@@ -13258,6 +13258,8 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             preview_paths: Vec::new(),
+            exit_code: None,
+            output_truncated: false,
         };
         let entry = assistant(
             "a1",
@@ -13672,6 +13674,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -14452,6 +14455,8 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             preview_paths: Vec::new(),
+            exit_code: None,
+            output_truncated: false,
         }
     }
 
@@ -14575,6 +14580,8 @@ mod tests {
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
             preview_paths: Vec::new(),
+            exit_code: None,
+            output_truncated: false,
         }
     }
 
@@ -15545,6 +15552,7 @@ mod tests {
                             last_turn_outcome: None,
                             terminal_activity: None,
                             running_subagents: 0,
+                            background_tasks: Vec::new(),
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,

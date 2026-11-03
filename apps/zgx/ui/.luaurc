@@ -1,0 +1,9 @@
+{
+	"languageMode": "strict",
+	"aliases": {
+		"ds": "./ds",
+		"screens": "./screens",
+		"demos": "./demos",
+		"account": "./account"
+	}
+}

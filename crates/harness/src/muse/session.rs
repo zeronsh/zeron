@@ -199,24 +199,13 @@ impl Runner {
 
     /// Zeron's MCP server, as a session-scoped stdio server. `optional`: a
     /// server that cannot start must not fail the whole turn.
+    /// The plugins' native servers ([`RunRequest::extra_mcp`]) ride beside it.
     fn config(&self) -> Option<Value> {
-        let mcp = self.request.mcp.as_ref()?;
-        if !self.host.granted.iter().any(|c| c == "sessionMcp") {
-            tracing::warn!(
-                target: "zeron_harness::muse",
-                "this Muse Code build cannot take session MCP servers; running without Zeron's"
-            );
-            return None;
-        }
-        Some(json!({"mcpServers": {
-            mcp.name.clone(): {
-                "transport": "stdio",
-                "command": mcp.command,
-                "args": mcp.args,
-                "env": mcp.env,
-                "mode": "optional",
-            }
-        }}))
+        session_mcp_config(
+            self.request.mcp.as_ref(),
+            &self.request.extra_mcp,
+            self.host.granted.iter().any(|c| c == "sessionMcp"),
+        )
     }
 
     /// Open the session: resume the stored one, or start fresh — also when
@@ -1032,5 +1021,79 @@ mod tests {
             Some("image/jpeg")
         );
         assert_eq!(media_type(Path::new("a.svg"), b"<svg"), None);
+    }
+}
+
+/// `mcpServers` for a session: Zeron's own server and the plugins' native
+/// ones, each optional. `None` when there are none, or when the build can't
+/// take session servers (`granted` lacks `sessionMcp`).
+fn session_mcp_config(
+    mcp: Option<&zeron_proto::McpServer>,
+    extras: &[zeron_proto::McpServer],
+    session_mcp: bool,
+) -> Option<Value> {
+    if mcp.is_none() && extras.is_empty() {
+        return None;
+    }
+    if !session_mcp {
+        tracing::warn!(
+            target: "zeron_harness::muse",
+            "this Muse Code build cannot take session MCP servers; running without Zeron's"
+        );
+        return None;
+    }
+    let mut servers = serde_json::Map::new();
+    for server in extras.iter().chain(mcp) {
+        servers.insert(
+            server.name.clone(),
+            json!({
+                "transport": "stdio",
+                "command": server.command,
+                "args": server.args,
+                "env": server.env,
+                "mode": "optional",
+            }),
+        );
+    }
+    Some(json!({ "mcpServers": servers }))
+}
+
+#[cfg(test)]
+mod session_mcp_tests {
+    use super::*;
+
+    #[test]
+    fn session_mcp_config_adds_plugin_servers_beside_zeron() {
+        let zeron = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: Default::default(),
+        };
+        let extra = zeron_proto::McpServer {
+            name: "plugin-focus".into(),
+            command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
+            args: vec![],
+            env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+        };
+        assert_eq!(session_mcp_config(None, &[], true), None);
+        assert_eq!(
+            session_mcp_config(Some(&zeron), std::slice::from_ref(&extra), false),
+            None
+        );
+        let config = session_mcp_config(Some(&zeron), std::slice::from_ref(&extra), true).unwrap();
+        assert_eq!(config["mcpServers"]["zeron"]["command"], "/opt/zeron/zeron");
+        assert_eq!(
+            config["mcpServers"]["plugin-focus"],
+            json!({
+                "transport": "stdio",
+                "command": "/data/plugins/.loaded/focus/0123/bin/server",
+                "args": [],
+                "env": { "FOCUS": "1" },
+                "mode": "optional",
+            })
+        );
+        let only = session_mcp_config(None, &[extra], true).unwrap();
+        assert_eq!(only["mcpServers"].as_object().unwrap().len(), 1);
     }
 }

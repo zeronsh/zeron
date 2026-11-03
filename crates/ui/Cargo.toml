@@ -108,6 +108,14 @@ required-features = ["appshots-fixture"]
 name = "settings-search-fixture"
 required-features = ["appshots-fixture"]
 
+[[example]]
+name = "right-panel-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "session-card-fixture"
+required-features = ["appshots-fixture"]
+
 [dependencies]
 zeron-voice-media.workspace = true
 zeron-voice-session.workspace = true

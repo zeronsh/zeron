@@ -42,6 +42,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -80,6 +81,7 @@ fn mock_script() -> Vec<AgentEvent> {
             diff: None,
             preview_paths: Vec::new(),
             image_payloads: Vec::new(),
+            exit_code: None,
         },
         done(DoneStatus::Completed),
     ]
@@ -1337,6 +1339,8 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         subagent_status: Some(status),
         subagent_tail: None,
         preview_paths: Vec::new(),
+        exit_code: None,
+        output_truncated: false,
     }
 }
 
@@ -2643,6 +2647,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         resume: None,
         worktree: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     core.doc_host
         .queue_command(
@@ -2878,6 +2883,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             diff: None,
             preview_paths: Vec::new(),
             image_payloads: Vec::new(),
+            exit_code: None,
         },
         AgentEvent::TextDelta { text: "two".into() },
         done(DoneStatus::Completed),
@@ -3283,6 +3289,7 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             diff: None,
             preview_paths: Vec::new(),
             image_payloads: Vec::new(),
+            exit_code: None,
         },
         image.clone(),
         image.clone(),

@@ -1,0 +1,10 @@
+# Loops the app runs over every pixel or point of a frame of something
+# moving (an agent visual's scene, shader or canvas: src/visuals.rs), in a
+# crate of their own so a debug build still optimizes them (the app's Cargo.toml: `opt-level` for
+# this package). Unoptimized, a 2x frame's colour swap took 46 ms.
+[package]
+name = "zeron-zgx-pixels"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false

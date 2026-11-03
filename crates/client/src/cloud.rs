@@ -582,6 +582,7 @@ impl Client {
                 repo_full_name,
             )),
             github_repo: Some(repo_full_name.to_owned()),
+            icon: None,
             created_at: Utc::now(),
         };
         let id = space.id.clone();
@@ -690,6 +691,7 @@ impl Client {
             last_seen_at: None,
             room_gen: Some(2),
             parent_chat_id: None,
+            child_kind: None,
         };
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
         Ok(chat_id)

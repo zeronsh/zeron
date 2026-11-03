@@ -877,11 +877,14 @@ async function start(msg) {
     local.store = fresh.store;
     runDir = fresh.dir;
   }
+  // Zeron's own server plus the plugins' native ones (`extraMcp`); Zeron's
+  // wins a name clash.
+  const servers = [...(msg.extraMcp ?? []), ...(msg.mcp ? [msg.mcp] : [])];
   const options = {
     model,
-    ...(msg.mcp ? { mcpServers: { [msg.mcp.name]: {
-      type: "stdio", command: msg.mcp.command, args: msg.mcp.args, env: msg.mcp.env,
-    } } } : {}),
+    ...(servers.length ? { mcpServers: Object.fromEntries(servers.map(server => [server.name, {
+      type: "stdio", command: server.command, args: server.args, env: server.env,
+    }])) } : {}),
     // askQuestion has no public answer channel in this SDK (SDKRequestMessage
     // carries only a request id) — a question would block the run forever.
     // generateImage has nowhere to land in a zeron session (ACP parity).

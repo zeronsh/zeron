@@ -1,47 +1,41 @@
-name: UI tests
+name: Linux tests
 
+# Called by ci.yml, which decides which of these run and holds the runners for
+# them (scripts/ci/plan.py, scripts/ci/admit.py).
 on:
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/**'
-      - '.github/actions/linux-ci/**'
-      - 'scripts/ci/**'
-      - 'scripts/*cursor-sdk*'
-      - '.github/workflows/cursor-*.yml'
-      - 'scripts/test-linux-browser.sh'
-      - 'scripts/test-browser-storage.py'
-      - '.github/workflows/ui-tests.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/**'
-      - '.github/actions/linux-ci/**'
-      - 'scripts/ci/**'
-      - 'scripts/*cursor-sdk*'
-      - '.github/workflows/cursor-*.yml'
-      - 'scripts/test-linux-browser.sh'
-      - 'scripts/test-browser-storage.py'
-      - '.github/workflows/ui-tests.yml'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+      core:
+        type: boolean
+        default: true
+      ui:
+        type: boolean
+        default: true
+      browser:
+        description: Also run the native browser fixture (ci.yml - nightly, manual runs and `ci:full`).
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
-concurrency:
-  group: ui-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Pull requests and main leave out the slow and soak tests (scripts/ci/nextest.toml
+# `ci` profile) and run the cursor_shim stress test for 14 rounds; the nightly
+# run (schedule) runs everything in full.
+env:
+  NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'default' || 'ci' }}
+  ZERON_STRESS_ROUNDS: ${{ github.event_name == 'schedule' && '100' || '14' }}
 
 jobs:
   # Every Linux Rust test that is not UI: one build, one nextest run (see
-  # scripts/ci/test-core.sh). Replaces session-sync-regressions and the Rust
-  # steps of cursor-compatibility and preview-tests.
+  # scripts/ci/test-core.sh), including the voice protocol and transport tests
+  # that need no audio stack.
   core-tests:
+    if: inputs.core
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -50,50 +44,51 @@ jobs:
         with:
           rust-cache: core
           save-rust-cache: 'true'
-      - name: Harness, engine, sync, update, doc and preview tests
+      - name: Harness, engine, sync, update, doc, preview, MCP and voice protocol tests
         run: scripts/ci/test-core.sh
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-core-tests
 
+  # UI and headless layout regressions, then (when `browser`) the native browser
+  # on X11 and Wayland. One job: the browser fixture shares the UI build's
+  # dependency graph and cache, so it costs a link rather than a second runner.
   ui-tests:
+    if: inputs.ui
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/linux-ci
+      - id: setup
+        uses: ./.github/actions/linux-ci
         with:
           rust-cache: ui
           save-rust-cache: 'true'
-          apt-cache: gpui
-          apt-packages: >-
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
-            libx11-dev libxcb1-dev libx11-xcb-dev
-            libfontconfig1-dev libfreetype-dev libasound2-dev
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - name: UI and headless layout regressions
-        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib --test voice_orb_geometry
-
-  linux-browser:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/linux-ci
-        with:
-          # Same dependency graph as ui-tests, which saves this cache on main.
-          rust-cache: ui
-          apt-cache: browser
-          apt-recommends: 'true'
+          # One .deb cache for both package sets (apt-install.sh uses it as its archive).
+          apt-cache: ui-browser
+          apt-recommends: ${{ inputs.browser && 'true' || 'false' }}
           apt-packages: >-
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
             libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev
             libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake
-            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xauth xdotool openbox
-            weston ffmpeg imagemagick fonts-noto-cjk
+            libwebkit2gtk-4.1-dev libjson-glib-dev
+            ${{ inputs.browser && 'xvfb xauth xdotool openbox weston ffmpeg imagemagick fonts-noto-cjk' || '' }}
+      - name: UI and headless layout regressions
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib
+      # The browser steps run even when a UI test failed (a separate signal), but not
+      # when the setup did: without the packages they can only fail.
       - name: Build browser fixture
+        if: ${{ inputs.browser && !cancelled() && steps.setup.outcome == 'success' }}
         run: cargo build --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: Persistent browser profiles across app launches
+        if: ${{ inputs.browser && !cancelled() && steps.setup.outcome == 'success' }}
         timeout-minutes: 5
         run: xvfb-run -a python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
       - name: X11 and Wayland browser regressions
+        if: ${{ inputs.browser && !cancelled() && steps.setup.outcome == 'success' }}
         timeout-minutes: 5
         env:
           RUST_LOG: gpui_wgpu=info
@@ -102,9 +97,15 @@ jobs:
           scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/default"
           VK_DRIVER_FILES=/dev/null scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/opengl"
       - name: Upload native browser evidence
-        if: always()
+        if: ${{ inputs.browser && always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-browser
           path: ${{ runner.temp }}/linux-browser
           if-no-files-found: warn
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-ui-tests

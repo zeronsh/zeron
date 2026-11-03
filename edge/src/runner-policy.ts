@@ -78,6 +78,13 @@ export const runnerRefusal = (auth: Verified, method: string, url: URL): string 
     case "attachments":
       // Retired mirror: acknowledged and discarded.
       return undefined;
+    case "plugin-keys":
+      // Who made a plugin: a lookup of one key (its owner's username, and
+      // whether it's this account's), so a Cloud machine can tell its
+      // plugins' authors. Registering, listing and revoking keys bind or
+      // unbind them from the account: the user's alone.
+      if (method === "GET" && parts.length === 2) return undefined;
+      return "runner tokens may only look up plugin keys";
     default:
       // Anything not named here is the user's, including routes added later.
       return "runner tokens cannot use this route";

@@ -161,6 +161,7 @@ impl Normalizer {
                 diff,
                 preview_paths: Vec::new(),
                 image_payloads: Vec::new(),
+                exit_code: None,
             });
         }
         events
@@ -205,6 +206,7 @@ impl Normalizer {
                     diff: None,
                     preview_paths: Vec::new(),
                     image_payloads: Vec::new(),
+                    exit_code: None,
                 });
             }
         }
@@ -239,6 +241,7 @@ impl Normalizer {
                     diff: None,
                     preview_paths: Vec::new(),
                     image_payloads: Vec::new(),
+                    exit_code: None,
                 });
             }
         }

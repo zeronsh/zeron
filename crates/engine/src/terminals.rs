@@ -28,7 +28,7 @@ mod windows;
 use tokio::sync::{mpsc, watch};
 
 use zeron_doc::TERMINAL_OUTPUT_BATCH_MS;
-use zeron_proto::{TerminalActivity, TerminalEvent, TerminalSession};
+use zeron_proto::{TerminalActivity, TerminalEvent, TerminalSession, TerminalStatus};
 
 pub mod link;
 mod program_status;
@@ -51,6 +51,9 @@ struct LiveTerminal {
     initial_script: Option<tempfile::NamedTempFile>,
     #[cfg(all(test, windows))]
     process_id: u32,
+    /// The shell's process id: something else in the PTY's foreground is a
+    /// program running ([`Terminals::status`]).
+    shell_pid: Option<u32>,
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
@@ -457,6 +460,7 @@ impl Terminals {
             initial_script,
             #[cfg(all(test, windows))]
             process_id: child.process_id().expect("ConPTY child has a process id"),
+            shell_pid: child.process_id(),
             master: Some(master),
             writer: Some(writer),
             killer,
@@ -661,6 +665,28 @@ impl Terminals {
         master
             .resize(size)
             .map_err(|e| EngineError::Other(format!("Terminal resize failed: {e}")))
+    }
+
+    /// Whether closing it would end a program (something other than the
+    /// shell in its foreground), and whether its shell has exited: what a
+    /// viewer asks before closing a terminal's tab.
+    pub fn status(&self, terminal_id: &str) -> Result<TerminalStatus, EngineError> {
+        let session = self.session(terminal_id)?;
+        let live = lock(&session);
+        if live.exited {
+            return Ok(TerminalStatus { busy: false, exited: true });
+        }
+        #[cfg(unix)]
+        let busy = match (
+            live.master.as_ref().and_then(|m| m.process_group_leader()),
+            live.shell_pid,
+        ) {
+            (Some(leader), Some(shell)) => leader > 0 && leader as u32 != shell,
+            _ => false,
+        };
+        #[cfg(not(unix))]
+        let busy = false;
+        Ok(TerminalStatus { busy, exited: false })
     }
 
     /// Kill the shell (if still running) and drop the session + replay buffer.
@@ -1353,6 +1379,40 @@ mod windows_tests {
 mod initial_command_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn status_says_whether_a_program_is_running() {
+        let root = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let session = terminals
+            .open_with_shell(root.path().to_str().unwrap(), 80, 24, Some("/bin/sh"))
+            .unwrap();
+        let wait_for = |want: bool| {
+            let terminals = &terminals;
+            let id = session.id.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if terminals.status(&id).unwrap().busy == want {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            }
+        };
+        assert!(wait_for(false).await, "an idle shell isn't busy");
+        terminals.write(&session.id, "sleep 30\n").unwrap();
+        assert!(wait_for(true).await, "a program in the foreground is");
+        terminals.write(&session.id, "\u{3}").unwrap();
+        assert!(wait_for(false).await, "and isn't once it's interrupted");
+        assert!(!terminals.status(&session.id).unwrap().exited);
+        terminals.close(&session.id).unwrap();
+        assert!(terminals.status(&session.id).is_err());
+    }
 
     #[tokio::test]
     async fn long_command_survives_delayed_shell_startup_and_script_is_cleaned_up() {

@@ -1,26 +1,22 @@
 name: Cursor compatibility
+# Pull requests and main: called by ci.yml (with rust-tests off: core-tests
+# already runs them there). Also called by release.yml and dispatched by
+# cursor-sdk-update.yml on its update branch.
 on:
-  pull_request:
-    paths:
-      - 'crates/harness/**'
-      - 'crates/doc/**'
-      - 'crates/engine/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/*cursor-sdk*'
-      - '.github/workflows/cursor-*.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'crates/harness/**'
-      - 'crates/doc/**'
-      - 'crates/engine/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/*cursor-sdk*'
-      - '.github/workflows/cursor-*.yml'
   workflow_dispatch:
+    inputs:
+      rust-tests:
+        type: boolean
+        default: true
   workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+      rust-tests:
+        type: boolean
+        default: true
 permissions:
   contents: read
 jobs:
@@ -40,15 +36,20 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/cursor-sdk-contract" --ignore-scripts --no-audit --no-fund "$pin"
       - name: Actual SDK token expiry, stream invalidation, and transient auth recovery
         run: node scripts/test-cursor-sdk-auth.mjs "$RUNNER_TEMP/cursor-sdk-contract/node_modules/@cursor/sdk"
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-cursor-compatibility
 
   # The Rust half (harness compatibility, steering, session recovery, durable
   # commands, message delivery, native Pi RPC) is part of the `core-tests` job
-  # of ui-tests.yml, which already runs on pull requests and on main with a
-  # superset of this workflow's paths. Run it here only for the callers that
-  # do not get that: release.yml (tag push), cursor-sdk-update.yml (manual
-  # dispatch on the update branch) and manual runs.
+  # of ui-tests.yml, which ci.yml runs on pull requests and main. Run it here
+  # for the other callers: release.yml (tag push), cursor-sdk-update.yml
+  # (dispatch on the update branch) and manual runs.
   rust-tests:
-    if: ${{ github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: inputs.rust-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

@@ -48,7 +48,7 @@ history deletion or prove that every possible checkpoint-pruning defect is fixed
 including cursor preservation, restart/deduplication, and injected outbox-write
 failure followed by ordinary or cursor-bearing snapshot persistence.
 
-`cargo test --locked -p zeron-engine --lib --test session_publication --test restart_resume --test local_profiles --test born_chat2_race --test codex_subagents --test message_queue --test transcript_salvage`
+`cargo test --locked -p zeron-engine --lib --test session_publication --test restart_resume --test misc --test born_chat2_race --test message_queue --test transcript_salvage`
 covers actual LRU eviction, disconnected cleanup before snapshot debounce,
 engine restart/resume, command queues, and profile lifecycle. The Codex adapter
 fixture reproduces a successful-but-invisible resumed turn, then validates full

@@ -141,7 +141,65 @@ pub struct Space {
     /// project can run on its own Cloud machine (the checkout picker's Cloud).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repo: Option<String>,
+    /// The picture its people chose for it (LWW, from any device); absent ⇒
+    /// its default tile (its repository's artwork, else its initial).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<SpaceIcon>,
     pub created_at: DateTime<Utc>,
+}
+
+/// A project's own picture: an emoji, or an image its people uploaded (an
+/// https URL), on an optional palette hue. Written whole, as one field, so a
+/// switch from one kind to another never mixes them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceIcon {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// A palette hue's name (`violet`, `amber`…) for the tile behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hue: Option<String>,
+}
+
+impl SpaceIcon {
+    /// The longest emoji kept (a ZWJ family with skin tones is ~35 bytes).
+    pub const MAX_EMOJI_BYTES: usize = 64;
+    pub const MAX_IMAGE_URL_BYTES: usize = 1024;
+    pub const MAX_HUE_BYTES: usize = 24;
+
+    /// Trimmed, each part checked: an emoji short and without control
+    /// characters, an image an https URL, a hue a lowercase word. `None`
+    /// when nothing is left (the default tile); `Err` names the bad part.
+    pub fn normalized(self) -> Result<Option<SpaceIcon>, &'static str> {
+        let trim = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+        let (emoji, image, hue) = (trim(self.emoji), trim(self.image), trim(self.hue));
+        if let Some(e) = &emoji
+            && (e.len() > Self::MAX_EMOJI_BYTES || e.chars().any(char::is_control))
+        {
+            return Err("emoji");
+        }
+        if let Some(i) = &image
+            && (i.len() > Self::MAX_IMAGE_URL_BYTES
+                || !i.starts_with("https://")
+                || i.chars().any(|c| c.is_control() || c.is_whitespace()))
+        {
+            return Err("image");
+        }
+        if let Some(h) = &hue
+            && (h.len() > Self::MAX_HUE_BYTES || !h.chars().all(|c| c.is_ascii_lowercase()))
+        {
+            return Err("hue");
+        }
+        if emoji.is_some() && image.is_some() {
+            return Err("both");
+        }
+        if emoji.is_none() && image.is_none() && hue.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(SpaceIcon { emoji, image, hue }))
+    }
 }
 
 impl Space {
@@ -258,6 +316,58 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// What a child (`parent_chat_id`) is to its parent: a side chat the
+    /// person treats as a conversation of its own, or a subagent the
+    /// parent's agent delegated to (listed under the parent's Subagents).
+    /// Recorded when an agent creates the child through the Zeron MCP
+    /// server; `None` on top-level chats, on side chats a person started or
+    /// forked, and on rows written before the field existed (all read as
+    /// side chats). A value from a newer peer this build doesn't know
+    /// decodes to `None` rather than costing the row.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_child_kind"
+    )]
+    pub child_kind: Option<ChildKind>,
+}
+
+/// A child chat's relation to its parent ([`Chat::child_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildKind {
+    /// A side conversation: shown under the parent's side chats.
+    Side,
+    /// Delegated work: shown under the parent's subagents.
+    Subagent,
+}
+
+impl ChildKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChildKind::Side => "side",
+            ChildKind::Subagent => "subagent",
+        }
+    }
+
+    /// The kind a stored value names; `None` for one this build doesn't know.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "side" => Some(ChildKind::Side),
+            "subagent" => Some(ChildKind::Subagent),
+            _ => None,
+        }
+    }
+}
+
+/// Decode `childKind` leniently: an unknown kind (a newer peer's) or a
+/// non-string reads as `None`, never failing the row.
+pub fn lenient_child_kind<'de, D>(deserializer: D) -> Result<Option<ChildKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.as_ref().and_then(serde_json::Value::as_str).and_then(ChildKind::parse))
 }
 
 impl Chat {
@@ -394,6 +504,40 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
+    /// Processes the chat's agent started in the background that still run
+    /// (Claude's `run_in_background` shells, Codex commands that outlived
+    /// their turn). The runtime's own authoritative set, oldest first; read it
+    /// through `view::background_tasks`. Missing on older peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTask>,
+}
+
+/// One background process of a chat's agent, as its runtime reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTask {
+    /// The runtime's id for it: what `StopBackgroundTask` and
+    /// `ReadBackgroundTaskOutput` address.
+    pub id: String,
+    /// The command line, or the agent's description of it when the runtime
+    /// never said what it runs.
+    pub command: String,
+    /// The agent's one-line description, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// When the host first saw it running.
+    pub started_at: DateTime<Utc>,
+}
+
+/// The tail of a background process's output (`ReadBackgroundTaskOutput`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTaskOutput {
+    /// Plain text (terminal escapes stripped), ending with the latest line.
+    pub text: String,
+    /// Earlier output was cut off.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 impl Session {
@@ -1063,6 +1207,23 @@ pub struct ChangeRequestSummary {
     pub state: ChangeRequestState,
     pub base_ref: String,
     pub head_ref: String,
+    /// Where an open request's review and checks stand, when the provider
+    /// told it. Absent from older engines and closed requests; clients that
+    /// don't read it are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signals: Option<ChangeRequestSignals>,
+}
+
+/// Where an open change request's review and checks stand.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestSignals {
+    pub review_decision: ChangeRequestReviewDecision,
+    /// Whether a review is requested of the signed-in account; `None` when
+    /// the account can't be told.
+    pub review_requested_of_viewer: Option<bool>,
+    /// The checks' rollup.
+    pub ci: crate::change_request_assessment::CiState,
 }
 
 /// Relationship filter for one repository; never widens repository scope.
@@ -1332,6 +1493,8 @@ pub struct AgentAccount {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_reset_credits: Option<CodexResetCredits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
@@ -1355,6 +1518,28 @@ pub struct AgentAccount {
     /// most one of them is in use. `None` for single-login agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetCredits {
+    pub available_count: u64,
+    pub credits: Vec<CodexResetCredit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetCredit {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetOutcome {
+    pub outcome: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1421,6 +1606,10 @@ pub struct AgentLoginPoll {
     /// poll.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_port: Option<u16>,
+    /// A device code the sign-in showed, to check against the page it
+    /// opened (said as it is, apart from `message`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1430,6 +1619,13 @@ pub enum AgentLoginStatus {
     Done,
     Error,
 }
+
+/// Labels of Cursor's usage windows. The composer's plan ring picks between
+/// them by the selected model, so the engine (which writes them) and the UI
+/// (which reads them) share these.
+pub const CURSOR_USAGE_CURSOR: &str = "Cursor";
+pub const CURSOR_USAGE_GROK: &str = "Grok";
+pub const CURSOR_USAGE_OTHER: &str = "Other";
 
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1515,6 +1711,16 @@ pub struct TerminalSession {
     /// from hosts that predate it, whose viewers answer as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub host_replies: bool,
+}
+
+/// `TerminalStatus`: whether closing the terminal would end a program
+/// running in it (something other than its shell in the foreground), and
+/// whether its shell has exited.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalStatus {
+    pub busy: bool,
+    pub exited: bool,
 }
 
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter
@@ -1670,6 +1876,7 @@ mod tests {
                     state,
                     base_ref: "main".into(),
                     head_ref: "feature/change".into(),
+                    signals: None,
                 }),
                 updated_at: Utc.with_ymd_and_hms(2026, 8, 15, 12, 30, 0).unwrap(),
             };
@@ -1983,6 +2190,24 @@ pub struct WorkspaceMutationCapabilities {
     pub move_entry: bool,
     #[serde(default)]
     pub delete_entry: bool,
+    /// `CreateWorkspaceEntry`: an empty file or folder made at a new path.
+    #[serde(default)]
+    pub create_entry: bool,
+}
+
+/// An empty file or folder at a path where nothing is, never replacing
+/// anything (an entry already there is `DestinationExists`). Its parent
+/// folder must already be there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspaceEntryRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    pub operation_id: String,
+    pub expected_checkout_id: String,
+    pub path: String,
+    /// `File` or `Directory`; links are never made.
+    pub kind: WorkspaceEntryKind,
 }
 
 /// Rename and move share the same no-replacement operation.
@@ -2079,6 +2304,15 @@ mod mutation_contract_tests {
             .unwrap(),
             delete
         );
+        let create: CreateWorkspaceEntryRequest = serde_json::from_value(serde_json::json!({"spaceId":"space", "operationId":"op", "expectedCheckoutId":"checkout", "path":"src/new.rs", "kind":"file"})).unwrap();
+        assert_eq!(create.kind, WorkspaceEntryKind::File);
+        assert_eq!(
+            serde_json::from_value::<CreateWorkspaceEntryRequest>(
+                serde_json::to_value(&create).unwrap()
+            )
+            .unwrap(),
+            create
+        );
         let outcome = WorkspaceMutationOutcome::Rejected {
             operation_id: "op".into(),
             reason: WorkspaceMutationRejection::DestinationExists,
@@ -2095,5 +2329,63 @@ mod mutation_contract_tests {
             serde_json::from_value::<WorkspaceMutationRejection>(serde_json::json!("overwrite"))
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod space_icon_tests {
+    use super::SpaceIcon;
+
+    fn icon(emoji: Option<&str>, image: Option<&str>, hue: Option<&str>) -> SpaceIcon {
+        SpaceIcon { emoji: emoji.map(Into::into), image: image.map(Into::into), hue: hue.map(Into::into) }
+    }
+
+    #[test]
+    fn a_space_icon_is_trimmed_checked_and_empty_is_none() {
+        assert_eq!(icon(Some(" 🚀 "), None, Some("violet")).normalized(), Ok(Some(icon(Some("🚀"), None, Some("violet")))));
+        assert_eq!(icon(Some("  "), Some(""), None).normalized(), Ok(None));
+        assert_eq!(icon(None, Some("https://e.test/auth/avatars/a"), None).normalized(), Ok(Some(icon(None, Some("https://e.test/auth/avatars/a"), None))));
+        // A family with skin tones fits; a paragraph doesn't.
+        assert!(icon(Some("👩🏽\u{200d}👩🏽\u{200d}👧🏽"), None, None).normalized().is_ok());
+        assert_eq!(icon(Some(&"x".repeat(65)), None, None).normalized(), Err("emoji"));
+        assert_eq!(icon(Some("a\nb"), None, None).normalized(), Err("emoji"));
+        assert_eq!(icon(None, Some("http://e.test/a.png"), None).normalized(), Err("image"));
+        assert_eq!(icon(None, Some("file:///etc/passwd"), None).normalized(), Err("image"));
+        assert_eq!(icon(None, None, Some("Violet")).normalized(), Err("hue"));
+        assert_eq!(icon(Some("🚀"), Some("https://e.test/a"), None).normalized(), Err("both"));
+        // A hue alone colours the default tile.
+        assert_eq!(icon(None, None, Some("amber")).normalized(), Ok(Some(icon(None, None, Some("amber")))));
+    }
+}
+
+#[cfg(test)]
+mod child_kind_tests {
+    use super::{Chat, ChildKind};
+
+    fn row(extra: serde_json::Value) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "id": "c", "deviceId": "d", "title": null, "archived": false, "cwd": null,
+            "branch": null, "checkoutId": null, "config": null, "lastMessagePreview": null,
+            "lastMessageAt": null, "createdAt": "2026-11-03T10:00:00Z", "parentChatId": "p"
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            row[k] = v.clone();
+        }
+        row
+    }
+
+    #[test]
+    fn a_child_kind_round_trips_and_an_unknown_one_costs_only_itself() {
+        let chat: Chat = serde_json::from_value(row(serde_json::json!({ "childKind": "subagent" }))).unwrap();
+        assert_eq!(chat.child_kind, Some(ChildKind::Subagent));
+        assert_eq!(serde_json::to_value(&chat).unwrap()["childKind"], "subagent");
+        let side: Chat = serde_json::from_value(row(serde_json::json!({ "childKind": "side" }))).unwrap();
+        assert_eq!(side.child_kind, Some(ChildKind::Side));
+        // A newer peer's kind, or none at all: the row stays, the kind is None.
+        for extra in [serde_json::json!({ "childKind": "orbit" }), serde_json::json!({ "childKind": 3 }), serde_json::json!({})] {
+            let chat: Chat = serde_json::from_value(row(extra)).unwrap();
+            assert_eq!(chat.child_kind, None);
+            assert!(serde_json::to_value(&chat).unwrap().get("childKind").is_none());
+        }
     }
 }

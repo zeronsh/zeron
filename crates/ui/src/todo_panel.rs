@@ -733,6 +733,8 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             preview_paths: Vec::new(),
+            exit_code: None,
+            output_truncated: false,
         }
     }
 
@@ -990,6 +992,8 @@ mod composer_tests {
                 subagent_status: None,
                 subagent_tail: None,
                 preview_paths: Vec::new(),
+                exit_code: None,
+                output_truncated: false,
             }],
             created_at: 0,
             device_id: "d".into(),

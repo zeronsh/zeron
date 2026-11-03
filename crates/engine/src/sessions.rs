@@ -313,6 +313,8 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Plugins whose native MCP servers local runs get (absent in bare tests).
+    plugins: OnceLock<crate::plugins::Plugins>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -362,6 +364,7 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                plugins: OnceLock::new(),
             }),
         }
     }
@@ -384,6 +387,11 @@ impl SessionsEngine {
     /// at dial time, so it follows token rotation across engine restarts.
     pub fn set_ipc_token_file(&self, path: std::path::PathBuf) {
         *lock(&self.inner.ipc_token_file) = Some(path);
+    }
+
+    /// Wire the plugins service: local runs get its native MCP servers.
+    pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
+        let _ = self.inner.plugins.set(plugins);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -484,6 +492,29 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.turn.background_live())
+    }
+
+    /// Ask the chat's runtime to stop one of its background processes. False
+    /// when no live runtime lists it (it ended meanwhile).
+    pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|h| h.turn.stop_background_process(task_id))
+    }
+
+    /// The tail of one background process's output; `None` when no live
+    /// runtime lists it.
+    pub async fn background_task_output(
+        &self,
+        chat_id: &str,
+        task_id: &str,
+    ) -> Option<zeron_proto::BackgroundTaskOutput> {
+        let turn = lock(&self.inner.runs).get(chat_id)?.turn.clone();
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || turn.background_output(&task_id))
+            .await
+            .ok()
+            .flatten()
     }
 
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
@@ -1807,6 +1838,7 @@ impl SessionsEngine {
                     resume: None,
                     worktree: None,
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 })
             })?;
         request.prompt = prompt.to_owned();
@@ -2037,6 +2069,7 @@ impl Inner {
                                 diff: None,
                                 preview_paths: Vec::new(),
                                 image_payloads: Vec::new(),
+                                exit_code: None,
                             },
                             AgentEvent::Error {
                                 message: "Generated image unavailable".into(),
@@ -2052,6 +2085,7 @@ impl Inner {
                 diff,
                 preview_paths,
                 image_payloads,
+                exit_code,
             } if !image_payloads.is_empty() => {
                 let stored = self
                     .store_tool_result_images(chat_id, &parents, &id, image_payloads)
@@ -2067,6 +2101,7 @@ impl Inner {
                         stored
                     },
                     image_payloads: Vec::new(),
+                    exit_code,
                 }]
             }
             other => vec![other],
@@ -2173,6 +2208,33 @@ impl Inner {
         }
     }
 
+    /// Publish the background processes `chat_id`'s runtime runs, mirrored
+    /// like [`Self::set_running_subagents`]. The live heartbeat keeps the row
+    /// fresh while they run; an engine that stops beating took them with it.
+    fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.background_tasks == tasks {
+                return;
+            }
+            entry.background_tasks = tasks;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
+            ws.record_session(&session);
+        }
+    }
+
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
         lock(&self.runs)
             .get(chat_id)
@@ -2205,6 +2267,7 @@ impl Inner {
                     last_turn_outcome: None,
                     terminal_activity: None,
                     running_subagents: 0,
+                    background_tasks: Vec::new(),
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -2294,6 +2357,10 @@ impl Inner {
     /// mcp` subcommand, dialing the engine's IPC port and stamped with the
     /// originating chat + device so the agent's side chats link back here.
     /// None when the engine serves no port or its executable is unknown.
+    ///
+    /// The bearer is the agent-scoped one (`{data_dir}/ipc-token-agent`): it
+    /// reaches what the MCP tools need and nothing that decides, signs,
+    /// updates or hands out credentials ([`zeron_rpc::agent_allowed`]).
     ///
     /// The IPC bearer travels as a file PATH (`ZERON_IPC_TOKEN_FILE`), not as
     /// `ZERON_IPC_TOKEN`: some harnesses hand this env to their CLI on the
@@ -3389,6 +3456,8 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_status,
                 subagent_tail,
                 preview_paths,
+                exit_code,
+                output_truncated,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -3408,6 +3477,8 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
                 preview_paths: preview_paths.clone(),
+                exit_code: *exit_code,
+                output_truncated: *output_truncated,
             },
             other => other.clone(),
         })
@@ -3587,6 +3658,13 @@ async fn drive_run(
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id, side_chats_only);
     }
+    // Plugins' native MCP servers come from this host's own allowed plugins,
+    // run from their verified snapshots — never from what a sender put here.
+    request.extra_mcp = inner
+        .plugins
+        .get()
+        .map(crate::plugins::Plugins::native_mcp_servers)
+        .unwrap_or_default();
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).
@@ -3972,6 +4050,8 @@ async fn drive_run(
     // so the gate still catches real crashes. touch_session throttles at 10s.
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The runtime's background processes, published on the session row.
+    let mut background_processes = turn.watch_background_processes();
     // PERSISTENT SESSION (zeron runsBySession): a completed turn on a
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
@@ -4108,6 +4188,11 @@ async fn drive_run(
                 },
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
+                    continue;
+                }
+                Ok(()) = background_processes.changed() => {
+                    let tasks = background_processes.borrow_and_update().clone();
+                    inner.set_background_tasks(&chat_id, tasks);
                     continue;
                 }
                 // A hang-up restarts the idle window, however long the call.
@@ -5068,6 +5153,8 @@ async fn drive_run(
         }
     }
     inner.set_running_subagents(&chat_id, 0);
+    // The runtime is gone, and its background processes with it.
+    inner.set_background_tasks(&chat_id, Vec::new());
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
@@ -5322,6 +5409,7 @@ mod tests {
         let payload = || AgentEvent::Subagent {
             parent_tool_use_id: "child".into(),
             event: Box::new(AgentEvent::ToolResult {
+                exit_code: None,
                 id: "tool-1".into(),
                 is_error: false,
                 output: None,
@@ -5398,6 +5486,7 @@ mod tests {
         assert!(journal.contains(&preview_paths[0]));
 
         let bad = AgentEvent::ToolResult {
+            exit_code: None,
             id: "tool-2".into(),
             is_error: false,
             output: None,
@@ -5609,6 +5698,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 

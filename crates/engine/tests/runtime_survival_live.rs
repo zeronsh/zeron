@@ -114,6 +114,7 @@ fn run(
         attachments: vec![],
         worktree: None,
         resume: None,
+        extra_mcp: Vec::new(),
     }
 }
 

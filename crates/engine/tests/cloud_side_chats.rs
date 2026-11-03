@@ -23,6 +23,7 @@ async fn a_side_chat_of_a_cloud_chat_runs_on_its_machine_without_a_project() {
             None,
             Some("/home/user/app".into()),
             None,
+            None,
         )
         .unwrap();
     let client = memory_client(core.rpc_service());
@@ -60,6 +61,7 @@ async fn deleting_a_cloud_chat_deletes_its_cloud_children() {
                 None,
                 Some("/home/user/app".into()),
                 parent.map(str::to_owned),
+                None,
             )
             .unwrap();
     };

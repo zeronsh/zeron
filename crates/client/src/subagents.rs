@@ -286,6 +286,8 @@ mod tests {
             subagent_status: status,
             subagent_tail: Some("Reading veil.rs".into()),
             preview_paths: Vec::new(),
+            exit_code: None,
+            output_truncated: false,
         }
     }
 

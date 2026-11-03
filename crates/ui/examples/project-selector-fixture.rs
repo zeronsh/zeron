@@ -39,8 +39,8 @@ fn main() {
             s.chats_synced = true;
             s.spaces_synced = true;
             s.spaces = serde_json::from_value(serde_json::json!([
-                {"id":"a","deviceId":"local","path":"/projects/anara","repositoryId":"github.com/anara/anara","createdAt":"2026-09-15T00:00:00Z"},
-                {"id":"b","deviceId":"remote","path":"/projects/anara","repositoryId":"github.com/anara/anara","createdAt":"2026-09-15T00:00:00Z"},
+                {"id":"a","deviceId":"local","path":"/projects/flint","repositoryId":"github.com/example/flint","createdAt":"2026-09-15T00:00:00Z"},
+                {"id":"b","deviceId":"remote","path":"/projects/flint","repositoryId":"github.com/example/flint","createdAt":"2026-09-15T00:00:00Z"},
                 {"id":"c","deviceId":"long","path":"/projects/design-system-with-a-long-project-name","createdAt":"2026-09-15T00:00:00Z"},
                 {"id":"d","deviceId":"unknown","path":"/projects/fieldnotes","createdAt":"2026-09-15T00:00:00Z"}
             ])).unwrap();

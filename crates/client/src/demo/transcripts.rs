@@ -39,6 +39,8 @@ pub(crate) fn tool(id: &str, call: ToolCall, is_error: bool, output: Option<&str
         subagent_status: None,
         subagent_tail: None,
         preview_paths: Vec::new(),
+        exit_code: None,
+        output_truncated: false,
     }
 }
 

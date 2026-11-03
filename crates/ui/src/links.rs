@@ -1,13 +1,12 @@
 //! Stable conversation links shared by sidebar copy actions and inbound URL routing.
 
-use sha2::{Digest, Sha256};
+use zeron_notify::links::encode_component;
+// The link format itself is shared with the zgx app (crates/notify).
+pub use zeron_notify::links::{
+    ConversationDeepLink, conversation_link as zeron_conversation_link,
+    parse_conversation_link as parse_zeron_conversation_link,
+};
 use zeron_proto::{AuthState, Chat, HarnessId, WorkspaceScope};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationDeepLink {
-    pub chat_id: String,
-    pub workspace: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessConversationLink {
@@ -36,35 +35,10 @@ pub fn workspace_locator(
         }
         WorkspaceScope::Local => format!("device:{}", local_device_id?),
     };
-    let mut hash = Sha256::new();
-    hash.update(format!("{scope:?}\0{identity}"));
-    Some(format!("{:x}", hash.finalize())[..16].to_string())
-}
-
-pub fn zeron_conversation_link(chat_id: &str, workspace: &str) -> String {
-    format!(
-        "zeron://open/chat/{}?workspace={}",
-        encode_component(chat_id),
-        encode_component(workspace)
-    )
-}
-
-pub fn parse_zeron_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
-    let rest = url
-        .strip_prefix("zeron://open/chat/")
-        .ok_or("not a Zeron conversation link")?;
-    let (chat_id, query) = rest.split_once('?').ok_or("missing workspace locator")?;
-    if chat_id.is_empty() || chat_id.contains('/') {
-        return Err("invalid conversation id");
-    }
-    let workspace = query
-        .split('&')
-        .find_map(|part| part.strip_prefix("workspace="))
-        .ok_or("missing workspace locator")?;
-    Ok(ConversationDeepLink {
-        chat_id: decode_component(chat_id)?,
-        workspace: decode_component(workspace)?,
-    })
+    Some(zeron_notify::links::workspace_locator_of(
+        &format!("{scope:?}"),
+        &identity,
+    ))
 }
 
 /// Only return schemes verified against the harness app. Hermes exposes a
@@ -79,39 +53,6 @@ pub fn harness_conversation_link(chat: &Chat) -> Option<HarnessConversationLink>
         label: "Codex conversation link",
         url: format!("codex://threads/{}", encode_component(id)),
     })
-}
-
-fn encode_component(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            use std::fmt::Write as _;
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
-}
-
-fn decode_component(value: &str) -> Result<String, &'static str> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let encoded = bytes
-                .get(index + 1..index + 3)
-                .ok_or("invalid URL escape")?;
-            let text = std::str::from_utf8(encoded).map_err(|_| "invalid URL escape")?;
-            out.push(u8::from_str_radix(text, 16).map_err(|_| "invalid URL escape")?);
-            index += 3;
-        } else {
-            out.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|_| "invalid UTF-8 in URL")
 }
 
 #[cfg(test)]
@@ -144,29 +85,11 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
         }
-    }
-
-    #[test]
-    fn zeron_link_round_trips_reserved_characters() {
-        let link = zeron_conversation_link("chat/with space", "workspace:one");
-        assert_eq!(
-            parse_zeron_conversation_link(&link).unwrap(),
-            ConversationDeepLink {
-                chat_id: "chat/with space".into(),
-                workspace: "workspace:one".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn malformed_or_foreign_links_are_rejected() {
-        assert!(parse_zeron_conversation_link("https://example.com").is_err());
-        assert!(parse_zeron_conversation_link("zeron://open/chat/id").is_err());
-        assert!(parse_zeron_conversation_link("zeron://open/chat/%GG?workspace=x").is_err());
     }
 
     #[test]

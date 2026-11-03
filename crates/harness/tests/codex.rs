@@ -108,6 +108,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -241,6 +242,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: Some(1),
     }));
 
     // fileChange (single add): WriteFile, refreshed at completion.
@@ -265,6 +267,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: None,
     }));
 
     // mcpToolCall with failed status.
@@ -283,6 +286,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: None,
     }));
 
     // webSearch lifecycle.
@@ -299,6 +303,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: None,
     }));
 
     // Completion-only todoList still opens and closes the lifecycle.
@@ -318,6 +323,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: None,
     }));
 
     // Streamed agentMessage must not re-emit its completed text…
@@ -553,6 +559,50 @@ async fn open_commands_report_background_work_and_killed_ones_do_not() {
         .unwrap();
     assert_eq!(until_done(&mut stream, |_| {}).await, DoneStatus::Completed);
     assert!(!turn.background_live(), "nothing left running");
+}
+
+/// A command that outlived its turn is listed as the person typed it, with
+/// its output; stopping it terminates its exec session.
+#[tokio::test]
+async fn a_background_command_is_listed_read_and_terminated() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut processes = turn.watch_background_processes();
+    let mut stream = harness()
+        .run(request("scenario:background-terminate"), controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn ends");
+
+    let listed = processes.borrow_and_update().clone();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].id, "bg");
+    assert_eq!(listed[0].command, "npm run dev");
+    assert_eq!(
+        turn.background_output("bg").expect("listed").text,
+        "ready on :3000"
+    );
+
+    assert!(turn.stop_background_process("bg"));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !processes.borrow_and_update().is_empty() {
+            processes.changed().await.expect("runtime alive");
+        }
+    })
+    .await
+    .expect("the terminated command leaves the list");
+    assert!(!turn.background_live());
 }
 
 #[tokio::test]
@@ -1461,6 +1511,7 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
             diff: None,
             preview_paths: Vec::new(),
             image_payloads: Vec::new(),
+            exit_code: Some(0),
         }),
     }));
     // The parent's steer (a userMessage item on the CHILD thread) arrives as
@@ -1878,6 +1929,7 @@ async fn view_image_reads_as_a_file_read() {
                 diff: None,
                 preview_paths: Vec::new(),
                 image_payloads: Vec::new(),
+                exit_code: None,
             },
         ]
     );

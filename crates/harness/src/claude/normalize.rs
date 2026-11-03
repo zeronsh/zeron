@@ -337,6 +337,74 @@ fn empty_tool_result(id: impl Into<String>, is_error: bool) -> AgentEvent {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: None,
+    }
+}
+
+/// Records `f`'s Bash calls, so their results carry the command's output.
+fn note_commands(f: &MessageFrame, commands: &mut std::collections::HashMap<String, bool>) {
+    for b in f.message.blocks() {
+        if b.kind == "tool_use" && b.name == "Bash" {
+            let background = b
+                .input
+                .get("run_in_background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            commands.insert(b.id, background);
+        }
+    }
+}
+
+/// A `tool_result` block as its event. A Bash call's carries its output (the
+/// end of it, [`zeron_proto::command_output_cap`]) and exit code: Claude Code
+/// leads a failed command's text with `Exit code N`; one that succeeded says
+/// nothing, so it exited 0 — unless it went to the background, which says
+/// only that it started. Every other tool's output stays off the event.
+fn tool_result(
+    b: &ContentBlock,
+    commands: &mut std::collections::HashMap<String, bool>,
+) -> AgentEvent {
+    let is_error = b.is_error.unwrap_or(false);
+    let (output, exit_code) = match commands.remove(&b.tool_use_id) {
+        Some(background) => {
+            let text = result_text(&b.content);
+            let (code, rest) = match text
+                .strip_prefix("Exit code ")
+                .map(|r| r.split_once('\n').unwrap_or((r, "")))
+                // (`Exit code 137 [killed]` for one stopped alone.)
+                .and_then(|(n, rest)| {
+                    Some((n.split_whitespace().next()?.parse::<i32>().ok()?, rest))
+                }) {
+                Some((code, rest)) => (Some(code), rest),
+                None => (None, text.as_str()),
+            };
+            let exit = code.or((!is_error && !background).then_some(0));
+            (zeron_proto::command_output_cap(rest), exit)
+        }
+        None => (None, None),
+    };
+    AgentEvent::ToolResult {
+        id: b.tool_use_id.clone(),
+        is_error,
+        output,
+        diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
+        exit_code,
+    }
+}
+
+/// A `tool_result`'s text: its string, or its text blocks joined.
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -562,6 +630,9 @@ pub(crate) struct Normalizer {
     /// can be labeled with the file the tool named. Removed when the result
     /// arrives.
     tool_paths: std::collections::HashMap<String, String>,
+    /// Bash calls not yet answered, tool_use id → whether it runs in the
+    /// background: their results carry the command's output and exit code.
+    command_calls: std::collections::HashMap<String, bool>,
     /// The typed fork of the turn under way (a turn runs one at most). Its
     /// replay feeds its chip only until the turn ends: a `forked-command-*`
     /// id after that stays the CLI's own, which no chip carries.
@@ -592,6 +663,7 @@ impl Normalizer {
             skill_calls: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             tool_paths: std::collections::HashMap::new(),
+            command_calls: std::collections::HashMap::new(),
             typed_fork: None,
             fork_transcripts: true,
             assistant_message_id: new_message_id(),
@@ -601,7 +673,8 @@ impl Normalizer {
         }
     }
 
-    /// Tool results on a user frame. Image bytes ride the result's content
+    /// Tool results on a user frame. A Bash call's carries its output tail
+    /// and exit code ([`tool_result`]). Image bytes ride the result's content
     /// blocks (or `toolUseResult` when those blocks have none) and stay off
     /// the journal: only `image_payloads` carries them, and the engine strips
     /// that before publish.
@@ -610,49 +683,36 @@ impl Normalizer {
         frame: &MessageFrame,
         clear_inline_skills: bool,
     ) -> Vec<AgentEvent> {
-        let Some(blocks) = frame.message.content.as_array() else {
-            return Vec::new();
-        };
         let mut pending = Vec::new();
-        for block in blocks {
-            // Parsed for the result's id and error flag. Nested image bytes
-            // are not on that struct, so those still come from the raw value.
-            let Ok(parsed) = serde_json::from_value::<ContentBlock>(block.clone()) else {
-                continue;
-            };
-            if parsed.kind != "tool_result" {
+        for block in frame.message.blocks() {
+            if block.kind != "tool_result" {
                 continue;
             }
-            let id = parsed.tool_use_id;
             if clear_inline_skills {
-                self.skill_calls.remove(&id);
+                self.skill_calls.remove(&block.tool_use_id);
             }
-            let is_error = parsed.is_error.unwrap_or(false);
             let name = self
                 .tool_paths
-                .remove(&id)
+                .remove(&block.tool_use_id)
                 .unwrap_or_else(|| "image.png".into());
-            let images = images_in_content(block.get("content"), &name);
-            pending.push((id, is_error, name, images));
+            let images = images_in_content(Some(&block.content), &name);
+            let event = tool_result(&block, &mut self.command_calls);
+            pending.push((event, name, images));
         }
-        if pending.len() == 1 && pending[0].3.is_empty() {
-            let name = pending[0].2.clone();
+        if pending.len() == 1 && pending[0].2.is_empty() {
+            let name = pending[0].1.clone();
             if let Some(image) = image_from_tool_use_result(frame.tool_use_result.as_ref(), &name) {
-                pending[0].3.push(image);
+                pending[0].2.push(image);
             }
         }
         pending
             .into_iter()
-            .map(
-                |(id, is_error, _name, image_payloads)| AgentEvent::ToolResult {
-                    id,
-                    is_error,
-                    output: None,
-                    diff: None,
-                    preview_paths: Vec::new(),
-                    image_payloads,
-                },
-            )
+            .map(|(mut event, _name, images)| {
+                if let AgentEvent::ToolResult { image_payloads, .. } = &mut event {
+                    *image_payloads = images;
+                }
+                event
+            })
             .collect()
     }
 
@@ -895,6 +955,7 @@ impl Normalizer {
             return Vec::new();
         };
         let events = if assistant {
+            note_commands(&f, &mut self.command_calls);
             subagent_message(&mut self.tool_paths, &chip, &f)
         } else {
             // Disk replay shows tool results only, the same as before. Image
@@ -1189,6 +1250,7 @@ impl Normalizer {
             }
 
             Frame::Assistant(f) => {
+                note_commands(&f, &mut self.command_calls);
                 if let Some(parent) = &f.parent_tool_use_id {
                     let parent = &self.route(parent).to_owned();
                     if self.fork_repeat(parent, f.uuid.as_deref()) {
@@ -1597,6 +1659,149 @@ mod tests {
         ));
     }
 
+    /// Folds a Bash call and its result through a fresh normalizer and the
+    /// doc fold, returning the tool part.
+    fn folded_tool(
+        name: &str,
+        input: Value,
+        content: Value,
+        is_error: bool,
+    ) -> zeron_doc::MessagePart {
+        let mut n = Normalizer::new();
+        let mut parts = Vec::new();
+        for raw in [
+            json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_1", "name": name, "input": input}
+            ]}}),
+            json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": content, "is_error": is_error}
+            ]}}),
+        ] {
+            let frame = crate::claude::wire::parse_frame(&raw.to_string()).expect("frame parses");
+            for event in n.normalize(frame, false) {
+                zeron_doc::fold_event_into_parts(&mut parts, &event);
+            }
+        }
+        parts
+            .into_iter()
+            .find(|p| p.id() == "toolu_1")
+            .expect("tool part")
+    }
+
+    /// A failed Bash's long output: its `Exit code N` lead becomes the exit
+    /// code, and the doc keeps the last 10 lines / 1 KB, flagged, redacted.
+    #[test]
+    fn bash_output_folds_to_a_short_tail_with_its_exit_code() {
+        let body: String = (1..=300)
+            .map(|i| format!("test case_{i} ... FAILED\n"))
+            .collect::<String>()
+            + "curl -H 'Authorization: Bearer sk-ant-api03-abcdefghijklmnop' failed";
+        let text = format!("Exit code 2\n{body}");
+        let part = folded_tool("Bash", json!({"command": "cargo test"}), json!(text), true);
+        let zeron_doc::MessagePart::Tool {
+            is_error,
+            output: Some(tail),
+            output_bytes,
+            output_truncated,
+            exit_code,
+            ..
+        } = &part
+        else {
+            panic!("no tail: {part:?}");
+        };
+        assert!(*is_error);
+        assert_eq!(*exit_code, Some(2));
+        assert!(*output_truncated);
+        assert_eq!(*output_bytes, Some(body.len() as u64));
+        assert!(tail.lines().count() <= 10, "{} lines", tail.lines().count());
+        assert!(tail.len() <= 1024, "{} bytes", tail.len());
+        assert!(tail.contains("test case_300 ... FAILED"));
+        assert!(!tail.contains("test case_250 "));
+        assert!(!tail.starts_with("Exit code"));
+        assert!(!tail.contains("sk-ant-api03"), "key survived: {tail}");
+    }
+
+    /// A short successful command keeps all its output, exit 0, unflagged;
+    /// array-shaped content reads like a string; a background command has no
+    /// exit code yet; a stopped one's `Exit code 137 [killed]` still parses.
+    #[test]
+    fn bash_results_read_their_exit_status() {
+        let ok = folded_tool(
+            "Bash",
+            json!({"command": "ls"}),
+            json!([{"type": "text", "text": "a.rs\nb.rs\n"}]),
+            false,
+        );
+        assert!(matches!(
+            &ok,
+            zeron_doc::MessagePart::Tool { output: Some(o), exit_code: Some(0), output_truncated: false, .. }
+                if o == "a.rs\nb.rs"
+        ));
+        let bg = folded_tool(
+            "Bash",
+            json!({"command": "npm run dev", "run_in_background": true}),
+            json!("Command running in background with ID: b1"),
+            false,
+        );
+        assert!(matches!(
+            &bg,
+            zeron_doc::MessagePart::Tool {
+                exit_code: None,
+                output: Some(_),
+                ..
+            }
+        ));
+        let killed = folded_tool(
+            "Bash",
+            json!({"command": "sleep 99"}),
+            json!("Exit code 137 [killed]"),
+            true,
+        );
+        assert!(matches!(
+            &killed,
+            zeron_doc::MessagePart::Tool {
+                exit_code: Some(137),
+                output: None,
+                ..
+            }
+        ));
+    }
+
+    /// A file read's result never reaches the event, let alone the doc.
+    #[test]
+    fn a_read_result_keeps_no_output() {
+        let mut n = Normalizer::new();
+        let mut events = Vec::new();
+        for raw in [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_r","name":"Read","input":{"file_path":"/w/.env"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_r","content":"API_KEY=hunter2"}]}}"#,
+        ] {
+            events.extend(n.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false));
+        }
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolResult {
+                output: None,
+                exit_code: None,
+                ..
+            }
+        )));
+        let part = folded_tool(
+            "Read",
+            json!({"file_path": "/w/.env"}),
+            json!("API_KEY=hunter2"),
+            false,
+        );
+        assert!(matches!(
+            &part,
+            zeron_doc::MessagePart::Tool {
+                output: None,
+                exit_code: None,
+                ..
+            }
+        ));
+    }
+
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
         Normalizer::new().normalize(frame, false)
@@ -1719,7 +1924,16 @@ mod tests {
             ev,
             vec![AgentEvent::Subagent {
                 parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(empty_tool_result("t1", false)),
+                event: Box::new(AgentEvent::ToolResult {
+                    id: "t1".into(),
+                    is_error: false,
+                    output: None,
+                    diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
+                    // (A subagent's Bash too: no `Exit code` lead, it exited 0.)
+                    exit_code: Some(0),
+                }),
             }]
         );
     }

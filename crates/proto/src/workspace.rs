@@ -31,6 +31,16 @@ pub mod capabilities {
     /// Older hosts resume the chat's one stored session whatever the
     /// provider, so a switch there hands one provider another's session id.
     pub const PROVIDER_SWITCH_V1: &str = "provider-switch-v1";
+    /// The host publishes its chats' background processes on their session
+    /// rows and answers `StopBackgroundTask` / `ReadBackgroundTaskOutput`
+    /// (forwarding them, for a chat another device hosts).
+    pub const BACKGROUND_TASKS_V1: &str = "background-tasks-v1";
+    /// The host serves the zgx interface (Zeron.app's beta): `AccessToken`,
+    /// plugins and templates, the ACP registry, `setSpaceIcon`,
+    /// `PostNotification`, `TerminalStatus` and change-request threads. The
+    /// interface asks for it on connect and offers Stable on an engine
+    /// without it.
+    pub const ZGX_INTERFACE_V1: &str = "zgx-interface-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -43,6 +53,8 @@ pub mod capabilities {
         PROJECTLESS_SCRATCH_V1,
         SIDEBAR_SECTION_ORDER_V1,
         PROVIDER_SWITCH_V1,
+        BACKGROUND_TASKS_V1,
+        ZGX_INTERFACE_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -75,6 +87,12 @@ pub struct EngineInfo {
     /// Supported protocol/document features. Missing on older engines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Which build of the engine this is: its git commit and when its
+    /// executable was built (`zeron-engine --build-id` says the same of a
+    /// binary on disk), so a client that started it can tell it's older than
+    /// the one it would start now. Absent on older engines: unknown, stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
 }
 
 impl EngineInfo {
@@ -109,6 +127,7 @@ mod tests {
             workspace_scope: WorkspaceScope::Local,
             cursor_sdk_version: Some("1.0.31".into()),
             capabilities: capabilities::current(),
+            build: None,
         };
         assert_eq!(
             serde_json::to_value(&info).unwrap(),
@@ -127,6 +146,8 @@ mod tests {
                     "projectless-scratch-v1",
                     "sidebar-section-order-v1",
                     "provider-switch-v1",
+                    "background-tasks-v1",
+                    "zgx-interface-v1",
                     "voice-client-media-v1"
                 ],
             })

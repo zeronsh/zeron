@@ -1,0 +1,264 @@
+{
+  "description": "Test vectors for the member card function, edge/src/card.ts. Every client implementing it must reproduce these. The ids are made up.",
+  "spec": {
+    "hash": "FNV-1a 32-bit over the UTF-8 bytes (offset 0x811c9dc5, prime 0x01000193, 32-bit wrapping multiply), then murmur3 fmix32",
+    "scene": "hash(id + ':scene') % scenes, a 0-based index into the scenes ordered by number",
+    "holo": "hash(id + ':holo') % 5, indexing holos",
+    "sky": "hash(id + ':sky')"
+  },
+  "holos": [
+    "aurora",
+    "reverse",
+    "secret",
+    "starlight",
+    "glyph"
+  ],
+  "hashes": [
+    {
+      "input": "",
+      "hash": 2872998923
+    },
+    {
+      "input": "a",
+      "hash": 444641715
+    },
+    {
+      "input": "zeron",
+      "hash": 3920131753
+    },
+    {
+      "input": "user_test_0001:scene",
+      "hash": 62640894
+    },
+    {
+      "input": "user_test_0001:holo",
+      "hash": 1378625095
+    },
+    {
+      "input": "user_test_0001:sky",
+      "hash": 1678271501
+    },
+    {
+      "input": "é",
+      "hash": 2387039943
+    },
+    {
+      "input": "ユーザー",
+      "hash": 3445456616
+    },
+    {
+      "input": "🂡",
+      "hash": 3106548733
+    }
+  ],
+  "cards": [
+    {
+      "id": "user_test_0001",
+      "scenes": 20,
+      "scene": 14,
+      "holo": 0,
+      "holoName": "aurora",
+      "sky": 1678271501
+    },
+    {
+      "id": "user_test_0002",
+      "scenes": 20,
+      "scene": 10,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 2564363760
+    },
+    {
+      "id": "user_test_0003",
+      "scenes": 20,
+      "scene": 19,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 2941292855
+    },
+    {
+      "id": "user_test_0004",
+      "scenes": 20,
+      "scene": 19,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 2955699900
+    },
+    {
+      "id": "user_test_0005",
+      "scenes": 20,
+      "scene": 18,
+      "holo": 3,
+      "holoName": "starlight",
+      "sky": 1056250803
+    },
+    {
+      "id": "user_test_0006",
+      "scenes": 20,
+      "scene": 4,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 3707144192
+    },
+    {
+      "id": "user_test_0007",
+      "scenes": 20,
+      "scene": 18,
+      "holo": 3,
+      "holoName": "starlight",
+      "sky": 1581408625
+    },
+    {
+      "id": "user_test_0008",
+      "scenes": 20,
+      "scene": 7,
+      "holo": 2,
+      "holoName": "secret",
+      "sky": 3955386535
+    },
+    {
+      "id": "user_test_0009",
+      "scenes": 20,
+      "scene": 17,
+      "holo": 2,
+      "holoName": "secret",
+      "sky": 1095194028
+    },
+    {
+      "id": "user_test_0010",
+      "scenes": 20,
+      "scene": 5,
+      "holo": 4,
+      "holoName": "glyph",
+      "sky": 2276114823
+    },
+    {
+      "id": "user_test_0011",
+      "scenes": 20,
+      "scene": 18,
+      "holo": 4,
+      "holoName": "glyph",
+      "sky": 1476704835
+    },
+    {
+      "id": "user_test_0012",
+      "scenes": 20,
+      "scene": 1,
+      "holo": 3,
+      "holoName": "starlight",
+      "sky": 269835148
+    },
+    {
+      "id": "user_01TESTTESTTESTTESTTESTTEST",
+      "scenes": 20,
+      "scene": 18,
+      "holo": 4,
+      "holoName": "glyph",
+      "sky": 2244616585
+    },
+    {
+      "id": "user_01FAKEFAKEFAKEFAKEFAKEFAKE",
+      "scenes": 20,
+      "scene": 14,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 4065931191
+    },
+    {
+      "id": "a",
+      "scenes": 20,
+      "scene": 13,
+      "holo": 0,
+      "holoName": "aurora",
+      "sky": 3031281313
+    },
+    {
+      "id": "",
+      "scenes": 20,
+      "scene": 12,
+      "holo": 3,
+      "holoName": "starlight",
+      "sky": 3428309187
+    },
+    {
+      "id": "é",
+      "scenes": 20,
+      "scene": 3,
+      "holo": 2,
+      "holoName": "secret",
+      "sky": 610631180
+    },
+    {
+      "id": "ユーザー",
+      "scenes": 20,
+      "scene": 17,
+      "holo": 4,
+      "holoName": "glyph",
+      "sky": 1509394216
+    },
+    {
+      "id": "user_test_0001",
+      "scenes": 21,
+      "scene": 15,
+      "holo": 0,
+      "holoName": "aurora",
+      "sky": 1678271501
+    },
+    {
+      "id": "user_test_0002",
+      "scenes": 24,
+      "scene": 14,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 2564363760
+    },
+    {
+      "id": "user_test_0003",
+      "scenes": 40,
+      "scene": 19,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 2941292855
+    },
+    {
+      "id": "user_test_0004",
+      "scenes": 1,
+      "scene": 0,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 2955699900
+    },
+    {
+      "id": "user_test_0001",
+      "scenes": 26,
+      "scene": 4,
+      "holo": 0,
+      "holoName": "aurora",
+      "sky": 1678271501
+    },
+    {
+      "id": "user_test_0002",
+      "scenes": 26,
+      "scene": 24,
+      "holo": 1,
+      "holoName": "reverse",
+      "sky": 2564363760
+    },
+    {
+      "id": "user_scene26_a",
+      "scenes": 26,
+      "scene": 19,
+      "holo": 0,
+      "holoName": "aurora",
+      "sky": 375430436
+    },
+    {
+      "id": "user_scene26_b",
+      "scenes": 26,
+      "scene": 7,
+      "holo": 3,
+      "holoName": "starlight",
+      "sky": 1703600698
+    }
+  ]
+}

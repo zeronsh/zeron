@@ -21,6 +21,7 @@ pub(crate) fn explorer(state: Entity<AppState>, cx: &mut Context<FilesSurface>) 
     files.mutation_capabilities = Some(zeron_proto::WorkspaceMutationCapabilities {
         move_entry: true,
         delete_entry: true,
+        create_entry: true,
     });
     files.tree.begin_load("", None, files.tree.generation());
     files.tree.apply_page(

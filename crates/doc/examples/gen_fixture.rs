@@ -57,6 +57,7 @@ fn main() {
             diff: None,
             preview_paths: Vec::new(),
             image_payloads: Vec::new(),
+            exit_code: None,
         },
     );
     fold_event_into_parts(

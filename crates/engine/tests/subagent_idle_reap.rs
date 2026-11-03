@@ -55,6 +55,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -226,6 +227,7 @@ async fn park_after_spawn() -> Parked {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: None,
     })
     .unwrap();
     feed.send(done(DoneStatus::Completed)).unwrap();

@@ -46,6 +46,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -307,6 +308,7 @@ async fn happy_path_maps_shim_frames_and_tags_subagents() {
         diff: None,
         preview_paths: Vec::new(),
         image_payloads: Vec::new(),
+        exit_code: None,
     }));
 
     // The task spawn is a parent chip; its interior arrives tagged, never bare.

@@ -162,6 +162,8 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
         subagent_status: None,
         subagent_tail: None,
         preview_paths: Vec::new(),
+        exit_code: None,
+        output_truncated: false,
     };
     let mut w = worker(390.0);
     w.input = TranscriptInput {
@@ -682,6 +684,8 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         subagent_status: Some(status),
         subagent_tail: None,
         preview_paths: Vec::new(),
+        exit_code: None,
+        output_truncated: false,
     };
     let frame_for = |status: SubagentStatus| {
         let mut w = worker(390.0);

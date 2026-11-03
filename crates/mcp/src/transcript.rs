@@ -285,6 +285,8 @@ mod tests {
                         subagent_status: None,
                         subagent_tail: None,
                         preview_paths: Vec::new(),
+                        exit_code: None,
+                        output_truncated: false,
                     },
                     MessagePart::Text {
                         id: "t2".into(),
