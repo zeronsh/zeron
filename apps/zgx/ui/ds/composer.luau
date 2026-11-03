@@ -49,6 +49,7 @@ local DropOverlay = require("@self/drop_overlay")
 local cargo = require("@self/composer_cargo")
 local Lightbox = require("@self/lightbox")
 local dock = require("@self/composer_dock")
+local ReplyPicture = require("@self/reply_picture")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
@@ -189,11 +190,14 @@ export type Props = {
 	queue: State<{ dock.Queued }>?,
 	can_steer: (boolean | () -> boolean)?,
 	on_queue_send: ((id: string) -> ())?,
+	on_queue_steer_all: (() -> ())?,
 	on_queue_edit: ((id: string) -> ())?,
 	on_queue_remove: ((id: string) -> ())?,
 	on_queue_reorder: ((from: number, to: number) -> ())?,
 	on_queue_save: ((id: string) -> ())?,
 	on_queue_cancel: ((id: string) -> ())?,
+	-- Where a queued row's pictures show from (ds/composer_dock's `pictures`).
+	queue_pictures: ReplyPicture.Pictures?,
 	todos: State<{ dock.Todo }>?,
 	on_dismiss_todos: (() -> ())?,
 	tasks: State<{ dock.Task }>?,
@@ -2168,11 +2172,13 @@ return ui.component(function(props: Props): Node
 			queue = props.queue,
 			can_steer = props.can_steer,
 			on_queue_send = props.on_queue_send,
+			on_queue_steer_all = props.on_queue_steer_all,
 			on_queue_edit = props.on_queue_edit,
 			on_queue_remove = props.on_queue_remove,
 			on_queue_reorder = props.on_queue_reorder,
 			on_queue_save = props.on_queue_save,
 			on_queue_cancel = props.on_queue_cancel,
+			pictures = props.queue_pictures,
 			todos = props.todos,
 			live = function()
 				return running ~= nil and running:get()

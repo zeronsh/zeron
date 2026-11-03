@@ -13,7 +13,8 @@
 --
 --   store.open(id?)       watch that session (nil: none), the last one let go
 --   store.send(req)       a message to a session: run now, or queued while
---                         a turn runs (a promise). A new chat is made with
+--                         a turn runs (a promise; of its queued row's id,
+--                         queued). A new chat is made with
 --                         sessions.create first, then sent its first
 --                         message with `fresh`.
 --   store.interrupt(id)   stop its turn
@@ -21,7 +22,9 @@
 --   store.deny(id, request)
 --   store.answer(id, request, answer)  a question's answer ({ values, text })
 --   store.configure(id, patch)  { model?, effort?, fast?, options?, access?, plan? }
---   store.queue(id, op)   { op = "remove" | "send" | "move", item, to? }
+--   store.queue(id, op)   { op = "remove" | "send" | "move", item, to? } (a
+--                         promise)
+--   store.steer_all(id, items, message_id)  queued rows steered as one
 --   store.queue_edit(id, item), store.queue_finish(id, item, action, text?)
 --                         a queued message edited in the composer
 --   store.load_catalog()  the models, looked up again
@@ -222,10 +225,18 @@ function M.queue_finish(id: string, item: string, action: string, text: string?)
 	return ui.call("chat.queue_finish", { id = id, item = item, action = action, text = text })
 end
 
-function M.queue(id: string, op: { [string]: any })
+-- A promise: the page shows what it asked at once (screens/chat/queued),
+-- and puts it back if this rejects.
+function M.queue(id: string, op: { [string]: any }): any
 	local args = table.clone(op)
 	args.id = id
-	quietly(ui.call("chat.queue", args))
+	return ui.call("chat.queue", args)
+end
+
+-- Queued rows (`items`, in the queue's order) steered as one message, each
+-- its own numbered block, shown meanwhile as `message_id`: a promise.
+function M.steer_all(id: string, items: { string }, message_id: string): any
+	return ui.call("chat.steer_all", { id = id, items = items, message_id = message_id })
 end
 
 -- Words put into the composer's draft (a plugin's `zeron.compose.insert`,
