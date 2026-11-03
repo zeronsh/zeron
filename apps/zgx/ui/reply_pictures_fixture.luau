@@ -180,6 +180,8 @@ local Page = ui.component(function(): Node
 			},
 		},
 		Lightbox.Host(),
+		-- What's said for a moment, as the shell has it (ds/toast).
+		ds.toast.Host {},
 	}
 end)
 
