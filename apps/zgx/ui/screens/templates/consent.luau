@@ -18,6 +18,12 @@
 -- An unsigned or changed package never gets here: the engine refuses it on
 -- import. So the signature line always says it checks out; who signed it is
 -- the question.
+--
+-- Keeping a template in preview (`item.keep`, the template's id: one an
+-- agent made, changed or switched to, or signed by "you" and never kept)
+-- shows the same sheet, as a keep: `templates.decide { keep, allow, hash }`,
+-- `hash` the digest of its files as shown (src/plugins/preview.rs). Kept,
+-- it runs with Zeron's powers until its files change.
 
 local ds = require("@ds")
 local words = require("@screens/plugins/words")
@@ -97,6 +103,14 @@ local function body(key: string): Node
 	local ignored: { string } = it.ignored or {}
 	local made_for = if it.zeron_version and it.zeron_version ~= "" then it.zeron_version else nil
 	local files = tonumber(it.files) or 0
+	local keep = it.keep ~= nil
+	local answer = function(allow: boolean)
+		if keep then
+			ui.invoke("templates.decide", { keep = it.keep, allow = allow, hash = it.hash })
+		else
+			ui.invoke("templates.decide", { pending = it.pending, allow = allow, hash = it.hash })
+		end
+	end
 	return ui.column {
 		w_full = true,
 		h_full = true,
@@ -111,7 +125,9 @@ local function body(key: string): Node
 				min_w = 0,
 				gap = "$space.1",
 				ui.text {
-					ui.t("templates.consent.install_title", { name = it.name }),
+					if keep
+						then ui.t("templates.consent.keep_title", { name = it.name })
+						else ui.t("templates.consent.install_title", { name = it.name }),
 					heading = 1,
 					text_size = "$font.size.lg",
 					line_height = "$font.line.lg",
@@ -127,16 +143,22 @@ local function body(key: string): Node
 				},
 			},
 		},
-		ds.Callout {
-			tone = "danger",
-			title = ui.t("templates.consent.trust", {
-				whom = function(): string
-					return whom(it)
-				end,
-			}),
-			body = ui.t("templates.consent.trust_body"),
-		},
-		if unknown
+		if keep
+			then ds.Callout {
+				tone = "danger",
+				title = ui.t("templates.consent.keep_trust"),
+				body = ui.t("templates.consent.keep_body"),
+			}
+			else ds.Callout {
+				tone = "danger",
+				title = ui.t("templates.consent.trust", {
+					whom = function(): string
+						return whom(it)
+					end,
+				}),
+				body = ui.t("templates.consent.trust_body"),
+			},
+		if unknown and not keep
 			then ds.Callout {
 				tone = "warning",
 				title = ui.t("plugins.words.unverified"),
@@ -154,13 +176,15 @@ local function body(key: string): Node
 			id = "template-consent-facts",
 			w_full = true,
 			gap = "$space.3",
-			fact(
-				"shield-check",
-				ui.t("templates.consent.signature"),
-				ui.t("templates.consent.signature_detail", { key = short(it.key) }),
-				"$zeron.tone.success.ink"
-			),
-			fact(
+			if keep
+				then fact("file-code", ui.t("templates.consent.keep_files", { n = files }), ui.t("templates.consent.keep_files_detail"))
+				else fact(
+					"shield-check",
+					ui.t("templates.consent.signature"),
+					ui.t("templates.consent.signature_detail", { key = short(it.key) }),
+					"$zeron.tone.success.ink"
+				),
+			if keep then nil else fact(
 				"file-code",
 				if made_for
 					then ui.t("templates.consent.files_made_for", { n = files, version = made_for })
@@ -202,7 +226,7 @@ local function body(key: string): Node
 						return consent:get().busy == true
 					end,
 					on_click = function()
-						ui.invoke("templates.decide", { pending = it.pending, allow = false, hash = it.hash })
+						answer(false)
 					end,
 					ui.t("templates.consent.not_now"),
 				},
@@ -214,9 +238,9 @@ local function body(key: string): Node
 						return consent:get().busy == true
 					end,
 					on_click = function()
-						ui.invoke("templates.decide", { pending = it.pending, allow = true, hash = it.hash })
+						answer(true)
 					end,
-					ui.t("templates.consent.install"),
+					if keep then ui.t("templates.consent.keep") else ui.t("templates.consent.install"),
 				},
 			},
 		},
@@ -242,7 +266,7 @@ function M.View(): Node
 				return if s.busy then "loading" else "none"
 			end
 			local a = it.author or {}
-			return `{it.pending}@{it.hash}:{a.kind or ""}:{a.username or ""}:{a.reason or ""}`
+			return `{it.keep or it.pending}@{it.hash}:{a.kind or ""}:{a.username or ""}:{a.reason or ""}`
 		end, body, { w_full = true, h_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 	}
 end

@@ -8,7 +8,17 @@ A template is a whole interface for Zeron, like a WordPress theme. It's a folder
 - Saving a file rewrites only what changed, and the window reloads **in place**. State is kept wherever both versions have the module.
 - **Fallback, per file:** a file that fails (to load, to build, or later) is replaced by Zeron's own copy of that file alone. You get one notice, and `template_status` names it with its error. Save it again to retry.
 - **Fallback, whole:** if your `app.luau` fails, the whole window goes back to Zeron's own and the template shows as broken.
-- **The way back from any template:** View → Use Zeron's Template, `use_template { id = "zeron" }`, or launching Zeron with `--zeron-template`.
+- **The way back from any template:** View → Use Zeron's Template (in the menu bar, or the bar Zeron draws at the window's top on Linux and Windows), Revert on a preview's bar, holding ⌥ as Zeron opens, or launching it with `--zeron-template`. Each starts **safe mode**: Zeron's own interface runs whatever `.active` says, the terminals templates opened are closed, and it stays so across launches until the person picks a template on Zeron's Templates page. A template that crashes Zeron at launch twice in a row starts it too.
+
+## Preview until the person keeps it
+
+A template is Zeron's own code, so it can do anything Zeron can, but only once the person has **kept** it in Zeron's own window. Until then it runs as a **preview**: it draws as it likes, under a bar Zeron draws ("Agent template · Keep… / Revert"), and Zeron refuses what it asks of the host's powers. That means terminals, the account, plugins, switching or changing templates, writing files, and sending to agents or answering for them.
+
+- Every template you make or switch to with these tools starts as a preview. So does one installed signed by this device, and one changed since it was kept: what the person keeps is the template's files as they were, so an edit after that is a preview again until they keep it again.
+- Keep opens Zeron's own sheet in a window of its own. Only that window records the decision, in Zeron's app data, never the engine's. No tool, IPC call or plugin can keep a template for the person.
+- Zeron says when the template in use changed without the person choosing it there.
+
+The line this holds is agents that reach Zeron only through its MCP tools, and agents in their usual sandboxes, which can't write Zeron's app data (`~/Library/Application Support/…` on macOS). Code running unsandboxed as the person, with their shell, is already the person: it can write any of their files, this record included, and no template rule stands in its way.
 - **Out of date:** a template is out of date when it was made from another version of Zeron. `template_status` lists the files whose Zeron original has changed since you copied them. Compare yours with `.zeron/`'s.
 
 ## The folder
@@ -48,7 +58,7 @@ Zeron's interface is written in zgx. A template that follows these stays fast, k
 ## The loop
 
 1. **`create_template { id, name, from? }`**: a copy of Zeron's app (or of another template). Its reply gives the folder, its files, a short map, and a link to this guide.
-2. **`use_template { id }`**: the window switches to it, live.
+2. **`use_template { id }`**: the window switches to it, live, as a preview (see above): ask the person to keep it when it's ready, or before it needs what a preview can't do.
 3. **Edit and save.** Each save shows at once in the window.
 4. **`template_status { id }`**:
    - whether it's in use;
@@ -121,4 +131,6 @@ Save it with the template in use, and the next new chat shows it. If it fails, Z
 
 `export_template { id, path }` saves a template as one `.zeron-template` file, signed with this device's key (the person's Zeron account vouches for it, as for their plugins). It holds the template's own files and its `preview.png`; the files no template may replace (`screens/plugins/`, `screens/templates/`, `account/`, `.luaurc`) are left out.
 
-`import_template { path }` checks the signature over every file before anything is written; an unsigned or changed package is refused. One signed on this device installs at once. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they allow it in Zeron's own consent window, which shows who signed it. No tool can allow it for them; the reply says `needs_consent`. Protected files in a package are never installed (`ignored` names them). Once installed, `list_templates` shows it with `imported.author`.
+`import_template { path }` checks the signature over every file before anything is written; an unsigned or changed package is refused. One signed on this device installs at once, as a preview until the person keeps it. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they allow it in Zeron's own consent window, which shows who signed it. No tool can allow it for them; the reply says `needs_consent`. Protected files in a package are never installed (`ignored` names them). Once installed, `list_templates` shows it with `imported.author`.
+
+A template installed from a link is checked there for a newer version, signed by the same key. Only a later version is taken. One whose files differ from what's installed (anything but its `preview.png`) waits in Zeron's consent window like a new import, and replaces the installed one only once the person allows it there.

@@ -246,6 +246,17 @@ pub fn load_key(data_dir: &Path) -> Option<SigningKey> {
     SigningKey::from_pkcs8(&der)
 }
 
+/// This device's proof for a device-room dial to `target` on `conn_id` at
+/// `ts` (epoch ms): `(public key, signature)` over
+/// [`zeron_rpc::caller_proof_message`], both b64url. `None` without a key
+/// (never made here: an unregistered key would prove nothing). The private
+/// key never leaves this module.
+pub fn device_link_proof(data_dir: &Path, target: &str, conn_id: &str, ts: i64) -> Option<(String, String)> {
+    let key = load_key(data_dir)?;
+    let message = zeron_rpc::caller_proof_message(target, conn_id, ts);
+    Some((key.public(), key.sign(message.as_bytes())))
+}
+
 /// Held while the key file is read and made, so two first uses at once
 /// (the service starting and a sign-in landing) agree on one key: without
 /// it, each made its own, and the one registered could be the one whose
@@ -268,20 +279,36 @@ fn load_or_create_locked(data_dir: &Path) -> Result<SigningKey, String> {
     Ok(key)
 }
 
-/// Set the current key aside as `plugin-signing-key.revoked-<unix>` and make a
-/// fresh one.
+/// Delete the current key (and any set aside by older versions as
+/// `plugin-signing-key.revoked-<unix>`) and make a fresh one. A retired
+/// private key is never kept: whoever holds it can sign as it.
 pub fn rotate_key(data_dir: &Path) -> Result<SigningKey, String> {
     let _held = KEY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = data_dir.join(KEY_FILE);
-    if path.exists() {
-        let aside = data_dir.join(format!(
-            "{KEY_FILE}.revoked-{}",
-            chrono::Utc::now().timestamp()
-        ));
-        std::fs::rename(&path, aside)
-            .map_err(|_| "Couldn't replace this device's signing key".to_string())?;
-    }
+    delete_locked(data_dir)?;
     load_or_create_locked(data_dir)
+}
+
+/// Delete this device's key, and old ones set aside (the next use makes
+/// a fresh one).
+pub fn delete_key(data_dir: &Path) {
+    let _held = KEY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Err(error) = delete_locked(data_dir) {
+        tracing::warn!(%error, "plugins: couldn't delete the old signing key");
+    }
+}
+
+fn delete_locked(data_dir: &Path) -> Result<(), String> {
+    let path = data_dir.join(KEY_FILE);
+    if std::fs::symlink_metadata(&path).is_ok() {
+        std::fs::remove_file(&path).map_err(|_| "Couldn't replace this device's signing key".to_string())?;
+    }
+    let aside = format!("{KEY_FILE}.revoked-");
+    for entry in std::fs::read_dir(data_dir).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&aside) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
 }
 
 /// The manifest as Zeron writes it: 2-space indent, trailing newline.

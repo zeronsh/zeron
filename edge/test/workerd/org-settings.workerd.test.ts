@@ -393,11 +393,11 @@ describe("org invitations", () => {
 
   it("counts a resend against the hourly invitation quota", async () => {
     const { orgId, admin } = await org();
-    const emails = Array.from({ length: 20 }, (_, i) => `q${i}-${newId("x")}@example.net`);
+    // The hour's 20, ten at a time.
+    const emails = Array.from({ length: 10 }, (_, i) => `q${i}-${newId("x")}@example.net`);
     for (let i = 0; i < 2; i++) {
       await call("POST", `/auth/orgs/${orgId}/invitations`, admin.userId, { emails: emails.map((e) => `${i}${e}`) });
     }
-    await call("POST", `/auth/orgs/${orgId}/invitations`, admin.userId, { emails: emails.slice(0, 10) });
     const [invitation] = (await workos()).invitations.filter((i) => i.organization_id === orgId);
     expect(await call("POST", `/auth/orgs/${orgId}/invitations/${invitation!.id}/resend`, admin.userId)).toEqual({
       status: 429,

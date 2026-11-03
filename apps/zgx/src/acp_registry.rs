@@ -79,7 +79,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let r = registry.clone();
     host.async_action("acp_registry.add", move |id| {
         let r = r.clone();
-        async move { r.add(text(&id)).await }
+        async move { crate::plugins::preview::refuse("acp_registry.add")?; r.add(text(&id)).await }
     });
     let r = registry.clone();
     host.async_action("acp_registry.remove", move |id| {
@@ -101,7 +101,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let id = args.field("id").map(text).unwrap_or_default();
         let env = args.field("env").map(text).unwrap_or_default();
         let params = r.addressed(json!({ "id": id, "env": env }));
-        async move {
+        async move { crate::plugins::preview::refuse("acp_registry.env_set")?;
             match engine::get().call("SetAcpAgentEnv", params).await {
                 Ok(reply) => Ok(Value::from(reply["env"].as_str().unwrap_or_default())),
                 Err(error) => Err(reason(&error)),
@@ -113,7 +113,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let r = r.clone();
         let field = |k: &str| args.field(k).map(text).unwrap_or_default();
         let params = json!({ "name": field("name"), "command": field("command"), "env": field("env") });
-        async move { r.add_own(params).await }
+        async move { crate::plugins::preview::refuse("acp_registry.add_own")?; r.add_own(params).await }
     });
 }
 
