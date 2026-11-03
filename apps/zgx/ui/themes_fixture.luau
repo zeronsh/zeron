@@ -127,6 +127,21 @@ end }
 ui.command { id = "drop_harbor", title = "Drop Harbor Night on the page", run = function()
 	page.dropped({ { path = "/Downloads/Harbor Night.json", name = "Harbor Night.json", size = 1012, type = "application/json" } })
 end }
+-- What an agent's theme tools do while the window runs: the files change,
+-- the engine says so (WatchThemes), and the host publishes the list again.
+-- Here: Harbor Night's window turned plum, and a theme made, "Ink".
+ui.command { id = "agent_edits", title = "Change the themes from outside", run = function()
+	for _, p in model.list do
+		if p.id == data.HARBOR.id then
+			p.background = "#2a1430"
+		end
+	end
+	local ink = table.clone(data.HARBOR)
+	ink.id, ink.name, ink.entry, ink.background = "custom-ink-dark", "Ink", "custom-ink", "#101820"
+	table.insert(model.list, ink)
+	table.insert(model.entries, { id = "custom-ink", name = "Ink", source = "imported", status = { ok = true }, variants = { "custom-ink-dark" } })
+	publish()
+end }
 ui.command { id = "themes", title = "Open Themes", run = function()
 	route.settings("themes")
 end }
