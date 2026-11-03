@@ -405,7 +405,9 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			agent = c.agent :: any,
 			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
 			branch = c.branch,
-			subagents = c.running_subagents,
+			-- (Its side chats working count as its subagents do, as its
+			-- lanes' badge counts them: screens/chat/lanes.)
+			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
 		}) :: any)
 	end
 	if #loose.sessions > 0 then
