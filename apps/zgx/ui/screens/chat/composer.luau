@@ -157,7 +157,9 @@ local function Composer(): Node
 						end
 					end
 					checkout:set(d.checkout)
-					device:set(d.device)
+					-- (A device asked of this new chat, a device's "+" in the
+					-- sidebar, over the one last used.)
+					device:set(route.take_device() or d.device)
 					project:set(route.current:peek().project)
 				end
 			elseif s then
@@ -199,6 +201,26 @@ local function Composer(): Node
 		if now.name == "home" and project:peek() ~= now.project then
 			project:set(now.project)
 		end
+	end)
+	-- A device asked of a new chat already showing (a device's "+" in the
+	-- sidebar, the composer here): picked, with the route's project. (One
+	-- asked on the way here from a session is the arrival's, above.)
+	ui.effect(function()
+		local pick = route.device_pick:get()
+		if pick == nil or session_id:peek() ~= nil or was:peek() ~= nil then
+			return
+		end
+		local d = route.take_device()
+		ui.batch(function()
+			-- (None: the device's own pick, screens/chat/where.)
+			local p = route.current:peek().project
+			if project:peek() ~= p then
+				project:set(p)
+			end
+			if d and device:peek() ~= d then
+				device:set(d)
+			end
+		end)
 	end)
 	-- Out: a choice made here changes the session, or is what the next new
 	-- chat starts with.

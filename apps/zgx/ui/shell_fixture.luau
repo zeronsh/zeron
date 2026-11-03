@@ -808,6 +808,17 @@ ui.command {
 		publish()
 	end,
 }
+-- Atlas's folder on devbox too, a project of its own there (the same
+-- repository on another computer): a new chat in Atlas on devbox starts in
+-- it (tests/sidebar_device_new_chat).
+ui.command {
+	id = "atlas_twin_on_box",
+	title = "Atlas has a folder on devbox too",
+	run = function()
+		table.insert(model.projects, { id = "atlas-box", name = "Atlas", device = "box", path = "/srv/atlas", git = true })
+		publish()
+	end,
+}
 -- Fix the build's side chats, on this Mac as Tidy the tests is (no branch):
 -- the panel home's rows to set beside the sidebar's (tests/
 -- sidebar_panel_parity). One moved last and made first, one the other way.
