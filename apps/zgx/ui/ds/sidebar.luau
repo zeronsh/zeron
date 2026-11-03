@@ -652,6 +652,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (Closing waits out the fade, so nothing is cut while it can be seen.)
 	local CLOSE, CLOSE_AFTER = 240, GO
 	local OPEN = 260
+	-- (The empty projects' fold: its tiles fly as it opens and closes, so it
+	-- moves in one stroke, quicker, its height and ink together.)
+	local FLY = 200
 	-- What fades with `shown`: away at once, back in once there is room.
 	-- (Its props, `props`, changed in place and returned.)
 	local function fades(props: ContainerProps, shown: () -> boolean): ContainerProps
@@ -2175,14 +2178,16 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- fades in; `together`, both at once, for the last place, with nothing
 	-- after it to slide up), and whether its rows are in the list at all
 	-- (still there while it closes).
-	type Fold = { key: string, is_open: () -> boolean, write: (boolean) -> (), h: Anim, o: Anim, present: boolean, together: boolean }
+	-- (`dur`: one duration both ways, for a fold played together; else
+	-- OPEN and CLOSE.)
+	type Fold = { key: string, is_open: () -> boolean, write: (boolean) -> (), h: Anim, o: Anim, present: boolean, together: boolean, dur: number? }
 	local shape = ui.use_state(0)
 	local folds_by: { [string]: Fold } = {}
-	local function fold_of(key: string, is_open: () -> boolean, write: (boolean) -> (), together: boolean?): Fold
+	local function fold_of(key: string, is_open: () -> boolean, write: (boolean) -> (), together: boolean?, dur: number?): Fold
 		local f = folds_by[key]
 		if not f then
 			local on = is_open()
-			f = { key = key, is_open = is_open, write = write, h = still(if on then 1 else 0), o = still(if on then 1 else 0), present = on, together = together == true }
+			f = { key = key, is_open = is_open, write = write, h = still(if on then 1 else 0), o = still(if on then 1 else 0), present = on, together = together == true, dur = dur }
 			folds_by[key] = f
 		end
 		return f
@@ -2193,18 +2198,19 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- while it moves, those past what shows stand in as one; see
 		-- `build_shape`.)
 		shape:set(shape:peek() + 1)
+		local open, close = f.dur or OPEN, f.dur or CLOSE
 		if on then
 			f.present = true
-			f.h = anim(f.h, 1, OPEN, 0, function()
+			f.h = anim(f.h, 1, open, 0, function()
 				shape:set(shape:peek() + 1)
 			end)
-			f.o = anim(f.o, 1, if f.together then OPEN else COME, if f.together then 0 else COME_AFTER)
+			f.o = anim(f.o, 1, if f.together then open else COME, if f.together then 0 else COME_AFTER)
 			-- (Its height on the column motion's CSS ease, ds/motion: into
 			-- place with no overshoot, as it opens so it closes.)
 			f.h.css = true
 		else
-			f.o = anim(f.o, 0, if f.together then CLOSE else GO)
-			f.h = anim(f.h, 0, CLOSE, if f.together then 0 else CLOSE_AFTER, function()
+			f.o = anim(f.o, 0, if f.together then close else GO)
+			f.h = anim(f.h, 0, close, if f.together then 0 else CLOSE_AFTER, function()
 				if not f.is_open() and f.present then
 					f.present = false
 				end
@@ -2240,7 +2246,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			return empties_open:peek()
 		end, function(on: boolean)
 			empties_open:set(on)
-		end)
+		end, true, FLY)
 	end
 	local function group_fold(key: string): Fold
 		local st = opened[key]
@@ -3576,7 +3582,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- What the row keeps before the stack, points: its insets, the word
 		-- (an estimate, the longer of its locales'), the space, and the
 		-- count's digits.
-		local EMPTY_FIXED = 8 * 2 + 40 + 4 + 8
+		local EMPTY_FIXED = 8 * 2 + 40 + 8 + 8
 		local EMPTY_DIGIT = 7
 		-- A tile's cut: a rounded square the next one's size, and a gap round it
 		-- (params[0]: its centre and half-side as fractions of the width,
@@ -3619,9 +3625,6 @@ fn layer(input:LayerInput)->vec4<f32> {
 			-- 1 open.
 			local function flown(): number
 				return value(empties_fold().h, clock:get())
-			end
-			local function inked(): number
-				return value(empties_fold().o, clock:get())
 			end
 			local stack_ref = ui.ref()
 			local STEP = EMPTY_TILE - EMPTY_OVERLAP
@@ -3687,7 +3690,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 					shrink = 0,
 					ml = if i == 1 then 0 else ui.raw(-EMPTY_OVERLAP, "tiles overlap by a third"),
 					-- (Flying: down to its row's icon as the fold opens, back as
-					-- it closes; it fades as the rows' own come in.)
+					-- it closes; whole while it flies, it hands over to the
+					-- row's own icon, fading in under it, over the last stretch.)
 					x = function(): number
 						local p = flown()
 						return if p > 0 then p * (lands(i)) else 0
@@ -3701,7 +3705,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 						return p * dy
 					end,
 					opacity = function(): number
-						return 1 - inked()
+						return 1 - math.clamp((flown() - 0.75) / 0.25, 0, 1)
 					end,
 					-- (The notch only while it sits in the stack.)
 					ui.show(function(): boolean
@@ -3744,11 +3748,11 @@ fn layer(input:LayerInput)->vec4<f32> {
 				},
 				-- (Gone from the header once they've landed in the rows.)
 				ui.show(function(): boolean
-					return inked() < 1 or not empties_open:get()
+					return flown() < 1 or not empties_open:get()
 				end, ui.row {
 					class = "empty-projects-stack",
 					ref = stack_ref,
-					ml = "$space.1",
+					ml = "$space.2",
 					shrink = 1,
 					min_w = 0,
 					items = "center",
