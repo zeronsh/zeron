@@ -42,6 +42,7 @@
 -- folds, selection and scroll.
 
 local control = require("@self/control")
+local token = require("@self/token")
 -- (Reduce motion: what travels lands at once.)
 local motion = require("@self/motion")
 -- A filter match's weight in a span (which takes a number, not a token).
@@ -2292,9 +2293,9 @@ local function component(props: Props): Node
 			role = "treeitem",
 			label = n.name,
 			-- (What plugins place by, and what's under them: the row's file,
-			-- by its path from the project's root.)
+			-- as a token: its path is "files.read"'s, ds/token.)
 			class = "file-row",
-			provide = { file = n.path },
+			provide = { file = token.file(n.path) },
 			focus = { border = 0 },
 			cursor = "default",
 			on_hover = function(inside: boolean)

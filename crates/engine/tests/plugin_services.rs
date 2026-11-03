@@ -59,6 +59,9 @@ async fn device_rooms() -> String {
                     .find_map(|kv| kv.strip_prefix("connId="))
                     .unwrap_or("anon")
                     .to_string();
+                // The dialing device, as the edge stamps it once its proof
+                // checks out (this stand-in takes the dial's word).
+                let caller = query.split('&').find_map(|kv| kv.strip_prefix("callerDevice=")).map(str::to_owned);
                 let (mut sink, mut incoming) = ws.split();
                 let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
                 {
@@ -89,6 +92,7 @@ async fn device_rooms() -> String {
                     } else if let Some(host) = rooms.hosts.get(&device) {
                         let mut routed = DeviceFrameHeader::new(header.s, header.k);
                         routed.from = Some(conn.clone());
+                        routed.from_device = caller.clone();
                         let _ = host.send(encode_device_frame(&routed, &payload).unwrap());
                     }
                 }
@@ -115,6 +119,11 @@ fn engine(dir: &Path, device: &str, rooms: &str) -> Engine {
     let host = core.start_host_relay(rooms);
     let mut links = LinkCacheConfig::new(rooms.to_string(), Arc::new(StaticToken("test-user".into())));
     links.probe_timeout = Duration::from_secs(5);
+    // Each dial says which device it is (the edge verifies the proof).
+    let me = device.to_owned();
+    links.caller_proof = Some(Arc::new(move |_: &str, _: &str, _: i64| {
+        Some(zeron_rpc::CallerProof { device: me.clone(), key: "test-key".into(), signature: "test-sig".into() })
+    }));
     core.set_links(LinkCache::new(links));
     let client = zeron_rpc::memory_client(core.rpc_service());
     Engine { core, client, _host: host }
@@ -151,8 +160,26 @@ async fn install(e: &Engine, dir: &Path, version: &str) {
         "icon": "icon.svg",
     });
     std::fs::write(folder.join("zeron-plugin.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
-    let signed = e.client.call(methods::SIGN_PLUGIN, json!({ "id": "hello-devices" })).await.unwrap();
+    // As Zeron's consent window signs: with a review for it as listed.
+    let review = review(e, "hello-devices").await;
+    let signed = e
+        .client
+        .call(methods::SIGN_PLUGIN, json!({ "id": "hello-devices", "review": review }))
+        .await
+        .unwrap();
     assert_eq!(signed["version"], version, "{signed}");
+}
+
+/// A consent-window review for plugin `id` as `e` lists it now.
+async fn review(e: &Engine, id: &str) -> Value {
+    let list = e.client.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
+    let item = list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == id).cloned().unwrap();
+    let minted = e
+        .client
+        .call(methods::REVIEW_PLUGIN, json!({ "id": id, "hash": item["hash"] }))
+        .await
+        .unwrap();
+    minted["review"].clone()
 }
 
 async fn allow(e: &Engine) {
@@ -164,9 +191,13 @@ async fn allow(e: &Engine) {
         .find(|p| p["id"] == "hello-devices")
         .cloned()
         .unwrap();
+    let review = review(e, "hello-devices").await;
     let decided = e
         .client
-        .call(methods::DECIDE_PLUGIN, json!({ "id": "hello-devices", "allow": true, "hash": item["hash"] }))
+        .call(
+            methods::DECIDE_PLUGIN,
+            json!({ "id": "hello-devices", "allow": true, "hash": item["hash"], "review": review }),
+        )
         .await
         .unwrap();
     assert_eq!(decided["status"], "on", "{decided}");
@@ -211,6 +242,7 @@ async fn a_window_on_one_device_calls_its_service_on_another() {
     let a = engine(&dir_a, "device-a", &rooms);
     let b = engine(&dir_b, "device-b", &rooms);
 
+
     // Not on B yet.
     install(&a, &dir_a, "1.0.0").await;
     allow(&a).await;
@@ -222,8 +254,10 @@ async fn a_window_on_one_device_calls_its_service_on_another() {
     let refused = ask(&a, "device-b", "where", json!({})).await;
     assert_eq!(refused["reason"], "not_approved", "{refused}");
 
-    // Allowed on B, from A (Settings → Plugins' device switcher): B's
-    // service answers, running B's own `echo`.
+    // A lists B's (Settings → Plugins' device switcher), but allowing is
+    // B's person's, in B's own window (R6): a forwarded allow is refused,
+    // with or without a review, and changes nothing there. Then B allows
+    // it, and B's service answers, running B's own `echo`.
     let on_b = a
         .client
         .call(methods::LIST_PLUGINS, json!({ "targetDeviceId": "device-b" }))
@@ -234,15 +268,21 @@ async fn a_window_on_one_device_calls_its_service_on_another() {
     assert_eq!(item["ask"], json!(["commands", "service"]), "{item}");
     // Its icon is B's file, carried in the listing (A can't read B's disk).
     assert_eq!(item["icon_svg"], ICON, "{item}");
-    let decided = a
-        .client
-        .call(
-            methods::DECIDE_PLUGIN,
-            json!({ "targetDeviceId": "device-b", "id": "hello-devices", "allow": true, "hash": item["hash"] }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(decided["status"], "on", "{decided}");
+    for review in [Value::Null, review(&a, "hello-devices").await] {
+        let forwarded = a
+            .client
+            .call(
+                methods::DECIDE_PLUGIN,
+                json!({ "targetDeviceId": "device-b", "id": "hello-devices", "allow": true, "hash": item["hash"], "review": review }),
+            )
+            .await;
+        assert!(forwarded.is_err(), "another device allowed it: {forwarded:?}");
+    }
+    // (Nor past A's own refusal: B's relay refuses it on arrival.)
+    let list = b.client.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
+    let still = list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == "hello-devices").cloned().unwrap();
+    assert_eq!(still["status"], "pending", "{still}");
+    allow(&b).await;
     // (A file here can't be installed there.)
     let refused = a
         .client

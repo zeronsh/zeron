@@ -5469,8 +5469,18 @@ mod tests {
                 .expect("embedded lifecycle")
                 .borrow()
                 .clone(),
-            DeferredEngineState::Waiting
+            // A saved session with no organization: the account's setup
+            // isn't finished (the engine waits on it as it waits to assemble).
+            DeferredEngineState::Onboarding
         ));
+        // The app's onboarding wait sees it as still waiting, not failed.
+        let mut deferred = handle.deferred_state().expect("embedded lifecycle");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), wait_for_deferred_engine(&mut deferred))
+                .await
+                .is_err(),
+            "onboarding is a wait, never an error"
+        );
 
         let info: EngineInfo = handle
             .client()
@@ -5488,6 +5498,32 @@ mod tests {
             .await
             .is_err(),
             "cloud data waits for organization onboarding"
+        );
+        // What this app asks during onboarding waits, never errors: its
+        // watch streams and data calls. Only plugin and template calls (which
+        // this app never makes) answer `setup_incomplete` at once.
+        for method in [methods::WATCH_CHATS, methods::WATCH_DEVICES, methods::WATCH_SPACES, methods::WATCH_SESSIONS] {
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    handle.client().call(method, serde_json::json!({})),
+                )
+                .await
+                .is_err(),
+                "{method} waits for organization onboarding"
+            );
+        }
+        let auth = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle.client().subscribe(methods::AUTH_STATUS, serde_json::json!({})),
+        )
+        .await
+        .expect("AuthStatus answers during onboarding");
+        assert!(auth.is_ok(), "{:?}", auth.err());
+        let plugins = handle.client().call(methods::LIST_PLUGINS, serde_json::json!({})).await;
+        assert!(
+            matches!(&plugins, Err(RpcError::Capability(code)) if code == "setup_incomplete"),
+            "{plugins:?}"
         );
         assert!(!dir.path().join("orgs").exists());
         handle.shutdown().await;
@@ -5573,6 +5609,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

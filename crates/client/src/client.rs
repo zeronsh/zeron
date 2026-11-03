@@ -802,6 +802,7 @@ impl Client {
             last_seen_at: None,
             room_gen: Some(2),
             parent_chat_id: None,
+            child_kind: None,
         };
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;

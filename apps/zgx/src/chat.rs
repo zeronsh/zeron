@@ -296,7 +296,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.send", move |req| {
         let v = pick(&req);
-        async move { v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.send")?; v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
     });
     host.async_action("chat.interrupt", move |id| async move {
         command(&text(&id), json!({ "kind": "interrupt" })).await?;
@@ -308,7 +308,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
-        async move { v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.respond")?; v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A question's Back: its page before again, with what was picked there.
     let back = which.clone();
@@ -324,7 +324,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let v = view.clone();
     host.async_action("chat.queue", move |args| {
         let v = v.clone();
-        async move { v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.queue")?; v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.retry", move |args| {

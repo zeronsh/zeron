@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde_json::json;
 use zgx_script::{ScriptHost, testing::TestApp};
 
-use super::{Item, expose_own, expose_surface};
+use super::{Item, expose_own, expose_surface, json_value, records};
 
 fn md_hello(status: &str) -> Item {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins-dev").join("md-hello");
@@ -31,7 +31,11 @@ fn reply(items: Vec<Item>) -> TestApp {
         let mut plugins = Vec::new();
         for item in &items {
             expose_own(&host, item.id());
-            for name in ["problem", "result", "ack"] {
+            // Its records, as the bridge publishes them: allowed to change
+            // how its blocks show, it reads what they hold.
+            let records = records::records_with(&item.permissions(), &item.change(), &Default::default());
+            host.shared(&format!("plugin.{}.records", item.id()), zgx_script::Value::Nil).set(json_value(&records));
+            for name in ["problem", "result", "ack", "cost"] {
                 host.action(format!("plugin.{}.{name}", item.id()), |_| {});
             }
             plugins.extend(item.plugin());

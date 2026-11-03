@@ -71,6 +71,8 @@ struct StubState {
     exchange_org: Mutex<String>,
     /// POST /auth/orgs answers 409 with this body ("" = creates `org_new`).
     create_org_conflict: Mutex<String>,
+    /// Bodies of `POST /plugin-keys` (a device's signing key registered).
+    plugin_keys: Mutex<Vec<serde_json::Value>>,
 }
 
 struct StubEdge {
@@ -188,6 +190,7 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
                           "firstName": "Wing", "lastName": "Test" },
                 "accessToken": token,
                 "refreshToken": format!("refresh-{n}"),
+                "stepUp": { "token": format!("ticket-{n}"), "expiresAt": 0 },
             });
             respond(&mut stream, "200 OK", &response.to_string()).await;
         }
@@ -246,6 +249,14 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
             } else {
                 respond(&mut stream, "409 Conflict", &conflict).await;
             }
+        }
+        ("POST", "/plugin-keys") => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            state.plugin_keys.lock().expect("lock").push(parsed);
+            respond(&mut stream, "200 OK", r#"{"ok":true}"#).await;
+        }
+        ("GET", "/plugin-keys") => {
+            respond(&mut stream, "200 OK", r#"{"keys":[],"now":1}"#).await;
         }
         _ => respond(&mut stream, "404 Not Found", r#"{"error":"not_found"}"#).await,
     }
@@ -306,6 +317,69 @@ async fn dev_mode_is_signed_in_with_configured_bearer() {
     auth.complete_sign_in("whatever")
         .await
         .expect("dev complete is a no-op");
+}
+
+/// The app restarts the engine as soon as a sign-in is announced, and the
+/// step-up ticket lives only in this process: what needs it (registering
+/// the plugin signing key) runs before the announcement, with the ticket.
+#[tokio::test]
+async fn a_fresh_ticket_is_used_before_the_sign_in_is_announced() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let seen: Arc<Mutex<Vec<(String, AuthState, Option<String>, bool)>>> = Arc::default();
+    let (record, probe) = (seen.clone(), auth.clone());
+    auth.on_fresh_ticket(Arc::new(move |user: String| {
+        let (record, probe) = (record.clone(), probe.clone());
+        Box::pin(async move {
+            // The bearer works already (registering needs it).
+            let bearer = probe.access_token().await.is_ok();
+            record.lock().unwrap().push((user, probe.state(), probe.step_up(), bearer));
+        })
+    }));
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state param");
+    auth.complete_sign_in(&format!("{state}.code123")).await.expect("sign-in");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let (user, state_then, ticket, bearer) = &seen[0];
+    assert_eq!(user, "user_1");
+    assert_eq!(*state_then, AuthState::SignedOut, "not announced yet");
+    assert_eq!(ticket.as_deref(), Some("ticket-1"));
+    assert!(bearer);
+    assert!(matches!(auth.state(), AuthState::NeedsOrganization { .. }), "announced after");
+}
+
+/// The app's first sign-in runs on its local engine (no edge of its own),
+/// which the app restarts into synced mode once the sign-in is announced:
+/// the plugin signing key is registered there, with the sign-in's ticket,
+/// before that.
+#[tokio::test]
+async fn a_local_engine_registers_its_signing_key_with_the_sign_ins_ticket() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("device-id"), "device-local").unwrap();
+    let core = zeron_engine::EngineCore::assemble(
+        dir.path(),
+        Arc::new(zeron_engine::HarnessRegistry::new()),
+        zeron_engine::HarnessId::Mock,
+        None,
+    )
+    .expect("a local engine");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    core.set_auth(auth.clone());
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state param");
+    auth.complete_sign_in(&format!("{state}.code123")).await.expect("sign-in");
+    // By the time the sign-in is announced (and the app would restart the
+    // engine), the key is registered with the ticket.
+    let registered = edge.state.plugin_keys.lock().unwrap().clone();
+    assert_eq!(registered.len(), 1, "{registered:?}");
+    assert_eq!(registered[0]["stepUp"], "ticket-1");
+    assert_eq!(registered[0]["deviceId"], "device-local");
+    let registration: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("plugin-signing-key.json")).unwrap()).unwrap();
+    assert_eq!((registration["registered_for"].as_str(), registration["key"].clone()), (Some("user_1"), registered[0]["key"].clone()));
 }
 
 #[tokio::test]

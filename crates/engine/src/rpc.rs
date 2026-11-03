@@ -53,6 +53,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod agent_gate;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -701,6 +702,11 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// What the child is to its parent (`childKind`: `side` | `subagent`,
+        /// the Zeron MCP's `kind`): kept on the row only with a parent. An
+        /// unknown kind reads as none (a side chat).
+        #[serde(default, deserialize_with = "zeron_proto::lenient_child_kind")]
+        child_kind: Option<zeron_proto::ChildKind>,
         /// Run on Cloud (the checkout picker's Cloud): the chat gets its own
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
@@ -1806,6 +1812,7 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                child_kind,
                 cloud: _,
             } => {
                 // A voice orchestrator is hidden, so the chats it creates are
@@ -1813,13 +1820,15 @@ impl EngineRpc {
                 let parent_chat_id = parent_chat_id
                     .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
                 self.workspace
-                    .create_chat_with_parent(
+                    .create_chat_hosted(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
+                        None,
                         config,
                         cwd,
                         parent_chat_id,
+                        child_kind,
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -2331,8 +2340,10 @@ fn forwardable(method: &str) -> bool {
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
             // Plugins are per device (what it runs, what it allowed): Settings
-            // → Plugins' device switcher reviews, allows, installs and removes
-            // them on another of your devices from this one.
+            // → Plugins' device switcher lists, declines, turns off, installs
+            // (from a link; it lands waiting there) and removes them on
+            // another of your devices from this one. Allowing stays with
+            // that device's own window (`zeron_rpc::peer_refused`, both ends).
             | methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
             | methods::DECIDE_PLUGIN
@@ -2523,6 +2534,8 @@ impl AuthRpc {
                 | methods::COMPLETE_SIGN_IN
                 | methods::SIGN_OUT
                 | methods::ACCESS_TOKEN
+                | methods::STEP_UP
+                | methods::DELETE_ACCOUNT
                 | methods::LIST_ORGS
                 | methods::CREATE_ORG
                 | methods::SELECT_ORG
@@ -2558,6 +2571,41 @@ impl RpcService for AuthRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "token": token, "expiresAt": expires_at }))
+            }
+            // Local IPC, the app's token only (agents and the relay are
+            // refused before here): a fresh interactive sign-in whose ticket
+            // stays in the engine, then the deletion it allows (R16).
+            methods::STEP_UP => {
+                let url = self
+                    .auth
+                    .start_step_up()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "url": url }))
+            }
+            methods::DELETE_ACCOUNT => {
+                #[derive(Deserialize)]
+                struct P {
+                    confirm: String,
+                }
+                let p: P = parse_params(params)?;
+                // Answered, not failed: `{ok: true}`, or `{ok: false, error:
+                // <code>, message, organization?}` with a stable code
+                // ([`crate::auth::DeleteAccountError::code`]).
+                match self.auth.delete_account(&p.confirm).await {
+                    Ok(()) => RpcReply::value(&serde_json::json!({ "ok": true })),
+                    Err(error) => {
+                        let mut reply = serde_json::json!({
+                            "ok": false,
+                            "error": error.code(),
+                            "message": error.to_string(),
+                        });
+                        if let crate::auth::DeleteAccountError::Refused { organization: Some(org), .. } = &error {
+                            reply["organization"] = serde_json::json!(org);
+                        }
+                        RpcReply::value(&reply)
+                    }
+                }
             }
             methods::SIGN_IN_HEADLESS => {
                 let url = self.auth.start_headless_sign_in();
@@ -2646,6 +2694,9 @@ impl crate::remote_terminals::Relay for EngineRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        // An agent's chats: capped at its own access, runs as the chat is
+        // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
+        let params = self.agent_gate(method, params)?;
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -2659,6 +2710,13 @@ impl RpcService for EngineRpc {
                 return Err(RpcError::BadParams(
                     "Another device installs a plugin from a link (url), not a file on this one".into(),
                 ));
+            }
+            // Allowing a plugin is that device's person's, in its own window
+            // (the receiving side refuses it too: `zeron_rpc::peer_refused`).
+            if zeron_rpc::peer_refused(method, &params) {
+                return Err(RpcError::Failed(format!(
+                    "{method}: only that device's own window can do that. It's waiting for you there."
+                )));
             }
             // Settings → Providers' Cloud: its logins live in the vault.
             if crate::cloud_accounts::is_cloud_accounts_target(&target)
@@ -2717,6 +2775,14 @@ impl RpcService for EngineRpc {
         }
         if voice_remote::handles(method) {
             return self.voice_remote(method, params).await;
+        }
+        // Signing out retires this device's plugin signing key first, while
+        // the session can still revoke it on the edge.
+        if method == methods::SIGN_OUT
+            && self.auth().is_ok_and(|auth| !auth.is_runner())
+            && let Some(plugins) = self.plugins.clone()
+        {
+            Box::pin(plugins.retire_signing_key()).await;
         }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())
@@ -3566,6 +3632,7 @@ impl RpcService for EngineRpc {
                     branch,
                     cwd,
                     parent_chat_id,
+                    child_kind,
                     cloud,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
@@ -3596,6 +3663,7 @@ impl RpcService for EngineRpc {
                             config.clone(),
                             cwd.clone(),
                             parent_chat_id.clone(),
+                            *child_kind,
                         )
                         .map_err(failed)?;
                     if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -5127,6 +5195,43 @@ mod tests {
             .unwrap();
             let row = core.workspace.chat(chat).unwrap().unwrap();
             assert_eq!(row.parent_chat_id.as_deref(), expected);
+        }
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_child_s_kind_is_recorded_only_with_a_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        use zeron_proto::ChildKind;
+        for (chat, parent, kind, expected) in [
+            ("sub", Some("main"), Some("subagent"), Some(ChildKind::Subagent)),
+            ("side", Some("main"), Some("side"), Some(ChildKind::Side)),
+            // A person's side chat names none; a newer peer's kind reads as none.
+            ("plain-side", Some("main"), None, None),
+            ("future", Some("main"), Some("orbit"), None),
+            // Without a parent, no kind.
+            ("top", None, Some("subagent"), None),
+        ] {
+            let mut params = serde_json::json!({"op":"createChat", "chatId":chat,
+                "deviceId":core.device_id,
+                "config":{"harness":"codex","sandbox":"workspace-write"}});
+            if let Some(parent) = parent {
+                params["parentChatId"] = parent.into();
+            }
+            if let Some(kind) = kind {
+                params["childKind"] = kind.into();
+            }
+            rpc.handle(methods::MUTATE, params).await.unwrap();
+            let row = core.workspace.chat(chat).unwrap().unwrap();
+            assert_eq!(row.child_kind, expected, "{chat}");
         }
         core.sessions.shutdown().await;
     }

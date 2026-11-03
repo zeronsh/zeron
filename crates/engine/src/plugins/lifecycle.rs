@@ -3,10 +3,13 @@
 //! folder, its decision, what it stored, and the update kept for it.
 //!
 //! Consent stays the app's. Installing records a decision only for a plugin
-//! signed by your own key (one of your devices'); anyone else's is listed
-//! `pending`, and the app's consent window asks. An update signed by the
-//! same key keeps what you allowed; one asking for more waits for you again
-//! (`status::decide`).
+//! signed by this device's own key, and even then only for what runs inside
+//! the plugin's sandbox (`capability::inside_sandbox`): native, commands,
+//! service, devices and ui.replace are always asked. Anyone else's (another of your
+//! devices' included) is listed `pending`, and the app's consent window
+//! asks. An update signed by the same key keeps what you allowed; one that
+//! grows its capability record waits for you again (`status::decide`). An
+//! Unknown author's update always waits: its decision was for the content.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zeron_rpc::{RpcError, RpcReply, methods, parse_params};
 
+use super::capability;
 use super::install::{self, Package, Source};
 use super::package;
 use super::template_packages;
@@ -179,37 +183,60 @@ impl Plugins {
         }
         source.version = package.manifest.version.clone();
         source.installed_at = now_secs();
+        let local = zeron_rpc::caller().is_local();
         let author = self.resolve_now(&package.key).await;
         let plugins_dir = self.inner.plugins_dir.clone();
         let staged = package.clone();
+        // Held while the folder is swapped: a scan in between would see it
+        // gone and forget its decision.
+        let scan_guard = self.inner.scan_lock.lock().await;
         let replaced = blocking(move || install::install(&plugins_dir, &staged, &source)).await?;
-        let asked = package.manifest.permissions.clone();
+        let record = capability::record(&package.manifest);
         self.update_state(|state| match &replaced {
             None => {
                 state.decisions.remove(&id);
-                // Yours (signed by one of your devices): no asking.
-                if author == Author::You {
-                    let mut permissions = asked.clone();
-                    permissions.sort();
-                    permissions.dedup();
+                // Signed on this device: what runs inside its sandbox is
+                // allowed; anything outside it waits for you.
+                // (Only when this device's own app installs it: an agent's
+                // or another device's install always waits.)
+                if author == Author::You && local {
+                    let granted = capability::inside_sandbox(&record);
+                    let permissions = granted["permissions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|p| p.as_str().map(str::to_owned))
+                        .collect();
                     state.decisions.insert(
                         id.clone(),
-                        Decision { allowed: true, author_key: Some(package.key.clone()), permissions, content_hash: None, off: false },
+                        Decision {
+                            allowed: true,
+                            author_key: Some(package.key.clone()),
+                            permissions,
+                            content_hash: None,
+                            off: false,
+                            grants: Some(granted),
+                            reask: false,
+                        },
                     );
                 }
             }
             Some(old) => {
                 // Allowed by its content (an author not known): the update
-                // is signed by the same key, so it's still the one allowed.
+                // is signed by the same key, but nobody knows whose that is,
+                // so it waits for you again.
                 if let Some(d) = state.decisions.get_mut(&id)
                     && d.allowed
                     && d.author_key.is_none()
                     && d.content_hash.as_deref() == Some(old.hash.as_str())
+                    && old.hash != package.hash
                 {
                     d.content_hash = Some(package.hash.clone());
+                    d.reask = true;
                 }
             }
         })?;
+        drop(scan_guard);
         install::forget_found(&self.inner.plugins_dir, &id);
         self.rescan().await;
         let entry = self.entry(&id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
@@ -224,6 +251,9 @@ impl Plugins {
             "removed": change.removed,
             "waiting": matches!(entry.item.status, Status::Pending | Status::Tampered),
         });
+        if let Some(diff) = &entry.item.digest_diff {
+            reply["digest_diff"] = diff.clone();
+        }
         if let Some(old) = &replaced {
             reply["from"] = json!(old.version);
         }
@@ -233,12 +263,38 @@ impl Plugins {
     /// Check every installed plugin's source (or `only`'s) for a new version.
     pub(super) async fn check_updates(&self, only: Option<&str>) -> Value {
         self.rescan().await;
-        let candidates: Vec<(String, String, PathBuf, String, Vec<String>, String)> = lock(&self.inner.entries)
+        struct Candidate {
+            id: String,
+            name: String,
+            dir: PathBuf,
+            key: String,
+            version: String,
+            permissions: Vec<String>,
+            hash: String,
+            allowed: Value,
+        }
+        let decisions = lock(&self.inner.state).decisions.clone();
+        let candidates: Vec<Candidate> = lock(&self.inner.entries)
             .iter()
             .filter(|e| !e.item.builtin && !e.item.own && only.is_none_or(|id| id == e.item.id))
             .filter_map(|e| {
                 let key = e.key()?.to_owned();
-                Some((e.item.id.clone(), e.item.name.clone(), e.inspected.dir.clone(), key, e.item.permissions.clone(), e.item.hash.clone()))
+                // Compared with what you allowed it, or what it is when
+                // you haven't yet.
+                let allowed = decisions
+                    .get(&e.item.id)
+                    .filter(|d| d.allowed)
+                    .map_or_else(|| e.record.clone(), |d| d.allowed_record());
+                Some(Candidate {
+                    id: e.item.id.clone(),
+                    name: e.item.name.clone(),
+                    dir: e.inspected.dir.clone(),
+                    key,
+                    version: e.item.version.clone(),
+                    permissions: e.item.permissions.clone(),
+                    hash: e.item.hash.clone(),
+                    allowed,
+                })
             })
             .collect();
         let mut updates = Vec::new();
@@ -246,11 +302,20 @@ impl Plugins {
         let Ok(scratch) = self.scratch() else {
             return json!({ "updates": [], "errors": [{ "error": "Couldn't make room to check" }] });
         };
-        for (id, name, dir, key, permissions, hash) in candidates {
-            let Some(source) = Source::load(&dir) else { continue };
+        for c in candidates {
+            let (id, name) = (c.id.clone(), c.name.clone());
+            let Some(source) = Source::load(&c.dir) else { continue };
             let plugins_dir = self.inner.plugins_dir.clone();
+            let installed = install::Installed {
+                id: &c.id,
+                key: &c.key,
+                version: &c.version,
+                permissions: &c.permissions,
+                hash: &c.hash,
+                allowed: &c.allowed,
+            };
             match install::fetch_again(&source, &scratch).await {
-                Ok(Some((fetched, source))) => match install::compare(&id, &key, &permissions, &hash, &fetched, source) {
+                Ok(Some((fetched, source))) => match install::compare(&installed, &fetched, source) {
                     Some(found) => {
                         let keep = found.refused.is_none().then_some(&fetched);
                         if let Err(error) = install::keep_found(&plugins_dir, &id, &found, keep) {
@@ -285,7 +350,7 @@ impl Plugins {
         let mut errors = Vec::new();
         for (id, name, key, hash, source) in listed.into_iter().filter(|c| only.is_none_or(|o| o == c.0)) {
             match template_packages::fetch_again(&source).await {
-                Ok(Some((fetched, source))) => match template_packages::compare(&id, &key, &hash, &fetched, source) {
+                Ok(Some((fetched, source))) => match template_packages::compare(&dir, &id, &key, &hash, &fetched, source) {
                     Some(found) => {
                         let keep = found.refused.is_none().then_some(&fetched);
                         if let Err(error) = template_packages::keep_found(&dir, &id, &found, keep) {

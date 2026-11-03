@@ -12,6 +12,11 @@
 //! | `profile.read` | your id, name, username and avatar |
 //! | `account.email` | your email, unless you hide email addresses |
 //! | `files.read` | file paths (`files_read`; the SDK gives an id of the plugin's own without) |
+//! | `messages.read`, or "ui.change" on a reply's blocks | a code block's source and a formula's TeX (`blocks_read`) |
+//!
+//! What an element gives plugins of a file or a block is a token
+//! (`tokens`), found through the plugin's own `plugin.<id>.file` and
+//! `plugin.<id>.block` as these say.
 
 use serde_json::{Map, Value as Json, json};
 
@@ -106,7 +111,27 @@ pub fn records(permissions: &[String], sources: &Sources) -> Json {
     if may("files.read") {
         out.insert("files_read".into(), json!(true));
     }
+    if may("messages.read") {
+        out.insert("blocks_read".into(), json!(true));
+    }
     Json::Object(out)
+}
+
+/// The records for a plugin allowed `permissions`, with these "ui.change"
+/// targets: a plugin allowed to change how a reply's code blocks or
+/// formulas show (`.md-code…`, `.md-math`) reads what they hold, as it
+/// draws them.
+pub fn records_with(permissions: &[String], change: &[String], sources: &Sources) -> Json {
+    let mut out = records(permissions, sources);
+    let changes_blocks = permissions.iter().any(|p| p == "ui.change")
+        && change.iter().any(|t| {
+            let last = t.rsplit(">>").next().unwrap_or(t).trim();
+            last.starts_with(".md-code") || last.starts_with(".md-math")
+        });
+    if changes_blocks {
+        out["blocks_read"] = json!(true);
+    }
+    out
 }
 
 /// Whether any of `permissions` reads the open chat's messages (so the

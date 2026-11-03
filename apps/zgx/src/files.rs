@@ -215,17 +215,17 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.write", move |arg| {
         let f = f.clone();
-        async move { f.write(arg).await }
+        async move { crate::plugins::preview::refuse("files.write")?; f.write(arg).await }
     });
     let f = files.clone();
     host.async_action("files.move", move |arg| {
         let f = f.clone();
-        async move { f.move_entry(arg).await }
+        async move { crate::plugins::preview::refuse("files.move")?; f.move_entry(arg).await }
     });
     let f = files.clone();
     host.async_action("files.delete", move |arg| {
         let f = f.clone();
-        async move { f.delete(arg).await }
+        async move { crate::plugins::preview::refuse("files.delete")?; f.delete(arg).await }
     });
     let f = files.clone();
     host.async_action("files.search", move |arg| {
@@ -240,7 +240,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.create", move |arg| {
         let f = f.clone();
-        async move { f.create(arg).await }
+        async move { crate::plugins::preview::refuse("files.create")?; f.create(arg).await }
     });
     let f = files.clone();
     host.async_action("files.reveal", move |arg| {

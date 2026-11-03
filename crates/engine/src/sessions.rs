@@ -2243,6 +2243,10 @@ impl Inner {
     /// originating chat + device so the agent's side chats link back here.
     /// None when the engine serves no port or its executable is unknown.
     ///
+    /// The bearer is the agent-scoped one (`{data_dir}/ipc-token-agent`): it
+    /// reaches what the MCP tools need and nothing that decides, signs,
+    /// updates or hands out credentials ([`zeron_rpc::agent_allowed`]).
+    ///
     /// The IPC bearer travels as a file PATH (`ZERON_IPC_TOKEN_FILE`), not as
     /// `ZERON_IPC_TOKEN`: some harnesses hand this env to their CLI on the
     /// command line (Claude's inline `--mcp-config`), where any local user can

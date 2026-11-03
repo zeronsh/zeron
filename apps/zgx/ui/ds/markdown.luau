@@ -30,6 +30,7 @@
 -- `selectable` on its list): this draws it, nothing more.
 
 local control = require("@self/control")
+local token = require("@self/token")
 local Icon = require("@self/icon")
 local Lightbox = require("@self/lightbox")
 local ReplyPicture = require("@self/reply_picture")
@@ -848,9 +849,10 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 		-- Display math (`$$…$$`, or a ```math fence): the formula, else its
 		-- source as the code block it is.
 		-- (What it gives is above it: a plugin replacing `.md-math` reads
-		-- `tex` there, where the node it replaces stood.)
+		-- `tex` there, where the node it replaces stood; as a token, read
+		-- through what the plugin may read, ds/token.)
 		return ui.div {
-			provide = { tex = b.text },
+			provide = { tex = token.block(b.text) },
 			w_full = true,
 			min_w = 0,
 			Math.Display(b.text, function(): Node
@@ -871,7 +873,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			f.n += #MarkdownFind.occurrences(b.text, f.q)
 		end
 		return ui.div {
-			provide = { code = { lang = b.lang or "", source = b.text } },
+			provide = { code = token.block({ lang = b.lang or "", source = b.text }) },
 			w_full = true,
 			min_w = 0,
 			CodeBlock {
