@@ -27,15 +27,20 @@
  * `cloud-tester`) and grants or revokes it for users
  * (`POST /admin/badges/{grant|revoke}`). A new badge is a new row, not new
  * code. Grants name a user id, not a directory row, so a user can hold a
- * badge before their first webhook lands.
+ * badge before their first webhook lands. Earned badges (earned-badges.ts,
+ * V3 BETA) are the exception: code defines them, and the directory grants
+ * each from what it stores (when the user first held a name), never by hand.
+ * A card shows its badges in the order they were defined, so two cards with
+ * the same badges show them alike.
  *
  * Usernames: a member card's URL (card-routes.ts). `usernames` holds every
  * name ever given, lowercase, keyed by name, so a name can't be held twice
  * however claims race. A user's name is the row without `retired_at`; a
  * retired row keeps its name out of circulation, so no one takes over a
- * deleted user's URL. The scene count a card derives from (card.ts) is stored
- * on the user at their first name, not with the name: a rename or a new claim
- * after an operator's clear keeps the card. Operators set or clear names at
+ * deleted user's URL. The scene count a card derives from (card.ts) and the
+ * time of the claim (`first_claimed_at`) are stored on the user at their
+ * first name, not with the name: a rename or a new claim after an operator's
+ * clear keeps the card and what the first claim earned. Operators set or clear names at
  * `POST /admin/usernames/{set|clear|face}`.
  *
  * Org creations: each user creates at most one org (`POST /auth/orgs`).
@@ -52,6 +57,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { CARD_SCENES, HOLOS, cardFirstName, deriveCard, type CardFace, type Holo } from "./card";
 import { forgetCard } from "./card-cache";
+import { EARNED_BADGES, V3_BETA, earnsV3Beta, isEarnedBadge } from "./earned-badges";
 import type { Env } from "./env";
 import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
@@ -98,6 +104,9 @@ export interface DirectoryUser {
   readonly deletedAt: string | null;
   /** Null until they claim one, and once it's cleared or they're deleted. */
   readonly username: string | null;
+  /** ISO 8601, when they first held a name (claimed or set); null if never.
+   * Never changes once set: what decides earned badges. */
+  readonly firstClaimedAt: string | null;
   /** Badges held, oldest grant first. */
   readonly badges: readonly UserBadge[];
   /** The org they created through `POST /auth/orgs`, if any. */
@@ -114,7 +123,8 @@ export interface PublicCard extends CardFace {
   readonly userNumber: number;
   /** `YYYY-MM-DD`, UTC. */
   readonly joinedOn: string;
-  /** Oldest grant first. */
+  /** In the order the badges were defined, oldest first: the same order on
+   * every card. */
   readonly badges: readonly { readonly id: string; readonly name: string; readonly icon: string | null }[];
 }
 
@@ -232,6 +242,8 @@ export class UserDirectory extends DurableObject<Env> {
     // An operator's choice of scene and foil for a card (null: the seed's).
     if (!columns.includes("card_scene")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN card_scene INTEGER");
     if (!columns.includes("card_holo")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN card_holo TEXT");
+    // When the user first held a name, epoch ms: set once (`recordName`).
+    if (!columns.includes("first_claimed_at")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN first_claimed_at INTEGER");
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS usernames (
       username TEXT PRIMARY KEY, user_id TEXT NOT NULL, claimed_at INTEGER NOT NULL, retired_at INTEGER,
       CHECK (length(username) BETWEEN 3 AND 20 AND username GLOB '[a-z0-9]*' AND username NOT GLOB '*[^a-z0-9_-]*'))`);
@@ -253,6 +265,64 @@ export class UserDirectory extends DurableObject<Env> {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, recorded_at INTEGER NOT NULL)`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS org_creations (
       user_id TEXT PRIMARY KEY, claim_id TEXT NOT NULL, claimed_at INTEGER NOT NULL, org_id TEXT, created_at INTEGER)`);
+    this.backfillEarnedBadges();
+  }
+
+  /**
+   * Define the earned badges, date the first claim of every user named before
+   * claims were dated, and grant each earned badge to every live user who
+   * earned it and doesn't hold it. On every start; a no-op once caught up.
+   *
+   * A user named before `first_claimed_at` existed is dated by their oldest
+   * `usernames` row: renamed and cleared names stay as retired rows with
+   * their `claimed_at`, so that is the first claim. When an operator released
+   * every name they held (the rows are gone, `card_scenes` remains), the
+   * claim is unknown but came before now, so now is its date: before the
+   * cutoff that earns the badge, as the claim did; after it, it doesn't.
+   */
+  private backfillEarnedBadges(): void {
+    this.ctx.storage.transactionSync(() => {
+      for (const b of EARNED_BADGES) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO badges (badge_id, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (badge_id) DO UPDATE SET
+             name = excluded.name, description = excluded.description, icon = excluded.icon`,
+          b.id,
+          b.name,
+          b.description,
+          b.icon,
+          Date.now()
+        );
+      }
+      this.ctx.storage.sql.exec(
+        `UPDATE users SET first_claimed_at = COALESCE((SELECT MIN(n.claimed_at) FROM usernames n WHERE n.user_id = users.user_id), ?)
+         WHERE first_claimed_at IS NULL AND (card_scenes IS NOT NULL OR user_id IN (SELECT user_id FROM usernames))`,
+        Date.now()
+      );
+      const unawarded = this.ctx.storage.sql
+        .exec(
+          `SELECT user_id FROM users u WHERE u.deleted_at IS NULL AND u.first_claimed_at IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM user_badges ub WHERE ub.user_id = u.user_id AND ub.badge_id = ?)`,
+          V3_BETA.id
+        )
+        .toArray();
+      for (const row of unawarded) this.awardEarnedBadges(row.user_id as string);
+    });
+  }
+
+  /** Grant `userId` what their stored first claim earned, dated by it. A
+   * badge they hold stays as it is. */
+  private awardEarnedBadges(userId: string): void {
+    const [row] = this.ctx.storage.sql.exec("SELECT first_claimed_at, deleted_at FROM users WHERE user_id = ?", userId).toArray();
+    if (!row || row.deleted_at !== null) return;
+    const firstClaimedAt = row.first_claimed_at as number | null;
+    if (!earnsV3Beta(firstClaimedAt)) return;
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO user_badges (user_id, badge_id, granted_at, note) VALUES (?, ?, ?, NULL)",
+      userId,
+      V3_BETA.id,
+      firstClaimedAt
+    );
   }
 
   /** Number every user still without one — the rows recorded before numbers
@@ -429,9 +499,17 @@ export class UserDirectory extends DurableObject<Env> {
     return row.deleted_at === null ? undefined : "deleted_user";
   }
 
-  /** The stored scene count is set once, by the user's first name. */
-  private freezeCardScenes(userId: string, scenes: number): void {
-    this.ctx.storage.sql.exec("UPDATE users SET card_scenes = COALESCE(card_scenes, ?) WHERE user_id = ?", scenes, userId);
+  /** A user was given a name at `now`: their first name, however it came,
+   * sets the stored scene count and the claim's time, once, and grants what
+   * that claim earned. Later names change neither. */
+  private recordName(userId: string, scenes: number, now: number): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE users SET card_scenes = COALESCE(card_scenes, ?), first_claimed_at = COALESCE(first_claimed_at, ?) WHERE user_id = ?",
+      scenes,
+      now,
+      userId
+    );
+    this.awardEarnedBadges(userId);
   }
 
   /** Whether a name is free; undefined past the attempt limit. A retired name
@@ -450,17 +528,18 @@ export class UserDirectory extends DurableObject<Env> {
       if (refusal) return { error: refusal };
       const held = this.username(userId);
       if (held) return held === username ? { card: this.card(username)! } : { error: "already_claimed" };
+      const now = Date.now();
       const taken =
         this.ctx.storage.sql
           .exec(
             "INSERT INTO usernames (username, user_id, claimed_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING username",
             username,
             userId,
-            Date.now()
+            now
           )
           .toArray().length === 0;
       if (taken) return { error: "username_taken" };
-      this.freezeCardScenes(userId, scenes);
+      this.recordName(userId, scenes, now);
       return { card: this.card(username)! };
     });
   }
@@ -475,14 +554,15 @@ export class UserDirectory extends DurableObject<Env> {
       const [row] = this.ctx.storage.sql.exec("SELECT user_id, retired_at FROM usernames WHERE username = ?", username).toArray();
       if (row && row.user_id !== userId) return { error: row.retired_at === null ? "username_taken" : "username_retired" };
       this.retireUsername(userId);
+      const now = Date.now();
       this.ctx.storage.sql.exec(
         `INSERT INTO usernames (username, user_id, claimed_at) VALUES (?, ?, ?)
          ON CONFLICT (username) DO UPDATE SET retired_at = NULL`,
         username,
         userId,
-        Date.now()
+        now
       );
-      this.freezeCardScenes(userId, scenes);
+      this.recordName(userId, scenes, now);
       return { card: this.card(username)! };
     });
   }
@@ -520,7 +600,7 @@ export class UserDirectory extends DurableObject<Env> {
     const badges = this.ctx.storage.sql
       .exec(
         `SELECT b.badge_id, b.name, b.icon FROM user_badges ub JOIN badges b ON b.badge_id = ub.badge_id
-         WHERE ub.user_id = ? ORDER BY ub.granted_at, ub.badge_id`,
+         WHERE ub.user_id = ? ORDER BY b.created_at, b.rowid`,
         row.user_id
       )
       .toArray();
@@ -607,6 +687,7 @@ export class UserDirectory extends DurableObject<Env> {
         updatedAt: row.updated_at as string,
         deletedAt: row.deleted_at as string | null,
         username: row.username as string | null,
+        firstClaimedAt: row.first_claimed_at === null ? null : new Date(row.first_claimed_at as number).toISOString(),
         badges: badges.get(row.user_id as string) ?? [],
         createdOrgId: row.created_org_id as string | null
       };
@@ -882,12 +963,16 @@ const readJson = async (request: Request): Promise<Record<string, unknown> | und
 const optionalText = (value: unknown, max: number): string | null | false =>
   value === undefined || value === null ? null : typeof value === "string" && value.length <= max ? value || null : false;
 
+const earnedBadgeError = (id: string): Response =>
+  jsonError(409, "earned_badge", `${id} is earned, never defined, granted or revoked by hand (earned-badges.ts).`);
+
 /**
  * `/admin/badges`:
  *   GET                                   — every badge with its holder count
  *   POST {id, name, description?, icon?}  — define (or rename) a badge
  *   POST /grant  {badgeId, userIds | "all", note?} — answers {granted}
  *   POST /revoke {badgeId, userIds}       — answers {revoked}
+ * An earned badge's id (earned-badges.ts) is refused by all three: 409.
  */
 const handleBadgeRoute = async (
   request: Request,
@@ -912,6 +997,7 @@ const handleBadgeRoute = async (
     ) {
       return jsonError(400, "bad_request", "Expected {id (a-z, 0-9, -), name, description?, icon?}.");
     }
+    if (isEarnedBadge(body.id)) return earnedBadgeError(body.id);
     return json(await directory.defineBadge({ id: body.id, name: body.name.trim(), description, icon }));
   }
   if (action !== "grant" && action !== "revoke") return jsonError(404, "not_found", "Not found.");
@@ -937,6 +1023,7 @@ const handleBadgeRoute = async (
       `Expected {badgeId, userIds (1–${MAX_BADGE_USERS} user ids${action === "grant" ? ' or "all"' : ""})${action === "grant" ? ", note?" : ""}}.`
     );
   }
+  if (isEarnedBadge(body.badgeId)) return earnedBadgeError(body.badgeId);
   const ids = userIds === "all" ? "all" : [...new Set(userIds as string[])];
   if (action === "revoke") return json({ revoked: await directory.revokeBadge(body.badgeId, ids as string[]) });
   const granted = await directory.grantBadge(body.badgeId, ids, note);

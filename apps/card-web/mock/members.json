@@ -1,5 +1,5 @@
 {
-  "about": "Fictional members for the static build, each exactly what the edge serves at /cards/:username (edge/src/user-directory.ts PublicCard: username, displayName, userNumber, joinedOn, badges[{id, name, icon}], scene, holo, sky). One badge exists today, Cloud Tester. Scenes 0 to 19 index the manifest by number; scenes 11 to 20 are being regenerated.",
+  "about": "Fictional members for the static build, each exactly what the edge serves at /cards/:username (edge/src/user-directory.ts PublicCard: username, displayName, userNumber, joinedOn, badges[{id, name, icon}], scene, holo, sky). Two badges exist today, Cloud Tester and V3 BETA (earned by claiming a card before the beta's cutoff), served in the order they were defined: Cloud Tester first. Scenes 0 to 19 index the manifest by number; scenes 11 to 20 are being regenerated.",
   "members": [
     {
       "username": "graham",
@@ -10,6 +10,11 @@
         {
           "id": "cloud-tester",
           "name": "Cloud Tester",
+          "icon": null
+        },
+        {
+          "id": "v3-beta",
+          "name": "V3 BETA",
           "icon": null
         }
       ],
@@ -22,7 +27,13 @@
       "displayName": "Ada",
       "userNumber": 117,
       "joinedOn": "2024-01-12",
-      "badges": [],
+      "badges": [
+        {
+          "id": "v3-beta",
+          "name": "V3 BETA",
+          "icon": null
+        }
+      ],
       "scene": 1,
       "holo": "secret",
       "sky": 2795611532
@@ -32,7 +43,13 @@
       "displayName": "Lin",
       "userNumber": 51,
       "joinedOn": "2024-03-03",
-      "badges": [],
+      "badges": [
+        {
+          "id": "v3-beta",
+          "name": "V3 BETA",
+          "icon": null
+        }
+      ],
       "scene": 4,
       "holo": "starlight",
       "sky": 1182007729
@@ -46,6 +63,11 @@
         {
           "id": "cloud-tester",
           "name": "Cloud Tester",
+          "icon": null
+        },
+        {
+          "id": "v3-beta",
+          "name": "V3 BETA",
           "icon": null
         }
       ],
@@ -140,6 +162,11 @@
         {
           "id": "cloud-tester",
           "name": "Cloud Tester",
+          "icon": null
+        },
+        {
+          "id": "v3-beta",
+          "name": "V3 BETA",
           "icon": null
         }
       ],
@@ -252,6 +279,11 @@
         {
           "id": "cloud-tester",
           "name": "Cloud Tester",
+          "icon": null
+        },
+        {
+          "id": "v3-beta",
+          "name": "V3 BETA",
           "icon": null
         }
       ],
