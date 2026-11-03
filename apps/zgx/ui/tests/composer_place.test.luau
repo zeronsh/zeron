@@ -145,6 +145,70 @@ test("composer place: the context ring shows only once a window is reported", fu
 	expect(app:error()).to_be(nil)
 end)
 
+-- A Codex plan: its five hours half used, its week less so; when each
+-- starts over, from now.
+local function plan(now: number): any
+	return {
+		name = "Codex",
+		email = "ada@example.com",
+		plan = "Pro",
+		windows = {
+			{ label = "5h", used = 0.49, resets = now + 2 * 3600 },
+			{ label = "Weekly", used = 0.3, resets = now + 3 * 86400 },
+		},
+	}
+end
+
+test("composer plan: a ring before the context ring, shown while the agent reports its plan", function()
+	local app = mounted()
+	expect(showing(app, "#composer-plan")).to_be(false)
+	app:set_state("test_place_quota", plan(os.time()))
+	settle(app)
+	expect(showing(app, "#composer-plan")).to_be(true)
+	expect(showing(app, "#composer-context")).to_be(true)
+	-- Before the context ring, as Zeron's footer has them.
+	local function x(sel: string): number
+		local first = string.match(app:tree(sel .. "[1]"), "[^\n]+") or ""
+		return tonumber(string.match(first, " (%-?%d+),%-?%d+ %d+x%d+")) or -1
+	end
+	expect(x("#composer-plan") < x("#composer-context")).to_be(true)
+	-- No windows, or none at all: no ring.
+	app:set_state("test_place_quota", { name = "Codex", windows = {} })
+	settle(app)
+	expect(showing(app, "#composer-plan")).to_be(false)
+	app:set_state("test_place_quota", nil)
+	settle(app)
+	expect(showing(app, "#composer-plan")).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("composer plan: its card says each window, how much is used and when it starts over", function()
+	local app = mounted()
+	app:set_state("test_place_quota", plan(os.time()))
+	settle(app)
+	app:hover("#composer-plan")
+	rested(app)
+	expect(app:has("#composer-plan-card")).to_be(true)
+	expect(app:has('#composer-plan-card >> "Codex usage"')).to_be(true)
+	-- The most used window leads.
+	expect(app:text("#composer-plan-percent")).to_be("49%")
+	expect(app:text("#composer-plan-who")).to_be("ada@example.com · Pro")
+	expect(app:has('#composer-plan-card >> "5h"')).to_be(true)
+	expect(app:has('#composer-plan-card >> "Weekly"')).to_be(true)
+	expect(app:has('#composer-plan-card >> "30%"')).to_be(true)
+	local tree = app:tree("#composer-plan-card")
+	expect(string.find(tree, "resets ", 1, true) ~= nil).to_be(true)
+	-- Its opening asks the provider again.
+	expect((app:state("test_place_quota_asks") :: number) >= 1).to_be(true)
+	-- Near the limit, the week leads.
+	local p = plan(os.time())
+	p.windows[2].used = 0.97
+	app:set_state("test_place_quota", p)
+	settle(app)
+	expect(app:text("#composer-plan-percent")).to_be("97%")
+	expect(app:error()).to_be(nil)
+end)
+
 test("composer place: the footer's chips are one height, the ring one of them", function()
 	local app = mounted()
 	rested(app)

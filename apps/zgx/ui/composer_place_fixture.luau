@@ -10,6 +10,9 @@
 --   test_place_branch    the branch chosen
 --   test_place_checkout  "worktree" | "local"
 --   test_place_usage     { tokens, window } or nil
+--   test_place_quota     the plan ring's plan ({ name?, email?, plan?,
+--                        windows }) or nil; `test_place_quota_asks` counts
+--                        its card asking again
 --   test_place_w         the composer's width
 --   test_place_card      the ring's card, drawn in place over the composer
 --   test_place_menu_specimen  the draft's text menu, drawn in place
@@ -38,6 +41,8 @@ local bare = ui.state("test_place_bare", false)
 -- (The picture: "plate-1-night" dark, "plate-3-sunrise" bright.)
 local picture = ui.state("test_place_picture", "plate-1-night")
 local usage = ui.state("test_place_usage", { tokens = 408389, window = 1000000 } :: Composer.Usage?)
+local quota = ui.state("test_place_quota", nil :: Composer.PlanUsage?)
+local quota_asks = ui.state("test_place_quota_asks", 0)
 
 -- The theme, as the app sets it (the window's, global), so what reads the
 -- theme's values follows it too.
@@ -182,6 +187,12 @@ return ui.column {
 			end,
 			usage = function(): Composer.Usage?
 				return usage:get()
+			end,
+			quota = function(): Composer.PlanUsage?
+				return quota:get()
+			end,
+			on_quota = function()
+				quota_asks:set(quota_asks:peek() + 1)
 			end,
 			over_art = function(): boolean
 				return art:get()

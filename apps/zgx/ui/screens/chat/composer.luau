@@ -30,6 +30,7 @@ local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
+local PlanUsage = require("@account/plan_usage")
 local DropOverlay = require("@ds/drop_overlay")
 local mentions = require("@ds/composer_mentions")
 local Invocations = require("@app/screens/chat/invocations")
@@ -298,6 +299,10 @@ local function Composer(): Node
 			catalog_device:set(d)
 			store.catalog_on(d)
 		end
+	end)
+	-- Its agents' plan usage, of that device (the plan ring's).
+	ui.effect(function()
+		PlanUsage.track(catalog_device:get())
 	end)
 	-- A new chat moved onto Cloud runs only the agents Cloud has accounts
 	-- for: a model it doesn't run gives way to Cloud's first, as the
@@ -952,6 +957,19 @@ local function Composer(): Node
 				end
 				return { tokens = s.context_tokens, window = s.context_window }
 			end,
+			-- How much of the agent's plan its live account has used, on
+			-- the device it runs on (the ring before the context's).
+			quota = function(): ds.ComposerPlanUsage?
+				local harness = agent()
+				local name: string? = nil
+				for _, h in store.catalog:get().harnesses do
+					if h.id == harness then
+						name = h.label
+					end
+				end
+				return PlanUsage.of(harness, catalog_device:get(), name)
+			end,
+			on_quota = PlanUsage.refresh,
 			-- A new chat stands over its wallpaper (Settings → Appearance):
 			-- the footer's chips take their backing.
 			over_art = function(): boolean

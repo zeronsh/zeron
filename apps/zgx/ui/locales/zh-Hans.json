@@ -647,6 +647,13 @@
         "capacity": "容量 {n} tokens",
         "waiting": "正在等待上下文用量",
         "unreported": "此智能体尚未报告上下文用量"
+      },
+      "quota_used": "Plan usage",
+      "quota": {
+        "heading": "Plan usage",
+        "heading_of": "{name} usage",
+        "percent": "{n}%",
+        "resets": "resets {when}"
       }
     },
     "markdown": {
