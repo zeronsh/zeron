@@ -449,9 +449,9 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 						-- (A string: the card says it in its name.)
 						-- zgx-lint: allow(untracked-get)
 						author = { id = "me", name = ui.t("files.comment.you"):get() },
-						at = os.time(),
+						-- (A draft that goes with your next message: no time,
+						-- and nothing to call it pending, every one is.)
 						body = b.body,
-						badge = ui.text { ui.t("files.comment.pending"), text_size = "$font.size.xs", color = "$text.tertiary" },
 						mine = true,
 						compact = true,
 						on_edit = function()
