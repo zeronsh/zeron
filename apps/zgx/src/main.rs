@@ -38,6 +38,7 @@ mod engine_update;
 mod editor_menu;
 mod favicons;
 mod files;
+mod fonts;
 mod github;
 mod haptics;
 mod heap;
@@ -579,6 +580,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
+        // The installed fonts, for Settings → Appearance's font pickers
+        // (src/fonts.rs).
+        fonts::install(&host);
         // Settings → About & updates: versions and the engine's updater
         // (src/about.rs).
         about::install(cx, &host);

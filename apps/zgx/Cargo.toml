@@ -60,6 +60,10 @@ ureq = { version = "2", features = ["json"] }
 # A template's preview, taken from the window (src/plugins/live.rs): the
 # version zgx's own snapshots are written with.
 png = "0.18"
+# The installed fonts, for Settings' font pickers (src/fonts.rs): the
+# versions zgx's text system reads them with.
+fontdb = "0.23"
+ttf-parser = "0.25"
 serde_json = "1"
 # Agents' logos: their sites' icon links, resolved (src/agent_logos.rs).
 # A tool's diff as the changes pane draws it (src/tool_details.rs): the

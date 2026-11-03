@@ -44,6 +44,7 @@ local FileIcon = require("@self/file_icons")
 local Math = require("@self/math")
 local MarkdownFind = require("@self/markdown_find")
 local locale = require("@self/locale")
+local look = require("@self/look")
 
 -- A link's context menu entry (ds/links, ds/context_menu's).
 export type LinkEntry = Links.Entry
@@ -405,7 +406,9 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.strike = true
 		end
 		if r.c then
-			span.font = "mono"
+			-- In code's font (Settings → Appearance; a span takes a family,
+			-- not a token), as code blocks are.
+			span.font = look.code_family()
 			span.bg = "$zeron.code.wash"
 			span.padding = { 4, 1 }
 			-- Zeron's inline code corner (markdown/render.rs's 4.5), each

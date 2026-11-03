@@ -66,6 +66,7 @@ local Syntax = require("@self/syntax")
 local Inline = require("@self/inline_block")
 local locale = require("@self/locale")
 local EditorMenu = require("@self/editor_menu")
+local look = require("@self/look")
 
 -- One thing standing between two lines: under `line`, drawn by `view`.
 export type Block = { key: string, line: number, [any]: any }
@@ -2812,7 +2813,9 @@ return ui.component(function(props: Props): Node
 				if not win then
 					return
 				end
-				local measured = c:measure_text("0", { size = SIZE, font = "$font.mono" })
+				-- (In code's family by name: a canvas's font takes no token.
+				-- Read here, a new code font measures again.)
+				local measured = c:measure_text("0", { size = SIZE, font = look.code_family() })
 				if measured and measured > 0 and math.abs(measured - digit:peek()) > 0.01 then
 					ui.after(0, function()
 						digit:set(measured)

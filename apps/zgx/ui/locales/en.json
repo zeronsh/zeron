@@ -1155,6 +1155,19 @@
         "terms": "glass translucent opaque transparency blur vibrancy material",
         "description": "The desktop shows through the window. Off, it's solid."
       },
+      "font_default": "Default ({name})",
+      "font_search": "Search fonts",
+      "font_none": "No fonts match.",
+      "interface_font": {
+        "label": "Interface font",
+        "terms": "typeface family font menus conversations geist system installed",
+        "description": "Menus and conversations."
+      },
+      "code_font": {
+        "label": "Code font",
+        "terms": "monospace typeface family font editor terminal diffs tool output geist mono installed",
+        "description": "Code, diffs, and terminals · monospaced only."
+      },
       "text_size": {
         "label": "Interface text size",
         "terms": "interface font typeface text size menus conversations bigger smaller",
