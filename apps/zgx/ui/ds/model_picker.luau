@@ -14,6 +14,7 @@
 
 local control = require("@self/control")
 local Dropdown = require("@self/dropdown")
+local PlanUsage = require("@self/plan_usage")
 local Mark = require("@self/mark")
 local AgentMark = require("@self/agent_mark")
 local EffortSlider = require("@self/effort_slider")
@@ -66,6 +67,12 @@ export type Props = {
 	favorites: State<{ [string]: boolean }>?,
 	-- Bumped, it opens (a shortcut to it; Dropdown's `open_with`).
 	open_with: State<number>?,
+	-- How much of the agent's plan its live account has used: the chip
+	-- fills with the Android app's wave that far (ds/plan_usage), and
+	-- resting on it shows the card of its windows; `on_usage`, told as the
+	-- pointer comes onto it (the moment to ask the provider again).
+	usage: (() -> any)?,
+	on_usage: (() -> ())?,
 }
 
 -- Devin Fusion's lead (what runs), listed first among its options.
@@ -608,5 +615,20 @@ return ui.component(function(props: Props): Node
 		end,
 		placement = props.placement,
 		bottom_up = bottom_up,
+		fill = if props.usage
+			then PlanUsage.Wave {
+				id = "model-usage-wave",
+				fraction = function(): number?
+					return PlanUsage.fraction((props.usage :: () -> any)())
+				end,
+				w_full = true,
+				h_full = true,
+			}
+			else nil,
+		hint = if props.usage then PlanUsage.Card { plan = props.usage :: any } else nil,
+		hint_placement = if props.usage
+			then { side = (props.placement or {}).side or "top", align = "end", offset = 8 }
+			else nil,
+		on_hint = props.on_usage,
 	}
 end)

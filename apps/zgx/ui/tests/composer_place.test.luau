@@ -145,6 +145,82 @@ test("composer place: the context ring shows only once a window is reported", fu
 	expect(app:error()).to_be(nil)
 end)
 
+-- A Codex plan: its five hours half used, its week less so; when each
+-- starts over, from now.
+local function plan(now: number): any
+	return {
+		name = "Codex",
+		email = "ada@example.com",
+		plan = "Pro",
+		windows = {
+			{ label = "5h", used = 0.49, resets = now + 2 * 3600 },
+			{ label = "Weekly", used = 0.3, resets = now + 3 * 86400 },
+		},
+	}
+end
+
+test("composer usage: the model chip fills with the plan's wave, the context ring the only ring", function()
+	local app = mounted()
+	expect(app:has("#model-usage-wave")).to_be(false)
+	app:set_state("test_place_quota", plan(os.time()))
+	settle(app)
+	-- The wave is the model chip's own, behind its name and effort.
+	expect(app:has('role:button "Model" >> #model-usage-wave')).to_be(true)
+	expect(app:has('role:button "Model" >> "Opus 5.5"')).to_be(true)
+	-- No ring or chip of its own: the context ring is the footer's one ring.
+	expect(app:has("#composer-plan")).to_be(false)
+	expect(app:has("#composer-limits")).to_be(false)
+	expect(showing(app, "#composer-context")).to_be(true)
+	-- No windows, or none at all: no wave.
+	app:set_state("test_place_quota", { name = "Codex", windows = {} })
+	settle(app)
+	expect(app:has("#model-usage-wave")).to_be(false)
+	app:set_state("test_place_quota", nil)
+	settle(app)
+	expect(app:has("#model-usage-wave")).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("composer usage: resting on the model chip shows each window, how much is used and when it starts over", function()
+	local app = mounted()
+	app:set_state("test_place_quota", plan(os.time()))
+	settle(app)
+	app:hover('role:button "Model"')
+	rested(app)
+	expect(showing(app, "#composer-plan-card")).to_be(true)
+	expect(app:has('#composer-plan-card >> "Codex usage"')).to_be(true)
+	-- The most used window leads.
+	expect(app:text("#composer-plan-percent")).to_be("49%")
+	expect(app:text("#composer-plan-who")).to_be("ada@example.com · Pro")
+	expect(app:has('#composer-plan-card >> "5h"')).to_be(true)
+	expect(app:has('#composer-plan-card >> "Weekly"')).to_be(true)
+	expect(app:has('#composer-plan-card >> "30%"')).to_be(true)
+	local tree = app:tree("#composer-plan-card")
+	expect(string.find(tree, "resets ", 1, true) ~= nil).to_be(true)
+	-- Resting on it asks the provider again.
+	expect((app:state("test_place_quota_asks") :: number) >= 1).to_be(true)
+	-- Near the limit, the week leads (and the wave warms: amber, then red).
+	local p = plan(os.time())
+	p.windows[2].used = 0.97
+	app:set_state("test_place_quota", p)
+	settle(app)
+	expect(app:text("#composer-plan-percent")).to_be("97%")
+	expect(app:error()).to_be(nil)
+end)
+
+test("composer usage: a press on the model chip opens the picker, not the card", function()
+	local app = mounted()
+	app:set_state("test_place_quota", plan(os.time()))
+	settle(app)
+	app:click('role:button "Model"')
+	rested(app)
+	expect(showing(app, "#composer-plan-card")).to_be(false)
+	expect(app:has('role:option ~"Opus 5.5"')).to_be(true)
+	app:key("Escape")
+	settle(app)
+	expect(app:error()).to_be(nil)
+end)
+
 test("composer place: the footer's chips are one height, the ring one of them", function()
 	local app = mounted()
 	rested(app)

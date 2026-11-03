@@ -53,12 +53,16 @@ local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
+local plan_usage = require("@self/plan_usage")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
 
 -- What the model's context holds, as its agent reports it: the tokens in
 -- it and the window's size (either may be missing).
 export type Usage = context_usage.Usage
+-- How much of the agent's plan its live account has used: its windows, as
+-- the provider reports them (ds/plan_usage).
+export type PlanUsage = plan_usage.Plan
 
 -- A device it can run on: its name; Cloud (a machine of its own), this
 -- device ("You"), or one out of reach.
@@ -131,6 +135,14 @@ export type Props = {
 	-- one has none), and hovering or focusing it opens a card saying the
 	-- numbers, as Zeron's does (crates/ui/src/context_usage.rs).
 	usage: (() -> Usage?)?,
+	-- How much of the agent's plan is used (its live account's windows): the
+	-- model chip fills with the Android app's wave as far as the most used
+	-- window (ds/plan_usage), and resting on it shows a card of each window,
+	-- how much and when it starts over (Zeron's footer, crates/ui/src/
+	-- account_usage.rs); a press opens the picker as ever. `on_quota` hears
+	-- the pointer come onto it (the moment to ask the provider again).
+	quota: (() -> PlanUsage?)?,
+	on_quota: (() -> ())?,
 	-- The footer stands over a wallpaper (a new chat's art): the pill's glass
 	-- continues under it as a tray, the chips on it rather than on the art,
 	-- easing in and out as the art comes and goes. Without, it stays bare.
@@ -1226,7 +1238,16 @@ return ui.component(function(props: Props): Node
 		local on = if type(below) == "function" then below() else below == true
 		return if on then "bottom" else "top"
 	end
-	local model = ui.presence(side, function(at: string): Node
+	-- (Built again as a plan to show comes or goes: the chip's wave and its
+	-- card are the trigger's own.)
+	local quota = props.quota
+	local function has_plan(): boolean
+		return quota ~= nil and plan_usage.fraction(quota()) ~= nil
+	end
+	local model = ui.presence(function(): string
+		return `{side()}|{if has_plan() then "plan" else "none"}`
+	end, function(key: string): Node
+		local at = string.match(key, "^[^|]+") or "top"
 		return ModelPicker {
 			model = props.model,
 			effort = props.effort,
@@ -1236,6 +1257,8 @@ return ui.component(function(props: Props): Node
 			models = props.models :: any,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
+			usage = if has_plan() then quota else nil,
+			on_usage = props.on_quota,
 		}
 	end)
 	-- The footer folds a step at a time as it runs short of room, the
