@@ -1,7 +1,6 @@
 --!strict
 -- The right panel's home: its page while no tab is in front (it was "Open a
--- tab"). First, what agents asked without stopping for it (every chat's
--- open questions, answered here: ds/question_card). For a session it says, as the shipping app's session card does
+-- tab"). For a session it says, as the shipping app's session card does
 -- (crates/ui shell/session_info.rs), where the session runs: its device
 -- (away, when it can't be reached), its project and its branch, with what
 -- the branch adds over its base (`+N −M`, opening the branch's changes in
@@ -33,8 +32,6 @@ local Icon = require("@ds/icon")
 local Tile = require("@ds/tile")
 local Tooltip = require("@ds/tooltip")
 local sessions = require("@account/sessions")
-local questions = require("@account/questions")
-local QuestionCard = require("@ds/question_card")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local store = require("@app/screens/chat/store")
@@ -1084,91 +1081,6 @@ function M.subagent_menu(open: () -> ()): { any }
 end
 
 -- ---------------------------------------------------------------------------
--- Questions: what agents asked without stopping for it, every chat's open
--- ones (this session's first, then the oldest), answered here without
--- going to the chat. Each card names its chat, a link to it. None, the
--- part isn't shown.
-
-local function questions_part(sid: string?): Node
-	local open = ui.computed(function(): { questions.Question }
-		local all = questions.open()
-		local out: { questions.Question } = {}
-		for _, q in all do
-			if q.chat == sid then
-				table.insert(out, q)
-			end
-		end
-		for _, q in all do
-			if q.chat ~= sid then
-				table.insert(out, q)
-			end
-		end
-		return out
-	end)
-	local function title_of(chat: string): string?
-		for _, c in sessions.now:get().chats do
-			if c.id == chat then
-				return c.title
-			end
-		end
-		for _, kids in sessions.now:get().children or {} do
-			for _, c in kids do
-				if c.id == chat then
-					return c.title
-				end
-			end
-		end
-		return nil
-	end
-	return ui.show(
-		function(): boolean
-			return #open:get() > 0
-		end,
-		ui.column {
-			id = "panel-home-questions",
-			w_full = true,
-			gap = "$zeron.list.gap",
-			PanelHome.Heading { label = locale.t("panel.home.questions") },
-			ui.each(open, function(q: questions.Question): Node
-				local id, chat = q.id, q.chat
-				return QuestionCard.Card {
-					id = `panel-question-{id}`,
-					question = function(): any
-						for _, x in open:get() do
-							if x.id == id then
-								return x
-							end
-						end
-						return q
-					end,
-					title = function(): string?
-						return title_of(chat)
-					end,
-					on_title = function()
-						route.open_session(chat)
-					end,
-					on_answer = function(text: string)
-						questions.answer(id, text)
-					end,
-					on_dismiss = function()
-						questions.dismiss(id)
-					end,
-					failed = function(): string?
-						return questions.failed(id)
-					end,
-				}
-			end, {
-				key = function(q: questions.Question): string
-					return q.id
-				end,
-				w_full = true,
-				gap = "$space.2",
-			}),
-		}
-	)
-end
-
--- ---------------------------------------------------------------------------
 -- The page.
 
 type Choice = { id: string, icon: Icon.Name, label: string, key: string, run: () -> () }
@@ -1217,7 +1129,7 @@ M.Page = ui.component(function(props: Props): Node
 		end
 	end)
 
-	local parts: { Node } = { questions_part(sid) }
+	local parts: { Node } = {}
 	if sid then
 		table.insert(parts, info(sid))
 		table.insert(parts, actions(props, sid))

@@ -768,7 +768,9 @@
       "approval": "Approval",
       "close": "Close without answering",
       "close_esc": "Close without answering · Esc",
-      "multi": "Select one or more options."
+      "multi": "Select one or more options.",
+      "later": "Answer later",
+      "later_esc": "Answer later · Esc"
     },
     "composer_cargo": {
       "remove": "Remove {name}",
@@ -1021,18 +1023,6 @@
       "cut": "Cut",
       "paste": "Paste",
       "label": "Text"
-    },
-    "question_card": {
-      "kind": "Question",
-      "dismiss": "Dismiss without answering",
-      "options": "Answers",
-      "answer": "Your answer",
-      "answer_placeholder": "Answer…",
-      "send": "Send answer",
-      "more": "More",
-      "less": "Less",
-      "dismissed": "Dismissed",
-      "failed": "Couldn't send: {why}"
     }
   },
   "settings": {
@@ -2648,8 +2638,8 @@
       "drop_to_mention": "Drop to mention"
     },
     "questions": {
-      "label": "Questions from the agent",
-      "put_away": "Hide answered questions"
+      "notice": "{n, plural, one {The agent asked a question} other {The agent asked # questions}}",
+      "answer": "Answer"
     }
   },
   "panel": {
@@ -2854,8 +2844,7 @@
       "port_open_external": "Open in Default Browser",
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
-      "previews_unavailable": "Local previews aren't available right now",
-      "questions": "Questions"
+      "previews_unavailable": "Local previews aren't available right now"
     }
   },
   "files": {

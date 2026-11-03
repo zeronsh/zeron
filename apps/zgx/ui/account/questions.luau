@@ -74,6 +74,20 @@ function M.list(): { Question }
 	return shown:get()
 end
 
+-- A question's Markdown as plain words (the composer's question shows
+-- text): its marks (emphasis, code, strikes, headings, links' brackets)
+-- gone, its lines kept. (Not `_`: it names things as often as it
+-- emphasizes them.)
+function M.plain(markdown: string): string
+	local s = markdown
+	s = string.gsub(s, "%[([^%]]*)%]%b()", "%1")
+	s = string.gsub(s, "[*`]+", "")
+	s = string.gsub(s, "~~", "")
+	s = string.gsub(s, "\n[ \t]*#+[ \t]*", "\n")
+	s = string.gsub(s, "^[ \t]*#+[ \t]*", "")
+	return (string.gsub(s, "^%s*(.-)%s*$", "%1"))
+end
+
 function M.of(chat: string?): { Question }
 	local out: { Question } = {}
 	if not chat then
