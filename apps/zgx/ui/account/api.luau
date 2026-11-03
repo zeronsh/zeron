@@ -146,7 +146,7 @@ function M.since(joined_on: string): string
 	return ui.t("time.date", { m = tostring(month), day = tostring(tonumber(d)), year = y }):get()
 end
 
--- How served badges look, by id: maintainer is a solid dark (ink) pill,
+-- How served badges look, by id: maintainer is a dark (ink) pill,
 -- anything else an outline one. card-web's BADGE_STYLES (site/card.js) keeps
 -- the same table, so a card reads alike in the app and on the web.
 local BADGE_STYLES: { [string]: string } = { maintainer = "ink" }
