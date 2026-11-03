@@ -30,7 +30,7 @@ dependencies = [
 [[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -43,7 +43,7 @@ dependencies = [
 [[package]]
 name = "accesskit_consumer"
 version = "0.38.0"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "accesskit",
  "hashbrown 0.16.1",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "accesskit_macos"
 version = "0.26.3"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -79,7 +79,7 @@ dependencies = [
 [[package]]
 name = "accesskit_unix"
 version = "0.22.1"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "accesskit",
  "accesskit_atspi_common",
@@ -96,7 +96,7 @@ dependencies = [
 [[package]]
 name = "accesskit_windows"
 version = "0.34.0"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -5472,7 +5472,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "29.0.4"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "android_system_properties",
  "arrayvec",
@@ -5844,7 +5844,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "ahash",
  "android-activity",
@@ -6349,7 +6349,7 @@ dependencies = [
 [[package]]
 name = "zgx"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "fixed_decimal",
  "foldhash 0.2.0",
@@ -6375,7 +6375,7 @@ dependencies = [
 [[package]]
 name = "zgx-alacritty-terminal"
 version = "0.26.1"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -6398,7 +6398,7 @@ dependencies = [
 [[package]]
 name = "zgx-components"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "zgx",
 ]
@@ -6406,7 +6406,7 @@ dependencies = [
 [[package]]
 name = "zgx-cosmic-text"
 version = "0.19.9"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "bitflags 2.13.2",
  "fontdb",
@@ -6429,7 +6429,7 @@ dependencies = [
 [[package]]
 name = "zgx-desktop"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -6479,12 +6479,12 @@ dependencies = [
 [[package]]
 name = "zgx-ghostty-sys"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 
 [[package]]
 name = "zgx-gpu"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "block2 0.6.2",
  "bytemuck",
@@ -6517,7 +6517,7 @@ dependencies = [
 [[package]]
 name = "zgx-harfrust"
 version = "0.5.3"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -6529,7 +6529,7 @@ dependencies = [
 [[package]]
 name = "zgx-mlua"
 version = "0.12.7"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "bstr",
  "either",
@@ -6544,7 +6544,7 @@ dependencies = [
 [[package]]
 name = "zgx-run"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "serde_json",
  "ureq 3.5.0",
@@ -6556,7 +6556,7 @@ dependencies = [
 [[package]]
 name = "zgx-script"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "icu_locale_core",
  "icu_plurals",
@@ -6577,7 +6577,7 @@ dependencies = [
 [[package]]
 name = "zgx-taffy"
 version = "0.9.1"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "arrayvec",
  "grid",
@@ -6588,7 +6588,7 @@ dependencies = [
 [[package]]
 name = "zgx-terminal"
 version = "0.1.8"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "libc",
  "polling",
@@ -6600,7 +6600,7 @@ dependencies = [
 [[package]]
 name = "zgx-zune-jpeg"
 version = "0.5.15"
-source = "git+https://github.com/katulevskiy/zgx?rev=78205d484c333f758e7d4b9a9b31a99325ec8847#78205d484c333f758e7d4b9a9b31a99325ec8847"
+source = "git+https://github.com/katulevskiy/zgx?rev=dd0bde433950c3527b0f8d7cc34cd864bbd14718#dd0bde433950c3527b0f8d7cc34cd864bbd14718"
 dependencies = [
  "zune-core",
 ]
