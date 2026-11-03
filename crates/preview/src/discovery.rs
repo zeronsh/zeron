@@ -98,47 +98,107 @@ pub fn framework(args: &[String]) -> (&'static str, u8) {
     }
 }
 
-/// A listener's command line as clients may show it (naming the process
-/// that opened a port): values that look like credentials (`--token x`,
-/// `--password=x`, `API_KEY=x`, a URL's `user:pass@`) read `…`.
-pub fn shown_command(args: &[String]) -> Vec<String> {
-    fn secret(name: &str) -> bool {
-        let name = name.trim_start_matches('-').to_ascii_lowercase();
-        [
-            "token",
-            "secret",
-            "passw",
-            "auth",
-            "credential",
-            "cookie",
-            "key",
-        ]
+/// What a listener is, in a few words, for clients to name it by: its
+/// program, and what a runner runs (`node server.js`, `python3 -m
+/// http.server`, `vite`, `npm run dev`, `cargo test zeron_engine` for a
+/// test binary). Never its other arguments, which may hold credentials:
+/// only a script's or module's name, a package's, or a runner's
+/// subcommand, each kept only while it looks like a plain name.
+pub fn process_label(args: &[String]) -> String {
+    fn base(path: &str) -> &str {
+        path.rsplit('/').next().unwrap_or(path)
+    }
+    // A plain name: letters, digits and `._-` (`@`, `/` and `:` where it
+    // allows them), short.
+    fn plain(word: &str, extra: &str) -> bool {
+        !word.is_empty()
+            && word.len() <= 40
+            && word
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c) || extra.contains(c))
+    }
+    let Some(first) = args.first() else {
+        return String::new();
+    };
+    let program = base(first);
+    if !plain(program, "") {
+        return String::new();
+    }
+    // A Rust test binary: target/<profile>/deps/<crate>-<16 hex>.
+    if first.contains("/deps/")
+        && let Some((name, hash)) = program.rsplit_once('-')
+        && hash.len() == 16
+        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return format!("cargo test {name}");
+    }
+    let rest = &args[1..];
+    // (Code given inline, `python -c …`, `node -e …`: only the program.)
+    let inline = rest
         .iter()
-        .any(|word| name.contains(word))
+        .any(|a| matches!(a.as_str(), "-c" | "-e" | "--eval" | "-p" | "--print"));
+    let words = || rest.iter().filter(|a| !a.starts_with('-'));
+    let lower = program.to_ascii_lowercase();
+    if lower.starts_with("python") {
+        if let Some(i) = rest.iter().position(|a| a == "-m")
+            && let Some(module) = rest.get(i + 1)
+            && plain(module, "")
+        {
+            return format!("{program} -m {module}");
+        }
+        if !inline && let Some(script) = words().next().map(|s| base(s)) && plain(script, "") {
+            return format!("{program} {script}");
+        }
+        return program.to_string();
     }
-    fn userinfo(arg: &str) -> Option<String> {
-        let (scheme, rest) = arg.split_once("://")?;
-        let (user, host) = rest.split_once('@')?;
-        (!user.contains('/') && user.contains(':')).then(|| format!("{scheme}://…@{host}"))
+    if matches!(lower.as_str(), "node" | "bun" | "deno" | "ruby" | "perl" | "php") {
+        if inline {
+            return program.to_string();
+        }
+        return match words().next() {
+            // A package's own command, run through its bin script.
+            Some(script) if script.contains("node_modules/") => {
+                let after = script.rsplit("node_modules/").next().unwrap_or(script);
+                let after = after.strip_prefix(".bin/").unwrap_or(after);
+                let package = if after.starts_with('@') {
+                    after.splitn(3, '/').take(2).collect::<Vec<_>>().join("/")
+                } else {
+                    after.split('/').next().unwrap_or(after).to_string()
+                };
+                if plain(&package, "@/") { package } else { program.to_string() }
+            }
+            Some(script) if plain(base(script), "") => format!("{program} {}", base(script)),
+            _ => program.to_string(),
+        };
     }
-    let mut hide_next = false;
-    args.iter()
-        .map(|arg| {
-            if std::mem::take(&mut hide_next) && !arg.starts_with('-') {
-                return "…".to_string();
-            }
-            if let Some((name, _)) = arg.split_once('=')
-                && !name.contains('/')
-                && secret(name)
-            {
-                return format!("{name}=…");
-            }
-            if arg.starts_with('-') && !arg.contains('=') && secret(arg) {
-                hide_next = true;
-            }
-            userinfo(arg).unwrap_or_else(|| arg.clone())
-        })
-        .collect()
+    if matches!(
+        lower.as_str(),
+        "npm" | "pnpm" | "yarn" | "npx" | "bunx" | "uv" | "uvx" | "cargo" | "go" | "dotnet"
+    ) {
+        let mut words = words();
+        let Some(sub) = words.next() else {
+            return program.to_string();
+        };
+        // npx/bunx/uvx run a package: its name.
+        if matches!(lower.as_str(), "npx" | "bunx" | "uvx") {
+            return if plain(sub, "@/") { format!("{program} {sub}") } else { program.to_string() };
+        }
+        if !matches!(
+            sub.as_str(),
+            "run" | "dev" | "start" | "serve" | "test" | "exec" | "watch" | "preview" | "x"
+        ) {
+            return program.to_string();
+        }
+        // `npm run dev`: a script's name from the package, after `run`.
+        if matches!(sub.as_str(), "run" | "exec" | "x")
+            && let Some(script) = words.next()
+            && plain(script, ":")
+        {
+            return format!("{program} {sub} {script}");
+        }
+        return format!("{program} {sub}");
+    }
+    program.to_string()
 }
 
 /// Port flags are operational settings, never part of a service identity.
@@ -715,38 +775,33 @@ pub fn same_process(_pid: u32, _started_at: u64) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn a_shown_command_hides_what_looks_like_credentials() {
-        let args = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-        assert_eq!(
-            shown_command(&args(&["python3", "-m", "http.server", "8000"])),
-            args(&["python3", "-m", "http.server", "8000"])
-        );
-        assert_eq!(
-            shown_command(&args(&[
-                "node",
-                "server.js",
-                "--token",
-                "abc",
-                "--api-key=xyz",
-                "DB_PASSWORD=hunter2",
-                "--auth",
-                "--port",
-                "3000",
-                "postgres://me:pw@db:5432/app",
-            ])),
-            args(&[
-                "node",
-                "server.js",
-                "--token",
-                "…",
-                "--api-key=…",
-                "DB_PASSWORD=…",
-                "--auth",
-                "--port",
-                "3000",
-                "postgres://…@db:5432/app",
-            ])
-        );
+    fn a_process_is_named_by_its_program_and_what_it_runs_only() {
+        let label = |a: &[&str]| process_label(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(label(&["/usr/bin/python3", "-m", "http.server", "8000"]), "python3 -m http.server");
+        assert_eq!(label(&["python", "app.py", "--token=abc"]), "python app.py");
+        assert_eq!(label(&["python", "-c", "print(1)"]), "python");
+        assert_eq!(label(&["node", "/w/server.js", "--port", "3000"]), "node server.js");
+        assert_eq!(label(&["node", "/w/node_modules/.bin/vite"]), "vite");
+        assert_eq!(label(&["node", "/w/node_modules/@scope/cli/bin/run.js"]), "@scope/cli");
+        assert_eq!(label(&["npm", "run", "dev"]), "npm run dev");
+        assert_eq!(label(&["cargo", "test", "-p", "x"]), "cargo test");
+        assert_eq!(label(&["/w/target/debug/deps/zeron_engine-0123456789abcdef", "--x"]), "cargo test zeron_engine");
+        assert_eq!(label(&["/usr/bin/zeron-engine", "serve", "--token", "abc"]), "zeron-engine");
+        assert_eq!(label(&[]), "");
+        // Nothing but plain names: a secret in a script's place, a URL, a
+        // runner's argument, never.
+        for args in [
+            vec!["node", "--token=abc", "https://user:pass@host/x?key=1"],
+            vec!["python3", "https://user:pass@host/x?key=1"],
+            vec!["npx", "https://user:pass@host/x?key=1"],
+            vec!["npm", "run", "--token=abc"],
+            vec!["server", "--token=abc", "https://user:pass@host/x?key=1"],
+        ] {
+            let l = label(&args);
+            for secret in ["abc", "pass", "key=1", "host"] {
+                assert!(!l.contains(secret), "{l:?} from {args:?}");
+            }
+        }
     }
     #[test]
     fn authentication_commands_are_not_preview_candidates() {
