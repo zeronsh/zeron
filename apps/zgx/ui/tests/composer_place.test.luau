@@ -159,39 +159,35 @@ local function plan(now: number): any
 	}
 end
 
-test("composer limits: a wave chip before the context ring, shown while the agent reports its plan", function()
+test("composer usage: the model chip fills with the plan's wave, the context ring the only ring", function()
 	local app = mounted()
-	expect(showing(app, "#composer-limits")).to_be(false)
+	expect(app:has("#model-usage-wave")).to_be(false)
 	app:set_state("test_place_quota", plan(os.time()))
 	settle(app)
-	expect(showing(app, "#composer-limits")).to_be(true)
-	expect(showing(app, "#composer-context")).to_be(true)
-	-- The most used window's percentage, over the wave.
-	expect(app:text("#composer-limits-percent")).to_be("49%")
-	-- Before the context ring, as Zeron's footer has them; one ring only.
-	local function x(sel: string): number
-		local first = string.match(app:tree(sel .. "[1]"), "[^\n]+") or ""
-		return tonumber(string.match(first, " (%-?%d+),%-?%d+ %d+x%d+")) or -1
-	end
-	expect(x("#composer-limits") < x("#composer-context")).to_be(true)
+	-- The wave is the model chip's own, behind its name and effort.
+	expect(app:has('role:button "Model" >> #model-usage-wave')).to_be(true)
+	expect(app:has('role:button "Model" >> "Opus 5.5"')).to_be(true)
+	-- No ring or chip of its own: the context ring is the footer's one ring.
 	expect(app:has("#composer-plan")).to_be(false)
-	-- No windows, or none at all: no chip.
+	expect(app:has("#composer-limits")).to_be(false)
+	expect(showing(app, "#composer-context")).to_be(true)
+	-- No windows, or none at all: no wave.
 	app:set_state("test_place_quota", { name = "Codex", windows = {} })
 	settle(app)
-	expect(showing(app, "#composer-limits")).to_be(false)
+	expect(app:has("#model-usage-wave")).to_be(false)
 	app:set_state("test_place_quota", nil)
 	settle(app)
-	expect(showing(app, "#composer-limits")).to_be(false)
+	expect(app:has("#model-usage-wave")).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 
-test("composer limits: resting on it previews each window, how much is used and when it starts over", function()
+test("composer usage: resting on the model chip shows each window, how much is used and when it starts over", function()
 	local app = mounted()
 	app:set_state("test_place_quota", plan(os.time()))
 	settle(app)
-	app:hover("#composer-limits")
+	app:hover('role:button "Model"')
 	rested(app)
-	expect(app:has("#composer-plan-card")).to_be(true)
+	expect(showing(app, "#composer-plan-card")).to_be(true)
 	expect(app:has('#composer-plan-card >> "Codex usage"')).to_be(true)
 	-- The most used window leads.
 	expect(app:text("#composer-plan-percent")).to_be("49%")
@@ -201,49 +197,27 @@ test("composer limits: resting on it previews each window, how much is used and 
 	expect(app:has('#composer-plan-card >> "30%"')).to_be(true)
 	local tree = app:tree("#composer-plan-card")
 	expect(string.find(tree, "resets ", 1, true) ~= nil).to_be(true)
-	-- Its opening asks the provider again.
+	-- Resting on it asks the provider again.
 	expect((app:state("test_place_quota_asks") :: number) >= 1).to_be(true)
-	-- Near the limit, the week leads.
+	-- Near the limit, the week leads (and the wave warms: amber, then red).
 	local p = plan(os.time())
 	p.windows[2].used = 0.97
 	app:set_state("test_place_quota", p)
 	settle(app)
 	expect(app:text("#composer-plan-percent")).to_be("97%")
-	expect(app:text("#composer-limits-percent")).to_be("97%")
 	expect(app:error()).to_be(nil)
 end)
 
-test("composer limits: a press pins the card open until a press outside, Escape, or the chip again", function()
+test("composer usage: a press on the model chip opens the picker, not the card", function()
 	local app = mounted()
 	app:set_state("test_place_quota", plan(os.time()))
 	settle(app)
-	app:click("#composer-limits")
+	app:click('role:button "Model"')
 	rested(app)
-	expect(showing(app, "#composer-plan-pinned")).to_be(true)
-	expect(app:has('#composer-plan-pinned >> "Codex usage"')).to_be(true)
-	-- No preview of its own over it.
 	expect(showing(app, "#composer-plan-card")).to_be(false)
-	-- The pointer going elsewhere leaves it open.
-	app:hover("#composer-place-project[1]")
-	rested(app)
-	expect(showing(app, "#composer-plan-pinned")).to_be(true)
+	expect(app:has('role:option ~"Opus 5.5"')).to_be(true)
 	app:key("Escape")
 	settle(app)
-	expect(showing(app, "#composer-plan-pinned")).to_be(false)
-	-- A press outside closes it too.
-	app:click("#composer-limits")
-	rested(app)
-	expect(showing(app, "#composer-plan-pinned")).to_be(true)
-	app:click("#composer-context")
-	settle(app)
-	expect(showing(app, "#composer-plan-pinned")).to_be(false)
-	-- And the chip again.
-	app:click("#composer-limits")
-	rested(app)
-	expect(showing(app, "#composer-plan-pinned")).to_be(true)
-	app:click("#composer-limits")
-	settle(app)
-	expect(showing(app, "#composer-plan-pinned")).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 

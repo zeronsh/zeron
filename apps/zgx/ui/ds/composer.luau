@@ -136,13 +136,12 @@ export type Props = {
 	-- one has none), and hovering or focusing it opens a card saying the
 	-- numbers, as Zeron's does (crates/ui/src/context_usage.rs).
 	usage: (() -> Usage?)?,
-	-- How much of the agent's plan is used (its live account's windows): a
-	-- chip before the context ring, the most used window's percentage over
-	-- the Android app's wave, shown while there's one; resting on it
-	-- previews a card of each window, how much and when it starts over, and
-	-- a press pins that card open (Zeron's footer, crates/ui/src/
-	-- account_usage.rs). `on_quota` hears its card open (the moment to ask
-	-- the provider again).
+	-- How much of the agent's plan is used (its live account's windows): the
+	-- model chip fills with the Android app's wave as far as the most used
+	-- window (ds/plan_usage), and resting on it shows a card of each window,
+	-- how much and when it starts over (Zeron's footer, crates/ui/src/
+	-- account_usage.rs); a press opens the picker as ever. `on_quota` hears
+	-- the pointer come onto it (the moment to ask the provider again).
 	quota: (() -> PlanUsage?)?,
 	on_quota: (() -> ())?,
 	-- The footer stands over a wallpaper (a new chat's art): the pill's glass
@@ -722,106 +721,6 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 	return ui.presence(side, build)
 end
 
--- The limits chip: the most used window's percentage over the Android
--- app's wave (ds/plan_usage), a violet wavefront filling the chip as far as
--- the plan is used. Resting on it previews the card; a press pins the card
--- open (a popover: a press outside or Escape closes it, a press on the chip
--- again too), the provider asked again as it opens.
-local function limits_chip(quota: () -> PlanUsage?, on_open: (() -> ())?, side: () -> string): Node
-	local pinned = ui.use_state(false)
-	local function fraction(): number?
-		return plan_usage.fraction(quota())
-	end
-	local function ask()
-		if on_open then
-			on_open()
-		end
-	end
-	-- What it shows, built again as it pins or unpins (a pinned card has no
-	-- preview of its own) or the composer changes sides.
-	local function face(key: string): Node
-		local at = string.match(key, "^[^|]+") or "top"
-		return ui.row {
-			id = "composer-limits-face",
-			relative = true,
-			h = CHIP_H,
-			px = "$zeron.space.tight",
-			items = "center",
-			rounded = CHIP_RADIUS,
-			overflow = "hidden",
-			tooltip = if pinned:peek() then nil else plan_usage.Card { plan = quota },
-			tooltip_placement = { side = at, align = "end", offset = 8 },
-			tooltip_delay = 150,
-			on_hover = function(inside: boolean)
-				if inside then
-					ask()
-				end
-			end,
-			plan_usage.Wave {
-				fraction = fraction,
-				absolute = true,
-				left = 0,
-				right = 0,
-				top = 0,
-				bottom = 0,
-				pointer_events = "none",
-			},
-			ui.text {
-				function(): string
-					return plan_usage.percent(fraction() or 0)
-				end,
-				id = "composer-limits-percent",
-				tabular = true,
-				text_size = "$font.size.xs",
-				weight = "$font.weight.medium",
-				color = "$text.secondary",
-			},
-		}
-	end
-	-- The chip, the popover's anchor (zgx's popover holds its anchor): built
-	-- with it as the composer changes sides.
-	local function chip(): Node
-		return ui.row {
-			id = "composer-limits",
-			h = CHIP_H,
-			items = "center",
-			rounded = CHIP_RADIUS,
-			hover = { bg = "$hover" },
-			bg = function(): any
-				return if pinned:get() then "$hover" else nil
-			end :: any,
-			focusable = true,
-			role = "button",
-			label = locale.t("ds.composer.quota_used"),
-			on_click = function()
-				if not pinned:peek() then
-					ask()
-				end
-				pinned:set(not pinned:peek())
-			end,
-			-- (Focus left on the chip by the press: Escape closes its card.)
-			on_key = function(e: any): boolean?
-				if e.key == "Escape" and pinned:peek() then
-					pinned:set(false)
-					return true
-				end
-				return nil
-			end,
-			ui.presence(function(): string
-				return `{side()}|{if pinned:get() then "pinned" else "free"}`
-			end, face),
-		}
-	end
-	return ui.presence(side, function(at: string): Node
-		return plan_usage.Popover {
-			plan = quota,
-			open = pinned,
-			anchor = chip(),
-			placement = { side = at, align = "end", offset = 8 },
-		}
-	end)
-end
-
 -- Where it works, as a line: where it runs (a worktree's glyph, Cloud's,
 -- or a folder: a local checkout's, or no project's), the project's name ›
 -- the branch. No project: the folder and "No project". The branch gives
@@ -1345,7 +1244,16 @@ return ui.component(function(props: Props): Node
 		local on = if type(below) == "function" then below() else below == true
 		return if on then "bottom" else "top"
 	end
-	local model = ui.presence(side, function(at: string): Node
+	-- (Built again as a plan to show comes or goes: the chip's wave and its
+	-- card are the trigger's own.)
+	local quota = props.quota
+	local function has_plan(): boolean
+		return quota ~= nil and plan_usage.fraction(quota()) ~= nil
+	end
+	local model = ui.presence(function(): string
+		return `{side()}|{if has_plan() then "plan" else "none"}`
+	end, function(key: string): Node
+		local at = string.match(key, "^[^|]+") or "top"
 		return ModelPicker {
 			model = props.model,
 			effort = props.effort,
@@ -1356,6 +1264,8 @@ return ui.component(function(props: Props): Node
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			showing = props.model_open,
+			usage = if has_plan() then quota else nil,
+			on_usage = props.on_quota,
 		}
 	end)
 	-- The footer folds a step at a time as it runs short of room, the
@@ -2270,11 +2180,6 @@ return ui.component(function(props: Props): Node
 				items = "center",
 				shrink = 0,
 				model,
-				if props.quota
-					then ui.show(function(): boolean
-						return plan_usage.fraction((props.quota :: () -> PlanUsage?)()) ~= nil
-					end, limits_chip(props.quota, props.on_quota, side))
-					else nil,
 				if props.usage
 					then ui.show(function(): boolean
 						local u = (props.usage :: () -> Usage?)()

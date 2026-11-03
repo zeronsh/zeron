@@ -1,5 +1,5 @@
 -- How much of an agent's plan its live account has used, as the composer's
--- limits chip shows it and its card says it (Zeron's
+-- model chip shows it (filled that far) and its card says it (Zeron's
 -- crates/ui/src/account_usage.rs, and the Android app's wave,
 -- apps/android ui/AccountUsage.kt): each window the provider reports (the
 -- five hours, the week; Cursor's pools), the chip reading the most used.
@@ -7,8 +7,9 @@
 --   plan_usage.fraction(p)  0 to 1: the most used window, or nil (none)
 --   plan_usage.percent(f)   "67%"
 --   Wave { fraction = fn }  Android's wave: a violet wavefront filling its
---                           box from the left as far as `fraction`, eased
---                           there as it changes (600 ms)
+--                           box from the left as far as `fraction` (amber
+--                           from 75%, red from 90%), eased there as it
+--                           changes (600 ms)
 --   Card { plan = fn }      the card (ds/hover_card's): the agent's usage
 --                           and how much at its head, who on what plan,
 --                           then each window: its name, a slim bar, how
@@ -49,16 +50,25 @@ local function percent(f: number): string
 end
 M.percent = percent
 
--- Android's violet: lighter on a dark theme, deeper on a light one (read
--- off the text's own ink, so a template's theme decides too).
-local VIOLET_DARK, VIOLET_LIGHT = { 0xb2, 0xa5, 0xff }, { 0x6e, 0x50, 0xd7 }
-local function violet(alpha: number): string
-	local text = ink.hex("text.primary")
-	local r = tonumber(text:sub(2, 3), 16) or 255
-	local g = tonumber(text:sub(4, 5), 16) or 255
-	local b = tonumber(text:sub(6, 7), 16) or 255
-	local c = if (r + g + b) / 3 > 128 then VIOLET_DARK else VIOLET_LIGHT
-	return string.format("#%02x%02x%02x%02x", c[1], c[2], c[3], math.floor(alpha * 255 + 0.5))
+-- The wave's colour at `f`, at `alpha`: Android's violet (lighter on a
+-- dark theme, deeper on a light one, read off the text's own ink so a
+-- template's theme decides too) while there's room, then the theme's amber
+-- from three quarters and its red from nine tenths, the card's thresholds.
+local VIOLET_DARK, VIOLET_LIGHT = "#b2a5ff", "#6e50d7"
+local function channels(hex: string): (number, number, number)
+	return tonumber(hex:sub(2, 3), 16) or 255, tonumber(hex:sub(4, 5), 16) or 255, tonumber(hex:sub(6, 7), 16) or 255
+end
+local function wave_color(f: number, alpha: number): string
+	local base
+	local t = tone(f)
+	if t == "accent" then
+		local r, g, b = channels(ink.hex("text.primary"))
+		base = if (r + g + b) / 3 > 128 then VIOLET_DARK else VIOLET_LIGHT
+	else
+		base = ink.hex(`zeron.tone.{t}.ink`)
+	end
+	local r, g, b = channels(base)
+	return string.format("#%02x%02x%02x%02x", r, g, b, math.floor(alpha * 255 + 0.5))
 end
 
 -- The wavefront at `front` (0 to 1 of `w`), its edge bent by `bend`: flat
@@ -109,8 +119,10 @@ function M.Wave(props: { fraction: () -> number?, [string]: any }): Node
 			return
 		end
 		local bend = h * 0.13 * math.clamp(math.min(p, 1 - p) * 10, 0, 1)
-		c:fill(wave(w, h, math.min(p + 0.025, 1), bend * 0.7), violet(0.10))
-		c:fill(wave(w, h, p, bend), ui.linear(0, 0, w, 0, { violet(0.13), violet(0.30) }))
+		-- (The colour reads the reading itself, not the eased fill.)
+		local f = math.clamp(target() or 0, 0, 1)
+		c:fill(wave(w, h, math.min(p + 0.025, 1), bend * 0.7), wave_color(f, 0.10))
+		c:fill(wave(w, h, p, bend), ui.linear(0, 0, w, 0, { wave_color(f, 0.13), wave_color(f, 0.30) }))
 	end
 	return ui.canvas(canvas)
 end
@@ -289,27 +301,6 @@ end
 
 function M.Card(props: { plan: () -> Plan? }): Node
 	return HoverCard.Card(card(props.plan, "composer-plan-card"))
-end
-
--- The same card pinned open from `anchor` (a press on the chip): a popover
--- in the hover card's frame, closing on a press outside it or Escape.
-function M.Popover(props: { plan: () -> Plan?, open: State<boolean>, anchor: Node, placement: any }): Node
-	local panel = HoverCard.frame(card(props.plan, "composer-plan-pinned"), "card")
-	panel.open = props.open
-	panel.anchor = props.anchor
-	panel.placement = props.placement
-	panel.label = locale.t("ds.composer.quota_used")
-	panel.items = "stretch"
-	-- It takes the focus as it opens (a press pinned it), so Escape is its.
-	panel.focusable = true
-	panel.on_key = function(e: any): boolean?
-		if e.key == "Escape" then
-			props.open:set(false)
-			return true
-		end
-		return nil
-	end
-	return ui.popover(panel)
 end
 
 return M

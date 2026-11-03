@@ -10,7 +10,7 @@
 --   test_place_branch    the branch chosen
 --   test_place_checkout  "worktree" | "local"
 --   test_place_usage     { tokens, window } or nil
---   test_place_quota     the limits chip's plan ({ name?, email?, plan?,
+--   test_place_quota     the model chip's plan usage ({ name?, email?, plan?,
 --                        windows }) or nil; `test_place_quota_asks` counts
 --                        its card asking again
 --   test_place_w         the composer's width
