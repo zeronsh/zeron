@@ -21,6 +21,7 @@
 --                                         ⌘ is held, its width kept
 --   SessionRow.pr_badge(pr)               its pull request
 --   SessionRow.subagents(n)               subagents running under it
+--   SessionRow.questions(n)               questions its agent asked, open
 --   SessionRow.on_tree(body, tree, lead)  under a group: a branch off the
 --                                         group's trunk
 --   SessionRow.pager_lead(whole)          "Show N more"'s chevron
@@ -74,6 +75,8 @@ export type Session = {
 	device: string?,
 	branch: string?,
 	subagents: number?,
+	-- Questions its agent asked without stopping for them, still open.
+	questions: number?,
 	pr: { number: number, state: string?, title: string? }?,
 }
 
@@ -341,6 +344,42 @@ function M.subagents(n: () -> number): Node
 				text_size = "$font.size.xs",
 				weight = "$font.weight.medium",
 				color = "$zeron.status.working",
+				tabular = true,
+			},
+		}
+	)
+end
+
+-- Questions its agent asked without stopping for them, still open ("? 2"):
+-- on a wash of the input hue, in the subagents pill's shape. Not its
+-- state: the agent goes on working, so its corner and dot say what they
+-- said; this says only that something waits on you. None, nothing.
+function M.questions(n: () -> number): Node
+	return ui.show(
+		function(): boolean
+			return n() > 0
+		end,
+		ui.row {
+			class = "questions-pill",
+			shrink = 0,
+			relative = true,
+			h = 16,
+			px = "$space.1",
+			gap = "$zeron.space.hair",
+			items = "center",
+			rounded = "$radius.full",
+			label = function(): string
+				return locale.s("ds.sidebar.questions_open", { n = n() })
+			end,
+			ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, rounded = "$radius.full", bg = "$zeron.status.input", opacity = 0.1 },
+			ui.text {
+				function(): string
+					local c = n()
+					return "? " .. (if c > 99 then "99+" else tostring(c))
+				end,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = "$zeron.status.input",
 				tabular = true,
 			},
 		}
@@ -864,6 +903,9 @@ function M.Row(props: RowProps): Node
 				},
 				M.subagents(function(): number
 					return cur().subagents or 0
+				end),
+				M.questions(function(): number
+					return cur().questions or 0
 				end),
 				M.Corner { cur = cur, hovered = hovered, jump = props.jump, action = props.action }
 			),

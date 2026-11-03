@@ -1144,7 +1144,7 @@ fn now_seconds() -> i64 {
 
 /// An RFC 3339 time as Unix seconds ("2026-10-31T21:27:23.486Z", or with an
 /// offset).
-fn unix_seconds(stamp: &str) -> Option<i64> {
+pub(crate) fn unix_seconds(stamp: &str) -> Option<i64> {
     let (date, time) = stamp.split_once('T')?;
     let mut date = date.split('-').map(|p| p.parse::<i64>().ok());
     let (y, m, d) = (date.next()??, date.next()??, date.next()??);

@@ -493,7 +493,8 @@
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
-      "show_less": "Show less"
+      "show_less": "Show less",
+      "questions_open": "{n, plural, one {# open question} other {# open questions}}"
     },
     "git": {
       "pull_request": "Pull request",
@@ -1020,6 +1021,18 @@
       "cut": "Cut",
       "paste": "Paste",
       "label": "Text"
+    },
+    "question_card": {
+      "kind": "Question",
+      "dismiss": "Dismiss without answering",
+      "options": "Answers",
+      "answer": "Your answer",
+      "answer_placeholder": "Answer…",
+      "send": "Send answer",
+      "more": "More",
+      "less": "Less",
+      "dismissed": "Dismissed",
+      "failed": "Couldn't send: {why}"
     }
   },
   "settings": {
@@ -2633,6 +2646,10 @@
       "couldnt_stop_task": "Couldn't stop that process",
       "commands_or_skills": "commands or skills",
       "drop_to_mention": "Drop to mention"
+    },
+    "questions": {
+      "label": "Questions from the agent",
+      "put_away": "Hide answered questions"
     }
   },
   "panel": {
@@ -2837,7 +2854,8 @@
       "port_open_external": "Open in Default Browser",
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
-      "previews_unavailable": "Local previews aren't available right now"
+      "previews_unavailable": "Local previews aren't available right now",
+      "questions": "Questions"
     }
   },
   "files": {

@@ -493,7 +493,8 @@
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
-      "show_less": "显示更少"
+      "show_less": "显示更少",
+      "questions_open": "{n, plural, other {# 个待回答问题}}"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -1020,6 +1021,18 @@
       "cut": "剪切",
       "paste": "粘贴",
       "label": "文本"
+    },
+    "question_card": {
+      "kind": "问题",
+      "dismiss": "不回答并关闭",
+      "options": "答案",
+      "answer": "你的回答",
+      "answer_placeholder": "回答…",
+      "send": "发送回答",
+      "more": "更多",
+      "less": "收起",
+      "dismissed": "已关闭",
+      "failed": "无法发送：{why}"
     }
   },
   "settings": {
@@ -2633,6 +2646,10 @@
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
       "drop_to_mention": "松开以提及"
+    },
+    "questions": {
+      "label": "智能体的问题",
+      "put_away": "隐藏已回答的问题"
     }
   },
   "panel": {
@@ -2837,7 +2854,8 @@
       "port_open_external": "在默认浏览器中打开",
       "port_copy": "复制网址",
       "port_copied": "网址已复制",
-      "previews_unavailable": "本地预览暂时不可用"
+      "previews_unavailable": "本地预览暂时不可用",
+      "questions": "问题"
     }
   },
   "files": {

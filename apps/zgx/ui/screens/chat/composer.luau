@@ -36,6 +36,7 @@ local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
+local Questions = require("@app/screens/chat/questions")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
@@ -1307,6 +1308,14 @@ local function Composer(): Node
 				-- the pane, left a box over the transcript taking its wheel.)
 				-- (And not over a plugin's page: the chat's page is kept unseen
 				-- under it, and so is this.)
+				-- What the agent asked without stopping for it, pinned over
+				-- the pill (screens/chat/questions): in reach while the reply
+				-- that asked scrolls away.
+				ui.show(function(): boolean
+					return route.current:get().name == "session"
+				end, Questions.Stack(function(): string?
+					return session_id:get()
+				end)),
 				ui.show(function(): boolean
 					return not route.needs_project:get() and route.current:get().name ~= "plugin"
 				end, composer()),

@@ -67,6 +67,9 @@ export type Session = {
 	branch: string?,
 	-- Subagents running under it (Zeron's "● N" pill beside its corner).
 	subagents: number?,
+	-- Questions its agent asked without stopping for them, still open (a
+	-- "? N" pill beside its corner; never its state).
+	questions: number?,
 	-- Its pull request: a badge beside its corner.
 	pr: PullRequest?,
 	-- When it was made (as `time`), for sorting by it.
@@ -1027,6 +1030,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 
 	local pr_badge = SessionRow.pr_badge
 	local subagents_pill = SessionRow.subagents
+	local questions_pill = SessionRow.questions
 
 	-- A session's row, as its group (`by`) shows it. In a flyout (`wide`),
 	-- full width and its agent in its slot whatever the sidebar's width, and
@@ -1313,6 +1317,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
 					subagents_pill(function(): number
 						return cur().subagents or 0
+					end),
+					questions_pill(function(): number
+						return cur().questions or 0
 					end),
 					-- Its state (or time) at rest; under the pointer, archive (on
 					-- the shelf, unarchive); ⌘ held alone, its jump's keys.
