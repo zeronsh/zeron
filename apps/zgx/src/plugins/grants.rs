@@ -35,6 +35,10 @@ pub const SHARED_READ: &[(&str, Option<&str>)] = &[
     // work no one would see waits for it.
     ("zgx.window.shown", None),
     ("zgx.window.active", None),
+    // How much the desktop blurs behind the window's glass (src/desktop_blur.rs):
+    // the design system lent to plugins reads it (ds/material), so a plugin's
+    // components tint as the app's do.
+    ("window.blur", None),
 ];
 
 /// What plugins may change of the app's own shared state, and the grant
