@@ -253,6 +253,32 @@ local function devices(): ({ [string]: string }, string?)
 	return names, here
 end
 
+-- A device's id by the name its group shows (ds.Sidebar groups by name):
+-- the project's own device where it's named so, else the first of yours
+-- named so, else one of Cloud's; nil for none (Unknown device).
+local function device_named(name: string, project: string?): string?
+	local now = sessions.now:peek()
+	local own: string? = nil
+	for _, p in now.projects do
+		if p.id == project then
+			own = p.device
+		end
+	end
+	local first, cloud = nil :: string?, nil :: string?
+	for _, d in now.devices do
+		if d.name == name then
+			if d.id == own then
+				return d.id
+			elseif d.cloud then
+				cloud = cloud or d.id
+			else
+				first = first or d.id
+			end
+		end
+	end
+	return first or cloud
+end
+
 -- The sessions as the sidebar groups them: under each project (in the
 -- engine's order, empty ones too: a new chat starts in one), those in none
 -- under Chats.
@@ -1215,8 +1241,9 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end :: any,
 		user = user,
 		top = props.top,
-		on_new = function(project: string?)
-			route.new_chat(project)
+		-- (A device's "+", inside a project's group: on that device too.)
+		on_new = function(project: string?, device: string?)
+			route.new_chat(project, if device then device_named(device, project) else nil)
 		end,
 		on_archive = M.archive,
 		archived = shelf,
