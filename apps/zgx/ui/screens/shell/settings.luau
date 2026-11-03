@@ -161,6 +161,7 @@ local TITLE_KEYS: { [string]: { string } } = {
 	about = { "About & updates", "settings.about.title" },
 	archived = { "Archived", "settings.archived.title" },
 	plugins = { "Plugins", "plugins.page.title" },
+	themes = { "Themes", "themes.page.title" },
 	templates = { "Templates", "templates.page.title" },
 }
 local GROUP_KEYS: { [string]: string } = {

@@ -1,6 +1,8 @@
 -- Settings → Appearance: how Zeron looks on this Mac, the shell's own
 -- look (screens/shell/appearance: the scheme, which setup chose too; a new
--- chat's wallpaper and its effect) and the window's glass (ds.material).
+-- chat's wallpaper and its effect), the theme each scheme wears (a quick
+-- pick; every theme is on the Themes page, screens/themes) and the window's
+-- glass (ds.material).
 
 local ds = require("@ds")
 local material = require("@ds/material")
@@ -12,6 +14,8 @@ local wallpaper = require("@app/screens/settings/wallpaper")
 local plugin_settings = require("@app/screens/plugins/settings")
 local motion = require("@ds/motion")
 local prefers = require("@ds/prefers")
+local themes = require("@app/screens/themes/state")
+local route = require("@app/screens/shell/route")
 
 local M = {}
 
@@ -20,6 +24,9 @@ M.TITLE = "Appearance"
 
 search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.terms"), {
 	{ key = "scheme", title = ui.t("settings.appearance.scheme.label"), terms = ui.t("settings.appearance.scheme.terms") },
+	{ key = "theme_light", title = ui.t("settings.appearance.theme.light"), terms = ui.t("settings.appearance.theme.terms") },
+	{ key = "theme_dark", title = ui.t("settings.appearance.theme.dark"), terms = ui.t("settings.appearance.theme.terms") },
+	{ key = "themes", title = ui.t("settings.appearance.theme.more"), terms = ui.t("settings.appearance.theme.terms") },
 	{ key = "accent", title = ui.t("settings.appearance.accent.label"), terms = ui.t("settings.appearance.accent.terms") },
 	{ key = "reduce_motion", title = ui.t("settings.appearance.reduce_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.reduce_motion.terms") },
 	{ key = "glass", title = ui.t("settings.appearance.glass.label"), terms = ui.t("settings.appearance.glass.terms") },
@@ -188,6 +195,76 @@ local function adjust_dialog(): Node
 	}
 end
 
+-- A scheme's theme, picked from every theme that has a variant for it,
+-- grouped as the Themes page's tabs are. Its label says which scheme while
+-- following the system ("Light theme"), else just "Theme".
+local GROUPS = { builtin = "themes.page.builtin", template = "themes.page.from_templates", imported = "themes.page.yours" }
+local function theme_row(kind: string): Node
+	local chosen = ui.state(`settings_theme_{kind}`, themes.worn(kind))
+	ui.effect(function()
+		local now = themes.worn(kind)
+		if chosen:peek() ~= now then
+			chosen:set(now)
+		end
+	end)
+	local function label(): string
+		local key = if appearance.scheme:get() == "system" then kind else "one"
+		return ui.t(`settings.appearance.theme.{key}`):get()
+	end
+	return row(`theme_{kind}`, {
+		label = label,
+		control = ds.Select {
+			value = chosen,
+			name = label,
+			w = 220,
+			on_change = function(id: string)
+				themes.use_for(kind, id)
+			end,
+			options = function(): { any }
+				local out = {}
+				for _, e in themes.entries:get() do
+					for _, id in e.variants do
+						local p = themes.palette(id)
+						if p and p.kind == kind then
+							-- A built-in theme by its name (Gruvbox, not Gruvbox
+							-- Dark); one of several variants of yours by both.
+							local name = if e.source == "builtin" or #e.variants == 1 or p.name == e.name then e.name else `{e.name} {p.name}`
+							table.insert(out, { value = id, label = name, group = ui.t(GROUPS[e.source] or GROUPS.builtin):get() })
+						end
+					end
+				end
+				return out
+			end,
+		},
+	})
+end
+
+-- The quick picks: one for each scheme showing (both, following the
+-- system), and the way to every theme.
+local function theme_rows(): Node
+	local scheme = appearance.scheme
+	return ui.column {
+		w_full = true,
+		ui.show(function(): boolean
+			return scheme:get() ~= "dark"
+		end, theme_row("light")),
+		ui.show(function(): boolean
+			return scheme:get() == "system"
+		end, ds.Settings.Rule()),
+		ui.show(function(): boolean
+			return scheme:get() ~= "light"
+		end, theme_row("dark")),
+		ds.Settings.Rule(),
+		row("themes", {
+			label = ui.t("settings.appearance.theme.more"),
+			description = ui.t("settings.appearance.theme.more_description"),
+			on_click = function()
+				route.settings("themes")
+			end,
+		}),
+	}
+end
+
 -- What the Wallpaper select shows: Appearance's choice, or nothing while a
 -- plugin's wallpaper is used (picking one then takes it back).
 local pick = ui.state("settings_wallpaper_pick", nil :: string?)
@@ -217,6 +294,7 @@ function M.view(): Node
 						} :: any,
 					},
 				}),
+				theme_rows(),
 				-- The accent: the theme's own, or one of Zeron's presets, the
 				-- whole window wearing it (ds.look).
 				row("accent", {

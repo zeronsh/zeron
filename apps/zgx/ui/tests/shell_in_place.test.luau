@@ -385,10 +385,10 @@ test("a palette section's title keeps to its row as a search moves it first", fu
 	-- Settings is a later section (its title taller; maybe below the fold,
 	-- as pages are added); a search for one of its rows makes it the first:
 	-- its title stands as the first's.
-	app:type('role:textbox "Search"', "Them")
+	app:type('role:textbox "Search"', "Mode")
 	app:frames(30)
 	local title_y, title_h = box(app, "#palette-list", 'text "Settings"')
-	local row_y = box(app, "#palette-list", 'option "Theme"')
+	local row_y = box(app, "#palette-list", 'option "Mode"')
 	expect(title_y).never.to_be_nil()
 	expect(`room {(row_y :: number) - (title_y :: number) - (title_h :: number)}`).to_be(`room {room}`)
 end)
