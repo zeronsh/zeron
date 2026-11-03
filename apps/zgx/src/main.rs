@@ -136,6 +136,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: first thing in main, before any thread is started.
         unsafe { std::env::set_var("ZGX_CHECK", "0") };
     }
+    // The browser tab's pages on Linux (zgx-desktop's `webkitgtk`) are drawn
+    // in GTK 3 offscreen windows, which can't make a GL context. Where
+    // WebKitGTK (2.42 and later) shares a page's frames as GPU buffers
+    // (DMA-BUF: a GPU it can render with, as on NVIDIA), it needs one in
+    // this process to show them and aborts the app without it ("GDK is not
+    // able to create a GL context"). Shared memory instead: the web process
+    // still renders, and its frames come back as pixels zgx copies anyway.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none() {
+        // SAFETY: first thing in main, before any thread is started.
+        unsafe { std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1") };
+    }
     // `zeron`'s command line (crates/cli), as the Zeron app's: help,
     // `--version`, `update`, `daemon` here; `headless`, `login`, `status`,
     // `plugin` and the engine's other subcommands in the engine helper beside

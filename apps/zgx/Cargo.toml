@@ -33,7 +33,12 @@ zgx = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b
 # held), and zgx measures 1-10% less CPU for script, text and layout work.
 # `terminal`: `ui.terminal` drawn by zgx (a pseudoterminal and its screen),
 # for the panel's terminal tabs (src/terminal.rs runs the process in it).
-zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", features = ["mimalloc", "terminal"] }
+# `webkitgtk`: `ui.webview` on Linux, for the panel's browser tabs, as
+# WebKitGTK 4.1 pages (webkit2gtk-4.1), opened at run time: building needs
+# none of it, and without it pages are placeholders ("Web view · <url>").
+# zgx-run turns it on by default, but this app takes zgx-run without its
+# defaults (below). Nothing on macOS or Windows.
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", features = ["mimalloc", "terminal", "webkitgtk"] }
 # `inspect`: devtools for `zgx inspect` (and its MCP server), asked for
 # with `--inspect`. `i18n`: `ui.t`'s plurals and numbers by each locale's
 # own rules (ICU4X's data, about 90 KB), for ui/locales' translations.
