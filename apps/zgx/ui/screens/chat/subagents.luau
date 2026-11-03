@@ -105,7 +105,7 @@ local function row_of(id: string?): sessions.Chat?
 end
 
 -- A spawn as its row lists it.
-local function spawn_item(s: any, parent: sessions.Chat?, times: { [string]: any }, stopping: { [string]: boolean }): any
+local function spawn_item(s: any, parent: sessions.Chat?, times: { [string]: any }, stopping: { [string]: number }): any
 	local t = times[s.id] or {}
 	local model = model_label(s.model) or (if parent then model_label(parent.model) else nil)
 	return {
@@ -121,12 +121,12 @@ local function spawn_item(s: any, parent: sessions.Chat?, times: { [string]: any
 		ended = t.stop,
 		stoppable = true,
 		openable = s.ref ~= nil,
-		stopping = stopping[`call:{s.id}`] == true,
+		stopping = shared.is_stopping(stopping, `call:{s.id}`),
 	}
 end
 
 -- A chat its agent made as its subagent, as its row lists it.
-local function chat_item(c: sessions.Child, now: number, stopping: { [string]: boolean }): any
+local function chat_item(c: sessions.Child, now: number, stopping: { [string]: number }): any
 	local status = M.chat_status(c, now)
 	local preview = first_line((c :: any).preview)
 	return {
@@ -143,7 +143,7 @@ local function chat_item(c: sessions.Child, now: number, stopping: { [string]: b
 		ended = if status ~= "running" then (c.updated or c.created) else nil,
 		stoppable = true,
 		openable = true,
-		stopping = stopping[`chat:{c.id}`] == true,
+		stopping = shared.is_stopping(stopping, `chat:{c.id}`),
 	}
 end
 

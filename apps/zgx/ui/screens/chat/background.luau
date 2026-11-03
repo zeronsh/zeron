@@ -12,8 +12,9 @@
 --
 -- What a stop is on its way to is marked in `shared.stopping` (its key):
 -- its row says "Stopping" until it's gone, or until the stop failed (the
--- mark taken off, its Stop back), or for at most `STALE_MS` (an answer of
--- "stopping" that never came true gives its Stop back).
+-- mark taken off, its Stop back), or for at most `shared.STOP_HOLD`
+-- seconds (an answer of "stopping" that never came true gives its Stop
+-- back).
 
 local ds = require("@ds")
 local store = require("@app/screens/chat/store")
@@ -26,27 +27,29 @@ local M = {}
 export type Kind = "task" | "call" | "chat"
 export type Item = { key: string, kind: Kind, id: string, name: string }
 
-local STALE_MS = 15000
+local STALE_MS = shared.STOP_HOLD * 1000
 
 -- A stop of all of it on its way, by session (its calls not all answered).
 local pending = ui.state("chat_background_pending", {} :: { [string]: boolean })
 
 local function mark(keys: { string }, on: boolean)
 	local all = table.clone(shared.stopping:peek())
+	local now = os.time()
 	for _, k in keys do
-		all[k] = if on then true else nil
+		all[k] = if on then now else nil
 	end
 	shared.stopping:set(all)
 end
 
--- Given a forgotten stop's time: still marked after `STALE_MS`, its mark
--- goes (the row's Stop back).
+-- Given a forgotten stop's time: still marked after `STALE_MS` (by this
+-- stop, not a later one), its mark goes, the row's Stop back.
 local function expire(keys: { string })
+	local asked = os.time()
 	ui.after(STALE_MS, function()
 		local now = shared.stopping:peek()
 		local left: { string } = {}
 		for _, k in keys do
-			if now[k] then
+			if now[k] and now[k] <= asked then
 				table.insert(left, k)
 			end
 		end
@@ -56,8 +59,8 @@ local function expire(keys: { string })
 	end)
 end
 
--- What's running in `sid` (the session open in this window), read with
--- `read` (`:get()` tracked, `:peek()` not).
+-- What's running in `sid` (the session open in this window), `tracked`
+-- or not (a click's read).
 local function list(sid: string?, tracked: boolean): { Item }
 	local out: { Item } = {}
 	if not sid then
@@ -108,7 +111,7 @@ function M.busy(sid: string?): boolean
 	end
 	local marked = shared.stopping:get()
 	for _, it in items do
-		if not marked[it.key] then
+		if not shared.is_stopping(marked, it.key) then
 			return false
 		end
 	end
