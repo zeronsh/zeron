@@ -25,7 +25,7 @@ fn harness(name: &str) -> Arc<dyn Harness> {
         "grok" => Arc::new(AcpHarness::grok()),
         "devin" => Arc::new(AcpHarness::devin()),
         "hermes" => Arc::new(AcpHarness::hermes()),
-        "pi" => Arc::new(AcpHarness::pi()),
+        "pi" => Arc::new(zeron_harness::PiHarness::new()),
         "antigravity" => Arc::new(AcpHarness::antigravity()),
         _ => panic!("unknown harness {name}"),
     }
@@ -104,6 +104,8 @@ impl Rig {
                     reasoning: None,
                     model_options: Default::default(),
                     sandbox: SandboxLevel::DangerFullAccess,
+                    access: Default::default(),
+                    plan: false,
                 },
             )
             .unwrap();
@@ -128,9 +130,13 @@ impl Rig {
             cwd: self.dir.path().to_str().unwrap().into(),
             sandbox: SandboxLevel::DangerFullAccess,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: vec![],
             worktree: None,
             resume: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 

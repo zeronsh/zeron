@@ -11,13 +11,20 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod cloud;
+pub(crate) mod companions;
+mod providers;
+pub use providers::UsageWindowInfo;
 mod session;
+mod voice;
+pub use voice::*;
 mod types;
 
 use std::sync::Arc;
 
 use zeron_client as zc;
 
+pub use cloud::*;
 pub use session::*;
 pub use types::*;
 
@@ -234,7 +241,12 @@ impl CoreClient {
     }
 
     pub fn set_session_config(&self, chat_id: String, config: ChatConfig) -> CoreResult<()> {
-        let config: zc::ChatConfig = config.try_into()?;
+        let mut config: zc::ChatConfig = config.try_into()?;
+        // The phone does not pick a mode yet: keep the chat's own.
+        if let Some(current) = self.client.session_config(&chat_id) {
+            config.access = current.access;
+            config.plan = current.plan;
+        }
         Ok(self.client.set_session_config(&chat_id, &config)?)
     }
 
@@ -244,6 +256,16 @@ impl CoreClient {
 
     pub fn pin_session(&self, chat_id: String) -> CoreResult<()> {
         Ok(self.client.pin_session(&chat_id)?)
+    }
+
+    /// Pin between neighbours (`None` at either end).
+    pub fn pin_session_at(
+        &self,
+        chat_id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.pin_session_at(&chat_id, after, before)?)
     }
 
     pub fn unpin_session(&self, chat_id: String) -> CoreResult<()> {
@@ -280,6 +302,20 @@ impl CoreClient {
     /// Move a session into a section (`None` = back to recent).
     pub fn assign_section(&self, chat_id: String, section_id: Option<String>) -> CoreResult<()> {
         Ok(self.client.assign_section(&chat_id, section_id)?)
+    }
+
+    /// Move a session into a section between its members (`None` at either
+    /// end), as a drop into the section does.
+    pub fn place_session(
+        &self,
+        chat_id: String,
+        section_id: Option<String>,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self
+            .client
+            .place_session(&chat_id, section_id, after, before)?)
     }
 
     /// Create (or find) the project for `path` on `device_id`. Returns its id.
@@ -349,6 +385,19 @@ impl CoreClient {
         let client = self.client.clone();
         let fallback = harness.clone();
         on_runtime(async move { Ok(client.list_models(&device_id, &harness).await) })
+            .await
+            .unwrap_or_else(|_| zc::catalog::fallback_models(&fallback))
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Cloud's model catalog for `harness`: the edge's list, else the last
+    /// one read, else the static list.
+    pub async fn cloud_models(&self, harness: String) -> Vec<ModelInfo> {
+        let client = self.client.clone();
+        let fallback = harness.clone();
+        on_runtime(async move { Ok(client.cloud_models(&harness).await) })
             .await
             .unwrap_or_else(|_| zc::catalog::fallback_models(&fallback))
             .into_iter()
@@ -488,6 +537,18 @@ impl CoreClient {
     /// OS network path: `false` only for a definitive "unsatisfied".
     pub fn set_network_online(&self, online: bool) {
         self.client.set_network_online(online);
+    }
+
+    /// The OS network path changed (another interface or route): direct
+    /// connections re-pair now; terminals ride the relay meanwhile.
+    pub fn network_path_changed(&self) {
+        self.client.network_path_changed();
+    }
+
+    /// Start pairing with the computer hosting `chat_id` (a terminal is
+    /// about to open there), so it starts on the direct link.
+    pub fn warm_direct(&self, chat_id: String) {
+        self.client.warm_direct(&chat_id);
     }
 
     /// App returned to the foreground: resume, redial/probe rooms.

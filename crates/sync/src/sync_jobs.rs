@@ -114,6 +114,27 @@ impl DocsStore {
         })
     }
 
+    /// Thin-client delivery discovery includes an unacknowledged host wake
+    /// even after the room has ACKed every outgoing row.
+    pub fn pending_viewer_deliveries(
+        &self,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut q = conn.prepare(
+                "SELECT doc_id FROM (SELECT doc_id FROM chat_outbox
+                  UNION SELECT doc_id FROM chat_sync_jobs WHERE kind='viewer-delivery')
+                 WHERE doc_id>?1 ORDER BY doc_id LIMIT ?2",
+            )?;
+            Ok(
+                q.query_map(params![after, limit.min(64) as i64], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?,
+            )
+        })
+    }
+
     pub fn pending_sync_docs(&self, after: &str, limit: usize) -> Result<Vec<String>, StoreError> {
         store_blocking(|| {
             let conn = self.conn();
@@ -133,6 +154,52 @@ impl DocsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn viewer_discovery_retains_acked_wakes_and_pages_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        for n in 0..80 {
+            let id = format!("chat-{n:03}");
+            store.schedule_sync_job(&id, "viewer-delivery").unwrap();
+            store
+                .enqueue_chat_update(&id, &format!("batch-{n}"), b"bytes")
+                .unwrap();
+        }
+        store
+            .acknowledge_chat_update("chat-000", "batch-0")
+            .unwrap();
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        let first = store.pending_viewer_deliveries("", 100).unwrap();
+        assert_eq!(first.len(), 64);
+        assert_eq!(first[0], "chat-000", "ACKed rows still owe a wake");
+        let last = store
+            .pending_viewer_deliveries(first.last().unwrap(), 100)
+            .unwrap();
+        assert_eq!(last.len(), 16);
+        let old = store
+            .sync_job_version("chat-000", "viewer-delivery")
+            .unwrap()
+            .unwrap();
+        store
+            .schedule_sync_job("chat-000", "viewer-delivery")
+            .unwrap();
+        store
+            .complete_sync_job("chat-000", "viewer-delivery", old)
+            .unwrap();
+        assert!(
+            store
+                .sync_job_version("chat-000", "viewer-delivery")
+                .unwrap()
+                .is_some()
+        );
+        store.delete_snapshot("chat-000").unwrap();
+        assert_eq!(
+            store.pending_viewer_deliveries("", 1).unwrap(),
+            vec!["chat-001"]
+        );
+    }
+
     #[test]
     fn reconciliation_resumes_and_new_requests_fence_old_completion() {
         let dir = tempfile::tempdir().unwrap();

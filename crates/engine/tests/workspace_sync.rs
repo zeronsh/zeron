@@ -154,9 +154,13 @@ fn run_request(prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -321,6 +325,39 @@ async fn two_engines_share_a_workspace() {
     )
     .await;
 
+    // A project's picture from B (whole, LWW) shows on A; a bad one is
+    // refused and changes nothing.
+    client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "setSpaceIcon", "spaceId": "space-1",
+                "icon": { "emoji": "🚀", "hue": "amber" } }),
+        )
+        .await
+        .expect("set space icon");
+    wait_for(
+        || {
+            a.workspace.read_spaces().unwrap_or_default().iter().any(|s| {
+                s.id == "space-1"
+                    && s.icon.as_ref().is_some_and(|i| i.emoji.as_deref() == Some("🚀") && i.hue.as_deref() == Some("amber"))
+            })
+        },
+        "space icon on A",
+    )
+    .await;
+    assert!(
+        client_b
+            .call(
+                methods::MUTATE,
+                serde_json::json!({ "op": "setSpaceIcon", "spaceId": "space-1",
+                    "icon": { "image": "file:///etc/passwd" } }),
+            )
+            .await
+            .is_err()
+    );
+    let kept = b.workspace.read_spaces().unwrap().into_iter().find(|s| s.id == "space-1").unwrap();
+    assert_eq!(kept.icon.and_then(|i| i.emoji).as_deref(), Some("🚀"));
+
     // Device rename from B visible on A.
     client_b
         .call(
@@ -404,7 +441,10 @@ async fn projectless_claim_syncs_after_offline_creation_and_survives_viewer_rest
     let row = b.workspace.chat("projectless-offline").unwrap().unwrap();
     assert_eq!(row.device_id, "dev-a");
     assert_eq!(row.space_id, None);
-    assert_eq!(row.cwd.as_deref(), Some("~"));
+    // The claim gives the new chat its own scratch folder, not `~`.
+    assert!(zeron_proto::projectless::is_scratch_cwd(
+        row.cwd.as_deref().unwrap()
+    ));
     assert!(a.workspace.read_spaces().unwrap().is_empty());
     assert!(b.workspace.read_spaces().unwrap().is_empty());
     b.shutdown().await;
@@ -565,6 +605,8 @@ async fn chat_config_selects_the_run_harness() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
+                access: Default::default(),
+                plan: false,
             }),
             None,
         )
@@ -693,6 +735,9 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 git_detected: true,
                 git_checked_at: Some(now),
                 checkout_id: Some("co-1".into()),
+                repository_id: None,
+                github_repo: None,
+                icon: None,
                 created_at: now,
             })
             .unwrap();
@@ -714,6 +759,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 room_gen: None,
                 parent_chat_id: None,
                 harness_session_cwd: Some("/tmp/legacy".into()),
+                harness_session_harness: None,
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),
             })
@@ -721,6 +767,10 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
         legacy
             .upsert_session(&Session {
                 last_completed_turn: None,
+                last_turn_outcome: None,
+                terminal_activity: None,
+                running_subagents: 0,
+                background_tasks: Vec::new(),
                 chat_id: "chat-legacy".into(),
                 device_id: "dev-a".into(),
                 status: SessionStatus::Idle,
@@ -802,4 +852,113 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
             .is_some(),
         "legacy snapshot retained for rollback"
     );
+}
+
+#[tokio::test]
+async fn a_cloud_project_names_its_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = assemble(dir.path(), "dev-a");
+
+    // Only the logical Cloud device takes a repository at create.
+    assert!(
+        a.workspace
+            .create_cloud_space("space-x", "dev-a", "/home/user/app", None, "acme/app")
+            .is_err()
+    );
+    a.workspace
+        .create_cloud_space("space-c", "cloud-acct", "/home/user/app", None, "acme/app")
+        .expect("create Cloud project");
+    // The same repository on Cloud again is the same project.
+    a.workspace
+        .create_cloud_space(
+            "space-d",
+            "cloud-acct",
+            "/home/user/app-2",
+            None,
+            "Acme/App",
+        )
+        .expect("idempotent");
+    let spaces = a.workspace.read_spaces().expect("spaces");
+    let cloud: Vec<_> = spaces
+        .iter()
+        .filter(|s| s.device_id == "cloud-acct")
+        .collect();
+    assert_eq!(cloud.len(), 1);
+    assert_eq!(cloud[0].id, "space-c");
+    assert_eq!(cloud[0].github_repo.as_deref(), Some("acme/app"));
+    assert!(cloud[0].git_detected);
+    assert_eq!(
+        cloud[0].repository_id.as_deref(),
+        Some("github.com/acme/app")
+    );
+
+    a.shutdown().await;
+}
+
+/// A Cloud project and a full clone of the same repository are one project:
+/// the Cloud row takes the clone's commit identity, whether it was created
+/// before the clone was known (healed) or after (stamped).
+#[tokio::test]
+async fn cloud_projects_group_with_a_full_clone_of_their_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = assemble(dir.path(), "dev-a");
+    a.workspace
+        .create_cloud_space(
+            "cloud-early",
+            "cloud-acct",
+            "/home/user/app",
+            None,
+            "acme/app",
+        )
+        .expect("create Cloud project");
+    a.workspace
+        .create_space("local", "dev-a", "/src/app", None, true)
+        .expect("create local project");
+    a.workspace
+        .set_space_git("local", true, None, Some("commit:root1"), Some("Acme/App"))
+        .expect("stamp the clone");
+    let repo_of = |id: &str| {
+        a.workspace
+            .read_spaces()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.repository_id)
+    };
+
+    // Healed: the clone's identity, never the other way round.
+    assert_eq!(
+        a.workspace
+            .align_cloud_spaces("acme/app", "commit:root1")
+            .unwrap(),
+        1
+    );
+    assert_eq!(repo_of("cloud-early").as_deref(), Some("commit:root1"));
+    assert_eq!(
+        a.workspace
+            .align_cloud_spaces("acme/app", "github.com/acme/app")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        a.workspace
+            .align_cloud_spaces("acme/app", "commit:other")
+            .unwrap(),
+        0
+    );
+    assert_eq!(repo_of("cloud-early").as_deref(), Some("commit:root1"));
+
+    // Stamped: a Cloud project created once the clone is known.
+    a.workspace
+        .create_cloud_space(
+            "cloud-late",
+            "cloud-two",
+            "/home/user/app",
+            None,
+            "acme/app",
+        )
+        .expect("create on another Cloud device");
+    assert_eq!(repo_of("cloud-late").as_deref(), Some("commit:root1"));
+
+    a.shutdown().await;
 }

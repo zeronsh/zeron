@@ -1,5 +1,5 @@
 //! Effects remain cached source-space images; a separate alpha mask follows layout.
-use crate::settings::NewThreadBackgroundEffect;
+use crate::settings::{NewThreadBackgroundAdjustment, NewThreadBackgroundEffect};
 use crate::theme::Theme;
 use gpui::{Pixels, px};
 use std::path::{Path, PathBuf};
@@ -12,12 +12,18 @@ use std::time::Instant;
 pub(crate) struct Readiness {
     current: Option<Arc<gpui::RenderImage>>,
     previous: Option<Arc<gpui::RenderImage>>,
+    current_adjustment: NewThreadBackgroundAdjustment,
+    previous_adjustment: NewThreadBackgroundAdjustment,
+    current_path: Option<PathBuf>,
+    previous_path: Option<PathBuf>,
     started: Option<Instant>,
 }
 
 pub(crate) struct ArtworkFrame {
     pub current: Option<Arc<gpui::RenderImage>>,
     pub previous: Option<Arc<gpui::RenderImage>>,
+    pub current_adjustment: NewThreadBackgroundAdjustment,
+    pub previous_adjustment: NewThreadBackgroundAdjustment,
     pub mix: f32,
     pub active: bool,
 }
@@ -32,6 +38,8 @@ impl Readiness {
     pub fn frame(
         &mut self,
         image: Option<Arc<gpui::RenderImage>>,
+        path: Option<&Path>,
+        adjustment: NewThreadBackgroundAdjustment,
         enabled: bool,
         reduced: bool,
         now: Instant,
@@ -39,7 +47,16 @@ impl Readiness {
         let progress = self.started.map_or(1.0, |start| crossfade_mix(start, now));
         if reduced || progress >= 1.0 {
             self.previous = None;
+            self.previous_path = None;
             self.started = None;
+        }
+        // Effects may still be loading, but a crop belongs to the source path,
+        // not its effect raster. Replacement images keep their own framing.
+        if path.is_some() && path == self.current_path.as_deref() {
+            self.current_adjustment = adjustment.normalized();
+        }
+        if path.is_some() && path == self.previous_path.as_deref() {
+            self.previous_adjustment = adjustment.normalized();
         }
         // None while enabled means "still loading", not "remove artwork".
         if self.started.is_none() && (!enabled || image.is_some()) {
@@ -47,9 +64,14 @@ impl Readiness {
             if self.current.as_ref().map(|image| image.id) != target.as_ref().map(|image| image.id)
             {
                 self.previous = self.current.take();
+                self.previous_adjustment = self.current_adjustment;
+                self.previous_path = self.current_path.take();
                 self.current = target;
+                self.current_adjustment = adjustment.normalized();
+                self.current_path = path.map(Path::to_path_buf);
                 if reduced {
                     self.previous = None;
+                    self.previous_path = None;
                 } else {
                     self.started = Some(now);
                 }
@@ -58,6 +80,8 @@ impl Readiness {
         ArtworkFrame {
             current: self.current.clone(),
             previous: self.previous.clone(),
+            current_adjustment: self.current_adjustment,
+            previous_adjustment: self.previous_adjustment,
             mix: self.started.map_or(1.0, |start| crossfade_mix(start, now)),
             active: self.started.is_some(),
         }
@@ -414,11 +438,13 @@ mod tests {
         let latest = artwork();
         let mut ready = Readiness::default();
         let now = Instant::now();
-        ready.frame(Some(first.clone()), true, true, now);
-        let loading = ready.frame(None, true, false, now);
+        let path = Some(Path::new("background.png"));
+        let adjustment = NewThreadBackgroundAdjustment::default();
+        ready.frame(Some(first.clone()), path, adjustment, true, true, now);
+        let loading = ready.frame(None, path, adjustment, true, false, now);
         assert_eq!(loading.current.unwrap().id, first.id);
         assert!(!loading.active);
-        let start = ready.frame(Some(next.clone()), true, false, now);
+        let start = ready.frame(Some(next.clone()), path, adjustment, true, false, now);
         assert_eq!(start.mix, 0.0);
         assert_eq!(start.previous.unwrap().id, first.id);
         let halfway = now
@@ -427,20 +453,91 @@ mod tests {
                     * crate::motion::speed_scale()
                     * 0.5,
             );
-        let frame = ready.frame(Some(latest.clone()), true, false, halfway);
+        let frame = ready.frame(Some(latest.clone()), path, adjustment, true, false, halfway);
         assert!((frame.mix - 0.875).abs() < 0.001);
         assert_eq!(frame.current.unwrap().id, next.id);
         let done = now + std::time::Duration::from_secs(1);
-        let frame = ready.frame(Some(latest.clone()), true, false, done);
+        let frame = ready.frame(Some(latest.clone()), path, adjustment, true, false, done);
         assert_eq!(frame.previous.unwrap().id, next.id);
         assert_eq!(frame.current.unwrap().id, latest.id);
         assert_eq!(frame.mix, 0.0);
-        let frame = ready.frame(Some(latest), true, true, done);
+        let frame = ready.frame(Some(latest), path, adjustment, true, true, done);
         assert!(!frame.active);
         assert!(frame.previous.is_none());
         assert_eq!(frame.mix, 1.0);
-        let removed = ready.frame(None, false, true, done);
+        let removed = ready.frame(None, None, adjustment, false, true, done);
         assert!(removed.current.is_none() && removed.previous.is_none());
+    }
+
+    #[test]
+    fn wallpaper_replacement_and_removal_keep_the_departing_crop() {
+        let first = artwork();
+        let next = artwork();
+        let first_path = Some(Path::new("first.png"));
+        let next_path = Some(Path::new("next.png"));
+        let cropped = NewThreadBackgroundAdjustment {
+            focal_x: 0.2,
+            focal_y: 0.8,
+            zoom: 2.0,
+        };
+        let centered = NewThreadBackgroundAdjustment::default();
+        let mut ready = Readiness::default();
+        let now = Instant::now();
+        ready.frame(Some(first.clone()), first_path, cropped, true, true, now);
+        let loading = ready.frame(None, next_path, centered, true, false, now);
+        assert_eq!(loading.current.as_ref().unwrap().id, first.id);
+        assert_eq!(loading.current_adjustment, cropped);
+        let start = ready.frame(Some(next), next_path, centered, true, false, now);
+        assert_eq!(start.previous_adjustment, cropped);
+        assert_eq!(start.current_adjustment, centered);
+        let latest = artwork();
+        let latest_path = Some(Path::new("latest.png"));
+        let waiting = ready.frame(Some(latest.clone()), latest_path, cropped, true, false, now);
+        assert_eq!(waiting.previous_adjustment, cropped);
+        assert_eq!(waiting.current_adjustment, centered);
+        let done = now + std::time::Duration::from_secs(1);
+        let adopted = ready.frame(Some(latest), latest_path, cropped, true, false, done);
+        assert_eq!(adopted.previous_adjustment, centered);
+        assert_eq!(adopted.current_adjustment, cropped);
+
+        let mut ready = Readiness::default();
+        ready.frame(Some(first), first_path, cropped, true, true, now);
+        let removed = ready.frame(None, None, centered, false, false, now);
+        assert!(removed.current.is_none());
+        assert!(removed.previous.is_some());
+        assert_eq!(removed.previous_adjustment, cropped);
+    }
+
+    #[test]
+    fn applying_crop_during_effect_loading_updates_the_same_source_without_a_fade() {
+        let first = artwork();
+        let effect = artwork();
+        let path = Some(Path::new("background.png"));
+        let centered = NewThreadBackgroundAdjustment::default();
+        let cropped = NewThreadBackgroundAdjustment {
+            zoom: 2.0,
+            ..centered
+        };
+        let latest = NewThreadBackgroundAdjustment {
+            zoom: 3.0,
+            ..centered
+        };
+        let mut ready = Readiness::default();
+        let now = Instant::now();
+        ready.frame(Some(first), path, centered, true, true, now);
+        let loading = ready.frame(None, path, cropped, true, false, now);
+        assert_eq!(loading.current_adjustment, cropped);
+        assert!(!loading.active);
+        let start = ready.frame(Some(effect.clone()), path, cropped, true, false, now);
+        assert_eq!(start.previous_adjustment, cropped);
+        assert_eq!(start.current_adjustment, cropped);
+        let applied = ready.frame(Some(effect.clone()), path, latest, true, false, now);
+        assert_eq!(applied.previous_adjustment, latest);
+        assert_eq!(applied.current_adjustment, latest);
+        let done = now + std::time::Duration::from_secs(1);
+        let applied = ready.frame(Some(effect), path, cropped, true, false, done);
+        assert_eq!(applied.current_adjustment, cropped);
+        assert!(!applied.active);
     }
 
     #[gpui::test]

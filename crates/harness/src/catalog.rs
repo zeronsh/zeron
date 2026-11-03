@@ -38,6 +38,16 @@ impl Catalog {
             .map(|r| r.models)
     }
 
+    /// The last successful catalog for `key`, without refreshing or waiting:
+    /// `None` when cold, for another credential, or while a refresh holds it.
+    pub(crate) fn cached_for(&self, key: [u8; 32]) -> Option<Vec<Model>> {
+        let state = self.state.try_lock().ok()?;
+        if state.context != Some(key) {
+            return None;
+        }
+        state.models.clone()
+    }
+
     pub(crate) async fn get_with<F, Fut, K>(
         &self,
         force: bool,

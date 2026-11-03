@@ -306,11 +306,13 @@ pub(crate) struct ChatUrl {
     pub(crate) edge: String,
     pub(crate) chat_id: String,
     pub(crate) device_id: String,
+    pub(crate) host_device_id: String,
 }
 
 impl UrlProvider for ChatUrl {
     fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
         let bearer = self.bearer.clone();
+        let host = self.host_device_id.clone();
         let (edge, chat, device) = (
             self.edge.clone(),
             self.chat_id.clone(),
@@ -318,7 +320,11 @@ impl UrlProvider for ChatUrl {
         );
         Box::pin(async move {
             let token = bearer.get().await?;
-            Ok(urls::chat_ws(&edge, &chat, &token, &device))
+            Ok(format!(
+                "{}&hostDevice={}",
+                urls::chat_ws(&edge, &chat, &token, &device),
+                urls::encode(&host)
+            ))
         })
     }
 }
@@ -330,6 +336,7 @@ pub(crate) struct ChatHttp {
     pub(crate) edge: String,
     pub(crate) chat_id: String,
     pub(crate) device_id: String,
+    pub(crate) host_device_id: String,
 }
 
 fn http_err(err: reqwest::Error) -> SyncError {
@@ -435,7 +442,11 @@ impl ChatTransport for ChatHttp {
         bytes: Vec<u8>,
     ) -> BoxFuture<'static, Result<String, SyncError>> {
         let bearer = self.bearer.clone();
-        let url = urls::chat_push(&self.edge, &self.chat_id, &batch_id, &self.device_id);
+        let url = format!(
+            "{}&hostDevice={}",
+            urls::chat_push(&self.edge, &self.chat_id, &batch_id, &self.device_id),
+            urls::encode(&self.host_device_id)
+        );
         Box::pin(async move {
             let _permit = zeron_sync::budget::shared()
                 .http(zeron_sync::budget::Priority::Interactive)
@@ -493,6 +504,7 @@ pub(crate) struct RoomDeps {
     pub bearer: Bearer,
     pub edge: String,
     pub device_id: String,
+    pub host_device_id: String,
     pub store: Arc<DocsStore>,
     /// Remote change landed (schedule a coalesced session refresh).
     pub on_applied: Arc<dyn Fn() + Send + Sync>,
@@ -564,12 +576,14 @@ impl Room {
             edge: deps.edge.clone(),
             chat_id: self.chat_id.clone(),
             device_id: deps.device_id.clone(),
+            host_device_id: deps.host_device_id.clone(),
         });
         let http = Arc::new(ChatHttp {
             bearer: deps.bearer.clone(),
             edge: deps.edge.clone(),
             chat_id: self.chat_id.clone(),
             device_id: deps.device_id.clone(),
+            host_device_id: deps.host_device_id.clone(),
         });
         let weak = Arc::downgrade(self);
         let cancel = self.cancel.clone();

@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -76,6 +76,26 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
 ];
 
+const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// WAL size retained after a checkpoint resets the log. SQLite's default (-1)
+/// keeps the file at its all-time high-water mark (observed: 400 MB). Steady
+/// state never reaches this — auto-checkpoint folds the log every ~4 MB
+/// (1000 pages) — so the cap only bites after a large burst (a multi-MB
+/// snapshot, a VACUUM). 64 MiB bounds idle disk use while sparing ordinary
+/// bursts a truncate/re-extend cycle on every write.
+const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// VACUUM ([`DocsStore::reclaim_free_space`]) only when free pages are BOTH a large share of the file
+/// and a meaningful absolute size: a healthy database never pays the rewrite.
+const VACUUM_MIN_FREE_BYTES: i64 = 32 * 1024 * 1024;
+/// `freelist_count / page_count` above which reclaiming is worth a rewrite.
+const VACUUM_MIN_FREE_DENOMINATOR: i64 = 4;
+
+/// Maintenance is skipped (and logged) rather than waited on when another
+/// connection holds a lock.
+const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
 ///
 /// Holds warm-open doc snapshots (the DO room is authoritative; these make
@@ -93,11 +113,20 @@ impl DocsStore {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir)?;
-        let mut conn = Connection::open(data_dir.join("docs.sqlite3"))?;
+        let path = data_dir.join("docs.sqlite3");
+        let mut conn = Connection::open(&path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
+        conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
         migrate(&mut conn)?;
+        // Best-effort hygiene must never stall boot behind another connection.
+        conn.busy_timeout(MAINTENANCE_BUSY_TIMEOUT)?;
+        // Only the cheap WAL truncate here: open sits on boot paths (engine
+        // assembly, the iOS client), and a VACUUM's cost is linear in the
+        // live size. Callers run `reclaim_free_space` off those paths.
+        checkpoint_truncate(&conn, &path, "open");
+        conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
         Ok(Self {
             conn: Mutex::new(conn),
             failed_publications: Mutex::new(HashSet::new()),
@@ -562,6 +591,28 @@ impl DocsStore {
         Ok(())
     }
 
+    /// Reclaim free space: WAL truncate, then a VACUUM only past the
+    /// free-page thresholds, under a short busy timeout. Cheap when there is
+    /// nothing to reclaim. Blocking and holds the store for the VACUUM (it
+    /// rewrites the live database) — run it off any latency-sensitive path;
+    /// best-effort — problems are logged, never returned.
+    pub fn reclaim_free_space(&self) {
+        store_blocking(|| {
+            let conn = self.conn();
+            let Some(path) = conn.path().map(std::path::PathBuf::from) else {
+                return;
+            };
+            if let Err(err) = conn.busy_timeout(MAINTENANCE_BUSY_TIMEOUT) {
+                tracing::warn!(%err, "docs store: reclaim skipped");
+                return;
+            }
+            maintain(&conn, &path);
+            if let Err(err) = conn.busy_timeout(STORE_BUSY_TIMEOUT) {
+                tracing::warn!(%err, "docs store: busy timeout not restored after reclaim");
+            }
+        });
+    }
+
     pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
         // A poisoned lock only means another thread panicked mid-query; the
         // connection itself is still usable.
@@ -595,6 +646,81 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         tx.commit()?;
     }
     Ok(())
+}
+
+/// Fold and truncate a bloated WAL, then reclaim free pages if they dominate
+/// the file. Every step is best-effort — failures (including SQLITE_BUSY from
+/// another connection) are logged. Steady-state WAL growth is handled by
+/// SQLite's auto-checkpoint plus `journal_size_limit`, so there is no
+/// periodic pass.
+fn maintain(conn: &Connection, path: &Path) {
+    checkpoint_truncate(conn, path, "open");
+    match reclaim_free_pages(conn) {
+        // VACUUM in WAL mode writes the whole live database into the WAL.
+        Ok(true) => checkpoint_truncate(conn, path, "vacuum"),
+        Ok(false) => {}
+        Err(err) => tracing::warn!(%err, "docs store: VACUUM skipped"),
+    }
+}
+
+/// `PRAGMA wal_checkpoint(TRUNCATE)`; logs instead of failing.
+fn checkpoint_truncate(conn: &Connection, path: &Path, reason: &str) {
+    let wal_path = path.with_extension("sqlite3-wal");
+    let wal_bytes = || std::fs::metadata(&wal_path).map_or(0, |m| m.len());
+    let before = wal_bytes();
+    let result = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    });
+    match result {
+        Ok((0, frames)) => {
+            if before > 0 {
+                tracing::info!(
+                    reason,
+                    frames,
+                    wal_bytes_before = before,
+                    wal_bytes_after = wal_bytes(),
+                    "docs store: WAL checkpointed and truncated"
+                );
+            }
+        }
+        Ok((_, frames)) => tracing::warn!(
+            reason,
+            frames,
+            wal_bytes = before,
+            "docs store: WAL checkpoint busy (another connection is active); left for later"
+        ),
+        Err(err) => tracing::warn!(reason, %err, "docs store: WAL checkpoint failed"),
+    }
+}
+
+/// VACUUM when free pages are both a large fraction of the file and above an
+/// absolute floor. Returns whether a VACUUM ran. Rewrite cost is linear in the
+/// LIVE size (~0.6 s for 150 MB live / 70 MB free on an M-series SSD, warm
+/// cache); healthy databases skip it entirely.
+fn reclaim_free_pages(conn: &Connection) -> rusqlite::Result<bool> {
+    let pragma = |name: &str| conn.pragma_query_value(None, name, |row| row.get::<_, i64>(0));
+    let page_size = pragma("page_size")?;
+    let page_count = pragma("page_count")?;
+    let freelist = pragma("freelist_count")?;
+    if !worth_vacuuming(page_size, page_count, freelist) {
+        return Ok(false);
+    }
+    let started = Instant::now();
+    conn.execute_batch("VACUUM")?;
+    let after = pragma("page_count")? * page_size;
+    tracing::info!(
+        bytes_before = page_count * page_size,
+        bytes_after = after,
+        free_bytes = freelist * page_size,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "docs store: reclaimed free pages with VACUUM"
+    );
+    Ok(true)
+}
+
+fn worth_vacuuming(page_size: i64, page_count: i64, freelist: i64) -> bool {
+    freelist * page_size >= VACUUM_MIN_FREE_BYTES
+        && freelist * VACUUM_MIN_FREE_DENOMINATOR >= page_count
 }
 
 fn now_ms() -> i64 {
@@ -844,6 +970,179 @@ mod publication_failure_tests {
                 reopened.load_snapshot_with_cursor("chat").unwrap().unwrap(),
                 (b"after".to_vec(), if cursor_save { 43 } else { 42 }, 2)
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+
+    const MIB: usize = 1024 * 1024;
+
+    fn pragma(conn: &Connection, name: &str) -> i64 {
+        conn.pragma_query_value(None, name, |row| row.get(0))
+            .unwrap()
+    }
+
+    fn file_len(path: &Path) -> u64 {
+        std::fs::metadata(path).map_or(0, |m| m.len())
+    }
+
+    /// 48 MiB of snapshots, 40 MiB of them deleted: well past both thresholds.
+    fn fragmented_store(dir: &Path) {
+        let store = DocsStore::open(dir).unwrap();
+        for i in 0..48 {
+            store
+                .save_snapshot(&format!("d{i}"), &vec![7; MIB])
+                .unwrap();
+        }
+        for i in 0..40 {
+            store.delete_snapshot(&format!("d{i}")).unwrap();
+        }
+        let conn = store.conn();
+        assert!(worth_vacuuming(
+            pragma(&conn, "page_size"),
+            pragma(&conn, "page_count"),
+            pragma(&conn, "freelist_count")
+        ));
+    }
+
+    #[test]
+    fn open_folds_and_truncates_a_bloated_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(DocsStore::open(dir.path()).unwrap());
+        let wal = dir.path().join("docs.sqlite3-wal");
+        // A live connection keeps the WAL from being cleaned up on close.
+        let other = Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        other.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        for i in 0..8 {
+            other
+                .execute(
+                    "INSERT INTO snapshots(doc_id,bytes,saved_at) VALUES (?1,zeroblob(?2),0)",
+                    params![format!("d{i}"), MIB as i64],
+                )
+                .unwrap();
+        }
+        assert!(file_len(&wal) > 8 * MIB as u64);
+
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(file_len(&wal), 0, "boot checkpoint truncates the WAL");
+        assert!(store.has_snapshot("d7").unwrap(), "frames folded, not lost");
+        assert_eq!(
+            pragma(&store.conn(), "journal_size_limit"),
+            JOURNAL_SIZE_LIMIT_BYTES
+        );
+    }
+
+    #[test]
+    fn reclaim_vacuums_a_fragmented_database_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("docs.sqlite3");
+        fragmented_store(dir.path());
+        let before = file_len(&db);
+
+        let store = DocsStore::open(dir.path()).unwrap();
+        // Open never pays for the rewrite; the reclaim pass does.
+        assert!(pragma(&store.conn(), "freelist_count") > 0);
+        store.reclaim_free_space();
+        assert_eq!(pragma(&store.conn(), "freelist_count"), 0);
+        assert!(file_len(&db) < before / 2, "file shrank");
+        assert_eq!(file_len(&dir.path().join("docs.sqlite3-wal")), 0);
+        assert_eq!(store.load_snapshot("d47").unwrap().unwrap().len(), MIB);
+        assert!(
+            !reclaim_free_pages(&store.conn()).unwrap(),
+            "a compacted database is not rewritten again"
+        );
+    }
+
+    #[test]
+    fn reclaim_after_a_post_open_shrink_vacuums_without_a_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("docs.sqlite3");
+        // Open-time maintenance finds nothing to do; the shrink happens after.
+        let store = DocsStore::open(dir.path()).unwrap();
+        store
+            .save_snapshot("registry1", &vec![7; 48 * MIB])
+            .unwrap();
+        store.save_snapshot("registry1", &vec![7; MIB]).unwrap();
+        assert!(pragma(&store.conn(), "freelist_count") > 0);
+        let before = file_len(&db);
+
+        store.reclaim_free_space();
+        assert_eq!(pragma(&store.conn(), "freelist_count"), 0);
+        assert!(file_len(&db) < before / 2, "file shrank");
+        assert_eq!(file_len(&dir.path().join("docs.sqlite3-wal")), 0);
+        assert_eq!(
+            store.load_snapshot("registry1").unwrap().unwrap().len(),
+            MIB
+        );
+        // The busy timeout is back at the store's normal wait.
+        let busy: i64 = pragma(&store.conn(), "busy_timeout");
+        assert_eq!(busy, STORE_BUSY_TIMEOUT.as_millis() as i64);
+        // Idempotent and cheap once compact.
+        store.reclaim_free_space();
+        assert_eq!(pragma(&store.conn(), "freelist_count"), 0);
+    }
+
+    #[test]
+    fn small_or_proportionally_minor_freelists_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        for i in 0..4 {
+            store
+                .save_snapshot(&format!("d{i}"), &vec![7; MIB])
+                .unwrap();
+        }
+        for i in 0..3 {
+            store.delete_snapshot(&format!("d{i}")).unwrap();
+        }
+        let freelist = pragma(&store.conn(), "freelist_count");
+        assert!(freelist > 0);
+        assert!(!reclaim_free_pages(&store.conn()).unwrap(), "below 32 MiB");
+        assert_eq!(pragma(&store.conn(), "freelist_count"), freelist);
+
+        let page = 4096;
+        let floor = VACUUM_MIN_FREE_BYTES / page;
+        assert!(worth_vacuuming(page, floor * 4, floor));
+        assert!(!worth_vacuuming(page, floor * 4 + 1, floor), "under 25%");
+        assert!(!worth_vacuuming(page, floor, floor - 1), "under the floor");
+    }
+
+    #[test]
+    fn maintenance_yields_to_a_connection_holding_the_database() {
+        // WAL lets VACUUM proceed beside a reader; a held write lock defers it.
+        for (lock, vacuumed) in [
+            ("BEGIN; SELECT count(*) FROM snapshots;", true),
+            ("BEGIN IMMEDIATE;", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            fragmented_store(dir.path());
+            let other = Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+            other.execute_batch(lock).unwrap();
+
+            let started = Instant::now();
+            let store = DocsStore::open(dir.path()).expect("maintenance never fails open");
+            store.reclaim_free_space();
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{lock}: maintenance waited on the store busy timeout"
+            );
+            assert_eq!(store.load_snapshot("d47").unwrap().unwrap().len(), MIB);
+            assert_eq!(
+                pragma(&store.conn(), "freelist_count") == 0,
+                vacuumed,
+                "{lock}"
+            );
+
+            other.execute_batch("COMMIT").unwrap();
+            store.save_snapshot("after", b"ok").unwrap();
+            assert!(store.has_snapshot("after").unwrap());
+            drop(store);
+            // A deferred VACUUM simply runs on the next uncontended pass.
+            let store = DocsStore::open(dir.path()).unwrap();
+            store.reclaim_free_space();
+            assert_eq!(pragma(&store.conn(), "freelist_count"), 0, "{lock}");
         }
     }
 }

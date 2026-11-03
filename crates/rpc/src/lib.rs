@@ -20,27 +20,68 @@ use serde::{Deserialize, Serialize};
 
 mod client;
 pub mod device_room;
+pub mod ipc_auth;
 mod server;
+mod ws;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{RpcClient, RpcSubscription, connect_ipc, connect_ws};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
-    decode_device_frame, device_room_ws_url, encode_device_frame,
+    decode_device_frame, device_room_ws_url, encode_device_frame, is_liveness_probe,
 };
 pub use server::{serve_connection, serve_ws_listener};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
+    pub const VOICE_CAPABILITIES_V2: &str = "VoiceCapabilitiesV2";
+    pub const PREPARE_VOICE_V2: &str = "PrepareVoiceV2";
+    pub const OWN_VOICE_V2: &str = "OwnVoiceV2";
+    pub const NEGOTIATE_VOICE_V2: &str = "NegotiateVoiceV2";
+    pub const CONFIRM_VOICE_MEDIA_V2: &str = "ConfirmVoiceMediaV2";
+    pub const REPORT_VOICE_MEDIA_V2: &str = "ReportVoiceMediaV2";
+    pub const STOP_VOICE_V2: &str = "StopVoiceV2";
+    pub const CANCEL_VOICE_ATTEMPT_V2: &str = "CancelVoiceAttemptV2";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
+    /// The ACP registry's agents as the target device sees them (`{refresh?}`
+    /// → `{agents, fetchedAt, offline, platform}`), and adding (or
+    /// updating) and removing one there (`{id}`).
+    pub const LIST_ACP_REGISTRY: &str = "ListAcpRegistry";
+    pub const ADD_ACP_AGENT: &str = "AddAcpAgent";
+    pub const REMOVE_ACP_AGENT: &str = "RemoveAcpAgent";
+    /// An added agent's own environment on the target device (`{id}` →
+    /// `{env}`, `KEY=VALUE` a line; set with `{id, env}`): kept there,
+    /// owner-only, never synced.
+    pub const GET_ACP_AGENT_ENV: &str = "GetAcpAgentEnv";
+    pub const SET_ACP_AGENT_ENV: &str = "SetAcpAgentEnv";
+    /// An added agent's sign-in on the target device, asked of it without
+    /// signing in (`{id, refresh?}` → `{signedIn, account?, canSignOut,
+    /// methods}`), and signing it out there (`{id}`, ACP's `logout`).
+    pub const GET_ACP_AGENT_SIGN_IN: &str = "GetAcpAgentSignIn";
+    pub const SIGN_OUT_ACP_AGENT: &str = "SignOutAcpAgent";
+    /// One variable of an added agent's own environment on the target device
+    /// (`{id, var, value}`; an empty value forgets it): the key a sign-in
+    /// method reads from there. Replies `{ok}`; the value never comes back.
+    pub const SET_ACP_AGENT_KEY: &str = "SetAcpAgentKey";
+    /// An agent of your own on the target device (`{name, command, env}`),
+    /// run through the same generic ACP harness as the registry's.
+    pub const ADD_OWN_AGENT: &str = "AddOwnAgent";
     /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// Whether agents' commits on this device credit Zeron
+    /// (`{enabled, cloud}`; set with `{enabled}`).
+    pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";
+    pub const SET_COMMIT_CREDIT: &str = "SetCommitCredit";
+    /// Which providers on this device run without their own subagents
+    /// (`{switchable, off}`; set with `{harness, enabled}`).
+    pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
+    pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -63,6 +104,10 @@ pub mod methods {
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.
     pub const FOCUS_CHAT: &str = "FocusChat";
+    /// `{viewportId, focused}`: an app window gained or lost focus (desktop
+    /// banners hold back while one is focused). Focused viewports repeat it;
+    /// a report goes stale after 45 s.
+    pub const SET_VIEWPORT_FOCUS: &str = "SetViewportFocus";
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";
@@ -109,8 +154,8 @@ pub mod methods {
     /// Spaces registry (device+folder pairs) from the workspace doc.
     pub const WATCH_SPACES: &str = "WatchSpaces";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
-    /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
-    /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
+    /// Params are tagged `{op: createChat|createSpace|renameSpace|setSpaceIcon|
+    /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
@@ -124,12 +169,22 @@ pub mod methods {
     /// Headed IPC owners do not implement this method: closing another app's
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
+    /// Headless IPC only: stop starting work ahead of a Cloud sleep (the
+    /// edge runs `zeron quiesce` before stopping the machine). Replies
+    /// `{"quiesced":true}` or `{"quiesced":false,"busy":"<why>"}`.
+    pub const QUIESCE_FOR_SLEEP: &str = "QuiesceForSleep";
     pub const AUTH_STATUS: &str = "AuthStatus";
     // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";
     pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
     pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
     pub const SIGN_OUT: &str = "SignOut";
+    /// The signed-in session's current bearer, for a local client that calls
+    /// the edge as the user itself (zgx's account calls): `{}` →
+    /// `{token, expiresAt?}` (unix seconds). Refreshed as the engine's own
+    /// calls refresh; the refresh token never leaves the engine. Local IPC
+    /// only ([`crate::local_only`]): the device-room relay refuses it.
+    pub const ACCESS_TOKEN: &str = "AccessToken";
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";
@@ -153,16 +208,30 @@ pub mod methods {
     pub const FETCH_ALL: &str = "FetchAll";
     pub const SWITCH_REF: &str = "SwitchRef";
     pub const LIST_FOLDERS: &str = "ListFolders";
+    pub const GET_WORKTREE_SETTINGS: &str = "GetWorktreeSettings";
+    pub const SET_WORKTREE_SETTINGS: &str = "SetWorktreeSettings";
     /// The device's browse roots: home plus mounted drives/volumes.
     pub const LIST_DRIVES: &str = "ListDrives";
+    /// Folders under the host's home by name (new-project picker).
+    pub const SEARCH_HOME_FOLDERS: &str = "SearchHomeFolders";
+    /// The new-project picker closed: drop the host's home index if unpinned.
+    pub const RELEASE_HOME_FOLDER_SEARCH: &str = "ReleaseHomeFolderSearch";
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
     pub const SEARCH_FILES: &str = "SearchFiles";
     // Device-local workspace filesystem operations. All are relay-forwardable;
     // WatchWorkspaceFiles is the only streaming method in this group.
     pub const LIST_WORKSPACE_DIRECTORY: &str = "ListWorkspaceDirectory";
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
+    /// Start or keep alive a workspace's search index (fire-and-forget warm).
+    pub const WARM_WORKSPACE_SEARCH: &str = "WarmWorkspaceSearch";
+    /// Plain-text search over a workspace's file contents.
+    pub const SEARCH_WORKSPACE_CONTENT: &str = "SearchWorkspaceContent";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
+    pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";
+    pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";
+    /// An empty file or folder at a new path (never replacing one).
+    pub const CREATE_WORKSPACE_ENTRY: &str = "CreateWorkspaceEntry";
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
@@ -172,18 +241,40 @@ pub mod methods {
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
+    // A chat's background processes (`Session::background_tasks`) live in
+    // its host's runtime: `{chatId, taskId}`, relay-forwardable.
+    pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
+    pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
     pub const WRITE_TERMINAL: &str = "WriteTerminal";
     pub const RESIZE_TERMINAL: &str = "ResizeTerminal";
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
+    /// Whether closing a terminal would end a program running in it.
+    pub const TERMINAL_STATUS: &str = "TerminalStatus";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
+    /// One page of a repository's open pull requests (`filter`, `after`
+    /// cursor), with the total count.
+    pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";
+    /// Resolve a selected checkout through local Git metadata only.
+    pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
+    pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
+    pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
+    /// `{url, path, line, side: "LEFT" | "RIGHT", commitId, body}` → the
+    /// comment: a new review thread on one line of the changes.
+    pub const POST_CHANGE_REQUEST_REVIEW_COMMENT: &str = "PostChangeRequestReviewComment";
+    /// `{url, thread, body}` → the comment: a reply in a review thread.
+    pub const REPLY_CHANGE_REQUEST_THREAD: &str = "ReplyChangeRequestThread";
+    /// `{url, thread, resolved}` → `{resolved}`: a review thread resolved or
+    /// opened again.
+    pub const RESOLVE_CHANGE_REQUEST_THREAD: &str = "ResolveChangeRequestThread";
+    pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.
@@ -194,13 +285,27 @@ pub mod methods {
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
+    /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
+    /// callback the requesting device caught on its own loopback (a phone
+    /// signing a computer's agent in). Answers `{status, location?}`.
+    pub const RELAY_AGENT_LOGIN_CALLBACK: &str = "RelayAgentLoginCallback";
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
+    pub const CONSUME_CODEX_RESET_CREDIT: &str = "ConsumeCodexResetCredit";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
+    /// One chunk of an image an agent's reply names in Markdown
+    /// (`![alt](path)`), read only from inside that chat's working folder.
+    pub const READ_CHAT_IMAGE_CHUNK: &str = "ReadChatImageChunk";
+    /// Store an agent's HTML page and show it inline in that chat's live
+    /// turn (`show_visual`). Local only: the calling agent runs on this device.
+    pub const PUBLISH_VISUAL: &str = "PublishVisual";
+    /// Store an image file an agent shows and fold it into that chat's live
+    /// turn as an image part (`show_image`). Local only, like `PublishVisual`.
+    pub const PUBLISH_IMAGE: &str = "PublishImage";
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
@@ -218,6 +323,280 @@ pub mod methods {
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    // Cloud (docs/design/cloud-device.md). IPC-only: the engine calls the
+    // edge's CloudAccount DO with the user's bearer; never routed by
+    // targetDeviceId.
+    /// The account: `{}` → `CloudStatus`.
+    pub const CLOUD_STATUS: &str = "CloudStatus";
+    /// Turn Cloud on (instant: mints the logical Cloud device; sandboxes are
+    /// per session). `{}` → `CloudStatus`.
+    pub const CLOUD_ENABLE: &str = "CloudEnable";
+    /// Turn Cloud off: deletes every session sandbox (final usage captured
+    /// first), revokes their vault enrollments, and removes the logical
+    /// device. `{}` → `CloudStatus` (`Deleting`, then `Off`).
+    pub const CLOUD_DELETE: &str = "CloudDelete";
+    /// `{}` → `CloudSessions`.
+    pub const CLOUD_SESSIONS: &str = "CloudSessions";
+    /// `{chatId}` → `CloudSession`. Wake/sleep one session's sandbox; sending
+    /// to a sleeping session wakes it on its own (the host nudge).
+    pub const CLOUD_SESSION_WAKE: &str = "CloudSessionWake";
+    pub const CLOUD_SESSION_SLEEP: &str = "CloudSessionSleep";
+    /// `{chatId}` → `CloudSession` (`Deleting`). Deletes the sandbox and
+    /// anything uncommitted in it; the transcript stays.
+    pub const CLOUD_SESSION_DELETE: &str = "CloudSessionDelete";
+    /// The signed-in user's Cloud credits — balance, and use per UTC day
+    /// (reconciled against the sandbox provider's own meter):
+    /// `{from?: "YYYY-MM-DD", to?: "YYYY-MM-DD"}` (default: the last 30 days)
+    /// → `CloudUsage`.
+    pub const CLOUD_USAGE: &str = "CloudUsage";
+    /// The signed-in user's plan and credits, and what can be bought:
+    /// `{}` → `BillingStatus`.
+    pub const BILLING_STATUS: &str = "BillingStatus";
+    /// A Stripe Checkout page: `{kind: "subscription", plan}` or
+    /// `{kind: "credits", packs}` → `BillingLink`.
+    pub const BILLING_CHECKOUT: &str = "BillingCheckout";
+    /// The Stripe Billing Portal (change plan, payment method, invoices,
+    /// cancel): `{}` → `BillingLink`.
+    pub const BILLING_PORTAL: &str = "BillingPortal";
+    // Credential vault (IPC-only; the edge forwards to the vault Worker).
+    /// `{}` → `VaultStatus`.
+    pub const VAULT_STATUS: &str = "VaultStatus";
+    /// Sign in to Codex on THIS device (`codex login` into a throwaway
+    /// CODEX_HOME, shredded afterwards) and upload the result to the vault;
+    /// the device's own Codex login and account slots are untouched.
+    ///
+    /// Returns as soon as the sign-in page is known, in the same shape as
+    /// `StartAgentLogin`: `{authorizedDevices}` →
+    /// `AgentLoginStart {loginId, url, mode: "browser", callbackPort?}`.
+    /// The caller opens `url` in the browser, then drives the flow with the
+    /// existing account-login methods on this same engine (NO
+    /// `targetDeviceId`): `PollAgentLogin {loginId}` → `AgentLoginPoll`
+    /// (`pending` — may carry a late `url`; `done` once the vault holds the
+    /// credential; `error` + `message`, e.g. the vault's refusal) and
+    /// `CancelAgentLogin {loginId}`. After `done`, refresh with `VaultStatus`.
+    /// The flow gives up after 15 minutes. Fails up front (no browser) when
+    /// the account can't use Cloud.
+    pub const VAULT_CONNECT_CODEX: &str = "VaultConnectCodex";
+    /// Sign in to Claude on THIS device through Claude's own OAuth flow
+    /// (PKCE, loopback callback) in capture-only mode — the `claudeAiOauth`
+    /// tokens go straight to the vault, never into this device's live Claude
+    /// login, Keychain or an account slot, so the vault stays the only
+    /// refresher: `{authorizedDevices}` → `AgentLoginStart`, driven exactly
+    /// like `VaultConnectCodex` (`PollAgentLogin` / `CancelAgentLogin`). When
+    /// no loopback port can be bound the start comes back with
+    /// `mode: "paste-code"`: finish it with `CompleteAgentLogin {loginId,
+    /// code}` (its reply is this device's unchanged `AgentAccountsSnapshot`;
+    /// the upload has happened once it returns), then `VaultStatus`.
+    pub const VAULT_CONNECT_CLAUDE: &str = "VaultConnectClaude";
+    /// `{provider: "anthropic-key"|"openai-key", key, authorizedDevices}` →
+    /// `VaultStatus`.
+    pub const VAULT_PUT_API_KEY: &str = "VaultPutApiKey";
+    /// `{provider, authorizedDevices}` → `VaultStatus`.
+    pub const VAULT_AUTHORIZE: &str = "VaultAuthorize";
+    /// `{provider}` → `VaultStatus`.
+    pub const VAULT_DISCONNECT: &str = "VaultDisconnect";
+    /// `{deviceId}` → `VaultStatus`.
+    pub const VAULT_REVOKE_DEVICE: &str = "VaultRevokeDevice";
+    /// `{authorizedDevices}` → `GithubDeviceFlow`.
+    pub const GITHUB_CONNECT_START: &str = "GithubConnectStart";
+    /// `{flowId}` → `GithubConnectProgress`.
+    pub const GITHUB_CONNECT_POLL: &str = "GithubConnectPoll";
+    /// Repositories the account's vault-held GitHub connection can see,
+    /// newest push first: `{query?}` → `{repos: GithubRepo[]}`. Answered via
+    /// the edge (the vault calls GitHub; the token never leaves it), so any
+    /// signed-in device can list them; a Cloud session device answers with
+    /// its own grant. Fails with a `github_not_connected:`-prefixed message
+    /// when GitHub isn't connected.
+    pub const LIST_GITHUB_REPOS: &str = "ListGithubRepos";
+    /// `{repo, defaultBranch?}` → `RepoRef[]`: the branches a Cloud session
+    /// of `repo` (`owner/name`) can start from, through the user's GitHub
+    /// connection (the vault calls GitHub), the default first.
+    pub const LIST_CLOUD_BRANCHES: &str = "ListCloudBranches";
+
+    // ── Plugins (the plugins contract; local IPC only but PluginDeliver) ──
+    /// `{}` → `{dirs: {plugins, templates}, plugins: PluginItem[]}`, by name.
+    pub const LIST_PLUGINS: &str = "ListPlugins";
+    /// `{}` → stream of `ListPlugins`' reply: the current list at once, then
+    /// each change.
+    pub const WATCH_PLUGINS: &str = "WatchPlugins";
+    /// `{id, allow, hash}` → `PluginItem`.
+    pub const DECIDE_PLUGIN: &str = "DecidePlugin";
+    /// `{id, off}` → `PluginItem` (an allowed plugin only).
+    pub const SET_PLUGIN_OFF: &str = "SetPluginOff";
+    /// `{id}` → `{}`: the folder moves to `plugins/.removed/`.
+    pub const REMOVE_PLUGIN: &str = "RemovePlugin";
+    /// `{id, name, description?, permissions?}` → `PluginItem`.
+    pub const NEW_PLUGIN: &str = "NewPlugin";
+    /// `{id}` → `PluginItem`, or `{path}` → `VerifyPlugin`'s reply; both
+    /// with `files` (how many files the signature covers).
+    pub const SIGN_PLUGIN: &str = "SignPlugin";
+    /// `{path}` → `{author, status, hash, error?}`.
+    pub const VERIFY_PLUGIN: &str = "VerifyPlugin";
+    /// `{}` → `{device: {id, name}, tools: [..]}`.
+    pub const LIST_PLUGIN_TOOLS: &str = "ListPluginTools";
+    /// `{}` → stream of `ListPluginTools`' reply.
+    pub const WATCH_PLUGIN_TOOLS: &str = "WatchPluginTools";
+    /// `{mcp_name | plugin+tool, args, chatId?}` → `{ok: true, value}`.
+    pub const CALL_PLUGIN_TOOL: &str = "CallPluginTool";
+    /// `{}` → stream (the app) of `{callId, plugin, tool, args, chatId?}`;
+    /// the latest subscriber wins.
+    pub const SERVE_PLUGIN_TOOLS: &str = "ServePluginTools";
+    /// `{callId, ok, value?, error?}` → `{}`.
+    pub const PLUGIN_TOOL_RESULT: &str = "PluginToolResult";
+    /// `{plugin, to: deviceId | "*", data}` → `{results: {deviceId: outcome}}`.
+    pub const PLUGIN_SEND: &str = "PluginSend";
+    /// Peer to peer over the device link: `{plugin, from, author_key?, data}`
+    /// → `{outcome}`. The one plugin method a peer may call.
+    pub const PLUGIN_DELIVER: &str = "PluginDeliver";
+    /// The app (a plugin's window): `{plugin, method, args?, device?,
+    /// timeout?}` → `{ok: true, value}` | `{ok: false, reason, message}`.
+    /// Its service on this device, or on `device` (sent there as
+    /// [`SERVE_PLUGIN_CALL`] with the plugin's version and signing key).
+    /// `method: "@watch"` has `device`'s service events reach this device's
+    /// windows while they're open.
+    pub const CALL_PLUGIN_SERVICE: &str = "CallPluginService";
+    /// Peer to peer over the device link: `{plugin, version, authorKey?,
+    /// from, method, args?, timeout?}` → as `CallPluginService`. Refused
+    /// with a reason unless the plugin is installed, on and allowed here,
+    /// in the same version, by the same author. A peer may call it.
+    pub const SERVE_PLUGIN_CALL: &str = "ServePluginCall";
+    /// `{}` → stream (the app) of `{plugin, from: {id, name}, data, at}`.
+    pub const WATCH_PLUGIN_CHANNEL: &str = "WatchPluginChannel";
+    /// `{}` → `{key, registered}`.
+    pub const PLUGIN_SIGNING_KEY: &str = "PluginSigningKey";
+    /// Templates (whole replacements of Zeron's interface): `{}` → `{dir,
+    /// active, templates: [{id, name, description, author, version,
+    /// zeron_version, builtin, active, status: "ok" | "errors" | "out_of_date"
+    /// | "broken", error?, dir, preview?, imported?: {key, author}}], pending:
+    /// [{pending, id, name, key, author, hash, ignored, …}]}`, Zeron's own
+    /// first. "out_of_date":
+    /// its `zeron_version` isn't this Zeron's (a real update since it was made).
+    pub const LIST_TEMPLATES: &str = "ListTemplates";
+    /// `{id, name?, from?}` → `{id, dir, files: [rel], map}`: a full copy of
+    /// Zeron's app (overlaid with `from`'s files) to edit.
+    pub const CREATE_TEMPLATE: &str = "CreateTemplate";
+    /// `{id}` → `{active}`: the template the window runs (the app switches
+    /// live).
+    pub const USE_TEMPLATE: &str = "UseTemplate";
+    /// `{id}` → `{id, active, root_error?, file_errors: {rel: error},
+    /// out_of_date: [rel], files, inherits}`.
+    pub const TEMPLATE_STATUS: &str = "TemplateStatus";
+    /// `{id}` → `{deleted, active}`: set aside in the templates folder's
+    /// `.removed`.
+    pub const DELETE_TEMPLATE: &str = "DeleteTemplate";
+    /// `{id, path}` → `{id, path, files, key}`: the template as a signed
+    /// package (`path`, a `.zeron-template` file), signed with this device's
+    /// plugin key in the template domain. Never-templated files are left out.
+    pub const EXPORT_TEMPLATE: &str = "ExportTemplate";
+    /// `{path}` → yours (signed by this device's key): installed,
+    /// `{installed, name, author, ignored}`; anyone else's: kept for you to
+    /// allow in Zeron, `{pending, id, name, …, key, author, hash, ignored,
+    /// needs_consent: true}`. Unsigned or tampered packages are refused.
+    pub const IMPORT_TEMPLATE: &str = "ImportTemplate";
+    /// `{pending, allow, hash}` → `{installed, name, author}` or
+    /// `{declined}`: the consent window's answer for a waiting package
+    /// (checked again; `hash` is the package as shown). Only Zeron's consent
+    /// window calls it.
+    pub const DECIDE_TEMPLATE: &str = "DecideTemplate";
+    /// Each template installed from a link checked there for a newer
+    /// version (`{id?}`): `{updates, errors}`.
+    pub const CHECK_TEMPLATE_UPDATES: &str = "CheckTemplateUpdates";
+    /// The update found for a template, installed in its place (`{id}`).
+    pub const UPDATE_TEMPLATE: &str = "UpdateTemplate";
+    /// `{}` → `{screens: [{module, file, title, description, elements}],
+    /// map}`: each screen's named elements (`#id`, `.class`) from its source;
+    /// `DescribeElements` is the live window's.
+    pub const DESCRIBE_APP: &str = "DescribeApp";
+    /// `{}` → `{elements: [{selector, place, about, provides, present}],
+    /// everywhere, how}`: where plugins can place their nodes, as the main
+    /// window running now has it (it writes the map as its template
+    /// changes).
+    pub const DESCRIBE_ELEMENTS: &str = "DescribeElements";
+    /// `{id, snapshot?}` → `{id, name, status, error?, permissions, allowed,
+    /// open, on_in_window?, placements?: [{at, how, count, regions}],
+    /// problem?, hidden?, failed?, pages?, snapshot?}`: where a plugin's nodes
+    /// landed in the window, for an agent to check its work (and, with
+    /// `snapshot`, a picture of the window cut to them).
+    pub const PLUGIN_STATUS: &str = "PluginStatus";
+    /// `{dir}` → the list: the app's folder of Zeron's own plugins, scanned
+    /// with yours (allowed what they ask, on unless turned off, never
+    /// removed).
+    pub const SET_BUILTIN_PLUGINS: &str = "SetBuiltinPlugins";
+    /// `{path}` (a `.zeron-plugin` file) or `{url, ref?, folder?}` (a
+    /// package link, a GitHub release, a git repository) → `{plugin,
+    /// update, from?, added, removed, waiting}`: someone else's plugin
+    /// installed, verified first; it waits for you in the app (`waiting`)
+    /// unless it's signed by your own key. Over an installed one only when
+    /// the same key signed both (an update).
+    pub const INSTALL_PLUGIN: &str = "InstallPlugin";
+    /// `{id?}` → `{updates: [{id, name, version, added, removed,
+    /// refused?}], errors: [{id, name, error}]}`: each installed plugin's
+    /// source checked for a new version (listed on its item as `update`).
+    pub const CHECK_PLUGIN_UPDATES: &str = "CheckPluginUpdates";
+    /// `{id}` → as `InstallPlugin`: the update found for it installed
+    /// (checked first when none was found yet). Refused when someone else
+    /// signed it or it was changed; new permissions wait for you again.
+    pub const UPDATE_PLUGIN: &str = "UpdatePlugin";
+    /// `{id, to?}` → `{path}`: a plugin as a `.zeron-plugin` package (an
+    /// own plugin is re-signed first), into the folder or file `to`.
+    pub const EXPORT_PLUGIN: &str = "ExportPlugin";
+    /// `{source, title, body, session?}` → `{outcome: "posted" | "off" |
+    /// "held" | "paced" | "unavailable"}`: a banner asked for (a plugin's),
+    /// shown as the engine's own are, under the same Settings, at most a few
+    /// a minute for each `source`; clicking it opens `session`.
+    pub const POST_NOTIFICATION: &str = "PostNotification";
+}
+
+/// Methods answered only over this device's own local IPC, never to a peer
+/// device through the device-room relay ([`HostRelay`] refuses them): they
+/// hand the caller this device's credentials.
+pub fn local_only(method: &str) -> bool {
+    matches!(
+        method,
+        methods::ACCESS_TOKEN
+            // Plugins: authoring, tools and the window's channel stay this
+            // device's. Your other devices may list, review, allow, turn
+            // off, install and remove plugins here (the account's own
+            // devices: Settings → Plugins' device switcher), deliver a
+            // message, and call a service (`ServePluginCall`).
+            | methods::NEW_PLUGIN
+            | methods::SIGN_PLUGIN
+            | methods::VERIFY_PLUGIN
+            | methods::LIST_PLUGIN_TOOLS
+            | methods::WATCH_PLUGIN_TOOLS
+            | methods::CALL_PLUGIN_TOOL
+            | methods::SERVE_PLUGIN_TOOLS
+            | methods::PLUGIN_TOOL_RESULT
+            | methods::PLUGIN_SEND
+            | methods::CALL_PLUGIN_SERVICE
+            | methods::WATCH_PLUGIN_CHANNEL
+            | methods::PLUGIN_SIGNING_KEY
+            | methods::LIST_TEMPLATES
+            | methods::CREATE_TEMPLATE
+            | methods::USE_TEMPLATE
+            | methods::TEMPLATE_STATUS
+            | methods::DELETE_TEMPLATE
+            | methods::EXPORT_TEMPLATE
+            | methods::IMPORT_TEMPLATE
+            | methods::DECIDE_TEMPLATE
+            | methods::CHECK_TEMPLATE_UPDATES
+            | methods::UPDATE_TEMPLATE
+            | methods::DESCRIBE_APP
+            | methods::DESCRIBE_ELEMENTS
+            | methods::SET_BUILTIN_PLUGINS
+            | methods::POST_NOTIFICATION
+            | methods::EXPORT_PLUGIN
+    )
+}
+
+/// Stable capability error codes transported without provider stderr.
+pub mod capability_errors {
+    pub const PULL_REQUESTS_CLI_UNAVAILABLE: &str = "pull_requests.cli_unavailable";
+    pub const PULL_REQUESTS_AUTHENTICATION: &str = "pull_requests.authentication";
+    pub const PULL_REQUESTS_RATE_LIMITED: &str = "pull_requests.rate_limited";
+    pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
+    pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
+    pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -226,6 +605,9 @@ pub enum RpcError {
     UnknownMethod(String),
     #[error("bad params: {0}")]
     BadParams(String),
+    /// Stable machine-readable capability failure preserved across transports.
+    #[error("capability error: {0}")]
+    Capability(String),
     #[error("{0}")]
     Failed(String),
     #[error("transport: {0}")]
@@ -250,7 +632,13 @@ pub struct ClientFrame {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerFrame {
     pub id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `"ok": null` is a reply whose value is `null` (for example an absent
+    /// `Option`), distinct from a frame without `ok`.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ok: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub err: Option<String>,
@@ -258,6 +646,13 @@ pub struct ServerFrame {
     pub item: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+}
+
+fn present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// What a service returns for one invocation.
@@ -371,8 +766,58 @@ mod tests {
                 }
                 "Never" => Ok(RpcReply::Stream(futures::stream::pending().boxed())),
                 "Boom" => Err(RpcError::Failed("boom".into())),
+                "Capability" => Err(RpcError::Capability(
+                    capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
+                )),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
+        }
+    }
+
+    #[test]
+    fn plugin_methods_are_local_only_but_managing_delivering_and_serving() {
+        for method in [
+            methods::NEW_PLUGIN,
+            methods::SIGN_PLUGIN,
+            methods::VERIFY_PLUGIN,
+            methods::LIST_PLUGIN_TOOLS,
+            methods::WATCH_PLUGIN_TOOLS,
+            methods::CALL_PLUGIN_TOOL,
+            methods::SERVE_PLUGIN_TOOLS,
+            methods::PLUGIN_TOOL_RESULT,
+            methods::PLUGIN_SEND,
+            methods::CALL_PLUGIN_SERVICE,
+            methods::WATCH_PLUGIN_CHANNEL,
+            methods::PLUGIN_SIGNING_KEY,
+            methods::LIST_TEMPLATES,
+            methods::CREATE_TEMPLATE,
+            methods::USE_TEMPLATE,
+            methods::TEMPLATE_STATUS,
+            methods::DELETE_TEMPLATE,
+            methods::EXPORT_TEMPLATE,
+            methods::IMPORT_TEMPLATE,
+            methods::DECIDE_TEMPLATE,
+            methods::CHECK_TEMPLATE_UPDATES,
+            methods::UPDATE_TEMPLATE,
+            methods::DESCRIBE_APP,
+        ] {
+            assert!(local_only(method), "{method}");
+        }
+        assert!(!local_only(methods::PLUGIN_DELIVER));
+        assert!(!local_only(methods::SERVE_PLUGIN_CALL));
+        // Your other devices manage this one's plugins (Settings → Plugins).
+        for method in [
+            methods::LIST_PLUGINS,
+            methods::WATCH_PLUGINS,
+            methods::DECIDE_PLUGIN,
+            methods::SET_PLUGIN_OFF,
+            methods::REMOVE_PLUGIN,
+            methods::INSTALL_PLUGIN,
+            methods::CHECK_PLUGIN_UPDATES,
+            methods::UPDATE_PLUGIN,
+            methods::PLUGIN_STATUS,
+        ] {
+            assert!(!local_only(method), "{method}");
         }
     }
 
@@ -408,6 +853,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::Failed(m) if m == "boom"));
+
+        let err = client
+            .call("Capability", serde_json::Value::Null)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RpcError::Capability(code)
+                if code == capability_errors::PULL_REQUESTS_AUTHENTICATION
+        ));
     }
 
     #[tokio::test]
@@ -514,12 +969,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_round_trip() {
+    async fn unary_null_reply_resolves_the_call() {
+        let client = memory_client(Arc::new(TestService));
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.call("Echo", serde_json::Value::Null),
+        )
+        .await
+        .expect("a null reply is a reply")
+        .unwrap();
+        assert_eq!(reply, serde_json::Value::Null);
+        let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"ok":null}"#).unwrap();
+        assert_eq!(frame.ok, Some(serde_json::Value::Null));
+        let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"done":true}"#).unwrap();
+        assert_eq!(frame.ok, None);
+    }
+
+    /// Serve `TestService` on an ephemeral port behind `token`.
+    async fn serve_test(token: &str) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        tokio::spawn(serve_ws_listener(
+            listener,
+            Arc::new(TestService),
+            token.to_string(),
+        ));
+        port
+    }
 
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+    #[tokio::test]
+    async fn websocket_round_trip() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+
+        let client = connect_ws(&format!("ws://127.0.0.1:{port}"), Some(&token))
+            .await
+            .unwrap();
         let echoed = client
             .call("Echo", serde_json::json!("hello"))
             .await
@@ -535,32 +1020,176 @@ mod tests {
         assert_eq!(items.recv().await, None);
     }
 
+    /// A reply past tungstenite's default 16 MiB frame cap (a long chat's
+    /// transcript watch) must arrive, not drop the connection.
     #[tokio::test]
-    async fn handshake_with_origin_header_is_rejected() {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    async fn websocket_carries_messages_past_the_default_frame_cap() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+        // Multi-byte chars so fragment boundaries land mid-codepoint.
+        let big = "é".repeat(9_500_000);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        let client = connect_ws(&format!("ws://127.0.0.1:{port}"), Some(&token))
+            .await
+            .unwrap();
+        let echoed = client.call("Echo", serde_json::json!(big)).await.unwrap();
+        assert_eq!(echoed.as_str().map(str::len), Some(big.len()));
+        assert_eq!(client.close_reason(), None);
 
-        // A browser page opening ws://127.0.0.1:{port} always sends Origin;
-        // the server must refuse the handshake before serving any RPC.
+        // A peer still on tungstenite's default limits (an older app build)
+        // reassembles the fragmented reply too.
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
         let mut req = format!("ws://127.0.0.1:{port}")
             .into_client_request()
             .unwrap();
         req.headers_mut()
-            .insert("origin", "https://evil.example".parse().unwrap());
-        let result = tokio_tungstenite::connect_async(req).await;
-        assert!(
-            result.is_err(),
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut legacy, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+        let request = serde_json::to_string(&ClientFrame {
+            id: 1,
+            method: Some("Echo".into()),
+            params: serde_json::json!(big),
+            cancel: false,
+        })
+        .unwrap();
+        // It sends one unfragmented frame past 16 MiB: the raised cap takes it.
+        assert!(request.len() > 16 << 20);
+        legacy.send(Message::Text(request)).await.unwrap();
+        let reply = loop {
+            match legacy.next().await.unwrap().unwrap() {
+                Message::Text(text) => break text,
+                _ => continue,
+            }
+        };
+        let frame: ServerFrame = serde_json::from_str(&reply).unwrap();
+        assert_eq!(
+            frame.ok.and_then(|v| v.as_str().map(str::len)),
+            Some(big.len())
+        );
+    }
+
+    /// Raw handshake status for a dial with the given headers (`None` = served).
+    async fn handshake_status(port: u16, headers: &[(&str, &str)]) -> Option<u16> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut req = format!("ws://127.0.0.1:{port}")
+            .into_client_request()
+            .unwrap();
+        for (name, value) in headers {
+            req.headers_mut().insert(
+                tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+                    .unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        match tokio_tungstenite::connect_async(req).await {
+            Ok(_) => None,
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                Some(response.status().as_u16())
+            }
+            Err(other) => panic!("unexpected handshake failure: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_with_origin_header_is_rejected() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+        let bearer = format!("Bearer {token}");
+
+        // A browser page opening ws://127.0.0.1:{port} always sends Origin;
+        // the server must refuse the handshake before serving any RPC — even
+        // when the bearer is right.
+        assert_eq!(
+            handshake_status(
+                port,
+                &[
+                    ("origin", "https://evil.example"),
+                    ("authorization", &bearer)
+                ]
+            )
+            .await,
+            Some(403),
             "handshake carrying an Origin header must be rejected"
         );
 
         // A native viewport (no Origin) still connects and can call RPC — the
         // reject must not be a blanket denial.
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        let client = connect_ws(&format!("ws://127.0.0.1:{port}"), Some(&token))
+            .await
+            .unwrap();
         let echoed = client.call("Echo", serde_json::json!("ok")).await.unwrap();
         assert_eq!(echoed, serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn handshake_requires_the_engine_bearer() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+
+        // Any local process can reach the port; without the token it gets 401.
+        assert_eq!(handshake_status(port, &[]).await, Some(401));
+        let wrong = format!("Bearer {}", ipc_auth::generate_token().unwrap());
+        assert_eq!(
+            handshake_status(port, &[("authorization", &wrong)]).await,
+            Some(401)
+        );
+        assert_eq!(
+            handshake_status(port, &[("authorization", &token)]).await,
+            Some(401),
+            "the Bearer scheme is required"
+        );
+        let url = format!("ws://127.0.0.1:{port}");
+        assert!(connect_ws(&url, None).await.is_err());
+        let error = match connect_ws(&url, Some("not-the-token")).await {
+            Ok(_) => panic!("a wrong token must not be served"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("401"), "{error}");
+
+        // The right token is served.
+        let right = format!("Bearer {token}");
+        assert_eq!(
+            handshake_status(port, &[("authorization", &right)]).await,
+            None
+        );
+        let client = connect_ws(&url, Some(&token)).await.unwrap();
+        assert_eq!(
+            client.call("Echo", serde_json::json!(7)).await.unwrap(),
+            serde_json::json!(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_ipc_reads_the_published_token_at_dial_time() {
+        let dir = tempfile::tempdir().unwrap();
+        // Engine start #1.
+        let first = ipc_auth::issue_token(dir.path()).unwrap();
+        let first_port = serve_test(&first).await;
+        let client = connect_ipc(first_port, Some(dir.path())).await.unwrap();
+        assert_eq!(
+            client.call("Echo", serde_json::json!(1)).await.unwrap(),
+            serde_json::json!(1)
+        );
+
+        // Engine restart: a new token replaces the file. The next dial picks
+        // it up without any client-side configuration.
+        let second = ipc_auth::issue_token(dir.path()).unwrap();
+        let second_port = serve_test(&second).await;
+        let client = connect_ipc(second_port, Some(dir.path())).await.unwrap();
+        assert_eq!(
+            client.call("Echo", serde_json::json!(2)).await.unwrap(),
+            serde_json::json!(2)
+        );
+
+        // A client holding only the stale file is refused with a clear reason.
+        let stale = tempfile::tempdir().unwrap();
+        ipc_auth::write_token(&ipc_auth::token_path(stale.path()), &first).unwrap();
+        let error = match connect_ipc(second_port, Some(stale.path())).await {
+            Ok(_) => panic!("a rotated token must not be served"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("rejected"), "{error}");
     }
 
     #[tokio::test]

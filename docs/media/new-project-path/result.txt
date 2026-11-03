@@ -1,0 +1,19 @@
+New project typed path, run against a real in-process engine listing /tmp/zeron-demo/ana.
+Input: window key/mouse events; text through the focused field's input handler.
+
+✓ ⇧⌘N opens New project on its devices
+✓ ⌘L on the device list types a path on the highlighted device
+✓ ⇥ completes each folder from the device's real listing
+✓ ⌘↵ opens the typed folder and adds it as a project
+✓ the engine's registry holds the project /tmp/zeron-demo/ana/code/opensource/zeron
+✓ the app lands on the new project /tmp/zeron-demo/ana/code/opensource/zeron
+✓ Home lists the device's real home
+✓ the folder rows still browse as before
+✓ the pen turns the crumbs into the open folder's path, from ~
+✓ ↵ opens the edited path; the crumbs come back
+✓ ⌘↵ adds the open folder, as before
+✓ the engine's registry holds the project /tmp/zeron-demo/ana/code/work/dashboard
+✓ a missing folder says so and keeps the typed path
+✓ Esc gives the trail back and keeps New project open
+✓ the corrected path opens and is added
+✓ the engine's registry holds the project /tmp/zeron-demo/ana/code/opensource/helix

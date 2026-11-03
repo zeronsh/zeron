@@ -61,10 +61,19 @@ fn front_page_mirrors_the_desktop_sidebar() {
     // Recency order; archived + child chats never appear.
     assert_eq!(
         ids(&ws.front.recent),
-        ["chat-cjk", "chat-home", "chat-deploy", "chat-blog"]
+        [
+            "chat-visuals",
+            "chat-cjk",
+            "chat-home",
+            "chat-deploy",
+            "chat-blog"
+        ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
-    assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
+    assert_eq!(
+        ids(ws.children("chat-veil")),
+        ["chat-side-easing", "chat-side"]
+    );
 
     let veil = ws.session("chat-veil").unwrap();
     assert_eq!(veil.indicator, ChatIndicator::Working);
@@ -97,7 +106,15 @@ fn front_page_mirrors_the_desktop_sidebar() {
     let zeron = ws.project("space-zeron").unwrap();
     assert_eq!(zeron.indicator, ChatIndicator::AwaitingInput);
     assert!(zeron.unseen_count >= 2);
-    assert_eq!(ids(&ws.projectless), ["chat-home"]);
+    // Clones of one repository are one project, with one name and color.
+    let clone = ws.project("space-zeron-vps").unwrap();
+    assert_eq!(clone.group_key, zeron.group_key);
+    assert_eq!(clone.group_name, "zeron");
+    assert_eq!(clone.color_index, zeron.color_index);
+    let cjk = ws.session("chat-cjk").unwrap();
+    assert_eq!(cjk.project.as_ref().unwrap().color_index, zeron.color_index);
+    assert_ne!(ws.project("space-edge").unwrap().group_key, zeron.group_key);
+    assert_eq!(ids(&ws.projectless), ["chat-visuals", "chat-home"]);
     assert!(ws.devices.iter().any(|d| d.is_self && d.id == "ios-test"));
     assert!(!ws.device("dev-studio").unwrap().online);
 
@@ -129,6 +146,49 @@ fn sidebar_writes_reorder_the_front_page() {
     let later = ws.front.sections.iter().find(|s| s.id == section).unwrap();
     assert_eq!(ids(&later.sessions), ["chat-deploy"]);
     assert!(!ids(&ws.front.recent).contains(&"chat-deploy"));
+    // A section lists its members in their placed order, as desktop does,
+    // and a placement out of Pinned unpins.
+    let members = |client: &Client| {
+        let ws = client.workspace();
+        ids(&ws
+            .front
+            .sections
+            .iter()
+            .find(|s| s.id == section)
+            .unwrap()
+            .sessions)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    };
+    client
+        .place_session(
+            "chat-home",
+            Some(section.clone()),
+            None,
+            Some("chat-deploy".into()),
+        )
+        .unwrap();
+    assert_eq!(members(&client), ["chat-home", "chat-deploy"]);
+    assert!(!ids(&client.workspace().front.pinned).contains(&"chat-home"));
+    client
+        .place_session(
+            "chat-home",
+            Some(section.clone()),
+            Some("chat-deploy".into()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(members(&client), ["chat-deploy", "chat-home"]);
+    // A drop into Pinned lands between its neighbours.
+    client
+        .pin_session_at("chat-home", None, Some("chat-picker".into()))
+        .unwrap();
+    assert_eq!(
+        ids(&client.workspace().front.pinned),
+        ["chat-home", "chat-picker"]
+    );
+    assert_eq!(members(&client), ["chat-deploy"]);
     client.set_section_collapsed(&section, true).unwrap();
     client.rename_section(&section, "Someday").unwrap();
     let ws = client.workspace();
@@ -175,7 +235,10 @@ fn send_streams_a_reply_and_adopts_the_echo() {
     assert_eq!(echo.pending.len(), 1);
     assert_eq!(echo.pending[0].message_id, message_id);
     assert!(echo.entry(&message_id).unwrap().echo.is_some());
-    assert!(echo.working, "a send in flight reads as working");
+    assert!(
+        !echo.working,
+        "a pending send is not confirmed host activity"
+    );
 
     let (tx, rx) = std::sync::mpsc::channel();
     let _watch = session.watch(move |snap| {
@@ -249,8 +312,7 @@ fn questions_answer_through_respond_input() {
     });
     // The host publishes the question, then flips the chat's status.
     wait_for("awaiting input", Duration::from_secs(5), || {
-        client.workspace().session("chat-deploy").unwrap().indicator
-            == ChatIndicator::AwaitingInput
+        client.workspace().session("chat-deploy").unwrap().indicator == ChatIndicator::AwaitingInput
     });
     let input = session.composer().open_input.clone().unwrap();
     session
@@ -539,4 +601,38 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     let row = client.workspace().session("chat-blog").unwrap().clone();
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
+}
+
+/// A provider change goes through only where the chat's host switches
+/// providers; a model change goes through anywhere.
+#[test]
+fn provider_switch_needs_a_host_that_switches() {
+    let (client, _dir) = demo(fast());
+    let switched = |chat: &str| {
+        let mut config = client
+            .session_config(chat)
+            .expect("demo chats have a config");
+        use zeron_proto::HarnessId;
+        config.harness = if config.harness == HarnessId::Codex {
+            HarnessId::ClaudeCode
+        } else {
+            HarnessId::Codex
+        };
+        config.model = None;
+        (client.set_session_config(chat, &config), config.harness)
+    };
+    // The Mac advertises provider switching.
+    let (result, harness) = switched("chat-veil");
+    result.expect("a host that switches takes the change");
+    assert_eq!(client.session_config("chat-veil").unwrap().harness, harness);
+    // The studio's engine predates it: the chat keeps its provider.
+    let before = client.session_config("chat-blog").unwrap();
+    let (result, _) = switched("chat-blog");
+    let error = result.expect_err("an older host refuses").to_string();
+    assert!(error.contains("newer Zeron"), "{error}");
+    assert_eq!(client.session_config("chat-blog").unwrap(), before);
+    // A model change on the same provider is not a switch.
+    let mut model = before.clone();
+    model.model = Some("another-model".into());
+    client.set_session_config("chat-blog", &model).unwrap();
 }

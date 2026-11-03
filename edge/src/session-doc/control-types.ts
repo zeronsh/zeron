@@ -5,6 +5,14 @@
  * edge package stays dependency-light (no effect).
  */
 
+/** One checklist entry. `done` stays authoritative for completion; `status` is
+ * additive and only present for an in-progress item (absent ⇒ derive from `done`). */
+export interface TodoItem {
+  readonly text: string;
+  readonly done: boolean;
+  readonly status?: "pending" | "inProgress" | "completed";
+}
+
 export type ToolCall =
   | { readonly _tag: "Exec"; readonly command: string; readonly background?: boolean }
   | { readonly _tag: "ReadFile"; readonly path: string }
@@ -29,7 +37,7 @@ export type ToolCall =
   | { readonly _tag: "WebSearch"; readonly query: string }
   | {
       readonly _tag: "Todo";
-      readonly items: ReadonlyArray<{ readonly text: string; readonly done: boolean }>;
+      readonly items: ReadonlyArray<TodoItem>;
     }
   | { readonly _tag: "Mcp"; readonly server?: string; readonly tool: string; readonly input: unknown }
   | { readonly _tag: "Unknown"; readonly name: string; readonly input: unknown };
@@ -49,6 +57,13 @@ export interface UserInputQuestion {
   readonly question: string;
   readonly options: ReadonlyArray<{ readonly label: string; readonly description?: string }>;
   readonly multiSelect?: boolean;
+}
+
+/** What the user picked or typed for one question (mirrors the Rust
+ * `UserInputAnswer`). */
+export interface UserInputAnswer {
+  readonly questionId: string;
+  readonly labels: ReadonlyArray<string>;
 }
 
 /** Message parts — the structured view of an assistant turn (parts.ts). */
@@ -84,6 +99,9 @@ export type MessagePart =
       readonly requestId: string;
       readonly questions: ReadonlyArray<UserInputQuestion>;
       readonly resolved?: boolean;
+      /** What the run received once resolved: empty ⇒ closed unanswered;
+       * absent ⇒ pending, or resolved before answers were recorded. */
+      readonly answers?: ReadonlyArray<UserInputAnswer>;
     }
   | {
       /** The run ended abnormally (harness failure, stall, interrupt). */

@@ -1,0 +1,10 @@
+{
+  "status": {
+    "working": "正在处理",
+    "input": "等你回复",
+    "approval": "需要你批准",
+    "failed": "已停止",
+    "done": "完成"
+  },
+  "minutes": "{n, plural, other {# 分钟}}"
+}

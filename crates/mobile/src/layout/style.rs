@@ -149,14 +149,14 @@ pub(crate) struct Typography {
 
 impl Typography {
     pub fn new(
-        faces: &[(FaceRole, Arc<Vec<u8>>)],
+        faces: &[(FaceRole, &'static [u8])],
         fallback: Option<Arc<dyn zeron_text::FallbackMeasurer>>,
         registry: Arc<Mutex<HashMap<u16, StyleDesc>>>,
     ) -> Self {
         let mut book = FontBook::new();
         let mut ids = HashMap::new();
         for (role, bytes) in faces {
-            if let Ok(id) = book.add_face(bytes.as_ref().clone()) {
+            if let Ok(id) = book.add_static_face(bytes) {
                 ids.insert(*role, id);
             }
         }

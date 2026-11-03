@@ -16,6 +16,7 @@ pub mod rebuild;
 pub mod registry;
 pub mod schema;
 pub mod transcript_delta;
+pub mod voice;
 pub mod workspace;
 
 pub use commands::*;

@@ -39,7 +39,7 @@ fn percent_decode_path(encoded: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn escape_mention_label(label: &str) -> String {
+pub(crate) fn escape_mention_label(label: &str) -> String {
     label
         .replace('\\', "\\\\")
         .replace('[', "\\[")

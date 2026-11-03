@@ -1,0 +1,9 @@
+{
+  "id": "md-hello",
+  "name": "Hello blocks",
+  "version": "1.0.0",
+  "description": "A reply's ```hello code blocks drawn as a greeting card: how a renderer of a block's own (Mermaid, a chart) is a plugin.",
+  "entry": "init.luau",
+  "permissions": ["ui.change"],
+  "ui": { "change": [".md-code.lang-hello"] }
+}

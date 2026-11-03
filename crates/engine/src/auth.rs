@@ -5,7 +5,11 @@
 //! delegates the secret-bearing **code exchange** and **refresh** to the edge Worker
 //! (`/auth/exchange`, `/auth/refresh` — the WorkOS API key lives only there).
 //!
-//! Two modes:
+//! Three modes:
+//! - **Runner** (a Cloud device — `{data_dir}/runner.json`, see [`crate::runner`]): always
+//!   signed in as the enrolled `{userId}` in `{orgId}`; bearers are runner JWTs minted by a
+//!   signed `POST /runner/token`, cached + refreshed with the same single-flight, cooldown
+//!   and background loop as WorkOS. Never touches `session.json` or WorkOS.
 //! - **Dev** (no WorkOS client id configured, or the edge reports `auth: "dev"`): always
 //!   signed in; the bearer IS the configured user id (current M2/M3 behavior).
 //! - **WorkOS**: authorization-code flow. Headed devices use a loopback callback server
@@ -39,6 +43,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const REFRESH_RETRY_BASE: Duration = Duration::from_secs(1);
 /// DNS can recover without an OS path event. Keep polling even at the cap.
 const REFRESH_RETRY_CAP: Duration = Duration::from_secs(5);
+/// A runner whose key the edge rejected (device deleted/revoked) retries
+/// this slowly: it stays dark, but recovers if the rejection was transient.
+const RUNNER_REJECTED_RETRY: Duration = Duration::from_secs(60);
 
 type RefreshFlight =
     futures::future::Shared<futures::future::BoxFuture<'static, Result<Option<String>, String>>>;
@@ -152,6 +159,44 @@ impl Serialize for AuthState {
 // Config + construction
 // ---------------------------------------------------------------------------
 
+/// Which screen the hosted sign-in opens on (AuthKit's `screen_hint`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenHint {
+    #[serde(rename = "sign-in")]
+    SignIn,
+    #[serde(rename = "sign-up")]
+    SignUp,
+}
+
+/// How a headed sign-in opens (`SignIn {screenHint?, fresh?}`). The default
+/// is the hosted page's own default, exactly as before these existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInOptions {
+    #[serde(default)]
+    pub screen_hint: Option<ScreenHint>,
+    /// Ask afresh (`max_age=0`): the hosted page doesn't go on as the
+    /// account the browser is still signed into.
+    #[serde(default)]
+    pub fresh: bool,
+}
+
+impl SignInOptions {
+    /// What the options add to the authorize URL's query (empty for none).
+    fn query(&self) -> String {
+        let mut query = String::new();
+        match self.screen_hint {
+            Some(ScreenHint::SignIn) => query.push_str("&screen_hint=sign-in"),
+            Some(ScreenHint::SignUp) => query.push_str("&screen_hint=sign-up"),
+            None => {}
+        }
+        if self.fresh {
+            query.push_str("&max_age=0");
+        }
+        query
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     /// Edge base URL (`/auth/*` routes).
@@ -225,6 +270,15 @@ impl AccessEntry {
         }
     }
 
+    fn with_ttl(token: String, ttl: Duration) -> Self {
+        Self {
+            token,
+            ttl,
+            got_at: Instant::now(),
+            got_wall: std::time::SystemTime::now(),
+        }
+    }
+
     fn remaining(&self) -> Duration {
         let monotonic = self.got_at.elapsed();
         let wall = std::time::SystemTime::now()
@@ -253,12 +307,19 @@ struct AuthInner {
     /// exchange); two concurrent refreshes would race and could revoke the session.
     refresh_gate: tokio::sync::Mutex<()>,
     refresh_flight: Mutex<Option<RefreshFlight>>,
+    /// Set at shutdown ([`Auth::quiesce_refresh`]): no refresh after.
+    refresh_quiesced: std::sync::atomic::AtomicBool,
     /// Failed refreshes are shared across every HTTP/WS token consumer, not
     /// just delayed by the background loop. Resettable without waiting on HTTP.
     refresh_retry: Mutex<RefreshRetry>,
     retry_tx: watch::Sender<u64>,
     /// Loopback callback listener port, bound lazily on the first headed sign-in.
     loopback: tokio::sync::Mutex<Option<u16>>,
+    /// `Some` = runner mode (a Cloud device's enrolled identity).
+    runner: Option<Arc<crate::runner::RunnerIdentity>>,
+    /// The edge definitively rejected the runner's signed token request
+    /// (deleted/revoked device): bearer consumers see `SignedOut`.
+    runner_rejected: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -301,6 +362,32 @@ impl Auth {
             (Some(_), None) => AuthState::SignedOut,
         };
         let loaded_workos_session = workos.is_some() && stored.is_some();
+        Self::assemble(config, workos, loaded_workos_session, stored, initial, None)
+    }
+
+    /// Runner mode: a Cloud device authenticating with its enrolled key. The
+    /// identity is fixed (`SignedIn{user: userId, org: orgId}`); WorkOS and
+    /// `session.json` are never consulted.
+    pub fn new_runner(config: AuthConfig, identity: Arc<crate::runner::RunnerIdentity>) -> Self {
+        let initial = AuthState::SignedIn {
+            user: AuthUser {
+                id: identity.user_id().to_string(),
+                email: String::new(),
+                name: None,
+            },
+            org_id: Some(identity.org_id().to_string()),
+        };
+        Self::assemble(config, None, false, None, initial, Some(identity))
+    }
+
+    fn assemble(
+        config: AuthConfig,
+        workos: Option<String>,
+        loaded_workos_session: bool,
+        stored: Option<StoredSession>,
+        initial: AuthState,
+        runner: Option<Arc<crate::runner::RunnerIdentity>>,
+    ) -> Self {
         let (state_tx, _) = watch::channel(initial);
         let (token_tx, _) = watch::channel(0);
         let (retry_tx, _) = watch::channel(0);
@@ -321,11 +408,30 @@ impl Auth {
                 sign_in: Mutex::new(SignInLifecycle::default()),
                 refresh_gate: tokio::sync::Mutex::new(()),
                 refresh_flight: Mutex::new(None),
+                refresh_quiesced: std::sync::atomic::AtomicBool::new(false),
                 refresh_retry: Mutex::new(RefreshRetry::default()),
                 retry_tx,
                 loopback: tokio::sync::Mutex::new(None),
+                runner,
+                runner_rejected: std::sync::atomic::AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Whether this is a Cloud runner (enrolled key, no WorkOS session).
+    pub fn is_runner(&self) -> bool {
+        self.inner.runner.is_some()
+    }
+
+    /// The runner identity (signing key + ids), in runner mode.
+    pub fn runner_identity(&self) -> Option<Arc<crate::runner::RunnerIdentity>> {
+        self.inner.runner.clone()
+    }
+
+    fn runner_rejected(&self) -> bool {
+        self.inner
+            .runner_rejected
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Like [`Auth::new`], but additionally probes `{edge}/health`: an edge running in
@@ -383,6 +489,9 @@ impl Auth {
     /// Dev mode mirrors the edge's dev-bearer parsing (`user@org` → `user`,
     /// a bare token IS the user id). `None` = signed out (WorkOS only).
     pub fn user_id(&self) -> Option<String> {
+        if let Some(runner) = &self.inner.runner {
+            return Some(runner.user_id().to_string());
+        }
         if self.inner.workos.is_none() {
             let dev = &self.inner.config.dev_user_id;
             return Some(dev.split('@').next().unwrap_or(dev).to_string());
@@ -395,6 +504,9 @@ impl Auth {
     /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
     /// it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
+        if self.inner.runner.is_some() {
+            return self.runner_access_token().await;
+        }
         if self.inner.workos.is_none() {
             return Ok(self.inner.config.dev_user_id.clone());
         }
@@ -438,7 +550,7 @@ impl Auth {
     pub fn spawn_refresh_loop(&self) -> tokio::task::JoinHandle<()> {
         let auth = self.clone();
         tokio::spawn(async move {
-            if auth.inner.workos.is_none() {
+            if auth.inner.workos.is_none() && auth.inner.runner.is_none() {
                 return;
             }
             let mut state_rx = auth.watch_state();
@@ -503,11 +615,28 @@ impl Auth {
     /// Begin a headed sign-in: returns the AuthKit authorize URL redirecting to our
     /// loopback callback server (bound lazily on an ephemeral port).
     pub async fn start_sign_in(&self) -> Result<String, EngineError> {
+        self.start_sign_in_with(SignInOptions::default()).await
+    }
+
+    /// [`Self::start_sign_in`] with how the hosted page opens: on making an
+    /// account or on signing in, and whether it asks afresh rather than
+    /// going on as the account the browser is already signed into.
+    pub async fn start_sign_in_with(&self, options: SignInOptions) -> Result<String, EngineError> {
         if self.inner.workos.is_none() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)
         }
         let port = self.ensure_loopback().await?;
-        Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback")))
+        Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback"), options))
+    }
+
+    /// The bearer for a local client that calls the edge itself (IPC-only
+    /// `AccessToken`), with its expiry (unix seconds) when the token says.
+    /// Refreshed as [`Self::access_token`] refreshes; the refresh token never
+    /// leaves the engine.
+    pub async fn access_token_with_expiry(&self) -> Result<(String, Option<i64>), TokenError> {
+        let token = self.access_token().await?;
+        let expires_at = jwt_claims(&token).and_then(|claims| claims.exp);
+        Ok((token, expires_at))
     }
 
     /// Begin a headless sign-in: the redirect is the edge's hosted paste-code page —
@@ -517,7 +646,10 @@ impl Auth {
             return String::new();
         }
         let edge = self.inner.config.edge_url.trim_end_matches('/');
-        self.begin_sign_in(&format!("{edge}/auth/cli/callback"))
+        self.begin_sign_in(
+            &format!("{edge}/auth/cli/callback"),
+            SignInOptions::default(),
+        )
     }
 
     /// Finish a headless sign-in with the pasted `state.code` string. The state half
@@ -545,6 +677,12 @@ impl Auth {
     }
 
     pub fn sign_out(&self) {
+        if self.is_runner() {
+            // A runner's identity is its enrolled key, not a session: there
+            // is nothing to sign out of (delete the Cloud device instead).
+            tracing::info!("auth: sign-out ignored on a Cloud runner");
+            return;
+        }
         let mut sign_in = lock(&self.inner.sign_in);
         self.clear_session(&mut sign_in);
     }
@@ -580,6 +718,8 @@ impl Auth {
     }
 
     /// Create an org (the edge makes us its first admin member) and scope to it.
+    /// Each user creates one: if we already did (a double-submit, a retry, or an
+    /// earlier session), the edge answers 409 with that org and we continue in it.
     pub async fn create_org(&self, name: &str) -> Result<(), EngineError> {
         if self.inner.workos.is_none() {
             return Ok(());
@@ -587,16 +727,35 @@ impl Auth {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Created {
-            organization_id: String,
+            organization_id: Option<String>,
         }
-        let created: Created = self
-            .authed_json(
+        let res = self
+            .authed_send(
                 reqwest::Method::POST,
                 "/auth/orgs",
                 Some(serde_json::json!({ "name": name })),
             )
             .await?;
-        self.select_org(&created.organization_id).await
+        let conflict = res.status() == reqwest::StatusCode::CONFLICT;
+        if !conflict && !res.status().is_success() {
+            return Err(EngineError::Other(format!(
+                "workspace request failed ({})",
+                res.status().as_u16()
+            )));
+        }
+        let created: Created = res.json().await.map_err(|e| {
+            EngineError::Other(format!("malformed response: {}", describe_http_error(e)))
+        })?;
+        match created.organization_id {
+            Some(organization_id) => self.select_org(&organization_id).await,
+            // Our other request is still creating it.
+            None if conflict => Err(EngineError::Other(
+                "your workspace is still being created — try again in a moment".into(),
+            )),
+            None => Err(EngineError::Other(
+                "malformed response: missing organizationId".into(),
+            )),
+        }
     }
 
     /// Scope the session to an org: one refresh with `organizationId`; the state follows
@@ -621,7 +780,7 @@ impl Auth {
 
     // -- internals ----------------------------------------------------------
 
-    fn begin_sign_in(&self, redirect_uri: &str) -> String {
+    fn begin_sign_in(&self, redirect_uri: &str, options: SignInOptions) -> String {
         let state = uuid::Uuid::new_v4().to_string();
         {
             let mut sign_in = lock(&self.inner.sign_in);
@@ -633,11 +792,12 @@ impl Auth {
         }
         let client_id = self.inner.workos.clone().unwrap_or_default();
         format!(
-            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}",
+            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}{}",
             self.inner.config.workos_api_base.trim_end_matches('/'),
             url_encode(&client_id),
             url_encode(redirect_uri),
-            state
+            state,
+            options.query()
         )
     }
 
@@ -784,11 +944,36 @@ impl Auth {
         flight.await.map_err(EngineError::Other)
     }
 
+    /// Shutdown: wait (bounded) for a token refresh already in flight, then
+    /// let no other start in this process. A refresh token is single-use; a
+    /// process that quits mid-exchange lets the next engine spend the same
+    /// token, and the loser of that race deletes the shared session file.
+    pub async fn quiesce_refresh(&self, limit: std::time::Duration) {
+        // Set while holding the gate (when it's had in time): a refresh
+        // queued behind the in-flight one then sees the flag, never a window
+        // between our release and the store. Later ones answer "no token" at
+        // once, never waiting (shutdown's own flushes may ask for a bearer).
+        let gate = tokio::time::timeout(limit, self.inner.refresh_gate.lock()).await;
+        self.inner
+            .refresh_quiesced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if gate.is_err() {
+            tracing::warn!("a token refresh was still running at shutdown");
+        }
+    }
+
     async fn refresh_serialized(
         &self,
         organization_id: Option<&str>,
     ) -> Result<Option<String>, EngineError> {
         let _gate = self.inner.refresh_gate.lock().await;
+        if self
+            .inner
+            .refresh_quiesced
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(None);
+        }
         // Re-check under the gate: the refresh we queued behind may have done the work.
         if organization_id.is_none()
             && let Some(entry) = &*lock(&self.inner.access)
@@ -818,7 +1003,11 @@ impl Auth {
                         REFRESH_RETRY_BASE.saturating_mul(1 << (retry.failures - 1).min(8));
                     let jitter =
                         Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]));
-                    let delay = (backoff + jitter).min(REFRESH_RETRY_CAP);
+                    let delay = if self.runner_rejected() {
+                        RUNNER_REJECTED_RETRY
+                    } else {
+                        (backoff + jitter).min(REFRESH_RETRY_CAP)
+                    };
                     tracing::warn!(error = %err, retry_ms = delay.as_millis() as u64,
                         "auth: refresh failed; cooling down");
                     retry.failure = Some(RefreshFailure {
@@ -843,6 +1032,9 @@ impl Auth {
         &self,
         organization_id: Option<&str>,
     ) -> Result<Option<String>, EngineError> {
+        if let Some(runner) = self.inner.runner.clone() {
+            return self.refresh_runner_locked(&runner).await;
+        }
         let (generation, refresh_token) = {
             let sign_in = lock(&self.inner.sign_in);
             let Some(refresh_token) = lock(&self.inner.stored)
@@ -957,6 +1149,134 @@ impl Auth {
         Ok(Some(tokens.access_token))
     }
 
+    /// Runner bearer: cached runner JWT, else a signed `/runner/token`
+    /// through the shared single-flight refresh. A definitive rejection
+    /// (deleted/revoked device) reads as `SignedOut`; everything else is
+    /// `TemporarilyUnavailable`.
+    async fn runner_access_token(&self) -> Result<String, TokenError> {
+        let fresh = || {
+            lock(&self.inner.access)
+                .as_ref()
+                .filter(|entry| entry.remaining() > TOKEN_SLACK)
+                .map(|entry| entry.token.clone())
+        };
+        if let Some(token) = fresh() {
+            return Ok(token);
+        }
+        let result = self.refresh(None).await;
+        if let Some(token) = fresh() {
+            return Ok(token);
+        }
+        match result {
+            Ok(Some(token)) => Ok(token),
+            _ if self.runner_rejected() => Err(TokenError::SignedOut),
+            Ok(None) => Err(TokenError::TemporarilyUnavailable(
+                "runner token unavailable".into(),
+            )),
+            Err(err) => Err(TokenError::TemporarilyUnavailable(err.to_string())),
+        }
+    }
+
+    /// `POST {edge}/runner/token {orgId, userId, deviceId, ts, sig}` →
+    /// `{accessToken, expiresAt}`. Called only under the refresh gate.
+    async fn refresh_runner_locked(
+        &self,
+        runner: &crate::runner::RunnerIdentity,
+    ) -> Result<Option<String>, EngineError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RunnerToken {
+            access_token: String,
+            #[serde(default)]
+            expires_at: Option<i64>,
+        }
+        let url = format!("{}/runner/token", runner.edge_url());
+        let mut attempt = 0;
+        let res = loop {
+            attempt += 1;
+            let res = self
+                .inner
+                .http
+                .post(&url)
+                .json(&runner.token_request())
+                .send()
+                .await
+                .map_err(|err| {
+                    EngineError::Other(format!(
+                        "could not reach the edge for a runner token: {}",
+                        describe_http_error(err)
+                    ))
+                })?;
+            let status = res.status().as_u16();
+            if res.status().is_success() {
+                break res;
+            }
+            let body = crate::runner::EdgeErrorBody::read(res).await;
+            // Replay fence: our ts lagged the last accepted one (clock
+            // stepped back across a restart). Retry once with a fresh ts.
+            if body.error == "stale" && attempt == 1 {
+                continue;
+            }
+            if (400..500).contains(&status) && !matches!(status, 408 | 429) && body.error != "stale"
+            {
+                if !self
+                    .inner
+                    .runner_rejected
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    tracing::error!(
+                        status,
+                        detail = %body.describe(),
+                        device = %runner.device_id(),
+                        "auth: the edge REJECTED this Cloud runner's key — the device was \
+                         deleted or revoked; it stays offline until re-provisioned"
+                    );
+                }
+                *lock(&self.inner.access) = None;
+                return Err(EngineError::Other(format!(
+                    "runner credentials rejected ({status}): {}",
+                    body.describe()
+                )));
+            }
+            return Err(EngineError::Other(format!(
+                "runner token request failed ({status}): {}",
+                body.describe()
+            )));
+        };
+        let token: RunnerToken = res.json().await.map_err(|err| {
+            EngineError::Other(format!(
+                "malformed runner token response: {}",
+                describe_http_error(err)
+            ))
+        })?;
+        if self
+            .inner
+            .runner_rejected
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            tracing::info!("auth: runner credentials accepted again");
+        }
+        // TTL: the JWT's own lifetime when it has one (skew-immune); else the
+        // edge's `expiresAt` (dev-mode bearers are not JWTs).
+        let jwt_ttl = jwt_claims(&token.access_token).and_then(|c| match (c.exp, c.iat) {
+            (Some(exp), Some(iat)) if exp > iat => Some(Duration::from_secs((exp - iat) as u64)),
+            _ => None,
+        });
+        let ttl = jwt_ttl.unwrap_or_else(|| {
+            let remaining_ms = token
+                .expires_at
+                .map(|at| at - crate::now_ms())
+                .unwrap_or(240_000);
+            Duration::from_millis(remaining_ms.max(60_000) as u64)
+        });
+        tracing::info!(ttl_s = ttl.as_secs(), "auth: runner token refreshed");
+        *lock(&self.inner.access) = Some(AccessEntry::with_ttl(token.access_token.clone(), ttl));
+        self.inner
+            .token_tx
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        Ok(Some(token.access_token))
+    }
+
     fn session_file(&self) -> PathBuf {
         self.inner.config.data_dir.join("session.json")
     }
@@ -985,6 +1305,24 @@ impl Auth {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, EngineError> {
+        let res = self.authed_send(method, path, body).await?;
+        if !res.status().is_success() {
+            return Err(EngineError::Other(format!(
+                "workspace request failed ({})",
+                res.status().as_u16()
+            )));
+        }
+        res.json::<T>().await.map_err(|e| {
+            EngineError::Other(format!("malformed response: {}", describe_http_error(e)))
+        })
+    }
+
+    async fn authed_send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<reqwest::Response, EngineError> {
         let token = self.access_token().await?;
         let url = format!(
             "{}{}",
@@ -995,20 +1333,11 @@ impl Auth {
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let res = req.send().await.map_err(|e| {
+        req.send().await.map_err(|e| {
             EngineError::Other(format!(
                 "the edge is unreachable: {}",
                 describe_http_error(e)
             ))
-        })?;
-        if !res.status().is_success() {
-            return Err(EngineError::Other(format!(
-                "workspace request failed ({})",
-                res.status().as_u16()
-            )));
-        }
-        res.json::<T>().await.map_err(|e| {
-            EngineError::Other(format!("malformed response: {}", describe_http_error(e)))
         })
     }
 

@@ -14,6 +14,21 @@
 			);
 			target = A1000000000000000000T001 /* Zeron */;
 		};
+		A400000000000000000000E1 /* Exceptions for "ZeronLiveActivity" folder in "ZeronLiveActivity" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A4000000000000000000T001 /* ZeronLiveActivity */;
+		};
+		A400000000000000000000E2 /* Exceptions for "Zeron" folder in "ZeronLiveActivity" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				"Fonts/Geist-Medium.ttf",
+				"Fonts/GeistMono-Medium.ttf",
+			);
+			target = A4000000000000000000T001 /* ZeronLiveActivity */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -21,6 +36,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				A100000000000000000000E1 /* Exceptions for "Zeron" folder in "Zeron" target */,
+				A400000000000000000000E2 /* Exceptions for "Zeron" folder in "ZeronLiveActivity" target */,
 			);
 			path = Zeron;
 			sourceTree = "<group>";
@@ -33,6 +49,19 @@
 		A3000000000000000000G001 /* ZeronUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = ZeronUITests;
+			sourceTree = "<group>";
+		};
+		A4000000000000000000G001 /* ZeronLiveActivity */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A400000000000000000000E1 /* Exceptions for "ZeronLiveActivity" folder in "ZeronLiveActivity" target */,
+			);
+			path = ZeronLiveActivity;
+			sourceTree = "<group>";
+		};
+		A5000000000000000000G001 /* ZeronShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ZeronShared;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -52,6 +81,13 @@
 			remoteGlobalIDString = A1000000000000000000T001;
 			remoteInfo = Zeron;
 		};
+		A4000000000000000000X001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000PJ01 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A4000000000000000000T001;
+			remoteInfo = ZeronLiveActivity;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
@@ -65,16 +101,53 @@
 			target = A1000000000000000000T001 /* Zeron */;
 			targetProxy = A3000000000000000000X001 /* PBXContainerItemProxy */;
 		};
+		A4000000000000000000D001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A4000000000000000000T001 /* ZeronLiveActivity */;
+			targetProxy = A4000000000000000000X001 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXFileReference section */
 		A1000000000000000000PR01 /* Zeron.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zeron.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000PR01 /* ZeronTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000000000000000000PR01 /* ZeronUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A4000000000000000000PR01 /* ZeronLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ZeronLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXBuildFile section */
+        B71000000000000000000001 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = B71000000000000000000002 /* WebRTC */; };
+		A4000000000000000000BF01 /* ZeronLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A4000000000000000000PR01 /* ZeronLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+/* Begin PBXCopyFilesBuildPhase section */
+		A1000000000000000000CP01 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A4000000000000000000BF01 /* ZeronLiveActivity.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+/* Begin XCRemoteSwiftPackageReference section */
+        B71000000000000000000003 /* WebRTC */ = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/stasel/WebRTC.git"; requirement = {kind = exactVersion; version = 150.0.0; }; };
+/* End XCRemoteSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+        B71000000000000000000002 /* WebRTC */ = {isa = XCSwiftPackageProductDependency; package = B71000000000000000000003; productName = WebRTC; };
+/* End XCSwiftPackageProductDependency section */
 /* Begin PBXFrameworksBuildPhase section */
 		A1000000000000000000F001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+                B71000000000000000000001 /* WebRTC in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A4000000000000000000F001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -90,6 +163,8 @@
 				A1000000000000000000G001 /* Zeron */,
 				A2000000000000000000G001 /* ZeronTests */,
 				A3000000000000000000G001 /* ZeronUITests */,
+				A4000000000000000000G001 /* ZeronLiveActivity */,
+				A5000000000000000000G001 /* ZeronShared */,
 				A1000000000000000000G002 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -100,6 +175,7 @@
 				A1000000000000000000PR01 /* Zeron.app */,
 				A2000000000000000000PR01 /* ZeronTests.xctest */,
 				A3000000000000000000PR01 /* ZeronUITests.xctest */,
+				A4000000000000000000PR01 /* ZeronLiveActivity.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -115,17 +191,20 @@
 				A1000000000000000000S001 /* Sources */,
 				A1000000000000000000F001 /* Frameworks */,
 				A1000000000000000000R001 /* Resources */,
+				A1000000000000000000CP01 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A4000000000000000000D001 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A1000000000000000000G001 /* Zeron */,
+				A5000000000000000000G001 /* ZeronShared */,
 			);
 			name = Zeron;
 			packageProductDependencies = (
-			);
+                B71000000000000000000002 /* WebRTC */,			);
 			productName = Zeron;
 			productReference = A1000000000000000000PR01 /* Zeron.app */;
 			productType = "com.apple.product-type.application";
@@ -172,17 +251,44 @@
 			productReference = A3000000000000000000PR01 /* ZeronUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A4000000000000000000T001 /* ZeronLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A4000000000000000000C001 /* Build configuration list for PBXNativeTarget "ZeronLiveActivity" */;
+			buildPhases = (
+				A4000000000000000000S001 /* Sources */,
+				A4000000000000000000F001 /* Frameworks */,
+				A4000000000000000000R001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A4000000000000000000G001 /* ZeronLiveActivity */,
+				A5000000000000000000G001 /* ZeronShared */,
+			);
+			name = ZeronLiveActivity;
+			packageProductDependencies = (
+			);
+			productName = ZeronLiveActivity;
+			productReference = A4000000000000000000PR01 /* ZeronLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
 		A1000000000000000000PJ01 /* Project object */ = {
 			isa = PBXProject;
+            packageReferences = (B71000000000000000000003);
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					A1000000000000000000T001 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					A4000000000000000000T001 = {
 						CreatedOnToolsVersion = 26.3;
 					};
 				};
@@ -204,12 +310,20 @@
 				A1000000000000000000T001 /* Zeron */,
 				A2000000000000000000T001 /* ZeronTests */,
 				A3000000000000000000T001 /* ZeronUITests */,
+				A4000000000000000000T001 /* ZeronLiveActivity */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A1000000000000000000R001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A4000000000000000000R001 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -257,6 +371,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A3000000000000000000S001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A4000000000000000000S001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -470,6 +591,60 @@
 			};
 			name = Release;
 		};
+		A4000000000000000000BC03 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ZeronLiveActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Zeron;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A4000000000000000000BC04 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ZeronLiveActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Zeron;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -505,6 +680,15 @@
 			buildConfigurations = (
 				A3000000000000000000BC03 /* Debug */,
 				A3000000000000000000BC04 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A4000000000000000000C001 /* Build configuration list for PBXNativeTarget "ZeronLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A4000000000000000000BC03 /* Debug */,
+				A4000000000000000000BC04 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

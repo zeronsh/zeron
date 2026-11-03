@@ -114,6 +114,13 @@ fn tree_rail_geometry(
     Some((metrics, bounds.top()))
 }
 
+fn tree_scroll_overflow(list: &gpui::ListState) -> (bool, bool) {
+    // ListState reports a negative offset as content scrolls upward.
+    let offset = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    let max = f32::from(list.max_offset_for_scrollbar().y);
+    (offset > 0.5, offset < max - 0.5)
+}
+
 /// The file tree's share of the shared floating rail: it owns no scroll
 /// handle, so geometry comes from the list state's own accessors and drags
 /// land through the list state's scrollbar offset setter.
@@ -166,6 +173,7 @@ impl FilesSurface {
     }
 
     pub(super) fn on_tree_scrolled(&mut self, cx: &mut Context<Self>) {
+        self.close_tree_context_menu(cx);
         // The list repaints itself; the floating rail needs a view pass.
         cx.notify();
     }
@@ -179,8 +187,13 @@ impl FilesSurface {
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let scrollbar = popover::rail(self, "files-tree-scrollbar", &theme, cx);
+        self.reset_tree_drop_rows();
+        let root_target = self.render_tree_root_target(cx);
         div()
             .id("files-tree")
+            .debug_selector(|| "files-tree".into())
+            .on_drag_move::<WorkspacePathDrag>(cx.listener(Self::on_tree_drag_move))
+            .on_drop::<WorkspacePathDrag>(cx.listener(Self::on_tree_drop))
             .role(gpui::Role::Tree)
             .aria_label("Workspace file tree")
             .relative()
@@ -192,11 +205,24 @@ impl FilesSurface {
             .on_hover(cx.listener(Self::on_tree_hovered))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.tree_focus.focus(window, cx)),
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.tree_focus.focus(window, cx);
+                    // Like other explorers, a plain click on empty space
+                    // deselects; a modified click there keeps the selection.
+                    let modifiers = event.modifiers;
+                    if !modifiers.shift
+                        && !modifiers.secondary()
+                        && this.is_tree_empty_space(event.position)
+                        && this.tree.clear_selection()
+                    {
+                        cx.notify();
+                    }
+                }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_tree_key_down(event, window, cx)
             }))
+            .child(root_target)
             .child({
                 // The sidebar's overflow treatment: rows fade under the top
                 // and bottom edges while there is more to scroll to, read
@@ -206,16 +232,16 @@ impl FilesSurface {
                     TREE_FADE_BAND,
                     true,
                     true,
-                    list(self.tree_list.clone(), cx.processor(Self::render_tree_row))
-                        .flex_1()
-                        .min_h_0()
-                        .with_sizing_behavior(ListSizingBehavior::Auto),
+                    crate::overscroll::overscroll(
+                        "tree-overscroll",
+                        crate::overscroll::OverscrollSource::List(self.tree_list.clone()),
+                        list(self.tree_list.clone(), cx.processor(Self::render_tree_row))
+                            .flex_1()
+                            .min_h_0()
+                            .with_sizing_behavior(ListSizingBehavior::Auto),
+                    ),
                 )
-                .fade_overflow_y_with(move |_| {
-                    let offset = f32::from(overflow.scroll_px_offset_for_scrollbar().y);
-                    let max = f32::from(overflow.max_offset_for_scrollbar().y);
-                    (offset > 0.5, offset < max - 0.5)
-                })
+                .fade_overflow_y_with(move |_| tree_scroll_overflow(&overflow))
             })
             .children(scrollbar)
             .into_any_element()
@@ -232,17 +258,45 @@ impl FilesSurface {
         };
         let theme = Theme::of(cx).clone();
         let padding = 8.0 + row.depth as f32 * TREE_INDENT;
+        let drop_key = row.path.clone();
+        let drop_target = match &row.kind {
+            VisibleRowKind::Entry => Some(row.path.clone()),
+            VisibleRowKind::Empty { directory } => Some(directory.clone()),
+            _ => None,
+        };
         let content = match row.kind {
             VisibleRowKind::Entry => {
                 let Some(node) = self.tree.node(&row.path).cloned() else {
                     return gpui::Empty.into_any_element();
                 };
                 let path = row.path.clone();
-                let selected = self.tree.selected() == Some(path.as_str());
+                let menu_path = path.clone();
+                let selected = self.tree.is_selected(&path);
+                let cursor = self.tree.selected() == Some(path.as_str());
                 let focused = self.tree_focus.is_focused(window);
+                // Mark the keyboard cursor once it no longer equals the whole selection.
+                let distinct_cursor =
+                    cursor && focused && (!selected || self.tree.selection_len() > 1);
                 let is_directory = node.entry.kind == WorkspaceEntryKind::Directory;
                 let decoration = self.git_decoration(&row.path, is_directory, cx);
-                let drag_payload = WorkspacePathDrag::new(path.clone(), is_directory);
+                let drag_payload = WorkspacePathDrag::new(path.clone(), is_directory)
+                    .with_origin(
+                        self.interaction_origin(cx),
+                        super::WorkspacePathSource::Tree,
+                        node.entry.mutation_revision.clone(),
+                    )
+                    // Dragging a selected row carries the whole selection.
+                    .with_selection(if selected && self.tree.selection_len() > 1 {
+                        self.tree_drag_items()
+                    } else {
+                        Vec::new()
+                    });
+                let drag_owner = cx.weak_entity();
+                let renaming = self
+                    .tree_rename
+                    .as_ref()
+                    .is_some_and(|rename| rename.path == path);
+                let rename_element = self.render_tree_rename(&path, cx);
                 let expanded = is_directory && self.tree.is_expanded(&path);
                 let text_color = if let Some(decoration) = decoration {
                     decoration.color(&theme)
@@ -265,6 +319,14 @@ impl FilesSurface {
                     )))
                     .role(gpui::Role::TreeItem)
                     .aria_label(node.entry.name.clone())
+                    .debug_selector({
+                        let path = row.path.clone();
+                        move || format!("tree-entry:{path}")
+                    })
+                    .when(
+                        is_directory && self.tree_drag.destination.as_deref() == Some(&path),
+                        |el| el.bg(crate::theme::wash(0.18)),
+                    )
                     .aria_selected(selected)
                     .when(is_directory, |element| element.aria_expanded(expanded))
                     .h(px(TREE_ROW_HEIGHT))
@@ -280,18 +342,54 @@ impl FilesSurface {
                         element.opacity(0.52)
                     })
                     .when(selected, |element| {
-                        element.bg(crate::theme::wash(if focused { 0.12 } else { 0.08 }))
+                        element.bg(crate::theme::wash(match (focused, distinct_cursor) {
+                            (true, true) => 0.16,
+                            (true, false) => 0.12,
+                            (false, _) => 0.08,
+                        }))
                     })
                     .when(!selected, |element| {
-                        element.hover(|style| style.bg(crate::theme::wash(0.055)))
+                        element
+                            .when(distinct_cursor, |element| {
+                                element.bg(crate::theme::wash(0.04))
+                            })
+                            .hover(|style| style.bg(crate::theme::wash(0.055)))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.tree_focus.focus(window, cx);
-                        this.activate_tree_path(path.clone(), cx);
-                    }))
-                    .on_drag(drag_payload, |payload, _, _, cx| {
-                        cx.stop_propagation();
-                        workspace_path_drag_ghost(payload, cx)
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            this.tree_focus.focus(window, cx);
+                            let modifiers = event.modifiers();
+                            if modifiers.shift {
+                                this.tree.select_range_to(&path, modifiers.secondary());
+                                cx.notify();
+                            } else if modifiers.secondary() {
+                                this.tree.toggle_selected(path.clone());
+                                cx.notify();
+                            } else {
+                                this.activate_tree_path(path.clone(), cx);
+                            }
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            window.prevent_default();
+                            this.open_tree_context_menu(
+                                menu_path.clone(),
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
+                    .when(!renaming, |element| {
+                        element.on_drag(drag_payload, move |payload, _, _, cx| {
+                            let _ = drag_owner
+                                .update(cx, |files, cx| files.close_tree_context_menu(cx));
+                            cx.stop_propagation();
+                            workspace_path_drag_ghost(payload, cx)
+                        })
                     })
                     .child(
                         div()
@@ -317,15 +415,16 @@ impl FilesSurface {
                             .size(px(14.0))
                             .flex_none(),
                     )
-                    .child(
+                    .child(rename_element.unwrap_or_else(|| {
                         div()
                             .min_w_0()
                             .truncate()
                             .font_family(theme.font_sans.clone())
                             .text_size(px(11.5))
                             .text_color(text_color)
-                            .child(node.entry.name),
-                    )
+                            .child(node.entry.name)
+                            .into_any_element()
+                    }))
                     .into_any_element()
             }
             VisibleRowKind::Loading { .. } => status_row(
@@ -395,7 +494,12 @@ impl FilesSurface {
                 )
                 .into_any_element(),
         };
-        with_indent_guides(content, row.depth, TREE_ROW_HEIGHT, &theme)
+        self.track_tree_drop_row(
+            drop_key,
+            drop_target,
+            TREE_ROW_HEIGHT,
+            with_indent_guides(content, row.depth, TREE_ROW_HEIGHT, &theme),
+        )
     }
 
     pub(super) fn activate_tree_path(&mut self, path: String, cx: &mut Context<Self>) {
@@ -436,7 +540,61 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Leave text input and editing shortcuts to the inline field. Stopping
+        // printable keys here would also prevent the platform's text insertion.
+        if self.tree_rename.is_some() {
+            return;
+        }
+        if event.keystroke.key == "escape" && cx.has_active_drag() {
+            cx.stop_active_drag(window);
+            self.clear_tree_drag(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.tree_menu_key(event, window, cx) {
+            return;
+        }
+        if event.keystroke.key == "menu"
+            || (event.keystroke.key == "f10" && event.keystroke.modifiers.shift)
+        {
+            if let Some(path) = self.tree.selected().map(str::to_string) {
+                self.open_tree_context_menu(
+                    path,
+                    self.tree_list.viewport_bounds().origin,
+                    window,
+                    cx,
+                );
+            }
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+        if event.keystroke.key == "escape" && self.tree.collapse_selection() {
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if matches!(event.keystroke.key.as_str(), "f2" | "delete") {
+            let paths = self.tree_action_paths();
+            if event.keystroke.key == "delete" {
+                self.begin_tree_delete(paths, window, cx);
+            } else if let [path] = paths.as_slice() {
+                self.begin_tree_rename(path.clone(), window, cx);
+            }
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         let handled = match event.keystroke.key.as_str() {
+            "up" if event.keystroke.modifiers.shift => {
+                self.tree.extend_selection(-1);
+                true
+            }
+            "down" if event.keystroke.modifiers.shift => {
+                self.tree.extend_selection(1);
+                true
+            }
             "up" => {
                 self.tree.select_previous();
                 true
@@ -531,7 +689,7 @@ fn status_row(
 mod tests {
     use super::super::model::VisibleTreeRow;
     use super::*;
-    use gpui::{ListAlignment, ListOffset, ListState};
+    use gpui::{AppContext, ListAlignment, ListOffset, ListState};
 
     fn rows(paths: &[&str]) -> Vec<VisibleTreeRow> {
         paths
@@ -542,6 +700,162 @@ mod tests {
                 kind: VisibleRowKind::Entry,
             })
             .collect()
+    }
+
+    #[gpui::test]
+    fn tree_fades_only_at_edges_with_hidden_rows(cx: &mut gpui::TestAppContext) {
+        struct TestTree(ListState);
+        impl gpui::Render for TestTree {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(TREE_ROW_HEIGHT)).w_full().into_any_element()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let state = ListState::new(10, ListAlignment::Top, px(0.0)).measure_all();
+        let view = cx.update(|_, cx| cx.new(|_| TestTree(state.clone())));
+        let mut draw = |height| {
+            cx.draw(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(200.0), px(height)),
+                |_, _| view.clone().into_any_element(),
+            );
+        };
+
+        draw(100.0);
+        assert_eq!(state.max_offset_for_scrollbar().y, px(170.0));
+        assert_eq!(tree_scroll_overflow(&state), (false, true));
+
+        state.set_offset_from_scrollbar(gpui::point(px(0.0), px(-85.0)));
+        draw(100.0);
+        assert_eq!(tree_scroll_overflow(&state), (true, true));
+
+        state.scroll_to_reveal_item(9);
+        draw(100.0);
+        assert_eq!(tree_scroll_overflow(&state), (true, false));
+        let last = state.bounds_for_item(9).unwrap();
+        let viewport = state.viewport_bounds();
+        assert!(last.top() >= viewport.top() && last.bottom() <= viewport.bottom());
+
+        // A taller viewport or removed rows clamps scrolling during layout;
+        // the fade must disappear in that same frame.
+        draw(400.0);
+        assert_eq!(tree_scroll_overflow(&state), (false, false));
+        draw(100.0);
+        state.scroll_to_reveal_item(9);
+        draw(100.0);
+        state.splice(2..10, 0);
+        draw(100.0);
+        assert_eq!(tree_scroll_overflow(&state), (false, false));
+    }
+
+    #[gpui::test]
+    fn modifier_clicks_build_a_selection_without_opening(cx: &mut gpui::TestAppContext) {
+        use super::super::{FilesEvent, test_support};
+        let (files, cx) = test_support::setup(cx);
+        test_support::set_root_entries(
+            &files,
+            cx,
+            vec![
+                test_support::entry("folder", WorkspaceEntryKind::Directory),
+                test_support::entry("a.txt", WorkspaceEntryKind::File),
+                test_support::entry("b.txt", WorkspaceEntryKind::File),
+                test_support::entry("c.txt", WorkspaceEntryKind::File),
+            ],
+        );
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+        let row = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            cx.debug_bounds(selector).unwrap().center()
+        };
+        let secondary = gpui::Modifiers::secondary_key();
+        let shift = gpui::Modifiers::shift();
+
+        let a = row(cx, "tree-entry:a.txt");
+        cx.simulate_click(a, gpui::Modifiers::default());
+        let c = row(cx, "tree-entry:c.txt");
+        cx.simulate_click(c, secondary);
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["a.txt", "c.txt"]);
+        });
+        let folder = row(cx, "tree-entry:folder");
+        cx.simulate_click(folder, shift);
+        files.read_with(cx, |files, _| {
+            assert_eq!(
+                files.tree.selected_paths(),
+                ["folder", "a.txt", "b.txt", "c.txt"]
+            );
+            assert!(!files.tree.is_expanded("folder"));
+        });
+        cx.run_until_parked();
+        let opened = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                FilesEvent::OpenFile(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(opened, ["a.txt"]);
+
+        cx.simulate_keystrokes("escape");
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder"]);
+        });
+        cx.simulate_keystrokes("shift-down shift-down");
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder", "a.txt", "b.txt"]);
+        });
+        let b = row(cx, "tree-entry:b.txt");
+        cx.simulate_click(b, gpui::Modifiers::default());
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn plain_click_on_empty_space_clears_the_selection(cx: &mut gpui::TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update(cx, |files, cx| {
+            files.tree.select("folder");
+            files.tree.toggle_selected("a.txt");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let last = cx.debug_bounds("tree-entry:a.txt").unwrap();
+        let empty = gpui::point(last.center().x, last.bottom() + px(40.));
+        files.read_with(cx, |files, _| assert!(files.is_tree_empty_space(empty)));
+
+        // Modified clicks on empty space keep the selection.
+        cx.simulate_click(empty, gpui::Modifiers::secondary_key());
+        cx.simulate_click(empty, gpui::Modifiers::shift());
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder", "a.txt"]);
+        });
+        // A click on a row is not empty space.
+        files.read_with(cx, |files, _| {
+            assert!(!files.is_tree_empty_space(last.center()));
+        });
+
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        files.update_in(cx, |files, window, _| {
+            assert!(files.tree.selected_paths().is_empty());
+            assert_eq!(files.tree.selected(), None);
+            assert!(files.tree_focus.is_focused(window));
+        });
+        cx.simulate_keystrokes("down");
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder"]);
+        });
     }
 
     #[test]

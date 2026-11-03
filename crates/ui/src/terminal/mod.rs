@@ -1,9 +1,12 @@
 //! Terminal panel (feature-inventory §1.10): an `alacritty_terminal`-backed
 //! emulator fed by the engine's PTY stream over the generic RPC client.
 //!
-//! - [`emulator`] — pure Term + vte state machine (bytes in, grid out);
-//! - [`view`] — cell palette, keystroke→bytes encoding, input coalescing, and
-//!   the custom grid-painting element;
+//! - [`emulator`] — pure Term + vte state machine (bytes in, grid out),
+//!   shared with the mobile apps (`zeron-term`);
+//! - [`view`] — cell palette, key/pointer/focus encodings, the ordered input
+//!   queue, and the custom grid-painting element;
+//! - [`predict`] — local echo prediction for terminals on other devices
+//!   (`zeron-term` too);
 //! - [`panel`] — session-scoped tabs, subscriptions with reconnect backoff,
 //!   drag-reorder, and the Cmd/Ctrl+J toggle action.
 //!
@@ -12,6 +15,6 @@
 //! engine serves (feature-inventory §2.1).
 
 pub(crate) mod dock;
-pub mod emulator;
 pub mod panel;
 pub mod view;
+pub use zeron_term::{emulator, predict};

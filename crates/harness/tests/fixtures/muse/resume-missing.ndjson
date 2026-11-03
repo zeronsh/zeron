@@ -1,0 +1,12 @@
+{"expect":"initialize","bind":{"$ID:init":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:init","result":{"serverInfo":{"name":"muse","version":"1.4.3"},"schema":{"version":1,"fingerprint":"sha256:fake"},"grantedCapabilities":["sessionMcp"]}}}
+{"expect":"initialized"}
+{"expect":"session/resume","bind":{"$ID:resume":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:resume","error":{"code":-32020,"message":"session gone-session was not found","data":{"kind":"sessionNotFound","retryable":false}}}}
+{"expect":"session/start","bind":{"$SESSION":["params","sessionId"],"$ID:start":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:start","result":{"session":{"sessionId":"$SESSION","modelId":"muse-spark-1.2","status":"idle"}}}}
+{"expect":"turn/start","bind":{"$TURN1":["params","commandId"],"$ID:turn":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:turn","result":{"commandId":"$TURN1","status":"accepted","turnId":"$TURN1","startedNewTurn":true,"disposition":"started"}}}
+{"emit":{"jsonrpc":"2.0","method":"turn/started","params":{"sessionId":"$SESSION","turnId":"$TURN1","commandId":"$TURN1"}}}
+{"emit":{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"$SESSION","item":{"itemId":"msg-1","kind":"agentMessage","turnId":"$TURN1","revision":2,"status":"completed","text":"Fresh start."}}}}
+{"emit":{"jsonrpc":"2.0","method":"turn/completed","params":{"sessionId":"$SESSION","turnId":"$TURN1","terminal":"completed"}}}

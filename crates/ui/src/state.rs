@@ -29,12 +29,12 @@ use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
-use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
+use zeron_engine::{EngineConfig, EngineRuntime, InstanceLock};
 use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
     EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcService, memory_client, methods};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
@@ -123,12 +123,21 @@ pub enum EngineMode {
 trait EngineBackend: Send + Sync {
     fn client(&self) -> &RpcClient;
     fn mode(&self) -> EngineMode;
+    async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        Err(RpcError::Failed("voice media unavailable".into()))
+    }
     /// Graceful teardown (drains runs / flushes docs for the in-process engine).
     async fn shutdown(&self);
+    /// Resolves when the connection to the engine is lost (a separate
+    /// engine exited or crashed). Never for an in-process engine.
+    async fn closed(&self) {
+        std::future::pending::<()>().await
+    }
 }
 
 /// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
 struct InProcessEngine {
+    service: Arc<dyn RpcService>,
     runtime: Arc<tokio::sync::Mutex<Option<EngineRuntime>>>,
     boot_task: tokio::task::JoinHandle<()>,
     refresh_task: tokio::task::JoinHandle<()>,
@@ -140,6 +149,9 @@ struct InProcessEngine {
 
 #[async_trait]
 impl EngineBackend for InProcessEngine {
+    async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        Ok(memory_client(self.service.clone()))
+    }
     fn client(&self) -> &RpcClient {
         &self.client
     }
@@ -157,93 +169,77 @@ impl EngineBackend for InProcessEngine {
             // listener is closed before bootstrap reports an assembly failure.
             let _ = ipc.await;
         }
+        // As the background engine does: no token refresh may be mid-exchange
+        // when another engine takes over the session file (single-use token).
+        self.refresh_task.abort();
         if let Some(runtime) = self.runtime.lock().await.take() {
+            runtime
+                .core()
+                .auth()
+                .quiesce_refresh(std::time::Duration::from_secs(10))
+                .await;
             runtime.shutdown().await;
         }
-        self.refresh_task.abort();
     }
 }
 
-#[derive(Clone)]
-enum DeferredEngineState {
-    Waiting,
-    Ready,
-    Failed(String),
+use zeron_engine::deferred::{
+    DeferredEngine, DeferredState as DeferredEngineState, wait as wait_for_deferred_engine,
+};
+
+/// Start the app's background engine when no engine serves the port, and
+/// attach to it, rather than embedding one (set once at startup by the app;
+/// tests and fixtures embed).
+static LAUNCH_BACKGROUND_ENGINE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Have [`EngineHandle::bootstrap`] start the background engine
+/// (`zeron_engine::managed`) instead of embedding one. Embedding stays the
+/// fallback when it can't start.
+pub fn launch_background_engine() {
+    LAUNCH_BACKGROUND_ENGINE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Serves engine identity and AuthRpc immediately, then holds data calls only
-/// while a captured synced profile still needs organization onboarding.
-/// Existing subscriptions attach to the assembled service without reconnecting.
-struct DeferredEngineRpc {
-    auth: AuthRpc,
-    engine_info: EngineInfo,
-    state: tokio::sync::watch::Receiver<DeferredEngineState>,
-    service: Arc<tokio::sync::OnceCell<Arc<dyn RpcService>>>,
-}
+/// After a background engine goes away unasked, the app starts it again —
+/// first at once-ish, then backing off so a crashing engine can't spin. One
+/// that keeps dying is a bug to see, not hide: past the last delay the app
+/// stops and shows the failure (with Retry). Embedding wouldn't help — an
+/// engine bug crashes an in-process engine too, taking the window with it.
+const ENGINE_RESPAWN_BACKOFF: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+];
+const ENGINE_LOSS_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
-#[async_trait]
-impl RpcService for DeferredEngineRpc {
-    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        if method == methods::ENGINE_INFO {
-            return RpcReply::value(&self.engine_info);
-        }
-        if method == methods::ENGINE_READY {
-            let mut state = self.state.clone();
-            return match wait_for_deferred_engine(&mut state).await {
-                Ok(()) => RpcReply::value(&serde_json::json!({ "ready": true })),
-                Err(message) => Err(RpcError::Failed(message)),
-            };
-        }
-        if AuthRpc::handles(method) {
-            return self.auth.handle(method, params).await;
-        }
-
-        let mut state = self.state.clone();
-        loop {
-            let current = { state.borrow().clone() };
-            match current {
-                DeferredEngineState::Waiting => {}
-                DeferredEngineState::Ready => {
-                    let service = self.service.get().ok_or_else(|| {
-                        RpcError::Failed(
-                            "embedded engine became ready without an RPC service".into(),
-                        )
-                    })?;
-                    return service.handle(method, params).await;
-                }
-                DeferredEngineState::Failed(message) => return Err(RpcError::Failed(message)),
-            }
-            state.changed().await.map_err(|_| RpcError::Closed)?;
-        }
-    }
-}
-
-async fn wait_for_deferred_engine(
-    state: &mut tokio::sync::watch::Receiver<DeferredEngineState>,
-) -> Result<(), String> {
-    loop {
-        let current = { state.borrow().clone() };
-        match current {
-            DeferredEngineState::Waiting => {}
-            DeferredEngineState::Ready => return Ok(()),
-            DeferredEngineState::Failed(message) => return Err(message),
-        }
-        state
-            .changed()
-            .await
-            .map_err(|_| "embedded engine assembly ended without a result".to_string())?;
-    }
+/// Record an unasked engine loss: how long to wait before starting it
+/// again, or `None` once losses come too often to keep trying.
+fn record_engine_loss(
+    losses: &mut Vec<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    losses.retain(|at| now.saturating_duration_since(*at) < ENGINE_LOSS_WINDOW);
+    losses.push(now);
+    ENGINE_RESPAWN_BACKOFF.get(losses.len() - 1).copied()
 }
 
 /// External daemon over `ws://127.0.0.1:{port}`.
 struct RemoteEngine {
     client: Arc<RpcClient>,
     url: String,
+    /// The daemon's IPC port and data dir: a second connection presents the
+    /// same bearer the first did.
+    ipc_port: u16,
+    data_dir: std::path::PathBuf,
     lifecycle_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[async_trait]
 impl EngineBackend for RemoteEngine {
+    async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        zeron_rpc::connect_ipc(self.ipc_port, Some(&self.data_dir)).await
+    }
     fn client(&self) -> &RpcClient {
         &self.client
     }
@@ -251,6 +247,9 @@ impl EngineBackend for RemoteEngine {
         EngineMode::Remote {
             url: self.url.clone(),
         }
+    }
+    async fn closed(&self) {
+        self.client.closed().await;
     }
     async fn shutdown(&self) {
         // The daemon outlives this viewport; only stop our readiness probe.
@@ -284,11 +283,10 @@ impl EngineHandle {
         static BOOTSTRAP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _gate = BOOTSTRAP_GATE.lock().await;
 
-        if let Some(handle) = Self::attach_to_daemon(config.ipc_port).await {
+        if let Some(handle) = Self::attach_to_daemon(config.ipc_port, &config.data_dir).await {
             return Ok(handle);
         }
 
-        tracing::info!(data_dir = %config.data_dir.display(), "no daemon on port; embedding engine");
         let engine_config = EngineConfig {
             data_dir: config.data_dir,
             edge_url: config.edge_url,
@@ -298,7 +296,14 @@ impl EngineHandle {
             org_id: config.org_id,
             workos_client_id: config.workos_client_id,
         };
+        let launching = LAUNCH_BACKGROUND_ENGINE.load(std::sync::atomic::Ordering::SeqCst);
+        if Self::should_launch_background(launching, engine_config.ipc_port).await
+            && let Some(handle) = Self::launch_background(&engine_config).await
+        {
+            return Ok(handle);
+        }
 
+        tracing::info!(data_dir = %engine_config.data_dir.display(), "no engine on port; embedding one");
         // Own the data dir before opening anything under it or binding IPC —
         // the lock, not the port bind, is the ownership decision. A failed
         // acquire means an out-of-process engine holds the dir but was not
@@ -314,27 +319,18 @@ impl EngineHandle {
                         return Err(err.into());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(handle) = Self::attach_to_daemon(engine_config.ipc_port).await {
+                    if let Some(handle) =
+                        Self::attach_to_daemon(engine_config.ipc_port, &engine_config.data_dir)
+                            .await
+                    {
                         return Ok(handle);
                     }
                 }
             }
         };
 
-        let auth = Engine::build_auth(&engine_config).await;
-        let workspace_scope = Engine::initial_workspace_scope(&auth);
-        let initial_profile = Engine::resolve_profile(&engine_config, &auth, workspace_scope)?;
-        let profile_is_resolved = initial_profile.is_some();
-        let engine_info = Engine::engine_info(&engine_config, workspace_scope)?;
-        let refresh_task = auth.spawn_refresh_loop();
-        let (state_tx, mut state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
-        let assembled_service = Arc::new(tokio::sync::OnceCell::new());
-        let service: Arc<dyn RpcService> = Arc::new(DeferredEngineRpc {
-            auth: AuthRpc::new(auth.clone()),
-            engine_info: engine_info.clone(),
-            state: state_rx.clone(),
-            service: assembled_service.clone(),
-        });
+        let mut deferred = DeferredEngine::prepare(&engine_config).await?;
+        let service = deferred.service.clone();
         let client = memory_client(service.clone());
 
         // Serve the same service on the IPC port so a terminal viewport can
@@ -345,7 +341,13 @@ impl EngineHandle {
         //
         // Best-effort — losing the bind race with another engine costs other
         // viewports, not this one.
-        let ipc_task = match zeron_engine::serve_ipc(engine_config.ipc_port, service).await {
+        let served = zeron_engine::serve_ipc(
+            engine_config.ipc_port,
+            &engine_config.data_dir,
+            service.clone(),
+        )
+        .await;
+        let ipc_task = match served {
             Ok(task) => Some(task),
             Err(err) => {
                 tracing::warn!(
@@ -356,91 +358,101 @@ impl EngineHandle {
                 None
             }
         };
-        let runtime = Arc::new(tokio::sync::Mutex::new(None));
-        let runtime_for_boot = runtime.clone();
-        let service_for_boot = assembled_service.clone();
         // Agents only learn a port THIS window serves: a lost bind race must
         // not point their injected MCP server at some other engine.
         let served_ipc_port = ipc_task.as_ref().map(|_| engine_config.ipc_port);
-        // The instance lock rides into the boot task and is consumed by
-        // assembly — held through sign-in onboarding too, because this process
-        // owns the data dir from the moment it decided to embed.
-        let boot_task = tokio::spawn(async move {
-            let profile = match initial_profile {
-                Some(profile) => profile,
-                None => {
-                    let mut auth_state = auth.watch_state();
-                    while !auth_state.borrow().is_signed_in() {
-                        if auth_state.changed().await.is_err() {
-                            state_tx.send_replace(DeferredEngineState::Failed(
-                                "authentication state closed before workspace onboarding".into(),
-                            ));
-                            return;
-                        }
-                    }
-                    match Engine::resolve_profile(&engine_config, &auth, workspace_scope) {
-                        Ok(Some(profile)) => profile,
-                        Ok(None) => {
-                            state_tx.send_replace(DeferredEngineState::Failed(
-                                "workspace onboarding completed without an organization".into(),
-                            ));
-                            return;
-                        }
-                        Err(err) => {
-                            state_tx.send_replace(DeferredEngineState::Failed(err.to_string()));
-                            return;
-                        }
-                    }
-                }
-            };
-
-            match Engine::assemble_runtime_with_lock(&engine_config, auth, profile, lock).await {
-                Ok(engine_runtime) => {
-                    let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
-                    if let Some(port) = served_ipc_port {
-                        engine_runtime.core().sessions.set_ipc_port(port);
-                    }
-                    *runtime_for_boot.lock().await = Some(engine_runtime);
-                    if service_for_boot.set(service).is_err() {
-                        state_tx.send_replace(DeferredEngineState::Failed(
-                            "embedded engine RPC service was assembled more than once".into(),
-                        ));
-                        return;
-                    }
-                    state_tx.send_replace(DeferredEngineState::Ready);
-                }
-                Err(err) => {
-                    tracing::error!(error = %err, "embedded engine assembly failed");
-                    state_tx.send_replace(DeferredEngineState::Failed(format!("{err:#}")));
-                }
-            }
-        });
+        let boot_task = deferred.spawn_boot(engine_config, lock, served_ipc_port, |_| {});
+        let mut state_rx = deferred.state();
         let handle = EngineHandle {
             inner: Arc::new(InProcessEngine {
-                runtime,
+                service,
+                runtime: deferred.runtime.clone(),
                 boot_task,
-                refresh_task,
+                refresh_task: deferred.refresh_task,
                 ipc_task: tokio::sync::Mutex::new(ipc_task),
                 client,
             }),
-            engine_info,
+            engine_info: deferred.engine_info,
             deferred_state: Some(state_rx.clone()),
         };
         // Local, development, and already-resolved synced profiles need no
         // authentication UI while assembling. Keep the viewport Connecting
         // until their stores and journals are actually open, and surface a
         // boot failure through the existing bootstrap error path.
-        if profile_is_resolved && let Err(message) = wait_for_deferred_engine(&mut state_rx).await {
+        if deferred.profile_is_resolved
+            && let Err(message) = wait_for_deferred_engine(&mut state_rx).await
+        {
             handle.shutdown().await;
             return Err(anyhow::anyhow!(message));
         }
         Ok(handle)
     }
 
+    /// Whether to start the background engine rather than embed: launching
+    /// is on, the port is a real one (port 0 has no address a background
+    /// engine could be found at), and nothing else holds it — a stranger on
+    /// the port would keep the engine from ever serving, so embed at once
+    /// as before.
+    async fn should_launch_background(launching: bool, ipc_port: u16) -> bool {
+        if !launching || ipc_port == 0 {
+            return false;
+        }
+        let taken = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::net::TcpStream::connect(("127.0.0.1", ipc_port)),
+        )
+        .await
+        .is_ok_and(|connected| connected.is_ok());
+        if taken {
+            tracing::warn!(
+                port = ipc_port,
+                "the engine port is held by something else; embedding"
+            );
+        }
+        !taken
+    }
+
+    /// Start the app's background engine and attach to it once it serves
+    /// the port. `None` falls back to embedding: it couldn't start, exited,
+    /// or didn't come up in time.
+    async fn launch_background(config: &EngineConfig) -> Option<EngineHandle> {
+        const STARTUP: std::time::Duration = std::time::Duration::from_secs(20);
+        let app = std::env::current_exe().ok()?;
+        let mut child = match zeron_engine::managed::launch(config, &app) {
+            Ok(child) => child,
+            Err(err) => {
+                tracing::warn!(error = %err, "couldn't start the background engine; embedding one");
+                return None;
+            }
+        };
+        tracing::info!(pid = child.id(), "background engine started");
+        let deadline = std::time::Instant::now() + STARTUP;
+        loop {
+            if let Some(handle) = Self::attach_to_daemon(config.ipc_port, &config.data_dir).await {
+                zeron_engine::managed::reap(child);
+                return Some(handle);
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                tracing::warn!(%status, "background engine exited during startup; embedding one");
+                return None;
+            }
+            if std::time::Instant::now() >= deadline {
+                // Ours and never served: stop it, so it lets go of the data
+                // directory the embedded engine is about to take.
+                tracing::warn!("background engine didn't come up in time; embedding one");
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
     /// Probe the IPC port and, if a live engine answers, attach as a remote
     /// viewport. `None` means embed: nothing listening, a non-engine listener,
-    /// or a listener without an identity.
-    async fn attach_to_daemon(ipc_port: u16) -> Option<EngineHandle> {
+    /// a listener without an identity, or an engine whose IPC bearer
+    /// (`{data_dir}/ipc-token`, read at dial time) this viewport doesn't hold.
+    async fn attach_to_daemon(ipc_port: u16, data_dir: &std::path::Path) -> Option<EngineHandle> {
         let url = format!("ws://127.0.0.1:{ipc_port}");
         let probe = tokio::time::timeout(
             std::time::Duration::from_millis(750),
@@ -451,7 +463,7 @@ impl EngineHandle {
             return None;
         }
         tracing::info!(%url, "engine daemon detected; connecting");
-        match connect_ws(&url).await {
+        match zeron_rpc::connect_ipc(ipc_port, Some(data_dir)).await {
             Ok(client) => match query_engine_info(&client).await {
                 Ok(engine_info) => {
                     let client = Arc::new(client);
@@ -479,6 +491,8 @@ impl EngineHandle {
                         inner: Arc::new(RemoteEngine {
                             client,
                             url,
+                            ipc_port,
+                            data_dir: data_dir.to_path_buf(),
                             lifecycle_task: tokio::sync::Mutex::new(Some(lifecycle_task)),
                         }),
                         engine_info,
@@ -510,13 +524,20 @@ impl EngineHandle {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
                 url: "memory://test".into(),
+                ipc_port: 0,
+                data_dir: std::path::PathBuf::new(),
                 lifecycle_task: tokio::sync::Mutex::new(None),
             }),
             engine_info: EngineInfo {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: Vec::new(),
+                // What a current engine advertises.
+                capabilities: zeron_proto::capabilities::CURRENT
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect(),
+                build: None,
             },
             deferred_state: None,
         }
@@ -530,6 +551,10 @@ impl EngineHandle {
         self.inner.mode()
     }
 
+    pub async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        self.inner.media_client().await
+    }
+
     pub fn engine_info(&self) -> &EngineInfo {
         &self.engine_info
     }
@@ -540,6 +565,11 @@ impl EngineHandle {
 
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
+    }
+
+    /// Resolves when the connection to a separate engine is lost.
+    pub async fn closed(&self) {
+        self.inner.closed().await;
     }
 }
 
@@ -565,6 +595,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
                 workspace_scope: WorkspaceScope::Synced,
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                build: None,
             })
         }
         Err(err) => Err(err),
@@ -582,8 +613,18 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
 pub use zeron_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
-    parse_auth_state, project_label, sort_active, sort_chats, sort_spaces, sort_tabs,
+    parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
+
+/// What a session row shows that ticks with the clock rather than with its
+/// content: the staleness-checked indicator and running-subagent count. A
+/// change in either must repaint even when the row itself is untouched.
+fn session_presence(session: &Session, now: DateTime<Utc>) -> (Indicator, u32) {
+    (
+        effective_indicator(Some(session), now),
+        running_subagents(Some(session), now),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Org gate (pure)
@@ -629,12 +670,60 @@ pub fn sort_memberships(mut orgs: Vec<OrgRow>) -> Vec<OrgRow> {
 /// A composer send whose doc command is queued but not yet executed by the
 /// chat's host device — cleared when the host writes the user message back
 /// into the transcript (same client-minted id as the [`AppState::echoes`]
-/// dedup); past [`UNDELIVERED_GRACE_MS`] it surfaces as the explicit
-/// failed/retry state instead.
+/// dedup), or, for a chat that isn't open, when its session row shows the
+/// turn that runs it; past [`UNDELIVERED_GRACE_MS`] it surfaces as the
+/// explicit failed/retry state instead.
 #[derive(Debug, Clone)]
 struct PendingSend {
     message_id: String,
     started: DateTime<Utc>,
+    /// The chat's session row when the send began; `None` if it had none.
+    row_before: Option<Session>,
+    /// The send creates the chat, so no earlier turn of it exists.
+    new_chat: bool,
+}
+
+impl PendingSend {
+    /// Whether `session`, the chat's row now, shows its host took this send.
+    /// The transcript names the message but is watched for the selected chat
+    /// only: a session left before its message landed read "Failed" 120 s
+    /// later, mid-run (user report 2026-10-26). A row shows turns, not
+    /// messages. A chat with no live run takes a send rather than queueing
+    /// it, and its host writes the message, then starts a turn, so the next
+    /// turn to start (or to end between two frames) is taken for the send's.
+    /// A turn started there first, from another device or a session its host
+    /// resumes after a restart, passes for it too.
+    ///
+    /// No earlier turn's result may count: it would ring the done chime a
+    /// pending send keeps quiet (d3141ef0). Hence no stale row, no live row
+    /// with a completion the send has not seen, no settled row when a turn
+    /// was in flight at send time, no outcome older than the send, and no
+    /// interrupted one, which a restart stamps on the turn it cut off. A
+    /// restarted host, or a Cloud machine waking, comes back with no
+    /// completion at all, which counts.
+    fn adopted_by(&self, session: &Session, now: DateTime<Utc>) -> bool {
+        use zeron_proto::SessionStatus::{AwaitingInput, Errored, Idle, Working};
+        let before = self.row_before.as_ref();
+        let settled_before = before.map_or(self.new_chat, |b| matches!(b.status, Idle | Errored));
+        match session.status {
+            Working | AwaitingInput => {
+                let completed_before = before.and_then(|b| b.last_completed_turn.as_ref());
+                !zeron_proto::view::session_stale(session, now)
+                    && session.started_at.is_some()
+                    && session.started_at != before.and_then(|b| b.started_at)
+                    && (session.last_completed_turn.as_ref() == completed_before
+                        || session.last_completed_turn.is_none() && settled_before)
+            }
+            Idle | Errored => {
+                settled_before
+                    && session.last_turn_outcome.is_some_and(|o| {
+                        o.status != zeron_proto::DoneStatus::Interrupted
+                            && o.finished_at > self.started
+                    })
+                    && session.last_turn_outcome != before.and_then(|b| b.last_turn_outcome)
+            }
+        }
+    }
 }
 
 /// How long an unadopted send reads as Working/Sending (or Queued when the
@@ -643,6 +732,163 @@ struct PendingSend {
 /// no visible trace of the send at all — the exact hole the 2026-08-19
 /// incident fell into.
 pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
+
+/// A chat must sync this long before it says so: a quick open never flashes
+/// a caption (the engine's degrade grace is the same 4 s).
+pub const SYNC_SHOWN_AFTER_MS: i64 = 4_000;
+/// A room still down this long into a sync has outlived a whole first dial
+/// (20 s connect + 15 s hello deadline): from here a send waits for the
+/// connection, it is no longer just a slow open.
+pub const SYNC_STALLED_AFTER_MS: i64 = 35_000;
+
+/// How the path from this device to a chat's host reads right now. One
+/// derivation for the composer caption, the Queued badges, the pending-send
+/// hold and the transcript loader, so they can never tell different stories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatLink {
+    pub sync: LinkSync,
+    /// The host's presence went dark. Cloud machines that sleep or wake
+    /// answer on their own and never count ([`crate::cloud::Presence::warns`]).
+    pub host_unreachable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkSync {
+    /// Delivery is proven, or there is nothing to prove: hosted here, a
+    /// local profile, or a dormant chat on a healthy connection.
+    Live,
+    /// Opening or catching up with its room. `shown` once it has lasted
+    /// [`SYNC_SHOWN_AFTER_MS`].
+    Syncing {
+        shown: bool,
+    },
+    /// Its room stayed down [`SYNC_STALLED_AFTER_MS`] into the sync.
+    Stalled,
+    /// The registry is down and this chat has no live room of its own, or
+    /// an engine without per-chat sync states reports its room down.
+    Reconnecting,
+    Offline,
+}
+
+impl ChatLink {
+    pub const LIVE: Self = Self {
+        sync: LinkSync::Live,
+        host_unreachable: false,
+    };
+
+    /// A send made now would wait on this path: "Queued", not "Sending".
+    /// A syncing chat still delivers — pushes go out before catch-up ends.
+    pub fn send_would_queue(self) -> bool {
+        self.host_unreachable
+            || matches!(
+                self.sync,
+                LinkSync::Stalled | LinkSync::Reconnecting | LinkSync::Offline
+            )
+    }
+
+    /// Nothing proves a send can be delivered, or its adoption seen, yet:
+    /// the pending-send overlay holds instead of expiring.
+    pub fn delivery_unconfirmed(self) -> bool {
+        self.host_unreachable || self.sync != LinkSync::Live
+    }
+}
+
+/// Why a selected chat with nothing to show is not known to be empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptLoading {
+    /// The engine has not replayed the document yet.
+    Opening,
+    /// Replayed, but this copy of a remote chat may be behind its room.
+    Syncing,
+    Reconnecting,
+    Offline,
+}
+
+/// The engine is still bringing this chat's room up to date. Delivery proven
+/// over the room or HTTP ends it; so does any state that is not a sync.
+fn chat_syncing(chat: &zeron_proto::ChatConnectivity) -> bool {
+    use zeron_proto::ChatSyncState as S;
+    !chat.delivery_live && matches!(chat.sync_state, S::Waiting | S::Connecting | S::Offline)
+}
+
+/// How long one chat has been syncing, as this view saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyncClock {
+    /// The caption's hold and the stall both count from here: when the sync
+    /// began, or when the chat was opened during it, so a sync already
+    /// under way in the background never flashes a caption, or reads as
+    /// stalled, on a chat just opened. Nothing else restarts it: a room the
+    /// engine moves back to waiting for a slot keeps its clock, so a sync
+    /// that never delivers always ends up stalled instead of spinning.
+    began: DateTime<Utc>,
+}
+
+/// The Cloud setup placeholder's step while the machine comes up; the
+/// machine's own first step ("Started a machine") replaces it in place.
+const CLOUD_STARTING_STEP: &str = "Starting a machine";
+const CLOUD_WAKING_STEP: &str = "Waking the machine";
+/// The setup step once Cloud refused to start or wake the machine for lack
+/// of credits. The message stays queued: credits added, the machine starts
+/// and runs it.
+const CLOUD_NO_CREDITS_STEP: &str = "Out of Cloud credits";
+
+/// How often Cloud's status (credits above all) is re-read while attached,
+/// and how stale it may be when a window comes forward.
+const CLOUD_STATUS_POLL: std::time::Duration = std::time::Duration::from_secs(120);
+const CLOUD_STATUS_FOCUS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+/// A Cloud read that failed is tried again this soon (unknown credits let
+/// sends through).
+const CLOUD_STATUS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The one-shot timer behind [`AppState::watch_clock_transitions`].
+#[derive(Default)]
+struct ClockTransitions {
+    /// Re-arms the timer after every notify.
+    observation: Option<gpui::Subscription>,
+    /// The last time observers saw current state (a notify or a wake).
+    checked_at: Option<DateTime<Utc>>,
+    wake_at: Option<DateTime<Utc>>,
+    task: Option<Task<()>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CLOCK: std::cell::Cell<Option<DateTime<Utc>>> = const { std::cell::Cell::new(None) };
+}
+
+/// Wall-clock time for clock-driven state derivations. Tests pin it to the
+/// simulated executor's timeline with [`TestClock`].
+pub(crate) fn clock_now() -> DateTime<Utc> {
+    #[cfg(test)]
+    if let Some(now) = TEST_CLOCK.with(std::cell::Cell::get) {
+        return now;
+    }
+    Utc::now()
+}
+
+/// Pins [`clock_now`] on this test thread until dropped.
+#[cfg(test)]
+pub(crate) struct TestClock;
+
+#[cfg(test)]
+impl TestClock {
+    pub(crate) fn start(now: DateTime<Utc>) -> Self {
+        let clock = Self;
+        clock.set(now);
+        clock
+    }
+
+    pub(crate) fn set(&self, now: DateTime<Utc>) {
+        TEST_CLOCK.with(|clock| clock.set(Some(now)));
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        TEST_CLOCK.with(|clock| clock.set(None));
+    }
+}
 
 /// A send's attachment-upload leg in flight. `done` is bumped by the upload
 /// task per completed chunk (binary bytes); the working label reads it every
@@ -661,9 +907,25 @@ pub fn canvas_panel_key(space_id: Option<&str>) -> String {
     format!("{CANVAS_PANEL_PREFIX}{}", space_id.unwrap_or(""))
 }
 
+/// The new-session canvas's project/device pick, see [`AppState::canvas_target`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanvasTarget {
+    space: Option<String>,
+    no_project: bool,
+    device: Option<String>,
+}
+
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
+/// How long a requested wake reads as waking before the machine has to
+/// answer for itself: a cold start is well under this.
+const CLOUD_WAKE_GRACE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// The least time between session-list re-reads prompted by a surface that
+/// couldn't reach its Cloud machine (it retries every couple of seconds).
+const CLOUD_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
+
 pub struct AppState {
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
@@ -677,7 +939,7 @@ pub struct AppState {
     device_presentation: Option<Vec<(Device, bool, String)>>,
     // Presence ticks also retire stale remote session indicators. Remember
     // their last published appearance even when the device rows stay online.
-    session_presence_presentation: Vec<Indicator>,
+    session_presence_presentation: Vec<(Indicator, u32)>,
     /// Live edge posture (WatchConnectivity): drives the connection pill,
     /// composer honesty ("will queue"), and the Queued send badges.
     pub connectivity: zeron_proto::Connectivity,
@@ -685,6 +947,10 @@ pub struct AppState {
     /// frame. The default `Disabled` value is only a placeholder and must not
     /// seed notification decisions before the watch is authoritative.
     pub(crate) connectivity_observed: bool,
+    /// Each syncing chat's [`SyncClock`] (see [`chat_syncing`]): its
+    /// [`LinkSync::Syncing`] caption and [`LinkSync::Stalled`] are timed
+    /// here, not from the engine's 4 s room grace.
+    sync_clocks: HashMap<String, SyncClock>,
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
@@ -712,6 +978,10 @@ pub struct AppState {
     /// device whose projects the project picker lists. `None` falls back to
     /// the local device.
     pub selected_device: Option<String>,
+    /// The new-session canvas's own target, set aside while a chat is open
+    /// (a chat implies ITS project/device) and put back on return, so the
+    /// canvas always reopens where the user left it.
+    pub(crate) canvas_target: Option<CanvasTarget>,
     pub selected_chat: Option<String>,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
@@ -767,11 +1037,58 @@ pub struct AppState {
     /// Device-local agent CLI update lifecycle. Unlike `ListHarnesses`, this
     /// standing stream may be backed by subprocess and network probes.
     pub harness_updates: Vec<zeron_proto::HarnessUpdateStatus>,
+    /// Last `CloudStatus` any surface fetched (Settings → Cloud, Devices,
+    /// New project). Fetched on open and after actions — never polled — so
+    /// device lists can say "Asleep" instead of "Offline" for Cloud.
+    pub cloud_status: Option<zeron_proto::CloudStatus>,
+    /// Every Cloud session and its machine's state, read on focus, chat
+    /// selection and page open — and every few seconds only while one is
+    /// being set up, woken or deleted ([`Self::refresh_cloud_sessions`]).
+    pub cloud_sessions: Option<zeron_proto::CloudSessions>,
+    cloud_sessions_task: Option<Task<()>>,
+    /// Sessions (by their chat id) someone asked to wake, and when: the
+    /// machine reads as waking until its own heartbeat arrives, rather than
+    /// asleep again while the session list catches up.
+    cloud_wakes: HashMap<String, std::time::Instant>,
+    /// When a surface that couldn't reach a Cloud machine last had the
+    /// session list re-read ([`Self::recheck_cloud_machine`]).
+    cloud_recheck_at: Option<std::time::Instant>,
+    /// The GitHub repositories Cloud reaches (the Zeron GitHub App's
+    /// installations): a project whose repository is here can run a session
+    /// on Cloud. `None` = Cloud off, GitHub not connected, or not read yet.
+    pub cloud_repos: Option<Vec<zeron_proto::GithubRepo>>,
+    cloud_repos_task: Option<Task<()>>,
+    /// A [`Self::refresh_cloud_repos`] read is in flight (its button spins).
+    cloud_repos_refreshing: bool,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
+    /// Notifies at clock-driven transitions (see [`Self::watch_clock_transitions`]).
+    clock: ClockTransitions,
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
+    /// How the current engine was reached, kept to reconnect with.
+    boot_config: Option<EngineBootConfig>,
+    /// Watches the engine connection; a separate engine going away (crash,
+    /// restart into an update, sign-out elsewhere) reconnects — starting it
+    /// again when nothing serves the port.
+    connection_task: Option<Task<()>>,
+    /// The next engine exit is ours (sign-out, a workspace switch): the shell
+    /// replaces the runtime itself.
+    engine_exit_expected: bool,
+    /// When Cloud's status was last read, and the reads under way.
+    cloud_status_read_at: Option<std::time::Instant>,
+    cloud_status_task: Option<Task<()>>,
+    cloud_recheck_task: Option<Task<()>>,
+    /// When separate engines went away unasked, recently (respawn backoff).
+    engine_losses: Vec<std::time::Instant>,
+    /// The pending respawn after a loss.
+    reconnect_task: Option<Task<()>>,
+    /// This window's id to the engine, and whether one of the app's windows
+    /// is focused — the engine holds desktop banners while one is.
+    viewport_id: String,
+    viewport_focused: bool,
+    focus_task: Option<Task<()>>,
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
@@ -802,6 +1119,31 @@ fn is_text_append(frame: &TranscriptFrame) -> bool {
         if upsert.is_empty() && remove.is_empty() && !append.is_empty())
 }
 
+/// Each session's presence at `now` (the lease-dependent part of a frame).
+fn session_presence_at(sessions: &[Session], now: DateTime<Utc>) -> Vec<(Indicator, u32)> {
+    sessions
+        .iter()
+        .map(|session| session_presence(session, now))
+        .collect()
+}
+
+/// Device rows as rendered at `now`: the heartbeat timestamp only through its
+/// online state and last-seen label.
+fn device_presentation_at(devices: &[Device], now: DateTime<Utc>) -> Vec<(Device, bool, String)> {
+    devices
+        .iter()
+        .map(|device| {
+            let mut metadata = device.clone();
+            metadata.last_seen_at = None;
+            (
+                metadata,
+                crate::settings::devices::device_online(device.last_seen_at, now),
+                crate::settings::devices::format_last_seen(device.last_seen_at, now),
+            )
+        })
+        .collect()
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -819,6 +1161,7 @@ impl AppState {
             session_presence_presentation: Vec::new(),
             connectivity: zeron_proto::Connectivity::default(),
             connectivity_observed: false,
+            sync_clocks: HashMap::new(),
             spaces: Vec::new(),
             chats: Vec::new(),
             pending_side_chat: None,
@@ -829,6 +1172,7 @@ impl AppState {
             selected_space: None,
             no_project: false,
             selected_device: None,
+            canvas_target: None,
             selected_chat: None,
             transcript: Vec::new(),
             queue: Vec::new(),
@@ -847,9 +1191,29 @@ impl AppState {
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             harness_updates: Vec::new(),
+            cloud_status: None,
+            cloud_sessions: None,
+            cloud_sessions_task: None,
+            cloud_wakes: HashMap::new(),
+            cloud_recheck_at: None,
+            cloud_repos: None,
+            cloud_repos_task: None,
+            cloud_repos_refreshing: false,
             data_dir: None,
+            clock: ClockTransitions::default(),
             engine: None,
             watch_tasks: Vec::new(),
+            boot_config: None,
+            connection_task: None,
+            engine_exit_expected: false,
+            cloud_status_read_at: None,
+            cloud_status_task: None,
+            cloud_recheck_task: None,
+            engine_losses: Vec::new(),
+            reconnect_task: None,
+            viewport_id: uuid::Uuid::new_v4().to_string(),
+            viewport_focused: false,
+            focus_task: None,
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
@@ -1035,27 +1399,37 @@ impl AppState {
         true
     }
 
-    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
+    /// Returns whether anything observable changed. The engine re-publishes
+    /// identical lists (presence and sync churn elsewhere in the doc), and
+    /// each notify re-renders the whole shell.
+    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) -> bool {
+        let mut changed = false;
         if let Some(pending) = &self.pending_side_chat {
             if chats.iter().any(|chat| chat.id == pending.id) {
                 self.pending_side_chat = None;
+                changed = true;
             } else {
                 chats.push(pending.clone());
             }
         }
         sort_chats(&mut chats);
-        self.chats = chats;
-        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
-        self.chats_synced = true;
-        self.transcript_cache
-            .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
+        if !self.chats_synced || self.chats != chats {
+            changed = true;
+            self.chats = chats;
+            self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
+            self.chats_synced = true;
+            self.transcript_cache
+                .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
+        }
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
         {
+            changed = true;
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
             self.transcript_baselines.remove(selected);
             self.prepared_transcripts.remove(selected);
             self.selected_chat = None;
+            self.restore_canvas_target();
             self.transcript.clear();
             self.context_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -1064,6 +1438,7 @@ impl AppState {
             self.queue.clear();
             self.queue_task = None;
         }
+        changed
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
@@ -1071,10 +1446,7 @@ impl AppState {
     }
 
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
-        let presence: Vec<_> = sessions
-            .iter()
-            .map(|session| effective_indicator(Some(session), now))
-            .collect();
+        let presence = session_presence_at(&sessions, now);
         let presentation: Vec<_> = sessions
             .iter()
             .map(|session| {
@@ -1090,14 +1462,44 @@ impl AppState {
         self.session_presentation = Some(presentation);
         self.session_presence_presentation = presence;
         self.sessions = sessions;
-        changed
+        let adopted = self.adopt_pending_sends(now);
+        changed || adopted
     }
 
-    pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) {
+    /// Clears the pending send of each chat but the open one whose row shows
+    /// the turn that runs it ([`PendingSend::adopted_by`]); the open chat's
+    /// transcript names the message, so only it acks there. Returns whether
+    /// one was cleared.
+    fn adopt_pending_sends(&mut self, now: DateTime<Utc>) -> bool {
+        let pending = self.pending_sends.len();
+        let selected = self.selected_chat.as_deref();
+        let sessions = &self.sessions;
+        self.pending_sends.retain(|chat_id, send| {
+            selected == Some(chat_id.as_str())
+                || !sessions
+                    .iter()
+                    .find(|s| s.chat_id == *chat_id)
+                    .is_some_and(|s| send.adopted_by(s, now))
+        });
+        self.pending_sends.len() != pending
+    }
+
+    /// Returns whether the list or the healed selection changed.
+    pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) -> bool {
         sort_spaces(&mut spaces);
-        self.spaces = spaces;
-        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
-        self.spaces_synced = true;
+        let previous_selection = self.selected_space.clone();
+        let mut changed = false;
+        if !self.spaces_synced || self.spaces != spaces {
+            changed = true;
+            self.spaces = spaces;
+            self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
+            self.spaces_synced = true;
+        }
+        self.heal_space_selection();
+        changed || self.selected_space != previous_selection
+    }
+
+    fn heal_space_selection(&mut self) {
         if self.no_project {
             self.selected_space = None;
             return;
@@ -1216,57 +1618,178 @@ impl AppState {
         }
     }
 
-    pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) {
-        self.connectivity = connectivity;
-        self.connectivity_observed = true;
+    /// Returns whether the posture changed. The first frame after attach always
+    /// counts: it ends the bootstrap gap the shell's alert baseline waits on.
+    pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) -> bool {
+        self.apply_connectivity_at(connectivity, clock_now())
     }
 
-    /// Is this chat's delivery path degraded — will a send QUEUE rather than
-    /// reach its executor promptly? Locally-hosted chats are never degraded
-    /// (a queued command executes on this device even fully offline). Remote
-    /// chats degrade when the OS is offline, when registry recovery is needed
-    /// to restore their delivery path, when an active room stays down, or when
-    /// the host device has gone presence-dark. A Local sync state is normal
-    /// dormancy while the global connection and remote host are healthy.
-    pub fn chat_delivery_degraded(&self, chat_id: &str) -> bool {
-        use zeron_proto::ConnectivityState as S;
-        if self.connectivity.state == S::Disabled {
-            return false;
+    fn apply_connectivity_at(
+        &mut self,
+        connectivity: zeron_proto::Connectivity,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let changed = !self.connectivity_observed || self.connectivity != connectivity;
+        // A new engine's first frame starts every clock afresh: the syncs
+        // the last one ran say nothing about this one's.
+        if !self.connectivity_observed {
+            self.sync_clocks.clear();
         }
+        self.sync_clocks.retain(|id, _| {
+            connectivity
+                .chats
+                .iter()
+                .any(|chat| chat.chat_id == *id && chat_syncing(chat))
+        });
+        for chat in connectivity.chats.iter().filter(|chat| chat_syncing(chat)) {
+            self.sync_clocks
+                .entry(chat.chat_id.clone())
+                .or_insert(SyncClock { began: now });
+        }
+        self.connectivity = connectivity;
+        self.connectivity_observed = true;
+        changed
+    }
+
+    /// The path to `chat_id`'s host at `now` (see [`ChatLink`]). A chat
+    /// hosted here never waits: its queued command executes on this device
+    /// even fully offline. Opening a remote chat is [`LinkSync::Syncing`] —
+    /// an outage is claimed only once its room has stalled.
+    pub fn chat_link_at(&self, chat_id: &str, now: DateTime<Utc>) -> ChatLink {
+        use zeron_proto::{ChatSyncState as C, ConnectivityState as S};
+        let global = match self.connectivity.state {
+            S::Disabled => return ChatLink::LIVE,
+            S::Offline => Some(LinkSync::Offline),
+            S::Reconnecting => Some(LinkSync::Reconnecting),
+            S::Connected => None,
+        };
         let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) else {
             // Unknown chat (a just-minted canvas send): only the global
             // state can speak.
-            return self.connectivity.state != S::Connected;
+            return ChatLink {
+                sync: global.unwrap_or(LinkSync::Live),
+                host_unreachable: false,
+            };
         };
         if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
-            return false;
-        }
-        if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
-        {
-            return true;
+            return ChatLink::LIVE;
         }
         let net = self
             .connectivity
             .chats
             .iter()
             .find(|c| c.chat_id == chat_id);
-        if self.connectivity.state == S::Reconnecting {
-            // The registry can be down while this chat's room or HTTP fallback
-            // still delivers. A dormant or unknown chat has no such proof.
-            return !net.is_some_and(|net| net.delivery_live);
-        }
-        match net {
-            Some(net) if net.sync_state == zeron_proto::ChatSyncState::Local => false,
-            Some(net) => !net.connected,
-            None => false,
+        let sync = match (global, net) {
+            (Some(LinkSync::Offline), _) => LinkSync::Offline,
+            // The registry can be down while this chat's room or HTTP
+            // fallback still delivers.
+            (_, Some(net)) if net.delivery_live => LinkSync::Live,
+            // A dormant or unknown chat has no such proof.
+            (Some(global), _) => global,
+            // Dormant by design while the connection is healthy.
+            (None, None) => LinkSync::Live,
+            (None, Some(net)) => match net.sync_state {
+                C::Local | C::Synced | C::StorageError => LinkSync::Live,
+                // Engines before per-chat sync states report only the
+                // graced room bit.
+                C::Unknown if net.connected => LinkSync::Live,
+                C::Unknown => LinkSync::Reconnecting,
+                C::Waiting | C::Connecting | C::Offline => {
+                    let lasted = |ms: i64| {
+                        self.sync_clocks
+                            .get(chat_id)
+                            .is_some_and(|clock| (now - clock.began).num_milliseconds() >= ms)
+                    };
+                    // A joined room catching up a long backlog never stalls.
+                    if !net.connected && lasted(SYNC_STALLED_AFTER_MS) {
+                        LinkSync::Stalled
+                    } else {
+                        LinkSync::Syncing {
+                            shown: lasted(SYNC_SHOWN_AFTER_MS),
+                        }
+                    }
+                }
+            },
+        };
+        ChatLink {
+            sync,
+            host_unreachable: self.device_presence(&chat.device_id, now).warns(),
         }
     }
 
-    /// A send is queued: in flight AND its delivery path is degraded — the
-    /// honest badge is "Queued", not a Working spinner.
+    /// The path to the device a new chat would run on (the canvas has no
+    /// chat row yet): the global posture and that device's presence.
+    pub fn device_link_at(&self, device_id: &str, now: DateTime<Utc>) -> ChatLink {
+        use zeron_proto::ConnectivityState as S;
+        if self.connectivity.state == S::Disabled
+            || self.local_device_id.as_deref() == Some(device_id)
+        {
+            return ChatLink::LIVE;
+        }
+        ChatLink {
+            sync: match self.connectivity.state {
+                S::Offline => LinkSync::Offline,
+                S::Reconnecting => LinkSync::Reconnecting,
+                S::Disabled | S::Connected => LinkSync::Live,
+            },
+            host_unreachable: self.device_presence(device_id, now).warns(),
+        }
+    }
+
+    /// A send is queued: in flight AND its path would hold it — the honest
+    /// badge is "Queued", not a Working spinner.
     pub fn send_queued(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.send_pending(chat_id, now) && self.chat_delivery_degraded(chat_id)
+        self.send_pending(chat_id, now) && self.chat_link_at(chat_id, now).send_would_queue()
+    }
+
+    /// Why the selected chat's blank transcript is still loading, if it is.
+    /// A never-synced copy of a remote chat replays as empty, which is not
+    /// "no messages": it stays loading until its room proves it caught up.
+    /// A chat hosted here, or on a local profile, is authoritative from its
+    /// own disk; an unsaved side chat has nothing to load.
+    pub fn transcript_loading(&self, now: DateTime<Utc>) -> Option<TranscriptLoading> {
+        use zeron_proto::{ChatSyncState as C, ConnectivityState as S};
+        let chat_id = self.selected_chat.as_deref()?;
+        let hosted_here = self.chats.iter().any(|chat| {
+            chat.id == chat_id && Some(chat.device_id.as_str()) == self.local_device_id.as_deref()
+        });
+        if self.engine.is_none()
+            || self.unsaved_side_chat
+            || hosted_here
+            || (self.connectivity_observed && self.connectivity.state == S::Disabled)
+            || !self.transcript.is_empty()
+            || self
+                .echoes
+                .get(chat_id)
+                .is_some_and(|echoes| !echoes.is_empty())
+        {
+            return None;
+        }
+        if !self.transcript_replayed {
+            return Some(TranscriptLoading::Opening);
+        }
+        let caught_up = self
+            .connectivity
+            .chats
+            .iter()
+            .find(|net| net.chat_id == chat_id)
+            .is_some_and(|net| {
+                net.delivery_live
+                    || match net.sync_state {
+                        C::Local | C::Synced | C::StorageError => true,
+                        C::Unknown => net.connected,
+                        C::Waiting | C::Connecting | C::Offline => false,
+                    }
+            });
+        if caught_up {
+            return None;
+        }
+        Some(match self.chat_link_at(chat_id, now).sync {
+            LinkSync::Offline => TranscriptLoading::Offline,
+            LinkSync::Stalled | LinkSync::Reconnecting => TranscriptLoading::Reconnecting,
+            // Not reported yet: the room the replay opened has yet to speak.
+            LinkSync::Live | LinkSync::Syncing { .. } => TranscriptLoading::Syncing,
+        })
     }
 
     pub fn apply_devices(&mut self, devices: Vec<Device>) -> bool {
@@ -1288,23 +1811,8 @@ impl AppState {
             self.change_requests
                 .clear_unsupported_on_version_change(&device.id, device.version.as_deref());
         }
-        let presentation: Vec<_> = devices
-            .iter()
-            .map(|device| {
-                let mut metadata = device.clone();
-                metadata.last_seen_at = None;
-                (
-                    metadata,
-                    crate::settings::devices::device_online(device.last_seen_at, now),
-                    crate::settings::devices::format_last_seen(device.last_seen_at, now),
-                )
-            })
-            .collect();
-        let session_presence: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|session| effective_indicator(Some(session), now))
-            .collect();
+        let presentation = device_presentation_at(&devices, now);
+        let session_presence = session_presence_at(&self.sessions, now);
         let changed = self.device_presentation.as_ref() != Some(&presentation)
             || self.session_presence_presentation != session_presence;
         self.device_presentation = Some(presentation);
@@ -1365,20 +1873,40 @@ impl AppState {
             .map(|s| s.id.clone())
     }
 
-    pub fn apply_harness_updates(&mut self, statuses: Vec<zeron_proto::HarnessUpdateStatus>) {
+    pub fn apply_harness_updates(
+        &mut self,
+        statuses: Vec<zeron_proto::HarnessUpdateStatus>,
+    ) -> bool {
+        if self.harness_updates == statuses {
+            return false;
+        }
         self.harness_updates = statuses;
+        true
     }
 
-    pub fn apply_auth(&mut self, auth: AuthState) {
+    pub fn apply_auth(&mut self, auth: AuthState) -> bool {
+        if self.auth.as_ref() == Some(&auth) {
+            return false;
+        }
         self.auth = Some(auth);
+        true
     }
 
     /// Tolerant AuthStatus frame reducer (see [`parse_auth_state`]).
-    pub fn apply_auth_value(&mut self, value: serde_json::Value) {
+    pub fn apply_auth_value(&mut self, value: serde_json::Value) -> bool {
         match parse_auth_state(&value) {
             Some(auth) => self.apply_auth(auth),
-            None => tracing::warn!("dropping unrecognized AuthStatus frame"),
+            None => {
+                tracing::warn!("dropping unrecognized AuthStatus frame");
+                false
+            }
         }
+    }
+
+    /// Signed in (Cloud is per account; whether this account can use it is
+    /// `CloudStatus::available`).
+    pub fn signed_in(&self) -> bool {
+        matches!(self.auth, Some(AuthState::SignedIn { .. }))
     }
 
     /// The signed-in user, if the engine reports one.
@@ -1394,15 +1922,35 @@ impl AppState {
             self.prepared_transcripts.remove(id);
         }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        // Doc frames supersede optimistic echoes carrying the same id.
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
-        }
         self.transcript = entries;
+        self.settle_echoes();
         self.transcript_replayed = true;
         self.ack_pending_send_from_transcript();
+    }
+
+    /// Doc frames supersede optimistic echoes carrying the same id. A Cloud
+    /// setup placeholder also goes once the doc moved past its message
+    /// without the machine's setup entry (the machine was already up).
+    fn settle_echoes(&mut self) {
+        let Some(chat_id) = self.selected_chat.as_deref() else {
+            return;
+        };
+        let Some(echoes) = self.echoes.get_mut(chat_id) else {
+            return;
+        };
+        let transcript = &self.transcript;
+        echoes.retain(|echo| {
+            if transcript.iter().any(|e| e.id == echo.id) {
+                return false;
+            }
+            let Some(message_id) = zeron_proto::cloud_setup_message_id(&echo.id) else {
+                return true;
+            };
+            transcript
+                .iter()
+                .position(|e| e.id == message_id)
+                .is_none_or(|ix| ix + 1 == transcript.len())
+        });
     }
 
     /// Apply a `WatchDocMessages` delta frame in place. `Err` = this copy has
@@ -1420,12 +1968,7 @@ impl AppState {
         if is_reset {
             self.transcript_replayed = true;
         }
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            let transcript = &self.transcript;
-            echoes.retain(|echo| !transcript.iter().any(|e| e.id == echo.id));
-        }
+        self.settle_echoes();
         self.ack_pending_send_from_transcript();
         Ok(())
     }
@@ -1580,6 +2123,121 @@ impl AppState {
         }
     }
 
+    /// The send of `message_id` brings `chat_id`'s Cloud machine up (`waking`
+    /// a sleeping one): show the first setup step under it right away. The
+    /// machine's own setup entry replaces it in place once it boots
+    /// (`zeron_proto::cloud_setup_entry_id`), with the steps that follow.
+    pub fn push_cloud_setup_echo(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        created_at: i64,
+        waking: bool,
+    ) {
+        // Pushed a beat after the send: the machine may already have written
+        // its own setup entry, or (already up) moved past the message.
+        let entry_id = zeron_proto::cloud_setup_entry_id(message_id);
+        if self.selected_chat.as_deref() == Some(chat_id)
+            && (self.transcript.iter().any(|e| e.id == entry_id)
+                || self
+                    .transcript
+                    .iter()
+                    .position(|e| e.id == message_id)
+                    .is_some_and(|ix| ix + 1 < self.transcript.len()))
+        {
+            return;
+        }
+        // Worded and shaped like the machine's own first step ("Started a
+        // machine"), which replaces it in place: no Cloud-step input, since
+        // the doc keeps none on the machine's, so both draw alike.
+        let name = if waking {
+            CLOUD_WAKING_STEP
+        } else {
+            CLOUD_STARTING_STEP
+        };
+        self.push_echo(
+            chat_id,
+            SessionMessageEntry {
+                id: entry_id,
+                role: zeron_doc::MessageRole::Assistant,
+                parts: vec![zeron_doc::MessagePart::Tool {
+                    id: zeron_proto::cloud_setup_part_id(message_id, "machine"),
+                    call: zeron_proto::ToolCall::Unknown {
+                        name: name.into(),
+                        input: None,
+                    },
+                    is_error: false,
+                    resolved: false,
+                    output: None,
+                    diff: None,
+                    output_ref: None,
+                    output_bytes: None,
+                    diff_ref: None,
+                    diff_stats: None,
+                    subagent_ref: None,
+                    subagent_status: None,
+                    subagent_tail: None,
+                }],
+                created_at: created_at + 1,
+                device_id: "local".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            },
+        );
+        // The machine may have failed before this placeholder arrived.
+        self.settle_failed_cloud_setups();
+    }
+
+    /// The selected chat's latest message — an unconfirmed echo first, since
+    /// it is newer than anything the transcript holds — with the Cloud setup
+    /// entry it brought up, if it had to start or wake a machine. Setup
+    /// entry ids derive from their message's, so finding one is enough.
+    fn latest_cloud_setup(&self) -> Option<(&SessionMessageEntry, Option<&SessionMessageEntry>)> {
+        let user = zeron_doc::MessageRole::User;
+        let message = self
+            .pending_echoes()
+            .iter()
+            .rev()
+            .find(|entry| entry.role == user)
+            .or_else(|| self.transcript.iter().rev().find(|entry| entry.role == user))?;
+        let setup_id = zeron_proto::cloud_setup_entry_id(&message.id);
+        let setup = self
+            .pending_echoes()
+            .iter()
+            .chain(&self.transcript)
+            .find(|entry| entry.id == setup_id);
+        Some((message, setup))
+    }
+
+    /// The selected chat's current turn is a Cloud setup still under way:
+    /// the placeholder, or the machine's setup entry (which carries on as
+    /// the turn's answer) still streaming.
+    pub fn cloud_setup_streaming(&self) -> bool {
+        self.latest_cloud_setup().is_some_and(|(_, setup)| {
+            setup.is_some_and(|setup| setup.status == Some(zeron_doc::MessageStatus::Streaming))
+        })
+    }
+
+    /// When the send that brought the selected chat's Cloud machine up was
+    /// made (ms), while that setup belongs to the current turn — the app's
+    /// placeholder or the machine's own steps after the latest message.
+    /// Setting the machine up is part of the work, so the turn's timer counts
+    /// from the send, and keeps that base once the turn itself starts. A
+    /// newer message to a machine already up has none.
+    pub fn cloud_setup_turn_started(&self) -> Option<i64> {
+        let (message, setup) = self.latest_cloud_setup()?;
+        setup.map(|_| message.created_at)
+    }
+
+    /// The selected chat shows a Cloud setup placeholder (it says what the
+    /// send waits on, so the working line under it doesn't repeat it).
+    pub fn cloud_setup_echo_pending(&self) -> bool {
+        self.pending_echoes()
+            .iter()
+            .any(|echo| zeron_proto::cloud_setup_message_id(&echo.id).is_some())
+    }
+
     /// Drop an echo (send failed — the prompt returns to the draft).
     pub fn remove_echo(&mut self, chat_id: &str, message_id: &str) {
         if let Some(echoes) = self.echoes.get_mut(chat_id) {
@@ -1592,17 +2250,30 @@ impl AppState {
     }
 
     /// Composer send fired: overlay the chat as Working until the host writes
-    /// the user message back into the transcript (or the TTL lapses). A remote
-    /// send has no live session row until the host drains the queued command —
-    /// that gap read as "no live run" and flashed the Completed dot, and any
-    /// phantom Working→Idle edge in it rang the done-chime on send (user
-    /// report 2026-08-05).
+    /// the user message back into the transcript or its session row shows the
+    /// turn that runs it ([`PendingSend::adopted_by`]). A remote send has no
+    /// live session row until the host drains the queued command — that gap
+    /// read as "no live run" and flashed the Completed dot, and any phantom
+    /// Working→Idle edge in it rang the done-chime on send (user report
+    /// 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
+        self.begin_send(chat_id, message_id, false, now);
+    }
+
+    /// [`Self::begin_pending_send`] for the send that creates its chat.
+    pub fn begin_first_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
+        self.begin_send(chat_id, message_id, true, now);
+    }
+
+    fn begin_send(&mut self, chat_id: &str, message_id: &str, new_chat: bool, now: DateTime<Utc>) {
+        let row_before = self.session_for(chat_id).cloned();
         self.pending_sends.insert(
             chat_id.to_string(),
             PendingSend {
                 message_id: message_id.to_string(),
                 started: now,
+                row_before,
+                new_chat,
             },
         );
     }
@@ -1652,11 +2323,16 @@ impl AppState {
 
     /// A `WatchTransfers` snapshot: the engine-side relay leg's in-flight
     /// queued-attachment transfers, replacing the whole set each frame.
-    pub fn apply_transfers(&mut self, transfers: Vec<zeron_proto::TransferProgress>) {
-        self.transfers = transfers
+    pub fn apply_transfers(&mut self, transfers: Vec<zeron_proto::TransferProgress>) -> bool {
+        let transfers: HashMap<_, _> = transfers
             .into_iter()
             .map(|t| (t.upload_id, (t.done, t.total)))
             .collect();
+        if self.transfers == transfers {
+            return false;
+        }
+        self.transfers = transfers;
+        true
     }
 
     /// Percent of one queued attachment's relay transfer, by the uploadId
@@ -1674,24 +2350,32 @@ impl AppState {
     }
 
     /// Is a send still in flight for this chat (unacked)? Inside the grace
-    /// window normally; while the chat's delivery path is degraded the
-    /// overlay holds indefinitely — the truth IS "Queued", and silently
-    /// expiring back to Idle left a queued send with no visible trace at
-    /// all (the 30s→silence hole, 2026-08-19).
+    /// window normally; while nothing confirms the chat's path (see
+    /// [`ChatLink::delivery_unconfirmed`]) the overlay holds indefinitely —
+    /// silently expiring back to Idle left a queued send with no visible
+    /// trace at all (the 30s→silence hole, 2026-08-19).
     pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
-                || self.chat_delivery_degraded(chat_id)
+                || self.chat_link_at(chat_id, now).delivery_unconfirmed()
+                || self.cloud_machine_booting(chat_id).is_some()
         })
     }
 
     /// The send has sat unadopted past the grace window: surface the
     /// EXPLICIT failed state ("Not delivered — retry") instead of either
-    /// faking progress or silently forgetting the send ever happened.
+    /// faking progress or silently forgetting the send ever happened. A chat
+    /// still syncing has not failed it: the send went out with the room's
+    /// first pushes, or leaves when the room joins, and its adoption shows
+    /// once the copy catches up.
     pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
-        })
+        }) && self.cloud_machine_booting(chat_id).is_none()
+            && !matches!(
+                self.chat_link_at(chat_id, now).sync,
+                LinkSync::Syncing { .. }
+            )
     }
 
     /// Retry pressed: restart the grace clock so the overlay returns to its
@@ -1712,7 +2396,8 @@ impl AppState {
             .get(chat_id)
             .filter(|p| {
                 now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
-                    || self.chat_delivery_degraded(chat_id)
+                    || self.chat_link_at(chat_id, now).delivery_unconfirmed()
+                    || self.cloud_machine_booting(chat_id).is_some()
             })
             .map(|p| p.started)
     }
@@ -1766,10 +2451,11 @@ impl AppState {
     /// another chat (`parent_chat_id`, the Zeron MCP's orchestration link)
     /// are the parent's workers, not sessions the user started: they stay
     /// reachable by id/deep link but never take a sidebar row or jump slot.
+    /// Voice orchestrator chats are hidden the same way.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
-            .filter(|c| !c.archived && c.parent_chat_id.is_none())
+            .filter(|c| !c.archived && c.is_top_level())
     }
 
     pub(crate) fn restore_composer_target(
@@ -1789,6 +2475,34 @@ impl AppState {
             } else {
                 defaults.project.clone()
             };
+        }
+    }
+
+    fn current_canvas_target(&self) -> CanvasTarget {
+        CanvasTarget {
+            space: self.selected_space.clone(),
+            no_project: self.no_project,
+            device: self.selected_device.clone(),
+        }
+    }
+
+    /// Put back the canvas target set aside when a chat opened. A project
+    /// deleted meanwhile heals the way [`Self::apply_spaces`] would.
+    fn restore_canvas_target(&mut self) {
+        let Some(target) = self.canvas_target.take() else {
+            return;
+        };
+        self.selected_device = target.device;
+        self.no_project = target.no_project;
+        self.selected_space = target.space;
+        if self.spaces_synced
+            && !self.no_project
+            && self
+                .selected_space
+                .as_ref()
+                .is_none_or(|id| !self.spaces.iter().any(|s| &s.id == id))
+        {
+            self.selected_space = self.first_space_on_picked_device();
         }
     }
 
@@ -1812,17 +2526,22 @@ impl AppState {
     }
 
     /// Pick the composer's target device. Keeps the project pick consistent:
-    /// a project on another device can't survive the switch — fall back to
-    /// the first project on the new device, else "no project".
+    /// it moves to the project's checkout on the new device, else the first
+    /// project there, else "no project".
     pub fn select_device(&mut self, device_id: String, cx: &mut Context<Self>) {
-        let project_moves = self
+        let moving = self
             .selected_space_row()
-            .is_some_and(|s| s.device_id != device_id);
-        if project_moves {
+            .filter(|s| s.device_id != device_id);
+        if let Some(space) = moving {
             let first = self
-                .spaces_sorted()
-                .iter()
+                .project_members(space)
+                .into_iter()
                 .find(|s| s.device_id == device_id)
+                .or_else(|| {
+                    self.spaces_sorted()
+                        .into_iter()
+                        .find(|s| s.device_id == device_id)
+                })
                 .map(|s| s.id.clone());
             self.no_project = first.is_none();
             self.selected_space = first;
@@ -1848,6 +2567,35 @@ impl AppState {
         self.space_row(chat.space_id.as_deref()?)
     }
 
+    /// The space whose name and color stand for `space`'s whole project
+    /// ([`zeron_proto::view::representative_space`]).
+    pub fn representative_space<'a>(&'a self, space: &'a Space) -> &'a Space {
+        zeron_proto::view::representative_space(&self.spaces, space)
+    }
+
+    /// Every space of `space`'s project ([`zeron_proto::view::project_key`]):
+    /// this device's first, then by device name and path.
+    pub fn project_members(&self, space: &Space) -> Vec<&Space> {
+        let key = zeron_proto::view::project_key(space);
+        let local = self.local_device_id.as_deref();
+        let mut members: Vec<&Space> = self
+            .spaces
+            .iter()
+            .filter(|s| zeron_proto::view::project_key(s) == key)
+            .collect();
+        members.sort_by_key(|s| {
+            (
+                local != Some(s.device_id.as_str()),
+                self.device_name(&s.device_id)
+                    .unwrap_or_default()
+                    .to_lowercase(),
+                s.path.clone(),
+                s.id.clone(),
+            )
+        });
+        members
+    }
+
     /// Non-archived chats of a space in tab (creation) order. Chats with a
     /// dangling/missing `space_id` are invisible by construction.
     pub fn chats_in_space(&self, space_id: &str) -> Vec<&Chat> {
@@ -1860,10 +2608,73 @@ impl AppState {
     }
 
     pub fn device_name(&self, device_id: &str) -> Option<&str> {
+        let device = self.devices.iter().find(|d| d.id == device_id);
+        // A session's machine is shown as the Cloud it belongs to.
+        if self.is_cloud_session_device(device_id) {
+            return Some(
+                self.cloud_account_device()
+                    .map_or(crate::cloud::CLOUD_LABEL, |d| d.name.as_str()),
+            );
+        }
+        // The logical Cloud device (Cloud projects live there) has no
+        // registry row of its own.
+        if device.is_none()
+            && self
+                .cloud_status
+                .as_ref()
+                .and_then(|status| status.device_id.as_deref())
+                == Some(device_id)
+        {
+            return Some(crate::cloud::CLOUD_LABEL);
+        }
+        device.map(|d| d.name.as_str())
+    }
+
+    /// Devices for lists and pickers: Cloud's per-session machines are
+    /// hidden; the logical Cloud device stands for them.
+    pub fn listed_devices(&self) -> impl Iterator<Item = &Device> {
+        self.devices.iter().filter(|d| crate::cloud::is_listed(d))
+    }
+
+    /// Devices the Providers page lists by name. Cloud is one extra entry
+    /// there (its accounts live in the vault), never its session machines.
+    pub fn provider_devices(&self) -> impl Iterator<Item = &Device> {
+        self.listed_devices().filter(|d| !crate::cloud::is_cloud(d))
+    }
+
+    /// The device a list shows for `device_id`: a session machine is shown
+    /// as the logical Cloud device it belongs to.
+    pub fn listed_device_id(&self, device_id: &str) -> String {
+        if self.is_cloud_session_device(device_id) {
+            let account = self
+                .cloud_account_device()
+                .map(|d| d.id.clone())
+                .or_else(|| self.cloud_status.as_ref().and_then(|s| s.device_id.clone()));
+            if let Some(account) = account {
+                return account;
+            }
+        }
+        device_id.to_string()
+    }
+
+    /// The logical Cloud device's registry row, when Cloud is on.
+    pub fn cloud_account_device(&self) -> Option<&Device> {
+        self.devices
+            .iter()
+            .find(|d| crate::cloud::is_cloud_account(d))
+    }
+
+    /// A session machine: by its registry capability, or (before its engine
+    /// has registered) by a session naming it.
+    pub fn is_cloud_session_device(&self, device_id: &str) -> bool {
         self.devices
             .iter()
             .find(|d| d.id == device_id)
-            .map(|d| d.name.as_str())
+            .is_some_and(crate::cloud::is_cloud_session_device)
+            || self
+                .cloud_sessions
+                .as_ref()
+                .is_some_and(|s| s.sessions.iter().any(|x| x.device_id == device_id))
     }
 
     /// Host-presence check: is this device's 15s presence heartbeat fresh?
@@ -1880,12 +2691,490 @@ impl AppState {
         }
     }
 
+    /// [`Self::device_online`] refined for Cloud. The logical Cloud device
+    /// reads from the account (on while Cloud is enabled); a session machine
+    /// from its session (a stopped one is "Asleep" — it wakes when its chat
+    /// is sent to — not "Offline").
+    pub fn device_presence(&self, device_id: &str, now: DateTime<Utc>) -> crate::cloud::Presence {
+        use crate::cloud::Presence;
+        let device = self.devices.iter().find(|d| d.id == device_id);
+        let is_account = device.is_some_and(crate::cloud::is_cloud_account)
+            || self
+                .cloud_status
+                .as_ref()
+                .and_then(|s| s.device_id.as_deref())
+                == Some(device_id);
+        if is_account {
+            return crate::cloud::account_presence(self.cloud_status.as_ref());
+        }
+        let online = self.device_online(device_id, now);
+        if self.is_cloud_session_device(device_id) || device.is_some_and(crate::cloud::is_cloud) {
+            let session = self
+                .cloud_sessions
+                .as_ref()
+                .and_then(|s| s.sessions.iter().find(|x| x.device_id == device_id));
+            let mut presence = crate::cloud::session_presence(device.is_some() && online, session);
+            // Machines sleep on their own when idle, and the session list is
+            // only re-read while one settles: a "ready" machine whose
+            // heartbeat stopped has gone to sleep, not lost its connection.
+            if presence == Presence::Online && device.is_some() && !online {
+                presence = Presence::Asleep;
+            }
+            // A wake was asked for and the list hasn't caught up yet.
+            if presence == Presence::Asleep
+                && session.is_some_and(|session| {
+                    self.cloud_wakes
+                        .get(&session.chat_id)
+                        .is_some_and(|at| at.elapsed() < CLOUD_WAKE_GRACE)
+                })
+            {
+                presence = Presence::Waking;
+            }
+            return presence;
+        }
+        if online {
+            Presence::Online
+        } else {
+            Presence::Offline
+        }
+    }
+
+    /// Publish a fresh `CloudStatus`; observers repaint only on change.
+    pub fn set_cloud_status(&mut self, status: zeron_proto::CloudStatus, cx: &mut Context<Self>) {
+        self.cloud_status_read_at = Some(std::time::Instant::now());
+        let out_of_credits = crate::cloud::out_of_credits(&status);
+        if self.cloud_status.as_ref() != Some(&status) {
+            self.cloud_status = Some(status);
+            cx.notify();
+        }
+        if out_of_credits && self.block_cloud_setups_for_credits() {
+            crate::cloud::show_out_of_credits(
+                "You're out of Cloud credits. Your message will send once you add some.",
+                cx,
+            );
+            cx.notify();
+        }
+    }
+
+    /// Cloud refused (or will refuse) to start or wake a machine for lack of
+    /// credits: every send still waiting on one says so instead of "Waking
+    /// the machine" forever, and stops reading as working. The message
+    /// stays queued for when credits are added. True when any changed.
+    fn block_cloud_setups_for_credits(&mut self) -> bool {
+        let mut blocked = Vec::new();
+        for (chat_id, echoes) in &mut self.echoes {
+            for entry in echoes.iter_mut() {
+                if zeron_proto::cloud_setup_message_id(&entry.id).is_none() {
+                    continue;
+                }
+                let mut changed = false;
+                for part in &mut entry.parts {
+                    if let zeron_doc::MessagePart::Tool {
+                        call: zeron_proto::ToolCall::Unknown { name, .. },
+                        is_error,
+                        resolved,
+                        ..
+                    } = part
+                        && (name == CLOUD_WAKING_STEP || name == CLOUD_STARTING_STEP)
+                    {
+                        *name = CLOUD_NO_CREDITS_STEP.into();
+                        *is_error = true;
+                        *resolved = true;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    // Not streaming any more: the turn isn't under way.
+                    entry.status = Some(zeron_doc::MessageStatus::Complete);
+                    blocked.push(chat_id.clone());
+                }
+            }
+        }
+        for chat_id in &blocked {
+            self.pending_sends.remove(chat_id);
+        }
+        if !blocked.is_empty() {
+            self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        }
+        !blocked.is_empty()
+    }
+
+    /// Re-read Cloud's status (credits above all), nothing else. A failed
+    /// read is retried soon: unknown credits let a Cloud send through.
+    pub fn refresh_cloud_status(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        if !self.signed_in() {
+            return;
+        }
+        self.cloud_status_task = Some(cx.spawn(async move |this, cx| {
+            let status = crate::cloud::fetch_status(engine).await;
+            this.update(cx, |state, cx| match status {
+                Ok(status) => state.set_cloud_status(status, cx),
+                Err(error) => {
+                    tracing::debug!(%error, "Cloud status read failed; retrying");
+                    state.cloud_status_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(CLOUD_STATUS_RETRY).await;
+                        this.update(cx, |state, cx| state.refresh_cloud_status(cx))
+                            .ok();
+                    }));
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Re-read Cloud's status when the last read is older than `max_age`.
+    pub fn refresh_cloud_status_if_stale(
+        &mut self,
+        max_age: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .cloud_status_read_at
+            .is_some_and(|at| at.elapsed() < max_age)
+        {
+            return;
+        }
+        self.refresh_cloud_status(cx);
+    }
+
+    /// A window came forward: credits may have run out (or been added)
+    /// while it was away.
+    pub fn window_activated(&mut self, cx: &mut Context<Self>) {
+        self.refresh_cloud_status_if_stale(CLOUD_STATUS_FOCUS_MAX_AGE, cx);
+    }
+
+    /// A send is starting or waking a Cloud machine: read the credits now,
+    /// and again once the edge has had its say on the wake.
+    pub fn recheck_cloud_credits(&mut self, cx: &mut Context<Self>) {
+        const AFTER_WAKE: std::time::Duration = std::time::Duration::from_secs(5);
+        self.refresh_cloud_status(cx);
+        self.cloud_recheck_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AFTER_WAKE).await;
+            this.update(cx, |state, cx| state.refresh_cloud_status(cx))
+                .ok();
+        }));
+    }
+
+    /// Whether Cloud is on for this account (its logical device exists).
+    /// Cloud is on for this account — never while signed out, whatever a
+    /// stale status says.
+    /// Signed in, and the edge offers this account Cloud (`CLOUD_ACCESS`):
+    /// Cloud and Billing in Settings, the Cloud checkout, Cloud projects.
+    /// False until the status arrives.
+    pub fn cloud_offered(&self) -> bool {
+        self.signed_in() && self.cloud_status.as_ref().is_some_and(|s| s.available)
+    }
+
+    /// [`Self::cloud_offered`], but true while the status is still unknown
+    /// (setup keeps its GitHub step until the edge says otherwise).
+    pub fn cloud_maybe_offered(&self) -> bool {
+        self.signed_in() && self.cloud_status.as_ref().is_none_or(|s| s.available)
+    }
+
+    pub fn cloud_enabled(&self) -> bool {
+        self.cloud_offered()
+            && (self.cloud_status
+            .as_ref()
+            .is_some_and(crate::cloud::account_enabled)
+                || self.cloud_account_device().is_some())
+    }
+
+    /// The Cloud session `chat_id` runs in — its own, or for a side chat its
+    /// parent's (same machine) — when the chat is hosted on Cloud.
+    pub fn chat_cloud_session(&self, chat_id: &str) -> Option<&zeron_proto::CloudSession> {
+        let sessions = self.cloud_sessions.as_ref()?;
+        let device_id = self
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .map_or("", |c| c.device_id.as_str());
+        crate::cloud::session_for(sessions, chat_id, device_id)
+    }
+
+    /// A send to `chat_id` is waiting for its Cloud machine to be set up or
+    /// woken: delivered (queued for the machine), not failed — the machine
+    /// picks it up as soon as it is up. `None` once the machine runs, or when
+    /// it failed (that is a real delivery problem).
+    pub fn cloud_machine_booting(&self, chat_id: &str) -> Option<zeron_proto::CloudState> {
+        use zeron_proto::CloudState;
+        self.chat_machine_down(chat_id)
+            .map(|(_, state)| state)
+            .filter(|state| {
+                matches!(
+                    state,
+                    CloudState::Provisioning
+                        | CloudState::Starting
+                        | CloudState::Sleeping
+                        | CloudState::Stopping
+                )
+            })
+    }
+
+    /// Whether a send is waiting on a Cloud machine (keeps the session poll
+    /// running until the machine is up).
+    fn send_waits_on_cloud(&self) -> bool {
+        self.pending_sends
+            .keys()
+            .any(|chat_id| self.cloud_machine_booting(chat_id).is_some())
+    }
+
+    /// When `chat_id`'s Cloud machine isn't running: the session to wake
+    /// (its chat id) and its state. Files, terminals and changes show a Wake
+    /// button then instead of dialing a machine that won't answer.
+    pub fn chat_machine_down(&self, chat_id: &str) -> Option<(String, zeron_proto::CloudState)> {
+        use zeron_proto::CloudState;
+        let chat = self.chats.iter().find(|c| c.id == chat_id)?;
+        if !self.is_cloud_session_device(&chat.device_id) {
+            return None;
+        }
+        let known = self.devices.iter().any(|d| d.id == chat.device_id);
+        let heartbeat = known && self.device_online(&chat.device_id, Utc::now());
+        let waking = |session: &str| {
+            self.cloud_wakes
+                .get(session)
+                .is_some_and(|at| at.elapsed() < CLOUD_WAKE_GRACE)
+        };
+        let (session, state) = match self.chat_cloud_session(chat_id) {
+            // The session list is only re-read while a machine settles, so
+            // one that went to sleep on its own still reads "ready": its
+            // stopped heartbeat says otherwise.
+            Some(session) if session.state == CloudState::Ready => {
+                if heartbeat || !known {
+                    return None;
+                }
+                (session.chat_id.clone(), CloudState::Sleeping)
+            }
+            Some(session) => (session.chat_id.clone(), session.state),
+            // No session read yet: trust a fresh heartbeat, else asleep.
+            None if heartbeat => return None,
+            None => (
+                chat.parent_chat_id
+                    .clone()
+                    .unwrap_or_else(|| chat.id.clone()),
+                CloudState::Sleeping,
+            ),
+        };
+        // A wake was asked for and the list hasn't caught up yet.
+        let state = match state {
+            CloudState::Sleeping | CloudState::Stopping if waking(&session) => CloudState::Starting,
+            state => state,
+        };
+        Some((session, state))
+    }
+
+    /// A surface (files, git status) couldn't reach `chat_id`'s host. When
+    /// that host is a Cloud machine, re-read the session list: it says at
+    /// once that the machine is stopping or asleep, where its heartbeat
+    /// takes over a minute to go stale. At most every few seconds.
+    pub fn recheck_cloud_machine(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let on_cloud = self
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .is_some_and(|chat| self.is_cloud_session_device(&chat.device_id));
+        if !on_cloud
+            || self
+                .cloud_recheck_at
+                .is_some_and(|at| at.elapsed() < CLOUD_RECHECK_INTERVAL)
+        {
+            return;
+        }
+        self.cloud_recheck_at = Some(std::time::Instant::now());
+        self.refresh_cloud_sessions(cx);
+    }
+
+    /// Wake a sleeping Cloud session (by its chat id). It reads as waking at
+    /// once; the session list is followed until the machine is up.
+    pub fn wake_cloud_session(&mut self, session_chat_id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        if self
+            .cloud_wakes
+            .get(&session_chat_id)
+            .is_some_and(|at| at.elapsed() < CLOUD_WAKE_GRACE)
+        {
+            return;
+        }
+        self.cloud_wakes
+            .insert(session_chat_id.clone(), std::time::Instant::now());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<zeron_proto::CloudSession>(
+                    zeron_rpc::methods::CLOUD_SESSION_WAKE,
+                    serde_json::json!({ "chatId": session_chat_id }),
+                )
+                .await;
+            this.update(cx, |state, cx| match result {
+                Ok(session) => {
+                    let mut sessions = state.cloud_sessions.clone().unwrap_or_default();
+                    sessions.sessions.retain(|s| s.chat_id != session.chat_id);
+                    sessions.sessions.push(session);
+                    state.set_cloud_sessions(sessions, cx);
+                    state.refresh_cloud_sessions(cx);
+                }
+                Err(error) => {
+                    state.cloud_wakes.remove(&session_chat_id);
+                    crate::toast::show(
+                        cx,
+                        crate::toast::ToastKind::Error,
+                        format!("Couldn't wake the Cloud agent: {error}"),
+                    );
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Publish fresh sessions; observers repaint only on change.
+    pub fn set_cloud_sessions(
+        &mut self,
+        sessions: zeron_proto::CloudSessions,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cloud_sessions.as_ref() != Some(&sessions) {
+            self.cloud_sessions = Some(sessions);
+            self.settle_failed_cloud_setups();
+            cx.notify();
+        }
+    }
+
+    /// A chat whose Cloud machine couldn't be set up or woken: the setup
+    /// step shown under its send turns into that failure, with the reason.
+    /// Otherwise it would spin forever — only the machine itself, once up,
+    /// replaces it. The send keeps its own course: no longer booting, it
+    /// reads as not delivered, with Retry.
+    fn settle_failed_cloud_setups(&mut self) {
+        use zeron_doc::{MessagePart, MessageStatus};
+        let failed: Vec<(String, String)> = self
+            .echoes
+            .keys()
+            .filter_map(|chat_id| {
+                let session = self.chat_cloud_session(chat_id)?;
+                (session.state == zeron_proto::CloudState::Error).then(|| {
+                    (
+                        chat_id.clone(),
+                        session
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Something went wrong with Cloud.".into()),
+                    )
+                })
+            })
+            .collect();
+        for (chat_id, error) in failed {
+            let Some(echoes) = self.echoes.get_mut(&chat_id) else {
+                continue;
+            };
+            let mut settled = false;
+            for echo in echoes.iter_mut().filter(|echo| {
+                zeron_proto::cloud_setup_message_id(&echo.id).is_some()
+                    && echo.status == Some(MessageStatus::Streaming)
+            }) {
+                echo.status = Some(MessageStatus::Complete);
+                for part in &mut echo.parts {
+                    if let MessagePart::Tool {
+                        call: zeron_proto::ToolCall::Unknown { name, .. },
+                        is_error,
+                        resolved,
+                        output,
+                        ..
+                    } = part
+                    {
+                        *name = if name == CLOUD_WAKING_STEP {
+                            "Couldn't wake the machine"
+                        } else {
+                            "Couldn't start a machine"
+                        }
+                        .into();
+                        *is_error = true;
+                        *resolved = true;
+                        *output = Some(error.clone());
+                    }
+                }
+                settled = true;
+            }
+            if settled {
+                self.transcript_revision = self.transcript_revision.wrapping_add(1);
+            }
+        }
+    }
+
+    /// Fold one session (a wake/sleep/delete reply) in, and follow it while
+    /// it settles.
+    pub fn apply_cloud_session(
+        &mut self,
+        session: zeron_proto::CloudSession,
+        cx: &mut Context<Self>,
+    ) {
+        let sessions = self
+            .cloud_sessions
+            .get_or_insert_with(|| zeron_proto::CloudSessions {
+                sessions: Vec::new(),
+                available: true,
+            });
+        match sessions
+            .sessions
+            .iter_mut()
+            .find(|s| s.chat_id == session.chat_id)
+        {
+            Some(existing) => *existing = session,
+            None => sessions.sessions.push(session),
+        }
+        self.settle_failed_cloud_setups();
+        cx.notify();
+        self.refresh_cloud_sessions(cx);
+    }
+
+    /// Read every Cloud session once — then again every
+    /// [`crate::cloud::SESSION_POLL`] only while one is being set up, woken
+    /// or deleted. Never runs for an account without Cloud.
+    pub fn refresh_cloud_sessions(&mut self, cx: &mut Context<Self>) {
+        if !self.cloud_enabled() {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        self.cloud_sessions_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let result = crate::cloud::fetch_sessions(engine.clone()).await;
+                let settling = this
+                    .update(cx, |state, cx| {
+                        if let Ok(sessions) = result {
+                            state.set_cloud_sessions(sessions, cx);
+                        }
+                        state
+                            .cloud_sessions
+                            .as_ref()
+                            .is_some_and(crate::cloud::any_session_settling)
+                            || state.send_waits_on_cloud()
+                    })
+                    .unwrap_or(false);
+                if !settling {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(crate::cloud::SESSION_POLL)
+                    .await;
+            }
+        }));
+    }
+
     /// The "@ device" tag for a space — shared by the space pickers' rows,
     /// the sidebar filter trigger, and the composer's space chip. Returns
     /// `(tag, offline)`; staleness renders as a disconnected GLYPH at the
-    /// call sites (user request), never words in the tag.
+    /// call sites (user request), never words in the tag. A sleeping Cloud
+    /// device is not stale — it wakes when a chat opens there.
     pub fn space_device_tag(&self, space: &Space, now: DateTime<Utc>) -> (String, bool) {
-        let offline = !self.device_online(&space.device_id, now);
+        let offline = self.device_presence(&space.device_id, now).warns();
         let device = self
             .device_name(&space.device_id)
             .unwrap_or("Unknown device");
@@ -1934,26 +3223,246 @@ impl AppState {
         now: DateTime<Utc>,
         space_filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &Chat)> {
+        let in_filter = self.project_filter(space_filter);
         self.overview_chats(now)
             .into_iter()
-            .filter(|(_, chat)| match space_filter {
-                Some(space_id) => chat.space_id.as_deref() == Some(space_id),
-                None => true,
-            })
+            .filter(|(_, chat)| in_filter(chat))
             .collect()
+    }
+
+    /// The sidebar's project filter matches by repository: it stores one
+    /// checkout's space id, and a chat in ANY checkout of that repository
+    /// (clones and worktrees on every device, [`zeron_proto::view::project_key`])
+    /// matches. A filter naming a space not synced here matches its own id.
+    pub fn project_filter<'a>(&'a self, filter: Option<&str>) -> impl Fn(&Chat) -> bool + 'a {
+        let filter = filter.map(|id| {
+            (
+                id.to_owned(),
+                self.space_row(id).map(zeron_proto::view::project_key),
+            )
+        });
+        move |chat| {
+            let Some((id, key)) = &filter else {
+                return true;
+            };
+            match chat.space_id.as_deref() {
+                Some(space_id) if space_id == id => true,
+                Some(space_id) => key.as_ref().is_some_and(|key| {
+                    self.space_row(space_id)
+                        .is_some_and(|space| zeron_proto::view::project_key(space) == *key)
+                }),
+                None => false,
+            }
+        }
+    }
+
+    /// Every project — one per repository across devices — as its checkouts
+    /// in [`Self::project_members`] order (this device's first), ordered by
+    /// the project's name.
+    pub fn projects(&self) -> Vec<Vec<&Space>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut projects: Vec<Vec<&Space>> = self
+            .spaces
+            .iter()
+            .filter(|space| seen.insert(zeron_proto::view::project_key(space)))
+            .map(|space| self.project_members(space))
+            .collect();
+        projects.sort_by_key(|members| {
+            let representative = self.representative_space(members[0]);
+            (
+                representative.display_name().to_lowercase(),
+                representative.id.clone(),
+            )
+        });
+        projects
+    }
+
+    /// A project's host tag: its one device as in [`Self::space_device_tag`],
+    /// else the devices holding a checkout. Offline only when every one is.
+    pub fn project_device_tag(&self, members: &[&Space], now: DateTime<Utc>) -> (String, bool) {
+        let mut devices: Vec<&str> = Vec::new();
+        for member in members {
+            if !devices.contains(&member.device_id.as_str()) {
+                devices.push(member.device_id.as_str());
+            }
+        }
+        match devices.as_slice() {
+            [] => (String::new(), false),
+            [_] => self.space_device_tag(members[0], now),
+            _ => {
+                let offline = devices.iter().all(|d| !self.device_online(d, now));
+                let tag = if devices.len() == 2 {
+                    devices
+                        .iter()
+                        .map(|d| self.device_name(d).unwrap_or("Unknown device"))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                } else {
+                    format!("{} devices", devices.len())
+                };
+                (format!("@ {tag}"), offline)
+            }
+        }
     }
 
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
 
-    /// Staleness-checked status dot for a chat row. A send in flight reads as
-    /// Working (see [`Self::display_status_for`]).
+    /// Subagents running under `chat_id` right now (the engine's count on its
+    /// session row; 0 once that row goes stale). Every device can ask, opened
+    /// chat or not.
+    pub fn running_subagents_for(&self, chat_id: &str, now: DateTime<Utc>) -> u32 {
+        running_subagents(self.session_for(chat_id), now)
+    }
+
+    /// Native run indicator for composer/Stop controls. Sidebar attention is
+    /// derived separately by `display_status_for`, including terminal reports.
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
         if self.send_pending(chat_id, now) {
             return Indicator::Working;
         }
-        effective_indicator(self.session_for(chat_id), now)
+        // A Cloud turn's setup streams into the entry that becomes its answer:
+        // working throughout, though the send is acked (the machine wrote the
+        // message back) a beat before its session row reads Working.
+        if self.selected_chat.as_deref() == Some(chat_id) && self.cloud_setup_streaming() {
+            return Indicator::Working;
+        }
+        zeron_proto::view::native_indicator(self.session_for(chat_id), now)
+    }
+
+    /// The earliest moment after `now` at which a clock-derived value flips
+    /// with no frame to announce it: a Working/AwaitingInput session going
+    /// stale ([`SESSION_STALE_MS`]), a remote device leaving its online window
+    /// (offline glyphs, unreachable hosts, Queued badges), a pending send's
+    /// grace expiring into "Not delivered", or a syncing chat's caption
+    /// showing or its room stalling. Each deadline is the first instant
+    /// the predicate reads differently. Relative-time labels are excluded:
+    /// they advance on the views' minute heartbeat. Pure.
+    pub fn next_clock_transition(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.clock_deadlines()
+            .filter(|deadline| *deadline > now)
+            .min()
+    }
+
+    /// Whether any clock-driven transition fell in `(from, to]`. Heartbeats
+    /// that move a deadline later without notifying (session and device
+    /// liveness leases) leave an armed timer early; this tells a real
+    /// transition from such an obsolete wake. Pure.
+    fn clock_transition_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
+        self.clock_deadlines()
+            .any(|deadline| from < deadline && deadline <= to)
+    }
+
+    fn clock_deadlines(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        let stale = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                matches!(
+                    session.activity_status(),
+                    zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                )
+            })
+            // `age_ms > SESSION_STALE_MS` first holds one millisecond past it.
+            .map(|session| {
+                session.updated_at + chrono::TimeDelta::milliseconds(SESSION_STALE_MS + 1)
+            });
+        let offline = self
+            .devices
+            .iter()
+            .filter(|device| self.local_device_id.as_deref() != Some(device.id.as_str()))
+            .filter_map(|device| device.last_seen_at)
+            // Whole seconds `<= DEVICE_ONLINE_WINDOW_SECS` stay online.
+            .map(|at| {
+                at + chrono::TimeDelta::seconds(
+                    crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1,
+                )
+            });
+        let grace = self.pending_sends.values().map(|pending| {
+            pending.started + chrono::TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1)
+        });
+        // The open chat's caption appears, and a room stalls under it or
+        // under a pending send, by clock alone; other chats' clocks change
+        // nothing on screen. Only a room that is down can stall.
+        let syncing = self
+            .sync_clocks
+            .iter()
+            .filter(|(id, _)| {
+                self.selected_chat.as_ref() == Some(*id) || self.pending_sends.contains_key(*id)
+            })
+            .filter(|(id, _)| {
+                self.chats.iter().any(|chat| {
+                    chat.id == **id
+                        && Some(chat.device_id.as_str()) != self.local_device_id.as_deref()
+                })
+            })
+            .flat_map(|(id, clock)| {
+                let down = self
+                    .connectivity
+                    .chats
+                    .iter()
+                    .any(|chat| chat.chat_id == *id && !chat.connected);
+                let shown = clock.began + chrono::TimeDelta::milliseconds(SYNC_SHOWN_AFTER_MS);
+                let stalled = down
+                    .then(|| clock.began + chrono::TimeDelta::milliseconds(SYNC_STALLED_AFTER_MS));
+                std::iter::once(shown).chain(stalled)
+            });
+        stale.chain(offline).chain(grace).chain(syncing)
+    }
+
+    /// Notify this entity at every clock-driven transition, so each state
+    /// observer (composer interrupts, session sounds, views) sees a session
+    /// go stale, a device go dark or a send's grace expire on time — no state
+    /// frame announces those. Idempotent; every notify re-arms a single
+    /// one-shot timer for the next deadline, so idle state never polls.
+    pub fn watch_clock_transitions(&mut self, cx: &mut Context<Self>) {
+        if self.clock.observation.is_none() {
+            self.clock.observation =
+                Some(cx.observe_self(|state, cx| state.arm_clock_transition(cx)));
+        }
+        self.arm_clock_transition(cx);
+    }
+
+    /// Re-evaluate the clock-dependent parts of the change-detection caches.
+    fn refresh_clock_presentations(&mut self, now: DateTime<Utc>) {
+        self.session_presence_presentation = session_presence_at(&self.sessions, now);
+        if self.device_presentation.is_some() {
+            self.device_presentation = Some(device_presentation_at(&self.devices, now));
+        }
+    }
+
+    fn arm_clock_transition(&mut self, cx: &mut Context<Self>) {
+        let now = clock_now();
+        self.clock.checked_at = Some(now);
+        let wake = self.next_clock_transition(now);
+        if wake == self.clock.wake_at && self.clock.task.is_some() {
+            return;
+        }
+        self.clock.wake_at = wake;
+        self.clock.task = wake.map(|wake| {
+            let delay = (wake - now).to_std().unwrap_or_default();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                this.update(cx, |state, cx| {
+                    state.clock.wake_at = None;
+                    state.clock.task = None;
+                    let now = clock_now();
+                    let from = state.clock.checked_at.unwrap_or(now);
+                    if state.clock_transition_between(from, now) {
+                        // Record what this transition changed, so the frame
+                        // that later reverts it (a heartbeat reviving the
+                        // session or device) compares unequal and notifies.
+                        state.refresh_clock_presentations(now);
+                        // The self-observer re-arms for the next deadline.
+                        cx.notify();
+                    } else {
+                        state.arm_clock_transition(cx);
+                    }
+                })
+                .ok();
+            })
+        });
     }
 
     pub fn selected_chat_row(&self) -> Option<&Chat> {
@@ -2014,6 +3523,7 @@ impl AppState {
         self.selected_space = None;
         self.no_project = false;
         self.selected_device = None;
+        self.canvas_target = None;
         self.selected_chat = None;
         self.auto_selected = false;
         self.chats_synced = false;
@@ -2029,6 +3539,7 @@ impl AppState {
         self.pending_sends.clear();
         self.upload_progress = None;
         self.transfers.clear();
+        self.sync_clocks.clear();
         self.local_device_id = None;
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         cx.notify();
@@ -2061,6 +3572,7 @@ impl AppState {
             state.attach_engine(engine, cx);
         }
         state.select_chat(Some(chat.id), cx);
+        state.watch_clock_transitions(cx);
         state
     }
 
@@ -2077,6 +3589,36 @@ impl AppState {
                 .selected_chat
                 .as_ref()
                 .is_some_and(|id| !self.pending_sends.contains_key(id))
+    }
+
+    /// A turn is streaming in this chat, or parked on a question it is still
+    /// owed an answer to. Only the status row decides: a persistent session
+    /// parked between turns reports idle.
+    pub(crate) fn chat_turn_running(&self, chat_id: &str) -> bool {
+        self.sessions.iter().any(|session| {
+            session.chat_id == chat_id
+                && matches!(
+                    session.status,
+                    zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                )
+        })
+    }
+
+    /// The selected chat may change provider right now: a saved chat between
+    /// turns (its transcript is handed to the new provider), or a side-chat
+    /// draft before its first send snapshots the harness.
+    pub(crate) fn harness_switchable(&self) -> bool {
+        if self.side_chat_harness_editable() {
+            return true;
+        }
+        !self.unsaved_side_chat
+            && self.selected_chat.as_ref().is_some_and(|id| {
+                !self.pending_sends.contains_key(id)
+                    && !self.chat_turn_running(id)
+                    // An older host would resume the chat's stored session
+                    // under the new provider.
+                    && self.chat_host_supports(id, zeron_proto::capabilities::PROVIDER_SWITCH_V1)
+            })
     }
 
     fn is_unsaved_side_chat(&self, chat_id: &str) -> bool {
@@ -2142,8 +3684,157 @@ impl AppState {
             s.workspace_scope = None;
             s.auth = None;
             s.data_dir = Some(data_dir);
+            s.boot_config = Some(config.clone());
+            // A deliberate start (launch, Retry, a runtime switch) begins
+            // the respawn backoff afresh.
+            s.engine_losses.clear();
+            s.reconnect_task = None;
             cx.notify();
         });
+        Self::connect(state, config, cx);
+    }
+
+    /// The next engine exit is the shell's doing (it stops the engine to
+    /// replace the runtime): don't reconnect on it.
+    pub fn expect_engine_exit(&mut self) {
+        self.engine_exit_expected = true;
+    }
+
+    /// A separate engine went away unasked: reconnect — the bootstrap probe
+    /// starts it again when nothing serves the port. What's on screen stays
+    /// while it does; the new engine's watches replace it frame by frame.
+    fn engine_connection_lost(&mut self, handle: &EngineHandle, cx: &mut Context<Self>) {
+        let current = self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.same_connection(handle));
+        if !current || self.engine_exit_expected {
+            return;
+        }
+        let Some(config) = self.boot_config.clone() else {
+            return;
+        };
+        // A transport failure (an oversized frame, a reset socket) loses the
+        // connection while the engine runs on; say which it was.
+        let reason = handle.client().close_reason();
+        let respawn = record_engine_loss(&mut self.engine_losses, std::time::Instant::now());
+        self.engine = None;
+        self.watch_tasks.clear();
+        self.transcript_task = None;
+        self.queue_task = None;
+        self.change_request_tasks.clear();
+        self.focus_task = None;
+        let Some(delay) = respawn else {
+            let log = config.data_dir.join("logs").join("zeron-engine.log");
+            tracing::error!(
+                losses = self.engine_losses.len(),
+                reason = reason.as_deref().unwrap_or("the engine went away"),
+                "the engine connection keeps dropping; giving up until Retry"
+            );
+            self.connection = ConnectionStatus::Failed(match reason {
+                Some(reason) => format!(
+                    "Zeron keeps losing its connection to the engine: {reason}. \
+                     Details are in {}.",
+                    log.display()
+                ),
+                None => format!(
+                    "Zeron's engine keeps stopping unexpectedly. Details are in {}.",
+                    log.display()
+                ),
+            });
+            cx.notify();
+            return;
+        };
+        tracing::warn!(?delay, ?reason, "lost the engine connection; reconnecting");
+        self.reconnect_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = cx.update(|cx| {
+                let Some(state) = this.upgrade() else {
+                    return;
+                };
+                // The shell may have replaced the runtime meanwhile.
+                let still_down = {
+                    let state = state.read(cx);
+                    state.engine.is_none() && !state.engine_exit_expected
+                };
+                if still_down {
+                    Self::connect(state, config, cx);
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Whether one of the app's windows is focused, for the engine's desktop
+    /// banners ("only while Zeron isn't focused"). Repeated while focused, so
+    /// a window that dies focused stops counting.
+    pub fn set_viewport_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if self.viewport_focused == focused && self.focus_task.is_some() {
+            return;
+        }
+        self.viewport_focused = focused;
+        self.report_focus(cx);
+    }
+
+    fn report_focus(&mut self, cx: &mut Context<Self>) {
+        const REPEAT: std::time::Duration = std::time::Duration::from_secs(20);
+        let Some(engine) = self.engine.clone().filter(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1)
+        }) else {
+            self.focus_task = None;
+            return;
+        };
+        let viewport_id = self.viewport_id.clone();
+        let focused = self.viewport_focused;
+        self.focus_task = Some(cx.spawn(async move |_, cx| {
+            loop {
+                let params = serde_json::json!({ "viewportId": viewport_id, "focused": focused });
+                if let Err(error) = engine
+                    .client()
+                    .call(methods::SET_VIEWPORT_FOCUS, params)
+                    .await
+                {
+                    tracing::debug!(%error, "viewport focus report failed");
+                }
+                if !focused {
+                    return;
+                }
+                cx.background_executor().timer(REPEAT).await;
+            }
+        }));
+    }
+
+    /// Tell the engine this app's windows are going away unfocused (the app
+    /// is quitting), so banners aren't held back for a focus report that's
+    /// about to go stale.
+    pub fn viewport_closing(&self) -> Option<impl std::future::Future<Output = ()> + use<>> {
+        let engine = self.engine.clone().filter(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1)
+        })?;
+        let params = serde_json::json!({ "viewportId": self.viewport_id, "focused": false });
+        Some(async move {
+            let _ = engine
+                .client()
+                .call(methods::SET_VIEWPORT_FOCUS, params)
+                .await;
+        })
+    }
+
+    /// Whether the engine posts desktop banners itself (the app then posts
+    /// none, so nothing doubles up).
+    pub fn engine_posts_banners(&self) -> bool {
+        self.engine.as_ref().is_some_and(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1)
+        })
+    }
+
+    fn connect(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
         let boot = Tokio::spawn(cx, EngineHandle::bootstrap(config));
         cx.spawn(async move |cx| {
             let outcome = match boot.await {
@@ -2184,6 +3875,14 @@ impl AppState {
             self.harness_updates.clear();
         }
         self.engine = Some(handle.clone());
+        self.engine_exit_expected = false;
+        let watched = handle.clone();
+        self.connection_task = Some(cx.spawn(async move |this, cx| {
+            watched.closed().await;
+            this.update(cx, |state, cx| state.engine_connection_lost(&watched, cx))
+                .ok();
+        }));
+        self.report_focus(cx);
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
@@ -2212,29 +3911,27 @@ impl AppState {
                 cx,
                 handle.clone(),
                 methods::WATCH_CONNECTIVITY,
-                |state, value| {
-                    state.apply_connectivity(value);
-                    true
-                },
+                AppState::apply_connectivity,
             ),
             spawn_watch(
                 cx,
                 handle.clone(),
                 methods::WATCH_TRANSFERS,
-                |state, value| {
-                    state.apply_transfers(value);
-                    true
-                },
+                AppState::apply_transfers,
             ),
-            spawn_watch(cx, handle.clone(), methods::WATCH_SPACES, |state, value| {
-                state.apply_spaces(value);
-                true
-            }),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_SPACES,
+                AppState::apply_spaces,
+            ),
             // Auth frames parse tolerantly — engine and proto tags differ today.
-            spawn_watch(cx, handle.clone(), methods::AUTH_STATUS, |state, value| {
-                state.apply_auth_value(value);
-                true
-            }),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::AUTH_STATUS,
+                AppState::apply_auth_value,
+            ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         if supports_harness_updates {
@@ -2242,12 +3939,26 @@ impl AppState {
                 cx,
                 handle.clone(),
                 methods::WATCH_HARNESS_UPDATES,
-                |state, value| {
-                    state.apply_harness_updates(value);
-                    true
-                },
+                AppState::apply_harness_updates,
             ));
         }
+        // Credits change on their own (use, renewals, purchases elsewhere):
+        // keep the status the composer's Cloud gate reads current.
+        watch_tasks.push(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CLOUD_STATUS_POLL).await;
+                if this
+                    .update(cx, |state, cx| {
+                        if state.cloud_enabled() {
+                            state.refresh_cloud_status(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
@@ -2264,7 +3975,108 @@ impl AppState {
                 self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
             }
         }
+        // Whether this account can run sessions on Cloud, and on which
+        // repositories (the checkout picker's Cloud option).
+        self.refresh_cloud(cx);
         cx.notify();
+    }
+
+    /// Read Cloud's status, then — when it is on — the repositories it
+    /// reaches. Best effort: an account without Cloud just has no option.
+    pub fn refresh_cloud(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        self.cloud_repos_task = Some(cx.spawn(async move |this, cx| {
+            // A failed read (offline, the edge failing for a moment) is tried
+            // again: until it answers, Cloud reads as not offered, and
+            // nothing else would ask again until a restart.
+            let mut delay = std::time::Duration::from_secs(30);
+            let mut status = loop {
+                match crate::cloud::fetch_status(engine.clone()).await {
+                    Ok(status) => break status,
+                    Err(_) => {
+                        cx.background_executor().timer(delay).await;
+                        delay = (delay * 2).min(std::time::Duration::from_secs(300));
+                    }
+                }
+            };
+            // Cloud is part of every signed-in account: one not set up yet
+            // is set up now. Nothing runs (or bills) until a chat does.
+            if status.available
+                && status.state == zeron_proto::CloudState::Off
+                && let Ok(on) = engine
+                    .client()
+                    .call_as::<zeron_proto::CloudStatus>(
+                        zeron_rpc::methods::CLOUD_ENABLE,
+                        serde_json::json!({}),
+                    )
+                    .await
+            {
+                status = on;
+            }
+            let enabled = crate::cloud::account_enabled(&status);
+            this.update(cx, |state, cx| {
+                state.set_cloud_status(status, cx);
+                if enabled {
+                    state.refresh_cloud_repos(cx);
+                } else if state.cloud_repos.take().is_some() {
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Re-read the repositories Cloud reaches (Cloud turned on, GitHub
+    /// connected, the GitHub App installed somewhere new).
+    pub fn refresh_cloud_repos(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        if !self.cloud_enabled() {
+            return;
+        }
+        self.cloud_repos_refreshing = true;
+        cx.notify();
+        self.cloud_repos_task = Some(cx.spawn(async move |this, cx| {
+            #[derive(serde::Deserialize)]
+            struct Listing {
+                #[serde(default)]
+                repos: Vec<zeron_proto::GithubRepo>,
+            }
+            let repos = engine
+                .client()
+                .call_as::<Listing>(methods::LIST_GITHUB_REPOS, serde_json::json!({}))
+                .await;
+            this.update(cx, |state, cx| {
+                state.cloud_repos_refreshing = false;
+                // A failed read keeps what was known.
+                if let Ok(listing) = repos {
+                    state.cloud_repos = Some(listing.repos);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub fn cloud_repos_refreshing(&self) -> bool {
+        self.cloud_repos_refreshing
+    }
+
+    /// The Cloud repository a project's GitHub origin names, when Cloud
+    /// reaches it — the checkout picker then offers Cloud.
+    pub fn cloud_repo_for(&self, space: &zeron_proto::Space) -> Option<&zeron_proto::GithubRepo> {
+        // Cloud is offered only while it is on.
+        if !self.cloud_enabled() {
+            return None;
+        }
+        let name = space.github_repo.as_deref()?;
+        self.cloud_repos
+            .as_ref()?
+            .iter()
+            .find(|repo| repo.full_name.eq_ignore_ascii_case(name))
     }
 
     fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {
@@ -2317,29 +4129,34 @@ impl AppState {
         cx.notify();
     }
 
-    fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) {
+    /// Returns whether a pending link was resolved (selected or rejected).
+    fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(link) = self.pending_deep_link.clone() else {
-            return;
+            return false;
         };
         let Some(locator) = crate::links::workspace_locator(
             self.workspace_scope,
             self.auth.as_ref(),
             self.local_device_id.as_deref(),
         ) else {
-            return;
+            return false;
         };
         if locator != link.workspace {
             self.pending_deep_link = None;
             self.deep_link_notice =
                 Some("This conversation link belongs to another workspace".into());
-            return;
+            return true;
         }
         if self.chats.iter().any(|chat| chat.id == link.chat_id) {
             self.pending_deep_link = None;
             self.select_chat(Some(link.chat_id), cx);
+            true
         } else if self.chats_synced {
             self.pending_deep_link = None;
             self.deep_link_notice = Some("The linked conversation was not found".into());
+            true
+        } else {
+            false
         }
     }
 
@@ -2363,6 +4180,14 @@ impl AppState {
                 self.mark_chat_seen(&id, cx);
             }
             return;
+        }
+        if let Some(clock) = chat_id.as_ref().and_then(|id| self.sync_clocks.get_mut(id)) {
+            clock.began = clock_now();
+        }
+        match (&self.selected_chat, &chat_id) {
+            (None, Some(_)) => self.canvas_target = Some(self.current_canvas_target()),
+            (Some(_), None) => self.restore_canvas_target(),
+            _ => {}
         }
         // Take the destination before trimming: switching to the oldest warm
         // transcript must not evict the very entry we are about to display.
@@ -2426,6 +4251,9 @@ impl AppState {
             }
         }
         self.selected_chat = chat_id.clone();
+        // The chat left no longer acks its send from its transcript, and its
+        // row may already show the turn that runs it.
+        self.adopt_pending_sends(Utc::now());
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
@@ -2454,7 +4282,7 @@ impl AppState {
         self.queue_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
-            // (the new-session canvas) keeps the current project pick.
+            // (the new-session canvas) restores the pick set aside above.
             if let Some(chat) = self.chats.iter().find(|c| c.id == id) {
                 match chat.space_id.clone() {
                     Some(space_id) => {
@@ -2543,10 +4371,17 @@ impl AppState {
     }
 
     pub fn mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let unseen = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .is_some_and(|chat| {
+                zeron_proto::view::has_unseen_activity(chat, self.session_for(chat_id))
+            });
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
             return;
         };
-        if !chat.unseen() {
+        if !unseen {
             return;
         }
         chat.last_seen_at = Some(Utc::now());
@@ -2574,7 +4409,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -2653,10 +4491,16 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     }
                 };
                 let alive = this.update(cx, |state, cx| {
-                    state.apply_chats(parsed);
-                    state.apply_pending_deep_link(cx);
-                    state.reconcile_change_request_watches(cx);
-                    cx.notify();
+                    // Identical re-published lists skip the re-sort fan-out:
+                    // watch reconciliation and a whole-shell re-render.
+                    let changed = state.apply_chats(parsed);
+                    let linked = state.apply_pending_deep_link(cx);
+                    if changed {
+                        state.reconcile_change_request_watches(cx);
+                    }
+                    if changed || linked {
+                        cx.notify();
+                    }
                 });
                 if alive.is_err() {
                     return;
@@ -2681,6 +4525,10 @@ fn spawn_change_request_watch(
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        // A host that rejects the checkout (a removed worktree, a folder it
+        // no longer knows) keeps rejecting it, so failed subscribes back off.
+        const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut retry_delay = RETRY_DELAY;
         loop {
             let params = watch_params(&target, local_device_id.as_deref());
 
@@ -2689,7 +4537,10 @@ fn spawn_change_request_watch(
                 .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, params)
                 .await
             {
-                Ok(subscription) => subscription,
+                Ok(subscription) => {
+                    retry_delay = RETRY_DELAY;
+                    subscription
+                }
                 Err(RpcError::UnknownMethod(_)) => {
                     tracing::debug!(
                         device = %target.device_id,
@@ -2719,7 +4570,8 @@ fn spawn_change_request_watch(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
                     continue;
                 }
             };
@@ -2739,8 +4591,9 @@ fn spawn_change_request_watch(
                 };
                 if this
                     .update(cx, |state, cx| {
-                        state.change_requests.store(target.clone(), snapshot);
-                        cx.notify();
+                        if state.change_requests.store(target.clone(), snapshot) {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -2801,11 +4654,11 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     let changed = apply(state, parsed);
-                    state.apply_pending_deep_link(cx);
-                    if changed {
-                        if matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
-                            state.reconcile_change_request_watches(cx);
-                        }
+                    let linked = state.apply_pending_deep_link(cx);
+                    if changed && matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
+                        state.reconcile_change_request_watches(cx);
+                    }
+                    if changed || linked {
                         cx.notify();
                     }
                 });
@@ -3109,9 +4962,10 @@ mod tests {
     use chrono::TimeDelta;
     use gpui::AppContext;
     use zeron_engine::{EngineCore, default_registry};
+    use zeron_rpc::RpcReply;
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `zeron_proto::view`.
-    use zeron_proto::{SessionStatus, UserProfile};
+    use zeron_proto::{DoneStatus, SessionStatus, UserProfile};
 
     /// A localhost port that was just free (bind :0, read, drop).
     async fn free_port() -> u16 {
@@ -3185,11 +5039,14 @@ mod tests {
     async fn remote_viewport_treats_legacy_daemon_as_ready() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        // The viewport reads the daemon's IPC bearer from its data dir.
+        let token = zeron_rpc::ipc_auth::issue_token(dir.path()).unwrap();
         let server = tokio::spawn(zeron_rpc::serve_ws_listener(
             listener,
             Arc::new(LegacyIdentityRpc),
+            token,
         ));
-        let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
@@ -3301,6 +5158,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
+        let dir = tempfile::tempdir().unwrap();
+        let token = zeron_rpc::ipc_auth::issue_token(dir.path()).unwrap();
         let server = tokio::spawn(zeron_rpc::serve_ws_listener(
             listener,
             Arc::new(DeferredIdentityRpc {
@@ -3309,12 +5168,13 @@ mod tests {
                     workspace_scope: WorkspaceScope::Local,
                     cursor_sdk_version: None,
                     capabilities: zeron_proto::capabilities::current(),
+                    build: None,
                 },
                 state: state_rx,
             }),
+            token,
         ));
 
-        let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
@@ -3367,7 +5227,14 @@ mod tests {
         assert_eq!(handle.mode(), EngineMode::InProcess);
 
         // Attach the way an external viewport would, and speak the same protocol.
-        let attached = connect_ws(&format!("ws://127.0.0.1:{port}"))
+        // Without the engine's bearer the port refuses to serve.
+        assert!(
+            zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{port}"), None)
+                .await
+                .is_err(),
+            "the IPC port must not serve a dial without the engine's token"
+        );
+        let attached = zeron_rpc::connect_ipc(port, Some(dir.path()))
             .await
             .expect("a second viewport must be able to attach");
         let harnesses = attached
@@ -3442,6 +5309,55 @@ mod tests {
 
         b.shutdown().await;
         a.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_background_engine_starts_only_on_a_free_real_port() {
+        let free = free_port().await;
+        assert!(EngineHandle::should_launch_background(true, free).await);
+        assert!(!EngineHandle::should_launch_background(false, free).await);
+        // Port 0 has no address a background engine could be found at.
+        assert!(!EngineHandle::should_launch_background(true, 0).await);
+        // A stranger on the port would keep it from ever serving.
+        let squatter = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let taken = squatter.local_addr().unwrap().port();
+        assert!(!EngineHandle::should_launch_background(true, taken).await);
+    }
+
+    #[test]
+    fn a_lost_engine_respawns_with_backoff_then_stops_to_show_the_failure() {
+        use std::time::Duration;
+        let start = std::time::Instant::now();
+        let mut losses = Vec::new();
+        assert_eq!(
+            record_engine_loss(&mut losses, start),
+            Some(Duration::from_secs(1))
+        );
+        // Spread out, losses age away: an update restart now and then
+        // always gets the short delay.
+        assert_eq!(
+            record_engine_loss(
+                &mut losses,
+                start + ENGINE_LOSS_WINDOW + Duration::from_secs(1)
+            ),
+            Some(Duration::from_secs(1))
+        );
+        let burst = start + Duration::from_secs(3600);
+        let delays: Vec<_> = (0..5)
+            .map(|n| record_engine_loss(&mut losses, burst + Duration::from_secs(n)))
+            .collect();
+        assert_eq!(
+            delays,
+            vec![
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(2)),
+                Some(Duration::from_secs(5)),
+                Some(Duration::from_secs(15)),
+                None,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3588,9 +5504,16 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(zeron_rpc::serve_ws_listener(listener, core.rpc_service()));
-
         let ui_dir = tempfile::tempdir().unwrap();
+        // The daemon publishes its bearer; this viewport shares the data dir
+        // it reads the token from.
+        let token = zeron_rpc::ipc_auth::issue_token(ui_dir.path()).unwrap();
+        tokio::spawn(zeron_rpc::serve_ws_listener(
+            listener,
+            core.rpc_service(),
+            token,
+        ));
+
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: ui_dir.path().to_path_buf(),
             ipc_port: port,
@@ -3646,6 +5569,7 @@ mod tests {
             created_at: base + TimeDelta::minutes(created_min),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,
@@ -3665,6 +5589,9 @@ mod tests {
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,
+            repository_id: None,
+            github_repo: None,
+            icon: None,
             created_at: base + TimeDelta::minutes(created_min),
         }
     }
@@ -3677,6 +5604,10 @@ mod tests {
     ) -> Session {
         Session {
             last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
             chat_id: chat_id.into(),
             device_id: "dev".into(),
             status,
@@ -3916,11 +5847,38 @@ mod tests {
     }
 
     #[test]
+    fn a_ready_cloud_machine_that_stopped_answering_is_asleep() {
+        use crate::cloud::Presence;
+        let mut state = AppState::new();
+        let now = Utc::now();
+        let mut machine = device("cloud-s", "Cloud");
+        machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+        machine.last_seen_at = Some(now);
+        state.devices = vec![machine];
+        state.cloud_sessions = Some(
+            serde_json::from_value(serde_json::json!({
+                "available": true,
+                "sessions": [{ "chatId": "chat", "deviceId": "cloud-s", "spaceId": "space", "state": "ready", "createdAt": 0 }]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(state.device_presence("cloud-s", now), Presence::Online);
+        // Idle machines sleep on their own; the cached list still says ready.
+        let later = now + TimeDelta::minutes(10);
+        assert_eq!(state.device_presence("cloud-s", later), Presence::Asleep);
+        assert!(!state.device_presence("cloud-s", later).warns());
+    }
+
+    #[test]
     fn session_heartbeats_preserve_freshness_without_redrawing_unchanged_status() {
         let mut state = AppState::new();
         let now = Utc::now();
         let mut row = Session {
             last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -3952,6 +5910,10 @@ mod tests {
         let now = Utc::now();
         state.sessions = vec![Session {
             last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -4116,6 +6078,574 @@ mod tests {
         assert!(s.send_undelivered("c", later));
     }
 
+    /// A row of `chat_id` in `status`, its turn started at `started_at` and
+    /// heartbeating at `at`.
+    fn turn(
+        chat_id: &str,
+        status: SessionStatus,
+        started_at: Option<DateTime<Utc>>,
+        at: DateTime<Utc>,
+    ) -> Session {
+        Session {
+            started_at,
+            ..session(chat_id, status, 0, at)
+        }
+    }
+
+    fn outcome(status: DoneStatus, finished_at: DateTime<Utc>) -> zeron_proto::NativeTurnOutcome {
+        zeron_proto::NativeTurnOutcome {
+            status,
+            finished_at,
+        }
+    }
+
+    /// The row of a turn that ended at `at` with `status`, settled the way
+    /// the engine settles it; `completed` is the chat's completion marker.
+    fn ended(
+        chat_id: &str,
+        status: DoneStatus,
+        completed: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Session {
+        let settled = match status {
+            DoneStatus::Errored => SessionStatus::Errored,
+            _ => SessionStatus::Idle,
+        };
+        Session {
+            last_completed_turn: completed.map(Into::into),
+            last_turn_outcome: Some(outcome(status, at)),
+            ..turn(chat_id, settled, None, at)
+        }
+    }
+
+    /// The shell's chime for `row`, the frame after `prev`.
+    fn chime(
+        s: &AppState,
+        prev: &Session,
+        row: &Session,
+        now: DateTime<Utc>,
+    ) -> Option<crate::sound::Ping> {
+        crate::sound::SessionNotificationState::new(row, now).ping_since(
+            &crate::sound::SessionNotificationState::new(prev, prev.updated_at),
+            s.send_pending(&row.chat_id, now),
+        )
+    }
+
+    #[test]
+    fn a_send_left_before_it_landed_is_adopted_by_the_turn_its_host_starts() {
+        // User report 2026-10-26: sessions launched back to back, each left
+        // for the next before its host wrote the message (a fresh worktree is
+        // checked out first). Only the selected chat's transcript acked a
+        // send, so 120 s later the sidebar painted live runs "Failed".
+        let sent = Utc::now();
+        let t = |secs: i64| sent + TimeDelta::seconds(secs);
+        let mut s = AppState::new();
+        s.selected_chat = Some("new".into());
+        s.begin_first_send("new", "m1", sent);
+        s.selected_chat = None; // Cmd+N: the next session's canvas
+        let new = chat("new", 0, Some(1));
+
+        let running = turn("new", SessionStatus::Working, Some(t(2)), t(2));
+        assert!(s.apply_sessions_at(vec![running.clone()], t(2)));
+        assert!(!s.send_pending("new", t(2)));
+        assert_eq!(s.display_status_for(&new, t(2)), ChatIndicator::Working);
+
+        // It finishes inside the grace window: Done, with its chime.
+        let done = ended("new", DoneStatus::Completed, Some("t1"), t(40));
+        s.apply_sessions_at(vec![done.clone()], t(40));
+        assert_eq!(s.display_status_for(&new, t(40)), ChatIndicator::Completed);
+        assert_eq!(
+            chime(&s, &running, &done, t(40)),
+            Some(crate::sound::Ping::Done)
+        );
+        assert!(!s.send_undelivered("new", t(121)));
+    }
+
+    #[test]
+    fn a_send_whose_turn_asks_a_question_reads_as_input() {
+        let sent = Utc::now();
+        let at = sent + TimeDelta::seconds(3);
+        let mut s = AppState::new();
+        s.begin_first_send("q", "m1", sent);
+        // Started and parked on its question between two frames.
+        let asking = turn("q", SessionStatus::AwaitingInput, Some(at), at);
+        s.apply_sessions_at(vec![asking], at);
+        let q = chat("q", 0, None);
+        assert_eq!(s.display_status_for(&q, at), ChatIndicator::AwaitingInput);
+        let later = sent + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        assert!(!s.send_undelivered("q", later));
+    }
+
+    #[test]
+    fn only_a_fresh_turn_started_after_the_send_adopts_it() {
+        let sent = Utc::now();
+        let t = |secs: i64| sent + TimeDelta::seconds(secs);
+        // The previous turn's row has gone stale, so the chat took a send.
+        let previous = Session {
+            last_completed_turn: Some("t0".into()),
+            ..turn("a", SessionStatus::Working, Some(t(-600)), t(-60))
+        };
+        let mut s = AppState::new();
+        s.apply_sessions_at(vec![previous.clone()], sent);
+        s.begin_pending_send("a", "m1", sent);
+        let pending_after = |s: &mut AppState, row: Session, now| {
+            s.apply_sessions_at(vec![row], now);
+            s.send_pending("a", now)
+        };
+
+        // That turn's heartbeat resumes.
+        let heartbeat = Session {
+            updated_at: t(5),
+            ..previous.clone()
+        };
+        assert!(pending_after(&mut s, heartbeat, t(5)));
+        // A turn on a row nobody has refreshed since.
+        let stale = Session {
+            started_at: Some(t(6)),
+            updated_at: t(6),
+            ..previous.clone()
+        };
+        assert!(pending_after(&mut s, stale, t(60)));
+        // A live row with no turn start at all (a peer that sends none).
+        let unstamped = Session {
+            started_at: None,
+            updated_at: t(60),
+            ..previous.clone()
+        };
+        assert!(pending_after(&mut s, unstamped, t(60)));
+        // That turn's end: no new turn to show.
+        let stopped = ended("a", DoneStatus::Interrupted, Some("t0"), t(61));
+        assert!(pending_after(&mut s, stopped, t(61)));
+        // Another chat's turn.
+        let other = turn("b", SessionStatus::Working, Some(t(62)), t(62));
+        assert!(pending_after(&mut s, other, t(62)));
+
+        let adopted = Session {
+            started_at: Some(t(63)),
+            updated_at: t(63),
+            ..previous
+        };
+        assert!(!pending_after(&mut s, adopted, t(63)));
+    }
+
+    #[test]
+    fn a_late_result_of_an_earlier_turn_never_adopts_a_send() {
+        // d3141ef0: completions stay quiet while a send is pending, and the
+        // result of a turn that ran before the send proves nothing about it.
+        let sent = Utc::now();
+        let t = |secs: i64| sent + TimeDelta::seconds(secs);
+        // A turn in flight at send time (its row had gone stale) ends, alone
+        // or with the next turn's start in one coalesced frame.
+        let previous = Session {
+            last_completed_turn: Some("t0".into()),
+            ..turn("a", SessionStatus::Working, Some(t(-600)), t(-60))
+        };
+        let next = Session {
+            last_completed_turn: Some("t1".into()),
+            ..turn("a", SessionStatus::Working, Some(t(3)), t(3))
+        };
+        // A settled row that lagged: a turn it never showed had already ended.
+        let idle = ended("a", DoneStatus::Completed, Some("t0"), t(-3600));
+        let caught_up = ended("a", DoneStatus::Completed, Some("t1"), t(-5));
+        for (before, row) in [
+            (
+                &previous,
+                ended("a", DoneStatus::Completed, Some("t1"), t(2)),
+            ),
+            (&previous, next),
+            (&idle, caught_up),
+        ] {
+            let mut s = AppState::new();
+            s.apply_sessions_at(vec![before.clone()], sent);
+            s.begin_pending_send("a", "m1", sent);
+            s.apply_sessions_at(vec![row.clone()], t(3));
+            assert!(s.send_pending("a", t(3)), "{row:?}");
+            assert_eq!(chime(&s, before, &row, t(3)), None, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn a_turn_that_ends_between_two_frames_adopts_a_send_it_could_only_be() {
+        let sent = Utc::now();
+        let at = sent + TimeDelta::seconds(2);
+        let later = sent + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        // A new chat's first row already has its turn over.
+        let new = chat("new", 0, Some(1));
+        for (status, completed, shown) in [
+            (DoneStatus::Completed, Some("t1"), ChatIndicator::Completed),
+            (DoneStatus::Errored, None, ChatIndicator::Errored),
+        ] {
+            let mut s = AppState::new();
+            s.begin_first_send("new", "m1", sent);
+            s.apply_sessions_at(vec![ended("new", status, completed, at)], at);
+            assert!(!s.send_pending("new", at), "{status:?}");
+            assert_eq!(s.display_status_for(&new, at), shown);
+            assert!(!s.send_undelivered("new", later), "{status:?}");
+        }
+
+        // A settled chat's next turn: after a completed turn, a failed one, or
+        // one stamped by a host whose clock runs ahead of this device's.
+        let hour_ago = sent - TimeDelta::hours(1);
+        let finished = ended("a", DoneStatus::Completed, Some("t0"), hour_ago);
+        let failed = ended("a", DoneStatus::Errored, Some("t0"), hour_ago);
+        let second_on = sent + TimeDelta::seconds(1);
+        let ahead = ended("a", DoneStatus::Completed, Some("t0"), second_on);
+        for before in [finished, failed, ahead] {
+            let mut s = AppState::new();
+            s.apply_sessions_at(vec![before.clone()], sent);
+            s.begin_pending_send("a", "m1", sent);
+            // The same row again, a restarted host's empty one, or a Stop,
+            // ends no turn of the send's.
+            let empty = Session {
+                last_completed_turn: None,
+                last_turn_outcome: None,
+                ..before.clone()
+            };
+            let stopped = ended("a", DoneStatus::Interrupted, Some("t0"), at);
+            for row in [before.clone(), empty, stopped] {
+                s.apply_sessions_at(vec![row.clone()], at);
+                assert!(s.send_pending("a", at), "{row:?}");
+            }
+            s.apply_sessions_at(vec![ended("a", DoneStatus::Completed, Some("t1"), at)], at);
+            assert!(!s.send_pending("a", at), "{before:?}");
+        }
+    }
+
+    #[test]
+    fn a_restarted_host_adopts_with_no_completion_but_not_on_its_recovery() {
+        // A host engine restart (a Cloud machine waking, too) starts its rows
+        // over: the send's turn comes back with no completion marker at all,
+        // after a finished turn or a stopped one.
+        let sent = Utc::now();
+        let t = |secs: i64| sent + TimeDelta::seconds(secs);
+        let first = turn("a", SessionStatus::Working, Some(t(5)), t(5));
+        for before in [
+            ended("a", DoneStatus::Completed, Some("t0"), t(-3600)),
+            ended("a", DoneStatus::Interrupted, Some("t0"), t(-3600)),
+        ] {
+            let mut s = AppState::new();
+            s.apply_sessions_at(vec![before.clone()], sent);
+            s.begin_pending_send("a", "m1", sent);
+            // Boot recovery settles a turn the restart cut off, which ran
+            // nothing of the send's.
+            s.apply_sessions_at(vec![ended("a", DoneStatus::Interrupted, None, t(4))], t(4));
+            assert!(s.send_pending("a", t(4)), "{before:?}");
+            s.apply_sessions_at(vec![first.clone()], t(5));
+            assert!(!s.send_pending("a", t(5)), "{before:?}");
+        }
+
+        // A turn in flight at send time (its row had gone stale), which the
+        // restart cut off, resumes first.
+        let previous = Session {
+            last_completed_turn: Some("t0".into()),
+            ..turn("a", SessionStatus::Working, Some(t(-600)), t(-60))
+        };
+        let mut s = AppState::new();
+        s.apply_sessions_at(vec![previous], sent);
+        s.begin_pending_send("a", "m1", sent);
+        s.apply_sessions_at(vec![first], t(5));
+        assert!(s.send_pending("a", t(5)));
+    }
+
+    #[test]
+    fn the_open_chat_keeps_its_exact_ack_and_leaving_hands_it_to_the_row() {
+        let sent = Utc::now();
+        let t = |secs: i64| sent + TimeDelta::seconds(secs);
+        let mut s = AppState::new();
+        s.selected_chat = Some("a".into());
+        s.begin_first_send("a", "m1", sent);
+        // Its transcript names the message; the row only shows a turn.
+        let asking = turn("a", SessionStatus::AwaitingInput, Some(t(2)), t(2));
+        s.apply_sessions_at(vec![asking.clone()], t(2));
+        assert!(s.send_pending("a", t(2)));
+        // Left: the next frame, though it looks the same, adopts and repaints.
+        s.selected_chat = Some("b".into());
+        let heartbeat = Session {
+            updated_at: t(12),
+            ..asking
+        };
+        assert!(s.apply_sessions_at(vec![heartbeat], t(12)));
+        assert!(!s.send_pending("a", t(12)));
+    }
+
+    #[gpui::test]
+    fn leaving_a_chat_hands_its_send_to_the_row_it_already_has(cx: &mut gpui::TestAppContext) {
+        // Its turn ended while it was open, before the transcript named the
+        // message, and nothing else is live: no frame follows the user out.
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, cx| {
+            let sent = Utc::now() - TimeDelta::seconds(10);
+            let at = sent + TimeDelta::seconds(5);
+            s.select_chat(Some("a".into()), cx);
+            s.begin_first_send("a", "m1", sent);
+            s.apply_sessions_at(vec![ended("a", DoneStatus::Completed, Some("t1"), at)], at);
+            assert!(s.send_pending("a", at));
+            s.select_chat(Some("b".into()), cx);
+            assert!(!s.send_pending("a", Utc::now()));
+        });
+    }
+
+    #[test]
+    fn a_known_chat_whose_row_arrives_after_the_send_proves_nothing() {
+        // Its first row may end a turn that was running as the user sent.
+        let sent = Utc::now();
+        let at = sent + TimeDelta::seconds(2);
+        let mut s = AppState::new();
+        s.begin_pending_send("a", "m1", sent);
+        let old = ended("a", DoneStatus::Completed, Some("t0"), at);
+        s.apply_sessions_at(vec![old], at);
+        assert!(s.send_pending("a", at));
+    }
+
+    #[test]
+    fn a_send_no_host_takes_still_fails_past_the_grace() {
+        let sent = Utc::now();
+        let later = sent + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        let mut s = AppState::new();
+        s.begin_first_send("a", "m1", sent);
+        let other = turn("b", SessionStatus::Working, Some(later), later);
+        s.apply_sessions_at(vec![other], later);
+        assert!(s.send_undelivered("a", later));
+    }
+
+    #[gpui::test]
+    fn an_unreachable_cloud_host_rereads_sessions_at_most_every_few_seconds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| {
+            let mut s = AppState::new();
+            let mut cloud = chat("c", 0, Some(10));
+            cloud.device_id = "cloud-s1".into();
+            let mut local = chat("l", 0, Some(10));
+            local.device_id = "mac".into();
+            s.chats = vec![cloud, local];
+            let mut machine = device("cloud-s1", "Cloud");
+            machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+            s.devices = vec![machine];
+            s
+        });
+        state.update(cx, |s, cx| {
+            s.recheck_cloud_machine("l", cx);
+            assert!(s.cloud_recheck_at.is_none(), "not a Cloud machine");
+            s.recheck_cloud_machine("c", cx);
+            let first = s.cloud_recheck_at.expect("re-read");
+            s.recheck_cloud_machine("c", cx);
+            assert_eq!(s.cloud_recheck_at, Some(first), "throttled");
+        });
+    }
+
+    #[test]
+    fn a_cloud_machine_that_went_quiet_is_down_and_a_wake_reads_as_waking() {
+        use zeron_proto::{CloudSessions, CloudState};
+        let now = Utc::now();
+        let mut s = AppState::new();
+        let mut c = chat("c", 0, Some(10));
+        c.device_id = "cloud-s1".into();
+        s.chats = vec![c];
+        let mut machine = device("cloud-s1", "Cloud");
+        machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+        machine.last_seen_at = Some(now);
+        s.devices = vec![machine];
+        s.cloud_sessions = Some(CloudSessions {
+            sessions: vec![
+                serde_json::from_value(serde_json::json!({
+                    "chatId": "c", "deviceId": "cloud-s1", "spaceId": "sp",
+                    "state": "ready", "createdAt": 0
+                }))
+                .unwrap(),
+            ],
+            available: true,
+        });
+        assert_eq!(s.chat_machine_down("c"), None, "ready and answering");
+        // It slept on its own: the list still says ready, the heartbeat stopped.
+        s.devices[0].last_seen_at = Some(now - TimeDelta::minutes(10));
+        assert_eq!(
+            s.chat_machine_down("c"),
+            Some(("c".into(), CloudState::Sleeping))
+        );
+        // Wake asked for: waking until the machine answers.
+        s.cloud_wakes.insert("c".into(), std::time::Instant::now());
+        assert_eq!(
+            s.chat_machine_down("c"),
+            Some(("c".into(), CloudState::Starting))
+        );
+        assert_eq!(
+            s.device_presence("cloud-s1", Utc::now()),
+            crate::cloud::Presence::Waking
+        );
+        s.devices[0].last_seen_at = Some(Utc::now());
+        assert_eq!(s.chat_machine_down("c"), None, "up again");
+    }
+
+    #[test]
+    fn a_send_waiting_on_a_booting_cloud_machine_is_pending_not_undelivered() {
+        use zeron_proto::{CloudSession, CloudSessions, CloudState};
+        let now = Utc::now();
+        let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        let mut s = AppState::new();
+        let mut c = chat("c", 0, Some(10));
+        c.device_id = "cloud-s1".into();
+        s.chats = vec![c];
+        let session = |state| CloudSession {
+            chat_id: "c".into(),
+            device_id: "cloud-s1".into(),
+            space_id: "sp".into(),
+            repo: Some("acme/app".into()),
+            path: Some("/home/user/app".into()),
+            state,
+            error: None,
+            failed_action: None,
+            last_active_at: None,
+            created_at: 0,
+        };
+        s.begin_pending_send("c", "m1", now);
+        for state in [
+            CloudState::Provisioning,
+            CloudState::Starting,
+            CloudState::Sleeping,
+        ] {
+            s.cloud_sessions = Some(CloudSessions {
+                sessions: vec![session(state)],
+                available: true,
+            });
+            assert_eq!(s.cloud_machine_booting("c"), Some(state));
+            assert!(s.send_pending("c", later), "{state:?}");
+            assert!(!s.send_undelivered("c", later), "{state:?}");
+        }
+        // A machine that failed is a real delivery problem.
+        s.cloud_sessions = Some(CloudSessions {
+            sessions: vec![session(CloudState::Error)],
+            available: true,
+        });
+        assert_eq!(s.cloud_machine_booting("c"), None);
+        assert!(s.send_undelivered("c", later));
+    }
+
+    #[test]
+    fn a_cloud_turn_stays_working_while_its_setup_streams() {
+        let entry = |id: &str, role, status| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: Vec::new(),
+            created_at: 1,
+            device_id: "d".into(),
+            status,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let user = zeron_doc::MessageRole::User;
+        let assistant = zeron_doc::MessageRole::Assistant;
+        let now = Utc::now();
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        // The machine wrote the message back and is on its setup; no
+        // session row says Working yet.
+        s.apply_transcript(vec![
+            entry("m1", user, None),
+            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Streaming)),
+        ]);
+        assert_eq!(s.indicator_for("c", now), Indicator::Working);
+        // Finished: the session row speaks for itself again.
+        s.apply_transcript(vec![
+            entry("m1", user, None),
+            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Complete)),
+        ]);
+        assert_ne!(s.indicator_for("c", now), Indicator::Working);
+    }
+
+    #[test]
+    fn a_cloud_turn_is_timed_from_the_send_that_started_its_machine() {
+        let entry = |id: &str, role, created_at| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: Vec::new(),
+            created_at,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let user = zeron_doc::MessageRole::User;
+        let assistant = zeron_doc::MessageRole::Assistant;
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        // An ordinary turn: no Cloud setup, no base.
+        s.apply_transcript(vec![entry("m0", user, 10)]);
+        assert_eq!(s.cloud_setup_turn_started(), None);
+        // Sent at 1000 to a machine that has to start: the placeholder.
+        s.push_echo("c", entry("m1", user, 1_000));
+        s.push_cloud_setup_echo("c", "m1", 1_000, false);
+        assert_eq!(s.cloud_setup_turn_started(), Some(1_000));
+        // The machine's own steps, then its turn: still the send.
+        s.apply_transcript(vec![
+            entry("m0", user, 10),
+            entry("m1", user, 1_000),
+            entry("m1.cloud-setup", assistant, 9_000),
+            entry("a1", assistant, 12_000),
+        ]);
+        assert_eq!(s.cloud_setup_turn_started(), Some(1_000));
+        // The next message, still only an echo, goes to the machine already
+        // up: no base, not the earlier turn's send.
+        s.push_echo("c", entry("m2", user, 20_000));
+        assert_eq!(s.cloud_setup_turn_started(), None);
+        // And once the host wrote it back.
+        s.apply_transcript(vec![
+            entry("m1", user, 1_000),
+            entry("m1.cloud-setup", assistant, 9_000),
+            entry("m2", user, 20_000),
+        ]);
+        assert_eq!(s.cloud_setup_turn_started(), None);
+    }
+
+    #[test]
+    fn a_cloud_machine_that_failed_settles_its_setup_step() {
+        use zeron_proto::{CloudSession, CloudSessions, CloudState};
+        let mut s = AppState::new();
+        let mut c = chat("c", 0, Some(10));
+        c.device_id = "cloud-s1".into();
+        s.chats = vec![c];
+        s.selected_chat = Some("c".into());
+        let session = |state, error: Option<&str>| CloudSessions {
+            sessions: vec![CloudSession {
+                chat_id: "c".into(),
+                device_id: "cloud-s1".into(),
+                space_id: "sp".into(),
+                repo: Some("acme/app".into()),
+                path: Some("/home/user/app".into()),
+                state,
+                error: error.map(String::from),
+                failed_action: None,
+                last_active_at: None,
+                created_at: 0,
+            }],
+            available: true,
+        };
+        s.cloud_sessions = Some(session(CloudState::Provisioning, None));
+        s.push_cloud_setup_echo("c", "m1", 0, false);
+        let step = |s: &AppState| match &s.pending_echoes()[0].parts[0] {
+            zeron_doc::MessagePart::Tool {
+                call: zeron_proto::ToolCall::Unknown { name, .. },
+                is_error,
+                output,
+                ..
+            } => (name.clone(), *is_error, output.clone()),
+            other => panic!("{other:?}"),
+        };
+        // Still being set up: the step spins.
+        assert_eq!(step(&s), ("Starting a machine".into(), false, None));
+        // Failed: the step says so, with the reason.
+        s.cloud_sessions = Some(session(CloudState::Error, Some("No room")));
+        s.settle_failed_cloud_setups();
+        assert_eq!(
+            step(&s),
+            ("Couldn't start a machine".into(), true, Some("No room".into()))
+        );
+        assert_eq!(
+            s.pending_echoes()[0].status,
+            Some(zeron_doc::MessageStatus::Complete)
+        );
+    }
+
     #[test]
     fn send_pending_acked_when_the_host_writes_the_message_back() {
         let now = Utc::now();
@@ -4223,12 +6753,9 @@ mod tests {
             display_status(&c, Some(&idle), now),
             ChatIndicator::Completed
         );
-        // Stale working session falls back to the seen check.
+        // A lost host is not a successful completion, even with unread text.
         let stale = session("c", SessionStatus::Working, 300, now);
-        assert_eq!(
-            display_status(&c, Some(&stale), now),
-            ChatIndicator::Completed
-        );
+        assert_eq!(display_status(&c, Some(&stale), now), ChatIndicator::Idle);
         // Seen after the last message = Idle.
         c.last_seen_at = c.last_message_at.map(|t| t + TimeDelta::minutes(1));
         assert_eq!(display_status(&c, Some(&idle), now), ChatIndicator::Idle);
@@ -4243,6 +6770,43 @@ mod tests {
         // No messages at all: nothing to see — Idle.
         let fresh = chat("f", 0, None);
         assert_eq!(display_status(&fresh, None, now), ChatIndicator::Idle);
+    }
+
+    #[gpui::test]
+    fn terminal_result_is_seen_without_an_assistant_message(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let now = Utc::now() - TimeDelta::seconds(1);
+            state.chats = vec![chat("c", 0, None)];
+            let mut row = session("c", SessionStatus::Idle, 0, now);
+            row.terminal_activity = Some(zeron_proto::TerminalActivity {
+                terminal_id: "pty".into(),
+                updated_at: now,
+                report: zeron_proto::ProgramStatus {
+                    id: String::new(),
+                    state: zeron_proto::ProgramState::Done,
+                    app: None,
+                    kind: None,
+                    progress: None,
+                    title: None,
+                    message: None,
+                },
+            });
+            state.apply_sessions(vec![row]);
+            assert!(
+                !state.chats[0].unseen(),
+                "there is no new assistant message"
+            );
+            assert_eq!(
+                state.display_status_for(&state.chats[0], now),
+                ChatIndicator::Completed
+            );
+            state.mark_chat_seen("c", cx);
+            assert_eq!(
+                state.display_status_for(&state.chats[0], Utc::now()),
+                ChatIndicator::Idle
+            );
+        });
     }
 
     #[test]
@@ -4494,6 +7058,46 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn canvas_reopens_on_its_own_target_after_visiting_chats(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_spaces(vec![
+                space("s1", "dev", "/a", 1),
+                space("s2", "remote", "/b", 2),
+            ]);
+            let mut remote = chat("remote-chat", 1, None);
+            remote.device_id = "remote".into();
+            remote.space_id = Some("s2".into());
+            let mut loose = chat("loose-chat", 2, None);
+            loose.device_id = "remote".into();
+            state.apply_chats(vec![remote, loose.clone()]);
+            state.select_space(Some("s1".into()), cx);
+
+            // Chats imply their own target while open…
+            state.select_chat(Some("remote-chat".into()), cx);
+            assert_eq!(state.selected_space.as_deref(), Some("s2"));
+            state.select_chat(Some("loose-chat".into()), cx);
+            assert!(state.no_project);
+            // …and the canvas returns to where it was left.
+            state.select_chat(None, cx);
+            assert!(!state.no_project);
+            assert_eq!(state.selected_space.as_deref(), Some("s1"));
+            assert_eq!(state.effective_device_id().as_deref(), Some("dev"));
+
+            // A projectless canvas survives a project chat, and a chat deleted
+            // elsewhere lands back on it too.
+            state.select_space(None, cx);
+            state.select_device("remote".into(), cx);
+            state.select_chat(Some("remote-chat".into()), cx);
+            state.apply_chats(vec![loose]);
+            assert!(state.selected_chat.is_none());
+            assert!(state.no_project);
+            assert!(state.selected_space.is_none());
+            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+        });
+    }
+
     #[test]
     fn chats_in_space_filters_and_orders() {
         let mut state = AppState::new();
@@ -4529,6 +7133,64 @@ mod tests {
     }
 
     #[test]
+    fn project_filter_and_projects_span_a_repository_across_devices() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("laptop".into());
+        let mut remote = space("remote", "metal", "/w/marigold", 1);
+        remote.repository_id = Some("commit:abc".into());
+        let mut local = space("local", "laptop", "/h/marigold", 2);
+        local.repository_id = Some("commit:abc".into());
+        let other = space("other", "laptop", "/h/notes", 3);
+        state.apply_spaces(vec![remote, local, other]);
+        let in_space = |id: &str, space: &str| {
+            let mut chat = chat(id, 0, None);
+            chat.space_id = Some(space.into());
+            chat
+        };
+        state.apply_chats(vec![
+            in_space("on-remote", "remote"),
+            in_space("on-local", "local"),
+            in_space("on-other", "other"),
+        ]);
+
+        // One project per repository, its checkouts local-first.
+        let projects: Vec<Vec<&str>> = state
+            .projects()
+            .iter()
+            .map(|members| members.iter().map(|s| s.id.as_str()).collect())
+            .collect();
+        assert_eq!(projects, vec![vec!["local", "remote"], vec!["other"]]);
+
+        // Filtering on either checkout shows the whole repository's chats.
+        for filter in ["remote", "local"] {
+            let mut ids: Vec<&str> = state
+                .sidebar_chats(Utc::now(), Some(filter))
+                .iter()
+                .map(|(_, c)| c.id.as_str())
+                .collect();
+            ids.sort();
+            assert_eq!(ids, ["on-local", "on-remote"], "filter {filter}");
+        }
+        let other_only: Vec<&str> = state
+            .sidebar_chats(Utc::now(), Some("other"))
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(other_only, ["on-other"]);
+
+        // A two-device project tags both hosts; a one-device one keeps the
+        // plain host tag.
+        let marigold = state.projects().into_iter().next().unwrap();
+        let (tag, _) = state.project_device_tag(&marigold, Utc::now());
+        assert!(tag.starts_with("@ ") && tag.contains(" · "), "{tag}");
+        let notes = state.projects().into_iter().nth(1).unwrap();
+        assert_eq!(
+            state.project_device_tag(&notes, Utc::now()).0,
+            state.space_device_tag(notes[0], Utc::now()).0
+        );
+    }
+
+    #[test]
     fn apply_chats_drops_vanished_selection() {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
@@ -4542,6 +7204,303 @@ mod tests {
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
     }
 
+    fn clock_epoch() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+            .unwrap()
+            .to_utc()
+    }
+
+    /// Builds a clock-watching state at the pinned `now` and counts its
+    /// notifications.
+    fn clock_state(
+        cx: &mut gpui::TestAppContext,
+        setup: impl FnOnce(&mut AppState),
+    ) -> (
+        Entity<AppState>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+        gpui::Subscription,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new();
+            setup(&mut state);
+            state.watch_clock_transitions(cx);
+            state
+        });
+        let notifies = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = notifies.clone();
+        let subscription =
+            cx.update(|cx| cx.observe(&state, move |_, _| counter.set(counter.get() + 1)));
+        (state, notifies, subscription)
+    }
+
+    /// Steps the simulated executor and the pinned wall clock together.
+    fn advance_to(
+        cx: &mut gpui::TestAppContext,
+        clock: &TestClock,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) {
+        clock.set(to);
+        cx.executor().advance_clock((to - from).to_std().unwrap());
+    }
+
+    /// Proves the state notifies exactly once, exactly at `deadline`.
+    fn assert_state_notifies_at(
+        cx: &mut gpui::TestAppContext,
+        now: DateTime<Utc>,
+        deadline: DateTime<Utc>,
+        setup: impl FnOnce(&mut AppState),
+    ) {
+        let clock = TestClock::start(now);
+        let (_state, notifies, _subscription) = clock_state(cx, setup);
+        let before = deadline - TimeDelta::milliseconds(1);
+        advance_to(cx, &clock, now, before);
+        assert_eq!(notifies.get(), 0, "no notify before the deadline");
+        advance_to(cx, &clock, before, deadline);
+        assert_eq!(notifies.get(), 1, "one notify at the deadline");
+        // Nothing else is due: the next minute passes silently.
+        advance_to(cx, &clock, deadline, deadline + TimeDelta::minutes(1));
+        assert_eq!(notifies.get(), 1);
+    }
+
+    #[gpui::test]
+    fn stale_session_notifies_state_at_its_cutoff(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let row = session("row", SessionStatus::Working, 10, now);
+        let cutoff = row.updated_at + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        let mut probe = AppState::new();
+        probe.sessions = vec![row.clone()];
+        assert_eq!(
+            probe.indicator_for("row", cutoff - TimeDelta::milliseconds(1)),
+            Indicator::Working
+        );
+        assert_eq!(probe.indicator_for("row", cutoff), Indicator::None);
+        assert_state_notifies_at(cx, now, cutoff, |state| state.sessions = vec![row]);
+    }
+
+    #[gpui::test]
+    fn remote_device_notifies_state_when_it_goes_offline(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let seen = now - TimeDelta::seconds(40);
+        let mut remote = device("remote", "Remote");
+        remote.last_seen_at = Some(seen);
+        // The local device is always online; its stale heartbeat is no deadline.
+        let mut local = device("local", "Local");
+        local.last_seen_at = Some(now - TimeDelta::seconds(65));
+        let offline =
+            seen + TimeDelta::seconds(crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1);
+        let mut probe = AppState::new();
+        probe.devices = vec![remote.clone()];
+        assert!(probe.device_online("remote", offline - TimeDelta::milliseconds(1)));
+        assert!(!probe.device_online("remote", offline));
+        assert_state_notifies_at(cx, now, offline, |state| {
+            state.local_device_id = Some("local".into());
+            state.devices = vec![local, remote];
+        });
+    }
+
+    #[gpui::test]
+    fn pending_send_notifies_state_when_its_grace_expires(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let started = now - TimeDelta::seconds(100);
+        let expiry = started + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        let mut probe = AppState::new();
+        probe.begin_pending_send("chat", "message", started);
+        assert!(!probe.send_undelivered("chat", expiry - TimeDelta::milliseconds(1)));
+        assert!(probe.send_undelivered("chat", expiry));
+        assert_state_notifies_at(cx, now, expiry, |state| {
+            state.begin_pending_send("chat", "message", started)
+        });
+    }
+
+    #[gpui::test]
+    fn settled_state_arms_no_clock(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let (state, notifies, _subscription) = clock_state(cx, |state| {
+            state.sessions = vec![
+                session("failed", SessionStatus::Errored, 0, now),
+                session("idle", SessionStatus::Idle, 0, now),
+            ];
+        });
+        assert!(state.read_with(cx, |state, _| state.clock.task.is_none()));
+        advance_to(cx, &clock, now, now + TimeDelta::hours(1));
+        assert_eq!(notifies.get(), 0);
+    }
+
+    #[gpui::test]
+    fn silent_heartbeat_defers_the_stale_notify(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let row = session("row", SessionStatus::Working, 10, now);
+        let first_cutoff = row.updated_at + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        let (state, notifies, _subscription) = clock_state(cx, |state| {
+            state.apply_sessions_at(vec![row], now);
+        });
+        // A heartbeat only refreshes the lease: the reducer stores it without
+        // notifying, so the armed timer is now early.
+        let heartbeat = now + TimeDelta::seconds(20);
+        advance_to(cx, &clock, now, heartbeat);
+        state.update(cx, |state, _| {
+            let changed = state.apply_sessions_at(
+                vec![session("row", SessionStatus::Working, 0, heartbeat)],
+                heartbeat,
+            );
+            assert!(!changed);
+        });
+        advance_to(cx, &clock, heartbeat, first_cutoff);
+        assert_eq!(notifies.get(), 0, "an obsolete deadline re-arms silently");
+        let cutoff = heartbeat + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        advance_to(
+            cx,
+            &clock,
+            first_cutoff,
+            cutoff - TimeDelta::milliseconds(1),
+        );
+        assert_eq!(notifies.get(), 0);
+        advance_to(cx, &clock, cutoff - TimeDelta::milliseconds(1), cutoff);
+        assert_eq!(notifies.get(), 1);
+    }
+
+    #[gpui::test]
+    fn revival_after_a_clock_transition_notifies_and_rearms(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let row = session("row", SessionStatus::Working, 0, now);
+        let stale_at = now + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        let (state, notifies, _subscription) = clock_state(cx, |state| {
+            state.apply_sessions_at(vec![row], now);
+        });
+        advance_to(cx, &clock, now, stale_at);
+        assert_eq!(notifies.get(), 1, "went stale by clock alone");
+        // A heartbeat revives it: that is a visible change again, and the
+        // revived lease arms its own cutoff.
+        let revived = stale_at + TimeDelta::seconds(1);
+        advance_to(cx, &clock, stale_at, revived);
+        state.update(cx, |state, cx| {
+            let changed = state.apply_sessions_at(
+                vec![session("row", SessionStatus::Working, 0, revived)],
+                revived,
+            );
+            assert!(changed, "revival is a change");
+            cx.notify();
+        });
+        assert_eq!(notifies.get(), 2);
+        let next_cutoff = revived + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        advance_to(cx, &clock, revived, next_cutoff);
+        assert_eq!(notifies.get(), 3, "the revived lease's cutoff fires");
+    }
+
+    #[test]
+    fn identical_chats_frames_report_no_change() {
+        let mut state = AppState::new();
+        // The first frame flips `chats_synced` even when empty.
+        assert!(state.apply_chats(vec![]));
+        assert!(!state.apply_chats(vec![]));
+        assert!(state.apply_chats(vec![chat("b", 1, None), chat("a", 0, None)]));
+        let revision = state.link_roots_revision;
+        // Same rows in a different wire order sort to the same list.
+        assert!(!state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]));
+        assert_eq!(state.link_roots_revision, revision);
+        let mut renamed = chat("a", 0, None);
+        renamed.title = Some("Renamed".into());
+        assert!(state.apply_chats(vec![renamed.clone(), chat("b", 1, None)]));
+        assert_ne!(state.link_roots_revision, revision);
+        // A selection pointing at no row still heals on an unchanged frame.
+        state.selected_chat = Some("gone".into());
+        assert!(state.apply_chats(vec![renamed, chat("b", 1, None)]));
+        assert_eq!(state.selected_chat, None);
+    }
+
+    #[test]
+    fn identical_spaces_frames_report_no_change() {
+        let mut state = AppState::new();
+        assert!(state.apply_spaces(vec![]));
+        assert!(!state.apply_spaces(vec![]));
+        let frame = vec![space("s2", "dev", "/b", 2), space("s1", "dev", "/a", 1)];
+        assert!(state.apply_spaces(frame.clone()));
+        assert_eq!(state.selected_space.as_deref(), Some("s1"));
+        assert!(!state.apply_spaces(frame.clone()));
+        // A vanished selection still heals (and reports it) on an unchanged list.
+        state.selected_space = Some("gone".into());
+        assert!(state.apply_spaces(frame));
+        assert_eq!(state.selected_space.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn identical_connectivity_frames_report_no_change() {
+        use zeron_proto::{Connectivity, ConnectivityState};
+        let mut state = AppState::new();
+        // The first frame ends the bootstrap gap even when it equals the default.
+        assert!(state.apply_connectivity(Connectivity::default()));
+        assert!(state.connectivity_observed);
+        assert!(!state.apply_connectivity(Connectivity::default()));
+        let reconnecting = Connectivity {
+            state: ConnectivityState::Reconnecting,
+            retry_at_ms: 5_000,
+            ..Default::default()
+        };
+        assert!(state.apply_connectivity(reconnecting.clone()));
+        assert!(!state.apply_connectivity(reconnecting.clone()));
+        assert!(state.apply_connectivity(Connectivity {
+            retry_at_ms: 9_000,
+            ..reconnecting
+        }));
+        // Re-attach reopens the gap: the next frame counts again.
+        state.connectivity_observed = false;
+        assert!(state.apply_connectivity(state.connectivity.clone()));
+    }
+
+    #[test]
+    fn identical_transfer_auth_and_harness_frames_report_no_change() {
+        use zeron_proto::{HarnessUpdatePhase, HarnessUpdateStatus, TransferProgress};
+        let mut state = AppState::new();
+        assert!(!state.apply_transfers(vec![]));
+        let progress = |done| TransferProgress {
+            upload_id: "u1".into(),
+            file_name: "a.png".into(),
+            done,
+            total: 100,
+        };
+        assert!(state.apply_transfers(vec![progress(10)]));
+        assert!(!state.apply_transfers(vec![progress(10)]));
+        assert!(state.apply_transfers(vec![progress(20)]));
+        assert_eq!(state.transfer_percent("u1"), Some(20));
+        assert!(state.apply_transfers(vec![]));
+
+        assert!(state.apply_auth(AuthState::SignedOut));
+        assert!(!state.apply_auth_value(serde_json::json!({ "state": "signedOut" })));
+        let user = UserProfile {
+            id: "u".into(),
+            email: "w@example.com".into(),
+            name: None,
+        };
+        assert!(state.apply_auth(AuthState::NeedsOrganization { user: user.clone() }));
+        assert!(!state.apply_auth(AuthState::NeedsOrganization { user }));
+        assert!(!state.apply_auth_value(serde_json::json!({ "bogus": true })));
+
+        let status = |phase| HarnessUpdateStatus {
+            harness: HarnessId::Codex,
+            installed_version: Some("1.0".into()),
+            latest_version: Some("2.0".into()),
+            channel: None,
+            source: Default::default(),
+            policy: Default::default(),
+            phase,
+            progress: None,
+            checked_at: None,
+            error: None,
+            can_apply: true,
+            manual_command: None,
+            compatibility: None,
+            held_back: None,
+        };
+        assert!(!state.apply_harness_updates(vec![]));
+        assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
+        assert!(!state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
+        assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Current)]));
+    }
+
     #[test]
     fn apply_chat_config_stamps_the_row() {
         let mut state = AppState::new();
@@ -4552,6 +7511,8 @@ mod tests {
             reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
             model_options: serde_json::Map::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            access: Default::default(),
+            plan: false,
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -4576,6 +7537,8 @@ mod tests {
                 reasoning: None,
                 model_options: serde_json::Map::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                access: Default::default(),
+                plan: false,
             },
         );
     }
@@ -4784,6 +7747,124 @@ mod tests {
     }
 
     #[test]
+    fn a_cloud_setup_placeholder_hands_off_to_the_machine_entry_or_goes() {
+        let entry = |id: &str, role| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![],
+            created_at: 0,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let user = zeron_doc::MessageRole::User;
+        let assistant = zeron_doc::MessageRole::Assistant;
+        let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        state.push_echo("c1", entry("m1", user));
+        state.push_cloud_setup_echo("c1", "m1", 0, false);
+        assert!(state.cloud_setup_echo_pending());
+        let placeholder = &state.pending_echoes()[1];
+        assert_eq!(placeholder.id, "m1.cloud-setup");
+        let zeron_doc::MessagePart::Tool {
+            id, call, resolved, ..
+        } = &placeholder.parts[0]
+        else {
+            panic!("{:?}", placeholder.parts)
+        };
+        assert_eq!(id, "m1.cloud-machine");
+        // Shaped like the machine's own step, which the doc keeps no input on.
+        assert_eq!(
+            call,
+            &zeron_proto::ToolCall::Unknown {
+                name: "Starting a machine".into(),
+                input: None,
+            }
+        );
+        assert!(!resolved);
+        // The host wrote the message: the machine is still coming up.
+        state.apply_transcript(vec![entry("m1", user)]);
+        assert!(state.cloud_setup_echo_pending());
+        // Its setup entry takes over (same ids).
+        state.apply_transcript(vec![entry("m1", user), entry("m1.cloud-setup", assistant)]);
+        assert!(!state.cloud_setup_echo_pending());
+        // A machine that was already up answers without one: the
+        // placeholder still goes.
+        state.push_echo("c1", entry("m2", user));
+        state.push_cloud_setup_echo("c1", "m2", 0, true);
+        state.apply_transcript(vec![entry("m2", user)]);
+        assert!(state.cloud_setup_echo_pending());
+        state.apply_transcript(vec![entry("m2", user), entry("a2", assistant)]);
+        assert!(!state.cloud_setup_echo_pending());
+        // The placeholder lands a beat after the send: never once the machine
+        // has written its own setup entry or already answered.
+        state.apply_transcript(vec![
+            entry("m1", user),
+            entry("m1.cloud-setup", assistant),
+            entry("m2", user),
+            entry("a2", assistant),
+        ]);
+        state.push_cloud_setup_echo("c1", "m1", 0, false);
+        state.push_cloud_setup_echo("c1", "m2", 0, true);
+        assert!(!state.cloud_setup_echo_pending());
+    }
+
+    #[test]
+    fn a_wake_refused_for_credits_says_so_and_stops_working() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        state.push_echo(
+            "c1",
+            SessionMessageEntry {
+                id: "m1".into(),
+                role: zeron_doc::MessageRole::User,
+                parts: vec![],
+                created_at: 0,
+                device_id: "d".into(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            },
+        );
+        state.push_cloud_setup_echo("c1", "m1", 0, true);
+        state.begin_pending_send("c1", "m1", chrono::Utc::now());
+        assert!(state.send_pending("c1", chrono::Utc::now()));
+        assert!(state.cloud_setup_streaming());
+        assert!(state.block_cloud_setups_for_credits());
+        // Neither the overlay nor the placeholder keeps the chat Working.
+        assert_eq!(
+            state.indicator_for("c1", chrono::Utc::now()),
+            Indicator::None
+        );
+        let step = state.echoes["c1"]
+            .iter()
+            .find(|entry| entry.id == zeron_proto::cloud_setup_entry_id("m1"))
+            .expect("placeholder");
+        let zeron_doc::MessagePart::Tool {
+            call,
+            is_error,
+            resolved,
+            ..
+        } = &step.parts[0]
+        else {
+            panic!("{:?}", step.parts)
+        };
+        assert_eq!(
+            call,
+            &zeron_proto::ToolCall::Unknown {
+                name: CLOUD_NO_CREDITS_STEP.into(),
+                input: None,
+            }
+        );
+        assert!(*is_error && *resolved);
+        // No more "working" for a send that can't run yet.
+        assert!(!state.send_pending("c1", chrono::Utc::now()));
+        // Once said, it isn't said again (one toast per send).
+        assert!(!state.block_cloud_setups_for_credits());
+    }
+
+    #[test]
     fn transcript_replay_barrier_requires_the_opening_reset() {
         let mut state = AppState::new();
         assert!(!state.transcript_replayed);
@@ -4930,6 +8011,10 @@ mod tests {
         assert_eq!(project_label(None), "No project");
         assert_eq!(project_label(Some("~")), "No project");
         assert_eq!(project_label(Some("~/")), "No project");
+        assert_eq!(
+            project_label(Some("~/.zeron/scratch/2026-10-11-3e4f5a6b")),
+            "No project"
+        );
         assert_eq!(project_label(Some("   ")), "No project");
         assert_eq!(project_label(Some("/")), "/");
     }
@@ -4977,14 +8062,14 @@ mod tests {
 
     #[test]
     fn chat_location_joins_project_and_branch() {
-        let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/soccertcg"));
+        let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/marigold"));
         c.branch = Some("zeron/rebalance".into());
         assert_eq!(
             chat_location(&c).as_deref(),
-            Some("soccertcg · zeron/rebalance")
+            Some("marigold · zeron/rebalance")
         );
         c.branch = None;
-        assert_eq!(chat_location(&c).as_deref(), Some("soccertcg"));
+        assert_eq!(chat_location(&c).as_deref(), Some("marigold"));
         c.cwd = None;
         c.branch = Some("main".into());
         assert_eq!(chat_location(&c).as_deref(), Some("main"));
@@ -4992,6 +8077,11 @@ mod tests {
         assert_eq!(chat_location(&c), None);
         c.branch = None;
         assert_eq!(chat_location(&c), None);
+        // Projectless: no project name, no folder.
+        for cwd in ["~", "~/.zeron/scratch/2026-10-11-3e4f5a6b"] {
+            c.cwd = Some(cwd.into());
+            assert_eq!(chat_location(&c), None);
+        }
     }
 
     #[test]
@@ -5155,77 +8245,89 @@ mod tests {
             pending_pushes: 0,
         }];
 
-        // Healthy: nothing degraded.
-        assert!(!s.chat_delivery_degraded("c-remote"));
-        assert!(!s.chat_delivery_degraded("c-local"));
+        let queues = |s: &AppState, id: &str| s.chat_link_at(id, now).send_would_queue();
+
+        // Healthy: nothing would queue. An engine without per-chat sync
+        // states proves its room with the graced bit alone.
+        assert_eq!(s.chat_link_at("c-remote", now), ChatLink::LIVE);
+        assert_eq!(s.chat_link_at("c-local", now), ChatLink::LIVE);
 
         // Idle chats can remain without a socket for longer than the engine's
         // grace. A stale down sample during focus must not flash a warning.
         s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Local;
         s.connectivity.chats[0].connected = false;
-        assert!(!s.chat_delivery_degraded("c-remote"));
+        assert!(!queues(&s, "c-remote"));
 
-        // A requested reconnect stays quiet inside its fresh grace window.
-        s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Waiting;
+        // A requested reconnect, or a room still down past the engine's
+        // grace, is SYNCING — opening a chat on a slow link is no outage.
+        for sync_state in [
+            zeron_proto::ChatSyncState::Waiting,
+            zeron_proto::ChatSyncState::Connecting,
+        ] {
+            for connected in [true, false] {
+                s.connectivity.chats[0].sync_state = sync_state;
+                s.connectivity.chats[0].connected = connected;
+                assert_eq!(
+                    s.chat_link_at("c-remote", now).sync,
+                    LinkSync::Syncing { shown: false }
+                );
+                assert!(!queues(&s, "c-remote"));
+            }
+        }
         s.connectivity.chats[0].connected = true;
-        assert!(!s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Connecting;
-        assert!(!s.chat_delivery_degraded("c-remote"));
 
-        // A requested or active room down past grace degrades even while
-        // globally Connected.
-        s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Waiting;
-        s.connectivity.chats[0].connected = false;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Connecting;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].connected = true;
-
-        // Global registry failure and host presence loss still warn for a
-        // dormant chat.
+        // Global registry failure still warns for a dormant chat.
         s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Local;
         s.connectivity.state = ConnectivityState::Reconnecting;
-        assert!(s.chat_delivery_degraded("c-remote"));
+        assert_eq!(s.chat_link_at("c-remote", now).sync, LinkSync::Reconnecting);
+        assert!(queues(&s, "c-remote"));
         s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Waiting;
-        assert!(s.chat_delivery_degraded("c-remote"));
+        assert!(queues(&s, "c-remote"));
 
         // A live chat room can deliver while the registry reconnects. The
         // graced `connected` bit alone is not proof, but delivery_live is.
         s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Synced;
-        assert!(s.chat_delivery_degraded("c-remote"));
+        assert!(queues(&s, "c-remote"));
         s.connectivity.chats[0].delivery_live = true;
-        assert!(!s.chat_delivery_degraded("c-remote"));
+        assert!(!queues(&s, "c-remote"));
         s.begin_pending_send("c-remote", "m-live", now);
         assert!(!s.send_queued("c-remote", now));
         s.connectivity.chats[0].sync_state = zeron_proto::ChatSyncState::Connecting;
         s.connectivity.chats[0].connected = false; // HTTP delivery can outlive the socket.
-        assert!(!s.chat_delivery_degraded("c-remote"));
+        assert!(!queues(&s, "c-remote"));
         s.connectivity.chats[0].delivery_live = false;
-        assert!(s.chat_delivery_degraded("c-remote"));
+        assert!(queues(&s, "c-remote"));
         assert!(s.send_queued("c-remote", now));
         s.connectivity.chats[0].connected = true;
         s.connectivity.state = ConnectivityState::Connected;
 
-        // Host gone presence-dark → degraded (a send would queue at best).
+        // Host gone presence-dark → unreachable (a send would queue at best).
         s.connectivity.chats[0].delivery_live = true;
         s.devices[0].last_seen_at = Some(now - TimeDelta::minutes(10));
-        assert!(s.chat_delivery_degraded("c-remote"));
+        assert_eq!(
+            s.chat_link_at("c-remote", now),
+            ChatLink {
+                sync: LinkSync::Live,
+                host_unreachable: true
+            }
+        );
+        assert!(queues(&s, "c-remote"));
         s.devices[0].last_seen_at = Some(now);
 
-        // OS offline: remote degrades; a locally-hosted chat NEVER does (the
+        // OS offline: remote queues; a locally-hosted chat NEVER does (the
         // queued command executes on this device even fully offline).
         s.connectivity.state = ConnectivityState::Offline;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        assert!(!s.chat_delivery_degraded("c-local"));
+        assert_eq!(s.chat_link_at("c-remote", now).sync, LinkSync::Offline);
+        assert_eq!(s.chat_link_at("c-local", now), ChatLink::LIVE);
         s.connectivity.chats[0].delivery_live = false;
 
-        // Local profile (Disabled): nothing degrades.
+        // Local profile (Disabled): nothing queues.
         s.connectivity.state = ConnectivityState::Disabled;
-        assert!(!s.chat_delivery_degraded("c-remote"));
+        assert_eq!(s.chat_link_at("c-remote", now), ChatLink::LIVE);
 
-        // Queued = pending send + degraded path — and degradation HOLDS the
-        // overlay past the grace window instead of silently expiring (the
-        // no-trace hole).
+        // Queued = pending send + a path that would hold it — and an
+        // unconfirmed path HOLDS the overlay past the grace window instead of
+        // silently expiring (the no-trace hole).
         s.connectivity.state = ConnectivityState::Offline;
         s.begin_pending_send("c-remote", "m1", now - TimeDelta::seconds(200));
         assert!(s.send_pending("c-remote", now));
@@ -5236,18 +8338,438 @@ mod tests {
         s.retry_pending_send("c-remote", now);
         assert!(!s.send_undelivered("c-remote", now));
         assert!(s.send_queued("c-remote", now));
-        // Path healed with a stale unacked send: the overlay expires after
-        // the grace rather than holding forever.
+        // A syncing chat delivers but cannot show the send adopted yet: the
+        // overlay holds without claiming Queued.
         s.retry_pending_send("c-remote", now - TimeDelta::seconds(200));
         s.connectivity.state = ConnectivityState::Connected;
+        assert!(s.send_pending("c-remote", now));
+        assert!(!s.send_queued("c-remote", now));
+        // Path proven live with a stale unacked send: the overlay expires
+        // after the grace rather than holding forever.
+        s.connectivity.chats[0].delivery_live = true;
         assert!(!s.send_pending("c-remote", now));
         assert!(!s.send_queued("c-remote", now));
         // …but the explicit undelivered flag still tells the truth.
         assert!(s.send_undelivered("c-remote", now));
     }
+
+    fn remote_chat_state(now: DateTime<Utc>) -> AppState {
+        let mut s = AppState::default();
+        s.local_device_id = Some("local".into());
+        let mut remote = chat("c-remote", 0, None);
+        remote.device_id = "remote".into();
+        let mut local = chat("c-local", 0, None);
+        local.device_id = "local".into();
+        s.chats = vec![remote, local];
+        let mut host = device("remote", "omarchy");
+        host.last_seen_at = Some(now);
+        s.devices = vec![host];
+        s
+    }
+
+    fn connectivity(
+        sync_state: zeron_proto::ChatSyncState,
+        connected: bool,
+        delivery_live: bool,
+    ) -> zeron_proto::Connectivity {
+        zeron_proto::Connectivity {
+            state: zeron_proto::ConnectivityState::Connected,
+            chats: vec![zeron_proto::ChatConnectivity {
+                chat_id: "c-remote".into(),
+                sync_state,
+                connected,
+                delivery_live,
+                pending_pushes: 0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The reported bug: opening a chat on a distant host over a slow link
+    /// read as an outage 4 s in ("Messages will send once the connection
+    /// recovers"), before anything was sent. It is syncing until its room
+    /// has outlived a whole first dial.
+    #[test]
+    fn opening_a_remote_chat_syncs_before_it_queues() {
+        use zeron_proto::ChatSyncState as C;
+        let t0 = clock_epoch();
+        let at = |ms: i64| t0 + TimeDelta::milliseconds(ms);
+        let mut s = remote_chat_state(t0);
+        // The dial starts at once, inside the engine's room grace.
+        s.apply_connectivity_at(connectivity(C::Connecting, true, false), t0);
+        let link = |s: &AppState, ms| s.chat_link_at("c-remote", at(ms)).sync;
+        assert_eq!(link(&s, 0), LinkSync::Syncing { shown: false });
+        // The engine's room grace lapses (connected → false) 4 s in, while
+        // the dial is still inside its 20 s connect + 15 s hello budget.
+        s.apply_connectivity_at(connectivity(C::Connecting, false, false), at(4_000));
+        assert_eq!(
+            link(&s, SYNC_SHOWN_AFTER_MS - 1),
+            LinkSync::Syncing { shown: false }
+        );
+        assert_eq!(
+            link(&s, SYNC_SHOWN_AFTER_MS),
+            LinkSync::Syncing { shown: true }
+        );
+        assert!(!s.chat_link_at("c-remote", at(34_999)).send_would_queue());
+        assert_eq!(
+            link(&s, SYNC_STALLED_AFTER_MS - 1),
+            LinkSync::Syncing { shown: true }
+        );
+        assert_eq!(link(&s, SYNC_STALLED_AFTER_MS), LinkSync::Stalled);
+        assert!(
+            s.chat_link_at("c-remote", at(SYNC_STALLED_AFTER_MS))
+                .send_would_queue()
+        );
+        // A joined room catching up a long backlog never stalls.
+        s.apply_connectivity_at(connectivity(C::Connecting, true, false), at(40_000));
+        assert_eq!(link(&s, 600_000), LinkSync::Syncing { shown: true });
+        // Delivery proven: live, and the next sync starts its own clock.
+        s.apply_connectivity_at(connectivity(C::Synced, true, true), at(600_000));
+        assert_eq!(link(&s, 600_000), LinkSync::Live);
+        s.apply_connectivity_at(connectivity(C::Connecting, false, false), at(700_000));
+        assert_eq!(link(&s, 700_000), LinkSync::Syncing { shown: false });
+        assert_eq!(link(&s, 700_000 + SYNC_STALLED_AFTER_MS), LinkSync::Stalled);
+        // Unchanged frames keep the clock; a vanished chat drops it.
+        s.apply_connectivity_at(connectivity(C::Connecting, false, false), at(720_000));
+        assert_eq!(link(&s, 700_000 + SYNC_STALLED_AFTER_MS), LinkSync::Stalled);
+        s.apply_connectivity_at(zeron_proto::Connectivity::default(), at(730_000));
+        assert!(s.sync_clocks.is_empty());
+    }
+
+    /// A chat queued behind busy rooms reads as syncing when opened, with a
+    /// fresh hold and a fresh stall budget. But a sync that never delivers
+    /// always ends up stalled: the engine moving its room back to waiting
+    /// for a slot does not restart the clock and spin forever.
+    #[gpui::test]
+    fn a_sync_that_never_delivers_stalls_even_back_in_the_queue(cx: &mut gpui::TestAppContext) {
+        use zeron_proto::ChatSyncState as C;
+        let t0 = clock_epoch();
+        let clock = TestClock::start(t0);
+        let at = |ms: i64| t0 + TimeDelta::milliseconds(ms);
+        let state = cx.new(|_| {
+            let mut s = remote_chat_state(t0);
+            s.devices.clear();
+            s.apply_connectivity_at(connectivity(C::Waiting, false, false), t0);
+            s
+        });
+        let link = |cx: &mut gpui::TestAppContext, ms| {
+            state.read_with(cx, |s, _| s.chat_link_at("c-remote", at(ms)).sync)
+        };
+        assert_eq!(link(cx, 60_000), LinkSync::Stalled);
+        // Opened a minute in: the caption's hold and the stall start now, so
+        // a sync that ends quickly never flashes either.
+        clock.set(at(60_000));
+        state.update(cx, |s, cx| s.select_chat(Some("c-remote".into()), cx));
+        assert_eq!(link(cx, 60_000), LinkSync::Syncing { shown: false });
+        assert_eq!(
+            link(cx, 60_000 + SYNC_SHOWN_AFTER_MS),
+            LinkSync::Syncing { shown: true }
+        );
+        // Admitted, then moved back to waiting for a slot before its room
+        // ever joined: the clock runs on through both.
+        state.update(cx, |s, _| {
+            s.apply_connectivity_at(connectivity(C::Connecting, false, false), at(61_000))
+        });
+        state.update(cx, |s, _| {
+            s.apply_connectivity_at(connectivity(C::Waiting, false, false), at(80_000))
+        });
+        assert_eq!(
+            link(cx, 60_000 + SYNC_STALLED_AFTER_MS - 1),
+            LinkSync::Syncing { shown: true }
+        );
+        assert_eq!(link(cx, 60_000 + SYNC_STALLED_AFTER_MS), LinkSync::Stalled);
+        state.update(cx, |s, _| {
+            s.apply_connectivity_at(connectivity(C::Connecting, false, false), at(100_000))
+        });
+        assert_eq!(link(cx, 200_000), LinkSync::Stalled);
+        // Only delivery ends it.
+        state.update(cx, |s, _| {
+            s.apply_connectivity_at(connectivity(C::Synced, true, true), at(200_000))
+        });
+        assert_eq!(link(cx, 200_000), LinkSync::Live);
+    }
+
+    /// A new engine's first frame restarts every sync clock: a chat the last
+    /// engine was dialing does not read as stalled 4 s into a fresh attempt.
+    #[test]
+    fn a_new_engine_restarts_sync_clocks() {
+        use zeron_proto::ChatSyncState as C;
+        let t0 = clock_epoch();
+        let at = |ms: i64| t0 + TimeDelta::milliseconds(ms);
+        let mut s = remote_chat_state(t0);
+        s.devices.clear();
+        s.apply_connectivity_at(connectivity(C::Connecting, false, false), t0);
+        assert_eq!(
+            s.chat_link_at("c-remote", at(60_000)).sync,
+            LinkSync::Stalled
+        );
+        // `attach_engine`: the bootstrap gap before the new engine's frame.
+        s.connectivity_observed = false;
+        s.apply_connectivity_at(connectivity(C::Connecting, false, false), at(60_000));
+        assert_eq!(
+            s.chat_link_at("c-remote", at(64_000)).sync,
+            LinkSync::Syncing { shown: true }
+        );
+        assert_eq!(
+            s.chat_link_at("c-remote", at(60_000 + SYNC_STALLED_AFTER_MS))
+                .sync,
+            LinkSync::Stalled
+        );
+    }
+
+    /// Past the grace, a send on a chat still syncing is in flight, not
+    /// failed: its pushes left before catch-up and its adoption shows once
+    /// the copy catches up. A stalled room fails it as before.
+    #[test]
+    fn a_send_on_a_syncing_chat_is_not_undelivered() {
+        use zeron_proto::ChatSyncState as C;
+        let t0 = clock_epoch();
+        let at = |ms: i64| t0 + TimeDelta::milliseconds(ms);
+        let mut s = remote_chat_state(t0);
+        s.devices.clear();
+        s.begin_pending_send("c-remote", "m", t0);
+        // A long catch-up on a joined room.
+        s.apply_connectivity_at(connectivity(C::Connecting, true, false), t0);
+        let late = at(UNDELIVERED_GRACE_MS + 60_000);
+        assert!(s.send_pending("c-remote", late));
+        assert!(!s.send_queued("c-remote", late));
+        assert!(!s.send_undelivered("c-remote", late));
+        // Its room drops: reconnecting at once, so the send waits and the
+        // explicit failed state surfaces.
+        s.apply_connectivity_at(connectivity(C::Connecting, false, false), late);
+        assert!(s.send_queued("c-remote", late));
+        assert!(s.send_undelivered("c-remote", late));
+
+        // A send already past its grace when a fresh dial starts waits out
+        // that dial's budget before it fails.
+        let mut fresh = remote_chat_state(t0);
+        fresh.devices.clear();
+        fresh.begin_pending_send("c-remote", "m", t0 - TimeDelta::minutes(5));
+        fresh.apply_connectivity_at(connectivity(C::Connecting, false, false), t0);
+        assert!(!fresh.send_undelivered("c-remote", at(SYNC_STALLED_AFTER_MS - 1)));
+        assert!(fresh.send_undelivered("c-remote", at(SYNC_STALLED_AFTER_MS)));
+    }
+
+    /// The new-chat canvas has no chat row: its link is the global posture
+    /// and the target device's presence.
+    #[test]
+    fn canvas_link_reads_the_global_state_and_the_device() {
+        use zeron_proto::ConnectivityState as S;
+        let t0 = clock_epoch();
+        let mut s = remote_chat_state(t0);
+        s.connectivity.state = S::Connected;
+        assert_eq!(s.device_link_at("remote", t0), ChatLink::LIVE);
+        s.devices[0].last_seen_at = Some(t0 - TimeDelta::minutes(10));
+        assert_eq!(
+            s.device_link_at("remote", t0),
+            ChatLink {
+                sync: LinkSync::Live,
+                host_unreachable: true
+            }
+        );
+        s.connectivity.state = S::Reconnecting;
+        assert_eq!(s.device_link_at("remote", t0).sync, LinkSync::Reconnecting);
+        s.connectivity.state = S::Offline;
+        assert_eq!(s.device_link_at("remote", t0).sync, LinkSync::Offline);
+        // This device, or a local profile, never waits.
+        assert_eq!(s.device_link_at("local", t0), ChatLink::LIVE);
+        s.connectivity.state = S::Disabled;
+        assert_eq!(s.device_link_at("remote", t0), ChatLink::LIVE);
+    }
+
+    /// HTTP fallback can deliver while the socket never joins (networks
+    /// that refuse the WS upgrade): proof of delivery beats the room bit.
+    #[test]
+    fn http_fallback_is_live_while_the_registry_is_connected() {
+        use zeron_proto::ChatSyncState as C;
+        let t0 = clock_epoch();
+        let mut s = remote_chat_state(t0);
+        s.devices.clear(); // no presence evidence: reachable
+        s.apply_connectivity_at(connectivity(C::Connecting, false, true), t0);
+        let later = t0 + TimeDelta::minutes(5);
+        assert_eq!(s.chat_link_at("c-remote", later), ChatLink::LIVE);
+        assert!(s.sync_clocks.is_empty());
+    }
+
+    /// A sleeping or waking Cloud machine answers the send itself: never
+    /// "Queued", never "can't reach".
+    #[test]
+    fn sleeping_cloud_machine_is_not_queued() {
+        let t0 = clock_epoch();
+        let mut s = remote_chat_state(t0);
+        s.apply_connectivity_at(
+            connectivity(zeron_proto::ChatSyncState::Synced, true, true),
+            t0,
+        );
+        // A session machine whose heartbeat stopped has gone to sleep.
+        s.devices[0].capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+        s.devices[0].last_seen_at = Some(t0 - TimeDelta::minutes(30));
+        assert!(matches!(
+            s.device_presence("remote", t0),
+            crate::cloud::Presence::Asleep | crate::cloud::Presence::Waking
+        ));
+        assert_eq!(s.chat_link_at("c-remote", t0), ChatLink::LIVE);
+        s.begin_pending_send("c-remote", "m", t0);
+        assert!(!s.send_queued("c-remote", t0));
+        // A plain device that went dark is unreachable.
+        s.devices[0].capabilities.clear();
+        assert!(s.chat_link_at("c-remote", t0).host_unreachable);
+        assert!(s.send_queued("c-remote", t0));
+    }
+
+    #[gpui::test]
+    fn chat_sync_caption_and_stall_are_clock_transitions(cx: &mut gpui::TestAppContext) {
+        use zeron_proto::ChatSyncState as C;
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let (state, notifies, _subscription) = clock_state(cx, |state| {
+            *state = remote_chat_state(now);
+            // Only the sync's own deadlines: no heartbeat to lapse.
+            state.devices.clear();
+            state.selected_chat = Some("c-remote".into());
+            state.apply_connectivity_at(connectivity(C::Connecting, false, false), now);
+        });
+        let shown = now + TimeDelta::milliseconds(SYNC_SHOWN_AFTER_MS);
+        let stalled = now + TimeDelta::milliseconds(SYNC_STALLED_AFTER_MS);
+        let before = |at: DateTime<Utc>| at - TimeDelta::milliseconds(1);
+        advance_to(cx, &clock, now, before(shown));
+        assert_eq!(notifies.get(), 0);
+        advance_to(cx, &clock, before(shown), shown);
+        assert_eq!(notifies.get(), 1, "the caption shows on time");
+        advance_to(cx, &clock, shown, before(stalled));
+        assert_eq!(notifies.get(), 1);
+        advance_to(cx, &clock, before(stalled), stalled);
+        assert_eq!(notifies.get(), 2, "the stall reads on time");
+        advance_to(cx, &clock, stalled, stalled + TimeDelta::minutes(1));
+        assert_eq!(notifies.get(), 2);
+        assert_eq!(
+            state.read_with(cx, |state, _| state
+                .chat_link_at("c-remote", clock_now())
+                .sync),
+            LinkSync::Stalled
+        );
+        // A joined room never stalls: no deadline past the caption.
+        let joined = stalled + TimeDelta::minutes(2);
+        advance_to(cx, &clock, stalled + TimeDelta::minutes(1), joined);
+        state.update(cx, |state, _| {
+            state.apply_connectivity_at(zeron_proto::Connectivity::default(), joined);
+            state.apply_connectivity_at(connectivity(C::Connecting, true, false), joined);
+        });
+        let deadlines: Vec<_> = state.read_with(cx, |state, _| state.clock_deadlines().collect());
+        assert_eq!(
+            deadlines,
+            [joined + TimeDelta::milliseconds(SYNC_SHOWN_AFTER_MS)]
+        );
+        // A chat syncing in the background, with nothing sent, shows nothing
+        // that changes by the clock; a pending send needs its stall on time.
+        state.update(cx, |state, _| {
+            state.selected_chat = None;
+            state.apply_connectivity_at(connectivity(C::Connecting, false, false), joined);
+        });
+        assert_eq!(
+            state.read_with(cx, |state, _| state.clock_deadlines().count()),
+            0
+        );
+        state.update(cx, |state, _| {
+            state.begin_pending_send("c-remote", "m", joined)
+        });
+        let deadlines: Vec<_> = state.read_with(cx, |state, _| state.clock_deadlines().collect());
+        assert!(deadlines.contains(&(joined + TimeDelta::milliseconds(SYNC_STALLED_AFTER_MS))));
+        state.update(cx, |state, _| {
+            state.pending_sends.clear();
+            state.selected_chat = Some("c-remote".into());
+        });
+        // A chat hosted here never arms one.
+        state.update(cx, |state, _| {
+            state.chats.retain(|chat| chat.id != "c-remote");
+            let mut here = chat("c-remote", 0, None);
+            here.device_id = "local".into();
+            state.chats.push(here);
+        });
+        assert_eq!(
+            state.read_with(cx, |state, _| state.clock_deadlines().count()),
+            0
+        );
+    }
+
+    /// A never-synced copy of a remote chat replays as empty: it must read
+    /// as loading — opening, then syncing — not as a chat with no messages.
+    #[test]
+    fn cold_remote_chat_reads_as_loading_not_empty() {
+        use zeron_proto::{ChatSyncState as C, ConnectivityState};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, _requests) = tokio::sync::mpsc::channel::<String>(8);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(8);
+        let t0 = clock_epoch();
+        let mut s = remote_chat_state(t0);
+        s.selected_chat = Some("c-remote".into());
+        // No engine: nothing can be loading.
+        assert_eq!(s.transcript_loading(t0), None);
+        s.set_test_engine(EngineHandle::from_test_client(zeron_rpc::RpcClient::new(
+            out, inbound,
+        )));
+        // Selected, not yet replayed, before any connectivity frame.
+        assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Opening));
+        // Replayed empty while the room the replay opened has yet to speak.
+        s.transcript_replayed = true;
+        assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Syncing));
+        s.apply_connectivity_at(connectivity(C::Waiting, true, false), t0);
+        assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Syncing));
+        let stalled = t0 + TimeDelta::milliseconds(SYNC_STALLED_AFTER_MS);
+        s.apply_connectivity_at(connectivity(C::Connecting, false, false), t0);
+        assert_eq!(
+            s.transcript_loading(stalled),
+            Some(TranscriptLoading::Reconnecting)
+        );
+        let mut offline = connectivity(C::Offline, false, false);
+        offline.state = ConnectivityState::Offline;
+        s.apply_connectivity_at(offline, t0);
+        assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Offline));
+        // Caught up: an empty chat really is empty.
+        s.apply_connectivity_at(connectivity(C::Synced, true, true), t0);
+        assert_eq!(s.transcript_loading(t0), None);
+        // Neither a storage failure nor a dormant chat keeps it loading.
+        for sync_state in [C::StorageError, C::Local] {
+            s.apply_connectivity_at(connectivity(sync_state, false, false), t0);
+            assert_eq!(s.transcript_loading(t0), None, "{sync_state:?}");
+        }
+        s.apply_connectivity_at(connectivity(C::Connecting, true, false), t0);
+        assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Syncing));
+        // An optimistic echo or any entry is something to show.
+        s.echoes
+            .entry("c-remote".into())
+            .or_default()
+            .push(user_entry("m"));
+        assert_eq!(s.transcript_loading(t0), None);
+        s.echoes.clear();
+        s.transcript = vec![user_entry("m")];
+        assert_eq!(s.transcript_loading(t0), None);
+        s.transcript.clear();
+        // A chat hosted here is authoritative from its own disk.
+        s.selected_chat = Some("c-local".into());
+        s.transcript_replayed = false;
+        assert_eq!(s.transcript_loading(t0), None);
+        // So is every chat on a local profile, once that is known.
+        s.selected_chat = Some("c-remote".into());
+        s.apply_connectivity_at(zeron_proto::Connectivity::default(), t0);
+        assert_eq!(s.transcript_loading(t0), None);
+        // An unsaved side chat has nothing to load.
+        s.connectivity_observed = false;
+        assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Opening));
+        s.unsaved_side_chat = true;
+        assert_eq!(s.transcript_loading(t0), None);
+    }
 }
 
-#[cfg(feature = "appshots-fixture")]
+#[cfg(any(
+    feature = "appshots-fixture",
+    feature = "pull-request-fixture",
+    feature = "project-path-fixture"
+))]
 impl AppState {
     /// Keep fixture documents deterministic while using the real attachment RPC.
     pub fn fixture_attachment_engine(&mut self, engine: EngineHandle) {
@@ -5255,9 +8777,10 @@ impl AppState {
     }
 }
 
-#[cfg(feature = "project-palette-fixture")]
+#[cfg(any(test, feature = "project-palette-fixture"))]
 impl AppState {
-    /// Seed provider metadata for the isolated native sidebar review fixture.
+    /// Seed provider metadata for the isolated native sidebar review fixture
+    /// and for tests that click a sidebar badge.
     pub fn fixture_sidebar_change_request(
         &mut self,
         snapshot: zeron_proto::CheckoutChangeRequestStatus,

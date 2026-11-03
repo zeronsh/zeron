@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use zeron_rpc::{RpcClient, connect_ws, methods};
+use zeron_rpc::{RpcClient, connect_ipc, methods};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(90);
 const MOCK_TEXT: &str = "Mock harness reporting in.";
@@ -119,10 +119,14 @@ async fn main() {
         .parse()
         .expect("B port");
 
-    let a = connect_ws(&format!("ws://127.0.0.1:{a_port}"))
+    // Each engine publishes its IPC bearer at `{data_dir}/ipc-token`.
+    let a_dir = args.next().map(std::path::PathBuf::from);
+    let b_dir = args.next().map(std::path::PathBuf::from);
+
+    let a = connect_ipc(a_port, a_dir.as_deref())
         .await
         .unwrap_or_else(|err| fail(&format!("connect device A ipc :{a_port}: {err}")));
-    let b = connect_ws(&format!("ws://127.0.0.1:{b_port}"))
+    let b = connect_ipc(b_port, b_dir.as_deref())
         .await
         .unwrap_or_else(|err| fail(&format!("connect device B ipc :{b_port}: {err}")));
 

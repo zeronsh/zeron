@@ -1,0 +1,47 @@
+name: Release-profile tests
+
+# Pull-request and main CI test the dev profile (fast rebuilds). This runs the
+# same Linux suites once a day against the optimized release profile that
+# ships, so optimization-only failures still surface. It does not save a Rust
+# cache, so it cannot evict the main-seeded caches pull requests depend on.
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-profile-tests
+  cancel-in-progress: false
+
+jobs:
+  core-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: release-profile-core
+      - name: Harness, engine, sync, update, doc and preview tests (release)
+        run: scripts/ci/test-core.sh --release
+
+  ui-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: release-profile-ui
+          apt-cache: gpui
+          apt-packages: >-
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+            libx11-dev libxcb1-dev libx11-xcb-dev
+            libfontconfig1-dev libfreetype-dev libasound2-dev
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+      - name: UI and headless layout regressions (release)
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast --release -p zeron-ui --lib

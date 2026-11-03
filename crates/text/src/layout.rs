@@ -8,7 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::analysis::{BRK_ALLOWED, BRK_HANG_ONLY, BRK_MANDATORY, BRK_SOFT_HYPHEN};
 use crate::prepare::{
-    F_BREAKABLE, F_DYN_H, F_DYN_W, F_LEAD, Hot, P_TAB, Piece, Prepared, utf16_len,
+    F_BREAKABLE, F_DYN_H, F_DYN_W, F_LEAD, Hot, InlineBox, P_TAB, Piece, Prepared, line_growth,
+    utf16_len,
 };
 
 /// Slack allowed when testing whether content fits: CoreText lets a line exceed its width by
@@ -396,6 +397,63 @@ impl Prepared {
         stats
     }
 
+    /// Total height of the paragraph at `max_width` when every line is `lh` tall with its
+    /// baseline `base` below the line top, grown per line by [`line_growth`] to fit inline
+    /// boxes. Equals `line_count(max_width) as f32 * lh` when there are no boxes (then it is
+    /// [`Prepared::line_count`]'s allocation-free walk); with boxes it walks line ranges, still
+    /// without allocating.
+    pub fn height(&self, max_width: f32, lh: f32, base: f32) -> f32 {
+        if !self.boxes {
+            return self.line_count(max_width) as f32 * lh;
+        }
+        let fit = fit_limit(max_width);
+        let mut loc = Locator::new();
+        let mut pos = Pos::START;
+        let mut h = 0.0f32;
+        while let Some(s) = self.step(pos, fit) {
+            let range = self.line_bytes(pos, &s, &mut loc);
+            let (above, below) = line_growth(self.range_box_extents(range), lh, base);
+            h += lh + above + below;
+            pos = s.next;
+        }
+        h
+    }
+
+    /// The tallest inline-box extents `(ascent, descent)` among a line's fragments, if any
+    /// (each maximized separately). Feed it to [`line_growth`].
+    pub fn line_box_extents(&self, line: &Line) -> Option<(f32, f32)> {
+        if !self.boxes {
+            return None;
+        }
+        max_extents(
+            line.fragments
+                .iter()
+                .filter_map(|f| self.spans.get(f.span)?.inline_box),
+        )
+    }
+
+    /// [`Prepared::line_box_extents`] for a line from [`Prepared::walk_lines`] or
+    /// [`Prepared::layout_next_line`] (no fragments needed).
+    pub fn line_range_box_extents(&self, line: &LineRange) -> Option<(f32, f32)> {
+        if !self.boxes {
+            return None;
+        }
+        self.range_box_extents(line.range.clone())
+    }
+
+    /// Extents of the inline boxes whose (non-empty) spans overlap `range`: boxes are atomic,
+    /// so a box on a line lies wholly inside its visible bytes.
+    fn range_box_extents(&self, range: Range<usize>) -> Option<(f32, f32)> {
+        let first = self.spans.partition_point(|s| s.range.end <= range.start);
+        max_extents(
+            self.spans[first..]
+                .iter()
+                .take_while(|s| s.range.start < range.end)
+                .filter(|s| !s.range.is_empty())
+                .filter_map(|s| s.inline_box),
+        )
+    }
+
     /// Visits every line at `max_width` without materializing fragments.
     pub fn walk_lines(&self, max_width: f32, mut f: impl FnMut(&LineRange)) {
         let fit = fit_limit(max_width);
@@ -667,6 +725,14 @@ impl Prepared {
         }
         fb.finish()
     }
+}
+
+/// Component-wise maximum `(ascent, descent)` of `boxes`; `None` when empty.
+fn max_extents(boxes: impl Iterator<Item = InlineBox>) -> Option<(f32, f32)> {
+    boxes.fold(None, |m, b| {
+        let (a, d) = m.unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
+        Some((a.max(b.ascent), d.max(b.descent)))
+    })
 }
 
 /// Maps (segment, unit) to byte offsets, memoizing its position so a monotone walk over a split

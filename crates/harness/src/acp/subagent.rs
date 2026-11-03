@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 use zeron_proto::{AgentEvent, DoneStatus, ToolCall};
 
 use crate::HarnessError;
+use crate::jsonl_tail::TailReader;
 
 use super::normalize::{OUTPUT_CAP, cap_text, xai_tool_name};
 
@@ -326,50 +327,6 @@ fn locate_history(root: &Path, child_session_id: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Incremental line reader over an append-only JSONL file. A partial trailing
-/// line (a write raced mid-append) carries over to the next poll.
-struct TailReader {
-    path: PathBuf,
-    offset: u64,
-    carry: Vec<u8>,
-}
-
-impl TailReader {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            offset: 0,
-            carry: Vec::new(),
-        }
-    }
-
-    /// New complete entries since the last poll; io/parse failures read as
-    /// "nothing new" (fail soft — the format is vendor-private).
-    fn read_new(&mut self) -> Vec<Value> {
-        use std::io::{Read as _, Seek as _};
-        let Ok(mut file) = std::fs::File::open(&self.path) else {
-            return Vec::new();
-        };
-        if file.seek(std::io::SeekFrom::Start(self.offset)).is_err() {
-            return Vec::new();
-        }
-        let mut bytes = Vec::new();
-        let Ok(read) = file.read_to_end(&mut bytes) else {
-            return Vec::new();
-        };
-        self.offset += read as u64;
-        self.carry.extend_from_slice(&bytes);
-        let mut entries = Vec::new();
-        while let Some(nl) = self.carry.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.carry.drain(..=nl).collect();
-            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                entries.push(v);
-            }
-        }
-        entries
-    }
 }
 
 /// Map one `chat_history.jsonl` entry to (untagged) transcript events.

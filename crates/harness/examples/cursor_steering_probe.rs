@@ -20,12 +20,16 @@ async fn main() -> anyhow::Result<()> {
         harness: None, model: Some(model), reasoning: None,
         model_options: Default::default(), cwd: workspace.path().to_string_lossy().into_owned(),
         sandbox: SandboxLevel::DangerFullAccess, auto_approve: true,
+        access: Default::default(), plan: false,
         attachments: vec![], worktree: None, resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut stream = CursorHarness::new()
         .run(
             request,
             RunControls {
+                realtime: None,
                 execution_lease: None,
                 steering,
                 interrupt: interrupt.clone(),
@@ -34,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
                     let _ = tx.send(vec![]);
                     rx
                 }),
+                turn: Default::default(),
             },
         )
         .await?;
@@ -56,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
                                     .send(SteerMessage {
                                         prompt: i.to_string(),
                                         message_id: Some(format!("digit-{i}")),
+                                        attachments: Vec::new(),
+                                        config: None,
                                     })
                                     .await
                                     .is_err()

@@ -312,6 +312,28 @@ private final class ShimmerText: UIView {
 }
 
 /// Tap target for one tool row's inline detail.
+/// A subagent card's tap target: a wash over the painted card while
+/// pressed, released with a short spring.
+final class SubagentCardControl: UIControl {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        layer.cornerRadius = 10
+        layer.cornerCurve = .continuous
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isHighlighted: Bool {
+        didSet {
+            guard isHighlighted != oldValue else { return }
+            let pressed = isHighlighted
+            UIView.animate(withDuration: pressed ? 0.12 : 0.28, delay: 0, usingSpringWithDamping: pressed ? 1 : 0.7, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+                self.backgroundColor = pressed ? Palette.controlFill : .clear
+            }
+        }
+    }
+}
+
 final class ToolToggleControl: UIControl {
     override var isHighlighted: Bool {
         didSet { backgroundColor = isHighlighted ? Palette.controlFill : .clear }

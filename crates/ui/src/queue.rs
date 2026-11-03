@@ -72,16 +72,29 @@ impl Render for QueueActionTooltip {
     }
 }
 
-/// Compact, borderless rows inside the queue's single glass surface.
-const ROW_HEIGHT: f32 = 36.0;
+/// Compact, borderless rows inside the queue's single glass surface. Rows
+/// keep the tray's inset between them, so neighbouring hover and editing
+/// washes never touch; each slot stays 36px.
+const ROW_HEIGHT: f32 = 32.0;
 const QUEUE_TEXT_SIZE: f32 = 12.5;
-const ROW_GAP: f32 = 0.0;
+const ROW_GAP: f32 = PANEL_PAD_X;
 const ROW_SLOT: f32 = ROW_HEIGHT + ROW_GAP;
 const ROW_PAD_X: f32 = 8.0;
-const ROW_RADIUS: f32 = 8.0;
-const PANEL_RADIUS: f32 = 16.0;
+pub(crate) const PANEL_RADIUS: f32 = 16.0;
+const PANEL_BORDER: f32 = 1.0;
+/// One inset on every visible side of the rows: left, right, top, and above
+/// the composer that overlaps the tray's bottom.
 const PANEL_PAD_X: f32 = 4.0;
 const PANEL_PAD_TOP: f32 = 4.0;
+/// Concentric with the tray: its radius less the border and the inset, so a
+/// row's hover and editing wash follow the tray's corner exactly.
+pub(crate) const ROW_RADIUS: f32 = PANEL_RADIUS - PANEL_BORDER - PANEL_PAD_X;
+/// Row buttons sit the same distance from the row's top, bottom and trailing
+/// edge (its horizontal padding), so their corners are concentric with the
+/// row's: the row radius less that inset.
+const ROW_CONTROL_INSET: f32 = ROW_PAD_X - PANEL_PAD_X;
+const ROW_CONTROL_SIZE: f32 = ROW_HEIGHT - 2.0 * ROW_CONTROL_INSET;
+const ROW_CONTROL_RADIUS: f32 = ROW_RADIUS - ROW_CONTROL_INSET;
 /// The custom 24px queue glyphs have quieter geometry than the legacy set, so
 /// render them slightly larger to preserve the previous optical weight.
 const QUEUE_ICON_SIZE: f32 = 13.0;
@@ -171,6 +184,16 @@ pub struct QueueDragState {
     pub over: usize,
     pub prev_over: usize,
     pub epoch: usize,
+    /// The pointer's height in the rows' content, and where it grabbed the
+    /// row, so the lifted copy stays under the cursor (the sidebar's drag).
+    pub pointer: f32,
+    pub grab: f32,
+}
+
+/// Top of the lifted copy of a dragged row: under the pointer where it was
+/// grabbed, kept within the list.
+fn queue_lifted_top(pointer: f32, grab: f32, count: usize) -> f32 {
+    (pointer - grab).clamp(0.0, count.saturating_sub(1) as f32 * ROW_SLOT)
 }
 
 /// Invisible cursor ghost: the real row stays in the queue and moves between
@@ -196,7 +219,7 @@ fn one_line(text: &str) -> SharedString {
 fn queue_visible_text(text: &str, attachments: &[String]) -> String {
     let text = crate::appshots::strip_context_for_display(text);
     if text.trim().is_empty() && !attachments.is_empty() {
-        return crate::attachments::ATTACHMENT_ONLY_TEXT.to_string();
+        return crate::attachments::attachment_only_text(attachments).to_string();
     }
     if attachments.is_empty() {
         return text.to_string();
@@ -212,9 +235,25 @@ fn queue_visible_text(text: &str, attachments: &[String]) -> String {
         return text.to_string();
     }
     if parsed.text.trim().is_empty() {
-        crate::attachments::ATTACHMENT_ONLY_TEXT.to_string()
+        crate::attachments::attachment_only_text(attachments).to_string()
     } else {
         parsed.text
+    }
+}
+
+/// The row's one-line label and the chips to paint over it. Commands, skills,
+/// files and attachments show the same chips as the transcript; editing and
+/// delivery still read the stored text, which keeps their canonical links.
+fn queue_row_text(
+    text: &str,
+    attachments: &[String],
+) -> (SharedString, Vec<crate::composer::SentMentionSpan>) {
+    let visible = queue_visible_text(text, attachments);
+    match crate::composer::sent_mention_display(&visible) {
+        // Line breaks become spaces of the same size, so the chips' spans
+        // still line up with the text.
+        Some((display, spans)) => (display.replace(['\r', '\n'], " ").into(), spans),
+        None => (one_line(&visible), Vec::new()),
     }
 }
 
@@ -241,9 +280,13 @@ fn queue_hidden_attachments_label(labels: &[String], shown: usize) -> Option<Str
     Some(format!("{} more: {}", hidden.len(), hidden.join(" · ")))
 }
 
-fn queue_panel_surface(theme: &Theme) -> gpui::Div {
+/// `dragging`: a drag is in flight. The tray stops occluding then, so files,
+/// workspace paths and chats dropped on it reach the conversation's drop zone
+/// beneath (and land in this composer); otherwise it keeps clicks and hover
+/// from falling through to the transcript behind it.
+pub(crate) fn queue_panel_surface(theme: &Theme, dragging: bool) -> gpui::Div {
     div()
-        .occlude()
+        .when(!dragging, |el| el.occlude())
         .rounded_t(px(PANEL_RADIUS))
         .bg(
             if theme.is_frost() && matches!(theme.appearance, crate::theme::Appearance::Dark) {
@@ -257,9 +300,10 @@ fn queue_panel_surface(theme: &Theme) -> gpui::Div {
         .when(!theme.is_frost(), |el| el.shadow_lg())
         // GPUI clips children to rectangles, so inset the rows to keep their
         // hover and editing backgrounds inside the tray's rounded corners.
+        // The composer covers the bottom overlap; the same inset shows above it.
         .px(px(PANEL_PAD_X))
         .pt(px(PANEL_PAD_TOP))
-        .pb(px(QUEUE_COMPOSER_OVERLAP))
+        .pb(px(QUEUE_COMPOSER_OVERLAP + PANEL_PAD_TOP))
         .flex()
         .flex_col()
 }
@@ -268,6 +312,7 @@ fn queue_rows(
     scroll: &gpui::ScrollHandle,
     max_height: gpui::Pixels,
     rows: impl IntoIterator<Item = AnyElement>,
+    lifted: Option<AnyElement>,
 ) -> crate::edge_fade::EdgeFaded {
     crate::edge_fade::edge_faded(
         Theme::TRANSCRIPT_FADE_BAND,
@@ -275,17 +320,20 @@ fn queue_rows(
         true,
         div()
             .id("message-queue-rows")
+            .relative()
             .max_h(max_height)
             .overflow_y_scroll()
             .track_scroll(scroll)
             .flex()
             .flex_col()
             .gap(px(ROW_GAP))
-            .children(rows),
+            .children(rows)
+            // Last, so it paints over the rows sliding beneath it.
+            .children(lifted),
     )
+    // Glyphs fade per pixel, so the ramp ends exactly at the list's clip
+    // edge; extending it past the edge leaves a hard cut there.
     .fade_overflow_y(scroll)
-    // GPUI samples glyph fades at baseline + font size.
-    .outset_bottom(QUEUE_TEXT_SIZE)
 }
 
 fn preview_load_gate() -> &'static futures::lock::Mutex<()> {
@@ -344,6 +392,52 @@ impl Composer {
 
         let list_chat = chat_id.clone();
         let drop_chat = chat_id.clone();
+        // The dragged row, lifted: it follows the pointer above the list like
+        // a dragged sidebar session, while its own slot stays open beneath.
+        let lifted = self.queue_drag.as_ref().and_then(|drag| {
+            let item = items.get(drag.from)?;
+            let top = queue_lifted_top(drag.pointer, drag.grab, count);
+            let row = self.queue_row(
+                &chat_id,
+                drag.from,
+                count,
+                item,
+                None,
+                &editing,
+                host_supports_actions,
+                show_latest_shortcut,
+                true,
+                &theme,
+                cx,
+            );
+            // Frosted like a menu: the rows sliding beneath read as blurred
+            // glass rather than showing through the lifted row's text.
+            // A faint wash over the menu tint lifts it a level above the tray.
+            let card = div()
+                .rounded(px(ROW_RADIUS))
+                .bg(crate::popover::surface_bg(&theme))
+                .shadow_md()
+                .child(
+                    div()
+                        .rounded(px(ROW_RADIUS))
+                        .bg(crate::theme::wash(0.06))
+                        .child(row),
+                );
+            Some(
+                div()
+                    .id("message-queue-lifted-row")
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(top))
+                    .child(crate::frost::frosted(
+                        ROW_RADIUS,
+                        crate::frost::MENU_BLUR,
+                        card,
+                    ))
+                    .into_any_element(),
+            )
+        });
         let rows = queue_rows(
             &self.queue_scroll,
             window.viewport_size().height * 0.3,
@@ -357,13 +451,16 @@ impl Composer {
                     &editing,
                     host_supports_actions,
                     show_latest_shortcut,
+                    false,
                     &theme,
                     cx,
                 )
             }),
+            lifted,
         );
 
-        let panel = queue_panel_surface(&theme)
+        let panel = queue_panel_surface(&theme, cx.has_active_drag())
+            .debug_selector(|| "message-queue-panel".into())
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             // The complete glass surface is a drop target, including its
             // padding.
@@ -378,7 +475,7 @@ impl Composer {
                         - f32::from(event.bounds.top())
                         - f32::from(this.queue_scroll.offset().y);
                     let over = queue_drop_index(rel_y, count);
-                    this.update_queue_drag_over(from, over, cx);
+                    this.update_queue_drag_over(from, over, rel_y - PANEL_PAD_TOP, cx);
                 },
             ))
             .on_drop::<QueueDragPayload>(cx.listener(
@@ -418,22 +515,31 @@ impl Composer {
         editing: &Option<String>,
         host_supports_actions: bool,
         show_latest_shortcut: bool,
+        lifted: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let key = SharedString::from(format!("queue-{}", item.id));
+        // The lifted copy is a separate element from the row left in place.
+        let key = SharedString::from(if lifted {
+            format!("queue-lifted-{}", item.id)
+        } else {
+            format!("queue-{}", item.id)
+        });
         let being_edited = editing.as_deref() == Some(item.id.as_str());
         let being_removed = self.queue_removing.contains(&item.id);
         let delivery_blocked = item.delivery_gate.is_some();
         let interaction_blocked = delivery_blocked || being_removed;
-        let text = match &item.delivery_gate {
+        let (text, chips) = match &item.delivery_gate {
             Some(QueueDeliveryGate::Editing {
                 owner_device_id, ..
-            }) if !being_edited => SharedString::from(format!("Editing on {owner_device_id}")),
+            }) if !being_edited => (
+                SharedString::from(format!("Editing on {owner_device_id}")),
+                Vec::new(),
+            ),
             Some(QueueDeliveryGate::ReviewRequired { .. }) if !being_edited => {
-                SharedString::from("Needs review")
+                (SharedString::from("Needs review"), Vec::new())
             }
-            _ => one_line(&queue_visible_text(&item.text, &item.attachments)),
+            _ => queue_row_text(&item.text, &item.attachments),
         };
 
         let edit_id = item.id.clone();
@@ -553,7 +659,7 @@ impl Composer {
             // The marker hints that the row belongs to the queue, while the
             // proven full-row drag hitbox keeps reordering easy. Editing
             // disables it so selection cannot become a reorder gesture.
-            .when(!being_edited && !interaction_blocked, |el| {
+            .when(!lifted && !being_edited && !interaction_blocked, |el| {
                 el.on_drag(
                     QueueDragPayload {
                         chat: drag_chat,
@@ -570,40 +676,43 @@ impl Composer {
             // from the editing state.
             .when(being_edited, |el| el.child(div().w(px(14.0)).flex_none()))
             .when(!being_edited, |el| {
+                // A line with chips is taller, so their pills have room.
+                let line_height = if chips.is_empty() { 16.0 } else { 20.0 };
                 let content = div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_size(px(QUEUE_TEXT_SIZE))
-                    .line_height(px(16.0))
+                    .line_height(px(line_height))
                     .text_color(theme.text.opacity(0.9))
-                    .child(text);
-                let labels = queue_attachment_labels(&item.text, &item.attachments);
+                    .child(crate::composer::chip_text(text, chips, theme));
+                // Attachments the row's chips already show get no tile.
+                let tiled: Vec<String> =
+                    crate::attachments::unchipped_attachments(&item.text, &item.attachments)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                let labels = queue_attachment_labels(&item.text, &tiled);
                 let limit = self.queue_preview_limit();
                 let hidden = queue_hidden_attachments_label(&labels, limit);
-                el.children(
-                    item.attachments
-                        .iter()
-                        .zip(&labels)
-                        .take(limit)
-                        .enumerate()
-                        .map(|(index, (path, label))| {
-                            self.queue_thumbnail(&key, index, path, label.into(), cx)
-                        }),
-                )
+                el.children(tiled.iter().zip(&labels).take(limit).enumerate().map(
+                    |(index, (path, label))| {
+                        self.queue_thumbnail(&key, index, path, label.into(), cx)
+                    },
+                ))
                 .when_some(hidden, |el, hidden| {
-                    let remaining = item.attachments.len() - limit;
+                    let remaining = tiled.len() - limit;
                     let hidden: SharedString = hidden.into();
                     el.child(
                         div()
                             .id(SharedString::from(format!("{key}-more-attachments")))
-                            .w(px(28.0))
-                            .h(px(28.0))
+                            .w(px(ROW_CONTROL_SIZE))
+                            .h(px(ROW_CONTROL_SIZE))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(5.0))
+                            .rounded(px(ROW_CONTROL_RADIUS))
                             .bg(crate::theme::ink(0.06))
                             .text_size(px(11.0))
                             .text_color(theme.text_muted)
@@ -663,6 +772,10 @@ impl Composer {
         let Some((from, over, prev_over, epoch)) = drag else {
             return row.into_any_element();
         };
+        if ix == from {
+            // Its lifted copy is what moves; the slot keeps its place.
+            return div().opacity(0.0).child(row).into_any_element();
+        }
         let (start, target) = queue_drag_offsets(ix, from, prev_over, over);
         if cx.reduce_motion() {
             return div()
@@ -711,7 +824,12 @@ impl Composer {
         );
         let keys: std::collections::HashSet<_> = items[visible]
             .iter()
-            .flat_map(|item| item.attachments.iter().take(self.queue_preview_limit()))
+            .flat_map(|item| {
+                attachments::unchipped_attachments(&item.text, &item.attachments)
+                    .into_iter()
+                    .take(self.queue_preview_limit())
+            })
+            .filter(|path| attachments::is_image_path(path))
             .map(|path| (device.clone(), path.clone()))
             .take(64)
             .collect();
@@ -878,6 +996,23 @@ impl Composer {
                 }
             })
             .tooltip_show_delay(std::time::Duration::from_millis(350));
+        // A file that is not an image has no thumbnail to load: its icon stands in.
+        if !attachments::is_image_path(path) {
+            return frame
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::file_icons::icon(
+                        crate::file_icons::FileIconIdentity::file(
+                            attachments::attachment_display_name(&label),
+                        ),
+                        Theme::of(cx).appearance,
+                    )
+                    .size(px(16.0)),
+                )
+                .into_any_element();
+        }
         match snapshot {
             Some(image) => {
                 let path = path.to_owned();
@@ -951,12 +1086,12 @@ impl Composer {
             .group(own.clone())
             .role(gpui::Role::Button)
             .aria_label(label)
-            .size(px(28.0))
+            .size(px(ROW_CONTROL_SIZE))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.0))
+            .rounded(px(ROW_CONTROL_RADIUS))
             .opacity(0.72)
             .when(enabled, |el| {
                 el.cursor_pointer()
@@ -1011,13 +1146,13 @@ impl Composer {
             .aria_label(tooltip)
             // Both labels occupy the same slot; modifier previews never move
             // the message text, thumbnails, or adjacent actions.
-            .w(px(if compact { 28.0 } else { 72.0 }))
-            .h(px(28.0))
+            .w(px(if compact { ROW_CONTROL_SIZE } else { 72.0 }))
+            .h(px(ROW_CONTROL_SIZE))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.0))
+            .rounded(px(ROW_CONTROL_RADIUS))
             .text_size(px(11.5))
             .text_color(theme.text_muted)
             .when(enabled, |el| {
@@ -1069,13 +1204,24 @@ impl Composer {
     }
 
     /// Track the drop slot while a row is dragged over the list.
-    fn update_queue_drag_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
+    /// Track the drop slot and the pointer (`pointer`: height in the rows'
+    /// content) while a row is dragged over the list.
+    fn update_queue_drag_over(
+        &mut self,
+        from: usize,
+        over: usize,
+        pointer: f32,
+        cx: &mut Context<Self>,
+    ) {
         match &mut self.queue_drag {
             Some(drag) if drag.from == from => {
                 if drag.over != over {
                     drag.prev_over = drag.over;
                     drag.over = over;
                     drag.epoch = drag.epoch.wrapping_add(1);
+                }
+                if drag.pointer != pointer {
+                    drag.pointer = pointer;
                     cx.notify();
                 }
             }
@@ -1085,6 +1231,8 @@ impl Composer {
                     over,
                     prev_over: from,
                     epoch: 0,
+                    pointer,
+                    grab: (pointer - from as f32 * ROW_SLOT).clamp(0.0, ROW_HEIGHT),
                 });
                 cx.notify();
             }
@@ -1350,14 +1498,23 @@ impl Composer {
                     .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
                 let mut load_failed = paths.is_none();
                 for path in paths.unwrap_or_default() {
-                    let loaded = crate::attachments::read_attachment_image(
-                        &engine, cx.background_executor(), Some(&host_device_id), &path,
-                        None,
-                    ).await;
+                    let loaded = if crate::attachments::is_image_path(&path) {
+                        crate::attachments::read_attachment_image(
+                            &engine, cx.background_executor(), Some(&host_device_id), &path,
+                            None,
+                        ).await.map(|loaded| crate::attachments::StagedAttachment {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            mention: None,
+                            name: loaded.name,
+                            content: crate::attachments::AttachmentContent::Image(loaded.image),
+                        })
+                    } else {
+                        crate::attachments::read_attachment_file(
+                            &engine, cx.background_executor(), Some(&host_device_id), &path,
+                        ).await
+                    };
                     match loaded {
-                        Some(loaded) => loaded_attachments.push(crate::attachments::StagedAttachment {
-                            id: uuid::Uuid::new_v4().to_string(), name: loaded.name, image: loaded.image,
-                        }),
+                        Some(staged) => loaded_attachments.push(staged),
                         None => { load_failed = true; break; }
                     }
                 }
@@ -1411,7 +1568,7 @@ impl Composer {
                             .to_string();
                         let attachments: Vec<String> = serde_json::from_value(reply["attachments"].clone()).unwrap_or_default();
                         let text = queue_visible_text(&raw_text, &attachments);
-                        let text = if !attachments.is_empty() && text == crate::attachments::ATTACHMENT_ONLY_TEXT {
+                        let text = if !attachments.is_empty() && crate::attachments::is_attachment_only_text(&text) {
                             String::new()
                         } else { text };
                         let selected_matches = composer.state.read(cx).selected_chat.as_deref()
@@ -1441,15 +1598,12 @@ impl Composer {
                         composer.queue_edit_base_text_hash = Some(base_text_hash.to_string());
                         composer.queue_edit_chat_id = Some(chat_id.clone());
                         composer.queue_edit_host_device_id = Some(host_device_id.clone());
-                        composer.queue_edit_draft = Some((
-                            composer.input.read(cx).text().to_string(),
-                            composer.attachments.remove(&composer.current_key).unwrap_or_default(),
-                            composer.appshots.remove(&composer.current_key).unwrap_or_default(),
-                        ));
-                        composer.attachments.insert(composer.current_key.clone(), loaded_attachments);
-                        composer.appshots.insert(composer.current_key.clone(), loaded_appshots);
-                        composer.focus_pending = true;
-                        composer.input.update(cx, |input, cx| input.set_text(text, cx));
+                        composer.swap_in_queued_draft(
+                            text,
+                            std::mem::take(&mut loaded_attachments),
+                            std::mem::take(&mut loaded_appshots),
+                            cx,
+                        );
                         composer.start_queue_edit_renewal(engine.clone(), cx);
                     }
                     Ok(reply)
@@ -1475,13 +1629,55 @@ impl Composer {
         self.queue_edit_task = Some(task);
     }
 
+    /// Set the draft aside and fill the composer with a queued message.
+    /// Restored attachments take the numbers of the chips that name them, so
+    /// those chips stay live; the draft's own numbering waits with the draft.
+    pub(crate) fn swap_in_queued_draft(
+        &mut self,
+        text: String,
+        mut attachments: Vec<crate::attachments::StagedAttachment>,
+        appshots: Vec<crate::appshots::CapturedAppshot>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue_edit_draft = Some((
+            self.input.read(cx).text().to_string(),
+            self.attachments
+                .remove(&self.current_key)
+                .unwrap_or_default(),
+            self.appshots.remove(&self.current_key).unwrap_or_default(),
+        ));
+        self.displace_attachment_draft();
+        crate::attachments::pair_with_chips(&text, &mut attachments);
+        self.attachments
+            .insert(self.current_key.clone(), attachments);
+        self.appshots.insert(self.current_key.clone(), appshots);
+        self.focus_pending = true;
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// The text a queue edit saves: a chip whose attachment was removed is
+    /// saved as its plain label.
+    pub(crate) fn queue_edit_text(&self, cx: &gpui::App) -> String {
+        let attached: Vec<u32> = self.staged().iter().filter_map(|att| att.mention).collect();
+        zeron_proto::attachment_mentions::demote_unattached_mentions(
+            self.input.read(cx).text(),
+            &attached,
+        )
+    }
+
     /// Save the composer into the existing row, including its attachments.
     /// An entirely empty composer removes the row.
     pub(crate) fn commit_queue_edit(&mut self, cx: &mut Context<Self>) -> bool {
         if self.editing_queued.is_none() {
             return false;
         }
-        let text = self.input.read(cx).text().to_string();
+        if self
+            .input
+            .update(cx, |input, cx| input.finish_dictation(true, cx))
+        {
+            return true;
+        }
+        let text = self.queue_edit_text(cx);
         if !self.check_reference_delivery(&text, cx) {
             return true;
         }
@@ -1498,6 +1694,7 @@ impl Composer {
         if self.editing_queued.is_none() {
             return false;
         }
+        self.input.update(cx, |input, _| input.cancel_dictation());
         self.finish_queue_edit("cancel", None, cx);
         true
     }
@@ -1507,7 +1704,7 @@ impl Composer {
         self.clear_queue_edit_local(cx);
     }
 
-    fn clear_queue_edit_local(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_queue_edit_local(&mut self, cx: &mut Context<Self>) {
         self.editing_queued = None;
         self.queue_edit_lease_id = None;
         self.queue_edit_base_text_hash = None;
@@ -1516,11 +1713,13 @@ impl Composer {
         self.queue_edit_pending_id = None;
         self.queue_edit_finishing = false;
         self.input.update(cx, |input, cx| {
+            input.cancel_dictation();
             input.read_only = false;
             cx.notify();
         });
         self.queue_edit_task = None;
         self.queue_edit_renew_task = None;
+        self.restore_attachment_draft();
         if let Some((text, attachments, appshots)) = self.queue_edit_draft.take() {
             self.appshots.insert(self.current_key.clone(), appshots);
             self.input.update(cx, |input, cx| input.set_text(text, cx));
@@ -1566,6 +1765,7 @@ impl Composer {
         });
         self.queue_edit_finishing = true;
         self.input.update(cx, |input, cx| {
+            input.cancel_dictation();
             input.read_only = true;
             cx.notify();
         });
@@ -1587,7 +1787,7 @@ impl Composer {
                         params["text"].as_str().unwrap_or_default(), &staged_appshots, &appshot_paths,
                     ).into();
                     if params["text"].as_str().is_some_and(|text| text.trim().is_empty()) && !paths.is_empty() {
-                        params["text"] = crate::attachments::ATTACHMENT_ONLY_TEXT.into();
+                        params["text"] = crate::attachments::attachment_only_text(&paths).into();
                     }
                     params["attachments"] = serde_json::json!(paths);
                 }
@@ -1833,9 +2033,11 @@ mod tests {
     use zeron_rpc::methods;
 
     use super::{
-        PANEL_PAD_TOP, PANEL_PAD_X, PANEL_RADIUS, QueuePrimaryAction, ROW_RADIUS, ROW_SLOT,
+        PANEL_BORDER, PANEL_PAD_TOP, PANEL_PAD_X, PANEL_RADIUS, QueuePrimaryAction,
+        ROW_CONTROL_INSET, ROW_CONTROL_RADIUS, ROW_CONTROL_SIZE, ROW_HEIGHT, ROW_PAD_X, ROW_RADIUS,
+        ROW_SLOT,
         available_queue_primary_action, latest_queued_message, one_line, queue_action_needs_host,
-        queue_drag_offsets, queue_drop_index, queue_latest_shortcut_visible,
+        queue_drag_offsets, queue_drop_index, queue_latest_shortcut_visible, queue_lifted_top,
         queue_mutation_acknowledged, queue_visible_text, visible_queue_rows,
     };
 
@@ -1937,6 +2139,16 @@ mod tests {
     }
 
     #[test]
+    fn the_lifted_row_follows_the_pointer_within_the_list() {
+        // Grabbed 10px into the row, the copy's top stays 10px above the pointer.
+        assert_eq!(queue_lifted_top(ROW_SLOT + 30.0, 10.0, 3), ROW_SLOT + 20.0);
+        // It never leaves the list above the first slot or below the last.
+        assert_eq!(queue_lifted_top(-40.0, 10.0, 3), 0.0);
+        assert_eq!(queue_lifted_top(10.0 * ROW_SLOT, 10.0, 3), 2.0 * ROW_SLOT);
+        assert_eq!(queue_lifted_top(50.0, 10.0, 1), 0.0);
+    }
+
+    #[test]
     fn drag_offsets_move_the_real_row_and_open_its_destination() {
         assert_eq!(queue_drag_offsets(0, 0, 0, 2), (0.0, 2.0 * ROW_SLOT));
         assert_eq!(queue_drag_offsets(1, 0, 0, 2), (0.0, -ROW_SLOT));
@@ -2014,18 +2226,23 @@ mod tests {
         );
     }
 
-    /// GPUI clips the rows rectangularly, so a row's own rounded hover wash
-    /// must fit inside the tray's rounded top corners (within its 1px border).
+    /// A row's rounded hover wash is concentric with the tray's corner: the
+    /// two arcs share a center, so the gap between them is even all round.
+    /// Row buttons are inset evenly from the row's top, bottom and trailing
+    /// edge, and their corners follow the row's corner.
     #[test]
-    fn row_hover_corners_stay_inside_the_panel_curve() {
-        let border = 1.0_f32;
-        let row_corner_center = (
-            border + PANEL_PAD_X + ROW_RADIUS,
-            border + PANEL_PAD_TOP + ROW_RADIUS,
-        );
-        let reach = (PANEL_RADIUS - row_corner_center.0).hypot(PANEL_RADIUS - row_corner_center.1)
-            + ROW_RADIUS;
-        assert!(reach <= PANEL_RADIUS - border, "row corner reaches {reach}");
+    fn row_buttons_are_concentric_with_the_row() {
+        assert_eq!((ROW_HEIGHT - ROW_CONTROL_SIZE) / 2.0, ROW_CONTROL_INSET);
+        assert_eq!(ROW_CONTROL_INSET, ROW_PAD_X - PANEL_PAD_X, "same inset on the side");
+        assert_eq!(ROW_CONTROL_RADIUS + ROW_CONTROL_INSET, ROW_RADIUS);
+    }
+
+    #[test]
+    fn row_hover_corners_are_concentric_with_the_panel_curve() {
+        assert_eq!(PANEL_PAD_X, PANEL_PAD_TOP, "one inset on every side");
+        let row_corner_center = PANEL_BORDER + PANEL_PAD_X + ROW_RADIUS;
+        assert_eq!(row_corner_center, PANEL_RADIUS);
+        assert_eq!(PANEL_RADIUS - PANEL_BORDER - ROW_RADIUS, PANEL_PAD_X);
     }
 
     /// Filenames are no longer printed in the row, so every attachment folded
@@ -2040,6 +2257,102 @@ mod tests {
         assert_eq!(super::queue_hidden_attachments_label(&labels, 3), None);
         assert_eq!(super::queue_hidden_attachments_label(&labels, 5), None);
         assert_eq!(super::queue_hidden_attachments_label(&[], 2), None);
+    }
+
+    /// A row's text without the room reserved for chip icons and padding.
+    fn plain(display: &gpui::SharedString) -> String {
+        display
+            .replace('\u{a0}', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn kinds(spans: &[crate::composer::SentMentionSpan]) -> Vec<crate::composer::ChipKind> {
+        spans.iter().map(|span| span.kind).collect()
+    }
+
+    /// Rows label references the way the transcript does, never as raw
+    /// `zeron-invoke:`/`zeron-file:` links, and still hide attachment trailers.
+    #[test]
+    fn queue_rows_label_commands_skills_and_files() {
+        use crate::composer::ChipKind;
+        use zeron_proto::invocation::Invocation;
+        let command = Invocation::Command {
+            name: "compact".into(),
+        }
+        .link();
+        let skill = Invocation::Skill {
+            name: "review-pr".into(),
+            path: "/skills/review-pr/SKILL.md".into(),
+            command: None,
+        }
+        .link();
+        let file = zeron_proto::file_mentions::local_file_link("src/queue.rs", false);
+        let text = format!("{command} then {skill}\non {file}");
+        let (display, spans) = super::queue_row_text(&text, &[]);
+        assert_eq!(plain(&display), "compact then review-pr on queue.rs");
+        assert_eq!(
+            kinds(&spans),
+            [ChipKind::Command, ChipKind::Skill, ChipKind::File]
+        );
+        // Every chip span lies inside the row's text, line breaks included.
+        assert!(spans.iter().all(|span| span.range.end <= display.len()));
+        assert!(!display.contains('\n'));
+
+        let paths = vec!["/tmp/image.png".to_string()];
+        let legacy = crate::attachments::with_attachments(&command, &paths);
+        assert_eq!(plain(&super::queue_row_text(&legacy, &paths).0), "compact");
+        let (display, spans) = super::queue_row_text("plain  text", &[]);
+        assert_eq!(display.as_ref(), "plain text");
+        assert!(spans.is_empty());
+    }
+
+    /// A queued message with attachment chips shows them as chips in its row,
+    /// and an attachments-only message names what it holds.
+    #[test]
+    fn queue_rows_label_attachment_chips_and_file_only_sends() {
+        use zeron_proto::attachment_mentions::attachment_mention_link;
+        let paths = vec![
+            "/uploads/ab12cd34-Image_1.png".to_string(),
+            "/uploads/ef56ab78-notes.md".to_string(),
+        ];
+        let text = format!(
+            "compare {} and {}",
+            attachment_mention_link(1, None),
+            attachment_mention_link(2, Some("notes.md"))
+        );
+        let (display, spans) = super::queue_row_text(&text, &paths);
+        assert_eq!(plain(&display), "compare Image 1 and notes.md");
+        assert_eq!(
+            kinds(&spans),
+            [
+                crate::composer::ChipKind::Image,
+                crate::composer::ChipKind::File
+            ]
+        );
+
+        let files = vec!["/uploads/ef56ab78-notes.md".to_string()];
+        assert_eq!(
+            queue_visible_text("", &files),
+            crate::attachments::FILE_ATTACHMENT_ONLY_TEXT
+        );
+        let mixed = vec!["/a/cat.png".to_string(), "/a/notes.md".to_string()];
+        assert_eq!(
+            queue_visible_text("", &mixed),
+            crate::attachments::FILE_ATTACHMENT_ONLY_TEXT
+        );
+        let images = vec!["/a/cat.png".to_string()];
+        assert_eq!(
+            queue_visible_text("", &images),
+            crate::attachments::ATTACHMENT_ONLY_TEXT
+        );
+        // A legacy trailer on a files-only row is hidden like an image one.
+        let legacy = crate::attachments::with_attachments("", &files);
+        assert_eq!(
+            queue_visible_text(&legacy, &files),
+            crate::attachments::FILE_ATTACHMENT_ONLY_TEXT
+        );
     }
 
     #[test]
@@ -2086,14 +2399,83 @@ mod scroll_tests {
                 )
                 .child(
                     div().absolute().bottom_0().w_full().child(
-                        queue_panel_surface(Theme::of(cx)).child(queue_rows(
+                        queue_panel_surface(Theme::of(cx), false).child(queue_rows(
                             &self.queue,
                             px(180.0),
                             (0..self.count)
                                 .map(|_| div().h(px(ROW_HEIGHT)).flex_none().into_any_element()),
+                            None,
                         )),
                     ),
                 )
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestDrag;
+
+    impl Render for TestDrag {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            gpui::Empty
+        }
+    }
+
+    /// The conversation's drop zone behind the tray, a drag source above it,
+    /// and the tray along the bottom.
+    struct TrayDropTestView {
+        dropped: std::rc::Rc<std::cell::Cell<bool>>,
+        /// The fix: the tray stops occluding while a drag is in flight.
+        yield_to_drops: bool,
+    }
+
+    impl Render for TrayDropTestView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let dropped = self.dropped.clone();
+            let dragging = self.yield_to_drops && cx.has_active_drag();
+            div()
+                .id("drop-zone")
+                .size_full()
+                .on_drop::<TestDrag>(move |_, _, _| dropped.set(true))
+                .child(
+                    div()
+                        .id("drag-source")
+                        .debug_selector(|| "drag-source".into())
+                        .size(px(40.0))
+                        .on_drag(TestDrag, |_, _, _, cx| cx.new(|_| TestDrag)),
+                )
+                .child(
+                    div().absolute().bottom_0().w_full().child(
+                        queue_panel_surface(Theme::of(cx), dragging)
+                            .debug_selector(|| "tray".into())
+                            .h(px(120.0)),
+                    ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn drops_on_the_tray_reach_the_drop_zone_beneath_it(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        for yield_to_drops in [true, false] {
+            let dropped = std::rc::Rc::new(std::cell::Cell::new(false));
+            let (_, cx) = cx.add_window_view(|_, _| TrayDropTestView {
+                dropped: dropped.clone(),
+                yield_to_drops,
+            });
+            cx.simulate_resize(gpui::size(px(400.0), px(400.0)));
+            cx.run_until_parked();
+            let source = cx.debug_bounds("drag-source").unwrap().center();
+            let tray = cx.debug_bounds("tray").unwrap().center();
+            cx.simulate_mouse_down(source, gpui::MouseButton::Left, gpui::Modifiers::default());
+            for step in 1..=4 {
+                let to = source + (tray - source) * (step as f32 / 4.0);
+                cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), Default::default());
+                cx.update(|window, cx| window.draw(cx).clear());
+            }
+            cx.simulate_mouse_up(tray, gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.run_until_parked();
+            // Without the fix the occluding tray swallows the drop.
+            assert_eq!(dropped.get(), yield_to_drops);
         }
     }
 

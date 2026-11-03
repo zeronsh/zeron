@@ -1,0 +1,7 @@
+{"expect":"initialize","bind":{"$ID:init":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:init","result":{"serverInfo":{"name":"muse","version":"1.4.3"},"schema":{"version":1,"fingerprint":"sha256:fake"},"grantedCapabilities":["sessionMcp"]}}}
+{"expect":"initialized"}
+{"expect":"session/start","bind":{"$SESSION":["params","sessionId"],"$ID:start":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:start","result":{"session":{"sessionId":"$SESSION","modelId":"muse-spark-1.2","status":"idle"}}}}
+{"expect":"turn/start","bind":{"$TURN1":["params","commandId"],"$ID:turn":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:turn","error":{"code":-32050,"message":"usage limit reached","data":{"kind":"quotaExceeded","retryable":false}}}}

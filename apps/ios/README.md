@@ -41,6 +41,10 @@ Zeron/
                streaming veil), FrameRelay
   Session/     SessionViewController, SessionSource (Core/Fixture), new-session
                canvas
+  Companions/  What works alongside a session: the companions panel (sheet on
+               iPhone, inspector column beside the session on iPad / unfolded
+               iPhone Duo), subagent transcripts, side chats, terminals (grid
+               painter + key bar over the core's emulator)
   Composer/    ComposerBar (glass capsule ⇄ card with inline context chips;
                send/queue/steer/stop), question and queue panels, attachments
   Threads/     Sessions (foldable sidebar sections)/folder/search lists,
@@ -48,7 +52,28 @@ Zeron/
   Shell/       Tab bar (Sessions, Settings, search; "New session" accessory
                with live summary), sign-in
   Debug/       Transcript lab + hitch meter
+ZeronLiveActivity/  Widget extension: the voice call's Live Activity (Dynamic
+               Island + Lock Screen), with the orb's states exported from
+               zeron-orb as vector assets
+ZeronShared/   Compiled into the app and the extension: the activity's
+               attributes and its mute/end App Intents
 ```
+
+### Companions
+
+A session's subagents, side chats and terminals (`Companions/`):
+
+- **Subagents** come off the transcript (`SessionHandle.subagents()`): a
+  spawn's card opens its own transcript, read-only — the host's live doc
+  while it runs, its uploaded copy once done (`TranscriptView.attachSubagent`).
+- **Side chats** are child chats: a fresh one shares its parent's host,
+  folder and agent (`CoreClient.createSideChat`; closed unused, it's
+  deleted), a fork copies the conversation through its latest reply
+  (`forkSideChat`, answered by the chat's host).
+- **Terminals** are PTYs on the chat's host. `crates/mobile/src/terminal`
+  runs the desktop's emulator and echo predictor (`crates/term`) over the
+  client's resumable `TerminalLink`; Swift paints frames and sends keys.
+  Terminals persist per chat and reattach after a relaunch.
 
 ### Transcript pipeline
 
@@ -65,6 +90,12 @@ Zeron/
    paints runs with CoreText at the Rust coordinates — measurement and
    rendering can't disagree. Display models for rows beyond the viewport are
    prefetched off the main thread.
+5. Agent visuals (`show_visual` Luau scripts) get a worker thread each
+   (`crates/mobile/src/visual`): it runs the script, lays the node tree out,
+   draws canvases and charts as vector paint, renders scenes and shaders with
+   wgpu, and reports its height back to the row. `VisualView` paints what
+   arrives (rasterized on the worker thread) and forwards touches; the demo's
+   "Agent visuals" chat (`-demo -route chat:chat-visuals`) has one of each.
 
 ## Launch arguments
 
@@ -74,6 +105,7 @@ Zeron/
 | `-fast` / `-longreply` | Demo stream speed / reply length |
 | `-big` / `-huge` | Demo transcripts with 120 / 600 turns |
 | `-route chat:<id>` / `new` / `more` / `search` | Open a screen at launch |
+| `-companions` / `-terminal [-terminal-demo]` / `-subagent <tool id>` / `-side-chat <id>` | With `-route chat:<id>`: open its companions panel, a terminal (typing a scripted demo), a subagent, or a side chat (DEBUG) |
 | `-signedout` | Clear stored credentials |
 | `-dev <userId> <orgId> [-edge <url>]` | Dev bearer against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`); not persisted |
 | `-harness <id>` | Default harness for new sessions (`mock` for live-stack tests) |

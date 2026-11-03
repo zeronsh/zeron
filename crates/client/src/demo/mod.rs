@@ -2,8 +2,8 @@
 //! simulated host.
 //!
 //! Nothing here short-circuits the client: the dataset lives in a real
-//! [`RegistryDoc`] (local writes settle through [`DemoServer`], a stand-in for
-//! the registry room) and real [`SessionDoc`]s. The viewer side writes
+//! [`RegistryDoc`] (local-only, like an edge-less engine: writes fold straight
+//! into its rows, with no room to ack them) and real [`SessionDoc`]s. The viewer side writes
 //! commands and queue rows exactly as in live mode; [`DemoHost`] plays the
 //! engine — adopting commands (writing the user entry under the client-minted
 //! id), streaming replies through `SegmentWriter`, flipping session status
@@ -11,7 +11,9 @@
 
 mod fixtures;
 mod png;
+mod terminal;
 mod transcripts;
+mod visuals;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,8 +23,8 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::{
-    MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, RegistryDoc, RegistryRow, RowOp,
-    SegmentWriter, SessionCommandPayload, SessionCommandStatus, SessionDoc, apply_op,
+    MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, SegmentWriter,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc,
 };
 use zeron_proto::{FolderEntry, FolderListing, RepoRef, Session, SessionStatus};
 
@@ -32,7 +34,6 @@ use crate::config::{DemoOptions, StreamSpeed};
 use crate::error::{ClientError, Result};
 use crate::rpc::ProgressFn;
 use crate::session::SessionCore;
-use crate::workspace::WorkspaceStore;
 use crate::{lock, now_ms};
 
 use transcripts::Step;
@@ -42,46 +43,6 @@ const ADOPT_DELAY: Duration = Duration::from_millis(180);
 /// Engines heartbeat live session rows well inside the 45s staleness gate.
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const LEASE_MS: i64 = 60_000;
-
-/// In-process registry room: merges pushed op batches into server rows and
-/// broadcasts them back (the mock server's merge, minus the socket).
-#[derive(Default)]
-pub(crate) struct DemoServer {
-    rows: HashMap<(String, String), RegistryRow>,
-    seq: u64,
-}
-
-impl DemoServer {
-    fn settle(&mut self, doc: &mut RegistryDoc) {
-        loop {
-            let batches = doc.take_pushable();
-            if batches.is_empty() {
-                return;
-            }
-            for batch in batches {
-                let mut touched = Vec::new();
-                for op in &batch.ops {
-                    self.apply(op, &mut touched);
-                }
-                self.seq = self.seq.max(doc.cursor()) + 1;
-                let _ = doc.apply_rows(self.seq, touched);
-                doc.ack_batch(&batch.batch, self.seq);
-            }
-        }
-    }
-
-    fn apply(&mut self, op: &RowOp, touched: &mut Vec<RegistryRow>) {
-        let key = (op.kind.clone(), op.id.clone());
-        let (next, changed) = apply_op(self.rows.get(&key), op);
-        if let Some(mut row) = next
-            && changed
-        {
-            row.seq = self.seq + 1;
-            self.rows.insert(key, row.clone());
-            touched.push(row);
-        }
-    }
-}
 
 /// A tiny deterministic PRNG (xorshift64*): demo cadence is reproducible.
 struct Rng(u64);
@@ -109,7 +70,6 @@ struct Lease {
 pub(crate) struct DemoHost {
     options: DemoOptions,
     client: Weak<ClientInner>,
-    server: Mutex<DemoServer>,
     refs: Mutex<HashMap<String, Vec<RepoRef>>>,
     /// Running turn per chat: (turn id, cancel token).
     turns: Mutex<HashMap<String, (u64, CancellationToken)>>,
@@ -121,6 +81,9 @@ pub(crate) struct DemoHost {
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
+    terminals: terminal::DemoTerminals,
+    /// Forked side chats → the chat they copy.
+    forks: Mutex<HashMap<String, String>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -132,7 +95,6 @@ impl DemoHost {
         Arc::new(Self {
             options,
             client: Arc::downgrade(client),
-            server: Mutex::new(DemoServer::default()),
             refs: Mutex::new(HashMap::new()),
             turns: Mutex::new(HashMap::new()),
             turn_seq: AtomicU64::new(1),
@@ -142,6 +104,8 @@ impl DemoHost {
             uploads: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
+            terminals: terminal::DemoTerminals::default(),
+            forks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -164,14 +128,8 @@ impl DemoHost {
         for status in seeded.change_requests {
             client.workspace.put_change_request(status);
         }
-        self.settle_registry(&client.workspace);
         self.beat_presence(client);
         Ok(())
-    }
-
-    pub(crate) fn settle_registry(&self, workspace: &WorkspaceStore) {
-        let mut server = lock(&self.server);
-        workspace.mutate(|doc| server.settle(doc));
     }
 
     fn beat_presence(&self, client: &ClientInner) {
@@ -261,7 +219,19 @@ impl DemoHost {
             .as_ref()
             .and_then(|c| c.last_message_at)
             .map_or_else(now_ms, |t| t.timestamp_millis());
+        let fork_of = lock(&self.forks).get(chat_id).cloned();
         let entries = match (chat_id, self.options.transcript_scale.turns()) {
+            _ if fork_of.is_some() => {
+                let source = fork_of.unwrap_or_default();
+                // Through the latest completed reply, like the engine's fork.
+                let mut entries = transcripts::fixture(&source, &host, last);
+                while entries.last().is_some_and(|e| {
+                    e.role != MessageRole::Assistant || e.status != Some(MessageStatus::Complete)
+                }) {
+                    entries.pop();
+                }
+                entries
+            }
             ("chat-veil", Some(turns)) => {
                 transcripts::synthetic(turns, &host, now_ms() - turns as i64 * 60_000)
             }
@@ -405,14 +375,20 @@ impl DemoHost {
                     request_id,
                     answers,
                 } => {
-                    let _ = core.write(|doc| doc.resolve_input(&request_id));
-                    let labels: Vec<String> = answers.into_iter().flat_map(|a| a.labels).collect();
-                    self.spawn_turn(
-                        chat_id.to_owned(),
-                        None,
-                        transcripts::answered(&labels),
-                        None,
-                    );
+                    let _ = core.write(|doc| doc.resolve_input(&request_id, &answers));
+                    if answers.is_empty() {
+                        // Closed unanswered: there is nothing to reply to.
+                        self.set_status(&client, chat_id, SessionStatus::Idle, None);
+                    } else {
+                        let labels: Vec<String> =
+                            answers.into_iter().flat_map(|a| a.labels).collect();
+                        self.spawn_turn(
+                            chat_id.to_owned(),
+                            None,
+                            transcripts::answered(&labels),
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -496,6 +472,10 @@ impl DemoHost {
         let _ = client.registry_write(|doc| {
             doc.upsert_session(&Session {
                 last_completed_turn: completed.map(str::to_owned),
+                last_turn_outcome: None,
+                terminal_activity: None,
+                running_subagents: 0,
+                background_tasks: Vec::new(),
                 chat_id: chat_id.to_owned(),
                 device_id: host,
                 status,
@@ -738,6 +718,7 @@ impl DemoHost {
                         request_id,
                         questions,
                         resolved: false,
+                        answers: None,
                     });
                     sync(&parts, &mut written, &mut index);
                     awaiting = true;
@@ -803,7 +784,7 @@ impl DemoHost {
     pub(crate) async fn host_rpc(
         self: &Arc<Self>,
         device_id: &str,
-        method: &'static str,
+        method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         use zeron_rpc::methods as m;
@@ -812,6 +793,9 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if let Some(reply) = self.companion_rpc(&client, method, &params)? {
+            return Ok(reply);
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client
@@ -945,6 +929,149 @@ impl DemoHost {
             other => return Err(ClientError::Unsupported(other.to_owned())),
         };
         Ok(reply)
+    }
+
+    /// Terminals, subagent blobs and forks: RPCs that aren't about one
+    /// chat's queue. `None` = not one of them.
+    fn companion_rpc(
+        self: &Arc<Self>,
+        client: &Arc<ClientInner>,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>> {
+        use zeron_rpc::methods as m;
+        let terminal = || params["terminalId"].as_str().unwrap_or_default().to_owned();
+        let ok = serde_json::json!({ "ok": true });
+        Ok(Some(match method {
+            m::OPEN_TERMINAL => {
+                let chat_id = params["chatId"].as_str().unwrap_or_default();
+                let cwd = client
+                    .workspace
+                    .chat(chat_id)
+                    .and_then(|c| c.cwd)
+                    .unwrap_or_else(|| "/Users/dev".into());
+                self.terminals.open(&cwd)
+            }
+            m::WRITE_TERMINAL => {
+                let data = params["data"].as_str().unwrap_or_default();
+                let bytes =
+                    crate::live::b64::decode(data).unwrap_or_else(|| data.as_bytes().to_vec());
+                self.terminals.write(&terminal(), &bytes)?;
+                ok
+            }
+            m::RESIZE_TERMINAL => ok,
+            m::CLOSE_TERMINAL => {
+                self.terminals.close(&terminal());
+                ok
+            }
+            m::FETCH_TOOL_BLOB => {
+                let blob = params["blobRef"].as_str().unwrap_or_default();
+                let doc_id = blob.split_once('/').map_or(blob, |(_, doc)| doc);
+                let host = self.host_of(client, "chat-veil");
+                let entries = transcripts::subagent_transcript(doc_id, &host, now_ms(), None)
+                    .ok_or_else(|| ClientError::HostError("FetchToolBlob: no such blob".into()))?;
+                serde_json::json!({ "text": serde_json::to_string(&entries).unwrap_or_default() })
+            }
+            m::FORK_SIDE_CHAT => {
+                let source_id = params["sourceChatId"].as_str().unwrap_or_default();
+                let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
+                let parent = params["parentChatId"]
+                    .as_str()
+                    .unwrap_or(source_id)
+                    .to_owned();
+                let mut chat = client
+                    .workspace
+                    .chat(source_id)
+                    .ok_or_else(|| ClientError::HostError("Source chat no longer exists".into()))?;
+                lock(&self.forks).insert(chat_id.clone(), source_id.to_owned());
+                chat.title = chat.title.map(|t| format!("Fork of {t}"));
+                chat.id = chat_id;
+                chat.parent_chat_id = Some(parent);
+                chat.created_at = Utc::now();
+                chat.last_message_at = Some(Utc::now());
+                chat.last_seen_at = Some(Utc::now());
+                client
+                    .registry_write(|doc| doc.upsert_chat(&chat))
+                    .map_err(|e| ClientError::Internal(e.to_string()))?;
+                serde_json::to_value(&chat).unwrap_or_default()
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// Host streams: terminal output, and a subagent's transcript (a
+    /// running one grows a part every couple of seconds).
+    pub(crate) async fn host_subscribe(
+        self: &Arc<Self>,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<crate::host_stream::HostStream> {
+        use zeron_rpc::methods as m;
+        let client = self.client()?;
+        if !client.network_online() || !self.host_online(&client, device_id) {
+            return Err(ClientError::HostUnavailable(device_id.to_owned()));
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        match method {
+            m::SUBSCRIBE_TERMINAL => {
+                let id = params["terminalId"].as_str().unwrap_or_default();
+                let after = params["afterSeq"].as_u64().unwrap_or(0);
+                Ok(crate::host_stream::HostStream::Local(
+                    self.terminals.subscribe(id, after)?,
+                ))
+            }
+            m::WATCH_DOC_MESSAGES => {
+                let doc_id = params["chatId"].as_str().unwrap_or_default().to_owned();
+                let host = self.host_of(&client, "chat-veil");
+                let running = transcripts::VEIL_AGENTS
+                    .iter()
+                    .any(|(id, running)| *running && doc_id.ends_with(id));
+                let steps = transcripts::subagent_steps(&doc_id);
+                if steps == 0 {
+                    return Err(ClientError::HostError(
+                        "WatchDocMessages: no such doc".into(),
+                    ));
+                }
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                let cancel = self.cancel_token();
+                let started = now_ms();
+                crate::runtime::shared().spawn(async move {
+                    // A running child shows its first parts at once, then
+                    // one more every couple of seconds, holding on its last
+                    // (it keeps working); a finished one is whole.
+                    let mut step = if running {
+                        steps.saturating_sub(2).max(1)
+                    } else {
+                        steps
+                    };
+                    loop {
+                        let entries = transcripts::subagent_transcript(
+                            &doc_id,
+                            &host,
+                            started,
+                            running.then_some(step),
+                        )
+                        .unwrap_or_default();
+                        let frame = serde_json::json!({ "reset": entries });
+                        if tx.send(frame).await.is_err() || !running || step >= steps {
+                            // Keep the stream open: the child is still at it.
+                            tokio::select! {
+                                _ = cancel.cancelled() => return,
+                                _ = tx.closed() => return,
+                            }
+                        }
+                        tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            _ = tokio::time::sleep(Duration::from_millis(2400)) => {}
+                        }
+                        step += 1;
+                    }
+                });
+                Ok(crate::host_stream::HostStream::Local(rx))
+            }
+            other => Err(ClientError::Unsupported(other.to_owned())),
+        }
     }
 
     pub(crate) async fn list_harnesses(&self, _device_id: &str) -> Vec<HarnessInfo> {
@@ -1113,6 +1240,9 @@ impl DemoHost {
     pub(crate) fn read_attachment(&self, path: &str) -> Result<Arc<Vec<u8>>> {
         if let Some(bytes) = lock(&self.uploads).get(path) {
             return Ok(bytes.clone());
+        }
+        if let Some(bytes) = visuals::read(path) {
+            return Ok(Arc::new(bytes));
         }
         transcripts::DEMO_IMAGES
             .iter()

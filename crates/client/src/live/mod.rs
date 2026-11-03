@@ -13,6 +13,8 @@
 //! short — the legacy client's one-shot chat join left chats dark until a
 //! relaunch.
 
+pub(crate) mod delivery;
+pub(crate) mod direct;
 pub(crate) mod escort;
 pub(crate) mod relay;
 pub(crate) mod room;
@@ -194,10 +196,14 @@ pub(crate) struct LiveBackend {
     registry_retry_at: AtomicI64,
     registry_failure: Mutex<Option<String>>,
     registry_save: Arc<Notify>,
+    registry_save_gate: Mutex<()>,
     registry_dirty: Arc<AtomicBool>,
     last_liveness_probe: AtomicI64,
     pub(crate) relay: relay::Relay,
+    /// Direct peer connections (terminals), started with the backend.
+    pub(crate) direct: std::sync::OnceLock<Option<zeron_preview::viewer::ViewerPeers>>,
     pub(crate) escorts: escort::Escorts,
+    pub(crate) delivery_wake: Arc<Notify>,
     cancel: CancellationToken,
 }
 
@@ -225,13 +231,16 @@ impl LiveBackend {
         let store = Arc::new(store);
         Self {
             relay: relay::Relay::new(inner, &edge, bearer),
+            direct: std::sync::OnceLock::new(),
             escorts: escort::Escorts::new(&inner.config.data_dir),
+            delivery_wake: Arc::new(Notify::new()),
             edge,
             store,
             registry: Mutex::new(None),
             registry_retry_at: AtomicI64::new(0),
             registry_failure: Mutex::new(None),
             registry_save: Arc::new(Notify::new()),
+            registry_save_gate: Mutex::new(()),
             registry_dirty: Arc::new(AtomicBool::new(false)),
             last_liveness_probe: AtomicI64::new(0),
             cancel: inner.cancel.child_token(),
@@ -245,12 +254,24 @@ impl LiveBackend {
     /// Spawn the registry join/event loop, the presence beat, and the
     /// registry saver.
     pub(crate) fn start(&self, inner: &Arc<ClientInner>) {
+        // Signaling first: pairing with a host can then start the moment a
+        // terminal wants it.
+        let _ = self.direct.set(direct::start(inner));
         self.spawn_registry(inner);
         self.spawn_registry_saver(inner);
         self.escorts.respawn(inner);
+        delivery::start(inner, self.delivery_wake.clone(), self.cancel.clone());
+    }
+
+    /// The direct peers, when they started.
+    pub(crate) fn direct(&self) -> Option<&zeron_preview::viewer::ViewerPeers> {
+        self.direct.get().and_then(Option::as_ref)
     }
 
     pub(crate) fn stop(&self) {
+        if let Some(direct) = self.direct() {
+            direct.stop();
+        }
         self.cancel.cancel();
         if let Some(client) = lock(&self.registry).take() {
             crate::runtime::shared().spawn(client.shutdown());
@@ -357,15 +378,20 @@ impl LiveBackend {
             return;
         }
         let Some(inner) = inner else { return };
-        let bytes = inner.workspace.mutate(|doc| doc.to_bytes());
-        match bytes {
-            Ok(bytes) => {
-                if let Err(err) = self.store.save_snapshot(REGISTRY_DOC_ID, &bytes) {
-                    tracing::warn!(error = %err, "registry snapshot save failed");
-                }
-            }
-            Err(err) => tracing::warn!(error = %err, "registry export failed"),
+        if let Err(err) = self.persist_registry(inner) {
+            self.registry_dirty.store(true, Ordering::Release);
+            tracing::warn!(error = %err, "registry snapshot save failed");
         }
+    }
+
+    /// Serialize export and save, so a debounced older export cannot overwrite
+    /// a new chat row persisted before its first command.
+    pub(crate) fn persist_registry(&self, inner: &ClientInner) -> Result<()> {
+        let _gate = lock(&self.registry_save_gate);
+        let bytes = inner.workspace.mutate(|doc| doc.to_bytes())?;
+        self.store
+            .save_snapshot(REGISTRY_DOC_ID, &bytes)
+            .map_err(|err| ClientError::Storage(err.to_string()))
     }
 
     /// Persist the registry now (backgrounding).

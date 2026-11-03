@@ -206,6 +206,16 @@ export class DeviceRoom implements DurableObject {
       });
     }
 
+    // Internal only (CloudAccount; index.ts forwards just /ws, /sidecar,
+    // /status and /nudge): a Cloud session device belongs to its user from
+    // the moment the edge mints it, so a send made while its machine is
+    // still booting queues here instead of 404ing on an unclaimed room.
+    if (url.pathname === "/claim" && request.method === "POST") {
+      if (!owner) this.setMeta("owner", userId);
+      else if (owner !== userId) return json({ error: "forbidden" }, 403);
+      return json({ ok: true });
+    }
+
     // Durable command nudge (§7). Any authenticated device of the owner may
     // nudge; the payload is only a chat id — the host validates against its
     // own doc before executing anything.

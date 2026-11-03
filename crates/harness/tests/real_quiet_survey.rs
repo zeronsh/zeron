@@ -22,6 +22,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
     let (steer_tx, steer_rx) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
             let (tx, rx) = oneshot::channel();
@@ -37,6 +38,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        turn: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -49,7 +51,7 @@ struct ProbeOutcome {
     started_err: Option<String>,
 }
 
-async fn probe_once(harness: AcpHarness) -> ProbeOutcome {
+async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
     let (controls, steer_tx, _token) = controls();
     let req = RunRequest {
         mcp: None,
@@ -64,9 +66,13 @@ async fn probe_once(harness: AcpHarness) -> ProbeOutcome {
         cwd: std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut stream = match harness.run(req, controls).await {
         Ok(s) => s,
@@ -196,11 +202,11 @@ async fn real_all_harnesses_quiet_survey() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
-    let agents: Vec<(&str, fn() -> AcpHarness)> = vec![
-        ("devin", AcpHarness::devin),
-        ("grok", AcpHarness::grok),
-        ("hermes", AcpHarness::hermes),
-        ("pi", AcpHarness::pi),
+    let agents: Vec<(&str, fn() -> Box<dyn Harness>)> = vec![
+        ("devin", || Box::new(AcpHarness::devin())),
+        ("grok", || Box::new(AcpHarness::grok())),
+        ("hermes", || Box::new(AcpHarness::hermes())),
+        ("pi", || Box::new(zeron_harness::PiHarness::new())),
     ];
     let mut failures: Vec<String> = Vec::new();
     for (name, ctor) in agents {

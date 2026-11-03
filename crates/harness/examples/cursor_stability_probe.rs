@@ -20,6 +20,7 @@ async fn turn(
     let (tx, steering) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: token.clone(),
@@ -28,6 +29,7 @@ async fn turn(
             let _ = tx.send(vec![]);
             rx
         }),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,
@@ -41,9 +43,13 @@ async fn turn(
         cwd: cwd.into(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         resume: session.clone(),
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut stream = harness
         .run(request, controls)
@@ -139,6 +145,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
     let nonce = format!("PARKED-STABILITY-{}", uuid::Uuid::new_v4());
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: CancellationToken::new(),
@@ -147,6 +154,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
             let _ = tx.send(vec![]);
             rx
         }),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,
@@ -162,9 +170,13 @@ async fn parked(harness: &CursorHarness, count: usize) {
         cwd: workspace.path().to_str().unwrap().into(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let mut id = String::new();
@@ -202,7 +214,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
                             println!("auth_clock_advanced_ms={offset} exchanges_before={}",exchanges.lines().count());
                         }
                     }
-                    tx.send(zeron_harness::SteerMessage{prompt:"Repeat the exact PARKED-STABILITY token from earlier. Reply only the token. Do not use tools or files.".into(),message_id:None}).await.unwrap();
+                    tx.send(zeron_harness::SteerMessage{prompt:"Repeat the exact PARKED-STABILITY token from earlier. Reply only the token. Do not use tools or files.".into(),message_id:None, attachments: Vec::new(), config: None}).await.unwrap();
                 }
                 _=>{}
             }
@@ -250,6 +262,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
     let (tx, steering) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: token.clone(),
@@ -258,6 +271,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
             let _ = tx.send(vec![]);
             rx
         }),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,
@@ -277,9 +291,13 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
         cwd: workspace.path().to_str().unwrap().into(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         resume: seed,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let producer = tokio::spawn(async move {
@@ -295,6 +313,8 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
                 .send(zeron_harness::SteerMessage {
                     prompt,
                     message_id: None,
+                    attachments: Vec::new(),
+                    config: None,
                 })
                 .await
                 .is_err()
@@ -387,6 +407,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         .collect();
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: CancellationToken::new(),
@@ -395,6 +416,7 @@ async fn history(harness: &CursorHarness, count: usize) {
             let _ = tx.send(vec![]);
             rx
         }),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,
@@ -411,9 +433,13 @@ async fn history(harness: &CursorHarness, count: usize) {
         cwd: workspace.path().to_str().unwrap().into(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let (start_tx, start_rx) = oneshot::channel();
@@ -422,7 +448,7 @@ async fn history(harness: &CursorHarness, count: usize) {
     let producer = tokio::spawn(async move {
         start_rx.await.unwrap();
         for token in sent.iter().skip(1) {
-            tx.send(zeron_harness::SteerMessage{prompt:format!("Add token {token} to your remembered conversation history. Reply with the token from the immediately previous user message, followed by this new token. Do not use tools."),message_id:Some(uuid::Uuid::new_v4().to_string())}).await.unwrap();
+            tx.send(zeron_harness::SteerMessage{prompt:format!("Add token {token} to your remembered conversation history. Reply with the token from the immediately previous user message, followed by this new token. Do not use tools."),message_id:Some(uuid::Uuid::new_v4().to_string()),attachments:Vec::new(),config:None}).await.unwrap();
         }
     });
     let mut id = String::new();

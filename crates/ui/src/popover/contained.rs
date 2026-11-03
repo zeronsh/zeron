@@ -6,6 +6,14 @@ use gpui::{
 };
 use std::time::Instant;
 
+/// Which trigger edge the menu lines up with: `End` grows leftward from the
+/// trigger's right edge, `Start` rightward from its left edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MenuAlign {
+    Start,
+    End,
+}
+
 /// Mount from a relative trigger. The menu uses the available side of the
 /// trigger instead of sliding over it when it approaches the dialog edge.
 pub(crate) fn contained_menu(
@@ -14,6 +22,7 @@ pub(crate) fn contained_menu(
     closing: Option<Instant>,
     trigger_height: f32,
     limits: Bounds<Pixels>,
+    align: MenuAlign,
 ) -> AnyElement {
     let exit = closing.map(super::exit_progress);
     // Half the usable height guarantees room on at least one side, even
@@ -40,13 +49,17 @@ pub(crate) fn contained_menu(
     div()
         .absolute()
         .bottom_0()
-        .right_0()
+        .map(|el| match align {
+            MenuAlign::Start => el.left_0(),
+            MenuAlign::End => el.right_0(),
+        })
         .size_0()
         .child(
             gpui::deferred(ContainedMenu {
                 content,
                 limits,
                 trigger_height,
+                align,
             })
             .priority(1),
         )
@@ -58,6 +71,7 @@ fn menu_origin(
     size: Size<Pixels>,
     trigger_height: Pixels,
     limits: Bounds<Pixels>,
+    align: MenuAlign,
 ) -> Point<Pixels> {
     let gap = px(6.0);
     let below = anchor.y + gap;
@@ -67,8 +81,12 @@ fn menu_origin(
     } else {
         above
     };
+    let x = match align {
+        MenuAlign::Start => anchor.x,
+        MenuAlign::End => anchor.x - size.width,
+    };
     point(
-        (anchor.x - size.width).clamp(
+        x.clamp(
             limits.left(),
             (limits.right() - size.width).max(limits.left()),
         ),
@@ -83,6 +101,7 @@ struct ContainedMenu {
     content: AnyElement,
     limits: Bounds<Pixels>,
     trigger_height: f32,
+    align: MenuAlign,
 }
 
 impl IntoElement for ContainedMenu {
@@ -132,7 +151,13 @@ impl Element for ContainedMenu {
         cx: &mut App,
     ) {
         let size = window.layout_bounds(*child).size;
-        let origin = menu_origin(bounds.origin, size, px(self.trigger_height), self.limits);
+        let origin = menu_origin(
+            bounds.origin,
+            size,
+            px(self.trigger_height),
+            self.limits,
+            self.align,
+        );
         window.with_element_offset(origin - bounds.origin, |window| {
             self.content.prepaint(window, cx)
         });
@@ -163,12 +188,35 @@ mod tests {
         let menu = size(px(260.0), px(280.0));
         for y in [120.0, 350.0, 650.0] {
             let anchor = point(px(870.0), px(y));
-            let origin = menu_origin(anchor, menu, px(34.0), limits);
+            let origin = menu_origin(anchor, menu, px(34.0), limits, MenuAlign::End);
             let bounds = Bounds::new(origin, menu);
             assert!(bounds.left() >= limits.left() && bounds.right() <= limits.right());
             assert!(bounds.top() >= limits.top() && bounds.bottom() <= limits.bottom());
             assert!(bounds.top() >= anchor.y + px(6.0) || bounds.bottom() <= anchor.y - px(40.0));
         }
+    }
+
+    #[test]
+    fn start_aligned_dropdown_grows_rightward_within_dialog() {
+        let limits = Bounds::new(point(px(100.0), px(80.0)), size(px(800.0), px(600.0)));
+        let menu = size(px(260.0), px(200.0));
+        let origin = menu_origin(
+            point(px(300.0), px(200.0)),
+            menu,
+            px(34.0),
+            limits,
+            MenuAlign::Start,
+        );
+        assert_eq!(origin.x, px(300.0));
+        // Near the right edge it slides back inside rather than overflowing.
+        let origin = menu_origin(
+            point(px(800.0), px(200.0)),
+            menu,
+            px(34.0),
+            limits,
+            MenuAlign::Start,
+        );
+        assert_eq!(origin.x, limits.right() - menu.width);
     }
 
     struct MenuFixture {
@@ -221,6 +269,7 @@ mod tests {
                             None,
                             34.0,
                             Bounds::new(point(px(100.0), px(80.0)), size(px(600.0), px(400.0))),
+                            MenuAlign::End,
                         )),
                 )
         }

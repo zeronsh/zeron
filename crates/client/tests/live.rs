@@ -58,6 +58,9 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         git_detected: true,
         git_checked_at: None,
         checkout_id: None,
+        repository_id: None,
+        github_repo: None,
+        icon: None,
         created_at: now,
     };
     let chat = Chat {
@@ -82,12 +85,15 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
             reasoning: None,
             model_options: Default::default(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            access: Default::default(),
+            plan: false,
         }),
         last_message_preview: None,
         last_message_at: Some(now),
         created_at: now,
         harness_session_id: None,
         harness_session_cwd: None,
+        harness_session_harness: None,
         space_id: Some(SPACE.into()),
         last_seen_at: Some(now),
         room_gen: Some(2),
@@ -326,7 +332,18 @@ async fn session_send_round_trips_through_the_chat_room() {
         panic!("idle chat starts a turn");
     };
     assert_eq!(session.snapshot().pending.len(), 1);
-    assert!(session.snapshot().working, "in flight to a live host");
+    assert!(
+        !session.snapshot().working,
+        "sending is not confirmed host activity"
+    );
+    assert_eq!(
+        session.composer().send_state,
+        Some(zeron_client::SendState::Sending)
+    );
+    assert_ne!(
+        client.workspace().session(CHAT).unwrap().indicator,
+        ChatIndicator::Working
+    );
 
     // The command row reaches the room; the host answers.
     let host_doc = LoroDoc::new();
@@ -413,6 +430,15 @@ async fn sends_survive_a_room_outage_and_deliver_on_rejoin() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(edge.rows(CHAT).is_empty(), "room refused");
     assert_eq!(session.snapshot().pending.len(), 1, "durable echo stays");
+    let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+    assert!(
+        store
+            .sync_job_version(CHAT, "viewer-delivery")
+            .unwrap()
+            .is_some(),
+        "an early successful wake cannot retire unpushed rows"
+    );
+    assert_eq!(edge.last_nudge_row_count(CHAT), Some(0));
 
     // The room comes back: the join loop retries (never one-shot) and the
     // outbox delivers.
@@ -425,6 +451,19 @@ async fn sends_survive_a_room_outage_and_deliver_on_rejoin() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let start = Instant::now();
+    while store
+        .sync_job_version(CHAT, "viewer-delivery")
+        .unwrap()
+        .is_some()
+    {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        edge.last_nudge_row_count(CHAT).unwrap() > 0,
+        "the final host wake follows command publication"
+    );
     let host_doc = LoroDoc::new();
     let start = Instant::now();
     while host_answers(&edge, &host_doc).is_none() {
@@ -811,5 +850,268 @@ async fn phone_born_sessions_reach_the_host_before_their_first_command() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert_eq!(edge.host_hint(&chat_id).as_deref(), Some(HOST));
+    client.shutdown();
+}
+
+// The wake must survive independently of the chat row ACK: the host may have
+// no room open yet, even though the edge already holds every command byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acked_command_recovers_failed_host_wake_without_opening_the_chat() {
+    let edge = MockEdge::start().await;
+    let _host = HostRegistry::start(&edge).await;
+    edge.nudge_status(500);
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    await_chat(&client, CHAT).await;
+    let session = client.open_session(CHAT).unwrap();
+    session
+        .send(SendRequest::text("wake the cold host"))
+        .unwrap();
+    let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+    let start = Instant::now();
+    while edge.rows(CHAT).is_empty() || store.has_pending_chat_updates(CHAT).unwrap() {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A 500 used to silently abandon the wake after the first attempt.
+    let start = Instant::now();
+    while edge.nudges(CHAT) < 2 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "host wake was not retried"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        store
+            .sync_job_version(CHAT, "viewer-delivery")
+            .unwrap()
+            .is_some()
+    );
+    client.shutdown();
+    drop(session);
+    drop(client);
+    let before = edge.nudges(CHAT);
+    edge.nudge_status(200);
+    let restarted = phone(&edge, dir.path());
+    // No open_session, viewport attach or preload: recovery discovers the job.
+    let start = Instant::now();
+    while edge.nudges(CHAT) <= before
+        || store
+            .sync_job_version(CHAT, "viewer-delivery")
+            .unwrap()
+            .is_some()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "ACKed command lost its host wake on restart"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    restarted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_host_wake_settles_instead_of_retrying_forever() {
+    let edge = MockEdge::start().await;
+    let _host = HostRegistry::start(&edge).await;
+    // Another owner's device: no retry can change a 403.
+    edge.nudge_status(403);
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    await_chat(&client, CHAT).await;
+    let session = client.open_session(CHAT).unwrap();
+    session
+        .send(SendRequest::text("to a foreign host"))
+        .unwrap();
+    let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+    let start = Instant::now();
+    while edge.rows(CHAT).is_empty()
+        || store.has_pending_chat_updates(CHAT).unwrap()
+        || store
+            .sync_job_version(CHAT, "viewer-delivery")
+            .unwrap()
+            .is_some()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a refused wake kept its receipt"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let settled = edge.nudges(CHAT);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(edge.nudges(CHAT), settled, "a refused wake was retried");
+    client.shutdown();
+}
+
+async fn await_chat(client: &Client, chat: &str) {
+    let start = Instant::now();
+    while client.workspace().session(chat).is_none() {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn immediate_exit_after_first_send_recovers_new_chat_on_each_host_platform() {
+    for (platform, harness) in [
+        ("windows", HarnessId::Codex),
+        ("macos", HarnessId::Cursor),
+        ("linux", HarnessId::ClaudeCode),
+    ] {
+        let edge = MockEdge::start().await;
+        let host = HostRegistry::start(&edge).await;
+        let (mut device, _, _) = host_rows(Utc::now());
+        device.platform = platform.into();
+        host.doc.lock().unwrap().upsert_device(&device).unwrap();
+        host.client.nudge();
+        edge.refuse_chat_joins(true);
+        edge.nudge_status(500);
+        let dir = tempfile::tempdir().unwrap();
+        let client = phone(&edge, dir.path());
+        await_chat(&client, CHAT).await;
+        let chat = client
+            .create_session(zeron_client::NewSession {
+                target: zeron_client::SessionTarget::Project {
+                    space_id: SPACE.into(),
+                },
+                config: Some(ChatConfig {
+                    harness,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    sandbox: SandboxLevel::WorkspaceWrite,
+                    access: Default::default(),
+                    plan: false,
+                }),
+                branch: None,
+                cwd: None,
+                title: None,
+            })
+            .unwrap();
+        let session = client.open_session(&chat).unwrap();
+        let SendOutcome::Started { message_id } = session
+            .send(SendRequest::text("first message before closing"))
+            .unwrap()
+        else {
+            panic!()
+        };
+        // No background flush, debounce sleep, or incoming host acknowledgement.
+        let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+        let bytes = store
+            .load_snapshot(zeron_doc::REGISTRY_DOC_ID)
+            .unwrap()
+            .unwrap();
+        let saved = RegistryDoc::from_bytes(&bytes, "ios-live").unwrap();
+        assert!(
+            saved.chat(&chat).unwrap().is_some(),
+            "{platform}: first send returned before its registry row was saved"
+        );
+        assert!(!session.snapshot().working);
+        client.shutdown();
+        drop(session);
+        drop(client);
+        edge.refuse_chat_joins(false);
+        edge.nudge_status(200);
+        let restarted = phone(&edge, dir.path());
+        assert!(
+            restarted.workspace().session(&chat).is_some(),
+            "{platform}: new registry row was not durable"
+        );
+        let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+        let start = Instant::now();
+        while edge.rows(&chat).is_empty()
+            || edge.nudges(&chat) == 0
+            || store.has_pending_chat_updates(&chat).unwrap()
+            || store
+                .sync_job_version(&chat, "viewer-delivery")
+                .unwrap()
+                .is_some()
+        {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "{platform}: first send was stranded without a UI open"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let doc = SessionDoc::from_doc(LoroDoc::new());
+        for row in edge.rows(&chat) {
+            doc.doc().import(&row.bytes).unwrap();
+        }
+        let commands = doc.read_commands().unwrap();
+        assert_eq!(
+            commands.len(),
+            1,
+            "{platform}: recovery duplicated the command"
+        );
+        assert!(
+            matches!(&commands[0].payload, SessionCommandPayload::Run { request, message_id: id } if id.as_str() == message_id.as_str() && request.harness == Some(harness))
+        );
+        restarted.shutdown();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_wakes_yield_delivery_capacity_to_later_chats() {
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    edge.nudge_status(500);
+    edge.nudge_status_for("z-healthy", 200);
+    for n in 0..9 {
+        let (_, _, mut row) = host_rows(Utc::now());
+        row.id = if n == 8 {
+            "z-healthy".into()
+        } else {
+            format!("a-stalled-{n}")
+        };
+        host.doc.lock().unwrap().upsert_chat(&row).unwrap();
+    }
+    host.client.nudge();
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    await_chat(&client, "z-healthy").await;
+    for n in 0..8 {
+        client
+            .open_session(&format!("a-stalled-{n}"))
+            .unwrap()
+            .send(SendRequest::text("stalled wake"))
+            .unwrap();
+    }
+    let start = Instant::now();
+    while edge.nudges("a-stalled-7") == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "delivery slots did not fill"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    client
+        .open_session("z-healthy")
+        .unwrap()
+        .send(SendRequest::text("healthy destination"))
+        .unwrap();
+    let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+    let start = Instant::now();
+    while edge.nudges("z-healthy") == 0
+        || store
+            .sync_job_version("z-healthy", "viewer-delivery")
+            .unwrap()
+            .is_some()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(16),
+            "stalled wakes starved the next delivery"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        store
+            .sync_job_version("a-stalled-0", "viewer-delivery")
+            .unwrap()
+            .is_some(),
+        "yielding must preserve the stalled obligation"
+    );
     client.shutdown();
 }

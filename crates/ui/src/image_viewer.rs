@@ -207,6 +207,7 @@ impl ImageView {
         image: Arc<Image>,
         natural: Size<Pixels>,
         on_image_click: Option<ImageClick>,
+        plate: Option<gpui::Hsla>,
         _window: &mut Window,
         _cx: &mut App,
     ) -> AnyElement {
@@ -282,6 +283,18 @@ impl ImageView {
                     cx.stop_propagation();
                     on_click(window, cx);
                 }
+            })
+            .when_some(plate, |viewport, plate| {
+                viewport.child(
+                    div()
+                        .absolute()
+                        .left(px(origin.x))
+                        .top(px(origin.y))
+                        .w(px(natural.width * geometry.scale))
+                        .h(px(natural.height * geometry.scale))
+                        .rounded(px(10.0))
+                        .bg(plate),
+                )
             })
             .child(
                 gpui::img(image)

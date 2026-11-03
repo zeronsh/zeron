@@ -13,7 +13,7 @@
 
 mod contained;
 mod hover_intent;
-pub(crate) use contained::contained_menu;
+pub(crate) use contained::{MenuAlign, contained_menu};
 pub use hover_intent::{HoverAction, HoverIntent};
 
 use gpui::{
@@ -513,13 +513,28 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
 /// and the overlay also keeps stray clicks from reaching whatever sits
 /// underneath.
 fn menu_motion(id: SharedString, exit: Option<f32>, inner: gpui::Div) -> AnyElement {
+    menu_motion_from(id, exit, inner, -2.0)
+}
+
+/// [`menu_motion`] with the entrance travelling `from` px (signed) out of
+/// the trigger's side, and the exit retreating back toward it.
+fn menu_motion_from(
+    id: SharedString,
+    exit: Option<f32>,
+    inner: gpui::Div,
+    from: f32,
+) -> AnyElement {
     if let Some(t) = exit {
         let inner = inner.relative().child(div().absolute().inset_0().occlude());
-        motion::menu_out(SharedString::from(format!("{id}-out")), t, inner).into_any_element()
+        motion::menu_out_toward(SharedString::from(format!("{id}-out")), from, t, inner)
+            .into_any_element()
     } else {
-        motion::menu_in(id, inner).into_any_element()
+        motion::menu_in_from(id, from, inner).into_any_element()
     }
 }
+
+/// Entrance travel for menus that open away from a trigger edge.
+const MENU_TRAVEL: f32 = 4.0;
 
 /// Wrap popover content in a floating anchored layer attached to the trigger:
 /// the caller `.child(anchored_menu(...))`s this from the trigger element while
@@ -583,10 +598,11 @@ pub fn anchored_menu_below_end(
                 gpui::anchored()
                     .anchor(Anchor::TopRight)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion(
+                    .child(menu_motion_from(
                         id.into(),
                         exit,
                         div().occlude().pt(px(6.0)).child(content),
+                        -MENU_TRAVEL,
                     )),
             )
             .priority(1)
@@ -684,10 +700,11 @@ pub fn anchored_menu_below_layer(
                 gpui::anchored()
                     .anchor(Anchor::TopLeft)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion(
+                    .child(menu_motion_from(
                         id.into(),
                         exit,
                         div().occlude().pt(px(gap)).child(content),
+                        -MENU_TRAVEL,
                     )),
             )
             .priority(priority)
@@ -711,10 +728,11 @@ pub fn anchored_menu_above(
             gpui::anchored()
                 .anchor(Anchor::BottomLeft)
                 .snap_to_window_with_margin(px(8.0))
-                .child(menu_motion(
+                .child(menu_motion_from(
                     id.into(),
                     exit,
                     div().occlude().pb(px(6.0)).child(content),
+                    MENU_TRAVEL,
                 )),
         )
         .priority(1)
@@ -783,10 +801,11 @@ pub fn anchored_menu_above_end(
                 gpui::anchored()
                     .anchor(Anchor::BottomRight)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion(
+                    .child(menu_motion_from(
                         id.into(),
                         exit,
                         div().occlude().pb(px(6.0)).child(content),
+                        MENU_TRAVEL,
                     )),
             )
             .priority(1)
@@ -1123,34 +1142,115 @@ pub fn key_hint_pair(
         .child(key_hint_label(theme, label))
 }
 
-/// A muted kbd hint chip inside menu rows (`⌘↵`-style accelerators).
+/// The face shortcut glyphs are set in. The UI font has no ⇧ ⌥ ↵ (they fell
+/// back to a mismatched face); the system font draws the platform's own.
+pub const KEY_GLYPH_FONT: &str = ".SystemUIFont";
+
+/// A shortcut legend (`⌘N`, `⇧⌘N`, `⌘1`): the sidebar's jump-hint voice
+/// everywhere — plain muted text at the row's subline size, no chip.
 pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
     let theme = &theme.for_popup();
     div()
         .flex_none()
-        .px(px(5.0))
-        .py(px(1.0))
-        .rounded(px(5.0))
-        .bg(ink(0.05))
-        .text_size(crate::typography::ui_rems(10.0))
-        .font_family(theme.font_mono.clone())
-        .text_color(theme.text_muted)
+        .whitespace_nowrap()
+        .font_family(KEY_GLYPH_FONT)
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted.opacity(0.5))
         .child(SharedString::from(label.to_string()))
 }
 
-/// The search/text input frame at the top of a picker popover (zeron
-/// `searchInput`: `w-full rounded-lg bg-white/[0.04] px-2.5 py-1.5
-/// text-[13px]` + `mb-1`, borderless — full width inside the card's own
-/// p-1, only a 4px bottom margin).
-pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
+/// The search row's height, hairline included.
+pub const SEARCH_ROW_HEIGHT: f32 = 40.0;
+
+/// The model picker's search row, shared by every searchable picker: a
+/// magnifier and a borderless input over a full-bleed hairline, in the
+/// card's own tone. Mount it as the card's FIRST child — it cancels the
+/// card's inset to run edge to edge, then restores the inset above the list.
+pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
+    search_row(theme).child(div().flex_1().min_w_0().child(input))
+}
+
+/// [`search_input_frame`] without the input, for rows that carry their own
+/// trailing controls. Children follow the magnifier.
+pub fn search_row(theme: &Theme) -> gpui::Div {
     div()
-        .mb(px(4.0))
+        .flex_none()
+        .h(px(SEARCH_ROW_HEIGHT))
+        .mx(px(-CARD_INSET))
+        .mt(px(-CARD_INSET))
+        .mb(px(CARD_INSET))
         .px(px(10.0))
-        .py(px(6.0))
-        .rounded(px(MENU_ITEM_RADIUS))
-        .bg(ink(0.04))
+        .border_b_1()
+        .border_color(hairline(0.08))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
         .text_size(crate::typography::ui_rems(13.0))
-        .child(input)
+        .child(
+            crate::icons::icon(crate::icons::MAGNIFER)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+}
+
+/// A searchable picker's row height, matching the model picker's rows.
+pub const PICKER_ROW_HEIGHT: f32 = 32.0;
+
+/// One row of a searchable picker, drawn like the model picker's: selection
+/// is the card's selected wash and ring, and the keyboard cursor and hover
+/// share one faint ink wash. The caller adds the id and listeners; `fade_key`
+/// keys the hover fade, as in [`menu_row`].
+pub fn picker_row(
+    theme: &Theme,
+    selected: bool,
+    highlighted: bool,
+    fade_key: impl Into<SharedString>,
+) -> gpui::Div {
+    let row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .min_h(px(PICKER_ROW_HEIGHT))
+        .px(px(8.0))
+        .rounded(px(MENU_ITEM_RADIUS))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text)
+        .cursor_pointer();
+    if selected {
+        return row
+            .bg(crate::theme::card_selected_bg())
+            .shadow(crate::theme::card_selected_shadows());
+    }
+    let fade_key = fade_key.into();
+    let mut row = row.bg(motion::hover_blend(&fade_key, ink(0.0), ink(0.05)));
+    row.interactivity()
+        .on_hover(motion::hover_listener(fade_key));
+    if highlighted { row.bg(ink(0.05)) } else { row }
+}
+
+/// A picker row's leading slot: a project's artwork, or a glyph centred in
+/// the same square, so every label starts at one edge.
+pub fn picker_icon_slot(art: AnyElement) -> gpui::Div {
+    div()
+        .size(px(16.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(art)
+}
+
+/// A full-bleed hairline between a picker's list and its pinned action rows.
+pub fn picker_divider() -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(1.0))
+        .my(px(2.0))
+        .mx(px(-CARD_INSET))
+        .bg(hairline(0.08))
 }
 
 /// A bordered trailing menu section (zeron picker action groups /
@@ -1904,6 +2004,86 @@ pub fn rail<V: ScrollRailHost>(
     )
 }
 
+/// One handle-backed rail on a view that hosts several: where its state
+/// lives and which scroller feeds it. [`ScrollRailHost`] spells this out for
+/// a view's only rail; a view can implement that trait once, so its other
+/// rails go through [`rail_for`] instead.
+pub struct RailAccess<V> {
+    pub bar: fn(&mut V) -> &mut MenuScrollbarState,
+    pub scroll: fn(&V) -> ScrollHandle,
+}
+
+impl<V> Clone for RailAccess<V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V> Copy for RailAccess<V> {}
+
+/// [`rail`] for a rail named by `access`: the same activity note, hide
+/// scheduling, visuals, and six pointer listeners, off its scroll handle.
+pub fn rail_for<V: 'static>(
+    host: &mut V,
+    access: RailAccess<V>,
+    id: &'static str,
+    theme: &Theme,
+    cx: &mut Context<V>,
+) -> Option<AnyElement> {
+    let scroll = (access.scroll)(host);
+    let bar = (access.bar)(host);
+    bar.note_scroll(&scroll);
+    let metrics = bar.metrics(&scroll)?;
+    schedule_scrollbar_hide(bar, cx);
+    let strip = (access.bar)(host).render_rail(theme, metrics)?;
+    Some(
+        strip
+            .id(id)
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if (access.bar)(this).set_bar_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    let scroll = (access.scroll)(this);
+                    if (access.bar)(this).begin_press(&scroll, event.position.y) {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drag(MenuScrollbarDrag, |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| MenuScrollbarDragGhost)
+            })
+            .on_drag_move(cx.listener(
+                move |this, event: &gpui::DragMoveEvent<MenuScrollbarDrag>, _, cx| {
+                    let scroll = (access.scroll)(this);
+                    if (access.bar)(this).drag_to(&scroll, event.event.position.y) {
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    (access.bar)(this).end_press();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    (access.bar)(this).end_press();
+                    cx.notify();
+                }),
+            )
+            .into_any_element(),
+    )
+}
+
 /// Rewind a handle-owned menu list to its top and drop its rail activity
 /// baseline in one step — the pair every "reopen this menu fresh" site must
 /// make. Skipping the offset half strands the list mid-scroll; skipping the
@@ -2373,10 +2553,21 @@ pub(crate) fn search_highlight(
         return text.into_any_element();
     };
     let ranges = search_match_ranges(&text, query);
-    if ranges.is_empty() {
+    search_highlight_ranges(text, ranges, theme)
+}
+
+/// [`search_highlight`] over byte ranges the caller already knows (a
+/// content search's matches). Ranges that are empty, out of bounds or off
+/// a character boundary are skipped.
+pub(crate) fn search_highlight_ranges(
+    text: SharedString,
+    ranges: Vec<std::ops::Range<usize>>,
+    theme: &Theme,
+) -> AnyElement {
+    let badges = valid_highlight_ranges(&text, ranges);
+    if badges.is_empty() {
         return text.into_any_element();
     }
-    let badges = ranges;
     let styled = gpui::StyledText::new(text).with_highlights(badges.iter().cloned().map(|range| {
         (
             range,
@@ -2419,6 +2610,21 @@ pub(crate) fn search_highlight(
         .into_any_element()
 }
 
+fn valid_highlight_ranges(
+    text: &str,
+    ranges: Vec<std::ops::Range<usize>>,
+) -> Vec<std::ops::Range<usize>> {
+    ranges
+        .into_iter()
+        .filter(|range| {
+            range.start < range.end
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end)
+        })
+        .collect()
+}
+
 fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let folded = text.to_lowercase();
     let mut original = Vec::with_capacity(folded.len());
@@ -2450,7 +2656,16 @@ fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
 
 #[cfg(test)]
 mod search_highlight_tests {
-    use super::search_match_ranges;
+    use super::{search_match_ranges, valid_highlight_ranges};
+
+    #[test]
+    fn explicit_ranges_skip_empty_out_of_bounds_and_split_characters() {
+        let text = "café needle";
+        assert_eq!(
+            valid_highlight_ranges(text, vec![6..12, 4..4, 3..4, 6..40, 0..3]),
+            vec![6..12, 0..3]
+        );
+    }
 
     #[test]
     fn inline_matches_keep_adjacent_word_boundaries() {

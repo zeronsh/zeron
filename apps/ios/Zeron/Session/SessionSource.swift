@@ -6,6 +6,7 @@ struct SessionChrome: Equatable {
     enum Banner: Equatable {
         case none
         case working(since: Date?, word: String)
+        case sending
         case offline
         case reconnecting(in: Int)
         case notDelivered
@@ -19,6 +20,8 @@ struct SessionChrome: Equatable {
         let text: String
         let options: [String]
         let multiSelect: Bool
+        var prefill: String? = nil
+        var multiline: Bool = false
     }
 
     /// Attachment upload progress (0…1) while images are escorted to the
@@ -73,7 +76,14 @@ protocol SessionSource: AnyObject {
     func finishEdit(text: String?) async
     /// Menu for a composer chip (model, effort, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
+    /// The model picker sheet, when this source has one (else the model
+    /// chip's menu).
+    func modelPicker() -> UIViewController?
+    /// Where this chat's provider signs in (an error card's "Log in").
+    func signInTarget() -> AgentAccountsViewController.Target?
     func loadImage(_ reference: String, into view: UIImageView)
+    /// An attachment's picture, for opening it full size (an image chip).
+    func image(_ reference: String) async -> UIImage?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
 }
@@ -225,5 +235,13 @@ final class FixtureSessionSource: SessionSource {
         }
     }
     func loadImage(_ reference: String, into view: UIImageView) {}
+    func image(_ reference: String) async -> UIImage? { nil }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
+}
+
+extension SessionSource {
+    /// Nothing was ever sent or queued here.
+    var isUnused: Bool { false }
+    func modelPicker() -> UIViewController? { nil }
+    func signInTarget() -> AgentAccountsViewController.Target? { nil }
 }

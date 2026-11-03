@@ -3,8 +3,8 @@
 //! - theme-owned background/ANSI16 plus the xterm 256-color cube/grayscale;
 //! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
 //!   escape sequences, Ctrl- combos, Alt prefixing);
-//! - the 12 ms input coalescer and the 80 ms resize debounce constants (the
-//!   panel drives the timers; the buffer logic here is pure);
+//! - the ordered input queue and the 80 ms resize debounce constant (the
+//!   panel drives the writes and timers; the buffer logic here is pure);
 //! - [`TerminalElement`] — a custom gpui element that measures cell metrics
 //!   from the real mono font (the "font probe"), reports the resulting
 //!   cols×rows back to the panel, and paints the grid: background quads for
@@ -18,7 +18,7 @@ use gpui::{
 
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
-use super::emulator::{CellColor, CellSnapshot, Side};
+use super::emulator::{CellColor, CellSnapshot, CursorShape, Side};
 use super::panel::TerminalPanel;
 
 /// Default terminal font metrics; the rendered values come from the theme.
@@ -30,8 +30,6 @@ const TERM_LINE_HEIGHT_RATIO: f32 = TERM_LINE_HEIGHT / TERM_FONT_SIZE;
 /// Inner padding of the grid area.
 pub const TERM_PADDING: f32 = 12.0;
 
-/// Keyboard input coalescing window before a `WriteTerminal` flush.
-pub const COALESCE_MS: u64 = 12;
 /// Debounce for `ResizeTerminal` after viewport-driven size changes.
 pub const RESIZE_DEBOUNCE_MS: u64 = 80;
 
@@ -282,6 +280,81 @@ pub fn keystroke_bytes(
     }
 }
 
+/// How a keydown reaches the PTY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyRoute {
+    /// Write these bytes now.
+    Bytes(Vec<u8>),
+    /// Typed text: let the platform's text input deliver it, so input
+    /// methods, dead keys and keyboard layouts compose it first.
+    Text,
+    /// Not the terminal's (app shortcuts).
+    NotOurs,
+}
+
+/// Route a keydown. Printable text goes through the platform text input;
+/// named keys and modified keys are encoded here.
+///
+/// Option follows the layout: where Option types an ASCII symbol (`@`, `|`,
+/// `\` on many European layouts) that symbol is typed; where it would type
+/// something else (`∫` for Option-B on US layouts) it acts as Alt/Meta, so
+/// shell word motions and editor bindings work without a setting.
+pub fn route_key(
+    key: &str,
+    key_char: Option<&str>,
+    mods: &Modifiers,
+    app_cursor: bool,
+) -> KeyRoute {
+    if mods.platform {
+        return KeyRoute::NotOurs;
+    }
+    let printable = key_char.filter(|c| !c.is_empty() && !c.chars().any(char::is_control));
+    if mods.alt && !mods.control {
+        if let Some(text) = printable
+            && text.is_ascii()
+            && !text.eq_ignore_ascii_case(key)
+            && key.chars().count() == 1
+        {
+            return KeyRoute::Text;
+        }
+        // Meta: ESC + the key as typed without Option.
+        let base = (key.chars().count() == 1).then(|| {
+            if mods.shift {
+                key.to_uppercase()
+            } else {
+                key.to_string()
+            }
+        });
+        return keystroke_bytes(key, base.as_deref(), mods, app_cursor)
+            .map_or(KeyRoute::NotOurs, KeyRoute::Bytes);
+    }
+    if !mods.control && !mods.function && printable.is_some() && !is_named_key(key) {
+        return KeyRoute::Text;
+    }
+    keystroke_bytes(key, key_char, mods, app_cursor).map_or(KeyRoute::NotOurs, KeyRoute::Bytes)
+}
+
+fn is_named_key(key: &str) -> bool {
+    matches!(
+        key,
+        "enter"
+            | "backspace"
+            | "tab"
+            | "escape"
+            | "space"
+            | "up"
+            | "down"
+            | "left"
+            | "right"
+            | "home"
+            | "end"
+            | "insert"
+            | "delete"
+            | "pageup"
+            | "pagedown"
+    ) || (key.len() >= 2 && key.starts_with('f') && key[1..].chars().all(|c| c.is_ascii_digit()))
+}
+
 /// Ctrl-key encoding (caret notation).
 fn control_bytes(key: &str) -> Option<Vec<u8>> {
     let mut chars = key.chars();
@@ -322,30 +395,173 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Input coalescer (pure buffer; the panel owns the 12 ms timer)
+// Pointer and focus reports
 // ---------------------------------------------------------------------------
 
-/// Buffers keyboard bytes between flushes. `push` returns `true` exactly when
-/// a flush timer should be scheduled (the buffer was empty), so at most one
-/// timer is in flight per burst.
-#[derive(Debug, Default)]
-pub struct InputCoalescer {
-    pending: Vec<u8>,
+/// Button codes for mouse reports.
+pub const MOUSE_LEFT: u8 = 0;
+pub const MOUSE_MIDDLE: u8 = 1;
+pub const MOUSE_RIGHT: u8 = 2;
+/// Legacy encoding's "some button released"; motion with nothing held.
+pub const MOUSE_NONE: u8 = 3;
+pub const MOUSE_WHEEL_UP: u8 = 64;
+pub const MOUSE_WHEEL_DOWN: u8 = 65;
+/// Added to a button code for motion reports.
+pub const MOUSE_MOTION: u8 = 32;
+
+/// Encode a pointer event for a program that asked for mouse reports.
+/// `col`/`row` are 0-based viewport cells. SGR (1006) reports releases with
+/// their button; the legacy encoding cannot name one and cannot address
+/// cells past 223, so such events are dropped rather than sent garbled.
+pub fn mouse_report(
+    button: u8,
+    col: usize,
+    row: usize,
+    release: bool,
+    mods: &Modifiers,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    let mut code = button;
+    if mods.shift {
+        code += 4;
+    }
+    if mods.alt {
+        code += 8;
+    }
+    if mods.control {
+        code += 16;
+    }
+    if sgr {
+        let end = if release { 'm' } else { 'M' };
+        return Some(format!("\x1b[<{code};{};{}{end}", col + 1, row + 1).into_bytes());
+    }
+    if release {
+        code = (code & !0b11) | MOUSE_NONE;
+    }
+    let encode = |v: usize| u8::try_from(v + 1 + 32).ok().filter(|b| *b < 255);
+    Some(vec![
+        0x1b,
+        b'[',
+        b'M',
+        32 + code,
+        encode(col)?,
+        encode(row)?,
+    ])
 }
 
-impl InputCoalescer {
-    pub fn push(&mut self, bytes: &[u8]) -> bool {
-        let was_empty = self.pending.is_empty();
+/// Focus change report (1004).
+pub fn focus_report(focused: bool) -> &'static [u8] {
+    if focused { b"\x1b[I" } else { b"\x1b[O" }
+}
+
+/// Wheel rows as arrow keys for a full-screen program without mouse
+/// reporting (alternate scroll, 1007). Positive rows scroll up.
+pub fn wheel_arrows(rows: i32, app_cursor: bool) -> Vec<u8> {
+    let arrow: &[u8] = match (rows > 0, app_cursor) {
+        (true, true) => b"\x1bOA",
+        (true, false) => b"\x1b[A",
+        (false, true) => b"\x1bOB",
+        (false, false) => b"\x1b[B",
+    };
+    arrow.repeat(rows.unsigned_abs() as usize)
+}
+
+// ---------------------------------------------------------------------------
+// Contrast
+// ---------------------------------------------------------------------------
+
+/// Contrast floor for text the program colored itself (WCAG ratio). Themes
+/// are tuned for their own default foreground; explicit colors are not
+/// (blue on black, a 256-color grey on a dark panel), and below this they
+/// stop being readable.
+pub const MIN_CONTRAST: f32 = 3.0;
+
+fn relative_luminance(color: Hsla) -> f32 {
+    let rgb = color.to_rgb();
+    let lin = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b)
+}
+
+pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// `fg`, moved in lightness just far enough from `bg` to reach `min`
+/// contrast, keeping its hue. A foreground identical to its background is
+/// deliberate (hidden blocks) and left alone.
+pub fn ensure_contrast(fg: Hsla, bg: Hsla, min: f32) -> Hsla {
+    if fg == bg || contrast_ratio(fg, bg) >= min {
+        return fg;
+    }
+    let toward_light = relative_luminance(bg) < 0.18;
+    let (mut lo, mut hi) = if toward_light {
+        (fg.l, 1.0)
+    } else {
+        (0.0, fg.l)
+    };
+    let mut best = Hsla {
+        l: if toward_light { 1.0 } else { 0.0 },
+        ..fg
+    };
+    for _ in 0..16 {
+        let mid = (lo + hi) / 2.0;
+        let candidate = Hsla { l: mid, ..fg };
+        if contrast_ratio(candidate, bg) >= min {
+            best = candidate;
+            if toward_light { hi = mid } else { lo = mid }
+        } else if toward_light {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    best
+}
+
+// ---------------------------------------------------------------------------
+// Input queue (pure buffer; the panel owns the write)
+// ---------------------------------------------------------------------------
+
+/// Keyboard bytes on their way to the PTY. A keystroke is written the moment
+/// it lands; while that write is in flight, later keys gather here and ride
+/// the next one. One write at a time keeps keys in typed order, and nothing
+/// ever waits on a timer.
+#[derive(Debug, Default)]
+pub struct InputQueue {
+    pending: Vec<u8>,
+    in_flight: bool,
+}
+
+impl InputQueue {
+    pub fn push(&mut self, bytes: &[u8]) {
         self.pending.extend_from_slice(bytes);
-        was_empty && !self.pending.is_empty()
     }
 
-    pub fn take(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending)
+    /// The next write, when one may start now: nothing in flight and
+    /// something pending. The caller must [`Self::finish`] it.
+    pub fn start(&mut self) -> Option<Vec<u8>> {
+        if self.in_flight || self.pending.is_empty() {
+            return None;
+        }
+        self.in_flight = true;
+        Some(std::mem::take(&mut self.pending))
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+    /// The in-flight write completed (or failed); the next may start.
+    pub fn finish(&mut self) {
+        self.in_flight = false;
+    }
+
+    #[cfg(test)]
+    pub fn pending(&self) -> &[u8] {
+        &self.pending
     }
 }
 
@@ -374,16 +590,26 @@ pub struct TerminalPrepaint {
     /// it has to tint a cell's own background rather than replace it, and it
     /// must not wash out the text it is highlighting.
     sel_quads: Vec<PaintQuad>,
-    /// Per row, the shaped segments and the grid COLUMN each one starts at.
-    /// Not one line per row: see [`shape_row`].
-    lines: Vec<Vec<(usize, ShapedLine)>>,
+    /// Per row, its top edge and the shaped segments with the grid COLUMN
+    /// each one starts at. Not one line per row: see [`shape_row`].
+    lines: Vec<(Pixels, Vec<(usize, ShapedLine)>)>,
     /// Grid cell advance, so paint can place segments by column.
     cell_w: Pixels,
     /// Grid row height, so paint places rows on the same baselines prepaint
     /// measured the grid with.
     line_h: Pixels,
     cursor: Option<PaintQuad>,
+    /// In-progress input-method composition at the cursor: its backdrop and
+    /// shaped text.
+    marked: Option<(PaintQuad, gpui::Point<Pixels>, ShapedLine)>,
 }
+
+/// Selection corner rounding, capped for small fonts.
+const SELECTION_RADIUS: f32 = 3.0;
+/// Beam and underline cursor thickness.
+const CURSOR_BAR: f32 = 2.0;
+/// Extra selection opacity at the instant of a copy (the flash eases out).
+const COPY_FLASH_ALPHA: f32 = 0.3;
 
 impl gpui::IntoElement for TerminalElement {
     type Element = Self;
@@ -475,7 +701,10 @@ impl gpui::Element for TerminalElement {
                 },
                 cx,
             );
-            panel.active_grid_snapshot(cx)
+            let snapshot = panel.active_grid_snapshot(cx);
+            // Pointer mapping follows the rows where they are drawn.
+            panel.shift_grid_origin(line_h * snapshot.as_ref().map_or(0.0, |s| s.scroll_frac));
+            snapshot
         });
         let Some(snapshot) = snapshot else {
             return TerminalPrepaint {
@@ -485,15 +714,29 @@ impl gpui::Element for TerminalElement {
                 cell_w,
                 line_h,
                 cursor: None,
+                marked: None,
             };
         };
 
         let mut bg_quads = Vec::new();
         let mut sel_quads = Vec::new();
-        let mut lines = Vec::with_capacity(snapshot.lines.len());
+        let mut lines = Vec::with_capacity(snapshot.lines.len() + 1);
+        // A partial scroll shifts every row down by the fraction and reveals
+        // the history row above; the content mask clips both edges.
+        let shift = line_h * snapshot.scroll_frac;
+        let first_row: i32 = if snapshot.line_above.is_some() { -1 } else { 0 };
+        let rows: Vec<&Vec<CellSnapshot>> = snapshot
+            .line_above
+            .iter()
+            .chain(snapshot.lines.iter())
+            .collect();
+        let row_count = rows.len();
+        let mut selection = theme.terminal.selection;
+        selection.a = (selection.a + COPY_FLASH_ALPHA * snapshot.copy_flash).min(0.9);
+        let radius = px(SELECTION_RADIUS.min(f32::from(line_h) / 4.0));
 
-        for (row_ix, row) in snapshot.lines.iter().enumerate() {
-            let y = origin.y + line_h * row_ix as f32;
+        for (row_ix, row) in rows.iter().copied().enumerate() {
+            let y = origin.y + shift + line_h * (first_row + row_ix as i32) as f32;
             // Selected runs, merged the same way background runs are: one quad
             // per contiguous span instead of one per cell.
             let mut sel_start: Option<usize> = None;
@@ -502,20 +745,45 @@ impl gpui::Element for TerminalElement {
                 match (sel_start, selected) {
                     (None, true) => sel_start = Some(col),
                     (Some(start), false) => {
-                        sel_quads.push(fill(
-                            Bounds::new(
-                                point(origin.x + cell_w * start as f32, y),
-                                size(cell_w * (col - start) as f32, line_h),
-                            ),
-                            theme.terminal.selection,
-                        ));
+                        sel_quads.push(
+                            fill(
+                                Bounds::new(
+                                    point(origin.x + cell_w * start as f32, y),
+                                    size(cell_w * (col - start) as f32, line_h),
+                                ),
+                                selection,
+                            )
+                            .corner_radii(radius),
+                        );
                         sel_start = None;
                     }
                     _ => {}
                 }
             }
-            // Merge consecutive non-default background cells into quads.
+            // Merge consecutive non-default background cells into quads. A
+            // run touching the grid's edge carries its color into the padding
+            // beside it, so full-bleed program backgrounds (editors, status
+            // lines) reach the panel edge instead of stopping a few px short.
             let mut run_start: Option<(usize, Hsla)> = None;
+            let edge_quad = |start: usize, end: usize, color: Hsla| {
+                let x0 = if start == 0 {
+                    bounds.left()
+                } else {
+                    origin.x + cell_w * start as f32
+                };
+                let x1 = if end == row.len() {
+                    bounds.right()
+                } else {
+                    origin.x + cell_w * end as f32
+                };
+                let y0 = if row_ix == 0 { bounds.top() } else { y };
+                let y1 = if row_ix + 1 == row_count {
+                    bounds.bottom()
+                } else {
+                    y + line_h
+                };
+                fill(Bounds::from_corners(point(x0, y0), point(x1, y1)), color)
+            };
             for (col, color) in row
                 .iter()
                 .map(|cell| cell.display_colors().1)
@@ -529,36 +797,76 @@ impl gpui::Element for TerminalElement {
                 match (&run_start, paint) {
                     (None, Some(color)) => run_start = Some((col, color)),
                     (Some((start, current)), next) if next != Some(*current) => {
-                        bg_quads.push(fill(
-                            Bounds::new(
-                                point(origin.x + cell_w * *start as f32, y),
-                                size(cell_w * (col - *start) as f32, line_h),
-                            ),
-                            *current,
-                        ));
+                        bg_quads.push(edge_quad(*start, col, *current));
                         run_start = next.map(|color| (col, color));
                     }
                     _ => {}
                 }
             }
-            lines.push(shape_row(row, &theme, &mono, font_size, window));
+            lines.push((y, shape_row(row, &theme, &mono, font_size, window)));
         }
 
-        let cursor = snapshot.cursor.map(|c| {
-            let cursor_bounds = Bounds::new(
+        let cursor = snapshot.cursor.filter(|_| snapshot.cursor_on).map(|c| {
+            let cell = Bounds::new(
                 point(
                     origin.x + cell_w * c.col as f32,
-                    origin.y + line_h * c.row as f32,
+                    origin.y + shift + line_h * c.row as f32,
                 ),
                 size(cell_w, line_h),
             );
-            if self.focused {
+            let bar = px(CURSOR_BAR);
+            match (self.focused, snapshot.cursor_shape) {
+                (false, _) | (true, CursorShape::HollowBlock) => {
+                    outline(cell, theme.cursor, gpui::BorderStyle::Solid)
+                }
                 // Translucent block: the glyph underneath stays legible.
-                fill(cursor_bounds, theme.cursor)
-            } else {
-                outline(cursor_bounds, theme.cursor, gpui::BorderStyle::Solid)
+                (true, CursorShape::Block) => fill(cell, theme.cursor),
+                (true, CursorShape::Beam) => fill(
+                    Bounds::new(cell.origin, size(bar, line_h)),
+                    theme.cursor.opacity(1.0),
+                ),
+                (true, CursorShape::Underline) => fill(
+                    Bounds::new(point(cell.left(), cell.bottom() - bar), size(cell_w, bar)),
+                    theme.cursor.opacity(1.0),
+                ),
             }
         });
+
+        // Composition text sits over the cursor cell on an opaque backdrop,
+        // underlined like every platform marks unconfirmed input.
+        let marked = snapshot
+            .marked_text
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .zip(snapshot.cursor)
+            .map(|(text, c)| {
+                let at = point(
+                    origin.x + cell_w * c.col as f32,
+                    origin.y + shift + line_h * c.row as f32,
+                );
+                let shaped = window.text_system().shape_line(
+                    SharedString::from(text.to_string()),
+                    font_size,
+                    &[TextRun {
+                        len: text.len(),
+                        font: mono.clone(),
+                        color: theme.terminal.foreground,
+                        background_color: None,
+                        underline: Some(gpui::UnderlineStyle {
+                            color: Some(theme.terminal.foreground),
+                            thickness: px(1.0),
+                            wavy: false,
+                        }),
+                        strikethrough: None,
+                    }],
+                    None,
+                );
+                let backdrop = fill(
+                    Bounds::new(at, size(shaped.width.max(cell_w), line_h)),
+                    theme.terminal.background.opacity(1.0),
+                );
+                (backdrop, at, shaped)
+            });
 
         TerminalPrepaint {
             bg_quads,
@@ -567,6 +875,7 @@ impl gpui::Element for TerminalElement {
             cell_w,
             line_h,
             cursor,
+            marked,
         }
     }
 
@@ -593,8 +902,8 @@ impl gpui::Element for TerminalElement {
                 window.paint_quad(quad);
             }
             let cell_w = prepaint.cell_w;
-            for (ix, segments) in prepaint.lines.iter().enumerate() {
-                let y = origin.y + line_h * ix as f32;
+            for (y, segments) in &prepaint.lines {
+                let y = *y;
                 for (col, line) in segments {
                     let _ = line.paint(
                         point(origin.x + cell_w * *col as f32, y),
@@ -609,7 +918,23 @@ impl gpui::Element for TerminalElement {
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
+            if let Some((backdrop, at, text)) = prepaint.marked.take() {
+                window.paint_quad(backdrop);
+                let _ = text.paint(at, line_h, gpui::TextAlign::Left, None, window, cx);
+            }
         });
+        if self.panel.read(cx).copy_flash_running() {
+            window.request_animation_frame();
+        }
+        // Typed text (and input-method composition) enters here.
+        if self.focused {
+            let focus = self.panel.read(cx).focus_handle();
+            window.handle_input(
+                &focus,
+                gpui::ElementInputHandler::new(bounds, self.panel.clone()),
+                cx,
+            );
+        }
     }
 }
 
@@ -683,8 +1008,13 @@ fn shape_row(
         if text.is_empty() {
             seg_col = col;
         }
-        let (fg, _) = cell.display_colors();
+        let (fg, bg) = cell.display_colors();
         let mut color = resolve_color(fg, theme);
+        // The theme's own default pair is already tuned; anything the
+        // program colored gets the contrast floor.
+        if !(fg == CellColor::Foreground && bg == CellColor::Background) {
+            color = ensure_contrast(color, resolve_color(bg, theme), MIN_CONTRAST);
+        }
         if cell.dim {
             color.a *= 0.6;
         }
@@ -699,11 +1029,21 @@ fn shape_row(
         } else {
             gpui::FontStyle::Normal
         };
-        let underline = cell.underline.then_some(gpui::UnderlineStyle {
-            color: Some(color),
-            thickness: px(1.0),
-            wavy: false,
-        });
+        // A predicted (not yet echoed) character carries a faint underline:
+        // it reads as typed, while still owning that it is provisional.
+        let underline = if cell.predicted {
+            Some(gpui::UnderlineStyle {
+                color: Some(color.opacity(0.45)),
+                thickness: px(1.0),
+                wavy: false,
+            })
+        } else {
+            cell.underline.then_some(gpui::UnderlineStyle {
+                color: Some(color),
+                thickness: px(1.0),
+                wavy: false,
+            })
+        };
         let len = ch.len_utf8();
         text.push(ch);
         match runs.last_mut() {
@@ -900,6 +1240,134 @@ mod tests {
     }
 
     #[test]
+    fn printable_keys_go_through_text_input_and_named_keys_are_encoded() {
+        let shift = Modifiers {
+            shift: true,
+            ..mods()
+        };
+        assert_eq!(route_key("a", Some("a"), &mods(), false), KeyRoute::Text);
+        assert_eq!(route_key("a", Some("A"), &shift, false), KeyRoute::Text);
+        assert_eq!(
+            route_key("enter", Some("\r"), &mods(), false),
+            KeyRoute::Bytes(b"\r".to_vec())
+        );
+        assert_eq!(
+            route_key("up", None, &mods(), true),
+            KeyRoute::Bytes(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            route_key(
+                "c",
+                Some("c"),
+                &Modifiers {
+                    control: true,
+                    ..mods()
+                },
+                false
+            ),
+            KeyRoute::Bytes(vec![0x03])
+        );
+        assert_eq!(
+            route_key(
+                "j",
+                Some("j"),
+                &Modifiers {
+                    platform: true,
+                    ..mods()
+                },
+                false
+            ),
+            KeyRoute::NotOurs
+        );
+    }
+
+    #[test]
+    fn option_types_layout_symbols_and_otherwise_acts_as_meta() {
+        let alt = Modifiers {
+            alt: true,
+            ..mods()
+        };
+        // US layout: Option-B would type `∫` — Meta-b for word motion.
+        assert_eq!(
+            route_key("b", Some("∫"), &alt, false),
+            KeyRoute::Bytes(vec![0x1b, b'b'])
+        );
+        assert_eq!(
+            route_key("b", Some("ı"), &Modifiers { shift: true, ..alt }, false),
+            KeyRoute::Bytes(vec![0x1b, b'B'])
+        );
+        // German layout: Option-L types `@`, which is what the user meant.
+        assert_eq!(route_key("l", Some("@"), &alt, false), KeyRoute::Text);
+        // Named keys keep their Meta prefix.
+        assert_eq!(
+            route_key("left", None, &alt, false),
+            KeyRoute::Bytes(b"\x1b\x1b[D".to_vec())
+        );
+    }
+
+    #[test]
+    fn mouse_reports_in_both_encodings() {
+        let none = mods();
+        assert_eq!(
+            mouse_report(MOUSE_LEFT, 4, 1, false, &none, true).unwrap(),
+            b"\x1b[<0;5;2M"
+        );
+        assert_eq!(
+            mouse_report(MOUSE_LEFT, 4, 1, true, &none, true).unwrap(),
+            b"\x1b[<0;5;2m",
+            "SGR names the released button"
+        );
+        let ctrl = Modifiers {
+            control: true,
+            ..mods()
+        };
+        assert_eq!(
+            mouse_report(MOUSE_WHEEL_UP, 0, 0, false, &ctrl, true).unwrap(),
+            b"\x1b[<80;1;1M"
+        );
+        assert_eq!(
+            mouse_report(MOUSE_RIGHT, 0, 0, false, &none, false).unwrap(),
+            vec![0x1b, b'[', b'M', 32 + 2, 33, 33]
+        );
+        assert_eq!(
+            mouse_report(MOUSE_RIGHT, 0, 0, true, &none, false).unwrap(),
+            vec![0x1b, b'[', b'M', 32 + 3, 33, 33],
+            "legacy release is button 3"
+        );
+        assert_eq!(
+            mouse_report(MOUSE_LEFT, 300, 0, false, &none, false),
+            None,
+            "legacy encoding cannot address column 301"
+        );
+    }
+
+    #[test]
+    fn focus_and_wheel_arrow_encodings() {
+        assert_eq!(focus_report(true), b"\x1b[I");
+        assert_eq!(focus_report(false), b"\x1b[O");
+        assert_eq!(wheel_arrows(2, false), b"\x1b[A\x1b[A");
+        assert_eq!(wheel_arrows(-1, true), b"\x1bOB");
+    }
+
+    #[test]
+    fn low_contrast_program_colors_are_lifted_and_good_ones_kept() {
+        let black = gpui::hsla(0.0, 0.0, 0.0, 1.0);
+        let navy = rgb8(0, 0, 128);
+        assert!(contrast_ratio(navy, black) < MIN_CONTRAST);
+        let lifted = ensure_contrast(navy, black, MIN_CONTRAST);
+        assert!(contrast_ratio(lifted, black) >= MIN_CONTRAST);
+        assert!((lifted.h - navy.h).abs() < 1e-3, "hue is kept");
+        let white = gpui::hsla(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(ensure_contrast(white, black, MIN_CONTRAST), white);
+        // Same color on itself is a deliberate block, not a contrast bug.
+        assert_eq!(ensure_contrast(navy, navy, MIN_CONTRAST), navy);
+        // Light backgrounds darken the text instead.
+        let pale = rgb8(250, 250, 160);
+        let darkened = ensure_contrast(pale, white, MIN_CONTRAST);
+        assert!(darkened.l < pale.l && contrast_ratio(darkened, white) >= MIN_CONTRAST);
+    }
+
+    #[test]
     fn paste_wraps_when_bracketed() {
         assert_eq!(paste_bytes("hi", false), b"hi".to_vec());
         assert_eq!(paste_bytes("hi", true), b"\x1b[200~hi\x1b[201~".to_vec());
@@ -911,19 +1379,18 @@ mod tests {
     }
 
     #[test]
-    fn coalescer_schedules_once_per_burst() {
-        let mut c = InputCoalescer::default();
-        assert!(c.is_empty());
-        assert!(c.push(b"a"), "first push schedules the flush");
-        assert!(!c.push(b"b"), "subsequent pushes ride the pending flush");
-        assert!(!c.push(b"c"));
-        assert_eq!(c.take(), b"abc".to_vec());
-        assert!(c.is_empty());
-        // Next burst schedules again.
-        assert!(c.push(b"d"));
-        // Empty pushes never schedule.
-        let mut c = InputCoalescer::default();
-        assert!(!c.push(b""));
+    fn input_queue_keeps_one_write_in_flight_and_order() {
+        let mut q = InputQueue::default();
+        assert_eq!(q.start(), None, "nothing pending");
+        q.push(b"a");
+        assert_eq!(q.start(), Some(b"a".to_vec()), "first key goes at once");
+        q.push(b"b");
+        q.push(b"c");
+        assert_eq!(q.start(), None, "keys typed mid-write wait for it");
+        q.finish();
+        assert_eq!(q.start(), Some(b"bc".to_vec()), "then ride one write");
+        q.finish();
+        assert_eq!(q.start(), None);
     }
 
     #[test]
@@ -1006,7 +1473,6 @@ mod tests {
 
     #[test]
     fn timing_constants_match_spec() {
-        assert_eq!(COALESCE_MS, 12);
         assert_eq!(RESIZE_DEBOUNCE_MS, 80);
     }
 

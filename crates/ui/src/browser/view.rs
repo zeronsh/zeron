@@ -51,25 +51,38 @@ impl BrowserSurface {
                 cx.stop_propagation();
                 return;
             }
-            if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
-                if let Some(native) = &self.native {
-                    match event.keystroke.key.as_str() {
-                        "c" | "x" => {
-                            native.command(serde_json::json!({"cmd":if event.keystroke.key=="c" {"copy"} else {"cut"}}));
-                            cx.stop_propagation();
-                            return;
-                        }
-                        "v" => {
-                            if let Some(text) =
-                                cx.read_from_clipboard().and_then(|item| item.text())
-                            {
-                                native.command(serde_json::json!({"cmd":"text","text":text}));
-                            }
-                            cx.stop_propagation();
-                            return;
-                        }
-                        _ => {}
+            let wpe = self
+                .native
+                .as_ref()
+                .is_some_and(|native| native.engine() == super::linux::Engine::Wpe);
+            if wpe {
+                // WebKit runs its own copy, cut and paste; it reads the system
+                // clipboard through the copy shared here.
+                let mods = event.keystroke.modifiers;
+                let key = event.keystroke.key.as_str();
+                if (mods.control && key == "v") || (mods.shift && key == "insert") {
+                    self.linux_share_clipboard(cx);
+                }
+            } else if event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && let Some(native) = &self.native
+            {
+                match event.keystroke.key.as_str() {
+                    "c" | "x" => {
+                        native.command(serde_json::json!({"cmd":if event.keystroke.key=="c" {"copy"} else {"cut"}}));
+                        cx.stop_propagation();
+                        return;
                     }
+                    "v" => {
+                        if let Some(text) =
+                            cx.read_from_clipboard().and_then(|item| item.text())
+                        {
+                            native.command(serde_json::json!({"cmd":"text","text":text}));
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
+                    _ => {}
                 }
             }
             self.linux_key(&event.keystroke, true);
@@ -78,6 +91,11 @@ impl BrowserSurface {
         }
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
+        if key == "escape" && self.annotating() {
+            self.stop_annotation(cx);
+            cx.stop_propagation();
+            return;
+        }
         let primary = if cfg!(target_os = "macos") {
             mods.platform
         } else {
@@ -284,10 +302,16 @@ impl BrowserSurface {
         if self.page.url.is_none() && self.previews_task.is_some() {
             return self.preview_body(theme, cx);
         }
-        let external = !cfg!(any(target_os = "macos", target_os = "linux"));
+        let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_error = self.page.error.is_some();
+        #[cfg(target_os = "linux")]
+        let starting = self.native_startup.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let starting = false;
         let title = if has_error {
             "Couldn’t load this page"
+        } else if starting {
+            "Starting browser…"
         } else if external && self.page.url.is_some() {
             "Opened in your browser"
         } else {
@@ -295,6 +319,8 @@ impl BrowserSurface {
         };
         let description = if let Some(error) = &self.page.error {
             error.clone()
+        } else if starting {
+            "You can keep working while your page opens.".into()
         } else if external {
             "Open a website or local app in your default browser. Embedded browsing is available on macOS and Linux.".into()
         } else {
@@ -399,11 +425,144 @@ impl BrowserSurface {
     }
 }
 
+#[cfg(windows)]
+impl BrowserSurface {
+    /// The page composites natively beneath GPUI's overlay plane; this
+    /// element only positions it and forwards pointer input that GPUI's hit
+    /// testing delivers here, so popovers above the page occlude naturally.
+    fn windows_page(
+        &self,
+        body: gpui::Stateful<gpui::Div>,
+        host: std::rc::Rc<super::native::Host>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        use super::native::{PointerKind, wheel_units};
+        let entity = cx.entity().downgrade();
+        let forward = |kind: PointerKind| {
+            move |this: &mut Self,
+                  position: gpui::Point<gpui::Pixels>,
+                  button: Option<MouseButton>,
+                  modifiers: gpui::Modifiers,
+                  clicks: usize| {
+                if let Some(native) = &this.native {
+                    native.pointer(kind, position, button, modifiers, clicks);
+                }
+            }
+        };
+        let right_occlusion = self.right_occlusion;
+        let mut body = body.cursor(self.page_cursor).child(
+            gpui::canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    // The Files panel slides over the page from the right.
+                    let mut mask = window.content_mask().bounds;
+                    let right = (window.viewport_size().width - right_occlusion).max(mask.left());
+                    mask.size.width = mask.size.width.min(right - mask.left());
+                    let scale = window.scale_factor();
+                    let composition = window.native_composition();
+                    let page = std::rc::Rc::downgrade(&host);
+                    window.on_present(move || {
+                        if let Some(page) = page.upgrade() {
+                            page.sync(bounds, mask, scale, composition);
+                        }
+                    });
+                    // A drag that began in the page keeps extending its
+                    // selection outside the page, like a native child.
+                    let capture = entity.clone();
+                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble
+                            && !bounds.contains(&event.position)
+                            && !cx.has_active_drag()
+                        {
+                            let _ = capture.update(cx, |this, _| {
+                                if let Some(native) =
+                                    this.native.as_ref().filter(|native| native.pressed())
+                                {
+                                    native.pointer(
+                                        PointerKind::Move,
+                                        event.position,
+                                        None,
+                                        event.modifiers,
+                                        0,
+                                    );
+                                }
+                            });
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0(),
+        );
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let down = forward(PointerKind::Down);
+            let up = forward(PointerKind::Up);
+            let up_out = forward(PointerKind::Up);
+            body = body
+                .on_mouse_down(
+                    button,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        if cx.has_active_drag() {
+                            return;
+                        }
+                        window.focus(&this.focus, cx);
+                        down(
+                            this,
+                            event.position,
+                            Some(event.button),
+                            event.modifiers,
+                            event.click_count,
+                        );
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_up(
+                    button,
+                    cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                        up(this, event.position, Some(event.button), event.modifiers, 0);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_up_out(
+                    button,
+                    cx.listener(move |this, event: &gpui::MouseUpEvent, _, _| {
+                        if this.native.as_ref().is_some_and(|native| native.pressed()) {
+                            up_out(this, event.position, Some(event.button), event.modifiers, 0);
+                        }
+                    }),
+                );
+        }
+        let moved = forward(PointerKind::Move);
+        body.on_mouse_move(
+            cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                if !cx.has_active_drag() {
+                    moved(this, event.position, None, event.modifiers, 0);
+                }
+            }),
+        )
+        .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+            if let Some(native) = &this.native {
+                native.wheel(event.position, wheel_units(event.delta), event.modifiers);
+                cx.stop_propagation();
+            }
+        }))
+        .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+            if !*hovered && let Some(native) = &this.native {
+                native.leave();
+            }
+        }))
+    }
+}
+
 impl Render for BrowserSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        #[cfg(target_os = "macos")]
+        let persistence_notice = self.context.data.persistence_notice();
+        #[cfg(not(target_os = "macos"))]
+        let persistence_notice: Option<&str> = None;
         let focused = self.address.focus_handle(cx).is_focused(window);
-        let external = !cfg!(any(target_os = "macos", target_os = "linux"));
+        let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_page = self.page.url.is_some();
         let back = button(
             "browser-back",
@@ -446,11 +605,11 @@ impl Render for BrowserSurface {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", windows))]
                     if let Some(native) = &this.native {
                         native.focus_chrome();
                     }
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(not(any(target_os = "macos", windows)))]
                     let _ = this;
                 }),
             )
@@ -503,9 +662,35 @@ impl Render for BrowserSurface {
         .when(has_page, |el| {
             el.on_click(cx.listener(|this, _, _, cx| this.open_external(cx)))
         });
+        // Annotation picks an element on the page into the composer.
+        let annotating = self.annotating();
+        let can_annotate = self.can_annotate();
+        let annotate = crate::files::toolbar_button(
+            "browser-annotate",
+            if annotating {
+                "Stop annotating"
+            } else {
+                "Annotate an element"
+            },
+        )
+        .when(!can_annotate, |el| el.cursor_default().opacity(0.35))
+        .when(annotating, |el| el.bg(crate::theme::wash(0.10)))
+        .child(
+            icons::icon(icons::CURSOR_SQUARE)
+                .size(px(surface_chrome::ICON_SIZE))
+                .text_color(if annotating {
+                    theme.accent
+                } else {
+                    theme.text_muted
+                }),
+        )
+        .when(can_annotate, |el| {
+            el.on_click(cx.listener(|this, _, _, cx| this.toggle_annotation(cx)))
+        });
         let toolbar = surface_chrome::toolbar(&theme)
             .when(!external, |el| el.child(back).child(forward).child(reload))
             .child(address)
+            .when(!external, |el| el.child(annotate))
             .child(open);
 
         let body = div()
@@ -535,6 +720,19 @@ impl Render for BrowserSurface {
                                 (window.viewport_size().width - right_occlusion).max(mask.left());
                             mask.size.width = mask.size.width.min(right - mask.left());
                             let dragging = cx.has_active_drag();
+                            // GPUIView refuses first responder, so a click on GPUI
+                            // content leaves the keyboard with the page. AppKit
+                            // gives presses on the page to WebKit, so every press
+                            // GPUI sees is outside it: take the keyboard back on
+                            // each, as zui does on Windows.
+                            let page = native.clone();
+                            window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, _| {
+                                if phase == gpui::DispatchPhase::Capture
+                                    && let Some(page) = page.upgrade()
+                                {
+                                    page.borrow().focus_chrome();
+                                }
+                            });
                             window.on_present(move || {
                                 if let Some(native) = native.upgrade() {
                                     native
@@ -556,9 +754,8 @@ impl Render for BrowserSurface {
             if self.page.error.is_some() {
                 body.child(self.empty_body(&theme, cx))
             } else {
-                let image = native.image.clone();
-                let image_scale = native.image_scale;
                 let entity = cx.entity().downgrade();
+                let wpe = native.engine() == super::linux::Engine::Wpe;
                 body.child(gpui::canvas(|_,_,_| (), move |bounds,_,window,cx| {
                     let scale = window.scale_factor();
                     if let Some(view)=entity.upgrade() {
@@ -566,46 +763,43 @@ impl Render for BrowserSurface {
                         window.handle_input(&focus,gpui::ElementInputHandler::new(bounds,view),cx);
                     }
                     let _ = entity.update(cx, |this,_| {
-                        if let Some(native)=&mut this.native { native.sync(bounds,scale); }
+                        let focused = this.focus.is_focused(window);
+                        if let Some(native)=&mut this.native {
+                            native.sync(bounds,scale);
+                            native.paint(bounds, focused, window);
+                        }
                     });
                     let capture=entity.clone();
                     window.on_mouse_event(move |event: &gpui::MouseMoveEvent,phase,_,cx| {
                         if phase==gpui::DispatchPhase::Bubble && !bounds.contains(&event.position) && !cx.has_active_drag() {
                             let _=capture.update(cx,|this,_| {
                                 if this.native.as_ref().is_some_and(|n|n.pressed.get().is_some()) {
-                                    this.linux_pointer("move",event.position,event.pressed_button,event.modifiers);
+                                    this.linux_pointer("move",event.position,event.pressed_button,event.modifiers,0);
                                 }
                             });
                         }
                     });
-                    if let Some(image)=&image {
-                        if let Some(bytes)=image.as_bytes(0).filter(|b| b.len() >= 4) {
-                            let color=gpui::rgb(((bytes[2] as u32)<<16)|((bytes[1] as u32)<<8)|bytes[0] as u32);
-                            window.paint_quad(gpui::fill(bounds,color));
-                        }
-                        let dimensions=image.size(0);
-                        // Keep the previous frame at its original scale while
-                        // WebKit reflows; clipping never stretches the page.
-                        let viewport=gpui::Bounds::new(bounds.origin,gpui::size(px(dimensions.width.0 as f32/image_scale),px(dimensions.height.0 as f32/image_scale)));
-                        let _=window.paint_image(viewport,gpui::Corners::default(),image.clone(),0,false);
-                    }
                 }).absolute().inset_0())
+                .cursor(self.page_cursor)
+                .when(wpe, |body| body.on_hover(cx.listener(|this, hovered: &bool, window, _| {
+                    if !*hovered {
+                        this.linux_pointer("leave", window.mouse_position(), None, window.modifiers(), 0);
+                    }
+                })))
                 .on_mouse_down(MouseButton::Left,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {
-                    if !cx.has_active_drag() { w.focus(&this.focus,cx); this.linux_pointer("down",event.position,Some(event.button),event.modifiers); cx.stop_propagation(); }
+                    if !cx.has_active_drag() { w.focus(&this.focus,cx); this.linux_pointer("down",event.position,Some(event.button),event.modifiers,event.click_count); cx.stop_propagation(); }
                 }))
                 .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {
-                    w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers);cx.stop_propagation();
+                    w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers,event.click_count);cx.stop_propagation();
                 }))
-                .on_mouse_up(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
-                .on_mouse_up_out(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,_| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);}))
-                .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
-                .on_mouse_down(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
-                .on_mouse_up(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
-                .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {if !cx.has_active_drag(){this.linux_pointer("move",event.position,event.pressed_button,event.modifiers);}}))
+                .on_mouse_up(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers,event.click_count);cx.stop_propagation();}))
+                .on_mouse_up_out(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,_| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers,event.click_count);}))
+                .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers,event.click_count);cx.stop_propagation();}))
+                .on_mouse_down(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers,event.click_count);cx.stop_propagation();}))
+                .on_mouse_up(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers,event.click_count);cx.stop_propagation();}))
+                .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {if !cx.has_active_drag(){this.linux_pointer("move",event.position,event.pressed_button,event.modifiers,0);}}))
                 .on_scroll_wheel(cx.listener(|this,event: &gpui::ScrollWheelEvent,_,cx| {
-                    if let Some(native)=&this.native {
-                        let delta=event.delta.pixel_delta(px(16.));let p=event.position-native.bounds.origin;
-                        native.command(serde_json::json!({"cmd":"scroll","x":f32::from(p.x),"y":f32::from(p.y),"dx":-f32::from(delta.x)/40.,"dy":-f32::from(delta.y)/40.,"mods":super::linux::modifiers_mask(event.modifiers)}));
+                    if this.linux_scroll(event) {
                         cx.stop_propagation();
                     }
                 }))
@@ -613,8 +807,27 @@ impl Render for BrowserSurface {
         } else {
             body.child(self.empty_body(&theme, cx))
         };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(windows)]
+        let body = if let Some(native) = &self.native {
+            if self.page.error.is_some() {
+                body.child(self.empty_body(&theme, cx))
+            } else {
+                self.windows_page(body, native.handle(), cx)
+            }
+        } else {
+            body.child(self.empty_body(&theme, cx))
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let body = body.child(self.empty_body(&theme, cx));
+        // WebView2 eases wheel notches itself; a glide would ease them twice.
+        // (AppKit hands macOS pages their wheel directly, and `macos::PageGlide`
+        // glides it there; the Linux page applies the smooth deltas it is sent
+        // as they come.)
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        let body = body.when(
+            cfg!(windows) && self.native.is_some() && self.page.error.is_none(),
+            |body| body.child(crate::smooth_scroll::raw_wheel_region()),
+        );
 
         #[cfg(target_os = "linux")]
         let body = body.when_some(self.linux_menu(&theme, cx), |el, menu| el.child(menu));
@@ -626,8 +839,10 @@ impl Render for BrowserSurface {
                 .as_deref()
                 .and_then(|s| url::Url::parse(s).ok())
                 .is_some_and(|u| {
+                    // (A preview's `*.localhost` name goes through the proxy,
+                    // on whichever port it got.)
                     super::model::loopback(&u)
-                        && !(u.port() == Some(zeron_proto::PREVIEW_PROXY_PORT)
+                        && !(u.port().is_some()
                             && u.host_str()
                                 .is_some_and(|host| host.ends_with(".localhost")))
                 });
@@ -645,7 +860,13 @@ impl Render for BrowserSurface {
             .on_action(cx.listener(|_, _: &super::CloseTab, _, cx| cx.emit(BrowserEvent::Close)))
             .on_action(cx.listener(|this, _: &super::Back, _, _| this.history(false)))
             .on_action(cx.listener(|this, _: &super::Forward, _, _| this.history(true)))
+            // Mouse side buttons drive the shell's route history everywhere
+            // else; over the browser they are inert.
+            .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Back), |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Forward), |_, _, cx| cx.stop_propagation())
             .child(toolbar)
+            .when_some(persistence_notice, |el, message| el.child(div().px(px(12.0)).py(px(8.0))
+                .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(message.to_owned())))
             .when_some(self.validation.clone(), |el, message| el.child(div().px(px(12.0)).py(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.danger).child(message)))
             .when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)
                 .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted)

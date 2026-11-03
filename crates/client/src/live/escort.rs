@@ -173,7 +173,7 @@ async fn run(
             Ok(path) => {
                 tracing::info!(upload = %upload_id, %path, "attachment escorted");
                 live.escorts.remove(upload_id);
-                inner.nudge_host(&meta.host_device_id, &meta.chat_id);
+                inner.nudge_host(&meta.chat_id);
                 return;
             }
             Err(err) => {

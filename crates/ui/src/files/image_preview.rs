@@ -205,6 +205,7 @@ impl Render for ImagePreview {
                 display.image,
                 gpui::size(px(source.width), px(source.height)),
                 None,
+                None,
                 window,
                 cx,
             ));

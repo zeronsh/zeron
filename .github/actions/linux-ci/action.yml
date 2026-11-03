@@ -1,0 +1,80 @@
+name: Linux Rust CI setup
+description: >-
+  Rust toolchain, cargo-nextest, optional apt packages (with a cached .deb
+  directory) and the main-seeded Rust cache for Linux test jobs. Run
+  actions/checkout first.
+
+inputs:
+  rust-cache:
+    description: >-
+      rust-cache shared key. Jobs with the same key share one cache, so they
+      must have the same dependency graph.
+    required: true
+  save-rust-cache:
+    description: >-
+      Whether this job may save the cache when it runs on main. Give it to
+      exactly one job per key. Pull requests never save.
+    default: 'false'
+  apt-packages:
+    description: apt packages to install (space separated). Nothing is installed when empty.
+    default: ''
+  apt-cache:
+    description: Name of the cached .deb directory for apt-packages (one per package list).
+    default: ''
+  apt-recommends:
+    description: Install recommended packages too ('true' or 'false').
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Rust toolchain
+      shell: bash
+      run: rustup show active-toolchain || rustup toolchain install
+
+    # apt mirrors on hosted runners occasionally stall for minutes; apt-install.sh
+    # bounds and retries the download and uses a directory of .debs that main
+    # saves to the cache (pull requests only restore it).
+    - name: Restore apt packages
+      id: apt-cache
+      if: inputs.apt-packages != ''
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/apt-debs/*.deb
+        key: apt-debs-v1-${{ inputs.apt-cache }}-${{ hashFiles('scripts/ci/apt-install.sh') }}
+    - name: Install system packages
+      if: inputs.apt-packages != ''
+      shell: bash
+      env:
+        APT_RECOMMENDS: ${{ inputs.apt-recommends == 'true' && '1' || '0' }}
+        APT_PACKAGES: ${{ inputs.apt-packages }}
+      run: |
+        # shellcheck disable=SC2086 # the package list is word-split on purpose
+        bash scripts/ci/apt-install.sh $APT_PACKAGES
+    - name: Save apt packages
+      if: inputs.apt-packages != '' && github.ref == 'refs/heads/main' && steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/apt-debs/*.deb
+        key: apt-debs-v1-${{ inputs.apt-cache }}-${{ hashFiles('scripts/ci/apt-install.sh') }}
+
+    # Exported for the rest of the job. Tests and the browser fixture are built in
+    # the dev profile without debug info (smaller, faster to link). CARGO_* variables
+    # are part of the rust-cache key, so every job sharing a cache must set the same.
+    - name: Build settings
+      shell: bash
+      run: echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        prefix-key: ci-linux-v1
+        shared-key: ${{ inputs.rust-cache }}
+        add-job-id-key: false
+        save-if: ${{ inputs.save-rust-cache == 'true' && github.ref == 'refs/heads/main' }}
+        cache-on-failure: true
+
+    # After the cache restore, so the checksum-verified binary is the one that
+    # runs (rust-cache restores ~/.cargo/bin).
+    - name: Install cargo-nextest
+      shell: bash
+      run: bash scripts/ci/install-nextest.sh

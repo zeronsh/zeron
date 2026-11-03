@@ -1,13 +1,15 @@
 import UIKit
 
 /// A glass capsule that floats above the bottom chrome for a few seconds,
-/// with an optional action ("Archived · Undo"). One at a time.
+/// with an optional button ("Archived · Undo"). One at a time.
 final class Toast: UIView {
     private static weak var current: Toast?
     private let glass = Glass.surface()
     private var dismissWork: DispatchWorkItem?
 
-    static func show(_ text: String, action: String? = nil, in window: UIWindow?, handler: (() -> Void)? = nil) {
+    /// `above`: a view of the screen's own (the composer) to float over
+    /// instead of the tab chrome.
+    static func show(_ text: String, action: String? = nil, in window: UIWindow?, above anchor: UIView? = nil, handler: (() -> Void)? = nil) {
         guard let window else { return }
         current?.dismiss(animated: false)
         let toast = Toast(text: text, action: action, handler: handler)
@@ -17,9 +19,13 @@ final class Toast: UIView {
         // session" accessory or the tab bar — expanded or minimized), not at a
         // fixed height that floats over list rows.
         let gap: CGFloat = 12
+        var top = chromeTop(in: window)
+        if let anchor, anchor.window === window {
+            top = min(top, anchor.convert(anchor.bounds, to: window).minY)
+        }
         NSLayoutConstraint.activate([
             toast.centerXAnchor.constraint(equalTo: window.centerXAnchor),
-            toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: chromeTop(in: window) - gap),
+            toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: top - gap),
             toast.widthAnchor.constraint(lessThanOrEqualTo: window.widthAnchor, constant: -48),
         ])
         current = toast
@@ -29,15 +35,12 @@ final class Toast: UIView {
     /// Top edge of the bottom chrome in window coordinates.
     private static func chromeTop(in window: UIWindow) -> CGFloat {
         var top = window.bounds.height - window.safeAreaInsets.bottom
-        var tabs: UITabBarController? = window.rootViewController as? UITabBarController
-        if tabs == nil, let split = window.rootViewController as? UISplitViewController, split.isCollapsed {
-            tabs = split.viewController(for: .compact) as? UITabBarController
+        var shell = window.rootViewController as? MainTabController
+        if shell == nil, let split = window.rootViewController as? UISplitViewController, split.isCollapsed {
+            shell = split.viewController(for: .compact) as? MainTabController
         }
-        if let tabs, !tabs.tabBar.isHidden, tabs.tabBar.window != nil {
-            top = min(top, tabs.tabBar.convert(tabs.tabBar.bounds, to: window).minY)
-            if let accessory = (tabs as? MainTabController)?.accessoryFrame(in: window) {
-                top = min(top, accessory.minY)
-            }
+        if let bar = shell?.bottomBarFrame(in: window) {
+            top = min(top, bar.minY)
         }
         // A pushed screen's own bottom bar (e.g. the composer) isn't tab
         // chrome; keep clear of the keyboard / home indicator either way.
@@ -52,17 +55,21 @@ final class Toast: UIView {
         label.text = text
         label.font = Fonts.ui(.sansMedium, 15)
         label.textColor = Palette.text
+        label.numberOfLines = 2
         let stack = UIStackView(arrangedSubviews: [label])
         stack.spacing = 14
         stack.alignment = .center
         if let action {
-            var c = UIButton.Configuration.plain()
+            // A small filled capsule in the text color, like the desktop's.
+            var c = UIButton.Configuration.filled()
             c.title = action
-            c.baseForegroundColor = Palette.accent
-            c.contentInsets = .zero
+            c.baseBackgroundColor = Palette.text
+            c.baseForegroundColor = Palette.background
+            c.cornerStyle = .capsule
+            c.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12)
             c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
                 var a = a
-                a.font = Fonts.ui(.sansSemibold, 15)
+                a.font = Fonts.ui(.sansSemibold, 14)
                 return a
             }
             let b = UIButton(configuration: c, primaryAction: UIAction { [weak self] _ in
@@ -70,6 +77,8 @@ final class Toast: UIView {
                 self?.dismiss(animated: true)
             })
             b.accessibilityIdentifier = "toast-action"
+            b.setContentHuggingPriority(.required, for: .horizontal)
+            b.setContentCompressionResistancePriority(.required, for: .horizontal)
             stack.addArrangedSubview(b)
         }
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -82,7 +91,7 @@ final class Toast: UIView {
             stack.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 12),
             stack.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -12),
             stack.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -20),
+            stack.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: action == nil ? -20 : -10),
         ])
         accessibilityIdentifier = "toast"
     }

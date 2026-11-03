@@ -9,6 +9,8 @@ use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, Window, div,
 use crate::popover::{self, MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::theme::Theme;
 
+pub use super::search::page_reveal;
+
 /// Width of the section column beside the settings page, published by the
 /// shell each frame so dropdowns and responsive pages measure the page pane.
 struct SettingsSidebarWidth(f32);
@@ -58,6 +60,7 @@ pub fn dropdown(
         content,
         closing,
         trigger_height,
+        align: popover::MenuAlign::End,
     }
     .into_any_element()
 }
@@ -68,6 +71,7 @@ struct SettingsDropdown {
     content: gpui::Div,
     closing: Option<std::time::Instant>,
     trigger_height: f32,
+    align: popover::MenuAlign,
 }
 
 impl RenderOnce for SettingsDropdown {
@@ -79,6 +83,7 @@ impl RenderOnce for SettingsDropdown {
             self.closing,
             self.trigger_height,
             limits,
+            self.align,
         )
     }
 }
@@ -171,7 +176,8 @@ impl RenderOnce for DropdownRows {
 /// a [`ScrollRailHost`] impl on the page delegating here, and a root
 /// `.relative()` host carrying only the list-hover `on_hover` around the
 /// `.overflow_y_scroll().track_scroll(&self.scroll.scroll)` page, with
-/// [`popover::rail`] supplying the rail and all of its listeners.
+/// [`popover::rail`] supplying the rail and all of its listeners and
+/// [`page_reveal`] gliding a settings-search pick into view.
 pub struct PageScroll {
     /// Tracked by the page's scrolling list directly — including the appshots
     /// half of the shortcuts page, which renders from its own file.
@@ -508,13 +514,16 @@ pub fn row_divider(theme: &Theme) -> gpui::Hsla {
     theme.border.opacity(0.6)
 }
 
+/// The corners of a [`section_card`].
+pub const BLOCK_RADIUS: f32 = 12.0;
+
 /// A filled, rounded block of related settings rows. Standalone blocks keep
 /// a section's worth of air above them; inside [`section`] the wrapper owns
 /// the spacing and zeroes this margin.
 pub fn section_card(theme: &Theme) -> gpui::Div {
     div()
         .mt(px(24.0))
-        .rounded(px(12.0))
+        .rounded(px(BLOCK_RADIUS))
         .bg(block_fill(theme))
         .overflow_hidden()
         .flex()
@@ -559,13 +568,30 @@ pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
 /// Row title. These metrics intentionally match the Shortcuts rows, whose
 /// title/description rhythm is the reference for the other settings cards.
 pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
+    let title = title.into();
+    #[cfg(test)]
+    ROW_TITLES.with_borrow_mut(|titles| titles.push(title.clone()));
     div()
         .min_w_0()
         .text_size(crate::typography::ui_rems(ROW_TITLE_SIZE))
         .line_height(crate::typography::ui_rems(17.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
-        .child(title.into())
+        .child(title)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every [`row_title`] rendered since the last [`take_row_titles`].
+    static ROW_TITLES: std::cell::RefCell<Vec<SharedString>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The row titles rendered since the last call: what the settings search
+/// must be able to find.
+#[cfg(test)]
+pub(crate) fn take_row_titles() -> Vec<SharedString> {
+    ROW_TITLES.take()
 }
 
 /// The quiet meta line under a row title: `text-[12px]
@@ -1258,6 +1284,7 @@ pub fn select<V: 'static>(
         menu_width: None,
         font: None,
         heading: None,
+        align: popover::MenuAlign::End,
         reach: Rc::new(reach),
         on_select: None,
     }
@@ -1273,6 +1300,7 @@ pub struct Select<V: 'static> {
     menu_width: Option<f32>,
     font: Option<SharedString>,
     heading: Option<&'static str>,
+    align: popover::MenuAlign,
     reach: SelectReach<V>,
     on_select: Option<SelectHandler<V>>,
 }
@@ -1342,6 +1370,13 @@ impl<V: 'static> Select<V> {
         self
     }
 
+    /// Open the menu rightward from the trigger's left edge, for triggers
+    /// that lead a row rather than end it.
+    pub fn open_rightward(mut self) -> Self {
+        self.align = popover::MenuAlign::Start;
+        self
+    }
+
     pub fn render(self, state: &SelectState, cx: &mut Context<V>) -> gpui::Stateful<gpui::Div> {
         let Self {
             id,
@@ -1353,6 +1388,7 @@ impl<V: 'static> Select<V> {
             menu_width,
             font,
             heading,
+            align,
             reach,
             on_select,
         } = self;
@@ -1488,12 +1524,13 @@ impl<V: 'static> Select<V> {
                     SELECT_HEIGHT,
                     if heading.is_some() { 32.0 } else { 8.0 },
                 ));
-            trigger = trigger.child(dropdown(
-                format!("{id}-menu"),
-                menu,
-                state.menu.closing_since(),
-                SELECT_HEIGHT,
-            ));
+            trigger = trigger.child(SettingsDropdown {
+                id: format!("{id}-menu").into(),
+                content: menu,
+                closing: state.menu.closing_since(),
+                trigger_height: SELECT_HEIGHT,
+                align,
+            });
         }
         trigger
     }
@@ -1501,14 +1538,16 @@ impl<V: 'static> Select<V> {
 
 /// Settings actions share one size, corner radius, and hover language. Use
 /// outlined for selectors, quiet for secondary actions, filled for row
-/// actions on a block (the dropdown trigger's glass wash), and solid for
-/// commits.
+/// actions on a block (the dropdown trigger's glass wash), solid for
+/// commits, and danger for destructive actions behind a confirmation.
 #[derive(Clone, Copy)]
 pub enum ActionTone {
     Quiet,
-    Outlined,
+    /// The secondary action: a borderless filled pill, the same as a
+    /// dropdown trigger beside it.
     Filled,
     Solid,
+    Danger,
 }
 
 pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
@@ -1527,12 +1566,6 @@ pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
         ActionTone::Quiet => button
             .text_color(theme.text_muted)
             .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text)),
-        ActionTone::Outlined => button
-            .bg(theme.input_glass_bg())
-            .border_1()
-            .border_color(theme.border)
-            .text_color(theme.text)
-            .hover(|s| s.bg(theme.glass_hover()).border_color(theme.border_strong)),
         ActionTone::Filled => {
             let lifted = select_fill(theme, true);
             button
@@ -1544,6 +1577,11 @@ pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
             .bg(theme.solid)
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.on_solid)
+            .hover(|s| s.opacity(0.9)),
+        // The dialogs' destructive fill (`popover::btn_danger`).
+        ActionTone::Danger => button
+            .bg(theme.danger_strong)
+            .text_color(gpui::white())
             .hover(|s| s.opacity(0.9)),
     }
 }
@@ -1649,10 +1687,21 @@ impl RenderOnce for SettingsScroll {
 
 /// A one-line hover note for settings controls (reset times, icon-only
 /// actions), in the same frosted chip as the rest of the app's tooltips.
-pub struct TextTooltip(pub SharedString);
+pub struct TextTooltip {
+    text: SharedString,
+    above: bool,
+}
+
+/// How far a [`text_tooltip_above`] chip sits over the pointer; clears a
+/// small control the pointer is anywhere inside.
+const TOOLTIP_ABOVE_GAP: f32 = 20.0;
 
 impl Render for TextTooltip {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
         let theme = Theme::of(cx);
         let card = div()
             .max_w(px(320.0))
@@ -1664,8 +1713,20 @@ impl Render for TextTooltip {
             .bg(crate::popover::surface_bg(theme))
             .text_size(px(11.0))
             .text_color(theme.text_muted)
-            .child(self.0.clone());
-        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+            .child(self.text.clone());
+        let card = crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card);
+        if !self.above {
+            return card.into_any_element();
+        }
+        // gpui hangs a tooltip below-right of the pointer. A zero-height box
+        // with end-aligned content makes the chip overflow upward instead.
+        div()
+            .h(px(0.0))
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(div().relative().bottom(px(TOOLTIP_ABOVE_GAP)).child(card))
+            .into_any_element()
     }
 }
 
@@ -1674,5 +1735,26 @@ pub fn text_tooltip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let text: SharedString = text.into();
-    move |_, cx| cx.new(|_| TextTooltip(text.clone())).into()
+    move |_, cx| {
+        cx.new(|_| TextTooltip {
+            text: text.clone(),
+            above: false,
+        })
+        .into()
+    }
+}
+
+/// Like [`text_tooltip`], shown above the pointer instead of below it, for
+/// controls with content underneath that the chip would otherwise cover.
+pub fn text_tooltip_above(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let text: SharedString = text.into();
+    move |_, cx| {
+        cx.new(|_| TextTooltip {
+            text: text.clone(),
+            above: true,
+        })
+        .into()
+    }
 }

@@ -6,7 +6,7 @@ if (process.argv[2] === 'server') {
     const msg = JSON.parse(line);
     let result;
     if (msg.method === 'initialize') result = {protocolVersion: '2024-11-05', capabilities: {tools:{}}, serverInfo: {name:'test',version:'1'}};
-    else if (msg.method === 'tools/list') result = {tools:[{name:'whoami',description:'Identity',inputSchema:{type:'object',properties:{mode:{type:'string'}}}}]};
+    else if (msg.method === 'tools/list') result = {tools:['whoami','create_chat','create_chats','read_chat','send_message','wait_for_turn'].map(name => ({name,description:'Zeron delegation',inputSchema:{type:'object',properties:{mode:{type:'string'}}}}))};
     else if (msg.method === 'tools/call') {
       if (msg.params.arguments.mode === 'hang') return;
       if (msg.params.arguments.mode === 'crash') process.exit(1);
@@ -22,6 +22,9 @@ if (process.argv[2] === 'server') {
     extension({on:(event,fn)=>handlers[event]=fn,registerTool:tool=>tools[tool.name]=tool});
     try {
       await handlers.session_start();
+      for (const name of ['create_chat','create_chats','read_chat','send_message','wait_for_turn']) {
+        assert.equal((await tools[`zeron_${name}`].execute('delegation',{})).content[0].text, chat);
+      }
       const tool = tools.zeron_whoami;
       assert.equal(tool.parameters.type,'object');
       const result = await tool.execute('call',{});
@@ -32,11 +35,7 @@ if (process.argv[2] === 'server') {
       controller.abort();
       await assert.rejects(waiting,/cancelled/);
       await assert.rejects(tool.execute('call',{mode:'crash'}),/exited/);
-      const notices = [];
-      const ctx = {ui:{notify:(message,level)=>notices.push([message,level])}};
-      handlers.message_end({message:{role:'assistant',stopReason:'stop',content:[]}}, ctx);
-      handlers.message_end({message:{role:'assistant',stopReason:'error',errorMessage:'Codex error: unsupported model'}}, ctx);
-      assert.deepEqual(notices,[['Codex error: unsupported model','error']]);
+      assert.equal(handlers.message_end, undefined, "native RPC reports provider failures directly");
       // Restarting the session must not let an old child's exit fail new RPCs.
       await handlers.session_start();
       assert.equal((await tools.zeron_whoami.execute('call',{})).content[0].text,chat);

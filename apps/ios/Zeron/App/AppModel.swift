@@ -10,6 +10,26 @@ final class AppModel {
         var folders: [FolderRowVM] = []
         var sessions: [SessionRowVM] = []
         var sectionSessions: [String: [SessionRowVM]] = [:]
+        /// `sessions` grouped by repository project, groups in recency order.
+        var projectGroups: [ProjectGroupVM] = []
+    }
+
+    struct ProjectGroupVM: Equatable {
+        /// Section id: `project:<group key>` (`home:<device>` without a project).
+        let id: String
+        var name: String
+        var sessions: [SessionRowVM]
+    }
+
+    /// The Sessions page groups its unsectioned sessions by project
+    /// (the desktop sidebar's "By project"). Local to this phone.
+    var groupByProject: Bool {
+        get { UserDefaults.standard.bool(forKey: "groupByProject") }
+        set {
+            guard newValue != groupByProject else { return }
+            UserDefaults.standard.set(newValue, forKey: "groupByProject")
+            observers.values.forEach { $0() }
+        }
     }
 
     struct LiveCounts: Equatable {
@@ -17,6 +37,11 @@ final class AppModel {
         var awaiting = 0
     }
 
+    @MainActor lazy var voice = RemoteVoiceController(app: self)
+    /// Every chat's terminals (shells on their hosts).
+    @MainActor lazy var terminals = TerminalStore(app: self)
+    /// Cloud for this account (status, GitHub, agent logins, billing).
+    @MainActor lazy var cloud = CloudStore(app: self)
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
@@ -33,6 +58,9 @@ final class AppModel {
     private var refreshScheduled = false
     private var clock: Timer?
     private let path = NWPathMonitor()
+    /// The network path's shape last seen (interfaces in order), so only a
+    /// real change re-pairs direct connections.
+    private var pathShape: String?
 
     var onSignedIn: (() -> Void)?
     var onSignOut: (() -> Void)?
@@ -75,7 +103,21 @@ final class AppModel {
     init() {
         // Online/offline + interface changes cut sync backoff short.
         path.pathUpdateHandler = { [weak self] p in
-            DispatchQueue.main.async { self?.client?.setNetworkOnline(online: p.status == .satisfied) }
+            // What a direct connection's path depends on: the interfaces in
+            // use and their order (Wi-Fi first, or cellular), and whether
+            // there's a route at all. Re-delivered paths with the same shape
+            // must not tear down a healthy direct link.
+            let shape = p.status == .satisfied
+                ? p.availableInterfaces.map { "\($0.type)/\($0.name)" }.joined(separator: ",") + (p.isExpensive ? "!" : "")
+                : ""
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.client?.setNetworkOnline(online: p.status == .satisfied)
+                if let last = self.pathShape, last != shape, !shape.isEmpty {
+                    self.client?.networkPathChanged()
+                }
+                self.pathShape = shape
+            }
         }
         path.start(queue: DispatchQueue(label: "sh.zeron.path"))
         let args = ProcessInfo.processInfo.arguments
@@ -166,8 +208,7 @@ final class AppModel {
     /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.
     static var edgeURL: String {
         #if DEBUG
-        let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "-edge"), i + 1 < args.count { return args[i + 1] }
+        if let edge = Endpoints.debugOverride("-edge", key: "debugEdgeURL") { return edge }
         #endif
         return Endpoints.edgeURL.absoluteString
     }
@@ -196,7 +237,8 @@ final class AppModel {
     }
 
     /// The user signing out: this device forgets the account's local docs.
-    func signOut() {
+    @MainActor func signOut() {
+        voice.stop()
         forgetOnSignOut = true
         onSignOut?()
     }
@@ -206,13 +248,18 @@ final class AppModel {
     /// keeps a different account out of it.
     private var forgetOnSignOut = false
 
-    func signOutLocally() {
+    @MainActor func signOutLocally() {
+        voice.stop()
+        terminals.signOut()
+        endDeliveryBackgroundTask()
+        lastDeliveryActivity = .distantPast
         client?.shutdown()
         client = nil
         Credentials.clearStored()
         AccountProfile.clear()
         clock?.invalidate()
         if forgetOnSignOut { try? FileManager.default.removeItem(at: Self.coreDir) }
+        cloud.reset()
         forgetOnSignOut = false
         // Nothing of the account stays in memory.
         frontPage = FrontPage()
@@ -228,8 +275,38 @@ final class AppModel {
         newSessionImages = []
     }
 
-    func didEnterBackground() { client?.onBackground() }
+    private var lastDeliveryActivity = Date.distantPast
+
+    func noteDeliveryActivity() { lastDeliveryActivity = Date() }
+
+    private var deliveryBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var deliveryBackgroundDeadline: DispatchWorkItem?
+
+    private func endDeliveryBackgroundTask() {
+        deliveryBackgroundDeadline?.cancel()
+        deliveryBackgroundDeadline = nil
+        guard deliveryBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(deliveryBackgroundTask)
+        deliveryBackgroundTask = .invalid
+    }
+
+    func didEnterBackground() {
+        // Give the already-durable room outbox and host wake time to reach
+        // the edge when the user leaves immediately after tapping Send.
+        endDeliveryBackgroundTask()
+        if client != nil, !isDemo,
+           Date().timeIntervalSince(lastDeliveryActivity) < 120 || rows.values.contains(where: { $0.sendState == .sending || $0.sendState == .queued }) {
+            deliveryBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Finish message delivery") { [weak self] in
+                self?.endDeliveryBackgroundTask()
+            }
+            let deadline = DispatchWorkItem { [weak self] in self?.endDeliveryBackgroundTask() }
+            deliveryBackgroundDeadline = deadline
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: deadline)
+        }
+        client?.onBackground()
+    }
     func willEnterForeground() {
+        endDeliveryBackgroundTask()
         client?.onForeground()
         refreshWorkspace()
     }
@@ -309,6 +386,10 @@ final class AppModel {
         }
     }
 
+    /// Something outside the registry stream changed the workspace (a Cloud
+    /// project written here): rebuild now rather than on the next frame.
+    func workspaceDidChange() { refreshWorkspace() }
+
     private func refreshWorkspace() {
         guard let client else { return }
         let ws = client.workspace()
@@ -330,6 +411,7 @@ final class AppModel {
             page.sectionSessions[s.id] = list
         }
         page.sessions = ws.front.recent.map(vm)
+        page.projectGroups = Self.projectGroups(ws.front.recent, page.sessions, projects: ws.projects)
         rawProjects = ws.projects
         // Sessions reachable only through their project still resolve by id.
         for p in ws.projects {
@@ -342,15 +424,47 @@ final class AppModel {
             if row.status == .working { counts.working += 1 }
             if row.status == .awaiting { counts.awaiting += 1 }
         }
+        // A row's own content (its model, say) counts even when the lists
+        // don't show it: open sessions read their chips from it.
+        let rowsChanged = all.count != rows.count || all.contains { rows[$0.key]?.revision != $0.value.revision }
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
-        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
+        let changed = rowsChanged || page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
         lastHosts = hosts
         live = counts
+        if !freshSideChats.isEmpty { sweepFreshSideChats() }
         frontPage = page
         archived = archivedVMs
         if changed { observers.values.forEach { $0() } }
+    }
+
+    /// Like the desktop's project grouping: checkouts of one repository
+    /// share a group (named for its representative), project-less sessions
+    /// group per device. Groups and rows keep the incoming recency order.
+    private static func projectGroups(_ rows: [SessionRow], _ vms: [SessionRowVM], projects: [ProjectView]) -> [ProjectGroupVM] {
+        let byId = Dictionary(projects.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var groups: [ProjectGroupVM] = []
+        var index: [String: Int] = [:]
+        for (row, vm) in zip(rows, vms) {
+            let id: String
+            let name: String
+            if let ref = row.project {
+                let project = byId[ref.id]
+                id = "project:" + (project?.groupKey ?? ref.id)
+                name = project?.groupName ?? ref.name
+            } else {
+                id = "home:" + row.deviceId
+                name = row.deviceName.map { "Home · \($0)" } ?? "Home"
+            }
+            if let i = index[id] {
+                groups[i].sessions.append(vm)
+            } else {
+                index[id] = groups.count
+                groups.append(ProjectGroupVM(id: id, name: name, sessions: [vm]))
+            }
+        }
+        return groups
     }
 
     static func status(_ i: ChatIndicator) -> SessionRowVM.Status {
@@ -424,9 +538,19 @@ final class AppModel {
         Toast.show("Archived", action: "Undo", in: window) { [weak self] in self?.unarchive(id) }
     }
     func unarchive(_ id: String) { attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
+    /// Permanently: the row on every device (a Cloud chat's machine too).
+    func delete(_ id: String) { attempt("delete") { try client?.deleteSession(chatId: id) } }
     func move(_ id: String, toSection section: String?) { attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
     func movePin(_ id: String, after: String?, before: String?) {
         attempt("move pin") { try client?.movePin(chatId: id, after: after, before: before) }
+    }
+    /// Pin between neighbours (`nil` at either end), as a drop into Pinned does.
+    func pin(_ id: String, after: String?, before: String?) {
+        attempt("pin") { try client?.pinSessionAt(chatId: id, after: after, before: before) }
+    }
+    /// Move into a section between its members (`nil` at either end).
+    func place(_ id: String, inSection section: String, after: String?, before: String?) {
+        attempt("assign") { try client?.placeSession(chatId: id, sectionId: section, after: after, before: before) }
     }
     func renameSection(_ id: String, _ name: String) { attempt("rename section") { try client?.renameSection(sectionId: id, name: name) } }
     func deleteSection(_ id: String) { attempt("delete section") { try client?.deleteSection(sectionId: id) } }
@@ -436,11 +560,76 @@ final class AppModel {
 
     // MARK: Sessions
 
-    func sessionSource(_ chatId: String) -> SessionSource {
-        guard let client, let handle = try? client.openSession(chatId: chatId) else {
-            return FixtureSessionSource(title: "Unavailable", subtitle: "")
+    func sessionSource(_ chatId: String) -> SessionSource? {
+        guard let client else { return nil }
+        do {
+            let handle = try client.openSession(chatId: chatId)
+            return CoreSessionSource(app: self, client: client, handle: handle, chatId: chatId)
+        } catch {
+            NSLog("open session failed: \(error)")
+            return nil
         }
-        return CoreSessionSource(app: self, client: client, handle: handle, chatId: chatId)
+    }
+
+    // MARK: Companions (side chats, subagents)
+
+    /// A session's side chats, newest first.
+    func sideChats(of chatId: String) -> [SessionRowVM] {
+        (client?.childSessions(parentId: chatId) ?? []).filter { !$0.archived }.map(Self.vm)
+    }
+
+    /// The subagents a session's agent spawned (its open transcript).
+    func sessionSubagents(_ chatId: String) -> [SubagentRow] {
+        guard let client, !chatId.contains("--sub--") else { return [] }
+        return (client.session(chatId: chatId) ?? (try? client.openSession(chatId: chatId)))?.subagents() ?? []
+    }
+
+    /// Side chats started here that nothing has been sent in yet: closed
+    /// unused, they go (the desktop only writes one at its first send).
+    /// Kept across launches, so one left open when the app was killed goes
+    /// too.
+    private(set) var freshSideChats = Set(UserDefaults.standard.stringArray(forKey: "freshSideChats") ?? []) {
+        didSet { UserDefaults.standard.set(Array(freshSideChats), forKey: "freshSideChats") }
+    }
+
+    func forgetFreshSideChat(_ id: String) {
+        freshSideChats.remove(id)
+    }
+
+    /// Fresh side chats nobody has open: empty a minute on, they go; one
+    /// that got a message (from any device) is just a side chat now.
+    private func sweepFreshSideChats() {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        for id in freshSideChats {
+            guard let row = rows[id] ?? client?.sessionRow(chatId: id) else { continue }
+            if row.preview != nil {
+                freshSideChats.remove(id)
+            } else if SessionViewController.live(id) == nil, now - row.createdAtMs > 60_000 {
+                freshSideChats.remove(id)
+                delete(id)
+            }
+        }
+    }
+
+    /// A fresh side chat under `parentId`; nil when it couldn't be made.
+    func createSideChat(parentId: String) -> String? {
+        do {
+            let id = try client?.createSideChat(parentId: parentId)
+            if let id { freshSideChats.insert(id) }
+            refreshWorkspace()
+            return id
+        } catch {
+            NSLog("side chat failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Fork `sourceId` into a side chat (its host copies the conversation).
+    func forkSideChat(sourceId: String) async throws -> String {
+        guard let client else { throw CoreError.Closed }
+        let id = try await client.forkSideChat(sourceId: sourceId)
+        await MainActor.run { refreshWorkspace() }
+        return id
     }
 
     // MARK: New session
@@ -475,8 +664,10 @@ final class AppModel {
         }
     }
 
-    var projectOptions: [ProjectOption] {
-        rawProjects.map { ProjectOption(id: $0.id, name: $0.name, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, colorIndex: Int($0.colorIndex)) }
+    @MainActor var projectOptions: [ProjectOption] {
+        // A Cloud project runs only on Cloud: hidden when this account isn't
+        // offered Cloud (or no longer is).
+        rawProjects.filter { !$0.isCloud || isDemo || cloud.available }.map { ProjectOption(id: $0.id, name: $0.name, path: $0.path, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, groupKey: $0.groupKey, groupName: $0.groupName, colorIndex: Int($0.colorIndex), isCloud: $0.isCloud, githubRepo: $0.githubRepo) }
     }
 
     var hostOptions: [HostOption] {
@@ -494,7 +685,25 @@ final class AppModel {
         var out: [ModelChoice] = []
         for h in harnesses where h.offered {
             let models = (try? await client.listModels(deviceId: deviceId, harness: h.id)) ?? fallbackModels(harness: h.id)
-            out += models.map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels) }
+            out += models.map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+        }
+        return out
+    }
+
+    /// A Cloud chat created whose first message didn't go out yet.
+    private var unsentCloudChat: (key: String, chatId: String)?
+
+    /// The agents Cloud runs.
+    static let cloudHarnesses = ["claude-code", "codex"]
+
+    /// Cloud's models, as the edge lists them (no computer or Cloud machine
+    /// is asked).
+    func cloudModels() async -> [ModelChoice] {
+        guard let client else { return [] }
+        var out: [ModelChoice] = []
+        for h in Self.cloudHarnesses {
+            let label = HarnessNames.label(h)
+            out += await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
         }
         return out
     }
@@ -527,6 +736,39 @@ final class AppModel {
         return refs.sorted { $0.current && !$1.current }.map(\.name)
     }
 
+    /// A session on its own Cloud machine in `draft.projectId` (a Cloud
+    /// project, or any project whose repository Cloud reaches): the edge
+    /// mints the machine, then the first message is sent as usual — it
+    /// waits in the chat until the machine is up.
+    @MainActor
+    func createCloudSession(draft: NewSessionDraft, text: String, images: [StagedImage]) async throws -> String {
+        guard let client, let spaceId = draft.projectId else { throw CoreError.Closed }
+        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        // A retry after a failed first send reuses that chat (and machine)
+        // instead of starting a second one.
+        let chatId: String
+        // Only while nothing the chat was made with changed (its project,
+        // branch, provider, model): otherwise that's a different chat.
+        let key = "\(spaceId)|\(draft.branch ?? "")|\(draft.harness)|\(draft.model ?? "")"
+        if let unsent = unsentCloudChat, unsent.key == key, client.sessionRow(chatId: unsent.chatId) != nil {
+            chatId = unsent.chatId
+        } else {
+            chatId = try await client.createCloudSession(spaceId: spaceId, config: config, branch: draft.branch, title: nil)
+            unsentCloudChat = (key, chatId)
+        }
+        let handle = try client.openSession(chatId: chatId)
+        _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: .queue))
+        unsentCloudChat = nil
+        noteDeliveryActivity()
+        refreshWorkspace()
+        return chatId
+    }
+
+    /// Branches of a Cloud project's repository (GitHub's, through Cloud).
+    func cloudBranches(repo: String) async -> [String] {
+        (try? await client?.githubBranches(repo: repo)) ?? []
+    }
+
     /// Create the chat, open it, and send the first message.
     func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
         guard let client else { return nil }
@@ -545,6 +787,7 @@ final class AppModel {
             let project = rawProjects.first { $0.id == draft.projectId }
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: worktree, busy: .queue))
+            noteDeliveryActivity()
             refreshWorkspace()
             return chatId
         } catch {

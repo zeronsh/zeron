@@ -3,6 +3,22 @@ use serde::{Deserialize, Serialize};
 
 pub const PREVIEW_PROXY_PORT: u16 = 7331;
 
+/// Stamped by the engine into the environment of every process it launches:
+/// [`chat_origin`] for agent runs, [`terminal_origin`] for its terminals
+/// (project actions run in one). Children inherit it, through `nohup`,
+/// daemonizing and an engine restart alike, so preview discovery lists
+/// exactly the servers Zeron started and knows which chat started them. One
+/// variable, so the nearest Zeron launch always overwrites an outer one.
+pub const ORIGIN_ENV: &str = "ZERON_ORIGIN";
+
+pub fn chat_origin(chat_id: &str) -> String {
+    format!("chat:{chat_id}")
+}
+
+pub fn terminal_origin(terminal_id: &str) -> String {
+    format!("terminal:{terminal_id}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewService {
@@ -21,6 +37,9 @@ pub struct PreviewService {
     /// Process creation time, milliseconds since the Unix epoch.
     pub started_at: u64,
     pub zeron_owned: bool,
+    /// The chat whose agent or terminal started it (see [`ORIGIN_ENV`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
 }
 
 impl PreviewService {

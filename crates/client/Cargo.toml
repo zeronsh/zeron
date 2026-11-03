@@ -12,10 +12,14 @@ publish.workspace = true
 # frontend (iOS, Android, tests, CLIs).
 
 [dependencies]
+zeron-voice-session.workspace = true
 zeron-proto.workspace = true
 zeron-doc.workspace = true
 zeron-sync.workspace = true
 zeron-rpc.workspace = true
+zeron-preview.workspace = true
+zeron-term-link.workspace = true
+anyhow.workspace = true
 loro.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -27,10 +31,13 @@ uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
+sha2.workspace = true
+base64 = "0.22"
 async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+zeron-visual.workspace = true
 zeron-sync = { workspace = true, features = ["mock-server"] }
 tokio-tungstenite.workspace = true
 async-trait.workspace = true

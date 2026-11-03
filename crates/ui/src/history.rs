@@ -1584,14 +1584,8 @@ impl Render for GitHistoryFetchButton {
                     })
             })
             .child(if fetching {
-                crate::loaders::mini_glyph_spinner(
-                    "history-fetch-all-spinner",
-                    1.75,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element()
+                crate::loaders::ring_spinner("history-fetch-all-spinner", 13.0, theme.text_muted)
+                    .into_any_element()
             } else {
                 crate::icons::icon(crate::icons::CLOUD)
                     .size(px(crate::surface_chrome::ICON_SIZE))
@@ -1730,14 +1724,8 @@ impl Render for GitHistorySearchControl {
         let closing = self.mode == GitHistorySearchMode::Collapsing;
         let transition_epoch = self.transition_epoch;
         let status_icon = if search_loading {
-            crate::loaders::mini_glyph_spinner(
-                "history-search-spinner",
-                1.5,
-                theme.glyph,
-                cx.entity_id(),
-                cx,
-            )
-            .into_any_element()
+            crate::loaders::ring_spinner("history-search-spinner", 12.0, theme.text_muted)
+                .into_any_element()
         } else {
             crate::icons::icon(crate::icons::MAGNIFER)
                 .size(px(11.0))
@@ -4280,12 +4268,10 @@ impl Render for GitHistory {
                 .items_center()
                 .justify_center()
                 .gap(px(8.0))
-                .child(crate::loaders::gradient_spinner(
+                .child(crate::loaders::ring_spinner(
                     "history-loading",
-                    &theme,
-                    3.0,
-                    cx.entity_id(),
-                    cx,
+                    20.0,
+                    theme.text_muted,
                 ))
                 .child(
                     div()

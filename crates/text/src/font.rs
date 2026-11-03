@@ -208,7 +208,15 @@ impl FontBook {
         }
         // Validate before leaking so a bad file doesn't leak.
         ttf_parser::Face::parse(&data, 0).map_err(|_| FontError::Parse)?;
-        let data: &'static [u8] = Box::leak(data.into_boxed_slice());
+        self.add_static_face(Box::leak(data.into_boxed_slice()))
+    }
+
+    /// Registers a font file already in memory for the process, so many books
+    /// can share one copy.
+    pub fn add_static_face(&mut self, data: &'static [u8]) -> Result<FaceId, FontError> {
+        if self.faces.len() >= u16::MAX as usize {
+            return Err(FontError::TooManyFaces);
+        }
         let hb = rustybuzz::Face::from_slice(data, 0).ok_or(FontError::Parse)?;
         let upem = hb.units_per_em() as f32;
         let mut ascii = 0u128;

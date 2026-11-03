@@ -19,7 +19,7 @@ use zeron_doc::{
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -34,6 +34,9 @@ const RESUBSCRIBE_DELAY: Duration = Duration::from_millis(300);
 pub struct Origin {
     pub chat_id: Option<String>,
     pub device_id: Option<String>,
+    /// The host launched the agent without its own subagent tools
+    /// ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
+    pub side_chats_only: bool,
 }
 
 impl Origin {
@@ -47,8 +50,15 @@ impl Origin {
         Self {
             chat_id: read("ZERON_CHAT_ID"),
             device_id: read("ZERON_DEVICE_ID"),
+            side_chats_only: read(zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV).as_deref()
+                == Some("1"),
         }
     }
+}
+
+/// A dial failure as an RPC error.
+fn transport(error: anyhow::Error) -> RpcError {
+    RpcError::Transport(format!("{error:#}"))
 }
 
 /// `ListHarnesses` row — the engine's `HarnessDescriptor`, re-declared here
@@ -68,6 +78,16 @@ pub struct HarnessInfo {
     pub installed: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub access_modes: Vec<zeron_proto::AccessMode>,
+    #[serde(default)]
+    pub supports_plan: bool,
+    /// Whether a login for this harness is present on the device, from
+    /// `ListAgentAccounts`. `None` = not asked or not answerable. Advisory:
+    /// detection does not see every credential source (an API key in the
+    /// environment, say), so only an explicit `false` counts against a harness.
+    #[serde(skip)]
+    pub signed_in: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -82,6 +102,12 @@ impl HarnessInfo {
     /// Offered on this device: installed and not switched off in Settings.
     pub fn available(&self) -> bool {
         self.installed && self.enabled.unwrap_or(true)
+    }
+
+    /// Ready to take work: installed, enabled, and not known to be signed out.
+    /// What an agent picking a delegate should choose from.
+    pub fn connected(&self) -> bool {
+        self.available() && self.signed_in != Some(false)
     }
 
     /// Can take a prompt inside the running turn (the composer's "Steer").
@@ -100,12 +126,17 @@ pub enum TurnOutcome {
     AwaitingInput,
     /// The run failed.
     Errored,
+    /// The native turn was interrupted; no success receipt was produced.
+    Interrupted,
     /// The deadline passed with the chat still working (or never starting).
     TimedOut,
 }
 
 pub struct Zeron {
-    url: String,
+    /// Engine IPC port; `None` = wrapped client only (no redial).
+    port: Option<u16>,
+    /// Data dir whose `ipc-token` authenticates each (re)dial.
+    data_dir: Option<std::path::PathBuf>,
     origin: Origin,
     rpc: Mutex<Option<Arc<RpcClient>>>,
 }
@@ -113,9 +144,11 @@ pub struct Zeron {
 impl Zeron {
     /// Lazy dialer: nothing connects until the first tool call, so `zeron
     /// mcp` starts (and answers `initialize`) even before the engine is up.
-    pub fn new(url: String, origin: Origin) -> Self {
+    /// Every (re)dial re-reads the engine's IPC token ([`connect_ipc`]).
+    pub fn new(port: u16, data_dir: Option<std::path::PathBuf>, origin: Origin) -> Self {
         Self {
-            url,
+            port: Some(port),
+            data_dir,
             origin,
             rpc: Mutex::new(None),
         }
@@ -124,7 +157,8 @@ impl Zeron {
     /// Wrap an already-connected client (tests, in-process embedding).
     pub fn with_client(client: RpcClient, origin: Origin) -> Self {
         Self {
-            url: String::new(),
+            port: None,
+            data_dir: None,
             origin,
             rpc: Mutex::new(Some(Arc::new(client))),
         }
@@ -139,15 +173,16 @@ impl Zeron {
         if let Some(client) = slot.as_ref() {
             return Ok(client.clone());
         }
-        if self.url.is_empty() {
+        let Some(port) = self.port else {
             bail!("engine connection closed");
-        }
-        let client = connect_ws(&self.url).await.map_err(|e| {
-            anyhow!(
-                "no Zeron engine listening at {} ({e}) — is Zeron running?",
-                self.url
-            )
-        })?;
+        };
+        let client = connect_ipc(port, self.data_dir.as_deref())
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "no Zeron engine reachable at ws://127.0.0.1:{port} ({e}) — is Zeron running?"
+                )
+            })?;
         let client = Arc::new(client);
         *slot = Some(client.clone());
         Ok(client)
@@ -187,6 +222,40 @@ impl Zeron {
                     .map_err(|e| anyhow!("{method}: {e}"))
             }
             other => other.map_err(|e| anyhow!("{method}: {e}")),
+        }
+    }
+
+    /// [`Self::call`] keeping the engine's error as is, so a tool can show
+    /// a `Failed` message in its own words (no method prefix) and tell an
+    /// engine that lacks the method apart.
+    pub async fn call_rpc(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let client = self.client().await.map_err(transport)?;
+        match client.call(method, params.clone()).await {
+            Err(RpcError::Closed) => {
+                self.forget_client().await;
+                let client = self.client().await.map_err(transport)?;
+                client.call(method, params).await
+            }
+            other => other,
+        }
+    }
+
+    /// A watch stream acknowledged by the engine before it returns, so an
+    /// engine without the method answers `UnknownMethod` instead of a
+    /// silent stream (reconnecting once if the socket is gone).
+    pub async fn subscribe_checked(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<RpcSubscription, RpcError> {
+        let client = self.client().await.map_err(transport)?;
+        match client.subscribe_checked(method, params.clone()).await {
+            Err(RpcError::Closed) => {
+                self.forget_client().await;
+                let client = self.client().await.map_err(transport)?;
+                client.subscribe_checked(method, params).await
+            }
+            other => other,
         }
     }
 
@@ -243,23 +312,86 @@ impl Zeron {
         self.snapshot_as(methods::WATCH_SESSIONS, json!({})).await
     }
 
+    /// The harness catalog with each row's login state filled in. The login
+    /// lookup is best-effort: when the accounts listing is unavailable every
+    /// `signed_in` stays `None` and nothing is held against a harness.
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
-        let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
-        serde_json::from_value(value).context("ListHarnesses: unexpected shape")
+        self.harnesses_on(None).await
+    }
+
+    pub async fn harnesses_on(&self, device: Option<&str>) -> anyhow::Result<Vec<HarnessInfo>> {
+        let mut params = json!({});
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        let value = self
+            .call(methods::LIST_HARNESSES, params.clone())
+            .await
+            .with_context(|| format!("harness catalog on device {}", device.unwrap_or("local")))?;
+        let mut harnesses: Vec<HarnessInfo> = serde_json::from_value(value).with_context(|| {
+            format!(
+                "ListHarnesses: unexpected catalog on device {}",
+                device.unwrap_or("local")
+            )
+        })?;
+        let accounts = self
+            .call(methods::LIST_AGENT_ACCOUNTS, params)
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<zeron_proto::AgentAccountsSnapshot>(v).ok());
+        if let Some(snapshot) = accounts {
+            for harness in &mut harnesses {
+                harness.signed_in = Some(
+                    snapshot
+                        .accounts
+                        .iter()
+                        .any(|a| a.harness == harness.id && a.active),
+                );
+            }
+        }
+        Ok(harnesses)
     }
 
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
+        self.models_on(harness, None).await
+    }
+
+    pub async fn models_on(
+        &self,
+        harness: HarnessId,
+        device: Option<&str>,
+    ) -> anyhow::Result<Vec<Model>> {
+        let mut params = json!({ "harness": harness });
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
         let value = self
-            .call(methods::LIST_MODELS, json!({ "harness": harness }))
-            .await?;
-        serde_json::from_value(value).context("ListModels: unexpected shape")
+            .call(methods::LIST_MODELS, params)
+            .await
+            .with_context(|| format!("model catalog on device {}", device.unwrap_or("local")))?;
+        serde_json::from_value(value).with_context(|| {
+            format!(
+                "ListModels: unexpected catalog on device {}",
+                device.unwrap_or("local")
+            )
+        })
     }
 
     /// The full transcript: attach, take the opening `reset` frame, detach.
     pub async fn transcript(&self, chat_id: &str) -> anyhow::Result<Vec<SessionMessageEntry>> {
-        let mut rx = self
-            .subscribe(methods::WATCH_DOC_MESSAGES, json!({ "chatId": chat_id }))
-            .await?;
+        self.transcript_on(chat_id, None).await
+    }
+
+    pub async fn transcript_on(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+    ) -> anyhow::Result<Vec<SessionMessageEntry>> {
+        let mut params = json!({ "chatId": chat_id });
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        let mut rx = self.subscribe(methods::WATCH_DOC_MESSAGES, params).await?;
         let mut entries = Vec::new();
         let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
         loop {
@@ -346,6 +478,43 @@ impl Zeron {
     pub async fn resolve_space(&self, key: &str) -> anyhow::Result<Space> {
         let spaces = self.spaces().await?;
         resolve_space_in(&spaces, key.trim())
+    }
+
+    /// Resolve the host first when specified, so repeated project names/paths
+    /// on other machines cannot influence selection.
+    pub async fn resolve_target(
+        &self,
+        project: Option<&str>,
+        device: Option<&str>,
+    ) -> anyhow::Result<(Option<Space>, String)> {
+        let device = device.map(str::trim).filter(|d| !d.is_empty());
+        let host = match device {
+            Some(key) => Some(self.resolve_device_id(Some(key)).await?),
+            None => None,
+        };
+        if let Some(project) = project {
+            let mut spaces = self.spaces().await?;
+            if let Some(host) = &host {
+                if let Some(space) = spaces.iter().find(|s| s.id == project.trim()) {
+                    anyhow::ensure!(
+                        space.device_id == *host,
+                        "project {} belongs to device {}, not device {host}",
+                        space.id,
+                        space.device_id
+                    );
+                }
+                spaces.retain(|s| s.device_id == *host);
+            }
+            let space = resolve_space_in(&spaces, project.trim())?;
+            return Ok((Some(space.clone()), space.device_id));
+        }
+        Ok((
+            None,
+            match host {
+                Some(host) => host,
+                None => self.local_device_id().await?,
+            },
+        ))
     }
 
     /// Device id or exact name; `None` means this engine's own device.
@@ -439,10 +608,19 @@ impl Zeron {
                 let advanced = baseline.is_none_or(|b| {
                     session.updated_at > b.updated_at
                         || session.last_completed_turn != b.last_completed_turn
+                        || session.last_turn_outcome != b.last_turn_outcome
                 });
-                match session.status {
+                // Liveness expiry is not a completion edge. Keep waiting for
+                // fresh evidence (or the deadline), just like the sidebar.
+                if zeron_proto::view::session_stale(&session, chrono::Utc::now()) {
+                    last = Some(session);
+                    continue;
+                }
+                match session.activity_status() {
                     SessionStatus::Working => {
-                        saw_working = true;
+                        // A terminal may be working beside an idle native
+                        // session. It cannot satisfy a pending native send.
+                        saw_working |= !expect_turn || session.status == SessionStatus::Working;
                         last = Some(session);
                     }
                     SessionStatus::AwaitingInput if advanced || saw_working => {
@@ -452,6 +630,18 @@ impl Zeron {
                         return Ok((TurnOutcome::Errored, Some(session)));
                     }
                     SessionStatus::Idle => {
+                        if session
+                            .last_turn_outcome
+                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted)
+                            && (!expect_turn
+                                || saw_working
+                                || advanced
+                                    && baseline.is_none_or(|b| {
+                                        b.last_turn_outcome != session.last_turn_outcome
+                                    }))
+                        {
+                            return Ok((TurnOutcome::Interrupted, Some(session)));
+                        }
                         let turn_changed = match baseline {
                             Some(b) => b.last_completed_turn != session.last_completed_turn,
                             // A row that did not exist at send time only
@@ -531,17 +721,18 @@ pub fn resolve_space_in(spaces: &[Space], key: &str) -> anyhow::Result<Space> {
     if key.is_empty() {
         bail!("project is required");
     }
-    if let Some(space) = spaces.iter().find(|s| s.id == key || s.path == key) {
+    if let Some(space) = spaces.iter().find(|s| s.id == key) {
         return Ok(space.clone());
     }
     let normalized = key.trim_end_matches(['/', '\\']);
+    let by_path: Vec<&Space> = spaces
+        .iter()
+        .filter(|s| s.path.trim_end_matches(['/', '\\']) == normalized)
+        .collect();
     let by_name: Vec<&Space> = spaces
         .iter()
         .filter(|s| s.display_name().eq_ignore_ascii_case(normalized))
         .collect();
-    if let [one] = by_name.as_slice() {
-        return Ok((*one).clone());
-    }
     let by_suffix: Vec<&Space> = spaces
         .iter()
         .filter(|s| {
@@ -549,21 +740,23 @@ pub fn resolve_space_in(spaces: &[Space], key: &str) -> anyhow::Result<Space> {
             path.ends_with(normalized) || path.contains(normalized)
         })
         .collect();
-    if let [one] = by_suffix.as_slice() {
-        return Ok((*one).clone());
-    }
-    let candidates = if by_name.len() > 1 {
+    let candidates = if !by_path.is_empty() {
+        &by_path
+    } else if !by_name.is_empty() {
         &by_name
     } else {
         &by_suffix
     };
+    if let [one] = candidates.as_slice() {
+        return Ok((*one).clone());
+    }
     if candidates.len() > 1 {
         bail!(
             "{} projects match {key:?}; use an id: {}",
             candidates.len(),
             candidates
                 .iter()
-                .map(|s| format!("{} ({})", s.path, s.id))
+                .map(|s| format!("{} (id {}, device {})", s.path, s.id, s.device_id))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -580,6 +773,55 @@ pub fn short(id: &str) -> &str {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[tokio::test]
+    async fn coalesced_repeated_interrupts_need_fresh_native_outcome_evidence() {
+        use futures::StreamExt;
+        struct Service(Session);
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Service {
+            async fn handle(&self, _: &str, _: Value) -> Result<zeron_rpc::RpcReply, RpcError> {
+                Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::iter([json!([self.0])])
+                        .chain(futures::stream::pending())
+                        .boxed(),
+                ))
+            }
+        }
+        let now = Utc::now();
+        let earlier = now - chrono::Duration::seconds(1);
+        let baseline: Session = serde_json::from_value(json!({
+            "chatId":"chat", "deviceId":"dev", "status":"idle", "updatedAt":earlier,
+            "lastTurnOutcome":{"status":"interrupted", "finishedAt":earlier}
+        }))
+        .unwrap();
+        for native_finished in [false, true] {
+            let mut current = baseline.clone();
+            current.updated_at = now; // Could also be a terminal liveness update.
+            if native_finished {
+                current.last_turn_outcome.as_mut().unwrap().finished_at = now;
+            }
+            let rpc = zeron_rpc::memory_client(Arc::new(Service(current)));
+            let client = Zeron::with_client(rpc, Origin::default());
+            let (outcome, _) = client
+                .wait_for_turn(
+                    &chat("chat", None),
+                    Some(&baseline),
+                    true,
+                    Duration::from_millis(50),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if native_finished {
+                    TurnOutcome::Interrupted
+                } else {
+                    TurnOutcome::TimedOut
+                }
+            );
+        }
+    }
 
     #[tokio::test]
     async fn one_shot_reads_release_quiet_watches() {
@@ -650,6 +892,7 @@ mod tests {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,
@@ -688,8 +931,30 @@ mod tests {
             git_detected: true,
             git_checked_at: None,
             checkout_id: None,
+            repository_id: None,
+            github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn repeated_exact_paths_and_names_do_not_select_the_first_project() {
+        let mut remote = space("s2", "/repo/comet", Some("remote"));
+        remote.device_id = "other-device".into();
+        let spaces = [space("s1", "/repo/comet", None), remote];
+        let err = resolve_space_in(&spaces, "/repo/comet/")
+            .unwrap_err()
+            .to_string();
+        for candidate in ["s1", "s2", "dev", "other-device"] {
+            assert!(err.contains(candidate), "{err}");
+        }
+        // A unique path suffix must not override ambiguous display names.
+        let spaces = [
+            space("s1", "/repo/comet", None),
+            space("s2", "/repo/other", Some("comet")),
+        ];
+        assert!(resolve_space_in(&spaces, "comet").is_err());
     }
 
     #[test]

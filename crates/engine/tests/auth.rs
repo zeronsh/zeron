@@ -69,6 +69,8 @@ struct StubState {
     token_ttl: AtomicUsize,
     /// org_id claim for exchange-minted tokens ("" = none).
     exchange_org: Mutex<String>,
+    /// POST /auth/orgs answers 409 with this body ("" = creates `org_new`).
+    create_org_conflict: Mutex<String>,
 }
 
 struct StubEdge {
@@ -238,7 +240,12 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
             .await;
         }
         ("POST", "/auth/orgs") => {
-            respond(&mut stream, "200 OK", r#"{"organizationId":"org_new"}"#).await;
+            let conflict = state.create_org_conflict.lock().expect("lock").clone();
+            if conflict.is_empty() {
+                respond(&mut stream, "200 OK", r#"{"organizationId":"org_new"}"#).await;
+            } else {
+                respond(&mut stream, "409 Conflict", &conflict).await;
+            }
         }
         _ => respond(&mut stream, "404 Not Found", r#"{"error":"not_found"}"#).await,
     }
@@ -395,6 +402,39 @@ async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
     auth.sign_out();
     assert_eq!(auth.state(), AuthState::SignedOut);
     assert!(!session_file.exists());
+}
+
+#[tokio::test]
+async fn creating_a_second_org_continues_in_the_first() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state");
+    auth.complete_sign_in(&format!("{state}.codeX"))
+        .await
+        .expect("sign in");
+    assert!(matches!(auth.state(), AuthState::NeedsOrganization { .. }));
+
+    // Another request of ours is still creating it: say so, stay at the gate.
+    *edge.state.create_org_conflict.lock().expect("lock") =
+        r#"{"error":"org_exists","organizationId":null}"#.into();
+    let pending = auth.create_org("Acme").await.expect_err("in flight");
+    assert!(
+        pending.to_string().contains("still being created"),
+        "{pending}"
+    );
+    assert!(matches!(auth.state(), AuthState::NeedsOrganization { .. }));
+
+    // We already created one: continue in it.
+    *edge.state.create_org_conflict.lock().expect("lock") =
+        r#"{"error":"org_exists","organizationId":"org_mine"}"#.into();
+    auth.create_org("Acme again")
+        .await
+        .expect("lands in the existing org");
+    assert!(
+        matches!(auth.state(), AuthState::SignedIn { org_id: Some(org), .. } if org == "org_mine")
+    );
 }
 
 #[tokio::test]
@@ -767,6 +807,100 @@ async fn loopback_callback_completes_headed_sign_in() {
     assert!(
         matches!(auth.state(), AuthState::SignedIn { org_id: Some(org), user } if org == "org_1" && user.name.as_deref() == Some("Wing Test"))
     );
+}
+
+#[tokio::test]
+async fn sign_in_options_shape_the_authorize_url() {
+    use zeron_engine::{ScreenHint, SignInOptions};
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+
+    // No options: the URL the desktop app has always opened.
+    let plain = auth.start_sign_in().await.expect("authorize url");
+    assert_eq!(query_param(&plain, "screen_hint"), None);
+    assert_eq!(query_param(&plain, "max_age"), None);
+
+    let create = auth
+        .start_sign_in_with(SignInOptions {
+            screen_hint: Some(ScreenHint::SignUp),
+            fresh: true,
+        })
+        .await
+        .expect("sign-up url");
+    assert_eq!(
+        query_param(&create, "screen_hint").as_deref(),
+        Some("sign-up")
+    );
+    assert_eq!(query_param(&create, "max_age").as_deref(), Some("0"));
+    assert!(query_param(&create, "state").is_some());
+
+    let existing = auth
+        .start_sign_in_with(SignInOptions {
+            screen_hint: Some(ScreenHint::SignIn),
+            fresh: false,
+        })
+        .await
+        .expect("sign-in url");
+    assert_eq!(
+        query_param(&existing, "screen_hint").as_deref(),
+        Some("sign-in")
+    );
+    assert_eq!(query_param(&existing, "max_age"), None);
+
+    // The `SignIn` params: camelCase, every field optional.
+    let parsed: SignInOptions =
+        serde_json::from_value(serde_json::json!({ "screenHint": "sign-up", "fresh": true }))
+            .expect("params");
+    assert_eq!(
+        parsed,
+        SignInOptions {
+            screen_hint: Some(ScreenHint::SignUp),
+            fresh: true
+        }
+    );
+    let empty: SignInOptions = serde_json::from_value(serde_json::json!({})).expect("empty");
+    assert_eq!(empty, SignInOptions::default());
+}
+
+#[tokio::test]
+async fn access_token_with_expiry_hands_out_the_session_bearer() {
+    let edge = StubEdge::start().await;
+    *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+
+    // Signed out: nothing to hand out.
+    assert!(matches!(
+        auth.access_token_with_expiry().await,
+        Err(TokenError::SignedOut)
+    ));
+
+    let url = auth.start_sign_in().await.expect("authorize url");
+    let callback = query_param(&url, "redirect_uri")
+        .expect("redirect")
+        .replace("%3A", ":")
+        .replace("%2F", "/");
+    let state = query_param(&url, "state").expect("state");
+    let ok = reqwest::get(format!("{callback}?code=abc&state={state}"))
+        .await
+        .expect("cb");
+    assert_eq!(ok.status().as_u16(), 200);
+    let mut state_rx = auth.watch_state();
+    wait_for(&mut state_rx, |s| s.is_signed_in()).await;
+
+    // The exchange's access token, its `exp` read out (the stub mints
+    // iat 1000 + 3600), from the cache: no refresh spent on it.
+    let (token, expires_at) = auth.access_token_with_expiry().await.expect("bearer");
+    assert_eq!(token, fake_jwt(3600, Some("org_1")));
+    assert_eq!(expires_at, Some(4600));
+    assert_eq!(edge.state.refreshes.load(Ordering::SeqCst), 0);
+
+    auth.sign_out();
+    assert!(matches!(
+        auth.access_token_with_expiry().await,
+        Err(TokenError::SignedOut)
+    ));
 }
 
 #[tokio::test]

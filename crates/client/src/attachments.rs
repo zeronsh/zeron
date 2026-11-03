@@ -20,6 +20,8 @@ use crate::lock;
 
 /// Body used when a message has only attachments.
 pub const ATTACHMENT_ONLY_TEXT: &str = "See the attached image(s).";
+/// Body the desktop uses when any attachment is not an image.
+pub const FILE_ATTACHMENT_ONLY_TEXT: &str = "See the attached file(s).";
 /// The trailer marker line.
 pub const ATTACHMENT_MARKER: &str = "Attached images (local files — open them to view):";
 /// Appshot context marker: everything after it is untrusted observed content.
@@ -204,7 +206,7 @@ pub fn parse_user_message(content: &str) -> ParsedUserMessage {
     let body = lines[..marker - 1].join("\n");
     let visible = visible_text(body.trim()).to_owned();
     ParsedUserMessage {
-        text: if visible == ATTACHMENT_ONLY_TEXT {
+        text: if visible == ATTACHMENT_ONLY_TEXT || visible == FILE_ATTACHMENT_ONLY_TEXT {
             String::new()
         } else {
             visible
@@ -300,6 +302,10 @@ mod tests {
         let only = with_attachments("", &paths[..1]);
         assert_eq!(parse_user_message(&only).text, "");
         assert_eq!(queue_visible_text(&only, &paths[..1]), ATTACHMENT_ONLY_TEXT);
+        let files = format!(
+            "{FILE_ATTACHMENT_ONLY_TEXT}\n\n{ATTACHMENT_MARKER}\n- /tmp/ab12cd34-notes.zip"
+        );
+        assert_eq!(parse_user_message(&files).text, "");
     }
 
     #[test]

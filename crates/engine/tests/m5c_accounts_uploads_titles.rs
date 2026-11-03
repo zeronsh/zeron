@@ -885,11 +885,23 @@ async fn uploads_chunk_commit_readback_and_jail() {
         .read_chunk(&outside.to_string_lossy(), 0, &[tmp.path().to_path_buf()])
         .expect("cwd-rooted read");
     assert_eq!(BASE64.decode(&ok.data).expect("data"), b"nope");
-    // Non-image extensions are refused even inside the jail (zeron parity).
+    // Files the user uploaded read back whatever their type (a queued message
+    // restores them for editing)…
     let text = PathBuf::from(uploads.dir()).join("notes.txt");
     std::fs::create_dir_all(uploads.dir()).expect("uploads dir");
     std::fs::write(&text, b"text").expect("txt");
-    assert!(uploads.read_chunk(&text.to_string_lossy(), 0, &[]).is_err());
+    let chunk = uploads
+        .read_chunk(&text.to_string_lossy(), 0, &[])
+        .expect("an uploaded file reads back");
+    assert_eq!(chunk.mime_type, "application/octet-stream");
+    // …but a non-image in a workspace root is still refused (zeron parity).
+    let in_root = tmp.path().join("notes.txt");
+    std::fs::write(&in_root, b"text").expect("txt");
+    assert!(
+        uploads
+            .read_chunk(&in_root.to_string_lossy(), 0, &[tmp.path().to_path_buf()])
+            .is_err()
+    );
 
     // Bogus upload ids never become paths.
     assert!(uploads.append("../evil", "aGk=", None).is_err());
@@ -964,9 +976,13 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         cwd: worktree.path.clone(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)
@@ -1010,9 +1026,13 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         cwd: worktree.path.clone(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)

@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let (_steering, steering) = tokio::sync::mpsc::channel(8);
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         request_input: Box::new(|_| {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -35,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,
@@ -46,9 +48,13 @@ async fn main() -> anyhow::Result<()> {
         cwd: std::env::current_dir()?.to_string_lossy().into_owned(),
         sandbox: SandboxLevel::ReadOnly,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     println!("Running real Devin ACP with {model}");
     let mut stream = harness.run(request, controls).await?;

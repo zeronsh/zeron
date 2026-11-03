@@ -14,7 +14,7 @@
  * never materializes anything.
  *
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
- * auto-response pair; the daily alarm does the nightly R2 backup only.
+ * auto-response pair; alarms retry accepted rows' host wakes and back up to R2.
  */
 import { createBlobStore, type BlobStore } from "./blobs";
 import {
@@ -32,6 +32,10 @@ import {
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import {
+  ensureChatWakes, finishChatWake, MAX_WAKE_ATTEMPTS, PERMANENT_WAKE_REJECTIONS,
+  pendingChatWake, queueChatWake, retryChatWake, validWakeRoute
+} from "./chat-wakes";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -54,6 +58,8 @@ interface SocketState {
   device: string;
   /** Set once a valid hello established the session. */
   ready?: boolean;
+  chatId?: string;
+  hostDevice?: string;
 }
 
 interface PushOutcome {
@@ -76,11 +82,13 @@ export class ChatRoom implements DurableObject {
   private readonly presence = new Map<string, number>();
   /** device → rolling push quota window. Memory-only. */
   private readonly quotas = new Map<string, QuotaWindow>();
+  private wakeFlight?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
     ensureChatLog(ctx.storage.sql);
+    ensureChatWakes(ctx.storage.sql);
     this.blobs = createBlobStore(ctx.storage.sql);
     // Runtime-answered keepalive; proves nothing about this DO's health.
     // Clients judge liveness by probe frames (same caveat as RegistryRoom).
@@ -104,9 +112,14 @@ export class ChatRoom implements DurableObject {
       if (!owner) setMeta(sql, "owner", userId);
       else if (owner !== userId) return json({ error: "forbidden" }, 403);
       const device = url.searchParams.get("device") ?? "";
+      const chatId = url.searchParams.get("chatId") ?? "";
+      // An unroutable wake hint never refuses the push: the rows are the
+      // user's message; only host discovery is skipped.
+      const hint = url.searchParams.get("hostDevice") ?? "";
+      const hostDevice = hint && validWakeRoute(chatId, hint) ? hint : "";
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
-      const state: SocketState = { userId, device };
+      const state: SocketState = { userId, device, chatId, hostDevice };
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
@@ -132,7 +145,7 @@ export class ChatRoom implements DurableObject {
       if (body.byteLength > MAX_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
       const outcome = commitCheckpoint(sql, this.blobs, seqCovered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
-      this.markBackupDirty();
+      await this.markBackupDirty();
       return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
     }
 
@@ -243,6 +256,9 @@ export class ChatRoom implements DurableObject {
       // makes at-least-once delivery exact-once in effect.
       const device = url.searchParams.get("device") ?? "";
       const batchId = url.searchParams.get("batchId") ?? "";
+      const chatId = url.searchParams.get("chatId") ?? "";
+      const hint = url.searchParams.get("hostDevice") ?? "";
+      const hostDevice = hint && validWakeRoute(chatId, hint) ? hint : "";
       if (batchId === "" || batchId.length > 128) {
         this.recordPush(device, false);
         return json({ error: "bad_push" }, 400);
@@ -259,14 +275,13 @@ export class ChatRoom implements DurableObject {
         this.recordPush(device, false);
         return json({ error: "quota" }, 429);
       }
-      const outcome = appendRow(sql, device, batchId, payload, Date.now());
+      const outcome = await this.acceptRow(device, batchId, payload, userId, chatId, hostDevice);
       if (!outcome.ok) {
         this.recordPush(device, false);
         return json({ error: outcome.error }, outcome.error === "too_large" ? 413 : 400);
       }
       this.recordPush(device, true);
       if (!outcome.dup) {
-        this.markBackupDirty();
         // Live relay to every ready socket — a same-device socket would
         // re-import its own bytes as a Loro no-op, so no exclusion needed.
         for (const socket of this.ctx.getWebSockets()) {
@@ -322,6 +337,7 @@ export class ChatRoom implements DurableObject {
       sql.exec("DELETE FROM rows");
       sql.exec("DELETE FROM meta");
       sql.exec("DELETE FROM blobs");
+      sql.exec("DELETE FROM chat_wake");
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "chat room reset");
@@ -360,7 +376,7 @@ export class ChatRoom implements DurableObject {
         this.handleRowsReq(ws, state, frame.header);
         return;
       case FRAME.push:
-        this.handlePush(ws, state, frame.header, frame.payload);
+        await this.handlePush(ws, state, frame.header, frame.payload);
         return;
       case FRAME.presence:
         this.handlePresence(ws, state, frame.header, frame.payload);
@@ -422,12 +438,12 @@ export class ChatRoom implements DurableObject {
     send(ws, FRAME.rowsDone, { headSeq: headSeq(sql) });
   }
 
-  private handlePush(
+  private async handlePush(
     ws: WebSocket,
     state: SocketState,
     header: Record<string, unknown>,
     payload: Uint8Array
-  ): void {
+  ): Promise<void> {
     const batchId = typeof header.batchId === "string" ? header.batchId : "";
     // Push errors carry the batchId so clients can RETIRE permanently
     // rejected batches from their replay queues (an unretireable batch
@@ -442,8 +458,7 @@ export class ChatRoom implements DurableObject {
       send(ws, FRAME.error, { code: "quota", message: "per-device push quota exceeded", batchId });
       return;
     }
-    const sql = this.ctx.storage.sql;
-    const outcome = appendRow(sql, state.device, batchId, payload, Date.now());
+    const outcome = await this.acceptRow(state.device, batchId, payload, state.userId, state.chatId ?? "", state.hostDevice ?? "");
     if (!outcome.ok) {
       this.recordPush(state.device, false);
       send(ws, FRAME.error, {
@@ -455,7 +470,6 @@ export class ChatRoom implements DurableObject {
     }
     this.recordPush(state.device, true);
     if (!outcome.dup) {
-      this.markBackupDirty();
       // Live relay to every OTHER ready socket — the sender has its own
       // bytes; it gets the ack (contrast RegistryRoom, whose LWW merge means
       // the sender must see the merged truth — here bytes are opaque and
@@ -534,16 +548,112 @@ export class ChatRoom implements DurableObject {
     setMeta(sql, "pushOutcomes", JSON.stringify(outcomes));
   }
 
-  private markBackupDirty(): void {
-    setMeta(this.ctx.storage.sql, "backupDirty", "1");
-    void this.ctx.storage.getAlarm().then((existing) => {
-      if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
+  /** SQL rows, wake receipt, and alarm are one SQLite storage transaction.
+   * ACKs therefore cannot outrun the durable host-discovery obligation. */
+  private async acceptRow(device: string, batch: string, payload: Uint8Array, user: string, chat: string, host: string) {
+    const sql = this.ctx.storage.sql;
+    const outcome = await this.ctx.storage.transaction(async () => {
+      const result = appendRow(sql, device, batch, payload, Date.now());
+      if (!result.ok) return result;
+      if (!result.dup) this.backupDirty();
+      // Host output must not feed a wake loop. Legacy senders without a
+      // hint keep their separate nudge path; hints are authenticated routing,
+      // never permission to execute (the host still validates its document).
+      if (host && host !== device) queueChatWake(sql, chat, host, user);
+      await this.scheduleAlarm();
+      return result;
+    });
+    if (outcome.ok && host && host !== device) this.ctx.waitUntil(this.flushWake());
+    return outcome;
+  }
+
+  private backupDirty(): void {
+    const sql = this.ctx.storage.sql;
+    setMeta(sql, "backupDirty", "1");
+    if (!getMeta(sql, "backupDue")) setMeta(sql, "backupDue", String(Date.now() + DAY_MS));
+  }
+
+  private async markBackupDirty(): Promise<void> {
+    await this.ctx.storage.transaction(async () => {
+      this.backupDirty();
+      await this.scheduleAlarm();
     });
   }
 
-  /** Daily alarm: nightly R2 backup, seq-monotonic so a reset-and-reseeding
-   * room can never replace the last good copy with a hollow one. */
+  /** Always called inside a storage transaction: a backup can't overwrite
+   * an earlier wake alarm, including when requests interleave with retries. */
+  private async scheduleAlarm(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const wake = pendingChatWake(sql);
+    const backup = getMeta(sql, "backupDirty") === "1"
+      ? Number(getMeta(sql, "backupDue") ?? Date.now() + DAY_MS) : Infinity;
+    const next = Math.min(wake?.next_at ?? Infinity, backup);
+    if (!Number.isFinite(next)) return;
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || next < existing) await this.ctx.storage.setAlarm(next);
+  }
+
+  private flushWake(): Promise<void> {
+    if (this.wakeFlight) return this.wakeFlight;
+    this.wakeFlight = this.deliverWake().finally(() => { this.wakeFlight = undefined; });
+    return this.wakeFlight;
+  }
+
+  private async deliverWake(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const wake = pendingChatWake(sql);
+    if (!wake) return;
+    let accepted = false;
+    let rejected = false;
+    try {
+      const room = this.env.DEVICE_ROOMS.get(this.env.DEVICE_ROOMS.idFromName(`d2/${wake.host_device}`));
+      const response = await room.fetch("https://device/nudge", {
+        method: "POST", headers: { [AUTH_USER_HEADER]: wake.user_id },
+        body: JSON.stringify({ chatId: wake.chat_id }), signal: AbortSignal.timeout(5000)
+      });
+      accepted = response.ok;
+      // Another owner's device (403) or a chat id it refuses (400): no retry
+      // can succeed. Unclaimed (404) and queue-full (503) retry.
+      rejected = PERMANENT_WAKE_REJECTIONS.has(response.status);
+      await response.arrayBuffer();
+    } catch {
+      // A failed forward remains owned by this room, even with no viewer.
+    }
+    const exhausted = !accepted && wake.attempts + 1 >= MAX_WAKE_ATTEMPTS;
+    if (rejected || exhausted) {
+      console.warn("chat2 host wake dropped", {
+        chat: wake.chat_id, host: wake.host_device, rejected, attempts: wake.attempts + 1
+      });
+    }
+    await this.ctx.storage.transaction(async () => {
+      if (accepted || rejected || exhausted) finishChatWake(sql, wake.token);
+      else retryChatWake(sql, wake);
+      await this.scheduleAlarm();
+    });
+  }
+
+  /** Wake retry + nightly backup share the DO's single durable alarm. */
   async alarm(): Promise<void> {
+    try {
+      const wake = pendingChatWake(this.ctx.storage.sql);
+      if (wake && wake.next_at <= Date.now()) await this.flushWake();
+      const due = Number(getMeta(this.ctx.storage.sql, "backupDue") ?? "0");
+      if (due <= Date.now()) {
+        try { await this.backup(); }
+        catch (error) {
+          // Do not exhaust the runtime's finite automatic retries or spin
+          // on an expired deadline during an R2 outage.
+          setMeta(this.ctx.storage.sql, "backupDue", String(Date.now() + 60_000));
+          console.warn("chat2 backup retrying", error);
+        }
+      }
+    } finally {
+      await this.ctx.storage.transaction(async () => { await this.scheduleAlarm(); });
+    }
+  }
+
+  /** Seq-monotonic backup; concurrent new rows retain their dirty flag. */
+  private async backup(): Promise<void> {
     const sql = this.ctx.storage.sql;
     if (getMeta(sql, "backupDirty") !== "1") return; // idle: stop the chain
     const head = headSeq(sql);
@@ -568,7 +678,15 @@ export class ChatRoom implements DurableObject {
       );
       setMeta(sql, "backupSeq", String(head));
     }
-    setMeta(sql, "backupDirty", "0");
+    if (headSeq(sql) === head) {
+      setMeta(sql, "backupDirty", "0");
+      sql.exec("DELETE FROM meta WHERE key='backupDue'");
+    } else {
+      // Rows landed during the upload: they stay dirty for the NEXT nightly
+      // backup. Leaving the passed deadline re-armed the alarm at once and
+      // re-uploaded the whole log back to back while the chat streamed.
+      setMeta(sql, "backupDue", String(Date.now() + DAY_MS));
+    }
   }
 }
 

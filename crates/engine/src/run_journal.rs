@@ -5,14 +5,16 @@
 //! journal is the durable replay source for live streams (`Subscribe` = replay then tail
 //! the broadcast hub) and the crash-recovery gauge: a journal whose LAST event is not
 //! `Done` belongs to a run that died mid-stream — boot recovery stamps its doc entry
-//! `aborted` and closes the journal with a synthetic `Done`.
+//! `aborted` and closes the journal with a synthetic `Done`. A turn the engine's own
+//! shutdown cut off closes normally, so a `{chat_id}.shutdown` marker beside the
+//! journal flags it for the same pick-up on the next boot.
 //!
 //! Bounded-window compaction is deferred (whole file kept for now, per M2 scope); a torn
 //! trailing line from a crash mid-write is tolerated everywhere.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -72,22 +74,93 @@ impl RunJournal {
         self.dir.join(format!("{}.resume", sanitize_id(chat_id)))
     }
 
-    /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):
-    /// persisted beside the journal so a run that CRASHES THE ENGINE cannot
-    /// revive itself in an infinite boot loop.
-    pub fn resume_attempts(&self, chat_id: &str) -> u32 {
-        std::fs::read_to_string(self.attempts_path(chat_id))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
+    fn shutdown_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.shutdown", sanitize_id(chat_id)))
     }
 
-    pub fn note_resume_attempt(&self, chat_id: &str) -> u32 {
-        let next = self.resume_attempts(chat_id) + 1;
-        if let Err(err) = std::fs::write(self.attempts_path(chat_id), next.to_string()) {
+    fn stop_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.stopped", sanitize_id(chat_id)))
+    }
+
+    /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):
+    /// persisted beside the journal so a run that CRASHES THE ENGINE cannot
+    /// revive itself in an infinite boot loop. Stored as `{count} {last_ms}`;
+    /// a ledger whose last revival is older than `since_ms` has expired (a
+    /// chain from days ago must not refuse today's crash). A bare count (the
+    /// older format) never expires.
+    pub fn resume_attempts(&self, chat_id: &str, since_ms: i64) -> u32 {
+        let Ok(raw) = std::fs::read_to_string(self.attempts_path(chat_id)) else {
+            return 0;
+        };
+        let mut fields = raw.split_whitespace();
+        let count = fields.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        match fields.next().and_then(|s| s.parse::<i64>().ok()) {
+            Some(last) if last < since_ms => 0,
+            _ => count,
+        }
+    }
+
+    /// Record one revival at `at_ms`, counting on from the unexpired ledger
+    /// (`since_ms` as in [`Self::resume_attempts`]); returns the new count.
+    pub fn note_resume_attempt(&self, chat_id: &str, at_ms: i64, since_ms: i64) -> u32 {
+        let next = self.resume_attempts(chat_id, since_ms) + 1;
+        if let Err(err) = std::fs::write(self.attempts_path(chat_id), format!("{next} {at_ms}")) {
             tracing::warn!(chat = %chat_id, error = %err, "resume-attempt ledger write failed");
         }
         next
+    }
+
+    /// Mark a chat whose turn the engine's own shutdown cut off (at `at_ms`):
+    /// its journal closes with an ordinary `Done{interrupted}`, so this marker
+    /// is what tells the next boot the turn was not the user's to end.
+    pub fn note_shutdown_interrupt(&self, chat_id: &str, at_ms: i64) {
+        if let Err(err) = std::fs::write(self.shutdown_path(chat_id), at_ms.to_string()) {
+            tracing::warn!(chat = %chat_id, error = %err, "shutdown marker write failed");
+        }
+    }
+
+    /// Chats marked by [`Self::note_shutdown_interrupt`], with when.
+    pub fn shutdown_interrupts(&self) -> Result<Vec<(String, i64)>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("shutdown") {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let at = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            marked.push((chat_id.to_string(), at));
+        }
+        marked.sort();
+        Ok(marked)
+    }
+
+    pub fn clear_shutdown_interrupt(&self, chat_id: &str) {
+        let _ = std::fs::remove_file(self.shutdown_path(chat_id));
+    }
+
+    /// Mark a chat whose turn the user stopped. Its journal closes only once
+    /// the stopped run settles (seconds later, for a harness slow to let
+    /// go): an engine that dies in between leaves a journal that reads as a
+    /// crash, and this marker keeps the next boot from reviving the turn.
+    pub fn note_user_stop(&self, chat_id: &str) {
+        if let Err(err) = std::fs::write(self.stop_path(chat_id), b"") {
+            tracing::warn!(chat = %chat_id, error = %err, "stop marker write failed");
+        }
+    }
+
+    /// Whether [`Self::note_user_stop`] marked the chat's last turn.
+    pub fn user_stopped(&self, chat_id: &str) -> bool {
+        self.stop_path(chat_id).exists()
+    }
+
+    pub fn clear_user_stop(&self, chat_id: &str) {
+        let _ = std::fs::remove_file(self.stop_path(chat_id));
     }
 
     /// A cleanly completed turn resets the budget — only consecutive
@@ -163,11 +236,17 @@ impl RunJournal {
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
     pub fn last_event(&self, chat_id: &str) -> Result<Option<(u64, AgentEvent)>, JournalError> {
-        let path = self.path_for(chat_id);
-        if !path.exists() {
-            return Ok(None);
-        }
-        Ok(read_lines(&path)?.into_iter().next_back())
+        last_valid_line(&self.path_for(chat_id))
+    }
+
+    /// Valid events newest-first, read backwards from the end of the file — for
+    /// callers that want the most recent match and can stop early instead of
+    /// materialising the whole journal like `replay` does.
+    pub fn events_rev(
+        &self,
+        chat_id: &str,
+    ) -> Result<impl Iterator<Item = Result<(u64, AgentEvent), JournalError>>, JournalError> {
+        RevEvents::open(&self.path_for(chat_id))
     }
 
     /// Crash-recovery scan: chat ids whose journal's last event is NOT a `Done` — their
@@ -183,8 +262,8 @@ impl RunJournal {
             let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let last = read_lines(&path)?.into_iter().next_back();
-            match last {
+            // Tail read only: journals reach tens of MB and boot scans every one.
+            match last_valid_line(&path)? {
                 Some((_, AgentEvent::Done { .. })) | None => {}
                 Some(_) => stale.push(chat_id.to_string()),
             }
@@ -213,33 +292,170 @@ fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
     };
     let mut out = Vec::new();
     for line in BufReader::new(file).lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<JournalLine>(&line) {
-            Ok(parsed) => out.push((parsed.seq, parsed.event)),
-            Err(err) => {
-                tracing::warn!(path = %path.display(), error = %err, "journal: skipping malformed line");
-            }
+        if let Some(parsed) = parse_line(path, &line?) {
+            out.push(parsed);
         }
     }
     Ok(out)
 }
 
+/// One journal line → `(seq, event)`; blank lines are skipped silently, malformed
+/// ones (torn tail writes) with a warning.
+fn parse_line(path: &Path, line: &str) -> Option<(u64, AgentEvent)> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<JournalLine>(line) {
+        Ok(parsed) => Some((parsed.seq, parsed.event)),
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "journal: skipping malformed line");
+            None
+        }
+    }
+}
+
+/// The last valid event in the file — what `read_lines(path).last()` returns, without
+/// reading more than the tail.
+fn last_valid_line(path: &Path) -> Result<Option<(u64, AgentEvent)>, JournalError> {
+    RevEvents::open(path)?.next().transpose()
+}
+
 /// Next seq (last valid seq + 1, starting at 1) and whether the file ends mid-line.
 fn scan_tail(path: &Path) -> Result<(u64, bool), JournalError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, false)),
-        Err(e) => return Err(e.into()),
+    let Some(mut lines) = RevLines::open(path)? else {
+        return Ok((1, false));
     };
-    let needs_newline = bytes.last().is_some_and(|b| *b != b'\n');
-    let next_seq = read_lines(path)?
-        .last()
+    let needs_newline = lines.ends_mid_line()?;
+    let next_seq = RevEvents::from_lines(path, Some(lines))
+        .next()
+        .transpose()?
         .map(|(seq, _)| seq + 1)
         .unwrap_or(1);
     Ok((next_seq, needs_newline))
+}
+
+/// First tail-read size. Journal lines are usually far shorter; a longer line grows the
+/// read geometrically, so a multi-MB line costs O(len) rather than O(len²).
+const TAIL_CHUNK: usize = 64 * 1024;
+
+/// Raw lines of a file, last to first, read backwards in chunks — memory is bounded by
+/// the longest line rather than the file. `\n` separators are stripped (a preceding `\r`
+/// is left in place; JSON parsing treats it as whitespace), so a file ending in `\n`
+/// yields an empty line first, which callers skip like any blank line.
+struct RevLines {
+    file: File,
+    /// File offset of `buf[0]`; bytes before it have not been read yet.
+    pos: u64,
+    /// Read but not yet yielded: the file's bytes `[pos, pos + buf.len())`.
+    buf: Vec<u8>,
+    finished: bool,
+}
+
+impl RevLines {
+    /// `None` when the file does not exist (an empty journal, as `read_lines` treats it).
+    fn open(path: &Path) -> std::io::Result<Option<Self>> {
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let pos = file.metadata()?.len();
+        Ok(Some(Self {
+            file,
+            pos,
+            buf: Vec::new(),
+            finished: false,
+        }))
+    }
+
+    /// Prepend the previous chunk of the file to `buf` (at least as large as `buf`).
+    fn fill(&mut self) -> std::io::Result<()> {
+        let want = TAIL_CHUNK.max(self.buf.len()) as u64;
+        let n = want.min(self.pos);
+        self.pos -= n;
+        let mut chunk = vec![0u8; n as usize];
+        self.file.seek(SeekFrom::Start(self.pos))?;
+        self.file.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&self.buf);
+        self.buf = chunk;
+        Ok(())
+    }
+
+    /// True when the file is non-empty and its last byte is not `\n` (a torn write).
+    /// Call before the first `next_line`.
+    fn ends_mid_line(&mut self) -> std::io::Result<bool> {
+        if self.buf.is_empty() && self.pos > 0 {
+            self.fill()?;
+        }
+        Ok(self.buf.last().is_some_and(|b| *b != b'\n'))
+    }
+
+    fn next_line(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        loop {
+            if self.finished {
+                return Ok(None);
+            }
+            if let Some(i) = self.buf.iter().rposition(|b| *b == b'\n') {
+                let line = self.buf.split_off(i + 1);
+                self.buf.truncate(i);
+                return Ok(Some(line));
+            }
+            if self.pos == 0 {
+                self.finished = true;
+                return Ok(Some(std::mem::take(&mut self.buf)));
+            }
+            self.fill()?;
+        }
+    }
+}
+
+/// Valid journal events newest-first: `read_lines` in reverse, with the same
+/// blank/malformed-line skipping, reading only as far back as the caller iterates.
+struct RevEvents {
+    path: PathBuf,
+    /// `None` once exhausted, after an I/O error, or when the file does not exist.
+    lines: Option<RevLines>,
+}
+
+impl RevEvents {
+    fn open(path: &Path) -> Result<Self, JournalError> {
+        Ok(Self::from_lines(path, RevLines::open(path)?))
+    }
+
+    fn from_lines(path: &Path, lines: Option<RevLines>) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            lines,
+        }
+    }
+}
+
+impl Iterator for RevEvents {
+    type Item = Result<(u64, AgentEvent), JournalError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let raw = match self.lines.as_mut()?.next_line() {
+                Ok(Some(raw)) => raw,
+                Ok(None) => {
+                    self.lines = None;
+                    return None;
+                }
+                Err(err) => {
+                    self.lines = None;
+                    return Some(Err(err.into()));
+                }
+            };
+            // A torn write can split a multi-byte char: treat it as malformed too.
+            let Ok(line) = std::str::from_utf8(&raw) else {
+                tracing::warn!(path = %self.path.display(), "journal: skipping non-UTF-8 line");
+                continue;
+            };
+            if let Some(parsed) = parse_line(&self.path, line) {
+                return Some(Ok(parsed));
+            }
+        }
+    }
 }
 
 /// Journal (`.jsonl`) and resume-budget (`.resume`) paths for `chat_id` under an
@@ -328,6 +544,44 @@ mod tests {
     }
 
     #[test]
+    fn resume_ledger_counts_on_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(journal.resume_attempts("chat-1", 0), 0);
+        assert_eq!(journal.note_resume_attempt("chat-1", 1_000, 0), 1);
+        assert_eq!(journal.note_resume_attempt("chat-1", 2_000, 0), 2);
+        assert_eq!(journal.resume_attempts("chat-1", 2_000), 2);
+        // The last revival is older than the window: the chain has expired.
+        assert_eq!(journal.resume_attempts("chat-1", 2_001), 0);
+        assert_eq!(journal.note_resume_attempt("chat-1", 9_000, 5_000), 1);
+        journal.clear_resume_attempts("chat-1");
+        assert_eq!(journal.resume_attempts("chat-1", 0), 0);
+        // The older bare-count format still counts, and never expires.
+        std::fs::write(dir.path().join("chat-2.resume"), "3").unwrap();
+        assert_eq!(journal.resume_attempts("chat-2", i64::MAX), 3);
+    }
+
+    #[test]
+    fn shutdown_markers_list_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("chat-b", &done()).unwrap();
+        journal.note_shutdown_interrupt("chat-b", 42);
+        journal.note_shutdown_interrupt("chat-a", 7);
+        assert_eq!(
+            journal.shutdown_interrupts().unwrap(),
+            vec![("chat-a".to_string(), 7), ("chat-b".to_string(), 42)]
+        );
+        // A marker never makes a closed journal stale.
+        assert!(journal.stale_sessions().unwrap().is_empty());
+        journal.clear_shutdown_interrupt("chat-a");
+        assert_eq!(
+            journal.shutdown_interrupts().unwrap(),
+            vec![("chat-b".to_string(), 42)]
+        );
+    }
+
+    #[test]
     fn torn_tail_line_is_tolerated() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -347,5 +601,173 @@ mod tests {
         let all = journal.replay("chat-1", 0).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[1].0, 2);
+    }
+
+    fn line(seq: u64, event: AgentEvent) -> String {
+        serde_json::to_string(&JournalLine { seq, event }).unwrap()
+    }
+
+    fn rev_lines(path: &Path) -> Vec<Vec<u8>> {
+        let Some(mut lines) = RevLines::open(path).unwrap() else {
+            return Vec::new();
+        };
+        std::iter::from_fn(|| lines.next_line().unwrap()).collect()
+    }
+
+    /// Journal contents covering the tail reader's edge cases; each must read the same
+    /// backwards as the full forward parse did.
+    fn tail_cases() -> Vec<(&'static str, Vec<u8>)> {
+        let huge = "x".repeat(5 * TAIL_CHUNK + 123);
+        let a = line(1, text("a"));
+        let b = line(2, text("b"));
+        let big = line(3, text(&huge));
+        let fin = line(4, done());
+        vec![
+            ("empty", Vec::new()),
+            ("only-newlines", b"\n\n\r\n  \n".to_vec()),
+            ("trailing-newline", format!("{a}\n{b}\n").into_bytes()),
+            ("no-trailing-newline", format!("{a}\n{b}").into_bytes()),
+            ("crlf", format!("{a}\r\n{b}\r\n").into_bytes()),
+            (
+                "blank-lines-at-end",
+                format!("{a}\n{b}\n\n  \n").into_bytes(),
+            ),
+            (
+                "garbage-last-line",
+                format!("{a}\n{b}\n{{\"seq\":3,\"event\":{{\"type\":\"textD").into_bytes(),
+            ),
+            (
+                "garbage-then-newline",
+                format!("{a}\n{b}\nnot json\n\n").into_bytes(),
+            ),
+            ("all-garbage", b"nope\n{\"seq\":\nstill nope".to_vec()),
+            (
+                "multi-chunk-last-line",
+                format!("{a}\n{big}\n").into_bytes(),
+            ),
+            (
+                "multi-chunk-last-line-unterminated",
+                format!("{a}\n{big}").into_bytes(),
+            ),
+            (
+                "multi-chunk-middle-line",
+                format!("{a}\n{big}\n{fin}\n").into_bytes(),
+            ),
+            (
+                "multi-chunk-garbage-tail",
+                format!("{a}\n{b}\n{}", &big[..big.len() - 7]).into_bytes(),
+            ),
+            ("multi-chunk-only-line", big.clone().into_bytes()),
+        ]
+    }
+
+    #[test]
+    fn rev_lines_are_forward_lines_reversed() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in tail_cases() {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            std::fs::write(&path, &bytes).unwrap();
+            let mut expected: Vec<Vec<u8>> =
+                bytes.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
+            expected.reverse();
+            assert_eq!(rev_lines(&path), expected, "{name}");
+        }
+        assert!(rev_lines(&dir.path().join("missing.jsonl")).is_empty());
+    }
+
+    #[test]
+    fn tail_reads_match_a_full_forward_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in tail_cases() {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            std::fs::write(&path, &bytes).unwrap();
+            let all = read_lines(&path).unwrap();
+
+            // Every valid event, newest-first.
+            let mut expected = all.clone();
+            expected.reverse();
+            let rev: Vec<_> = RevEvents::open(&path)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(rev, expected, "{name}");
+
+            assert_eq!(
+                last_valid_line(&path).unwrap(),
+                all.last().cloned(),
+                "{name}"
+            );
+            let old_scan_tail = (
+                all.last().map(|(seq, _)| seq + 1).unwrap_or(1),
+                bytes.last().is_some_and(|b| *b != b'\n'),
+            );
+            assert_eq!(scan_tail(&path).unwrap(), old_scan_tail, "{name}");
+        }
+        let missing = dir.path().join("missing.jsonl");
+        assert_eq!(last_valid_line(&missing).unwrap(), None);
+        assert_eq!(scan_tail(&missing).unwrap(), (1, false));
+    }
+
+    #[test]
+    fn stale_sessions_unchanged_by_tail_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in tail_cases() {
+            std::fs::write(dir.path().join(format!("{name}.jsonl")), bytes).unwrap();
+        }
+        std::fs::write(dir.path().join("ignored.resume"), "2").unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+
+        // The pre-tail-read implementation: full parse, inspect the last event.
+        let mut expected = Vec::new();
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let last = read_lines(&path).unwrap().into_iter().next_back();
+            if matches!(last, Some((_, ref event)) if !matches!(event, AgentEvent::Done { .. })) {
+                expected.push(path.file_stem().unwrap().to_str().unwrap().to_string());
+            }
+        }
+        expected.sort();
+        assert_eq!(journal.stale_sessions().unwrap(), expected);
+        assert!(expected.contains(&"multi-chunk-garbage-tail".to_string()));
+        assert!(!expected.contains(&"multi-chunk-middle-line".to_string()));
+    }
+
+    #[test]
+    fn append_after_multi_chunk_torn_tail_isolates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat-1.jsonl");
+        let big = line(7, text(&"y".repeat(3 * TAIL_CHUNK)));
+        std::fs::write(
+            &path,
+            format!("{}\n{}", line(6, text("a")), &big[..big.len() / 2]),
+        )
+        .unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(journal.append("chat-1", &text("b")).unwrap(), 7);
+        assert!(matches!(
+            journal.last_event("chat-1").unwrap(),
+            Some((7, AgentEvent::TextDelta { .. }))
+        ));
+        assert_eq!(journal.replay("chat-1", 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn non_utf8_tail_line_is_skipped_as_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat-1.jsonl");
+        let mut bytes = format!("{}\n", line(1, done())).into_bytes();
+        // A torn write that split a multi-byte char.
+        bytes
+            .extend_from_slice(b"{\"seq\":2,\"event\":{\"type\":\"textDelta\",\"text\":\"\xE2\x82");
+        std::fs::write(&path, bytes).unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert!(matches!(
+            journal.last_event("chat-1").unwrap(),
+            Some((1, AgentEvent::Done { .. }))
+        ));
+        assert!(journal.stale_sessions().unwrap().is_empty());
     }
 }

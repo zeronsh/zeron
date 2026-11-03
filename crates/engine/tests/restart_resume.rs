@@ -46,9 +46,13 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         cwd: cwd.into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -435,12 +439,15 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
 /// reuses one child across turns instead of respawning.
 struct PersistentHarness {
     runs_started: Arc<Mutex<usize>>,
+    id: HarnessId,
+    /// Per launch: whether its Zeron server was side-chats-only.
+    side_chats_only: Arc<Mutex<Vec<bool>>>,
 }
 
 #[async_trait]
 impl Harness for PersistentHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.id
     }
     fn display_name(&self) -> &str {
         "Persistent"
@@ -463,8 +470,15 @@ impl Harness for PersistentHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         *self.runs_started.lock().unwrap() += 1;
+        self.side_chats_only.lock().unwrap().push(
+            request
+                .mcp
+                .as_ref()
+                .is_some_and(|mcp| mcp.side_chats_only()),
+        );
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(32);
         let mut steering = controls.steering;
+        let harness = self.id;
         tokio::spawn(async move {
             let turn = |n: usize, prompt: &str| {
                 vec![
@@ -480,7 +494,7 @@ impl Harness for PersistentHarness {
                 ]
             };
             let first = vec![AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
+                harness,
                 model: "mock-1".into(),
                 tools: vec![],
                 cwd: "/tmp".into(),
@@ -529,6 +543,8 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(PersistentHarness {
         runs_started: runs_started.clone(),
+        id: HarnessId::Mock,
+        side_chats_only: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
@@ -563,6 +579,183 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
             .count(),
         2
     );
+    core.shutdown().await;
+}
+
+/// A Cloud device's credential broker whose answer the test changes.
+struct SwitchableCredential(Arc<Mutex<String>>);
+
+#[async_trait]
+impl zeron_engine::registry::RunEnvironment for SwitchableCredential {
+    async fn prepare(&self, _harness: HarnessId, _request: &mut RunRequest) -> Result<(), String> {
+        Ok(())
+    }
+    async fn credential(&self, _harness: HarnessId) -> Option<String> {
+        Some(self.0.lock().unwrap().clone())
+    }
+}
+
+/// Switching the Cloud account between turns replaces the parked child, so
+/// the next turn runs with the new login; an unchanged one keeps it warm.
+#[tokio::test]
+async fn a_switched_credential_replaces_the_parked_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let credential = Arc::new(Mutex::new("claude:1".to_string()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::Mock,
+        side_chats_only: Default::default(),
+    }));
+    registry.set_run_environment(Arc::new(SwitchableCredential(credential.clone())));
+    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    pre_title(&core);
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn on the warm child",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "same account: same child");
+
+    *credential.lock().unwrap() = "claude:2".into();
+    queue_run(&core, "third", "/tmp", "msg-user-3");
+    wait_for(
+        || complete_assistant_count(&core) == 3,
+        "third turn after the switch",
+    )
+    .await;
+    assert_eq!(
+        *runs_started.lock().unwrap(),
+        2,
+        "a switched account starts a new child"
+    );
+    core.shutdown().await;
+}
+
+/// Turning a provider's native subagents off (Settings → Providers) between
+/// turns replaces the parked child, whose successor's Zeron server is
+/// side-chats-only; an unchanged setting keeps it warm.
+#[tokio::test]
+async fn switched_native_subagents_replace_the_parked_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let side_chats_only = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::ClaudeCode,
+        side_chats_only: side_chats_only.clone(),
+    }));
+    let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
+        .expect("engine core assembles");
+    // A served IPC port: runs carry Zeron's own MCP server.
+    core.sessions.set_ipc_port(27699);
+    pre_title(&core);
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn on the warm child",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "same setting: same child");
+
+    registry
+        .set_native_subagents(HarnessId::ClaudeCode, false)
+        .unwrap();
+    queue_run(&core, "third", "/tmp", "msg-user-3");
+    wait_for(
+        || complete_assistant_count(&core) == 3,
+        "third turn after the switch",
+    )
+    .await;
+    assert_eq!(
+        *runs_started.lock().unwrap(),
+        2,
+        "a switched setting starts a new child"
+    );
+    assert_eq!(*side_chats_only.lock().unwrap(), [false, true]);
+    core.shutdown().await;
+}
+
+/// A side chat keeps its provider's own subagents whatever the setting, so
+/// switching them off doesn't replace its parked child either.
+#[tokio::test]
+async fn a_parked_side_chat_stays_warm_when_native_subagents_switch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let side_chats_only = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::ClaudeCode,
+        side_chats_only: side_chats_only.clone(),
+    }));
+    let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
+        .expect("engine core assembles");
+    core.sessions.set_ipc_port(27699);
+    core.workspace
+        .create_space("space-restart", &core.device_id, "/tmp", None, false)
+        .expect("create space row");
+    core.workspace
+        .create_chat("main", Some("space-restart"), None, None, None)
+        .expect("create the parent row");
+    core.workspace
+        .create_chat_with_parent(
+            CHAT,
+            Some("space-restart"),
+            None,
+            None,
+            None,
+            Some("main".into()),
+        )
+        .expect("create the side chat row");
+    core.workspace
+        .rename_chat(CHAT, "Pre-titled")
+        .expect("rename chat");
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    registry
+        .set_native_subagents(HarnessId::ClaudeCode, false)
+        .unwrap();
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn after the switch",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "the warm child serves it");
+    assert_eq!(*side_chats_only.lock().unwrap(), [false]);
     core.shutdown().await;
 }
 
@@ -670,25 +863,220 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         )),
         "aborted entry carries the visible interruption note"
     );
-    // Re-dispatch reuses the original user message id — never a duplicate.
-    assert_eq!(
-        entries
-            .iter()
-            .filter(|e| e.role == MessageRole::User)
-            .count(),
-        1
-    );
+    // Re-dispatch reuses the original user message id — never a duplicate,
+    // and the transcript keeps the user's own words.
+    let users: Vec<_> = entries
+        .iter()
+        .filter(|e| e.role == MessageRole::User)
+        .collect();
+    assert_eq!(users.len(), 1);
+    assert!(matches!(
+        &users[0].parts[0],
+        MessagePart::Text { text, .. } if text == "long task"
+    ));
     // The revived run continues the journal-recovered harness conversation.
+    // That session already holds the request and the partial work on it, so
+    // the provider gets a continuation, never the bare request a second time
+    // (it rides along only for reference, should the session have started over).
     // (An auto-title request may precede it — titling fires at dispatch.)
     let recorded = requests.lock().unwrap().clone();
+    assert!(
+        recorded.iter().all(|r| r.prompt != "long task"),
+        "the crashed request must not be re-sent: {recorded:#?}"
+    );
     let revived = recorded
         .iter()
-        .find(|r| r.prompt == "long task")
+        .find(|r| r.prompt.contains("Continue where you left off"))
         .expect("auto-resumed dispatch reached the harness");
     assert_eq!(
         revived.resume.as_deref(),
         Some("hs-crash"),
         "auto-resume must reattach the crashed harness session"
+    );
+    core.shutdown().await;
+}
+
+/// A kill moments into a turn: the journal shows the run, but the doc's
+/// debounced save never stored a reply entry, so the user's message is the
+/// transcript's last word. That is a crashed turn too — it is picked back
+/// up, not left unanswered.
+#[tokio::test]
+async fn a_crash_before_the_reply_reached_disk_still_auto_resumes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-crash").unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+        let doc = SessionDoc::init(CHAT).unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "msg-user-1".into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "long task".into(),
+            }],
+            created_at: now - 5_000,
+            device_id: "dev-crash".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        store
+            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+            .unwrap();
+        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "mock-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-crash".into(),
+                    assistant_message_id: "msg-assistant-1".into(),
+                },
+            )
+            .unwrap();
+    }
+
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble(
+        &dir,
+        RecordingHarness {
+            requests: requests.clone(),
+            session_id: "hs-after-crash".into(),
+            fail_starts: Default::default(),
+        },
+    );
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "the crashed turn to be picked back up",
+    )
+    .await;
+    let recorded = requests.lock().unwrap().clone();
+    let revived = recorded
+        .iter()
+        .find(|r| r.prompt == "long task")
+        .expect("auto-resumed dispatch reached the harness");
+    assert_eq!(revived.resume.as_deref(), Some("hs-crash"));
+    core.shutdown().await;
+}
+
+/// The agent reports where it runs with symlinks resolved; the chat names
+/// its folder through the symlink. A crash mid-turn leaves the resolved
+/// spelling stored (only a turn's Done restores the request's), and the
+/// recovered run must still resume that same conversation — not start fresh
+/// with its history gone (live, Claude Code on macOS's `/var` → `/private/var`).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_crash_recovers_the_conversation_through_a_symlinked_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-crash").unwrap();
+    let real = tmp.path().join("real-project");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("linked-project");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let real = std::fs::canonicalize(&real).unwrap();
+    let (real, link) = (real.to_str().unwrap(), link.to_str().unwrap());
+
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    {
+        let core = assemble(
+            &dir,
+            RecordingHarness {
+                requests: requests.clone(),
+                session_id: "unused".into(),
+                fail_starts: Default::default(),
+            },
+        );
+        core.workspace
+            .create_space("space-link", &core.device_id, link, None, false)
+            .unwrap();
+        core.workspace
+            .create_chat(CHAT, Some("space-link"), None, None, None)
+            .unwrap();
+        core.shutdown().await;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+        let doc = SessionDoc::init(CHAT).unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "msg-user-1".into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "long task".into(),
+            }],
+            created_at: now - 5_000,
+            device_id: "dev-crash".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        store
+            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+            .unwrap();
+        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "mock-1".into(),
+                    tools: vec![],
+                    cwd: real.into(),
+                    session_id: "hs-crash".into(),
+                    assistant_message_id: "msg-assistant-1".into(),
+                },
+            )
+            .unwrap();
+    }
+
+    let core = assemble(
+        &dir,
+        RecordingHarness {
+            requests: requests.clone(),
+            session_id: "hs-crash".into(),
+            fail_starts: Default::default(),
+        },
+    );
+    wait_for(
+        || {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt == "long task")
+        },
+        "the crashed turn to be picked back up",
+    )
+    .await;
+    let revived = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|r| r.prompt == "long task")
+        .cloned()
+        .unwrap();
+    assert_eq!(revived.cwd, link, "the chat's own folder");
+    assert_eq!(
+        revived.resume.as_deref(),
+        Some("hs-crash"),
+        "the same conversation, through the symlink"
     );
     core.shutdown().await;
 }
@@ -854,9 +1242,13 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         cwd: cwd.clone(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let assemble_real = || {
         EngineCore::assemble(

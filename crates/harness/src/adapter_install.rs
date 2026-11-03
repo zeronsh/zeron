@@ -114,7 +114,7 @@ fn install_dir(pin: &NpmPin) -> Option<PathBuf> {
 
 /// The package's bin entry inside an install dir, from its own package.json
 /// (`bin` as a string, or a map preferring `bin_name`).
-fn bin_entry(dir: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathBuf> {
+pub(crate) fn bin_entry(dir: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathBuf> {
     let pkg_dir = dir.join("node_modules").join(pin.name);
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(pkg_dir.join("package.json")).ok()?).ok()?;
@@ -178,7 +178,7 @@ fn find_npm_with(
 pub(crate) fn find_npm() -> Option<PathBuf> {
     find_npm_with(
         &|key| std::env::var_os(key),
-        crate::shell_env::login_shell_path().map(OsString::from),
+        crate::shell_env::user_path(),
         crate::executable::Platform::current(),
     )
 }
@@ -304,6 +304,48 @@ pub(crate) fn install_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+const RENAME_RETRIES: u32 = 20;
+const RENAME_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Move a finished install into place. On Windows a just-written tree is
+/// briefly held open by the malware scanner or by the verify process that
+/// just exited, and the rename fails with a sharing error that clears on
+/// its own: retry those for ~2s before reporting failure.
+pub(crate) async fn rename_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
+    rename_retrying(from, to, crate::executable::Platform::current()).await
+}
+
+async fn rename_retrying(
+    from: &Path,
+    to: &Path,
+    platform: crate::executable::Platform,
+) -> std::io::Result<()> {
+    let mut retries = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            // An existing destination also reads as access denied on
+            // Windows; that is a lost race, not a held handle.
+            Err(error)
+                if platform == crate::executable::Platform::Windows
+                    && retries < RENAME_RETRIES
+                    && windows_handle_busy(&error)
+                    && !to.exists() =>
+            {
+                retries += 1;
+                tokio::time::sleep(RENAME_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION: what
+/// Windows reports while another process still has the file open.
+pub(crate) fn windows_handle_busy(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
 /// Ensure the pinned package is installed; returns its bin entry. Failures
 /// carry npm's own output — the whole point is that a dying npm stops being
 /// an undiagnosable one-liner.
@@ -338,7 +380,7 @@ pub(crate) async fn ensure_installed(
         std::process::id()
     ));
     let cache_dir = root.join(".npm-cache");
-    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name).await;
+    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name, false).await;
     if let Err(e) = install {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
@@ -354,12 +396,12 @@ pub(crate) async fn ensure_installed(
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::rename(&tmp_dir, &final_dir).is_err() {
+    if rename_into_place(&tmp_dir, &final_dir).await.is_err() {
         // Lost a cross-process race (or a stale dir): keep whatever is in
         // place if it's complete, else replace it.
         if installed_entry(&pin, bin_name).is_none() {
             let _ = std::fs::remove_dir_all(&final_dir);
-            std::fs::rename(&tmp_dir, &final_dir)?;
+            rename_into_place(&tmp_dir, &final_dir).await?;
         } else {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
@@ -445,7 +487,7 @@ pub(crate) async fn ensure_installed_shim(
         std::process::id()
     ));
     let cache_dir = root.join(".npm-cache");
-    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name).await;
+    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name, false).await;
     if let Err(e) = install {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
@@ -455,12 +497,12 @@ pub(crate) async fn ensure_installed_shim(
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::rename(&tmp_dir, &final_dir).is_err() {
+    if rename_into_place(&tmp_dir, &final_dir).await.is_err() {
         // Lost a cross-process race (or a stale dir): keep whatever is in
         // place if it's complete, else replace it.
         if !final_dir.join(OK_MARKER).exists() {
             let _ = std::fs::remove_dir_all(&final_dir);
-            std::fs::rename(&tmp_dir, &final_dir)?;
+            rename_into_place(&tmp_dir, &final_dir).await?;
         } else {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
@@ -478,6 +520,7 @@ fn npm_install_plan(
     pin: &NpmPin,
     cache_dir: &Path,
     platform: crate::executable::Platform,
+    ignore_scripts: bool,
 ) -> Result<(PathBuf, Vec<OsString>), HarnessError> {
     let (program, mut args) = if platform == crate::executable::Platform::Windows {
         let node = node_sibling_for_npm(npm, platform).ok_or_else(|| {
@@ -506,16 +549,22 @@ fn npm_install_plan(
         .map(OsString::from),
     );
     args.push(cache_dir.as_os_str().to_owned());
+    if ignore_scripts {
+        // A registry agent's package: its install scripts never run (the
+        // ACP registry quarantines packages that need them).
+        args.push(OsString::from("--ignore-scripts"));
+    }
     args.push(OsString::from(pin.spec()));
     Ok((program, args))
 }
 
-async fn install_into(
+pub(crate) async fn install_into(
     npm: &Path,
     pin: &NpmPin,
     tmp_dir: &Path,
     cache_dir: &Path,
     display_name: &str,
+    ignore_scripts: bool,
 ) -> Result<(), HarnessError> {
     let _ = std::fs::remove_dir_all(tmp_dir);
     std::fs::create_dir_all(tmp_dir)?;
@@ -529,7 +578,7 @@ async fn install_into(
         "installing ACP adapter"
     );
     let (program, args) =
-        npm_install_plan(npm, pin, cache_dir, crate::executable::Platform::current())?;
+        npm_install_plan(npm, pin, cache_dir, crate::executable::Platform::current(), ignore_scripts)?;
     let mut cmd = crate::process::Command::new(&program);
     cmd.args(args)
         .current_dir(tmp_dir)
@@ -605,6 +654,40 @@ mod tests {
 
     use std::collections::HashMap;
 
+    #[test]
+    fn windows_sharing_errors_are_the_retryable_ones() {
+        for code in [5, 32, 33] {
+            assert!(windows_handle_busy(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
+        // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND / ERROR_ALREADY_EXISTS.
+        for code in [2, 3, 183] {
+            assert!(!windows_handle_busy(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
+        assert!(!windows_handle_busy(&std::io::Error::other("busy")));
+    }
+
+    #[tokio::test]
+    async fn install_rename_moves_into_place_and_fails_fast_when_not_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join(".tmp-x"), dir.path().join("x"));
+        std::fs::create_dir(&from).unwrap();
+        rename_retrying(&from, &to, crate::executable::Platform::Windows)
+            .await
+            .unwrap();
+        assert!(to.is_dir() && !from.exists());
+        let started = std::time::Instant::now();
+        assert!(
+            rename_retrying(&from, &to, crate::executable::Platform::Windows)
+                .await
+                .is_err()
+        );
+        assert!(started.elapsed() < RENAME_RETRY_DELAY);
+    }
+
     fn env(values: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {
         let values: HashMap<String, OsString> = values
             .iter()
@@ -620,10 +703,10 @@ mod tests {
         assert_eq!(pin.version, "1.1.14");
         assert_eq!(pin.dir_name(), "agentclientprotocol__codex-acp");
 
-        let pin = NpmPin::parse("pi-acp@0.0.33");
-        assert_eq!(pin.name, "pi-acp");
+        let pin = NpmPin::parse("example-adapter@0.0.33");
+        assert_eq!(pin.name, "example-adapter");
         assert_eq!(pin.version, "0.0.33");
-        assert_eq!(pin.dir_name(), "pi-acp");
+        assert_eq!(pin.dir_name(), "example-adapter");
     }
 
     #[test]
@@ -789,7 +872,7 @@ mod tests {
         let cache = temp.path().join("cache's Ω & $(echo nope); ^ % !");
         let pin = NpmPin::parse("@scope/tool@1.2.3");
         let (program, args) =
-            npm_install_plan(&npm, &pin, &cache, crate::executable::Platform::Windows).unwrap();
+            npm_install_plan(&npm, &pin, &cache, crate::executable::Platform::Windows, false).unwrap();
         assert_eq!(program, node);
         assert_eq!(args.first(), Some(&npm.into_os_string()));
         assert_eq!(args[1], OsString::from("install"));

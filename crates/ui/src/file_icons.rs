@@ -6,9 +6,13 @@
 //! authored SVG colors are preserved in light mode; dark mode lifts the
 //! palette's darker accents without replacing polychrome artwork with a tint.
 
-use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+};
 
-use gpui::{AssetSource, Img, Result, SharedString, Styled as _, img};
+use gpui::{App, AssetSource, Img, RenderImage, Result, SharedString, Styled as _, img};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use zeron_syntax::LanguageId;
@@ -204,6 +208,21 @@ pub fn icon(identity: FileIconIdentity<'_>, appearance: Appearance) -> Img {
     img(asset_path(identity, appearance)).flex_none()
 }
 
+/// A file-theme icon rasterized for painting straight into a text layout,
+/// where no [`Img`] element can sit. Rasterized once per asset path.
+pub(crate) fn raster(path: &SharedString, cx: &App) -> Option<Arc<RenderImage>> {
+    static CACHE: LazyLock<Mutex<HashMap<SharedString, Arc<RenderImage>>>> =
+        LazyLock::new(Default::default);
+    let mut cache = CACHE.lock().unwrap();
+    if let Some(image) = cache.get(path) {
+        return Some(image.clone());
+    }
+    let svg = Assets.load(path).ok()??;
+    let image = cx.svg_renderer().render_single_frame(&svg, 2.0).ok()?;
+    cache.insert(path.clone(), image.clone());
+    Some(image)
+}
+
 /// Whether a filename resolves to a themed identity rather than the generic
 /// document fallback. This is intentionally stricter than [`asset_path`]: it
 /// lets prose renderers decorate a standalone filename without treating every
@@ -307,6 +326,8 @@ fn language_asset(language: Option<LanguageId>) -> Option<&'static str> {
         LanguageId::Php => "php",
         LanguageId::Sql => "sql",
         LanguageId::Lua => "lua",
+        // Not a language id in the upstream manifest; `.luau` has its icon.
+        LanguageId::Luau => return definition_asset("luau"),
         LanguageId::Dockerfile => "dockerfile",
         LanguageId::Nix => "nix",
         LanguageId::Make => "makefile",

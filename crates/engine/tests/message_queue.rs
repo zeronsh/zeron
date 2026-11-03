@@ -106,17 +106,19 @@ impl Harness for HeldHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
         self.requests.lock().unwrap().push(request.clone());
-        if self.asks {
+        let answer = self.asks.then(|| {
             // Only the engine can mint a request id it will honour, so the
             // question has to go through controls rather than the stream.
-            let _answer = (controls.request_input)(vec![UserInputQuestion {
+            (controls.request_input)(vec![UserInputQuestion {
                 id: "q1".into(),
                 header: "Choose".into(),
                 question: "which one?".into(),
                 options: vec!["a".into(), "b".into()],
+                prefill: None,
+                multiline: false,
                 multi_select: false,
-            }]);
-        }
+            }])
+        });
         let finish = self.finish.subscribe();
         let steering = controls.steering;
         let prompts = self.prompts.clone();
@@ -155,7 +157,14 @@ impl Harness for HeldHarness {
             done
         })
         .flatten();
-        Ok(started.chain(gated).boxed())
+        // A live question owns its receiver until the run finishes. Dropping it
+        // now explicitly cancels the engine-owned input lifecycle.
+        Ok(started
+            .chain(gated)
+            .inspect(move |_| {
+                let _ = &answer;
+            })
+            .boxed())
     }
 }
 
@@ -378,7 +387,8 @@ async fn queue_holds_during_a_turn_and_flushes_in_order_at_its_end() {
 
 /// Quitting the host must neither release the queue through the interrupt's
 /// Idle transition nor release it when the persisted document is reopened.
-/// An explicit queue action remains the thaw gesture.
+/// An explicit queue action remains the thaw gesture. (The turn the shutdown
+/// cut off is picked back up on its own; the queue behind it is not.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_restores_the_queue_frozen_until_an_explicit_send() {
     let tmp = tempfile::tempdir().unwrap();
@@ -420,9 +430,18 @@ async fn restart_restores_the_queue_frozen_until_an_explicit_send() {
     // Materializing the persisted chat starts its background drain task. Give
     // that task time to prove the restored row stays frozen.
     assert_eq!(queue_texts(&after), vec!["after restart"]);
+    wait_for(
+        || after_prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the interrupted opening turn to be picked back up",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
-        after_prompts.lock().unwrap().is_empty(),
+        !after_prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p == "after restart"),
         "startup must not dispatch a recovered queue"
     );
     assert_eq!(queue_texts(&after), vec!["after restart"]);
@@ -1693,6 +1712,8 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             reasoning: Some(ReasoningLevel::Medium),
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            access: Default::default(),
+            plan: false,
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();
         core.doc_host

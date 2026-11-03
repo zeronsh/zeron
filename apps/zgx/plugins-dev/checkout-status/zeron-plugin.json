@@ -1,0 +1,17 @@
+{
+  "id": "checkout-status",
+  "name": "Checkout status",
+  "version": "1.0.0",
+  "description": "A chat's git status, asked on the device its checkout is on: this Mac or another of yours.",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": ["ui.add", "sessions.read", "files.read", "service", "commands", "tools"],
+  "commands": ["git"],
+  "tools": [
+    {
+      "name": "checkout_status",
+      "description": "The git branch and changed files of a checkout on this device.",
+      "input": { "type": "object", "properties": { "path": { "type": "string", "description": "The checkout's absolute path." } }, "required": ["path"] }
+    }
+  ]
+}

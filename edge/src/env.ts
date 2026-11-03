@@ -1,3 +1,7 @@
+import type { VaultRpc } from "../vault/src/api";
+import type { CloudAccount, LifecycleParams, ProvisionParams } from "./cloud/cloud-account";
+import type { CloudIndex } from "./cloud/cloud-index";
+
 export interface Env {
   SESSION_ROOMS: DurableObjectNamespace;
   DEVICE_ROOMS: DurableObjectNamespace;
@@ -22,6 +26,13 @@ export interface Env {
    * routes (code exchange, refresh, orgs). Unset ⇒ those routes answer 501,
    * matching the old apps/server dev-mode behavior. */
   WORKOS_API_KEY?: string;
+  /** Signing secret of the WorkOS webhook endpoint `https://<edge>/workos/webhook`
+   * (wrangler secret), subscribed to created/updated/deleted of user,
+   * organization and organization_membership. Unset ⇒ that route answers 503
+   * and WorkOS retries. */
+  WORKOS_WEBHOOK_SECRET?: string;
+  /** Every WorkOS user and organization, with members (`users1`; user-directory.ts). */
+  USER_DIRECTORY?: DurableObjectNamespace<import("./user-directory").UserDirectory>;
   /** APNs auth key (contents of AuthKey_XXXX.p8, wrangler secret) and its
    * key id. Unset ⇒ session notifications are decided and logged, not sent. */
   APNS_KEY_P8?: string;
@@ -29,6 +40,87 @@ export interface Env {
   /** Apple team id and the app's bundle id (defaults: the Zeron iOS app). */
   APNS_TEAM_ID?: string;
   APNS_TOPIC?: string;
+
+  // ── Cloud device (docs/design/cloud-device.md). Every binding is optional:
+  //    deployments without them (the dev/test wrangler configs) answer
+  //    `available: false` / 503 on the Cloud routes and nothing else changes.
+  /** Per-user Cloud account: projects, sessions, metering (`cloud1/{orgId}/{userId}`). */
+  CLOUD_ACCOUNTS?: DurableObjectNamespace<CloudAccount>;
+  /** The billing walk list (`index1`). */
+  CLOUD_INDEX?: DurableObjectNamespace<CloudIndex>;
+  CLOUD_PROVISION?: Workflow<ProvisionParams>;
+  CLOUD_WAKE?: Workflow<LifecycleParams>;
+  CLOUD_SLEEP?: Workflow<LifecycleParams>;
+  CLOUD_DELETE?: Workflow<LifecycleParams>;
+  /** zeron-vault's `VaultApi` entrypoint (service binding; no HTTP). */
+  VAULT?: VaultRpc;
+  /** Provider for NEW Cloud sandboxes (cloud/providers): "boat" (default)
+   * or "fake" (in-memory, local dev only). */
+  SANDBOX_PROVIDER?: string;
+  /** Sandbox auto-stop, seconds; unset = none (idle sleep is ours). Needed
+   * when the provider account forces auto-stop (Boat trial: ≤7200). */
+  CLOUD_TTL_SECONDS?: string;
+  /** Boat API key (secret). Needs sandbox.create/read/update/stop/resume/
+   * delete + exec + usage read. Unset ⇒ the Boat provider is unavailable. */
+  BOAT_API_KEY?: string;
+  /** Default `https://boat.dev/api/v1`. */
+  BOAT_API_BASE?: string;
+  /** Idle minutes before an unused Cloud session sleeps (default 20). */
+  CLOUD_IDLE_MINUTES?: string;
+  /** Credits a user gets the first time they turn Cloud on (default 0). */
+  CLOUD_STARTING_CREDITS?: string;
+  /** Provider billable seconds per credit (default 60): set to what the
+   * provider bills for a minute of the default machine, so a credit is a
+   * minute of it. Larger machines scale by the provider's multiplier. */
+  CLOUD_CREDIT_SECONDS?: string;
+  /** Stripe (cloud/stripe.ts): API key, webhook signing secret and the
+   * Price ids of the monthly plans and the credit pack. Billing reads as
+   * unavailable until all are set. */
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_BASE?: string;
+  STRIPE_PRICE_PRO?: string;
+  STRIPE_PRICE_MAX?: string;
+  STRIPE_PRICE_CREDITS?: string;
+  /** The Billing Portal configuration Cloud's customers get (its plans,
+   * switching, cancelling). Unset ⇒ the account's default portal. */
+  STRIPE_PORTAL_CONFIGURATION?: string;
+  /** Stripe API origin override (tests point it at a fake). */
+  STRIPE_API_URL?: string;
+  /** Origin session engines talk to; default = the creating request's
+   * origin. For dev tunnels. */
+  CLOUD_EDGE_URL?: string;
+  /** Most sessions awake at once per user (default 5). */
+  CLOUD_MAX_AWAKE?: string;
+  /** Most Cloud sessions (awake or asleep, each keeping its sandbox) per user
+   * (default 50). */
+  CLOUD_MAX_SESSIONS?: string;
+  /** Who Cloud is offered to: `everyone`, or WorkOS user/org ids separated
+   * by commas or spaces. Anyone else reads Cloud as unavailable, so every
+   * client hides it. Unset ⇒ nobody (everyone under AUTH_MODE=dev). A
+   * secret, so it changes without a deploy. */
+  CLOUD_ACCESS?: string;
+  /** Named provider snapshot new session sandboxes start from (engine
+   * pre-installed, no identity). Unset ⇒ a blank machine + install. */
+  CLOUD_TEMPLATE?: string;
+  /** Where session machines check their repository out (default
+   * `/home/user`); a local stack whose machines are processes on one
+   * computer points it at a scratch folder (scripts/cloud-dev.sh). */
+  CLOUD_PROJECTS_ROOT?: string;
+  /** Machine size for session sandboxes: small · default · large. */
+  CLOUD_MACHINE?: string;
+  /** ES256 JWK (JSON) pair for runner JWTs (secrets). */
+  RUNNER_JWT_PRIVATE_KEY?: string;
+  RUNNER_JWT_PUBLIC_KEY?: string;
+  /** Operator bearer for /admin/cloud/usage (secret). Unset ⇒ route 404s. */
+  ADMIN_TOKEN?: string;
+  /** Public card reads per client IP (card-gate.ts). Unset ⇒ unlimited. */
+  CARD_READS?: RateLimit;
+  /** The cards' still pictures (card-image.ts), keyed by the public card. */
+  CARD_IMAGES?: R2Bucket;
+  /** Browser Run, which draws a card's picture from its player page. Unset ⇒
+   * pictures not yet in CARD_IMAGES answer 404. */
+  BROWSER?: Fetcher;
 }
 
 /** APNs settings, when push is set up for this deployment. */
@@ -52,3 +144,15 @@ export const AUTH_USER_HEADER = "x-zeron-auth-user";
  * Worker; the SessionRoom DO sees this and skips its per-chat
  * claim-on-first-join ownership discipline for the room. */
 export const ROOM_KIND_HEADER = "x-zeron-room-kind";
+
+/** Header the Worker stamps on every DO forward made with a RUNNER bearer
+ * (the Cloud device): the verified device id from the runner JWT's `dev`
+ * claim. Always stripped from inbound requests first, so only the Worker can
+ * assert it. RegistryRoom restricts such callers to rows their device owns
+ * (registry-runner.ts). */
+export const RUNNER_DEVICE_HEADER = "x-zeron-runner-device";
+
+/** Companion of RUNNER_DEVICE_HEADER: the runner's account (logical Cloud
+ * device, JWT `cld`). A session runner may read its account's project
+ * spaces. Same strip-then-stamp discipline. */
+export const RUNNER_ACCOUNT_HEADER = "x-zeron-runner-account";

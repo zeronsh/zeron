@@ -6,8 +6,8 @@
 //! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
 //! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
-//! (`devin acp`), Grok (`grok agent stdio`) and Hermes (`hermes acp`) — plus
-//! pi via the community `pi-acp` adapter until a native driver exists.
+//! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
+//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use zeron_proto::{
-    AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
-    UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -38,22 +38,154 @@ pub enum HarnessError {
     Discovery(#[from] CatalogFailure),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// The host has no login for this run's provider (a Cloud device with
+    /// nothing connected for it). The message says where to sign in.
+    #[error("{0}")]
+    NotSignedIn(String),
 }
 
 /// A steer prompt pushed into a live run; delivered at the harness's steering boundary.
 pub struct SteerMessage {
     pub prompt: String,
     pub message_id: Option<String>,
+    /// Staged image paths sent with this prompt. Drivers that inline images
+    /// deliver them with the text; the rest rely on the path refs the prompt
+    /// text already carries.
+    pub attachments: Vec<String>,
+    /// The run configuration this prompt was sent with, when it differs
+    /// from the live runtime's and the driver adopts it in place
+    /// ([`Harness::reconfigures_in_place`]): apply it before the prompt.
+    pub config: Option<Box<RunRequest>>,
+}
+
+impl SteerMessage {
+    pub fn text(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            message_id: None,
+            attachments: Vec::new(),
+            config: None,
+        }
+    }
+}
+
+/// Host ↔ runtime signals that span a persistent runtime's turns.
+///
+/// Stopping a turn is not tearing down the runtime: a runtime holds work the
+/// user never asked to stop (background subagents, background shells). A
+/// driver that returns true from [`Harness::stops_turn_in_place`] answers
+/// [`Self::stop_turn`] by ending only the in-flight turn with
+/// `Done { status: Interrupted }` and staying alive for the next prompt; the
+/// `interrupt` token remains the runtime teardown.
+#[derive(Clone, Default)]
+pub struct TurnControl {
+    stop: std::sync::Arc<tokio::sync::Notify>,
+    background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    processes: std::sync::Arc<background::BackgroundWork>,
+}
+
+impl TurnControl {
+    /// Host: end the in-flight turn, keeping the runtime and its background work.
+    pub fn stop_turn(&self) {
+        self.stop.notify_one();
+    }
+
+    /// Driver: resolves once per [`Self::stop_turn`].
+    pub async fn stop_requested(&self) {
+        self.stop.notified().await;
+    }
+
+    /// Driver: how many background tasks the runtime currently holds.
+    pub fn set_background(&self, tasks: usize) {
+        self.background
+            .store(tasks, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Host: the runtime reports live background work, so retiring it now
+    /// would kill work nobody asked to stop.
+    pub fn background_live(&self) -> bool {
+        self.background.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    /// Driver: the background processes the runtime runs now, oldest first —
+    /// its whole set, not a delta. (Background agents are subagents, shown as
+    /// such; they count in [`Self::set_background`] only.)
+    pub fn set_background_processes(&self, processes: Vec<zeron_proto::BackgroundTask>) {
+        self.processes.set(processes);
+    }
+
+    /// Driver: where a listed process's output can be read.
+    pub fn set_background_output(&self, id: &str, source: OutputSource) {
+        self.processes.set_output(id, source);
+    }
+
+    /// Driver: output the wire delivered for a process, kept as its tail.
+    pub fn append_background_output(&self, id: &str, chunk: &str) {
+        self.processes.append_output(id, chunk);
+    }
+
+    /// Driver: drop the output kept for a process that ended unlisted.
+    pub fn clear_background_output(&self, id: &str) {
+        self.processes.clear_output(id);
+    }
+
+    /// Driver: resolves with each process the host asked to stop.
+    pub async fn background_stop_requested(&self) -> String {
+        self.processes.stop_requested().await
+    }
+
+    /// Host: the runtime's background processes as they change.
+    pub fn watch_background_processes(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Vec<zeron_proto::BackgroundTask>> {
+        self.processes.watch()
+    }
+
+    /// Host: ask the driver to stop one process. False when the runtime does
+    /// not list it (it ended meanwhile).
+    pub fn stop_background_process(&self, id: &str) -> bool {
+        self.processes.request_stop(id)
+    }
+
+    /// Host: the tail of a listed process's output; `None` when it is not
+    /// listed. May read a file: call it off the async runtime.
+    pub fn background_output(&self, id: &str) -> Option<zeron_proto::BackgroundTaskOutput> {
+        self.processes.output(id)
+    }
+}
+
+/// Run-config values compared as their wire meaning, not their JSON type:
+/// clients disagree on spelling (the phone sends `"true"` where the desktop
+/// sends `true`), and neither spelling is a different configuration.
+pub fn same_model_options(
+    a: &serde_json::Map<String, serde_json::Value>,
+    b: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    fn canonical(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) if s.is_empty() => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        }
+    }
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    keys.into_iter()
+        .all(|key| a.get(key).and_then(canonical) == b.get(key).and_then(canonical))
 }
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
+    pub realtime: Option<codex::realtime::RealtimeControls>,
     /// Shared execution gate held until the harness has shut down and reaped
     /// its subprocess, including when the host drops the event stream. Each
     /// detached session task must retain this lease through its cleanup.
     /// Standalone callers without an update coordinator can leave it unset.
     pub execution_lease: Option<std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
+    /// No answers at all — an empty list, or a dropped sender — is a decline:
+    /// the person closed the questions, or the run stopped waiting. Drivers
+    /// answer it with their protocol's own decline where it has one.
     pub request_input: Box<
         dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
     >,
@@ -63,6 +195,8 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Turn-level stop and background-work reporting (see [`TurnControl`]).
+    pub turn: TurnControl,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -112,6 +246,45 @@ pub trait Harness: Send + Sync {
     fn authoritative_prompt_end(&self) -> bool {
         self.deterministic_turn_end()
     }
+    /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
+    /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
+    /// with its background work. Otherwise stopping a turn tears the runtime
+    /// down through the `interrupt` token.
+    fn stops_turn_in_place(&self) -> bool {
+        false
+    }
+    /// Whether a live runtime started for `live` can take `next` as its
+    /// next prompt. Only a difference that changes how the runtime was
+    /// launched needs a fresh one — replacing a runtime kills its background
+    /// work. The default covers what every driver's launch reads (the
+    /// sandbox level and auto-approve are read only by drivers that
+    /// override this); drivers narrow it further to their own launch.
+    /// Whether a live runtime started for `live` adopts `next`'s differing
+    /// configuration in place, before `next`'s prompt, instead of being
+    /// replaced (which kills its background work). The prompt then arrives
+    /// with [`SteerMessage::config`] set. Consulted only when
+    /// [`Self::same_runtime`] is false.
+    fn reconfigures_in_place(&self, _live: &RunRequest, _next: &RunRequest) -> bool {
+        false
+    }
+    fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.model == next.model
+            && live.reasoning == next.reasoning
+            && same_model_options(&live.model_options, &next.model_options)
+            && live.cwd == next.cwd
+            && live.access == next.access
+            && live.plan == next.plan
+    }
+    /// The [`AccessMode`]s this driver honors, least to most trusting. A
+    /// request for any other runs with full access (the composer offers
+    /// only these).
+    fn access_modes(&self) -> &[AccessMode] {
+        &[AccessMode::FullAccess]
+    }
+    /// Whether this driver honors [`RunRequest::plan`].
+    fn supports_plan(&self) -> bool {
+        false
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
         Ok(None)
@@ -159,6 +332,15 @@ pub trait Harness: Send + Sync {
         ))
     }
 
+    /// Bootstrap without a synthetic user prompt; providers opt in explicitly.
+    async fn start_idle(
+        &self,
+        _request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::Protocol("idle runtime unsupported".into()))
+    }
+
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
     async fn run(
         &self,
@@ -168,8 +350,12 @@ pub trait Harness: Send + Sync {
 }
 
 pub mod acp;
+pub mod acp_registry;
 pub(crate) mod adapter_install;
+pub mod approval;
 pub mod archive_install;
+mod background;
+pub use background::OutputSource;
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;
@@ -177,13 +363,18 @@ pub mod redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
+pub mod agent_ports;
 pub mod cursor;
 pub(crate) mod executable;
 pub mod install;
+pub(crate) mod jsonl_tail;
 pub(crate) mod jsonrpc;
+pub(crate) mod lossy_lines;
 pub mod mock;
+pub mod muse;
 mod model_context;
 pub mod opencode;
+pub mod pi;
 pub mod process;
 mod scratch;
 pub mod shell_env;
@@ -196,38 +387,116 @@ pub mod windows_process;
 /// CLIs such as Homebrew's `gh` without changing the daemon's own environment.
 pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
     compose_path(cmd.as_std_mut(), std::iter::empty());
+    apply_login_shell_env(cmd.as_std_mut());
 }
 
 /// Compose the child's PATH: the resolved executable's directory first, then
-/// our own PATH, then the login-shell PATH snapshot — deduped. npm-shim CLIs
-/// are `#!/usr/bin/env node` scripts whose `node` lives beside them in the
-/// version manager's bin dir, and the CLIs themselves shell out to tools
-/// (git, rg, node) that a GUI/service launch's own PATH may lack.
+/// the user's own PATH (the login shell's), then this process's — deduped.
+/// npm-shim CLIs are `#!/usr/bin/env node` scripts whose `node` lives beside
+/// them in the version manager's bin dir, and the CLIs themselves shell out
+/// to tools (git, rg, node) that a GUI/service launch's own PATH may lack.
+/// Also hands the child the login shell's TLS, SSH-agent and locale
+/// variables when this process has none of its own.
 pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
     compose_path(
         cmd.as_std_mut(),
         exe.parent().filter(|d| !d.as_os_str().is_empty()),
     );
+    apply_login_shell_env(cmd.as_std_mut());
+}
+
+/// Apply the host-resolved run environment ([`RunRequest::env`] — credential
+/// broker output on a Cloud device) to an agent child. Call it after the
+/// driver's own env setup so the host's values win. Values are never logged.
+pub fn apply_run_env(cmd: &mut process::Command, env: &std::collections::BTreeMap<String, String>) {
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
 }
 
 fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
 ) {
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    for dir in executable_dir {
-        paths.push(dir.to_path_buf());
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&path));
-    }
-    if let Some(shell_path) = shell_env::login_shell_path() {
-        paths.extend(std::env::split_paths(shell_path));
-    }
-    let mut seen = std::collections::HashSet::new();
-    paths.retain(|p| !p.as_os_str().is_empty() && seen.insert(p.clone()));
+    let executable_dir: Vec<std::path::PathBuf> =
+        executable_dir.into_iter().map(Into::into).collect();
+    let own = std::env::var_os("PATH");
+    let user = shell_env::user_path();
+    #[cfg(windows)]
+    let node_dirs = executable::node_manager_dirs();
+    #[cfg(not(windows))]
+    let node_dirs = Vec::new();
+    let paths = child_path_entries(
+        executable::Platform::current(),
+        executable_dir,
+        own.as_deref(),
+        user.as_deref(),
+        node_dirs,
+    );
     if let Ok(joined) = std::env::join_paths(paths) {
         cmd.env("PATH", joined);
+    }
+}
+
+/// The child PATH's entries in precedence order. Unix puts the login shell's
+/// PATH before our own only when ours is a bare system PATH: a Dock/launchd
+/// launch inherits just that, whose `/usr/bin` stubs would otherwise shadow
+/// the user's Homebrew or nvm toolchain. A PATH set up on purpose (a venv,
+/// nix, direnv or nvm in the launching terminal, a service unit's own) keeps
+/// precedence (see [`executable::is_bare_system_path`]). Windows keeps its own PATH first (it already came from the
+/// user's environment, plus per-session additions like fnm's) and adds what
+/// the registry gained since we started, then the node-manager directories
+/// discovery searched, so `node`/`npx` MCP servers resolve like the CLI did.
+fn child_path_entries(
+    platform: executable::Platform,
+    executable_dir: Vec<std::path::PathBuf>,
+    own: Option<&std::ffi::OsStr>,
+    user: Option<&std::ffi::OsStr>,
+    node_dirs: Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    let split = |path: Option<&std::ffi::OsStr>| -> Vec<std::path::PathBuf> {
+        path.map(|p| std::env::split_paths(p).collect())
+            .unwrap_or_default()
+    };
+    let mut paths = executable_dir;
+    if platform == executable::Platform::Unix && executable::is_bare_system_path(own) {
+        paths.extend(split(user));
+        paths.extend(split(own));
+    } else {
+        paths.extend(split(own));
+        paths.extend(split(user));
+    }
+    paths.extend(node_dirs);
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| {
+        let key = if platform == executable::Platform::Windows {
+            // `C:\Tools\` and `c:\tools` are one directory to Windows.
+            p.to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .to_lowercase()
+        } else {
+            p.components()
+                .collect::<std::path::PathBuf>()
+                .to_string_lossy()
+                .into_owned()
+        };
+        !key.is_empty() && seen.insert(key)
+    });
+    paths
+}
+
+/// Login-shell variables (TLS trust, SSH agent, locale) the child lacks:
+/// absent from our own environment and not set or removed by the driver.
+fn apply_login_shell_env(cmd: &mut std::process::Command) {
+    let defaults = shell_env::child_env_defaults();
+    if defaults.is_empty() {
+        return;
+    }
+    let explicit: Vec<std::ffi::OsString> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+    for (key, value) in defaults {
+        if !explicit.contains(&key) {
+            cmd.env(key, value);
+        }
     }
 }
 
@@ -308,7 +577,7 @@ pub(crate) fn describe_exit(status: Option<std::process::ExitStatus>) -> String 
 }
 
 /// Remove recognizable credentials at the boundary where diagnostics become UI text.
-fn redact_secrets(text: &str) -> String {
+pub(crate) fn redact_secrets(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let markers = ["bearer ", "basic ", "sk-", "ghp_", "xox", "api_key="];
     let mut result = String::new();
@@ -390,17 +659,56 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
+pub use muse::MuseHarness;
+pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)
 // ---------------------------------------------------------------------------
 
-/// Reap the child: Unix sends SIGTERM then SIGKILL after `kill_grace`;
-/// Windows terminates the owned job after protocol shutdown has finished.
+/// End an agent runtime together with every process it started. `earlier`
+/// is a descendant snapshot taken when the teardown began, in case the
+/// agent exits before this one: its orphans can no longer be traced then.
+/// Windows' job object already owns the whole tree.
+pub(crate) async fn shutdown_agent(
+    child: &mut process::Child,
+    earlier: Vec<process::Tracked>,
+    kill_grace: std::time::Duration,
+) {
+    #[cfg(unix)]
+    {
+        let mut tree = earlier;
+        if let Some(pid) = child.id() {
+            for found in process::descendants(pid).await {
+                if !tree.contains(&found) {
+                    tree.push(found);
+                }
+            }
+        }
+        shutdown_child(child, kill_grace).await;
+        process::terminate_tree(&tree, kill_grace).await;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = earlier;
+        shutdown_child(child, kill_grace).await;
+    }
+}
+
+/// Reap the child: Unix sends SIGTERM then SIGKILL after `kill_grace`.
+/// Windows has no SIGTERM for a windowless child: when its stdin pipe is (or
+/// is now) closed and it exits on that EOF, it gets `kill_grace` to exit on
+/// its own (callers have already sent their protocol shutdown), so an agent
+/// is not killed mid-write to its session files. Then the owned job is
+/// terminated, descendants included — at once for a child with no stdin
+/// pipe, one whose stdin is still held elsewhere, or one that ignores EOF.
 pub(crate) async fn shutdown_child(child: &mut process::Child, kill_grace: std::time::Duration) {
     #[cfg(windows)]
     {
-        let _ = kill_grace;
+        if !matches!(child.try_wait(), Ok(Some(_))) && child.stdin_eof_coming().await {
+            // wait() drops the child's stdin first: EOF is the cue to exit.
+            let _ = tokio::time::timeout(kill_grace, child.wait()).await;
+        }
         let _ = child.start_kill();
         let _ = child.wait().await;
         return;
@@ -466,6 +774,110 @@ pub fn supports_titles(id: HarnessId) -> bool {
         id,
         HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
     )
+}
+
+/// Drivers that launch without the provider's own subagent tools when the
+/// run's Zeron server is side-chats-only ([`zeron_proto::McpServer::side_chats_only`]),
+/// and get them back on the next launch without it. Not Codex: its driver
+/// starts such a thread, but a thread keeps the multi-agent mode it last ran
+/// with (openai/codex rust-v0.153.4, codex-rs/core/src/session/mod.rs
+/// `resolve_multi_agent_version`), so turning them back on would not reach
+/// a chat that ran while they were off.
+pub fn switches_native_subagents(id: HarnessId) -> bool {
+    matches!(id, HarnessId::ClaudeCode)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::child_path_entries;
+    use crate::executable::Platform;
+    use std::path::PathBuf;
+
+    fn joined(entries: &[&str]) -> std::ffi::OsString {
+        std::env::join_paths(entries).unwrap()
+    }
+
+    #[test]
+    fn unix_child_path_puts_the_login_shell_before_a_gui_launch_path() {
+        let own = joined(&["/usr/bin", "/bin"]);
+        let user = joined(&["/opt/homebrew/bin", "/usr/bin/", "/bin"]);
+        let paths = child_path_entries(
+            Platform::Unix,
+            vec![PathBuf::from("/Users/a/.nvm/versions/node/v22/bin")],
+            Some(&own),
+            Some(&user),
+            Vec::new(),
+        );
+        assert_eq!(
+            paths,
+            [
+                "/Users/a/.nvm/versions/node/v22/bin",
+                "/opt/homebrew/bin",
+                "/usr/bin/",
+                "/bin"
+            ]
+            .map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn unix_child_path_keeps_a_deliberate_process_path_first() {
+        let own = joined(&["/home/a/project/.venv/bin", "/usr/bin", "/bin"]);
+        let user = joined(&["/opt/homebrew/bin", "/usr/bin"]);
+        let paths = child_path_entries(
+            Platform::Unix,
+            Vec::new(),
+            Some(&own),
+            Some(&user),
+            Vec::new(),
+        );
+        assert_eq!(
+            paths,
+            [
+                "/home/a/project/.venv/bin",
+                "/usr/bin",
+                "/bin",
+                "/opt/homebrew/bin"
+            ]
+            .map(PathBuf::from)
+        );
+        // A service's default PATH is still a bare one.
+        let systemd = joined(&[
+            "/usr/local/sbin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+        ]);
+        let paths = child_path_entries(
+            Platform::Unix,
+            Vec::new(),
+            Some(&systemd),
+            Some(&user),
+            Vec::new(),
+        );
+        assert_eq!(paths[0], PathBuf::from("/opt/homebrew/bin"));
+    }
+
+    #[test]
+    fn windows_child_path_appends_registry_and_node_dirs_case_insensitively() {
+        // Built from strings: `join_paths` would use this host's separator.
+        let paths = child_path_entries(
+            Platform::Windows,
+            vec![PathBuf::from(r"C:\Users\a\AppData\Roaming\npm")],
+            None,
+            None,
+            vec![
+                PathBuf::from(r"c:\users\a\appdata\roaming\npm\"),
+                PathBuf::from(r"C:\nvm4w\nodejs"),
+            ],
+        );
+        assert_eq!(
+            paths,
+            [r"C:\Users\a\AppData\Roaming\npm", r"C:\nvm4w\nodejs"].map(PathBuf::from)
+        );
+    }
 }
 
 #[cfg(test)]

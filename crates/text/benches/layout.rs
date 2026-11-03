@@ -233,6 +233,15 @@ fn benches(c: &mut Criterion) {
             })
         });
     }
+    // No inline boxes: must cost what `line_count` does.
+    g.bench_function("height_1k_paragraphs_w390", |b| {
+        b.iter(|| {
+            prepared
+                .iter()
+                .map(|p| p.height(black_box(390.0), 20.0, 15.0))
+                .sum::<f32>()
+        })
+    });
     g.bench_function("stats_1k_paragraphs_w390", |b| {
         b.iter(|| {
             prepared

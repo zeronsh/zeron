@@ -134,6 +134,10 @@ root).
   History trim: shallow checkpoint only at a frontier older than RETAIN_DAYS, same
   aged-frontier discipline as today (the ws4 live-frontier lesson: an offline device's
   concurrent ops must never land behind a shallow root).
+- Publication order: a device's own ops go out in commit order. Loro runs local-update
+  hooks after the commit, so two tasks committing at once can see them run swapped; a row
+  whose causal history arrives later parks on every reader. `chat2_host::OwnOpsOrder`
+  publishes the missing counter range from the doc first and drops the late hook.
 - Tail sidecar: publish last-64 JSON on the debounced commit tick (dirty-flag, like
   the DO's current lazy recompute). Diff sidecar publish moves from `diff_sync.rs`'s
   DO PUT to the chat2 PUT unchanged.

@@ -1,8 +1,8 @@
 //! The workspace registry replica and its derived [`WorkspaceSnapshot`].
 //!
 //! The replica is a [`RegistryDoc`] shared (`Arc<Mutex<_>>`) with the
-//! `zeron_sync::RegistryClient` in live mode; Demo mode settles local writes
-//! through an in-process stand-in for the registry room. Reads materialize
+//! `zeron_sync::RegistryClient` in live mode; Demo mode's replica is
+//! local-only (writes fold straight into its rows). Reads materialize
 //! the rows once per registry *generation* (cached), so the 1 Hz time-driven
 //! re-derivation (staleness, presence expiry, send grace) never re-decodes.
 

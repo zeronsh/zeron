@@ -3,7 +3,9 @@
 //! tweens; content keeps its final width while the outer surface clips it.
 
 use super::*;
-use zeron_proto::{HarnessId, HarnessUpdatePhase as Phase, HarnessUpdateStatus};
+use zeron_proto::{
+    HarnessId, HarnessUpdateFailureKind, HarnessUpdatePhase as Phase, HarnessUpdateStatus,
+};
 
 pub(super) fn versionless_notification_key(device: &str, harness: HarnessId) -> String {
     format!("{device}:{harness:?}:versionless")
@@ -20,6 +22,9 @@ pub(super) fn notification_key(device: &str, status: &HarnessUpdateStatus) -> Op
 }
 
 const CHIP_HEIGHT: f32 = 38.0;
+/// The summary row inside the card's 1px border, top and bottom. A row as
+/// tall as the whole card overflows the border box and sits a point low.
+const SUMMARY_HEIGHT: f32 = CHIP_HEIGHT - 2.0;
 const ROW_HEIGHT: f32 = 64.0;
 const MAX_VISIBLE_ROWS: f32 = 3.5;
 const LIST_FADE_BAND: f32 = 32.0;
@@ -95,10 +100,13 @@ fn agent_name(harness: HarnessId) -> &'static str {
         HarnessId::Devin => "Devin",
         HarnessId::Grok => "Grok",
         HarnessId::Hermes => "Hermes",
+        HarnessId::Fx => "fx",
         HarnessId::Pi => "Pi",
         HarnessId::Opencode => "OpenCode",
         HarnessId::Antigravity => "Antigravity",
+        HarnessId::Muse => "Muse Code",
         HarnessId::Mock => "Mock",
+        HarnessId::Registry(agent) => agent.registry_id(),
     }
 }
 
@@ -122,9 +130,20 @@ fn action(status: &HarnessUpdateStatus) -> Option<(&'static str, Option<&'static
         Phase::WaitingForIdle | Phase::Preparing | Phase::Downloading => {
             Some(("Cancel", Some(methods::CANCEL_HARNESS_UPDATE)))
         }
+        Phase::Failed if status.can_apply && install_failed(status) => {
+            Some(("Retry update", Some(methods::APPLY_HARNESS_UPDATE)))
+        }
         Phase::Failed => Some(("Check again", Some(methods::CHECK_HARNESS_UPDATES))),
         _ => None,
     }
+}
+
+/// The update itself failed (not a check): its release is still known.
+fn install_failed(status: &HarnessUpdateStatus) -> bool {
+    status
+        .error
+        .as_ref()
+        .is_some_and(|error| error.kind == HarnessUpdateFailureKind::Install)
 }
 
 fn right_inset(has_button: bool) -> f32 {
@@ -156,7 +175,13 @@ fn detail(status: &HarnessUpdateStatus) -> String {
             .error
             .as_ref()
             .map(|e| e.message.clone())
-            .unwrap_or_else(|| "Couldn’t check for updates".into()),
+            .unwrap_or_else(|| {
+                if install_failed(status) {
+                    "Update failed".into()
+                } else {
+                    "Couldn’t check for updates".into()
+                }
+            }),
         _ => "Checking for updates…".into(),
     }
 }
@@ -405,6 +430,7 @@ impl Shell {
                 Phase::Installing => format!("Updating {name}…"),
                 Phase::Verifying => format!("Verifying {name}…"),
                 Phase::Updated => format!("{name} updated"),
+                Phase::Failed if install_failed(status) => format!("{name} update failed"),
                 Phase::Failed => format!("{name} update check failed"),
                 _ => return None,
             }
@@ -427,14 +453,8 @@ impl Shell {
             .any(|row| row.connected && active(&row.status))
         {
             Some(
-                loaders::mini_glyph_spinner(
-                    "home-agent-update-activity",
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
+                crate::loaders::ring_spinner("home-agent-update-activity", 14.0, theme.text_muted)
+                    .into_any_element(),
             )
         } else if all_updated {
             Some(
@@ -512,7 +532,7 @@ impl Shell {
         let list_bottom_radius = (radius - 1.0).max(0.0);
         let summary = div()
             .id("home-harness-update-summary")
-            .h(px(CHIP_HEIGHT))
+            .h(px(SUMMARY_HEIGHT))
             .w_full()
             .flex_none()
             .pl(px(12.0))
@@ -723,12 +743,13 @@ impl Shell {
             div()
                 .id("home-harness-update-list-host")
                 .absolute()
-                .top(px(CHIP_HEIGHT))
+                .top(px(SUMMARY_HEIGHT))
                 // Keep the final layout centered as the shell widens, so
                 // neither edge appears attached to a moving clipping boundary.
-                .left(px((size[0] - list_width) * 0.5 + 1.0))
+                // Absolute offsets start inside the card's border already.
+                .left(px((size[0] - list_width) * 0.5))
                 .w(px((list_width - 2.0).max(0.0)))
-                .h(px((list_height - CHIP_HEIGHT - 1.0).max(0.0)))
+                .h(px((list_height - SUMMARY_HEIGHT - 1.0).max(0.0)))
                 .rounded_bl(px(list_bottom_radius))
                 .rounded_br(px(list_bottom_radius))
                 .overflow_hidden()
@@ -781,7 +802,7 @@ impl Shell {
                 el.child(
                     div()
                         .absolute()
-                        .top(px(CHIP_HEIGHT))
+                        .top(px(SUMMARY_HEIGHT))
                         .left(px(0.0))
                         .right(px(0.0))
                         .h(px(1.0))
@@ -903,7 +924,11 @@ impl Shell {
                     && !matches!(&error, zeron_rpc::RpcError::Failed(message)
                         if method == methods::APPLY_HARNESS_UPDATE && message == "update cancelled")
                 {
-                    shell.sidebar_notice = Some(format!("Agent update ({device}): {error}").into());
+                    shell.show_notice(
+                        crate::toast::ToastKind::Error,
+                        format!("Agent update ({device}): {error}"),
+                        cx,
+                    );
                 }
                 cx.notify();
             })
@@ -932,6 +957,8 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: None,
+            compatibility: None,
+            held_back: None,
         }
     }
 

@@ -252,6 +252,7 @@ mod tests {
                         super::super::NewThreadComposerBackground {
                             path: image.to_string_lossy().into_owned(),
                             name: "existing.png".into(),
+                            adjustment: super::super::NewThreadBackgroundAdjustment::default(),
                         },
                     ),
                     ..Default::default()

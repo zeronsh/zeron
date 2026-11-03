@@ -1,8 +1,8 @@
 import XCTest
 
 /// Drives every glass transition slowly (for screen recordings / visual
-/// review): push + pop, tab switches, the new-session sheet, and
-/// scroll-driven tab bar minimize.
+/// review): push + pop, Settings and back, the new-session sheet, and
+/// scrolling under the bottom bar.
 final class TransitionTourTests: XCTestCase {
     func testTour() {
         let app = XCUIApplication()
@@ -16,12 +16,12 @@ final class TransitionTourTests: XCTestCase {
         sleep(2)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         sleep(2)
-        // Tabs.
-        for tab in ["Settings", "Sessions"] {
-            app.tabBars.buttons[tab].tap()
-            sleep(1)
-        }
-        // Scroll to minimize the tab bar, then back.
+        // Settings and back.
+        app.buttons["bottom-settings"].tap()
+        sleep(1)
+        app.navigationBars["Settings"].buttons.firstMatch.tap()
+        sleep(1)
+        // Scroll under the bottom bar, then back.
         let list = app.collectionViews.firstMatch
         list.swipeUp(velocity: .slow)
         sleep(1)
@@ -36,7 +36,7 @@ final class TransitionTourTests: XCTestCase {
 }
 
 extension TransitionTourTests {
-    /// Just push + pop (fast iteration on the tab bar / accessory handoff).
+    /// Just push + pop (fast iteration on the bottom bar handoff).
     func testPushPop() {
         let app = XCUIApplication()
         app.launchArguments = ["-demo"]

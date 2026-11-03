@@ -1,0 +1,20 @@
+[package]
+name = "zatex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Fast, low-memory LaTeX math layout over any OpenType math font"
+
+# Parser + TeX layout driven entirely by the font's MATH table, emitting a flat
+# display list (glyph ids and rules). UI-free: hosts paint the glyph outlines.
+[dependencies]
+ttf-parser.workspace = true
+
+[features]
+# Six math faces compiled in (`zatex::bundled`), ~4 MB of read-only data;
+# a face is only parsed (and its pages touched) once something uses it.
+bundled = []
+
+[dev-dependencies]
+tiny-skia = "0.11"
