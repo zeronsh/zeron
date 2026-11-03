@@ -2811,6 +2811,8 @@
       "open_subagent": "Open subagent {title}",
       "working_first": "Working first",
       "mark_all_read": "Mark all done as read",
+      "new_side_in": "New side chat in {name}",
+      "new_side_on": "New side chat on {name}",
       "editor": {
         "add_title": "Add action",
         "edit_title": "Edit action",

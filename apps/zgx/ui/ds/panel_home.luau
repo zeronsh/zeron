@@ -242,6 +242,12 @@ export type LanesProps = {
 	-- have, and a secondary click on its title or round its rows (a row's
 	-- own menu, where it has one, stays the row's). Nil, none.
 	options: (() -> { ContextMenu.Entry }?)?,
+	-- A "+" on each group's header under the pointer, as the sidebar's
+	-- project headers have: `new_label` names it ("New side chat in
+	-- zeron"), and `on_new` is handed the header's groups, the outermost
+	-- first and its own last (a project's, a device's, or both). Nil, none.
+	on_new: ((groups: { LaneGroup }) -> ())?,
+	new_label: ((group: LaneGroup) -> string)?,
 }
 
 -- Whether a lane shows past the first few, and in a folded group: at
@@ -670,10 +676,33 @@ function M.Lanes(props: LanesProps): Node
 		local gkey = first.gkey
 		if first.kind == "group" then
 			local g = first.group :: LaneGroup
+			local on_new = props.on_new
+			local plus: Node? = nil
+			if on_new then
+				local label = if props.new_label then props.new_label(g) else g.name
+				plus = IconButton {
+					id = `{props.list}-new-{gkey}`,
+					icon = "plus",
+					label = label,
+					tooltip = label,
+					size = "sm",
+					tone = "quiet",
+					on_click = function()
+						local it = now:peek() :: Item?
+						if not (it and it.group) then
+							return
+						end
+						local groups = table.clone(it.path or {})
+						table.insert(groups, it.group :: LaneGroup)
+						on_new(groups)
+					end,
+				}
+			end
 			return ui.div {
 				w_full = true,
 				h = M.LANE_H,
 				SessionRow.Header {
+					trail = plus,
 					-- (An inner group's hangs off its outer group's trunk.)
 					tree = tree_of(now),
 					gap = M.LANE_H - SessionRow.SLOT,

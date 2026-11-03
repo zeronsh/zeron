@@ -55,6 +55,8 @@ local children = {
 	{ id = "side-b", parent = "chat-1", title = "Draft the release notes", device = "d", updated = NOW - 1800, created = NOW - 1900, agent = "openai" },
 }
 local online = true
+-- (`box_project`: the project checked out on the devbox too.)
+local box_project = false
 local function publish()
 	sessions.now:set({
 		state = "ready",
@@ -63,7 +65,12 @@ local function publish()
 			{ id = "d", name = "work-laptop", platform = "macos", here = true, online = true },
 			{ id = "box", name = "devbox", platform = "linux", here = false, online = online },
 		},
-		projects = { { id = "p1", name = "comet-native", device = "d", path = "/Users/me/comet-native", git = true } },
+		projects = if box_project
+			then {
+				{ id = "p1", name = "comet-native", device = "d", path = "/Users/me/comet-native", git = true },
+				{ id = "p2", name = "comet-native", device = "box", path = "/srv/comet-native", git = true },
+			}
+			else { { id = "p1", name = "comet-native", device = "d", path = "/Users/me/comet-native", git = true } },
 		chats = {
 			{ id = "chat-1", title = "Parent", project = "p1", device = "d", branch = "zeron/panel-home", cwd = "/proj", status = "idle", updated = NOW, created = NOW - 3600, side_chats = #children },
 			{ id = "chat-2", title = "On the devbox", device = "box", branch = "main", cwd = "/srv", updated = NOW, created = NOW - 3600 },
@@ -93,6 +100,10 @@ publish_messages()
 local stub_sessions = sessions :: any
 stub_sessions.create = function(req: any): any
 	note(`create:{req.parent}:{req.id}`)
+	-- (Where it's made, when its composer moved it.)
+	if req.project or req.device or req.no_project then
+		note(`place:{req.id}:{req.project or ""}:{req.device or ""}`)
+	end
 	return settled(true, req.id)
 end
 stub_sessions.fork = function(source: string, _parent: string?, id: string?): any
@@ -235,6 +246,10 @@ end }
 -- A side chat on the devbox (a worktree there): its own device's group.
 ui.command { id = "side_elsewhere", title = "A side chat on the devbox", run = function()
 	table.insert(children, { id = "side-box", parent = "chat-1", title = "Try it on the devbox", device = "box", updated = NOW - 10, created = NOW - 20, agent = "claude" })
+	publish()
+end }
+ui.command { id = "box_project", title = "The project on the devbox too", run = function()
+	box_project = true
 	publish()
 end }
 -- Lanes at work further down: a side chat working since long ago (under

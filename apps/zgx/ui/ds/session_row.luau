@@ -928,6 +928,9 @@ export type HeaderProps = {
 	-- step, a branch to its tile).
 	tree: (() -> Tree?)?,
 	gap: number?,
+	-- At its end under the pointer, in the place of how many it holds (a
+	-- project's new chat, as the sidebar's group headers have it: `corner_button`).
+	trail: Node?,
 }
 
 -- A group's header: its tile and name; a click folds it (folded, how many
@@ -939,9 +942,11 @@ function M.Header(props: HeaderProps): Node
 	end
 	local tree = props.tree
 	local leads = props.leads
+	local hovered = ui.use_state(false)
 	local body = M.Frame {
 		id = props.id,
 		class = "section-header",
+		hovered = hovered,
 		indent = if tree
 			then function(): number
 				local t = tree()
@@ -959,9 +964,19 @@ function M.Header(props: HeaderProps): Node
 			end
 			return M.tile(Icon { name = props.icon or "folder", size = 12 }, badge)
 		end)(),
-		words = M.header_words(props.name, function(): string
-			return tostring(props.count())
-		end, folded),
+		words = M.header_words(
+			props.name,
+			function(): string
+				return tostring(props.count())
+			end,
+			folded,
+			props.trail,
+			if props.trail
+				then function(): boolean
+					return hovered:get()
+				end
+				else nil
+		),
 		on_click = props.on_toggle,
 	}
 	if tree then
