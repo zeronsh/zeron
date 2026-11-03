@@ -16,13 +16,6 @@ local actions = require("@app/screens/onboarding/actions");
 local Palette = require("@app/screens/shell/palette")
 local view = require("@app/screens/shell/view")
 
-local palettes = require("@ds/palettes")
-
--- An official template's look (src/plugins/looks.rs): its built-in theme's
--- palettes, light and dark.
-local function official(light: string, dark: string): state.Look
-	return { stamp = `{light}|{dark}`, light = { palette = palettes.find(light) }, dark = { palette = palettes.find(dark) } }
-end
 -- A template's own theme files (the hot pink one's, both; the night one's,
 -- only dark).
 local function theme(scheme: string, accent: string, window: string, text: string): state.Scheme
@@ -31,10 +24,6 @@ end
 
 local model: { state.Template } = {
 	{ id = "zeron", name = "Zeron", description = "The default interface.", author = "Zeron", version = "0.2.131", zeron_version = "0.2.131", builtin = true, active = true, status = "ok" },
-	-- Zeron's official templates (its built-in themes, kept by each launch:
-	-- src/plugins/theme_templates.rs), each with its look, light then dark.
-	{ id = "theme-tokyo-night", name = "Tokyo Night", description = "Tokyo Night's colours on Zeron's interface.", author = "Zeron", version = "0.2.131", zeron_version = "0.2.131", builtin = true, active = false, status = "ok", theme = "tokyo-night", look = official("tokyo-night-light", "tokyo-night") },
-	{ id = "theme-github", name = "GitHub", description = "GitHub's colours on Zeron's interface.", author = "Zeron", version = "0.2.131", zeron_version = "0.2.131", builtin = true, active = false, status = "ok", theme = "github", look = official("github-light", "github-dark") },
 	{ id = "hot-pink", name = "Hot Pink", description = "Everything pink.", author = "you", version = "1.0.0", builtin = false, active = false, status = "ok", look = { stamp = "p1", light = theme("light", "#d6247a", "#fff0f6", "#3d0a22"), dark = theme("dark", "#ff3e9a", "#1a0010", "#ffe0ef") } },
 	{ id = "night", name = "Night", description = "A darker dark.", author = "you", version = "1.0.0", builtin = false, active = false, status = "ok", look = { stamp = "n1", dark = theme("dark", "#22ccaa", "#000000", "#e8fff9") } },
 	{ id = "airy", name = "Airy", description = "More room between things.", author = "you", version = "1.0.0", zeron_version = "0.2.131", builtin = false, active = false, status = "ok" },

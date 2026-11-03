@@ -44,7 +44,7 @@ pub mod settings;
 pub mod recovery;
 pub mod remote;
 pub mod templates;
-pub mod theme_templates;
+pub mod retired_themes;
 pub mod tokens;
 pub mod looks;
 pub mod template_consent;
@@ -654,9 +654,12 @@ pub fn prepare_live() -> PathBuf {
         eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
         return fallback;
     }
-    // Zeron's official templates (its built-in themes), kept as this build
-    // has them, never over a template of yours.
-    theme_templates::install_all(&root);
+    // The built-in themes once installed as templates, retired: one in use
+    // gives way to the default template, wearing that theme
+    // (retired_themes.rs).
+    if let Some(data) = crate::engine::data_dir() {
+        retired_themes::retire(&root, &data);
+    }
     let id = live::active(&root);
     match live::compose(&root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
@@ -1505,14 +1508,16 @@ impl Bridge {
         let active = self.overlay.borrow().template.clone();
         let mut list = Vec::new();
         let mut status = serde_json::Map::new();
-        let mut installed = live::installed(&root);
-        // Zeron's own first, then its official templates in its order, then
-        // the rest by name (as `installed` has them).
-        installed.sort_by_key(|t| match (&t.theme, t.id == live::BUILTIN) {
-            (_, true) => 0,
-            (Some(key), _) => 1 + theme_templates::order(key),
-            _ => usize::MAX,
-        });
+        let installed = live::installed(&root);
+        // Each template's own theme (its theme.luau, as data), for the Themes
+        // page (src/themes.rs).
+        crate::themes::set_templates(
+            installed
+                .iter()
+                .filter(|t| t.id != live::BUILTIN)
+                .map(|t| crate::themes::TemplateTheme { template: t.id.clone(), name: t.name.clone(), file: self.looks.theme_file(&root, &t.id) })
+                .collect(),
+        );
         for t in installed {
             let broken = self.broken.borrow().why(&t.id).map(String::from);
             let errors: BTreeMap<String, String> = live::files(&root.join(&t.id), |_| true)
@@ -1542,9 +1547,7 @@ impl Bridge {
                 ("author", Value::from(t.author.as_str())),
                 ("version", Value::from(t.version.as_str())),
                 ("zeron_version", Value::from(t.zeron_version.as_str())),
-                // Zeron's own and its official templates (its built-in
-                // themes): Zeron's, kept by each launch.
-                ("builtin", Value::from(t.id == live::BUILTIN || t.theme.is_some())),
+                ("builtin", Value::from(t.id == live::BUILTIN)),
                 ("active", Value::from(t.id == active)),
                 ("status", Value::from(state)),
             ];
@@ -1568,10 +1571,6 @@ impl Bridge {
                     fields.push(("update", json_value(&found)));
                 }
                 fields.push(("imported", json_value(&imported)));
-            }
-            // One of Zeron's built-in themes: which.
-            if let Some(theme) = &t.theme {
-                fields.push(("theme", Value::from(theme.as_str())));
             }
             list.push(Value::record(fields));
         }

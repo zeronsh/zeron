@@ -1138,12 +1138,20 @@
       "pt": "{n} pt",
       "pt_default": "{n} pt (default)",
       "scheme": {
-        "label": "Theme",
+        "label": "Mode",
         "terms": "color scheme system light dark mode",
         "description": "Light, dark, or as the system is.",
         "system": "System",
         "light": "Light",
         "dark": "Dark"
+      },
+      "theme": {
+        "light": "Light theme",
+        "dark": "Dark theme",
+        "one": "Theme",
+        "terms": "theme colors colours palette vscode dracula",
+        "more": "All themes",
+        "more_description": "Browse every theme, or import one from VS Code."
       },
       "accent": {
         "label": "Accent color",
@@ -1754,30 +1762,6 @@
         "browser": "Browser"
       }
     },
-    "theme_library": {
-      "built_in": "Built in",
-      "imported": "Imported",
-      "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
-      "imported_body": "Choose it under Light theme or Dark theme.",
-      "skipped": "Some of its themes didn't import: {names}",
-      "choose_source": "Choose Theme Source",
-      "vscode_theme": "VS Code theme",
-      "more_for": "More for {name}",
-      "needs_look": "Something in this theme needs fixing.",
-      "dark": "Dark",
-      "light": "Light",
-      "rename": "Rename",
-      "remove": "Remove",
-      "section": "Imported themes",
-      "section_description": "VS Code colour themes: a theme's .json, or an extension's package.json.",
-      "import": "Import theme",
-      "import_failed": "This theme couldn't be imported",
-      "rename_title": "Rename theme",
-      "couldnt_rename": "Couldn't rename the theme",
-      "name": "Name",
-      "remove_title": "Remove this theme?",
-      "remove_body": "It's removed from your library. Wherever it's in use, the default theme comes back."
-    },
     "store": {
       "says": {
         "refused": "Only an admin of the organization can do that.",
@@ -2344,9 +2328,11 @@
         "light": "Light",
         "dark": "Dark"
       },
-      "theme": "Theme",
+      "theme": "Mode",
       "use_template": "Use template: {name}",
       "templates": "Templates",
+      "use_theme": "Use theme: {name}",
+      "themes": "Themes",
       "use": "Use",
       "recent_files": "Recent files",
       "files": "Files",
@@ -3362,6 +3348,59 @@
       "install": "Install",
       "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
       "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
+    }
+  },
+  "themes": {
+    "page": {
+      "title": "Themes",
+      "description": "Colours for Zeron. Your theme is worn with any template.",
+      "search": "Search themes",
+      "tabs": "Themes",
+      "all": "All",
+      "builtin": "Built in",
+      "from_templates": "From templates",
+      "yours": "Yours",
+      "import": "Import theme",
+      "hint": "A theme is only colours, so it works with any template, and it can't do anything else.",
+      "about": {
+        "default": "The default, light and dark",
+        "both": "Light and dark",
+        "light": "Light only",
+        "dark": "Dark only"
+      },
+      "byline": {
+        "builtin": "Built in",
+        "template": "From {name}",
+        "imported": "Imported"
+      },
+      "needs_fixing": "Something in this theme needs fixing.",
+      "in_use": "In use",
+      "for_light": "Light",
+      "for_dark": "Dark",
+      "use": "Use",
+      "couldnt_use": "Couldn't use the theme",
+      "use_light": "Use only for light",
+      "use_dark": "Use only for dark",
+      "show_template": "Show in Templates",
+      "more_for": "More for {name}",
+      "rename": "Rename",
+      "remove": "Remove",
+      "rename_title": "Rename theme",
+      "couldnt_rename": "Couldn't rename the theme",
+      "name": "Name",
+      "remove_title": "Remove this theme?",
+      "remove_body": "It's removed from Yours. Wherever it's in use, the default comes back.",
+      "none_yours": "None of yours yet",
+      "none_yours_body": "Import a VS Code colour theme: its .json file, or an extension's folder. You can drop one on this page too.",
+      "none_templates": "No template brings a theme",
+      "none_templates_body": "When a template has colours of its own, they show here, to use with any template.",
+      "choose_source": "Choose Theme",
+      "vscode_theme": "VS Code theme",
+      "drop": "Drop to import",
+      "import_failed": "This theme couldn't be imported",
+      "skipped": "Some of its themes didn't import: {names}",
+      "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
+      "imported_body": "It's under Yours."
     }
   }
 }

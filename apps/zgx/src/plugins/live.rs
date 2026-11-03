@@ -423,9 +423,6 @@ pub struct Installed {
     /// Installed from someone's signed package: `.imported.json`'s
     /// `{key, author}` (the engine's `template_packages`).
     pub imported: Option<serde_json::Value>,
-    /// One of Zeron's built-in themes, installed (its manifest's
-    /// `builtin_theme`, the theme's key: `theme_templates`).
-    pub theme: Option<String>,
 }
 
 /// Whether a template made for Zeron `made_for` is out of date in Zeron
@@ -464,10 +461,6 @@ pub fn installed(templates: &Path) -> Vec<Installed> {
             imported: (id != BUILTIN)
                 .then(|| read_json(&dir.join(".imported.json")))
                 .filter(|v| v["key"].is_string()),
-            // Only a folder this build wrote, as it stands: a manifest that
-            // merely says `builtin_theme` (an imported package's) is an
-            // ordinary template, shown as its author's and deletable.
-            theme: (id != BUILTIN).then(|| super::theme_templates::verified(dir)).flatten(),
         })
     };
     let mut out: Vec<Installed> = manifest(&templates.join(ZERON), BUILTIN).into_iter().collect();
