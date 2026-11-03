@@ -16,21 +16,37 @@ use std::collections::HashMap;
 
 use zgx_script::Plugin;
 
-/// The plugin `error` is on, of those loaded, if any.
+/// The plugin `error` is on, of those loaded, if any: the VM it names
+/// first (a plugin's own), else the file it's at, exactly (a module a
+/// plugin replaced, run as the app's), never words anywhere in it (one
+/// plugin's message naming another's snapshot once had that one withdrawn).
 pub fn blame(error: &str, plugins: &[Plugin]) -> Option<String> {
-    for plugin in plugins {
-        // Its own VM's error: named for it, first thing.
-        if error.starts_with(&format!("{}: ", plugin.name)) {
-            return Some(plugin.name.clone());
-        }
-        // A file of its snapshot, run as the app's (a module it replaced).
-        if let Some(dir) = plugin.entry.parent()
-            && error.contains(dir.to_string_lossy().as_ref())
-        {
-            return Some(plugin.name.clone());
-        }
+    // Its own VM's error: named for it, first thing.
+    if let Some(plugin) = plugins.iter().find(|p| error.starts_with(&format!("{}: ", p.name))) {
+        return Some(plugin.name.clone());
     }
-    None
+    // A file of its snapshot, run as the app's: where the error is.
+    let at = std::path::Path::new(located(error)?);
+    plugins
+        .iter()
+        .find(|p| p.entry.parent().is_some_and(|dir| within(at, dir)))
+        .map(|p| p.name.clone())
+}
+
+/// The file an app's error is at: after its VM's preamble (`app.luau:
+/// runtime error: `), up to `.luau:<line>`.
+fn located(error: &str) -> Option<&str> {
+    let line = error.lines().next()?;
+    let rest = line.split_once(" error: ").map_or(line, |(_, rest)| rest);
+    let end = rest.find(".luau:")? + ".luau".len();
+    rest[end + 1..].starts_with(|c: char| c.is_ascii_digit()).then(|| &rest[..end])
+}
+
+/// Whether `file` is in `dir`, by whole parts (`/var` and `/private/var`
+/// are one folder on macOS).
+fn within(file: &std::path::Path, dir: &std::path::Path) -> bool {
+    let bare = |p: &std::path::Path| p.strip_prefix("/private").map(|rest| std::path::Path::new("/").join(rest)).unwrap_or_else(|_| p.to_path_buf());
+    bare(file).starts_with(bare(dir))
 }
 
 /// What failed, by name, with what it was when it failed (its file's print,
@@ -63,6 +79,11 @@ impl Failures {
             }
             None => false,
         }
+    }
+
+    /// `what` is gone (removed): a new one of that name starts afresh.
+    pub fn forget(&mut self, what: &str) {
+        self.by.remove(what);
     }
 
     pub fn why(&self, what: &str) -> Option<&str> {
@@ -104,6 +125,27 @@ mod tests {
         // The app's own, or a plugin whose name only starts another's: nobody's.
         assert_eq!(blame("app.luau: runtime error: screens/card.luau:3: oops", &plugins), None);
         assert_eq!(blame("focused: runtime error: x", &plugins), None);
+        let private = "app.luau: runtime error: /private/d/plugins/.loaded/focus/0123/a.luau:2: x";
+        assert_eq!(blame(private, &plugins).as_deref(), Some("focus"));
+    }
+
+    /// R26: one plugin can't get another withdrawn by naming its snapshot
+    /// in an error of its own (or of a module it replaced).
+    #[test]
+    fn an_error_naming_another_plugin_s_files_is_never_blamed_on_it() {
+        let plugins = vec![
+            plugin("victim", "/d/plugins/.loaded/victim/aa/init.luau"),
+            plugin("evil", "/d/plugins/.loaded/evil/bb/init.luau"),
+        ];
+        let own = "evil: runtime error: /d/plugins/.loaded/victim/aa/init.luau:1: framed";
+        assert_eq!(blame(own, &plugins).as_deref(), Some("evil"));
+        let replaced = "app.luau: runtime error: /d/plugins/.loaded/evil/bb/x.luau:3: /d/plugins/.loaded/victim/aa/init.luau:1: framed";
+        assert_eq!(blame(replaced, &plugins).as_deref(), Some("evil"));
+        let app = "app.luau: runtime error: screens/x.luau:3: see /d/plugins/.loaded/victim/aa/init.luau:1";
+        assert_eq!(blame(app, &plugins), None);
+        // (A folder whose name only starts another's isn't in it.)
+        let near = "app.luau: runtime error: /d/plugins/.loaded/victim/aaa/x.luau:3: x";
+        assert_eq!(blame(near, &plugins), None);
     }
 
     #[test]

@@ -82,7 +82,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             *q.watch.borrow_mut() = Some(watch);
         });
     }
+    // (Answering for you is yours: refused while a template runs as a
+    // preview, as `chat.respond` is.)
     host.async_action("questions.answer", |args| async move {
+        crate::plugins::preview::refuse("questions.answer")?;
         let id = args.field("id").map(text).unwrap_or_default();
         let answer = args.field("answer").map(text).unwrap_or_default();
         if id.is_empty() || answer.trim().is_empty() {
@@ -92,6 +95,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         engine::get().call("AnswerQuestion", params).await.map(|_| Value::Nil)
     });
     host.async_action("questions.dismiss", |id| async move {
+        crate::plugins::preview::refuse("questions.dismiss")?;
         let params = json!({ "questionId": text(&id) });
         engine::get().call("DismissQuestion", params).await.map(|_| Value::Nil)
     });

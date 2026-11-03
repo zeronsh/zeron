@@ -192,8 +192,6 @@ return function(id: string): any
 			return ui.shared("zeron.appearance", "dark"):get()
 		elseif name == "session" then
 			return ui.shared("zeron.page_session", nil :: any):get()
-		elseif name == "profile" then
-			return ui.shared("zeron.profile_id", nil :: any):get()
 		end
 		return nil
 	end
@@ -214,7 +212,22 @@ return function(id: string): any
 		return string.format("f%08x", h)
 	end
 
+	-- What's behind a token a place gave (a file's, a block's), as this
+	-- plugin may read it: nil when it may not.
+	local function behind(kind: string, token: any): any
+		if type(token) ~= "string" then
+			return nil
+		end
+		local ok, found = pcall(ui.call_sync, `{prefix}.{kind}`, token)
+		return if ok then found else nil
+	end
+
 	function M.context(name: string): any
+		-- You, as you allowed it (your account's id and name with
+		-- "profile.read"): never from a place, which gives no account.
+		if name == "profile" then
+			return table.clone((records:get() or {}).profile or {})
+		end
 		local value = M.read(name)
 		if name == "panel" then
 			if type(value) == "table" and type(value.page) == "table" then
@@ -247,8 +260,19 @@ return function(id: string): any
 				table.insert(out, M.context_of("session", sid))
 			end
 			return out
-		elseif name == "profile" then
-			return table.clone(r.profile or {})
+		elseif name == "panel_branch" or name == "panel_details" then
+			-- The session, by its id: its device, branch and folder as its
+			-- record holds them ("sessions.read"; the folder "files.read"'s).
+			local sid = if type(value) == "table" then value.session else nil
+			if type(sid) ~= "string" then
+				return nil
+			end
+			local s = (r.sessions or {})[sid] or {}
+			return { session = sid, device = s.device, cwd = s.cwd, branch = s.branch }
+		elseif name == "code" or name == "tex" then
+			-- A reply's block ("messages.read", or a plugin allowed to change
+			-- how such blocks show): `{ lang, source }`, or the TeX.
+			return behind("block", value)
 		elseif name == "panel" then
 			-- Plain data, and what can be done with it: a tab of this
 			-- plugin's own ("panel.tabs").
@@ -267,10 +291,13 @@ return function(id: string): any
 			end
 			return panel
 		elseif name == "file" then
-			if r.files_read then
-				return { id = value, path = value, name = string.match(value, "([^/]+)$") or value }
+			-- A token: its path with "files.read", else an id of this
+			-- plugin's own (the same file, the same id, this run).
+			local f = if r.files_read then behind("file", value) else nil
+			if type(f) == "table" and type(f.path) == "string" then
+				return { id = f.path, path = f.path, name = f.name or (string.match(f.path, "([^/]+)$") or f.path) }
 			end
-			return { id = own_id(value) }
+			return { id = own_id(tostring(value)) }
 		end
 		return value
 	end

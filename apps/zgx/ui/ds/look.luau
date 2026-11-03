@@ -4,7 +4,6 @@
 -- for the whole app, kept across launches, as the material is
 -- (ds/material); a window takes it through `theme` (`look.theme()`).
 
-local palettes = require("@self/palettes")
 local material = require("@self/material")
 local locale = require("@self/locale")
 
@@ -145,29 +144,12 @@ function M.code_family(): string
 	return if type(own) == "string" and own ~= "" then own else "mono"
 end
 
--- The palette each scheme wears (ds/palettes; Zeron's own by default):
--- one for light, one for dark, as the shipping app keeps them.
-M.palette = {
-	light = ui.persist("palette_light", "zeron-light"),
-	dark = ui.persist("palette_dark", "zeron-dark"),
-}
-
--- The palette's tokens for the scheme showing.
-function M.palette_theme(): { [string]: any }?
-	local kind = ui.theme.kind()
-	local light = kind == "light" or kind == "high-contrast-light"
-	local p = palettes.find((if light then M.palette.light else M.palette.dark):get())
-	return if p then palettes.tokens(p) else nil
-end
-
--- What the main window wears over its template's theme: the text size, the
--- fonts chosen, and an accent chosen over the theme's own.
+-- What the main window wears over its theme (ds/palettes, worn by
+-- ds/tokens): the text size, the fonts chosen, and an accent chosen over
+-- the theme's own.
 function M.window_theme(): { [string]: any }?
-	-- (No palette over the theme: a template brings its own, so a palette
-	-- chosen before the pickers went never applies.)
-	local palette = nil
 	local out: { [string]: any }? = nil
-	for _, part in { palette, M.text_theme(), M.font_theme(), M.theme() } do
+	for _, part in { M.text_theme(), M.font_theme(), M.theme() } do
 		if part then
 			out = out or {}
 			for k, v in part do

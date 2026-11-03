@@ -20,6 +20,7 @@
 
 local ds = require("@ds")
 local control = require("@ds/control")
+local token = require("@ds/token")
 local FilesPane = require("@ds/files_pane")
 local Workspace = require("@app/screens/files/workspace")
 local comments = require("@app/screens/files/comments")
@@ -368,11 +369,11 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 		},
 		viewer = {
 			id = "file-viewer",
-			-- (What's under it, for plugins: the open file's path.)
+			-- (What's under it, for plugins: the open file, as a token.)
 			provide = {
 				file = ui.computed(function(): string?
 					local d = v.doc:get()
-					return if d then d.path else nil
+					return if d then token.file(d.path) else nil
 				end),
 			},
 			doc = v.doc,
@@ -448,9 +449,9 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 						-- (A string: the card says it in its name.)
 						-- zgx-lint: allow(untracked-get)
 						author = { id = "me", name = ui.t("files.comment.you"):get() },
-						at = os.time(),
+						-- (A draft that goes with your next message: no time,
+						-- and nothing to call it pending, every one is.)
 						body = b.body,
-						badge = ui.text { ui.t("files.comment.pending"), text_size = "$font.size.xs", color = "$text.tertiary" },
 						mine = true,
 						compact = true,
 						on_edit = function()

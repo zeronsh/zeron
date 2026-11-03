@@ -709,6 +709,15 @@ function M.View(): Node
 					body = ui.t("plugins.page.offline_body"),
 				}
 			end,
+			-- (The account's setup isn't finished: plugins load once it is,
+			-- src/plugins `wait_for_setup`.)
+			setup = function(): Node
+				return ds.Callout {
+					tone = "info",
+					title = ui.t("plugins.page.setup_title"),
+					body = ui.t("plugins.page.setup_body"),
+				}
+			end,
 			away = away_notice,
 		},
 		found = found,

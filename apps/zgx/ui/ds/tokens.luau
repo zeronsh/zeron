@@ -590,13 +590,21 @@ function M.setup()
 	}
 	ui.theme.load("ds/themes/zeron-dark.json")
 	ui.theme.load("ds/themes/zeron-light.json")
-	-- A template's colours (its theme.luau; Zeron's own returns nil), worn
-	-- over those themes through the one mapping (ds/palettes): what each
-	-- scheme wears follows. (Guarded: a plugin, lent the design system,
-	-- has no app of its own to read.)
+	-- The theme chosen for each scheme, else the template's own (its
+	-- theme.luau; the default's returns nil), else Zeron's, worn over those
+	-- themes through the one mapping (ds/palettes), and worn again as the
+	-- choice or the themes change. (Guarded: a plugin, lent the design
+	-- system, has no app of its own to read.)
 	local palettes = require("@self/palettes")
-	local ok, family = pcall(require, "@app/theme")
-	ui.theme.follow_system(palettes.wear(if ok then family else nil))
+	local ok, own = pcall(require, "@app/theme")
+	if ok then
+		ui.effect(function()
+			palettes.wear(palettes.slots(own))
+		end)
+	else
+		palettes.wear(nil)
+	end
+	ui.theme.follow_system(palettes.scheme)
 	-- Corners made from others (a theme's tokens take no arithmetic), made
 	-- again as the theme's change, each its container's corner less its
 	-- edge and how far in it sits (inner = outer − inset, always):

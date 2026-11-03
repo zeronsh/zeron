@@ -199,15 +199,17 @@ local function info(sid: string): Node
 		return d ~= nil and not d.here and d.online == false
 	end
 
-	-- The branch as plugins read it in its row's slot (`panel_branch`:
-	-- { session, device, cwd, branch }): Git puts what the branch adds over
-	-- its base there. Core says nothing of git past the branch's name.
+	-- The branch as plugins read it in its row's slot (`panel_branch`, and
+	-- `panel_details` under the panel's details): the session, by its id
+	-- alone, while it has a branch. The SDK finds its device, branch and
+	-- folder in the plugin's records, as far as its grants reach
+	-- ("sessions.read", "files.read"): a place gives ids, never records.
+	-- Git puts what the branch adds over its base there. Core says nothing
+	-- of git past the branch's name.
 	local branch_info = ui.state(`panel_home_branch.{sid}`, nil :: any)
 	ui.effect(function()
 		local c = chat()
-		local now = if c and branch() ~= ""
-			then { session = sid, device = c.device, cwd = c.cwd, branch = branch() }
-			else nil
+		local now = if c and branch() ~= "" then { session = sid } else nil
 		local was = branch_info:peek()
 		if ui.json.encode(was) ~= ui.json.encode(now) then
 			branch_info:set(now)

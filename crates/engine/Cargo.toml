@@ -46,6 +46,8 @@ gethostname.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 sha2.workspace = true
 reqwest.workspace = true
+# The rules plugins are held to (paths, programs, network), shared with apps/zgx.
+zeron-plugin-guard.workspace = true
 ignore.workspace = true
 fff-search.workspace = true
 

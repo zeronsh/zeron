@@ -54,13 +54,22 @@ fn not_the_app(rel: &str) -> bool {
         || (!rel.contains('/') && rel.ends_with("_fixture.luau"))
 }
 
+/// Compared as a case-insensitive filesystem (macOS's, Windows') names
+/// files (`zeron_plugin_guard::path::fold`): `Screens/Plugins/page.luau`,
+/// `ſcreens/plugins/page.luau` (U+017F folds to s) and
+/// `screens/plugins./page.luau` are Zeron's plugins page there too.
 pub fn never_templated(rel: &str) -> bool {
-    NEVER_TEMPLATED.iter().any(|p| if p.ends_with('/') { rel.starts_with(p) } else { rel == *p })
+    use zeron_plugin_guard::path::fold;
+    let rel = fold(rel);
+    NEVER_TEMPLATED.iter().any(|p| {
+        let p = fold(p);
+        rel == p || rel.starts_with(&format!("{p}/"))
+    })
 }
 
 /// A template's own files that aren't part of its interface (its README
 /// links the authoring guide).
-fn template_meta(rel: &str) -> bool {
+pub fn template_meta(rel: &str) -> bool {
     matches!(rel, "zeron-template.json" | "preview.png" | "README.md")
 }
 
@@ -162,7 +171,7 @@ pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
         &json(serde_json::json!({
             "id": BUILTIN,
             "name": "Zeron",
-            "description": "Zeron's own interface.",
+            "description": "The default interface.",
             "author": "Zeron",
             "version": ZERON_VERSION,
             "zeron_version": ZERON_VERSION,
@@ -172,8 +181,17 @@ pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
 }
 
 /// The active template's id, from `.active` (Zeron's own if none, or if it's
-/// gone or isn't a plain id).
+/// gone or isn't a plain id), and Zeron's own whatever it says in safe mode
+/// (`preview::safe`): no template re-selects itself from there.
 pub fn active(templates: &Path) -> String {
+    if super::preview::safe() {
+        return BUILTIN.to_string();
+    }
+    chosen(templates)
+}
+
+/// What `.active` names, safe mode or not (the Templates page shows it).
+pub fn chosen(templates: &Path) -> String {
     let id = std::fs::read_to_string(templates.join(ACTIVE)).unwrap_or_default();
     let id = id.trim();
     let ok = !id.is_empty()
@@ -201,9 +219,19 @@ pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_fail
     let mut want = files(&templates.join(ZERON), |rel| !template_meta(rel));
     let mut from_template = BTreeSet::new();
     if id != BUILTIN && !whole_failed {
+        // Each file is written under one spelling: a template's `App.luau`
+        // stands in for Zeron's `app.luau` (one file on a case-insensitive
+        // filesystem), never both written, whichever sorts last winning.
+        let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
         for (rel, path) in files(&templates.join(id), |rel| !template_meta(rel)) {
             if never_templated(&rel) || failed.contains(&rel) {
                 continue;
+            }
+            if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&rel), rel.clone())
+                && zeron_s != rel
+            {
+                want.remove(&zeron_s);
+                from_template.remove(&zeron_s);
             }
             from_template.insert(rel.clone());
             want.insert(rel, path);
@@ -395,9 +423,6 @@ pub struct Installed {
     /// Installed from someone's signed package: `.imported.json`'s
     /// `{key, author}` (the engine's `template_packages`).
     pub imported: Option<serde_json::Value>,
-    /// One of Zeron's built-in themes, installed (its manifest's
-    /// `builtin_theme`, the theme's key: `theme_templates`).
-    pub theme: Option<String>,
 }
 
 /// Whether a template made for Zeron `made_for` is out of date in Zeron
@@ -436,7 +461,6 @@ pub fn installed(templates: &Path) -> Vec<Installed> {
             imported: (id != BUILTIN)
                 .then(|| read_json(&dir.join(".imported.json")))
                 .filter(|v| v["key"].is_string()),
-            theme: (id != BUILTIN).then(|| text(super::theme_templates::MARK)).filter(|k| !k.is_empty()),
         })
     };
     let mut out: Vec<Installed> = manifest(&templates.join(ZERON), BUILTIN).into_iter().collect();
@@ -591,6 +615,31 @@ mod tests {
         );
     }
 
+    /// R30: a protected path spelled as a case-insensitive filesystem reads
+    /// it the same (`Screens/`, `ſcreens/` with U+017F, a trailing dot) is
+    /// still Zeron's, and never laid down over Zeron's own.
+    #[test]
+    fn a_protected_path_in_another_spelling_is_still_zeron_s() {
+        for rel in ["Screens/Plugins/page.luau", "\u{17f}creens/plugins/page.luau", "screens/plugins./page.luau", "ACCOUNT/x.luau", ".LUAURC", "screens\\templates\\page.luau"] {
+            assert!(never_templated(rel), "{rel}");
+        }
+        for rel in ["screens/pluginsx/page.luau", "screens/shell/sidebar.luau", "accounts.luau"] {
+            assert!(!never_templated(rel), "{rel}");
+        }
+        let t = setup("folded");
+        write(&t, "t/\u{17f}creens/plugins/page.luau", "-- the template's plugins page");
+        write(&t, "t/App.luau", "-- the template's app");
+        let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        let live = t.join(LIVE);
+        assert_eq!(read(&live, "screens/plugins/page.luau"), "-- zeron plugins page");
+        assert!(!overlay.from_template.iter().any(|r| r.contains("plugins")), "{:?}", overlay.from_template);
+        // One spelling of a file written: the template's, in Zeron's place.
+        assert!(overlay.from_template.contains("App.luau"));
+        let names: Vec<String> = files(&live, |_| true).into_keys().filter(|r| r.eq_ignore_ascii_case("app.luau")).collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert_eq!(read(&live, &names[0]), "-- the template's app");
+    }
+
     #[test]
     fn switching_touches_only_the_files_that_differ() {
         let t = setup("touch");
@@ -640,6 +689,22 @@ mod tests {
         // (who ran it) isn't where it failed.
         assert_eq!(blame("app.luau: runtime error: screens/extra.luau:3: broke later", &t, &overlay).as_deref(), Some("screens/extra.luau"));
         assert_eq!(blame("app.luau: runtime error: ds/tokens.luau:3: oops", &t, &overlay), None);
+    }
+
+    /// R12: safe mode runs Zeron's own whatever `.active` says, so a
+    /// template re-selecting itself (from a timer, a terminal, an agent)
+    /// changes nothing until you pick one on the Templates page.
+    #[test]
+    fn safe_mode_holds_zeron_s_own_whatever_active_says() {
+        let t = setup("safe");
+        set_active(&t, "t").unwrap();
+        super::super::preview::enter_safe_for_test(true);
+        assert_eq!(active(&t), BUILTIN);
+        assert_eq!(chosen(&t), "t", "what was chosen, still shown");
+        set_active(&t, "t").unwrap();
+        assert_eq!(active(&t), BUILTIN, "re-selected from a timer: still Zeron's own");
+        super::super::preview::enter_safe_for_test(false);
+        assert_eq!(active(&t), "t");
     }
 
     #[test]

@@ -44,9 +44,12 @@ pub mod settings;
 pub mod recovery;
 pub mod remote;
 pub mod templates;
-pub mod theme_templates;
+pub mod retired_themes;
+pub mod tokens;
 pub mod looks;
 pub mod template_consent;
+pub mod preview;
+pub mod host_bar;
 pub mod locales;
 pub mod plugin_menus;
 pub mod notes;
@@ -74,6 +77,9 @@ use crate::engine::{
 /// that finds nothing changed is a stat of each file, off the UI thread,
 /// and composes nothing.
 const TEMPLATES_LOOK: Duration = Duration::from_secs(2);
+/// How long the main window runs before its launch counts as one that
+/// didn't crash.
+const LAUNCH_SETTLES: Duration = Duration::from_secs(20);
 /// The messages a plugin's inbox holds before the oldest go.
 const INBOX: usize = 256;
 /// How many of the requests to the app are kept (the app has run every
@@ -127,6 +133,10 @@ impl Item {
     }
     pub fn permissions(&self) -> Vec<String> {
         self.list(&self.json["permissions"])
+    }
+    /// Its "ui.change" targets, as its manifest lists them.
+    pub fn change(&self) -> Vec<String> {
+        self.list(&self.json["ui"]["change"])
     }
     /// Whether it runs, with `permission` among what it was allowed.
     pub fn may(&self, permission: &str) -> bool {
@@ -224,6 +234,12 @@ pub struct Bridge {
     /// meanwhile runs once it's done.
     looking: Cell<bool>,
     look_again: Cell<bool>,
+    /// The app itself switched templates (its Templates page, the host's
+    /// menu): the next switch a look finds is yours, and isn't noticed.
+    chose: Cell<bool>,
+    /// Whether the active template is trusted (preview.rs), as of its id,
+    /// its files' stamp and the approvals file's.
+    trust: RefCell<Option<((String, String, String), bool)>>,
     /// A template's files that failed (`<id>:<rel>`, by the file as it stood),
     /// Zeron's showing in their place until they change.
     failed_files: RefCell<recovery::Failures>,
@@ -273,7 +289,7 @@ pub struct Bridge {
     /// Has the templates folder looked at (and watched) again, as it moves.
     rewatch: RefCell<Option<zgx::task::LatestSender<()>>>,
     tasks: TaskSpawner,
-    watches: RefCell<Vec<Watch>>,
+    watches: RefCell<Vec<crate::engine::rpc::SetUpWatch>>,
     pub(crate) consent: RefCell<Option<consent::Consent>>,
     reviewed: Cell<bool>,
     /// Another device's plugins, shown by Settings → Plugins' switcher
@@ -288,6 +304,14 @@ pub fn expose_surface(host: &ScriptHost) {
     // Adding before or after any element, by any selector, is "ui.add"'s
     // (replacing is "ui.change"'s, an Override of the selector as written).
     host.require_contribution_capability(Capability::Named(grants::UI_ADD.into()));
+    // What a file or a reply's block is, as an element gives it: a token
+    // (`tokens`), never the path or the text.
+    tokens::install(host);
+    // Slots whose place gives what only "files.read" reads (Git's: a
+    // checkout's folder, its remote, commits' authors).
+    for slot in grants::FILES_SLOTS {
+        host.expose_hook(format!("slot:{slot}"), Some(Capability::Named(grants::UI_ADD_FILES.into())));
+    }
     for (key, capability) in grants::SHARED_READ {
         host.expose_shared_read(*key, capability.map(|c| Capability::Named(c.into())));
     }
@@ -308,6 +332,123 @@ pub fn expose_own(host: &ScriptHost, id: &str) {
     for name in grants::OWN_ACTIONS {
         host.expose_action(format!("plugin.{id}.{name}"), Some(own.clone()));
     }
+    // What's behind a token an element gave it, as its records allow.
+    tokens::serve(host, id, &host.shared(&format!("plugin.{id}.records"), Value::Nil));
+}
+
+/// The plugin watches on connection `rpc`. The engine answers them (and
+/// every plugin call) `setup_incomplete` while the account's setup isn't
+/// finished (no organization chosen): then they're asked again once it is
+/// (`auth::set_up`), on the same connection, so plugins load as setup
+/// finishes, with no relaunch. Settings → Plugins says so meanwhile.
+fn connect(b: &Rc<Bridge>, rpc: &Rpc) {
+    // Zeron's own plugins, shipped beside the app's scripts: the engine
+    // scans them with yours (each connection: an engine started again
+    // forgets).
+    let builtin = builtin_dir();
+    if builtin.is_dir() {
+        b.tasks.spawn(async move {
+            let asked = crate::auth::after_setup(|| {
+                let builtin = builtin.clone();
+                async move { call("SetBuiltinPlugins", json!({ "dir": builtin })).await }
+            });
+            if let Err(error) = asked.await {
+                eprintln!("zeron-zgx: Zeron's own plugins weren't loaded: {error}");
+            }
+        });
+    }
+    // Asked again once setup is finished (`Rpc::watch_set_up`), the page
+    // saying so meanwhile (`wait_for_setup`).
+    let wait = |b: &Rc<Bridge>| {
+        let me = Rc::downgrade(b);
+        move |again: crate::engine::rpc::Again| {
+            if let Some(b) = me.upgrade() {
+                b.wait_for_setup(again);
+            }
+        }
+    };
+    let mut watches = Vec::new();
+    let me = Rc::downgrade(b);
+    watches.push(rpc.watch_set_up(
+        "WatchPlugins",
+        json!({}),
+        move |item| {
+            if let Some(b) = me.upgrade() {
+                b.heard(&item);
+            }
+        },
+        wait(b),
+    ));
+    let me = Rc::downgrade(b);
+    watches.push(rpc.watch_set_up(
+        "ServePluginTools",
+        json!({}),
+        move |call| {
+            if let Some(b) = me.upgrade() {
+                b.tool_call(&call);
+            }
+        },
+        wait(b),
+    ));
+    let me = Rc::downgrade(b);
+    watches.push(rpc.watch_set_up(
+        "WatchPluginChannel",
+        json!({}),
+        move |message| {
+            if let Some(b) = me.upgrade() {
+                b.message(&message);
+            }
+        },
+        wait(b),
+    ));
+    *b.watches.borrow_mut() = watches;
+    // Another device's, if Settings → Plugins shows one.
+    remote::load(b);
+}
+
+/// The plugins in `before` gone from `now`: removed, or there again from
+/// somewhere else (another source) under the same id. An update from where
+/// it came keeps what it had.
+fn gone(before: &[Item], now: &[Item]) -> Vec<(String, Item)> {
+    let origin = |i: &Item| (i.json["source"]["kind"].clone(), i.json["source"]["url"].clone(), i.json["source"]["path"].clone());
+    before
+        .iter()
+        .filter(|old| !now.iter().any(|new| new.id() == old.id() && origin(new) == origin(old)))
+        .map(|old| (old.id().to_string(), old.clone()))
+        .collect()
+}
+
+/// The most of a review comment's code that goes with it, as it's sent
+/// (screens/chat/comments `SNIPPET_LINES`, `SNIPPET_BYTES`), and of its note.
+const COMMENT_LINES: usize = 40;
+const COMMENT_BYTES: usize = 4000;
+const COMMENT_NOTE: usize = 4000;
+
+/// A plugin's review comment as it may go on a draft: on the chat shown
+/// (`shown`, its id) alone, never another's kept draft; its code at most
+/// what's sent (40 lines), its note bounded. None: not on the chat shown.
+pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
+    let session = asked.field("session").map(text).filter(|s| !s.is_empty());
+    if shown.is_empty() || session.as_deref().is_some_and(|s| s != shown) {
+        return None;
+    }
+    let mut out = value_json(asked);
+    let cut = |text: &str, bytes: usize| -> String {
+        let mut end = text.len().min(bytes);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text[..end].to_string()
+    };
+    if let Some(snippet) = out["snippet"].as_str() {
+        let lines: Vec<&str> = snippet.split('\n').take(COMMENT_LINES).collect();
+        out["snippet"] = json!(cut(&lines.join("\n"), COMMENT_BYTES));
+    }
+    if let Some(note) = out["note"].as_str() {
+        out["note"] = json!(cut(note, COMMENT_NOTE));
+    }
+    out["session"] = json!(shown);
+    Some(json_value(&out))
 }
 
 /// Plugins for the main window `cx` shows `host` in.
@@ -336,6 +477,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         laid: RefCell::new(LIVE_LAID.with(|l| l.borrow().clone())),
         looking: Cell::new(false),
         look_again: Cell::new(false),
+        chose: Cell::new(false),
+        trust: RefCell::default(),
         failed_files: RefCell::default(),
         broken: RefCell::default(),
         fallbacks: RefCell::default(),
@@ -400,44 +543,12 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let weak = Rc::downgrade(&bridge);
     engine::get().on_connect(move |rpc| {
         let Some(b) = weak.upgrade() else { return };
-        // Zeron's own plugins, shipped beside the app's scripts: the engine
-        // scans them with yours (each connection: an engine started again
-        // forgets).
-        let builtin = builtin_dir();
-        if builtin.is_dir() {
-            b.tasks.spawn(async move {
-                if let Err(error) = call("SetBuiltinPlugins", json!({ "dir": builtin })).await {
-                    eprintln!("zeron-zgx: Zeron's own plugins weren't loaded: {error}");
-                }
-            });
-        }
-        let mut watches = Vec::new();
-        let me = Rc::downgrade(&b);
-        watches.push(rpc.watch("WatchPlugins", json!({}), move |item| {
-            if let Some(b) = me.upgrade() {
-                b.heard(&item);
-            }
-        }));
-        let me = Rc::downgrade(&b);
-        watches.push(rpc.watch("ServePluginTools", json!({}), move |call| {
-            if let Some(b) = me.upgrade() {
-                b.tool_call(&call);
-            }
-        }));
-        let me = Rc::downgrade(&b);
-        watches.push(rpc.watch("WatchPluginChannel", json!({}), move |message| {
-            if let Some(b) = me.upgrade() {
-                b.message(&message);
-            }
-        }));
-        *b.watches.borrow_mut() = watches;
+        connect(&b, rpc);
         // (Each chat's notes watched again on this connection.)
         let way = b.notes.borrow().clone();
         if let Some(way) = way {
             way.reconnect();
         }
-        // Another device's, if Settings → Plugins shows one.
-        remote::load(&b);
     });
 
     // Your templates, looked at as they change: as the kernel says they
@@ -472,6 +583,12 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             let Some(b) = weak.upgrade() else { return };
             b.look();
         }
+    });
+    // The window has run a while with its template: not a launch that
+    // crashed (two of those in a row start safe mode, preview.rs).
+    cx.tasks.spawn(async {
+        zgx::timer::sleep(LAUNCH_SETTLES).await;
+        preview::launch_settled();
     });
     let keep = RefCell::new(Some(bridge));
     cx.on_closed(move || {
@@ -538,16 +655,29 @@ pub fn prepare_live() -> PathBuf {
     let Some(root) = templates_root() else { return fallback };
     // The per-screen templates' copies (Oct 31, development only): gone.
     let _ = std::fs::remove_dir_all(root.join(".loaded"));
+    // Safe mode (preview.rs): as Zeron last closed, ⌥ held now, or a
+    // template that crashed the last two launches. `--zeron-template` is
+    // the same, asked on the command line.
+    preview::read_at_launch();
     if ZERON_TEMPLATE.swap(false, std::sync::atomic::Ordering::Relaxed) {
-        let _ = live::set_active(&root, live::BUILTIN);
+        preview::enter_safe();
+    }
+    {
+        let id = live::active(&root);
+        preview::launch_started(id != live::BUILTIN);
+        preview::set_template_running(id != live::BUILTIN);
+        preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
     }
     if let Err(error) = live::sync_zeron(&crate::ui_dir(), &root) {
         eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
         return fallback;
     }
-    // Zeron's official templates (its built-in themes), kept as this build
-    // has them, never over a template of yours.
-    theme_templates::install_all(&root);
+    // The built-in themes once installed as templates, retired: one in use
+    // gives way to the default template, wearing that theme
+    // (retired_themes.rs).
+    if let Some(data) = crate::engine::data_dir() {
+        retired_themes::retire(&root, &data);
+    }
     let id = live::active(&root);
     match live::compose(&root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
@@ -570,6 +700,29 @@ pub fn prepare_live() -> PathBuf {
 
 /// The host's own menu item's action ("Use Zeron's Template").
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
+/// The host's own "Keep <template>…": the keep sheet for the one in preview.
+pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
+
+/// One of the host's own commands (its menu items and its bar's buttons:
+/// never a script's, `zeron.` being the host's).
+pub fn host_command(id: &str) {
+    match id {
+        USE_ZERON_TEMPLATE => use_zeron_template(),
+        KEEP_TEMPLATE => {
+            if let (Some(p), Some(b)) = (preview::current(), BRIDGE.with(|b| b.borrow().upgrade())) {
+                template_consent::keep(&b, &p.id);
+            }
+        }
+        other => eprintln!("zeron-zgx: no host command {other}"),
+    }
+}
+
+/// `work` on the main window's tasks (the host's bar's timers).
+pub(crate) fn spawn_on_bridge(work: impl std::future::Future<Output = ()> + 'static) {
+    if let Some(b) = BRIDGE.with(|b| b.borrow().upgrade()) {
+        b.tasks.spawn(work);
+    }
+}
 
 static ZERON_TEMPLATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -671,7 +824,7 @@ pub fn builtin_dir() -> PathBuf {
 /// `ZERON_ZGX_DEV_GITHUB` names a JSON file that plays GitHub for them
 /// (`dev_github`).
 pub fn dev_plugins(host: &ScriptHost) {
-    let Some(dirs) = std::env::var_os("ZERON_ZGX_DEV_PLUGINS") else { return };
+    let Some(dirs) = crate::dev::switch("ZERON_ZGX_DEV_PLUGINS") else { return };
     expose_surface(host);
     let mut plugins = Vec::new();
     for dir in std::env::split_paths(&dirs) {
@@ -726,7 +879,7 @@ pub fn dev_plugins(host: &ScriptHost) {
 /// answered by its `op` (`pr`, `diff`, `list`, `repository`, `file_url`),
 /// writes as done, and `records` and `store` published as the bridge would.
 fn dev_github(host: &ScriptHost, id: &str) {
-    let Some(path) = std::env::var_os("ZERON_ZGX_DEV_GITHUB") else { return };
+    let Some(path) = crate::dev::switch("ZERON_ZGX_DEV_GITHUB") else { return };
     let answers: Json = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
         Ok(json) => json,
         Err(error) => {
@@ -774,7 +927,7 @@ fn dev_github(host: &ScriptHost, id: &str) {
 /// by its method's entry (`changes` by its scope), `fail` (method →
 /// "reason: words") refused as the engine refuses, anything else done.
 fn dev_service(host: &ScriptHost, id: &str) {
-    let Some(path) = std::env::var_os("ZERON_ZGX_DEV_SERVICE") else { return };
+    let Some(path) = crate::dev::switch("ZERON_ZGX_DEV_SERVICE") else { return };
     let answers: Json = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
         Ok(json) => json,
         Err(error) => {
@@ -783,7 +936,7 @@ fn dev_service(host: &ScriptHost, id: &str) {
         }
     };
     if let Some(records) = answers.get("records") {
-        host.shared(&format!("plugin.{id}.records"), json_value(records));
+        host.shared(&format!("plugin.{id}.records"), Value::Nil).set(json_value(records));
     }
     let answers = std::rc::Rc::new(answers);
     host.async_action(format!("plugin.{id}.service_call"), move |asked: Value| {
@@ -809,13 +962,21 @@ pub fn set_view(handle: zgx::compose::ViewHandle) {
     }
 }
 
-/// "Use Zeron's Template" (the host's own menu item, which no template can
-/// take away): Zeron's own becomes the active one; the window follows.
+/// "Use Zeron's Template" (the host's own menu item and bar button, which no
+/// template can take away): safe mode (preview.rs), so Zeron's own runs
+/// whatever `.active` says until you pick a template on the Templates page,
+/// and the terminals templates started are closed. The window follows.
 pub fn use_zeron_template() {
+    preview::enter_safe();
     if let Some(root) = templates_root()
         && let Err(error) = live::set_active(&root, live::BUILTIN)
     {
         eprintln!("zeron-zgx: Zeron's template wasn't chosen: {error}");
+    }
+    if let Some(b) = BRIDGE.with(|b| b.borrow().upgrade()) {
+        b.chose.set(true);
+        b.look();
+        b.rewatch();
     }
 }
 
@@ -967,6 +1128,15 @@ impl Bridge {
         if let (Some(p), Some(t)) = (frame["dirs"]["plugins"].as_str(), frame["dirs"]["templates"].as_str()) {
             *self.dirs.borrow_mut() = Some((PathBuf::from(p), PathBuf::from(t)));
         }
+        // The engine's word on the account's signing keys (a key added on
+        // another device, this device's revoked): said by the host, once.
+        for notice in frame["key_notices"].as_array().into_iter().flatten() {
+            if let (Some(id), Some(words)) = (notice["id"].as_str(), notice["words"].as_str())
+                && self.told.borrow_mut().insert(format!("key-notice:{id}"))
+            {
+                host_bar::notice(words.to_owned());
+            }
+        }
         // Each one newly waiting for you: said once.
         for item in &list {
             if matches!(item.status(), "pending" | "tampered") {
@@ -976,7 +1146,14 @@ impl Bridge {
                 }
             }
         }
+        // One removed, or put back from elsewhere under the same id, starts
+        // afresh: nothing it left (its queues, what it set, its saved state)
+        // reaches what's installed now.
+        let gone = gone(&self.items.borrow(), &list);
         *self.items.borrow_mut() = list;
+        for (id, old) in gone {
+            self.forget(&id, &old);
+        }
         self.state.set("ready");
         // (Turned off, or allowed "notes" no more: its notes go.)
         let way = self.notes.borrow().clone();
@@ -985,7 +1162,7 @@ impl Bridge {
         }
         // `ZERON_ZGX_REVIEW=<id>` (development): that plugin's sheet at
         // launch, its window serving devtools (run without --inspect).
-        if let Ok(id) = std::env::var("ZERON_ZGX_REVIEW")
+        if let Some(id) = crate::dev::switch("ZERON_ZGX_REVIEW").and_then(|v| v.into_string().ok())
             && !self.reviewed.replace(true)
         {
             consent::review(&self.me(), &id, None);
@@ -994,6 +1171,48 @@ impl Bridge {
             c.follow(self);
         }
         self.apply();
+    }
+
+    /// Plugin `id` (as `old` was) is gone: what this side keeps of it goes
+    /// too. Its calls and messages waiting, its records, its problems and
+    /// failure, the sidebar's filter if it could set it, and its scripts'
+    /// saved state (`ui.persist`, `<app data>/script-state/plugin:<id>/`).
+    /// (What its VM holds in memory this run goes when zgx forgets a
+    /// script's state, asked of zgx; its storage is the engine's to remove.)
+    fn forget(&self, id: &str, old: &Item) {
+        if let Some(calls) = self.calls.borrow_mut().get_mut(id) {
+            calls.list.clear();
+        }
+        if let Some(inbox) = self.inbox.borrow_mut().get_mut(id) {
+            inbox.list.clear();
+        }
+        let shared: Vec<Shared> = [
+            self.calls.borrow().get(id).and_then(|c| c.shared.clone()),
+            self.inbox.borrow().get(id).and_then(|c| c.shared.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let records = self.records.borrow().get(id).cloned();
+        self.problems.borrow_mut().remove(id);
+        self.costs.borrow_mut().remove(id);
+        self.failed_plugins.borrow_mut().forget(id);
+        self.told.borrow_mut().retain(|t| !t.starts_with(&format!("{id}@")));
+        // (Set with no borrow held: a plugin's effects run at once.)
+        for s in shared {
+            s.set(vlist(Vec::new()));
+        }
+        if let Some(records) = records {
+            records.set(Value::record([("profile", Value::record(Vec::<(&str, Value)>::new()))]));
+        }
+        let changed_sidebar = grants::capabilities(id, &old.permissions(), &old.change(), &[])
+            .contains(&Capability::Named("zeron.sidebar.filter".into()));
+        if changed_sidebar {
+            self.host.shared("sidebar.filter", Value::Nil).set(Value::Nil);
+        }
+        if let Some(dir) = zgx_script::app_data_dir(crate::APP_ID) {
+            let _ = std::fs::remove_dir_all(dir.join("script-state").join(format!("plugin%3A{id}")));
+        }
     }
 
     /// What zgx should load, from the list and your templates: set and
@@ -1063,6 +1282,27 @@ impl Bridge {
     }
 
     /// `blame`, after this turn.
+    /// A plugin watch answered `setup_incomplete`: Settings → Plugins says
+    /// to finish setting up, and once the account is set up (an
+    /// organization chosen) it's watched `again`, and the list follows.
+    fn wait_for_setup(self: &Rc<Self>, again: crate::engine::rpc::Again) {
+        if self.state.get() != "setup" {
+            eprintln!("zeron-zgx: plugins: waiting for the account's setup to be finished");
+            self.state.set("setup");
+            self.publish_page();
+        }
+        let me = Rc::downgrade(self);
+        self.tasks.spawn(async move {
+            crate::auth::set_up().await;
+            let Some(b) = me.upgrade() else { return };
+            if b.state.get() == "setup" {
+                b.state.set("loading");
+                b.publish_page();
+            }
+            again();
+        });
+    }
+
     fn later_blame(&self, error: String) {
         let me = Rc::downgrade(&self.me());
         self.tasks.spawn(async move {
@@ -1217,6 +1457,40 @@ impl Bridge {
             let l = self.laid.borrow();
             l.id != want.id || l.template_stamp != want.template_stamp || l.whole_failed != want.whole_failed || l.failed != want.failed
         };
+        // Whether it runs with Zeron's powers (preview.rs): known before the
+        // window reloads into it, so a preview's first line already runs
+        // gated. Hashed again only when its files or what you kept change.
+        let approvals = preview::approvals_path().map(|p| live::file_stamp(&p)).unwrap_or_default();
+        let trust_key = (id.clone(), want.template_stamp.clone(), approvals);
+        let cached = self.trust.borrow().as_ref().filter(|(k, _)| *k == trust_key).map(|(_, t)| *t);
+        let trusted = match cached {
+            Some(t) => t,
+            None => {
+                let (root, id) = (root.to_path_buf(), id.clone());
+                let t = off_thread(move || preview::trusted(&root, &id)).await.unwrap_or(false);
+                *self.trust.borrow_mut() = Some((trust_key, t));
+                t
+            }
+        };
+        let was = self.laid.borrow().id.clone();
+        let name = template_name(root, &id);
+        preview::set_template_running(id != live::BUILTIN);
+        preview::set((!trusted).then(|| preview::Preview { id: id.clone(), name: name.clone() }));
+        // A switch you didn't make here (an agent's use_template, a file
+        // written by hand): said by the host, whatever the template shows.
+        if was != id && !self.chose.replace(false) {
+            let by = std::fs::read(root.join(".active.by.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Json>(&b).ok())
+                .and_then(|v| v["chat"].as_str().map(|c| format!(" (asked by chat {})", &c[..c.len().min(8)])))
+                .unwrap_or_default();
+            let words = if id == live::BUILTIN {
+                format!("The default interface is back: the template was switched without you choosing it here{by}.")
+            } else {
+                format!("The template changed to {name} without you choosing it here{by}.")
+            };
+            host_bar::notice(words);
+        }
         let laid = {
             let (root, want) = (root.to_path_buf(), want.clone());
             off_thread(move || compose.then(|| live::compose(&root, &want.id, &want.failed, want.whole_failed).map_err(|e| e.to_string())))
@@ -1257,14 +1531,16 @@ impl Bridge {
         let active = self.overlay.borrow().template.clone();
         let mut list = Vec::new();
         let mut status = serde_json::Map::new();
-        let mut installed = live::installed(&root);
-        // Zeron's own first, then its official templates in its order, then
-        // the rest by name (as `installed` has them).
-        installed.sort_by_key(|t| match (&t.theme, t.id == live::BUILTIN) {
-            (_, true) => 0,
-            (Some(key), _) => 1 + theme_templates::order(key),
-            _ => usize::MAX,
-        });
+        let installed = live::installed(&root);
+        // Each template's own theme (its theme.luau, as data), for the Themes
+        // page (src/themes.rs).
+        crate::themes::set_templates(
+            installed
+                .iter()
+                .filter(|t| t.id != live::BUILTIN)
+                .map(|t| crate::themes::TemplateTheme { template: t.id.clone(), name: t.name.clone(), file: self.looks.theme_file(&root, &t.id) })
+                .collect(),
+        );
         for t in installed {
             let broken = self.broken.borrow().why(&t.id).map(String::from);
             let errors: BTreeMap<String, String> = live::files(&root.join(&t.id), |_| true)
@@ -1294,9 +1570,7 @@ impl Bridge {
                 ("author", Value::from(t.author.as_str())),
                 ("version", Value::from(t.version.as_str())),
                 ("zeron_version", Value::from(t.zeron_version.as_str())),
-                // Zeron's own and its official templates (its built-in
-                // themes): Zeron's, kept by each launch.
-                ("builtin", Value::from(t.id == live::BUILTIN || t.theme.is_some())),
+                ("builtin", Value::from(t.id == live::BUILTIN)),
                 ("active", Value::from(t.id == active)),
                 ("status", Value::from(state)),
             ];
@@ -1320,10 +1594,6 @@ impl Bridge {
                     fields.push(("update", json_value(&found)));
                 }
                 fields.push(("imported", json_value(&imported)));
-            }
-            // One of Zeron's built-in themes: which.
-            if let Some(theme) = &t.theme {
-                fields.push(("theme", Value::from(theme.as_str())));
             }
             list.push(Value::record(fields));
         }
@@ -1462,7 +1732,7 @@ impl Bridge {
             .filter(|i| i.status() == "on")
             .filter_map(|i| {
                 let shared = self.records.borrow().get(i.id()).cloned()?;
-                Some((shared, records::records(&i.permissions(), sources)))
+                Some((shared, records::records_with(&i.permissions(), &i.change(), sources)))
             })
             .collect();
         // (Set with no borrow held: a plugin's effects run at once.)
@@ -1664,7 +1934,8 @@ impl Bridge {
         let inbox_key = format!("plugin.{id}.inbox");
         expose_own(host, id);
         {
-            let shared = host.shared(&format!("plugin.{id}.records"), Value::record([("profile", Value::record(Vec::<(&str, Value)>::new()))]));
+            let shared = host.shared(&format!("plugin.{id}.records"), Value::Nil);
+            shared.set(Value::record([("profile", Value::record(Vec::<(&str, Value)>::new()))]));
             self.records.borrow_mut().insert(id.to_string(), shared);
         }
         {
@@ -1975,13 +2246,18 @@ impl Bridge {
         // the files pane's: screens/plugins hands it to the composer), for
         // a plugin allowed "compose". What it left that's still carried
         // comes back to it as `plugin.<id>.composed`.
+        // Only on the chat shown, its code held to what's sent (`comment`).
         host.action(format!("plugin.{id}.compose_comment"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |asked| {
                 if let Some(b) = me.upgrade()
                     && b.item(&plugin).is_some_and(|i| i.may("compose"))
                 {
-                    b.request("compose_comment", &plugin, asked);
+                    let shown = text(&b.host.shared("zeron.page_session", Value::Nil).signal().with_untracked(Value::clone));
+                    match comment(&asked, &shown) {
+                        Some(asked) => b.request("compose_comment", &plugin, asked),
+                        None => eprintln!("zeron-zgx: plugin {plugin}: a comment for a chat not shown, refused"),
+                    }
                 }
             }
         });
@@ -2393,8 +2669,12 @@ impl Bridge {
         });
     }
 
-    /// The window as it shows, cut to around `placements`' regions (the whole
-    /// window when none shows), saved for the agent to look at.
+    /// The window as it shows, cut to around `placements`' regions, saved
+    /// for the agent to look at; none when none of its nodes shows (never
+    /// the whole window: what else the window shows isn't the plugin's to
+    /// hand an agent). The regions are the plugin's own account of where
+    /// its nodes are, until zgx measures a plugin's nodes for the host
+    /// (asked of zgx): each is held inside the window, and so is the cut.
     fn picture(&self, plugin: &str, placements: &Json) -> Result<Json, String> {
         let ui = self.ui.upgrade().ok_or("The window is closed")?;
         let root = ui.root();
@@ -2405,8 +2685,8 @@ impl Bridge {
         }
         let scale = image.width() as f32 / bounds.width;
         let found = surfaces::regions(placements);
-        let whole = surfaces::Region { x: 0., y: 0., w: bounds.width, h: bounds.height };
-        let region = surfaces::around(&found, 24., bounds.width, bounds.height).unwrap_or(whole);
+        let region = surfaces::around(&found, 24., bounds.width, bounds.height)
+            .ok_or("None of its nodes shows now, so there's nothing of it to picture")?;
         let (w, h, pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
         let dir = engine::data_dir().ok_or("Zeron's data folder isn't known")?.join("plugins").join(".snapshots");
         let path = dir.join(format!("{plugin}.png"));
@@ -2414,7 +2694,7 @@ impl Bridge {
         Ok(json!({
             "snapshot": path.display().to_string(),
             "snapshot_region": { "x": region.x, "y": region.y, "w": region.w, "h": region.h },
-            "snapshot_note": if found.is_empty() { "None of its nodes shows: this is the whole window." } else { "The window around where its nodes show." },
+            "snapshot_note": "The window around where its nodes show.",
         }))
     }
 
@@ -2505,7 +2785,7 @@ impl Bridge {
             let me = me.clone();
             move |arg| {
                 let me = me.clone();
-                async move {
+                async move { crate::plugins::preview::refuse("plugins.remove")?;
                     let (id, device) = remote::id_and_device(&arg);
                     let elsewhere = device.is_some();
                     call_on(&me, device, "RemovePlugin", json!({ "id": id })).await?;
@@ -2526,6 +2806,9 @@ impl Bridge {
         host.action("plugins.setting_set", {
             let me = me.clone();
             move |asked| {
+                if crate::plugins::preview::refuse("plugins.setting_set").is_err() {
+                    return;
+                }
                 if let Some(b) = me.upgrade()
                     && let Err(why) = b.setting_set(&value_json(&asked))
                 {
@@ -2560,7 +2843,7 @@ impl Bridge {
             let me = me.clone();
             move |arg| {
                 let me = me.clone();
-                async move {
+                async move { crate::plugins::preview::refuse("plugins.install")?;
                     let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                     let device = remote::device_of(&arg);
                     let params = match (given("path"), given("url")) {
@@ -2581,7 +2864,7 @@ impl Bridge {
             let me = me.clone();
             move |arg| {
                 let me = me.clone();
-                async move {
+                async move { crate::plugins::preview::refuse("plugins.update")?;
                     let (id, device) = remote::id_and_device(&arg);
                     let reply = call_on(&me, device, "UpdatePlugin", json!({ "id": id })).await?;
                     Ok(json_value(&reply))
@@ -2600,7 +2883,7 @@ impl Bridge {
                 }
             }
         });
-        host.async_action("plugins.new", |name| async move {
+        host.async_action("plugins.new", |name| async move { crate::plugins::preview::refuse("plugins.new")?;
             let name = text(&name).trim().to_string();
             let id = slug(&name);
             if id.len() < 2 {
@@ -2645,8 +2928,15 @@ impl Bridge {
             move |id| {
                 let me = me.clone();
                 async move {
-                    call("UseTemplate", json!({ "id": text(&id) })).await?;
+                    // (A preview can't switch templates: preview.rs.)
+                    preview::refuse("templates.use")?;
+                    template_call("UseTemplate", json!({ "id": text(&id) })).await?;
+                    // Chosen here, on Zeron's own Templates page (never a
+                    // template's: screens/templates is never templated):
+                    // out of safe mode, and no notice of the switch.
+                    preview::leave_safe();
                     if let Some(b) = me.upgrade() {
+                        b.chose.set(true);
                         b.look();
                         b.rewatch();
                     }
@@ -2660,11 +2950,12 @@ impl Bridge {
             move |name| {
                 let me = me.clone();
                 async move {
+                    preview::refuse("templates.create")?;
                     let b = me.upgrade().ok_or("closed")?;
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let name = text(&name).trim().chars().take(60).collect::<String>();
                     let new_id = live::new_id(&root, &name);
-                    call("CreateTemplate", json!({ "id": new_id, "name": name, "from": live::BUILTIN })).await?;
+                    template_call("CreateTemplate", json!({ "id": new_id, "name": name, "from": live::BUILTIN })).await?;
                     b.look();
                     b.rewatch();
                     Ok(Value::from(new_id.as_str()))
@@ -2676,11 +2967,12 @@ impl Bridge {
             move |id| {
                 let me = me.clone();
                 async move {
+                    preview::refuse("templates.duplicate")?;
                     let b = me.upgrade().ok_or("closed")?;
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let from = text(&id);
                     let (new_id, name) = live::copy_name(&root, &from);
-                    call("CreateTemplate", json!({ "id": new_id, "name": name, "from": from })).await?;
+                    template_call("CreateTemplate", json!({ "id": new_id, "name": name, "from": from })).await?;
                     b.look();
                     b.rewatch();
                     Ok(Value::from(new_id.as_str()))
@@ -2692,7 +2984,12 @@ impl Bridge {
             move |id| {
                 let me = me.clone();
                 async move {
-                    call("DeleteTemplate", json!({ "id": text(&id) })).await?;
+                    preview::refuse("templates.delete")?;
+                    template_call("DeleteTemplate", json!({ "id": text(&id) })).await?;
+                    // One made later under its id isn't one you kept.
+                    if let Some(path) = preview::approvals_path() {
+                        preview::forget_at(&path, &text(&id));
+                    }
                     if let Some(b) = me.upgrade() {
                         b.look();
                         b.rewatch();
@@ -2706,13 +3003,14 @@ impl Bridge {
         // you in its own consent window (template_consent), which alone can
         // allow it.
         host.async_action("templates.export", |arg| async move {
+            preview::refuse("templates.export")?;
             let id = arg.field("id").map(text).unwrap_or_default();
             let mut path = arg.field("path").map(text).unwrap_or_default();
             // (A save dialog's name, its extension taken off.)
             if !path.is_empty() && !path.ends_with(".zeron-template") {
                 path.push_str(".zeron-template");
             }
-            call("ExportTemplate", json!({ "id": id, "path": path })).await.map(|v| json_value(&v))
+            template_call("ExportTemplate", json!({ "id": id, "path": path })).await.map(|v| json_value(&v))
         });
         host.async_action("templates.import", {
             let me = me.clone();
@@ -2720,13 +3018,14 @@ impl Bridge {
             move |arg| {
                 let me = me.clone();
                 async move {
+                    preview::refuse("templates.import")?;
                     let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                     let params = match (given("path").or_else(|| Some(text(&arg)).filter(|s| !s.is_empty())), given("url")) {
                         (Some(path), None) => json!({ "path": path }),
                         (None, Some(url)) => json!({ "url": url }),
                         _ => return Err("Choose a template file or paste a link".into()),
                     };
-                    let reply = call("ImportTemplate", params).await?;
+                    let reply = template_call("ImportTemplate", params).await?;
                     if let Some(b) = me.upgrade() {
                         if let Some(name) = reply["pending"].as_str() {
                             // Shown now: no "waiting" toast for it as well.
@@ -2747,7 +3046,7 @@ impl Bridge {
             move |_| {
                 let me = me.clone();
                 async move {
-                    let reply = call("CheckTemplateUpdates", json!({})).await?;
+                    let reply = template_call("CheckTemplateUpdates", json!({})).await?;
                     if let Some(b) = me.upgrade() {
                         b.look();
                     }
@@ -2760,8 +3059,15 @@ impl Bridge {
             move |id| {
                 let me = me.clone();
                 async move {
-                    let reply = call("UpdateTemplate", json!({ "id": text(&id) })).await?;
+                    preview::refuse("templates.update")?;
+                    let reply = template_call("UpdateTemplate", json!({ "id": text(&id) })).await?;
                     if let Some(b) = me.upgrade() {
+                        // A new version with new code waits for you, as an
+                        // import does: in Zeron's own consent window.
+                        if let Some(name) = reply["pending"].as_str() {
+                            b.told.borrow_mut().insert(format!("template:{name}"));
+                            template_consent::review(&b, name);
+                        }
                         b.look();
                     }
                     Ok(json_value(&reply))
@@ -2863,6 +3169,13 @@ pub fn slug(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
+/// A template call: asked again once the account's setup is finished if
+/// the engine answered `setup_incomplete` (no organization chosen yet), so
+/// the templates page works as soon as setup does.
+async fn template_call(method: &str, params: Json) -> Result<Json, String> {
+    crate::auth::after_setup(|| call(method, params.clone())).await
+}
+
 async fn call(method: &str, params: Json) -> Result<Json, String> {
     engine::get().call(method, params).await.map_err(|e| {
         // The engine's own words where it gave some; "offline" as the app says it.
@@ -2928,6 +3241,37 @@ mod tests {
         Item { json }
     }
 
+    /// R26: a plugin removed, or back under its id from somewhere else,
+    /// starts afresh; one updated from where it came keeps what it had.
+    #[test]
+    fn a_plugin_removed_or_put_back_from_elsewhere_is_forgotten() {
+        let at = |id: &str, url: &str| item(json!({ "id": id, "source": { "kind": "git", "url": url } }));
+        let before = vec![at("focus", "https://a/focus"), at("clock", "https://a/clock"), at("ping", "https://a/ping")];
+        let now = vec![at("focus", "https://a/focus"), at("ping", "https://evil/ping")];
+        let gone: Vec<String> = gone(&before, &now).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(gone, vec!["clock".to_string(), "ping".to_string()]);
+    }
+
+    /// R21: a plugin's review comment goes on the chat shown alone, with
+    /// at most the 40 lines of code that are sent (a 20,000-character
+    /// snippet once rode along unseen, onto any chat's draft).
+    #[test]
+    fn a_review_comment_goes_on_the_chat_shown_with_at_most_40_lines() {
+        let snippet: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        let asked = json_value(&json!({ "file": "a.rs", "line": 1, "note": "x".repeat(9000), "snippet": snippet }));
+        let shown = comment(&asked, "s1").expect("on the chat shown");
+        let kept = text(shown.field("snippet").unwrap());
+        assert_eq!(kept.lines().count(), 40, "{kept}");
+        assert!(kept.ends_with("line 40"));
+        assert_eq!(text(shown.field("note").unwrap()).len(), COMMENT_NOTE);
+        assert_eq!(text(shown.field("session").unwrap()), "s1");
+        let elsewhere = json_value(&json!({ "file": "a.rs", "line": 1, "note": "n", "session": "s2" }));
+        assert!(comment(&elsewhere, "s1").is_none(), "another chat's draft");
+        assert!(comment(&asked, "").is_none(), "no chat shown");
+        let wide = json_value(&json!({ "file": "a.rs", "line": 1, "note": "n", "snippet": "é".repeat(3000) }));
+        assert!(text(comment(&wide, "s1").unwrap().field("snippet").unwrap()).len() <= COMMENT_BYTES);
+    }
+
     #[test]
     fn only_a_plugin_on_loads_from_its_snapshot_with_its_grants() {
         let on = item(json!({
@@ -2983,5 +3327,29 @@ mod menu_tests {
         assert!(menus.contains("View"), "{menus}");
         assert!(menus.contains("Use Zeron's Template"), "{menus}");
         assert!(menus.contains(super::USE_ZERON_TEMPLATE), "{menus}");
+    }
+
+    fn command(id: &str, title: &str, menu: &str) -> zgx_script::Command {
+        zgx_script::Command { id: id.into(), title: title.into(), menu: menu.into(), key: None, separator: false }
+    }
+
+    /// R12: a template that registers the host's own action (or any
+    /// `zeron.` id) can't take the menu bar away: the platform refuses a
+    /// whole bar with an action twice, so the host leaves the script's out,
+    /// and the bar it sets is one the platform takes, with one way back.
+    #[test]
+    fn a_template_registering_use_zeron_template_keeps_the_menu_bar() {
+        let commands = vec![
+            command(super::USE_ZERON_TEMPLATE, "Stay Here", "View"),
+            command(super::KEEP_TEMPLATE, "Keep Me", "View"),
+            command("zeron.anything", "Mine", "File"),
+            command("new-chat", "New Chat", "File"),
+        ];
+        let bar = crate::menus(&commands);
+        let shown = format!("{bar:?}");
+        assert!(zgx_desktop::app_menu_bar(bar, |_| {}).is_ok(), "the platform takes the bar: {shown}");
+        assert_eq!(shown.matches(super::USE_ZERON_TEMPLATE).count(), 1, "{shown}");
+        assert!(shown.contains("Use Zeron's Template") && !shown.contains("Stay Here") && !shown.contains("Keep Me"), "{shown}");
+        assert!(!shown.contains("zeron.anything") && shown.contains("New Chat"), "{shown}");
     }
 }

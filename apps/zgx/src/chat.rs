@@ -165,6 +165,11 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments)),
             ("waiting", Value::from(self.waiting)),
+            // (This device's own copy: its pictures are the files it was
+            // sent from, here, which the chat's device never had. The
+            // chat's copy, once it comes, is marked `waiting` too until
+            // its reply begins, so that can't tell them apart.)
+            ("here", Value::Bool(true)),
             ("at", self.at.as_deref().map_or(Value::Nil, Value::from)),
             ("copy", copy_value(&words)),
         ])
@@ -308,6 +313,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         // (Queued while a turn runs: the queued row's id, which the composer's
         // own row, shown at once, is reconciled with.)
         async move {
+            crate::plugins::preview::refuse("chat.send")?;
             v.send(req)
                 .await
                 .map(|queued| queued.map_or(Value::Nil, |id| Value::from(id.as_str())))
@@ -327,7 +333,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
-        async move { v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.respond")?; v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A question's Back: its page before again, with what was picked there.
     let back = which.clone();
@@ -343,18 +349,28 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let v = view.clone();
     host.async_action("chat.queue", move |args| {
         let v = v.clone();
+        // (Refused while a template runs as a preview: before the row's
+        // shown, so nothing's left behind in the transcript.)
+        let refused = crate::plugins::preview::refuse("chat.queue");
         // A row steered or sent joins the transcript now, as the call is
         // made, not once the engine has answered (a chat on another device
         // answers a round trip later).
-        let shown = v.queue_shown(&args);
-        async move { v.queue_op(args, shown).await.map(|_| Value::Nil).map_err(String::from) }
+        let shown = if refused.is_ok() { v.queue_shown(&args) } else { None };
+        async move {
+            refused?;
+            v.queue_op(args, shown).await.map(|_| Value::Nil).map_err(String::from)
+        }
     });
     // Every queued row steered as one message (the queue tray's Steer all).
     let v = view.clone();
     host.async_action("chat.steer_all", move |args| {
         let v = v.clone();
-        let shown = v.steer_all_shown(&args);
-        async move { v.steer_all(args, shown).await.map(|_| Value::Nil).map_err(String::from) }
+        let refused = crate::plugins::preview::refuse("chat.steer_all");
+        let shown = if refused.is_ok() { v.steer_all_shown(&args) } else { None };
+        async move {
+            refused?;
+            v.steer_all(args, shown).await.map(|_| Value::Nil).map_err(String::from)
+        }
     });
     let v = view.clone();
     host.async_action("chat.retry", move |args| {

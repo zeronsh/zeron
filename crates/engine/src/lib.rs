@@ -299,6 +299,25 @@ impl EngineCore {
         doc_host.set_sessions(sessions.clone());
         let plugins = plugins::Plugins::new(data_dir, &device_id);
         plugins.set_workspace(workspace.clone());
+        // A service's `zeron.folders()`: where this device's chats and
+        // projects are (the built-in Git service works in these alone).
+        {
+            let (workspace, device_id) = (workspace.clone(), device_id.clone());
+            plugins.set_folders(move || {
+                let chats = workspace.read_chats().unwrap_or_default();
+                let spaces = workspace.read_spaces().unwrap_or_default();
+                let mut folders: Vec<String> = chats
+                    .into_iter()
+                    .filter(|c| c.device_id == device_id)
+                    .filter_map(|c| c.cwd)
+                    .chain(spaces.into_iter().filter(|s| s.device_id == device_id).map(|s| s.path))
+                    .filter(|f| !f.is_empty())
+                    .collect();
+                folders.sort();
+                folders.dedup();
+                folders
+            });
+        }
         // A plugin service's `zeron.notify`: as `PostNotification` posts.
         let viewport_focus = desktop_notify::ViewportFocus::default();
         {
@@ -1130,6 +1149,15 @@ impl Engine {
             link_config.liveness = Some(Arc::new(move |device_id: &str| {
                 workspace_for_liveness.peer_liveness(device_id)
             }));
+            // Prove which device dials (its registered plugin key), so the
+            // peer's edge stamps it and the peer knows who's asking
+            // (`Caller::Peer{device}`); without a key, dials go unstamped.
+            let (proof_dir, proof_device) = (config.data_dir.clone(), core.device_id.clone());
+            link_config.caller_proof = Some(Arc::new(move |target: &str, conn_id: &str, ts: i64| {
+                let (key, signature) =
+                    plugins::signing::device_link_proof(&proof_dir, target, conn_id, ts)?;
+                Some(zeron_rpc::CallerProof { device: proof_device.clone(), key, signature })
+            }));
             let links = zeron_rpc::LinkCache::new(link_config);
             let links_for_presence = links.clone();
             core.workspace
@@ -1214,7 +1242,7 @@ impl Engine {
         runtime
             .core()
             .sessions
-            .set_ipc_token_file(zeron_rpc::ipc_auth::token_path(&config.data_dir));
+            .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -1298,8 +1326,10 @@ async fn shutdown_signal() -> std::io::Result<()> {
 /// port, not who can reach it.
 ///
 /// Every call mints a fresh bearer at `{data_dir}/ipc-token` (0600) that each
-/// handshake must present ([`zeron_rpc::ipc_auth`]); viewports, the CLI and
-/// `zeron mcp` read it at dial time. The caller owns `data_dir` (it holds the
+/// handshake must present ([`zeron_rpc::ipc_auth`]); viewports and the CLI
+/// read it at dial time. Agents' `zeron mcp` servers get the agent-scoped
+/// one (`{data_dir}/ipc-token-agent`), which reaches only their tools'
+/// methods ([`zeron_rpc::agent_allowed`]). The caller owns `data_dir` (it holds the
 /// [`InstanceLock`]), so rotating the file before binding cannot strand
 /// another engine's clients — and a client that sees the port open always
 /// finds the new token already published.
@@ -1308,11 +1338,11 @@ pub async fn serve_ipc(
     data_dir: &Path,
     service: std::sync::Arc<dyn zeron_rpc::RpcService>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-    let token = zeron_rpc::ipc_auth::issue_token(data_dir)?;
+    let tokens = zeron_rpc::ipc_auth::issue_tokens(data_dir)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(zeron_rpc::serve_ws_listener(
-        listener, service, token,
+    Ok(tokio::spawn(zeron_rpc::serve_ws_listener_scoped(
+        listener, service, tokens,
     )))
 }
 

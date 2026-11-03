@@ -15,6 +15,14 @@ use zgx_script::Capability;
 /// before or after an element asks it.
 pub const UI_ADD: &str = "zeron.ui.add";
 
+/// Adding into a slot whose place gives what only "files.read" reads:
+/// a plugin allowed both "ui.add" and "files.read".
+pub const UI_ADD_FILES: &str = "zeron.ui.add.files";
+
+/// Those slots: Git's, whose places give a checkout's folder, its remote
+/// and its commits' authors (`git_branch`, `git_commit`).
+pub const FILES_SLOTS: &[&str] = &["git.branch", "git.commit", "git.commit.face", "git.commit.head"];
+
 /// What the app shows plugins to read and follow, and the capability each
 /// needs (none: every plugin). The app writes them (screens/plugins);
 /// plugins can't.
@@ -62,7 +70,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const NEVER_REPLACED: &[&str] = &["@app/screens/plugins", "@app/screens/shell/settings"];
 
 /// Each plugin's own actions (`plugin.<id>.<name>`).
-pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "menu_run", "compose_comment", "notes_watch", "notes_set"];
+pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "menu_run", "compose_comment", "file", "block", "notes_watch", "notes_set"];
 /// Each plugin's own shared state, to read (`plugin.<id>.<name>`).
 pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed", "notes"];
 
@@ -89,6 +97,97 @@ pub fn replaceable(module: &str) -> bool {
             .any(|never| module == *never || module.starts_with(&format!("{never}/")))
 }
 
+/// May a plugin allowed "ui.change" be given `target`? Only an element's
+/// selector, as zgx reads one: zgx's `Override` also lets `ui.override`
+/// swap an `@app/…` module (running the plugin as the app), so a target
+/// naming a module, or everything (`*`), is never given; nor Zeron's
+/// plugin placeholders (`.plugin-…`: a plugin's tabs, pages and the
+/// Unverified badge, each plugin's own through "panel.tabs" and
+/// "pages.add" alone). The engine refuses such a manifest too
+/// (`change_target_problem`); this holds whatever it lists.
+pub fn change_target(target: &str) -> bool {
+    let trimmed = target.trim();
+    if trimmed.is_empty()
+        || target.len() > 200
+        || target.chars().any(char::is_control)
+        // Outside quoted names: a module (`@app/…`), a node's number
+        // (`@n`), everything (`*`), a row or nth match.
+        || unquoted(target).any(|c| matches!(c, '@' | '*' | '[' | ']' | '~'))
+        || zgx_script::driver::parse(target).is_err()
+    {
+        return false;
+    }
+    !classes(target).any(|class| class.starts_with("plugin-"))
+        && last_id(target).is_none_or(|id| !UNTIL_ZGX_KEEPS_PRIVATE.contains(&id))
+}
+
+/// Temporary, emptied the day zgx keeps private controls over an
+/// ancestor's replacement (its R8 (c), asked for 0.1.10): the composer and
+/// the chat are meant to be changeable. The elements holding a control
+/// you decide with (an agent's tool approval, Settings, sign-in in it):
+/// replacing or filtering one would take the control with it. zgx keeps a `private` control out of every
+/// target's reach, but not yet out of an ancestor's replacement (asked of
+/// zgx: private controls kept over it and drawn above plugin layers), so
+/// until then these aren't given to "ui.change". Everything else stays
+/// open, these elements' insides included (adding, and changing their
+/// other parts).
+pub const UNTIL_ZGX_KEEPS_PRIVATE: &[&str] = &[
+    "shell",
+    "shell-chats",
+    "shell-page",
+    "shell-settings",
+    "settings",
+    "settings-nav",
+    "settings-page",
+    "chat-home",
+    "chat-session",
+    "chat-composer-dock",
+    "chat-composer",
+];
+
+/// The id a target's last part names (`#id`, or a bare word), if any.
+fn last_id(target: &str) -> Option<&str> {
+    let last = target.rsplit(">>").next()?.trim();
+    if let Some(rest) = last.strip_prefix('#') {
+        return rest.split(|c: char| c.is_whitespace() || c == '[').next();
+    }
+    let word = last.split(|c: char| c.is_whitespace() || c == '[').next()?;
+    let bare = !word.is_empty() && !word.starts_with(['.', '"']) && !word.starts_with("hook:") && !word.starts_with("role:");
+    bare.then_some(word)
+}
+
+/// `target`'s characters outside its quoted names.
+fn unquoted(target: &str) -> impl Iterator<Item = char> + '_ {
+    let mut quoted = false;
+    target.chars().filter(move |c| {
+        if *c == '"' {
+            quoted = !quoted;
+            return false;
+        }
+        !quoted
+    })
+}
+
+/// The class names a target asks for (`.name`), as zgx reads them.
+fn classes(target: &str) -> impl Iterator<Item = &str> {
+    let mut quoted = false;
+    let mut starts = Vec::new();
+    for (at, c) in target.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => starts.push(at + 1),
+            _ => {}
+        }
+    }
+    starts.into_iter().map(move |start| {
+        let rest = &target[start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '[' || c == '.')
+            .unwrap_or(rest.len());
+        &rest[..end]
+    })
+}
+
 /// What a plugin asking `permissions` (all allowed), with these `change`
 /// targets and `replace` modules, may do.
 pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace: &[String]) -> Vec<Capability> {
@@ -96,14 +195,19 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
     let named = |name: &str| Capability::Named(name.into());
     for permission in permissions {
         match permission.as_str() {
-            "ui.add" => out.push(named(UI_ADD)),
+            "ui.add" => {
+                out.push(named(UI_ADD));
+                if permissions.iter().any(|p| p == "files.read") {
+                    out.push(named(UI_ADD_FILES));
+                }
+            }
             "ui.change" => {
                 out.extend(
                     change
                         .iter()
                         // A raw target may not reach what's private: zgx
                         // keeps `hook = false` out of every target's reach.
-                        .filter(|t| !t.is_empty() && t.as_str() != "*")
+                        .filter(|t| change_target(t))
                         .map(|t| Capability::Override(t.clone())),
                 );
                 if change.iter().any(|t| SIDEBAR.contains(&t.as_str())) {
@@ -235,6 +339,49 @@ mod tests {
         assert!(!SHARED_READ.iter().any(|(k, _)| k.contains("notes")));
     }
 
+    /// R1 and R8: "ui.change" grants selectors of elements alone, never a
+    /// module (`@app/…`, a zgx module override), everything, or another
+    /// plugin's placeholders.
+    #[test]
+    fn change_grants_elements_never_modules_or_placeholders() {
+        let got = capabilities(
+            "x",
+            &s(&["ui.change"]),
+            &s(&[
+                "@app/screens/plugins/state",
+                " @app/screens/chat",
+                "@app/ds/button",
+                "*",
+                "",
+                "@3",
+                ".row[2]",
+                ".plugin-tab.plugin-github",
+                ".plugin-page",
+                "#panel >> .plugin-unverified",
+                // (Holding what you decide with: refused only until zgx keeps
+                // private controls over a replaced ancestor, R8 (c).)
+                "#chat-composer",
+                "#shell >> #settings-page",
+                "shell",
+                "#chat-session[0]",
+                "#composer-toolbar",
+                "hook:sidebar.sessions",
+                "\"Send @ once\"",
+            ]),
+            &[],
+        );
+        assert_eq!(
+            got,
+            vec![
+                own("x"),
+                Capability::Override("#composer-toolbar".into()),
+                Capability::Override("hook:sidebar.sessions".into()),
+                Capability::Override("\"Send @ once\"".into()),
+                Capability::Named("zeron.sidebar.filter".into()),
+            ]
+        );
+    }
+
     #[test]
     fn listed_targets_without_the_permission_give_nothing() {
         let got = capabilities("x", &[], &s(&["#titlebar-actions"]), &s(&["@app/screens/chat"]));
@@ -279,7 +426,7 @@ mod tests {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
-                for word in ["DecidePlugin", "SignPlugin", "plugins.decide", "plugins.sign", "DecideTemplate", "templates.decide"] {
+                for word in ["DecidePlugin", "SignPlugin", "ReviewPlugin", "ReviewTemplate", "plugins.decide", "plugins.sign", "DecideTemplate", "templates.decide"] {
                     if text.contains(word) {
                         found.push(format!("{word} in {}", path.display()));
                     }

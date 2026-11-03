@@ -74,7 +74,6 @@ zeron.place {
 | The window | `#shell` | `profile`, `appearance`, `route` (everywhere) |
 | Sidebar | `#sidebar`, `.session-row`, `.session-title`, `.section-header`, `#sidebar-actions`, `#rail` | `sessions`; a row its `session`; a header its `project` |
 | Title bar | `#titlebar`, `#titlebar-actions` | |
-| Settings | `#settings-nav`, `.settings-nav-row`, `#settings-page` | |
 | Chat | `#chat-home`, `#chat-session`, `#session-header`, `#transcript`, `.message`, `.message-actions`, `#chat-composer`, `#composer-toolbar` | the session page its `session`; a message its `message` |
 | Files | `#files-pane`, `#file-tree`, `#files-header`, `.file-row`, `.file-tab`, `#file-viewer` | a row, tab or the viewer its `file` |
 | Side panel | `#panel`, `#panel-strip`, `.panel-tab`, `#panel-empty` | a tab its `panel` |

@@ -35,7 +35,7 @@ test("on another device, a sent picture is read from there once and opens from t
 	expect(#reads(app)).to_be(2)
 end)
 
-test("a picture sent from here to another device shows from its file on the way, then from the chat's copy once it lands", function()
+test("a picture sent from here to another device shows from its file on the way, then from the chat's copy once it lands, before its reply begins too", function()
 	local app = chat(true)
 	app:set_state("test_sent_reads", "")
 	app:set_state("test_sent_pending", "sending")
@@ -49,7 +49,21 @@ test("a picture sent from here to another device shows from its file on the way,
 	expect(open.items[open.index].src).to_be("assets/composer/shell.png")
 	app:key("Escape")
 	app:frames(60)
-	-- Landed: the same bubble, its picture now the upload, read from there.
+	-- Arrived, its reply not begun (the chat's copy, still waiting): the
+	-- same bubble, its picture now the upload, read from there, not looked
+	-- for here.
+	app:set_state("test_sent_pending", "working")
+	app:frames(20)
+	expect(app:error()).to_be_nil()
+	expect(table.concat(reads(app), ",")).to_be("/host/uploads/paste.png")
+	app:click('"Open paste.png"')
+	app:frames(60)
+	open = app:state("ds/lightbox.luau::open")
+	expect(open).never.to_be_nil()
+	expect(open.items[open.index].src).to_be("assets/composer/shell.png")
+	app:key("Escape")
+	app:frames(60)
+	-- Its reply begun: the same picture, not read again.
 	app:set_state("test_sent_pending", "landed")
 	app:frames(20)
 	expect(app:error()).to_be_nil()

@@ -52,6 +52,7 @@
 
 local ds = require("@ds")
 local control = require("@ds/control")
+local token = require("@ds/token")
 local motion = require("@ds/motion")
 local Icon = require("@ds/icon")
 local FileIcon = require("@ds/file_icons")
@@ -801,14 +802,13 @@ M.Panel = ui.component(function(props: Props): Node
 				id = `panel-tab-{id}`,
 				ref = ref,
 				-- (What plugins place by, and what's under them: the tab, and a
-				-- file tab's file by its path.)
+				-- file tab's file, as a token.)
 				class = if tab.kind == "files" then "panel-tab file-tab" else "panel-tab",
 				provide = if tab.kind == "files"
 					then {
 						panel = id,
 						file = ui.computed(function(): string?
-							local path = Files.tab_file(id)
-							return path or tab.path
+							return token.file(Files.tab_file(id) or tab.path)
 						end),
 					}
 					else { panel = id },

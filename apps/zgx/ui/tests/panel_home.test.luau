@@ -14,6 +14,21 @@ local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
 	return ok()
 end
 
+-- Whether the dialog titled `title` has closed: gone, or kept but hidden.
+-- ds.Dialog keeps its modal open through its exit (130 ms), and an open
+-- modal takes every click over the window, so a click straight after Save
+-- waits for it, as a person's would. (Not a zgx bug: a modal closed at once
+-- stops taking clicks at once. `app:wait(t, { gone = true })` can't tell,
+-- as a closed modal's kept content still matches; the tree marks it hidden.)
+local function closed(app: any, title: string): boolean
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(`dialog "{title}"`, 1, true) then
+			return line:find(" hidden", 1, true) ~= nil
+		end
+	end
+	return true
+end
+
 -- The kinds of chat `id`'s panel tabs, in order ("terminal,files").
 local function kinds(app: any, id: string): string
 	local s = ((app:state("panel_sessions") :: any) or {})[`chat:{id}`]
@@ -244,6 +259,9 @@ test("Add action asks for a name and a command, then adds it; an import comes fi
 	end)).to_be(true)
 	expect(calls(app)).to_contain("save:p1:new:Lint:cargo clippy:lint:true")
 	expect(app:has('#panel-home-actions >> "Lint (setup)"')).to_be(true)
+	expect(eventually(app, function(): boolean
+		return closed(app, "Add action")
+	end)).to_be(true)
 	-- An import from zeron.json: the editor, filled in from it.
 	app:click('role:button "Import Tests"')
 	expect(app:wait('role:dialog >> "Add action"', { timeout_ms = 15000 })).to_be(true)
@@ -282,6 +300,9 @@ test("an action's gear edits it; Delete asks first, then it's gone", function()
 		return app:has('role:button "Run Dev server 2"')
 	end)).to_be(true)
 	expect(calls(app)).to_contain("save:p1:a1:Dev server 2:npm run dev:play:false")
+	expect(eventually(app, function(): boolean
+		return closed(app, "Edit action")
+	end)).to_be(true)
 	app:hover('role:button "Run Dev server 2"')
 	app:frames(5)
 	app:click('role:button "Edit Dev server 2"')

@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { handleAuthRoute } from "../../src/auth-routes";
+import { MAX_INVITES_PER_REQUEST, handleAuthRoute } from "../../src/auth-routes";
 import type { Env } from "../../src/env";
 import { INVITES_PER_HOUR, type UserDirectory } from "../../src/user-directory";
 
@@ -122,23 +122,24 @@ describe("POST /auth/orgs/{id}/invitations", () => {
       { emails: [] },
       { emails: ["  ", ""] },
       { emails: ["a@example.net", 3] },
-      { emails: addresses(21) }
+      { emails: addresses(MAX_INVITES_PER_REQUEST + 1) }
     ]) {
       expect(await invite(userId, orgId, body)).toEqual({ status: 400, body: { error: "invalid" } });
     }
-    // 21 addresses that dedupe to 20 are fine.
-    const twenty = addresses(20);
-    expect((await invite(userId, orgId, { emails: [...twenty, twenty[0]!.toUpperCase()] })).status).toBe(200);
+    // One too many that dedupe to the most are fine.
+    const most = addresses(MAX_INVITES_PER_REQUEST);
+    expect((await invite(userId, orgId, { emails: [...most, most[0]!.toUpperCase()] })).status).toBe(200);
   });
 
   it(`limits a user to ${INVITES_PER_HOUR} addresses an hour, across their orgs`, async () => {
     const { userId, orgId } = await admin();
     const second = newId("org");
     await workosControl("__memberships", { user_id: userId, organization_id: second, role: "admin" });
-    expect((await invite(userId, orgId, { emails: addresses(20) })).status).toBe(200);
-    expect((await invite(userId, second, { emails: addresses(20) })).status).toBe(200);
-    expect((await invite(userId, orgId, { emails: addresses(11) })).status).toBe(429);
+    // 20 = 10 + 5 + 5.
     expect((await invite(userId, orgId, { emails: addresses(10) })).status).toBe(200);
+    expect((await invite(userId, second, { emails: addresses(5) })).status).toBe(200);
+    expect((await invite(userId, orgId, { emails: addresses(6) })).status).toBe(429);
+    expect((await invite(userId, orgId, { emails: addresses(5) })).status).toBe(200);
     expect(await invite(userId, orgId, { emails: addresses(1) })).toEqual({ status: 429, body: { error: "rate_limited" } });
     expect((await invitations(orgId)).length + (await invitations(second)).length).toBe(INVITES_PER_HOUR);
 

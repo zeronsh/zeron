@@ -53,6 +53,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod agent_gate;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -2358,8 +2359,10 @@ fn forwardable(method: &str) -> bool {
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
             // Plugins are per device (what it runs, what it allowed): Settings
-            // → Plugins' device switcher reviews, allows, installs and removes
-            // them on another of your devices from this one.
+            // → Plugins' device switcher lists, declines, turns off, installs
+            // (from a link; it lands waiting there) and removes them on
+            // another of your devices from this one. Allowing stays with
+            // that device's own window (`zeron_rpc::peer_refused`, both ends).
             | methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
             | methods::DECIDE_PLUGIN
@@ -2393,12 +2396,32 @@ fn is_stream_method(method: &str) -> bool {
 }
 
 /// A watch receiver as a stream: current value first, then every change.
-/// The chat a call acts for. This engine serves agents and the app alike
-/// (no agent-scoped token yet), so it is the `chatId` the caller names.
+/// The chat a call acts for: the `chatId` the caller names. An agent (the
+/// agent-scoped token, [`zeron_rpc::Caller::Agent`]) acts for its own chat
+/// alone, the one its MCP server names: naming another, or none when its
+/// server has one, is refused.
 fn acting_chat(params_chat: Option<String>) -> Result<String, RpcError> {
-    params_chat
-        .filter(|c| !c.trim().is_empty())
-        .ok_or_else(|| RpcError::BadParams("chatId is required".into()))
+    let named = params_chat.filter(|c| !c.trim().is_empty());
+    match agent_chat()? {
+        Some(own) if named.as_deref().is_some_and(|n| n != own) => {
+            Err(RpcError::Failed("an agent asks and waits for its own chat alone".into()))
+        }
+        Some(own) => Ok(own),
+        None => named.ok_or_else(|| RpcError::BadParams("chatId is required".into())),
+    }
+}
+
+/// The calling agent's own chat (`Some`), or `None` for any other caller
+/// (the app, acting for the person). An agent whose MCP server names no
+/// chat acts for none: refused.
+fn agent_chat() -> Result<Option<String>, RpcError> {
+    match zeron_rpc::caller() {
+        zeron_rpc::Caller::Agent { chat: Some(chat) } if !chat.trim().is_empty() => Ok(Some(chat)),
+        zeron_rpc::Caller::Agent { .. } => {
+            Err(RpcError::Failed("questions are for an agent Zeron launched in a chat".into()))
+        }
+        _ => Ok(None),
+    }
 }
 
 impl EngineRpc {
@@ -2478,10 +2501,15 @@ impl EngineRpc {
             .as_ref()
             .ok_or_else(|| RpcError::Failed("questions aren't available on this engine".into()))?;
         // Who may withdraw or release a question: the chat a caller names
-        // (Zeron's MCP server names its own), held to it. This engine has no
-        // per-chat agent token, so the name is trusted as given; a caller
-        // naming none is the app, acting for the person.
-        let owner = |named: Option<String>| named;
+        // (Zeron's MCP server names its own), held to it. An agent is held to
+        // its own chat (`acting_chat`), never none, which is the app acting
+        // for the person.
+        let owner = |named: Option<String>| -> Result<Option<String>, RpcError> {
+            match agent_chat()? {
+                Some(_) => acting_chat(named).map(Some),
+                None => Ok(named),
+            }
+        };
         let question = match method {
             methods::ASK_QUESTION => {
                 let p: Ask = parse_params(params)?;
@@ -2500,12 +2528,12 @@ impl EngineRpc {
             }
             methods::CANCEL_QUESTION => {
                 let p: One = parse_params(params)?;
-                let caller = owner(p.chat_id);
+                let caller = owner(p.chat_id)?;
                 waits.cancel(&p.question_id, caller.as_deref()).map_err(failed)?
             }
             methods::RELEASE_QUESTION => {
                 let p: One = parse_params(params)?;
-                let caller = owner(p.chat_id);
+                let caller = owner(p.chat_id)?;
                 waits.release(&p.question_id, caller.as_deref(), p.deliver).map_err(failed)?
             }
             methods::NOTIFY_TURN_END => {
@@ -2679,6 +2707,8 @@ impl AuthRpc {
                 | methods::COMPLETE_SIGN_IN
                 | methods::SIGN_OUT
                 | methods::ACCESS_TOKEN
+                | methods::STEP_UP
+                | methods::DELETE_ACCOUNT
                 | methods::LIST_ORGS
                 | methods::CREATE_ORG
                 | methods::SELECT_ORG
@@ -2714,6 +2744,41 @@ impl RpcService for AuthRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "token": token, "expiresAt": expires_at }))
+            }
+            // Local IPC, the app's token only (agents and the relay are
+            // refused before here): a fresh interactive sign-in whose ticket
+            // stays in the engine, then the deletion it allows (R16).
+            methods::STEP_UP => {
+                let url = self
+                    .auth
+                    .start_step_up()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "url": url }))
+            }
+            methods::DELETE_ACCOUNT => {
+                #[derive(Deserialize)]
+                struct P {
+                    confirm: String,
+                }
+                let p: P = parse_params(params)?;
+                // Answered, not failed: `{ok: true}`, or `{ok: false, error:
+                // <code>, message, organization?}` with a stable code
+                // ([`crate::auth::DeleteAccountError::code`]).
+                match self.auth.delete_account(&p.confirm).await {
+                    Ok(()) => RpcReply::value(&serde_json::json!({ "ok": true })),
+                    Err(error) => {
+                        let mut reply = serde_json::json!({
+                            "ok": false,
+                            "error": error.code(),
+                            "message": error.to_string(),
+                        });
+                        if let crate::auth::DeleteAccountError::Refused { organization: Some(org), .. } = &error {
+                            reply["organization"] = serde_json::json!(org);
+                        }
+                        RpcReply::value(&reply)
+                    }
+                }
             }
             methods::SIGN_IN_HEADLESS => {
                 let url = self.auth.start_headless_sign_in();
@@ -2802,6 +2867,9 @@ impl crate::remote_terminals::Relay for EngineRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        // An agent's chats: capped at its own access, runs as the chat is
+        // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
+        let params = self.agent_gate(method, params)?;
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -2815,6 +2883,13 @@ impl RpcService for EngineRpc {
                 return Err(RpcError::BadParams(
                     "Another device installs a plugin from a link (url), not a file on this one".into(),
                 ));
+            }
+            // Allowing a plugin is that device's person's, in its own window
+            // (the receiving side refuses it too: `zeron_rpc::peer_refused`).
+            if zeron_rpc::peer_refused(method, &params) {
+                return Err(RpcError::Failed(format!(
+                    "{method}: only that device's own window can do that. It's waiting for you there."
+                )));
             }
             // Settings → Providers' Cloud: its logins live in the vault.
             if crate::cloud_accounts::is_cloud_accounts_target(&target)
@@ -2873,6 +2948,14 @@ impl RpcService for EngineRpc {
         }
         if voice_remote::handles(method) {
             return self.voice_remote(method, params).await;
+        }
+        // Signing out retires this device's plugin signing key first, while
+        // the session can still revoke it on the edge.
+        if method == methods::SIGN_OUT
+            && self.auth().is_ok_and(|auth| !auth.is_runner())
+            && let Some(plugins) = self.plugins.clone()
+        {
+            Box::pin(plugins.retire_signing_key()).await;
         }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())

@@ -227,6 +227,16 @@ export const createWorkOsFake = () => {
       org.name = body.name as string;
       return reply(200, { object: "organization", ...org });
     }
+    if (request.method === "POST" && url.pathname === "/user_management/authenticate") {
+      // A code is `code:<userId>` for a seeded user; a refresh token is
+      // `rt:<userId>`. The access token is the user id (the edge's dev mode).
+      const grant = body.grant_type as string;
+      const raw = String(grant === "authorization_code" ? body.code : body.refresh_token);
+      const prefix = grant === "authorization_code" ? "code:" : "rt:";
+      const user = raw.startsWith(prefix) ? users.find((u) => u.id === raw.slice(prefix.length)) : undefined;
+      if (!user) return reply(400, { error: "invalid_grant", error_description: "Invalid code." });
+      return reply(200, { user: { object: "user", ...user }, access_token: user.id, refresh_token: `rt:${user.id}` });
+    }
     if (request.method === "POST" && url.pathname === "/organizations") {
       const org = { id: `org_fake${++next}`, name: body.name as string };
       orgs.push(org);

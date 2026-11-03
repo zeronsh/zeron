@@ -446,6 +446,43 @@ impl AccessMode {
     }
 }
 
+impl SandboxLevel {
+    /// Every level, least to most trusting.
+    pub const ALL: [SandboxLevel; 3] = [
+        SandboxLevel::ReadOnly,
+        SandboxLevel::WorkspaceWrite,
+        SandboxLevel::DangerFullAccess,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SandboxLevel::ReadOnly => "read-only",
+            SandboxLevel::WorkspaceWrite => "workspace-write",
+            SandboxLevel::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+/// What an agent-made chat may run with: `sandbox` and `access` no more
+/// trusting than its creator's (`ceiling`), and whether either was lowered.
+/// A chat created through Zeron's MCP never gets more access than the chat
+/// that created it.
+pub fn cap_access(
+    (sandbox, access): (SandboxLevel, AccessMode),
+    (max_sandbox, max_access): (SandboxLevel, AccessMode),
+) -> (SandboxLevel, AccessMode, bool) {
+    fn rank<T: PartialEq>(all: &[T], x: &T) -> usize {
+        all.iter().position(|y| y == x).unwrap_or(0)
+    }
+    let sandbox_over = rank(&SandboxLevel::ALL, &sandbox) > rank(&SandboxLevel::ALL, &max_sandbox);
+    let access_over = rank(&AccessMode::ALL, &access) > rank(&AccessMode::ALL, &max_access);
+    (
+        if sandbox_over { max_sandbox } else { sandbox },
+        if access_over { max_access } else { access },
+        sandbox_over || access_over,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {

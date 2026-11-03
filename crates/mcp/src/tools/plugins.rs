@@ -194,7 +194,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: INSTALL_PLUGIN,
-            description: "Install someone's Zeron plugin from a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first: an unsigned or changed plugin is refused. One signed by the person's own key turns on at once. Anyone else's waits for the person to allow it in Zeron's window, which shows who signed it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same key signed both.",
+            description: "Install someone's Zeron plugin from a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first: an unsigned or changed plugin is refused. Whatever you install waits for the person to allow it in Zeron's window, which shows who signed it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same key signed both.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -207,12 +207,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: UPDATE_PLUGIN,
-            description: "Update a plugin installed from someone else to the newest version at the source it came from (its file, link, release or repository). With check: true, only say whether there's one: its version and what it changes in what the plugin asks (`added`, `removed`); without an id, check every installed plugin. An update signed by someone else, or changed after it was signed, is refused. One asking for a new permission is installed but waits for the person to allow it in Zeron's window (`waiting`); you can't allow it for them.",
+            description: "Check whether a plugin installed from someone else has a newer version at the source it came from (its file, link, release or repository): its version and what it changes in what the plugin asks (`added`, `removed`); without an id, check every installed plugin. Installing an update is the person's, in Zeron (Settings → Plugins): you can't update it for them, so tell them what you found.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "The plugin's id, from list_plugins. Optional with check: true." },
-                    "check": { "type": "boolean", "description": "Only check; install nothing." }
+                    "id": { "type": "string", "description": "The plugin's id, from list_plugins; without one, every installed plugin." },
+                    "check": { "type": "boolean", "description": "Kept for older callers: this tool only ever checks." }
                 }
             }),
         },
@@ -241,7 +241,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: USE_TEMPLATE,
-            description: "Run Zeron's window with a template: it switches live while Zeron is open. `zeron` is Zeron's own interface. Only templates installed on this device can be used.",
+            description: "Run Zeron's window with a template: it switches live while Zeron is open. `zeron` is Zeron's own interface. Only templates installed on this device can be used. Unless the person has kept this template in Zeron, it runs as a preview (`preview`): Zeron shows them a bar to Keep or Revert it, and holds back what only a kept template may do until they keep it. You can't keep it for them; ask them to look.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -279,19 +279,18 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: EXPORT_TEMPLATE,
-            description: "Share a template: save it as one signed .zeron-template file, signed with this device's key (the person's Zeron account vouches for it, as for their plugins). It holds the template's own files and its preview; the files no template may replace (screens/plugins, screens/templates, account/, .luaurc) are left out. Zeron's own can't be exported. Returns the file's path, how many files it holds and the key that signed it.",
+            description: "Share a template: save it as one signed .zeron-template file, signed with this device's key (the person's Zeron account vouches for it, as for their plugins). It holds the template's own files and its preview; the files no template may replace (screens/plugins, screens/templates, account/, .luaurc) are left out. Zeron's own can't be exported. It's saved in Zeron's exports folder (an earlier export of it there is replaced). Returns the file's path, how many files it holds and the key that signed it.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "A template's id, from list_templates." },
-                    "path": { "type": "string", "description": "Where to save it: a full path ending in .zeron-template, outside Zeron's templates folder. An earlier export there is replaced." }
+                    "id": { "type": "string", "description": "A template's id, from list_templates." }
                 },
-                "required": ["id", "path"]
+                "required": ["id"]
             }),
         },
         ToolDef {
             name: IMPORT_TEMPLATE,
-            description: "Install a template from a .zeron-template file (`path`) or a link (`url`: to a .zeron-template file, or a GitHub repository or release with one; a template from a link is checked there for updates). Zeron checks its signature over every file first: an unsigned or changed package is refused. One signed on this device installs at once. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they must allow it in Zeron's window (Templates shows it waiting, with who signed it); you can't allow it for them. The reply says which: `installed` (its id), or `pending` with `needs_consent`. Files no template may replace are never installed (`ignored` names them). list_templates shows it once installed.",
+            description: "Install a template from a .zeron-template file (`path`) or a link (`url`: to a .zeron-template file, or a GitHub repository or release with one; a template from a link is checked there for updates). Zeron checks its signature over every file first: an unsigned or changed package is refused. One signed on this device installs at once (using it still runs as a preview until the person keeps it). Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they must allow it in Zeron's window (Templates shows it waiting, with who signed it); you can't allow it for them. The reply says which: `installed` (its id), or `pending` with `needs_consent`. Files no template may replace are never installed (`ignored` names them). list_templates shows it once installed.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -500,7 +499,13 @@ impl Tools {
                 params["from"] = json!(from);
             }
         }
-        self.zeron.call_rpc(method, params).await.map_err(plain)
+        let mut reply = self.zeron.call_rpc(method, params).await.map_err(plain)?;
+        if method == methods::USE_TEMPLATE && reply["preview"] == json!(true) {
+            reply["next"] = json!(
+                "Unless the person has kept this template, Zeron runs it as a preview with a bar to Keep or Revert it. Ask them to look; you can't keep it for them."
+            );
+        }
+        Ok(reply)
     }
 
     /// `export_template` and `import_template`: the engine's
@@ -508,16 +513,15 @@ impl Tools {
     /// person's, in Zeron's own window: no tool answers for them.
     pub(super) async fn template_packages(&self, tool: &str, args: Value) -> Result<Value, String> {
         let args: PackageArgs = parse(args)?;
-        let path = args.path.filter(|p| !p.trim().is_empty());
         let (method, params) = if tool == EXPORT_TEMPLATE {
             let Some(id) = args.id.filter(|id| !id.trim().is_empty()) else {
                 return Err("Say which template: `id`, from list_templates.".into());
             };
-            let Some(path) = path else {
-                return Err("Say where to save it: `path`, a full path ending in .zeron-template.".into());
-            };
-            (methods::EXPORT_TEMPLATE, json!({ "id": id, "path": path }))
+            // Always to Zeron's exports folder (the reply says where): a
+            // path of an agent's choosing is the person's, and refused.
+            (methods::EXPORT_TEMPLATE, json!({ "id": id }))
         } else {
+            let path = args.path.filter(|p| !p.trim().is_empty());
             match (path, args.url.filter(|u| !u.trim().is_empty())) {
                 (Some(path), None) => (methods::IMPORT_TEMPLATE, json!({ "path": path })),
                 (None, Some(url)) => (methods::IMPORT_TEMPLATE, json!({ "url": url })),
@@ -602,8 +606,8 @@ impl Tools {
         Ok(installed(reply))
     }
 
-    /// `update_plugin`: `CheckPluginUpdates`, then (unless only checking)
-    /// `UpdatePlugin`.
+    /// `update_plugin`: `CheckPluginUpdates` only. Installing an update is
+    /// the person's (`UpdatePlugin` is closed to agents).
     pub(super) async fn update_plugin(&self, args: Value) -> Result<Value, String> {
         #[derive(Deserialize)]
         struct Args {
@@ -612,19 +616,21 @@ impl Tools {
             check: bool,
         }
         let args: Args = parse(args)?;
+        let _ = args.check;
         let id = args.id.filter(|id| !id.trim().is_empty());
-        if args.check {
-            return self
-                .zeron
-                .call_rpc(methods::CHECK_PLUGIN_UPDATES, json!({ "id": id }))
-                .await
-                .map_err(plain);
+        // Checking only: installing an update is the person's, in Zeron's
+        // window (an agent's token can't update a plugin).
+        let mut reply = self
+            .zeron
+            .call_rpc(methods::CHECK_PLUGIN_UPDATES, json!({ "id": id }))
+            .await
+            .map_err(plain)?;
+        if reply["updates"].as_array().is_some_and(|u| !u.is_empty()) {
+            reply["next"] = json!(
+                "To install an update, the person updates the plugin in Zeron (Settings → Plugins); you can't update it for them. Tell them what you found."
+            );
         }
-        let Some(id) = id else {
-            return Err("Say which plugin: `id`, from list_plugins (or check: true to look at them all).".into());
-        };
-        let reply = self.zeron.call_rpc(methods::UPDATE_PLUGIN, json!({ "id": id })).await.map_err(plain)?;
-        Ok(installed(reply))
+        Ok(reply)
     }
 
     /// The engine's `DescribeElements`, as the window wrote it.
@@ -771,7 +777,7 @@ mod tests {
                             "There's no template nope. list_templates names them.".into(),
                         ));
                     }
-                    _ => RpcReply::Value(json!({ "active": params["id"] })),
+                    _ => RpcReply::Value(json!({ "active": params["id"], "preview": params["id"] != "zeron" })),
                 },
                 methods::TEMPLATE_STATUS => RpcReply::Value(json!({
                     "id": params["id"], "active": false, "file_errors": { "ds/tokens.luau": "boom" },
@@ -869,13 +875,13 @@ mod tests {
             json!({ "id": "midnight", "name": "Midnight" })
         );
 
-        assert_eq!(
-            tools
-                .call(USE_TEMPLATE, json!({ "id": "midnight" }))
-                .await
-                .unwrap(),
-            json!({ "active": "midnight" })
-        );
+        // R7: an agent's switch is a preview until the person keeps it.
+        let used = tools
+            .call(USE_TEMPLATE, json!({ "id": "midnight" }))
+            .await
+            .unwrap();
+        assert_eq!((used["active"].as_str(), used["preview"].as_bool()), (Some("midnight"), Some(true)));
+        assert!(used["next"].as_str().unwrap().contains("can't keep it for them"));
         assert_eq!(
             last_call(&engine),
             (
@@ -926,17 +932,12 @@ mod tests {
         let tools = tools_for(engine.clone(), None);
 
         let exported = tools
-            .call(EXPORT_TEMPLATE, json!({ "id": "midnight", "path": "/x/midnight.zeron-template" }))
+            .call(EXPORT_TEMPLATE, json!({ "id": "midnight", "path": "/Users/x/.ssh/x.zeron-template" }))
             .await
             .unwrap();
         assert_eq!(exported["files"], 12);
-        assert_eq!(
-            last_call(&engine),
-            (
-                methods::EXPORT_TEMPLATE.to_owned(),
-                json!({ "id": "midnight", "path": "/x/midnight.zeron-template" })
-            )
-        );
+        // R29: an agent never names where it goes (Zeron's exports folder).
+        assert_eq!(last_call(&engine), (methods::EXPORT_TEMPLATE.to_owned(), json!({ "id": "midnight" })));
 
         // Yours: installed.
         let mine = tools
@@ -968,7 +969,6 @@ mod tests {
         // What's missing never reaches the engine.
         let before = engine.calls.lock().unwrap().len();
         assert!(tools.call(EXPORT_TEMPLATE, json!({ "path": "/x/a.zeron-template" })).await.unwrap_err().contains("`id`"));
-        assert!(tools.call(EXPORT_TEMPLATE, json!({ "id": "midnight" })).await.unwrap_err().contains("`path`"));
         assert!(tools.call(IMPORT_TEMPLATE, json!({ "path": " " })).await.unwrap_err().contains("`path`"));
         assert_eq!(engine.calls.lock().unwrap().len(), before);
 
@@ -976,7 +976,7 @@ mod tests {
         let catalog = super::super::catalog();
         assert!(catalog.iter().all(|d| !d.name.contains("decide") && !d.name.contains("allow")));
         let export = catalog.iter().find(|d| d.name == EXPORT_TEMPLATE).unwrap();
-        assert!(export.input_schema["required"].as_array().unwrap().contains(&json!("path")));
+        assert!(export.input_schema["properties"].get("path").is_none());
         // Importing takes a file or a link.
         let import = catalog.iter().find(|d| d.name == IMPORT_TEMPLATE).unwrap();
         for field in ["path", "url"] {
@@ -1223,11 +1223,16 @@ mod tests {
         let checked = tools.call(UPDATE_PLUGIN, json!({ "check": true })).await.unwrap();
         assert_eq!(checked["updates"][0]["added"], json!(["github"]));
         assert_eq!(last_call(&engine), (methods::CHECK_PLUGIN_UPDATES.to_owned(), json!({ "id": null })));
+        // R6: updating is the person's. The tool only checks, and says so.
         let updated = tools.call(UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
-        assert_eq!((updated["from"].as_str(), updated["version"].as_str()), (Some("1.0.0"), Some("2.0.0")));
-        assert!(updated.get("next").is_none());
-        assert_eq!(last_call(&engine), (methods::UPDATE_PLUGIN.to_owned(), json!({ "id": "focus" })));
-        assert!(tools.call(UPDATE_PLUGIN, json!({})).await.unwrap_err().contains("`id`"));
+        assert_eq!(updated["updates"][0]["version"], "2.0.0");
+        assert!(updated["next"].as_str().unwrap().contains("can't update it for them"));
+        assert_eq!(last_call(&engine), (methods::CHECK_PLUGIN_UPDATES.to_owned(), json!({ "id": "focus" })));
+        tools.call(UPDATE_PLUGIN, json!({})).await.unwrap();
+        assert!(
+            engine.calls.lock().unwrap().iter().all(|(method, _)| method != methods::UPDATE_PLUGIN),
+            "the tool never installs an update"
+        );
     }
 
     #[tokio::test]

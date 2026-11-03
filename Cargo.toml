@@ -12,6 +12,7 @@ members = [
     "crates/audio",
     "crates/proto",
     "crates/preview",
+    "crates/preview-label",
     "crates/doc",
     "crates/sync",
     "crates/harness",
@@ -32,11 +33,12 @@ members = [
     "crates/visual",
     "crates/visual-gpu",
     "crates/zatex",
+    "crates/plugin-guard",
     "apps/zeron",
 ]
 
 [workspace.package]
-version = "0.2.134"
+version = "0.2.136"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -51,6 +53,7 @@ zeron-voice-media = { path = "crates/voice-media" }
 zeron-audio = { path = "crates/audio" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
+zeron-preview-label = { path = "crates/preview-label" }
 zeron-doc = { path = "crates/doc" }
 zeron-sync = { path = "crates/sync" }
 zeron-harness = { path = "crates/harness" }
@@ -71,6 +74,7 @@ zeron-text = { path = "crates/text" }
 zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
+zeron-plugin-guard = { path = "crates/plugin-guard" }
 
 # CRDT
 loro = "1.17"

@@ -245,6 +245,64 @@ struct Auth {
     /// The engine's `AuthStatus`, on the current connection.
     watch: RefCell<Option<Watch>>,
     started: Cell<bool>,
+    /// What waits for the account to work in an organization (`set_up`).
+    set_up_waiters: RefCell<Vec<zgx::task::LatestSender<()>>>,
+}
+
+/// What the engine answers a call that needs the workspace while the
+/// account's setup isn't finished (signed in, no organization chosen: the
+/// engine's deferred.rs `SETUP_INCOMPLETE`).
+pub const SETUP_INCOMPLETE: &str = "setup_incomplete";
+
+/// Whether an engine error is "the account's setup isn't finished".
+pub fn setup_incomplete(error: &str) -> bool {
+    error.contains(SETUP_INCOMPLETE)
+}
+
+/// Whether the account works in an organization now (`AuthStatus` with an
+/// org): the engine answers workspace calls.
+pub fn is_set_up() -> bool {
+    AUTH.with(|a| matches!(&*a.session.borrow(), Session::SignedIn { org: Some(_), .. }))
+}
+
+/// Once the account works in an organization: at once if it does.
+pub async fn set_up() {
+    if is_set_up() {
+        return;
+    }
+    let (tell, mut heard) = zgx::task::latest::<()>();
+    AUTH.with(|a| a.set_up_waiters.borrow_mut().push(tell));
+    heard.recv().await;
+}
+
+/// `call` (an engine call), again once the account is set up if it answered
+/// `setup_incomplete`: what's asked while setup is still being finished
+/// (the templates page, a consent window) arrives once it is.
+pub async fn after_setup<T, F, Fut>(call: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    retry_after(call, set_up).await
+}
+
+/// How many times a call waits for setup before its answer is taken as is.
+const SETUP_RETRIES: usize = 3;
+
+async fn retry_after<T, F, Fut, W, WFut>(mut call: F, mut wait: W) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+    W: FnMut() -> WFut,
+    WFut: std::future::Future<Output = ()>,
+{
+    for _ in 0..SETUP_RETRIES {
+        match call().await {
+            Err(error) if setup_incomplete(&error) => wait().await,
+            other => return other,
+        }
+    }
+    call().await
 }
 
 thread_local! {
@@ -269,14 +327,14 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("account.sign_in", move |kind| {
         let a = a.clone();
         let create = text(&kind) == "create";
-        async move { a.sign_in(create).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.sign_in")?; a.sign_in(create).await.map_err(String::from) }
     });
     let a = auth.clone();
     host.action("account.cancel", move |_| a.cancel());
     let a = auth.clone();
     host.async_action("account.sign_out", move |_| {
         let a = a.clone();
-        async move {
+        async move { crate::plugins::preview::refuse("account.sign_out")?;
             a.sign_out().await;
             Ok(Value::Nil)
         }
@@ -284,42 +342,42 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let a = auth.clone();
     host.async_action("account.username", move |_| {
         let a = a.clone();
-        async move { a.username().await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.username")?; a.username().await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.check_username", move |name| {
         let a = a.clone();
-        async move { a.check_username(text(&name)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.check_username")?; a.check_username(text(&name)).await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.claim_username", move |name| {
         let a = a.clone();
-        async move { a.claim_username(text(&name)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.claim_username")?; a.claim_username(text(&name)).await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.card", move |name| {
         let a = a.clone();
-        async move { a.card(text(&name)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.card")?; a.card(text(&name)).await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.orgs", move |_| {
         let a = a.clone();
-        async move { a.orgs().await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.orgs")?; a.orgs().await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.create_org", move |name| {
         let a = a.clone();
-        async move { a.create_org(text(&name)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.create_org")?; a.create_org(text(&name)).await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.choose_org", move |id| {
         let a = a.clone();
-        async move { a.choose_org(text(&id)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.choose_org")?; a.choose_org(text(&id)).await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.onboarding", move |_| {
         let a = a.clone();
-        async move { a.onboarding().await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.onboarding")?; a.onboarding().await.map_err(String::from) }
     });
     let a = auth.clone();
     host.async_action("account.onboarded", move |ids| {
@@ -328,7 +386,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Value::List(list) => list.iter().map(text).collect(),
             _ => Vec::new(),
         };
-        async move { a.onboarded(ids).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.onboarded")?; a.onboarded(ids).await.map_err(String::from) }
     });
     let a = auth;
     host.async_action("account.invite", move |args| {
@@ -338,7 +396,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Some(Value::List(list)) => list.iter().map(text).collect(),
             _ => Vec::new(),
         };
-        async move { a.invite(id, emails).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("account.invite")?; a.invite(id, emails).await.map_err(String::from) }
     });
 }
 
@@ -397,6 +455,7 @@ impl Auth {
             signed_out_here: Cell::new(false),
             watch: RefCell::default(),
             started: Cell::new(false),
+            set_up_waiters: RefCell::default(),
         }
     }
 
@@ -467,7 +526,15 @@ impl Auth {
             self.access.borrow_mut().take();
         }
         let now_signed_in = matches!(session, Session::SignedIn { .. });
+        let now_set_up = matches!(session, Session::SignedIn { org: Some(_), .. });
         *self.session.borrow_mut() = session;
+        // Setup finished (an organization chosen): what waited for it asks
+        // again (`after_setup`).
+        if now_set_up {
+            for waiter in std::mem::take(&mut *self.set_up_waiters.borrow_mut()) {
+                waiter.send(());
+            }
+        }
         if now_signed_in {
             self.failure.set(None);
         } else if was_signed_in && self.failure.get().is_none() && !self.signed_out_here.get() {
@@ -938,7 +1005,7 @@ pub fn open_sign_in(url: &str) -> std::io::Result<()> {
 /// Set to a file's path, the page goes in that file (owner-only), for a
 /// test rig's own browser to open.
 pub fn no_browser(url: &str) -> bool {
-    let Some(setting) = std::env::var_os("ZERON_ZGX_NO_BROWSER") else {
+    let Some(setting) = crate::dev::smoke_switch("ZERON_ZGX_NO_BROWSER") else {
         return false;
     };
     let host = url.split("://").nth(1).and_then(|rest| rest.split(['/', '?']).next()).unwrap_or("");
@@ -1056,6 +1123,81 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A future run to its end on this thread (its waker unparks it).
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        struct Unpark(std::thread::Thread);
+        impl std::task::Wake for Unpark {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(v) = future.as_mut().poll(&mut cx) {
+                return v;
+            }
+            std::thread::park_timeout(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// While the account's setup isn't finished the engine answers template
+    /// (and plugin) calls `setup_incomplete`: the call waits for setup, then
+    /// asks again, and gets its answer; any other error is the answer.
+    #[test]
+    fn a_call_answered_setup_incomplete_asks_again_once_set_up() {
+        let asked = Cell::new(0);
+        let waited = Cell::new(0);
+        let got = block_on(retry_after(
+            || {
+                asked.set(asked.get() + 1);
+                let n = asked.get();
+                async move { if n == 1 { Err::<&str, _>("capability: setup_incomplete".to_string()) } else { Ok("templates") } }
+            },
+            || {
+                waited.set(waited.get() + 1);
+                async {}
+            },
+        ));
+        assert_eq!((got, asked.get(), waited.get()), (Ok("templates"), 2, 1));
+        // Another error isn't retried.
+        asked.set(0);
+        let got = block_on(retry_after(
+            || {
+                asked.set(asked.get() + 1);
+                async { Err::<(), _>("offline".to_string()) }
+            },
+            || async {},
+        ));
+        assert_eq!((got, asked.get()), (Err("offline".to_string()), 1));
+        // Setup never finishing: given up on after a few, the error kept.
+        asked.set(0);
+        let got = block_on(retry_after(
+            || {
+                asked.set(asked.get() + 1);
+                async { Err::<(), _>(SETUP_INCOMPLETE.to_string()) }
+            },
+            || async {},
+        ));
+        assert!(got.is_err_and(|e| setup_incomplete(&e)) && asked.get() == SETUP_RETRIES + 1);
+    }
+
+    /// `set_up` resolves once AuthStatus names an organization.
+    #[test]
+    fn set_up_resolves_when_an_organization_is_chosen() {
+        let auth = AUTH.with(Rc::clone);
+        auth.heard(session_from(&json!({ "state": "needsOrganization", "user": { "id": "u", "email": "a@b.c" } })));
+        assert!(!is_set_up());
+        let (tell, mut heard) = zgx::task::latest::<()>();
+        auth.set_up_waiters.borrow_mut().push(tell);
+        auth.heard(session_from(&json!({ "state": "signedIn", "orgId": "org_1", "user": { "id": "u", "email": "a@b.c" } })));
+        assert!(is_set_up());
+        assert_eq!(block_on(heard.recv()), Some(()));
+        assert!(auth.set_up_waiters.borrow().is_empty());
+        block_on(set_up());
+    }
 
     #[test]
     fn the_engines_auth_status_reads_as_a_session() {

@@ -391,13 +391,10 @@ return function(): Node
 		theme = function()
 			return ds.look.window_theme()
 		end,
-		-- What plugins anywhere in the window read (ids and plain values,
-		-- never records): who's signed in, the look, where the window is.
+		-- What plugins anywhere in the window read (plain values, never
+		-- records): the look, where the window is. (Not who's signed in:
+		-- your account is "profile.read"'s, its id in `zeron.profile_id`.)
 		provide = {
-			profile = ui.computed(function(): string?
-				local u = auth.user:get()
-				return if u then u.id else nil
-			end),
 			appearance = ui.computed(function(): string
 				local kind = ui.theme.kind()
 				return if kind == "light" or kind == "high-contrast-light" then "light" else "dark"
@@ -595,6 +592,10 @@ return function(): Node
 			in_settings,
 			ui.column {
 				id = "shell-settings",
+				-- Zeron's Settings are no plugin's to change or add to: what you
+				-- allow plugins and templates is decided here (Settings →
+				-- Plugins and Templates). Sealed, with all it holds.
+				hook = false,
 				w_full = true,
 				h_full = true,
 				focusable = true,
