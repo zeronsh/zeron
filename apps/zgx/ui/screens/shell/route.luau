@@ -31,8 +31,10 @@
 -- What it shows changes in place: each state above keeps its table while
 -- what it says is the same, so a session's state moving (working, done)
 -- reaches the sidebar's row, not everything that reads where you are.
--- The place survives a reload of the scripts (kept in a named state),
--- and the project chosen survives a relaunch.
+-- The place survives a reload of the scripts (kept in a named state), and
+-- a relaunch too: the window opens where it was left (a session, a new
+-- chat in the project chosen, a plugin's page), as it is saved with each
+-- move (`M.launched`).
 
 local sessions = require("@account/sessions")
 local look = require("@app/screens/shell/project_look")
@@ -44,9 +46,6 @@ export type Project = { id: string, device: string?, path: string?, name: string
 export type Session = { id: string, device: string?, cwd: string?, title: string?, project: string? }
 export type Choice = { value: string, label: string, hue: string?, src: string? }
 
--- Where it was, across a reload of the scripts (a relaunch starts on a
--- new chat).
-local kept = ui.state("shell_route_path", "/")
 local ROUTES = {
 	home = "/",
 	session = "/session/:id",
@@ -79,6 +78,25 @@ local function parse(path: string): Route
 	end
 	return { name = "home", params = {}, path = "/" }
 end
+-- Where it was left, across a relaunch: the chats' route as a path (a
+-- session, a new chat, a plugin's page; never settings, which is over the
+-- chats: their place under it stands), saved as it moves. Nil before any.
+local last = ui.persist("shell_last_route", nil :: string?)
+-- Where the launch started: where it was left (nil, never saved), read
+-- once a launch (a named state: a reload keeps the launch's), so the launch
+-- can tell whether it has moved since (`M.launched`).
+local function saved(): string?
+	local p = last:peek()
+	if type(p) ~= "string" then
+		return nil
+	end
+	local r = parse(p)
+	return if r.name == "settings" then nil else r.path
+end
+local start = ui.state("shell_launch_start", saved() or "")
+-- Where it is, across a reload of the scripts; a launch starts where it
+-- was left, so a session opens on it at once, never on another first.
+local kept = ui.state("shell_route_path", if start:peek() ~= "" then start:peek() else "/")
 -- Where it is, tracked (`route:get()`), or not (`peek`).
 local function here(): Route
 	made:get()
@@ -371,33 +389,97 @@ function M.open_session(id: string)
 	go("session", { id = id })
 end
 
--- Launched (not the scripts reloaded): the session most recently active,
--- once the chats have come, as Zeron opens on it (shell/tabs.rs); none, a
--- new chat. Gone somewhere meanwhile, it stays there. (Kept in a named
--- state, so a reload, which keeps it, never moves the window; a fixture
--- that wants its start as it is sets it first.)
+-- Launched (not the scripts reloaded), it starts where it was left (see
+-- `kept`), and once the chats have come, settles: a session left open
+-- that's still there stays open; one archived or gone since, and a first
+-- launch with nothing saved, give way to the session most recently active,
+-- as Zeron opens on it (shell/tabs.rs); none, a new chat. A session not
+-- among the chats yet is given a moment (`GRACE_MS`) to arrive, as an
+-- engine just started may list them late. Gone somewhere meanwhile (a
+-- `zeron://` link, a click), it stays there. (Kept in a named state, so a
+-- reload, which keeps it, never moves the window; a fixture that wants its
+-- start as it is sets it first.)
 M.launched = ui.state("shell_launch_opened", false)
+local GRACE_MS = 2000
+-- (The saved session not among the chats as they came, and whether its
+-- moment to arrive has passed.)
+local awaiting = ui.state("shell_launch_awaiting", false)
+local given_up = ui.state("shell_launch_given_up", false)
+ui.effect(function()
+	if awaiting:get() and not given_up:peek() then
+		ui.after(GRACE_MS, function()
+			given_up:set(true)
+		end)
+	end
+end)
 ui.effect(function()
 	-- (The chats read first: an early return keeps following them.)
 	local now = sessions.now:get()
+	local late = given_up:get()
 	if M.launched:peek() then
 		return
 	end
 	if now.state ~= "ready" then
 		return
 	end
-	M.launched:set(true)
-	if at().path ~= "/" then
+	local from = start:peek()
+	-- Moved since it started: it stays.
+	if at().path ~= (if from ~= "" then from else "/") then
+		M.launched:set(true)
 		return
 	end
+	local r = parse(from)
+	if from ~= "" and r.name ~= "session" then
+		-- (A new chat, a plugin's page: as it was left.)
+		M.launched:set(true)
+		return
+	end
+	if r.name == "session" then
+		local id = r.params.id
+		for _, c in now.chats do
+			if c.id == id then
+				M.launched:set(true)
+				return
+			end
+		end
+		local archived = false
+		for _, c in now.archived or {} do
+			if c.id == id then
+				archived = true
+			end
+		end
+		if not archived and not late then
+			if not awaiting:peek() then
+				awaiting:set(true)
+			end
+			return
+		end
+	end
+	M.launched:set(true)
 	local latest: sessions.Chat? = nil
 	for _, c in now.chats do
 		if latest == nil or c.updated > (latest :: sessions.Chat).updated then
 			latest = c
 		end
 	end
+	-- (In place of where it started: no step back to a new chat it never
+	-- showed, or a session gone.)
 	if latest then
-		M.open_session(latest.id)
+		go("session", { id = latest.id }, true)
+	elseif r.name == "session" then
+		go("home", nil, true)
+	end
+end)
+-- Where it is, saved as it moves (settings aside: it's over the chats),
+-- once the launch has settled (until then it is where it was left, or
+-- somewhere it will settle from).
+ui.effect(function()
+	local r = here()
+	if not M.launched:get() or r.name == "settings" then
+		return
+	end
+	if last:peek() ~= r.path then
+		last:set(r.path)
 	end
 end)
 
