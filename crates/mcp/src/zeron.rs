@@ -117,7 +117,7 @@ impl HarnessInfo {
 }
 
 /// Why a `wait_for_turn` returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TurnOutcome {
     /// The chat finished a turn (or was already idle with nothing pending).
@@ -572,7 +572,7 @@ impl Zeron {
         timeout: Duration,
     ) -> anyhow::Result<(TurnOutcome, Option<Session>)> {
         let deadline = Instant::now() + timeout;
-        let mut saw_working = false;
+        let mut progress = TurnProgress::new(baseline.cloned(), expect_turn);
         let mut last: Option<Session> = baseline.cloned();
         'resubscribe: loop {
             if deadline.saturating_duration_since(Instant::now()).is_zero() {
@@ -599,68 +599,105 @@ impl Zeron {
                         continue;
                     }
                 };
-                let Some(session) = session_for(&sessions, chat) else {
-                    // No row at all: the chat never ran. With a send in
-                    // flight the row appears when the host picks it up.
-                    if expect_turn {
-                        continue;
-                    }
-                    return Ok((TurnOutcome::Completed, None));
-                };
-                let advanced = baseline.is_none_or(|b| {
-                    session.updated_at > b.updated_at
-                        || session.last_completed_turn != b.last_completed_turn
-                        || session.last_turn_outcome != b.last_turn_outcome
-                });
-                // Liveness expiry is not a completion edge. Keep waiting for
-                // fresh evidence (or the deadline), just like the sidebar.
-                if zeron_proto::view::session_stale(&session, chrono::Utc::now()) {
-                    last = Some(session);
-                    continue;
+                let session = session_for(&sessions, chat);
+                let now = chrono::Utc::now();
+                if let Some(outcome) = progress.observe(session.as_ref(), now) {
+                    return Ok((outcome, session));
                 }
-                match session.activity_status() {
-                    SessionStatus::Working => {
-                        // A terminal may be working beside an idle native
-                        // session. It cannot satisfy a pending native send.
-                        saw_working |= !expect_turn || session.status == SessionStatus::Working;
-                        last = Some(session);
-                    }
-                    SessionStatus::AwaitingInput if advanced || saw_working => {
-                        return Ok((TurnOutcome::AwaitingInput, Some(session)));
-                    }
-                    SessionStatus::Errored if advanced || saw_working => {
-                        return Ok((TurnOutcome::Errored, Some(session)));
-                    }
-                    SessionStatus::Idle => {
-                        if session
-                            .last_turn_outcome
-                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted)
-                            && (!expect_turn
-                                || saw_working
-                                || advanced
-                                    && baseline.is_none_or(|b| {
-                                        b.last_turn_outcome != session.last_turn_outcome
-                                    }))
-                        {
-                            return Ok((TurnOutcome::Interrupted, Some(session)));
-                        }
-                        let turn_changed = match baseline {
-                            Some(b) => b.last_completed_turn != session.last_completed_turn,
-                            // A row that did not exist at send time only
-                            // counts once it records a finished turn.
-                            None if expect_turn => session.last_completed_turn.is_some(),
-                            None => true,
-                        };
-                        if turn_changed || saw_working {
-                            return Ok((TurnOutcome::Completed, Some(session)));
-                        }
-                        last = Some(session);
-                    }
-                    _ => {
-                        last = Some(session);
-                    }
+                if session.is_some() {
+                    last = session;
                 }
             }
+        }
+    }
+}
+
+/// The turn-end edge `wait_for_turn` waits for, fed one session row at a
+/// time: shared by the MCP server's blocking wait and the engine's
+/// notifications (`NotifyTurnEnd`), which persist it across restarts.
+///
+/// With `expect_turn` (a send is in flight) it settles only when the row
+/// moves past `baseline`: a new `last_completed_turn`, an
+/// `awaitingInput`/`errored` stamp newer than the baseline, or a
+/// working→idle edge. A chat with no row yet, or an idle row identical to
+/// the baseline, is a run that has not started. Without it the current
+/// posture settles at once unless the chat is working.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnProgress {
+    pub baseline: Option<Session>,
+    pub expect_turn: bool,
+    #[serde(default)]
+    pub saw_working: bool,
+}
+
+impl TurnProgress {
+    pub fn new(baseline: Option<Session>, expect_turn: bool) -> Self {
+        Self {
+            baseline,
+            expect_turn,
+            saw_working: false,
+        }
+    }
+
+    /// Feed the chat's current row (`None`: it has none). `Some` once the
+    /// turn has settled.
+    pub fn observe(
+        &mut self,
+        session: Option<&Session>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<TurnOutcome> {
+        let expect_turn = self.expect_turn;
+        let baseline = self.baseline.as_ref();
+        let Some(session) = session else {
+            // No row at all: the chat never ran. With a send in flight the
+            // row appears when the host picks it up.
+            return (!expect_turn).then_some(TurnOutcome::Completed);
+        };
+        let advanced = baseline.is_none_or(|b| {
+            session.updated_at > b.updated_at
+                || session.last_completed_turn != b.last_completed_turn
+                || session.last_turn_outcome != b.last_turn_outcome
+        });
+        // Liveness expiry is not a completion edge. Keep waiting for fresh
+        // evidence (or the deadline), just like the sidebar.
+        if zeron_proto::view::session_stale(session, now) {
+            return None;
+        }
+        let saw_working = self.saw_working;
+        match session.activity_status() {
+            SessionStatus::Working => {
+                // A terminal may be working beside an idle native session.
+                // It cannot satisfy a pending native send.
+                self.saw_working |= !expect_turn || session.status == SessionStatus::Working;
+                None
+            }
+            SessionStatus::AwaitingInput if advanced || saw_working => {
+                Some(TurnOutcome::AwaitingInput)
+            }
+            SessionStatus::Errored if advanced || saw_working => Some(TurnOutcome::Errored),
+            SessionStatus::Idle => {
+                if session
+                    .last_turn_outcome
+                    .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted)
+                    && (!expect_turn
+                        || saw_working
+                        || advanced
+                            && baseline
+                                .is_none_or(|b| b.last_turn_outcome != session.last_turn_outcome))
+                {
+                    return Some(TurnOutcome::Interrupted);
+                }
+                let turn_changed = match baseline {
+                    Some(b) => b.last_completed_turn != session.last_completed_turn,
+                    // A row that did not exist at send time only counts
+                    // once it records a finished turn.
+                    None if expect_turn => session.last_completed_turn.is_some(),
+                    None => true,
+                };
+                (turn_changed || saw_working).then_some(TurnOutcome::Completed)
+            }
+            _ => None,
         }
     }
 }

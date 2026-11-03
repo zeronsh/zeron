@@ -36,6 +36,7 @@ pub fn build_id() -> &'static str {
     })
 }
 pub mod auth;
+mod agent_waits;
 mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
@@ -189,6 +190,8 @@ pub struct EngineCore {
     pub local_import: Option<local_import::LocalImporter>,
     /// Plugins under `{data}/plugins/` (the plugins contract).
     pub plugins: plugins::Plugins,
+    /// Agents' questions to the person and their watches on other chats' turns.
+    pub agent_waits: agent_waits::AgentWaits,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -426,7 +429,14 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
+        let agent_waits = agent_waits::AgentWaits::new(
+            doc_host.clone(),
+            workspace.clone(),
+            sessions.clone(),
+            Some(profile.store_root().join("turn-watches.json")),
+        );
         Ok(Self {
+            agent_waits,
             sessions,
             doc_host,
             workspace,
@@ -591,7 +601,8 @@ impl EngineCore {
         .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
         .with_viewport_focus(self.viewport_focus.clone())
-        .with_plugins(self.plugins.clone());
+        .with_plugins(self.plugins.clone())
+        .with_agent_waits(self.agent_waits.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

@@ -24,7 +24,7 @@ mod zeron;
 pub use jsonrpc::serve_stdio;
 pub use tools::{ListedTool, ToolDef, Tools};
 pub use transcript::{RenderOptions, RenderedMessage, render_entries};
-pub use zeron::{Origin, Zeron};
+pub use zeron::{Origin, TurnOutcome, TurnProgress, Zeron, session_for};
 
 /// How `zeron mcp` finds the engine and who it speaks for.
 #[derive(Debug, Clone)]
