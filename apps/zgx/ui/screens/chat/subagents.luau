@@ -26,6 +26,7 @@ local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
 local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
+local shared = require("@app/screens/chat/shared")
 
 local M = {}
 
@@ -78,7 +79,7 @@ local function first_line(text: string?): string?
 end
 
 -- A chat's state as a subagent's.
-local function chat_status(c: sessions.Child, now: number): string
+function M.chat_status(c: sessions.Child, now: number): string
 	local s = c.status
 	if s == "working" or s == "input" or s == "approval" then
 		return "running"
@@ -104,7 +105,7 @@ local function row_of(id: string?): sessions.Chat?
 end
 
 -- A spawn as its row lists it.
-local function spawn_item(s: any, parent: sessions.Chat?, times: { [string]: any }): any
+local function spawn_item(s: any, parent: sessions.Chat?, times: { [string]: any }, stopping: { [string]: boolean }): any
 	local t = times[s.id] or {}
 	local model = model_label(s.model) or (if parent then model_label(parent.model) else nil)
 	return {
@@ -120,12 +121,13 @@ local function spawn_item(s: any, parent: sessions.Chat?, times: { [string]: any
 		ended = t.stop,
 		stoppable = true,
 		openable = s.ref ~= nil,
+		stopping = stopping[`call:{s.id}`] == true,
 	}
 end
 
 -- A chat its agent made as its subagent, as its row lists it.
-local function chat_item(c: sessions.Child, now: number): any
-	local status = chat_status(c, now)
+local function chat_item(c: sessions.Child, now: number, stopping: { [string]: boolean }): any
+	local status = M.chat_status(c, now)
 	local preview = first_line((c :: any).preview)
 	return {
 		id = `chat:{c.id}`,
@@ -141,6 +143,7 @@ local function chat_item(c: sessions.Child, now: number): any
 		ended = if status ~= "running" then (c.updated or c.created) else nil,
 		stoppable = true,
 		openable = true,
+		stopping = stopping[`chat:{c.id}`] == true,
 	}
 end
 
@@ -214,12 +217,14 @@ function M.use(session: () -> string?): { items: (m: any) -> { any }, stop: (sub
 		local sid = session()
 		local parent = row_of(sid)
 		local times = TIMES:get()
+		-- (Those a stop of all of them is on its way to: "Stopping".)
+		local stopping = shared.stopping:get()
 		for _, s in m.subagents or {} do
-			table.insert(out, spawn_item(s, parent, times))
+			table.insert(out, spawn_item(s, parent, times, stopping))
 		end
 		local now = os.time()
 		for _, c in made_in:get()[m.id] or {} do
-			table.insert(out, chat_item(c, now))
+			table.insert(out, chat_item(c, now, stopping))
 		end
 		return out
 	end

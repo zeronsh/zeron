@@ -662,7 +662,10 @@
         "heading_of": "{name} usage",
         "percent": "{n}%",
         "resets": "resets {when}"
-      }
+      },
+      "stop_background": "停止后台任务和子代理",
+      "stop_background_count": "停止后台任务和子代理（{n} 个运行中）",
+      "stopping_background": "正在停止后台任务和子代理"
     },
     "markdown": {
       "fit_content": "适合内容",
@@ -844,7 +847,8 @@
       "open_named": "打开 {name}",
       "running": "运行中",
       "queued_messages": "队列中的消息",
-      "queued": "已加入队列"
+      "queued": "已加入队列",
+      "stopping": "正在停止"
     },
     "composer_mentions": {
       "files": "文件",
@@ -2705,7 +2709,8 @@
       "stopped": "已停止 {name}",
       "not_running": "{name} 已经结束",
       "unsupported": "该代理无法单独停止此项",
-      "failed": "无法停止 {name}"
+      "failed": "无法停止 {name}",
+      "some_unsupported": "{n, plural, other {# 项无法停止}}"
     },
     "questions": {
       "notice": "{n, plural, other {智能体问了 # 个问题}}",

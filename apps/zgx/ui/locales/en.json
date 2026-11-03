@@ -662,7 +662,10 @@
         "heading_of": "{name} usage",
         "percent": "{n}%",
         "resets": "resets {when}"
-      }
+      },
+      "stop_background": "Stop background tasks and subagents",
+      "stop_background_count": "Stop background tasks and subagents ({n} running)",
+      "stopping_background": "Stopping background tasks and subagents"
     },
     "markdown": {
       "fit_content": "Fit content",
@@ -844,7 +847,8 @@
       "open_named": "Open {name}",
       "running": "Running",
       "queued_messages": "Queued messages",
-      "queued": "Queued"
+      "queued": "Queued",
+      "stopping": "Stopping"
     },
     "composer_mentions": {
       "files": "Files",
@@ -2705,7 +2709,8 @@
       "stopped": "Stopped {name}",
       "not_running": "{name} had already finished",
       "unsupported": "This agent can't stop that on its own",
-      "failed": "Couldn't stop {name}"
+      "failed": "Couldn't stop {name}",
+      "some_unsupported": "{n, plural, one {# couldn't be stopped} other {# couldn't be stopped}}"
     },
     "questions": {
       "notice": "{n, plural, one {The agent asked a question} other {The agent asked # questions}}",
