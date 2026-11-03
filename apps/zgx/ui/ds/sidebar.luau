@@ -2269,13 +2269,16 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end)
 	end
 	-- A section folded or opened from outside (the caller's `folded`: on
-	-- another device, say): its fold plays as a click's would.
+	-- another device, say), or the empty projects': its fold plays as a
+	-- click's would.
 	ui.effect(function()
 		local f = folded:get()
 		for key, fold in folds_by do
 			local id = string.match(key, "^sec:(.*)$")
 			if id and (fold.h.to == 1) == (f[id] == true) then
 				fold_set(fold, not f[id])
+			elseif key == "empties" and (fold.h.to == 1) ~= (f[EMPTIES] == true) then
+				fold_set(fold, f[EMPTIES] == true)
 			end
 		end
 	end)

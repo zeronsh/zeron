@@ -65,6 +65,14 @@ test("empty projects fold into one row at the projects' end, closed until it's o
 	toggle(app, "2 empty projects")
 	expect(shows(app, "Cobalt")).to_be(false)
 	expect(((app:state(FOLDED) :: any) or {})["::empty_projects"]).to_be(nil)
+
+	-- Opened and closed from outside (the folds kept, set again): it follows.
+	app:set_state(FOLDED, { ["::empty_projects"] = true })
+	app:frames(40)
+	expect(shows(app, "Cobalt")).to_be(true)
+	app:set_state(FOLDED, {})
+	app:frames(40)
+	expect(shows(app, "Cobalt")).to_be(false)
 end)
 
 test("an empty project's header starts a new chat in it and has its menu", function()
