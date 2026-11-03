@@ -190,12 +190,67 @@ pub fn tool_fields(part: &Json) -> Vec<(&'static str, Value)> {
     {
         fields.push(("diff", diff));
     }
+    if let Some(pictures) = pictures_value(part) {
+        fields.push(("pictures", pictures));
+    }
     fields
+}
+
+/// Pictures a tool row opens to, at most (the shipping chip's
+/// `MAX_IMAGES_PER_TOOL`).
+const MAX_PICTURES: usize = 4;
+
+/// The pictures a tool's result carried (`previewPaths`: the engine's copies
+/// in the profile's uploads, on the chat's host), each `{ path, name }`: its
+/// name the file the call named (a Read's), else the copy's own. Nil when it
+/// carried none: a path a tool only named is never read from here.
+fn pictures_value(part: &Json) -> Option<Value> {
+    let paths: Vec<&str> = part["previewPaths"]
+        .as_array()?
+        .iter()
+        .filter_map(Json::as_str)
+        .filter(|p| !p.trim().is_empty())
+        .take(MAX_PICTURES)
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let named = part["call"]["path"].as_str().and_then(file_name);
+    let list: Vec<Value> = paths
+        .iter()
+        .map(|path| {
+            let name = named.or_else(|| file_name(path)).unwrap_or_default();
+            Value::record([("path", Value::from(*path)), ("name", Value::from(name))])
+        })
+        .collect();
+    Some(Value::List(list.into()))
+}
+
+fn file_name(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).find(|s| !s.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_result_s_stored_pictures_are_the_row_s_named_as_the_call_s_file() {
+        let part = json!({
+            "kind": "tool", "id": "t1", "isError": false,
+            "call": { "kind": "readFile", "path": "/home/me/scratch/shot.png" },
+            "previewPaths": ["/home/me/.zeron/uploads/ab12-image.png"],
+        });
+        let fields = tool_fields(&part);
+        let (_, pictures) = fields.iter().find(|(k, _)| *k == "pictures").expect("pictures");
+        let Value::List(list) = pictures else { panic!("not a list: {pictures:?}") };
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].field("path").map(crate::auth::text).as_deref(), Some("/home/me/.zeron/uploads/ab12-image.png"));
+        assert_eq!(list[0].field("name").map(crate::auth::text).as_deref(), Some("shot.png"));
+        // None stored (an older doc, a path only named): no pictures.
+        let bare = json!({ "kind": "tool", "id": "t2", "call": { "kind": "readFile", "path": "/x/a.png" } });
+        assert!(!tool_fields(&bare).iter().any(|(k, _)| *k == "pictures"));
+    }
 
     #[test]
     fn a_diff_is_hunks_with_three_lines_of_context_numbered_from_one() {
