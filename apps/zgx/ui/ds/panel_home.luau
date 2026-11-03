@@ -248,6 +248,10 @@ export type LanesProps = {
 	-- first and its own last (a project's, a device's, or both). Nil, none.
 	on_new: ((groups: { LaneGroup }) -> ())?,
 	new_label: ((group: LaneGroup) -> string)?,
+	-- Stop under the pointer, in the corner, while `stoppable` (a running
+	-- subagent); nil, none. `on_archive` wins where both are given.
+	on_stop: ((lane: Lane) -> ())?,
+	stoppable: ((lane: Lane) -> boolean)?,
 }
 
 -- Whether a lane shows past the first few, and in a folded group: at
@@ -672,6 +676,21 @@ function M.Lanes(props: LanesProps): Node
 			tree = tree_of(now),
 		}
 	end
+	-- A lane's stop, named for it (its title follows it).
+	local function stop_button(lane: () -> Lane): Node
+		return IconButton {
+			icon = "stop",
+			label = function(): string
+				return locale.s("panel.home.stop_subagent", { title = lane().title })
+			end,
+			tooltip = locale.s("ds.activity.stop"),
+			size = "sm",
+			tone = "quiet",
+			on_click = function()
+				(props.on_stop :: (Lane) -> ())(lane())
+			end,
+		}
+	end
 	local function row(first: Item, _index: State<number>, now: State<any>): Node
 		local gkey = first.gkey
 		if first.kind == "group" then
@@ -807,6 +826,12 @@ function M.Lanes(props: LanesProps): Node
 					then SessionRow.corner_button("ds.sidebar.archive", "archive-minimalistic", function()
 						(props.on_archive :: (Lane) -> ())(lane())
 					end)
+					elseif props.on_stop then stop_button(lane)
+					else nil,
+				action_shown = if not props.on_archive and props.on_stop and props.stoppable
+					then function(): boolean
+						return (props.stoppable :: (Lane) -> boolean)(lane())
+					end
 					else nil,
 			},
 		}

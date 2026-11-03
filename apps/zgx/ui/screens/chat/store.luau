@@ -259,6 +259,45 @@ function M.stop_task(session: string, task: string): any
 	return ui.call("chat.stop_task", { session = session, task = task })
 end
 
+-- The host's stop of one call: a promise of `{ outcome, reason? }`.
+function M.ask_stop(session: string, call: string): any
+	return ui.call("chat.stop_call", { session = session, call = call })
+end
+
+-- One call of `session`'s live turn stopped while the turn goes on (a
+-- hung command, a subagent: its spawn's call), on its host. `name` is what
+-- the person knows it as. `settle(true)` once its agent is stopping it;
+-- `settle(false)` when it isn't (ended already, or the agent can't stop it
+-- alone), with a toast saying which.
+function M.stop_call(session: string, call: string, name: string, settle: ((stopping: boolean) -> ())?)
+	local function done(stopping: boolean)
+		if settle then
+			settle(stopping)
+		end
+	end
+	M.ask_stop(session, call):after(function(answer: any)
+		local outcome = if type(answer) == "table" then answer.outcome else nil
+		if outcome == "stopping" then
+			done(true)
+			ds.toast.show { title = ui.t("chat.stop.stopped", { name = name }), tone = "success" }
+		elseif outcome == "notRunning" then
+			done(false)
+			ds.toast.show { title = ui.t("chat.stop.not_running", { name = name }), tone = "neutral" }
+		else
+			done(false)
+			local reason = if type(answer) == "table" and type(answer.reason) == "string" then answer.reason else nil
+			ds.toast.show {
+				title = ui.t("chat.stop.unsupported"),
+				body = reason,
+				tone = "warning",
+			}
+		end
+	end, function()
+		done(false)
+		ds.toast.show { title = ui.t("chat.stop.failed", { name = name }), tone = "danger" }
+	end)
+end
+
 -- The device the composer runs on (nil: this one): `M.catalog` is its
 -- agents and models from now on (src/chat.rs `catalog_on`).
 function M.catalog_on(device: string?)

@@ -160,6 +160,9 @@ export type Props = {
 	-- A subagent's spawn (an agent row naming its doc): what opens it (a
 	-- lane of its own). Without it, the row opens its call as any does.
 	on_open_subagent: ((sub: { ref: string, title: string?, status: string? }) -> ())?,
+	-- Stop one running tool of a reply being written (ds/activity's
+	-- `stop_tool`): a hung command, a subagent. Without it, none has a stop.
+	on_stop_tool: ((tool: any, settle: (stopping: boolean) -> ()) -> ())?,
 }
 export type Anchor = { id: string, dy: number }
 export type TranscriptFind = {
@@ -459,6 +462,7 @@ type View = {
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	open_subagent: ((sub: any) -> ())?,
+	stop_tool: ((tool: any, settle: (stopping: boolean) -> ()) -> ())?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 	-- The page's room around the reading column (ds/wide), for a reply's
@@ -473,6 +477,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				stop_tool = if view then view.stop_tool else nil,
 				tools = function()
 					return brow:get().tools or {}
 				end,
@@ -625,6 +630,7 @@ local function reply(
 			Activity {
 				key = m.id,
 				open_subagent = if view then view.open_subagent else nil,
+				stop_tool = if view then view.stop_tool else nil,
 				tools = function()
 					return now().tools or {}
 				end,
@@ -1541,7 +1547,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, wide = wide, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, wide = wide, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, stop_tool = props.on_stop_tool, find = find_for }),
 			},
 		}
 	end

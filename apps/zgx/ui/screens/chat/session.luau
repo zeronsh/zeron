@@ -279,6 +279,17 @@ local function Session(id: Id?): Node
 									lanes.open_subagent(s, sub)
 								end
 							end,
+							-- A running tool's stop: that call alone, on the
+							-- chat's host; the reply goes on.
+							on_stop_tool = function(tool: any, settle: (boolean) -> ())
+								local s = which()
+								if not s then
+									settle(false)
+									return
+								end
+								local name = if tool.target then `{tool.verb} {tool.target}` else tool.verb
+								store.stop_call(s, tool.id, name, settle)
+							end,
 							open_link = open_link,
 							-- Their context menus (screens/chat/link_menu).
 							link_menu = LinkMenu(open_link, function(): any

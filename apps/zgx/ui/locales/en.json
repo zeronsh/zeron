@@ -706,7 +706,11 @@
       "show_all_lines": "Show all {n} lines",
       "open_subagent": "Open subagent {title}",
       "subagent": "Subagent",
-      "worked_for": "Worked for {secs}s · {summary}"
+      "worked_for": "Worked for {secs}s · {summary}",
+      "stop": "Stop",
+      "stop_named": "Stop {name}",
+      "stopping": "Stopping",
+      "stopped": "Stopped"
     },
     "transcript": {
       "copy_message": "Copy message",
@@ -2652,6 +2656,12 @@
       "remove_failed": "Couldn't remove that message",
       "commands_or_skills": "commands or skills",
       "drop_to_mention": "Drop to mention"
+    },
+    "stop": {
+      "stopped": "Stopped {name}",
+      "not_running": "{name} had already finished",
+      "unsupported": "This agent can't stop that on its own",
+      "failed": "Couldn't stop {name}"
     }
   },
   "panel": {
@@ -2860,7 +2870,8 @@
       "port_open_external": "Open in Default Browser",
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
-      "previews_unavailable": "Local previews aren't available right now"
+      "previews_unavailable": "Local previews aren't available right now",
+      "stop_subagent": "Stop subagent {title}"
     }
   },
   "files": {

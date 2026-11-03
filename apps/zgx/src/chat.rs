@@ -321,6 +321,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // A background process of the chat's stopped, on its host (the shipping
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
+    // One call of the chat's live turn stopped while the turn goes on (a
+    // hung command, a subagent), on its host: `{ outcome, reason? }`.
+    host.async_action("chat.stop_call", move |args| async move { stop_call(args).await.map_err(String::from) });
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -2010,6 +2013,42 @@ async fn stop_task(args: Value) -> Result<Value, Outcome> {
     Ok(Value::Bool(answer["stopping"].as_bool() == Some(true)))
 }
 
+/// `StopToolCall` for `{ session, call }` (a tool call's id, or a
+/// subagent's spawn), routed to the chat's host: what came of it, as
+/// `{ outcome = "stopping" | "notRunning" | "unsupported", reason? }`.
+async fn stop_call(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("session").map(text).unwrap_or_default();
+    let call = args.field("call").map(text).unwrap_or_default();
+    if id.is_empty() || call.is_empty() {
+        return Err("missing");
+    }
+    let chats = CHATS.with(Rc::clone);
+    let mut params = json!({ "chatId": id, "callId": call });
+    if let Some(t) = chats.chat(&id).and_then(|c| chats.target(&c)) {
+        params["targetDeviceId"] = json!(t);
+    }
+    let answer = engine::get()
+        .call("StopToolCall", params)
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(stop_call_answer(&answer))
+}
+
+/// The engine's answer as the scripts read it. An engine from before the
+/// method answers nothing they know: that reads as unsupported.
+fn stop_call_answer(answer: &Json) -> Value {
+    let outcome = match answer["outcome"].as_str() {
+        Some(o @ ("stopping" | "notRunning" | "unsupported")) => o,
+        _ if answer["stopping"].as_bool() == Some(true) => "stopping",
+        _ => "unsupported",
+    };
+    let mut fields = vec![("outcome", Value::from(outcome))];
+    if let Some(reason) = answer["reason"].as_str().filter(|r| !r.is_empty()) {
+        fields.push(("reason", Value::from(reason)));
+    }
+    Value::record(fields)
+}
+
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
     engine::get()
         .call("QueueCommand", json!({ "chatId": chat, "command": command }))
@@ -3328,6 +3367,11 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
     if part["isError"].as_bool() == Some(true) {
         fields.push(("failed", Value::Bool(true)));
     }
+    // No result yet (the doc writes `isError` only with one): still running
+    // while its reply is (ds/activity's stop reads both).
+    if part["kind"].as_str() == Some("tool") && part.get("isError").is_none_or(Json::is_null) {
+        fields.push(("running", Value::Bool(true)));
+    }
     // A subagent's spawn: the doc it runs in (its lane, a panel tab of its
     // own), how it stands, and its tab's title (the shipping app's).
     if kind == "agent"
@@ -4363,6 +4407,28 @@ mod tests {
         let claude = json!({ "id": "opus", "options": [{ "id": "fastMode", "label": "Fast", "defaultChoice": "off", "choices": [{ "id": "off", "label": "Off" }, { "id": "on", "label": "On" }] }] });
         assert_eq!(fast_option(&claude), Some(("fastMode".into(), "on".into(), "off".into())));
         assert!(model_value("claude-code", &claude).field("options").is_none());
+    }
+
+    #[test]
+    fn a_tool_without_its_result_reads_as_running_and_a_stop_answer_reads_plainly() {
+        let running = |v: &Value| matches!(v.field("running"), Some(Value::Bool(true)));
+        let call = json!({ "kind": "exec", "command": "npm run serve" });
+        let open = tool(&json!({ "id": "c1", "kind": "tool", "call": call })).expect("a tool");
+        assert!(running(&open), "no isError yet: still running");
+        let ended = tool(&json!({ "id": "c1", "kind": "tool", "call": call, "isError": true })).expect("a tool");
+        assert!(!running(&ended));
+        let ok = tool(&json!({ "id": "c1", "kind": "tool", "call": call, "isError": false })).expect("a tool");
+        assert!(!running(&ok));
+
+        let outcome = |v: &Value| v.field("outcome").map(crate::auth::text);
+        let reason = |v: &Value| v.field("reason").map(crate::auth::text);
+        let stopping = stop_call_answer(&json!({ "stopping": true, "outcome": "stopping" }));
+        assert_eq!(outcome(&stopping).as_deref(), Some("stopping"));
+        let refused = stop_call_answer(&json!({ "stopping": false, "outcome": "unsupported", "reason": "Not this tool." }));
+        assert_eq!(outcome(&refused).as_deref(), Some("unsupported"));
+        assert_eq!(reason(&refused).as_deref(), Some("Not this tool."));
+        // An engine without the method's outcome: unsupported, never stopping.
+        assert_eq!(outcome(&stop_call_answer(&json!({}))).as_deref(), Some("unsupported"));
     }
 
     #[test]

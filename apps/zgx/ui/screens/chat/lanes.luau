@@ -94,7 +94,8 @@ function M.subagents_of(messages: { any }): { any }
 			local sub = t.subagent
 			if sub and sub.ref and not seen[sub.ref] then
 				seen[sub.ref] = true
-				table.insert(out, { ref = sub.ref, title = sub.title or locale.s("chat.lanes.subagent"), status = sub.status, at = at })
+				-- (`call`: its spawn's, what stops it.)
+				table.insert(out, { ref = sub.ref, call = t.id, title = sub.title or locale.s("chat.lanes.subagent"), status = sub.status, at = at })
 			end
 		end
 	end
