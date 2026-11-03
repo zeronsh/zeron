@@ -78,7 +78,12 @@ export type PullRequest = { number: number, state: ("open" | "merged" | "closed"
 -- of its initial and hue; `emoji`: a chosen emoji, on a wash of its hue.)
 -- (`icon`: a group that is no folder, the chats in none, drawn as that
 -- glyph on a quiet wash in place of an initial on a hue.)
-export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, sessions: { Session } }
+-- (`empty`: the caller's word that it has no sessions but archived ones.
+-- Grouped by project first, those are listed after the rest, folded into
+-- one row of their own ("21 empty projects"), closed until it's opened;
+-- `details.empty_projects` off, not listed at all. A project with none at
+-- all, just added, isn't: a new chat starts in it.)
+export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, sessions: { Session } }
 -- You: your name, and an id your avatar is drawn from.
 export type User = { id: string?, name: string, avatar: string? }
 -- How its sessions are grouped (Zeron's Organize), as a key: its levels
@@ -102,6 +107,10 @@ export type Details = {
 	archived: State<boolean>?,
 	-- A project filter over the list (Zeron's), where the caller has one.
 	project_filter: State<boolean>?,
+	-- The empty projects' fold at the end of the projects (those it says
+	-- are `empty`): listed there, or (off) not at all. On unless the caller
+	-- says.
+	empty_projects: State<boolean>?,
 	-- A folded group (or Pinned, or a section of yours) still lists its
 	-- sessions in a state (working, asking, done unseen: those whose corner
 	-- shows a glyph), each leaving as it settles. On unless the caller says.
@@ -1633,6 +1642,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- Its second level's groups, with both levels on (its sessions all
 		-- of theirs).
 		children: { Group }?,
+		-- A project's with none but archived sessions (its `empty`), at the
+		-- top level: listed in the empty projects' fold.
+		empty: boolean?,
 	}
 	-- How long ago a session moved, in seconds (its `time`: a time, or as
 	-- it reads: "now", "5m", "3h", "1d", "2w"), for the most recent first.
@@ -1734,6 +1746,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						new_in = true,
 						project = p.id,
 						device = outer_device,
+						-- (Only at the top, and only while it holds none.)
+						empty = if subset == nil and p.empty == true and #p.sessions == 0 then true else nil,
 						shows_tile = function(): boolean
 							return details.project_icon:get()
 						end,
@@ -2032,6 +2046,27 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local SHELF_FIRST, SHELF_MORE = 10, 25
 	local shelf_shown = ui.use_state(SHELF_FIRST)
 	local groups_open = opened["::groups"]
+	-- The empty projects' fold: closed until it's opened (kept with the
+	-- folds, `folded`, as open: the one fold that starts closed).
+	local EMPTIES = "::empty_projects"
+	local empties_open: State<boolean> = {
+		get = function(_): boolean
+			return folded:get()[EMPTIES] == true
+		end,
+		peek = function(_): boolean
+			return folded:peek()[EMPTIES] == true
+		end,
+		set = function(_, on: boolean)
+			local f = table.clone(folded:peek())
+			f[EMPTIES] = if on then true else nil
+			folded:set(f)
+		end,
+	} :: any
+	-- Whether the empty projects are listed (in their fold) at all.
+	local function empties_shown(): boolean
+		local st = (details :: any).empty_projects :: State<boolean>?
+		return st == nil or st:get()
+	end
 	-- The sessions put in a place, in its order (any no longer known left
 	-- out).
 	local function sessions_of(ids: { string }): { Session }
@@ -2198,6 +2233,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end, function(on: boolean)
 			groups_open:set(on)
 		end, true)
+	end
+	local function empties_fold(): Fold
+		return fold_of("empties", function(): boolean
+			return empties_open:peek()
+		end, function(on: boolean)
+			empties_open:set(on)
+		end)
 	end
 	local function group_fold(key: string): Fold
 		local st = opened[key]
@@ -2551,9 +2593,21 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 		end
 		-- The groups.
-		local gs, title = groups_of(by, placed)
+		local all_groups, title = groups_of(by, placed)
+		-- (Projects with none but archived sessions: after the rest, in a
+		-- fold of their own; or, not shown, nowhere.)
+		local gs: { Group } = {}
+		local empties: { Group } = {}
+		local show_empties = empties_shown()
+		for _, g in all_groups do
+			if not g.empty then
+				table.insert(gs, g)
+			elseif show_empties then
+				table.insert(empties, g)
+			end
+		end
 		local gf = groups_fold()
-		local count = if by == "none" then #listed(gs[1].sessions) else #gs
+		local count = if by == "none" then #listed(gs[1].sessions) else #gs + #empties
 		add({ kind = "title", key = "title:groups", place = "regular", chain = {}, title = title, n = count, fold = groups_fold, open = groups_open, base = title_h })
 		if gf.present then
 			-- A group's header, then what's under it: its sessions (its first
@@ -2699,6 +2753,21 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					sessions_rows(g.key, listed(g.sessions), by, base, "regular")
 				else
 					emit_group(g, base, false, nil)
+				end
+			end
+			-- The empty projects: one row saying how many, its chevron
+			-- opening them under it, each a project's header as any other
+			-- (its new chat, its menu); closed, none of them in the list.
+			if #empties > 0 then
+				local ef = empties_fold()
+				add({ kind = "empties", key = "empties", place = "regular", chain = base, n = #empties, base = function(): number
+					return SLOT + gap_after
+				end })
+				if ef.present then
+					local inner = { gf, ef }
+					for _, g in empties do
+						emit_group(g, inner, false, nil)
+					end
 				end
 			end
 		end
@@ -3258,7 +3327,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local grows: { [string]: Anim } = {}
 		local going: { [string]: { it: Item, after: string? } } = {}
 		local pending: { [string]: number }? = nil
-		local GLIDES: { [string]: boolean } = { session = true, group = true, pager = true }
+		local GLIDES: { [string]: boolean } = { session = true, group = true, pager = true, empties = true }
 		local function quiet(): boolean
 			return drag:peek() == nil and starting == nil
 		end
@@ -3589,6 +3658,28 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					},
 					tree_now
 				)
+			elseif it.kind == "empties" then
+				-- "21 empty projects": quiet, its chevron where a group's tile
+				-- stands, pointing at them, down while they show.
+				local function says(): string
+					return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
+				end
+				node = row {
+					class = "empty-projects",
+					name = says,
+					lead = ui.div {
+						color = "$text.tertiary",
+						ui.presence(function(): string
+							return if empties_open:get() then "alt-arrow-down" else "alt-arrow-right"
+						end, function(name: string): Node
+							return Icon { name = name :: Icon.Name, size = 12 }
+						end),
+					},
+					words = SessionRow.pager_words(says),
+					on_click = function()
+						fold_set(empties_fold(), not empties_open:peek())
+					end,
+				}
 			elseif it.kind == "more" then
 				-- "Show N more": the shelf's next few.
 				node = row {
@@ -3905,7 +3996,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					table.insert(out, { key = `section:{sec.id}`, name = sec.name, sessions = own })
 				end
 				for _, g in (groups_of(by, placed_in(p))) do
-					table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
+					-- (The empty projects aren't on the rail: their fold is
+					-- the list's.)
+					if not g.empty then
+						table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
+					end
 				end
 				return out
 			end)
@@ -4103,6 +4198,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	end
 	if (details :: any).archived then
 		table.insert(SHOW, { key = "archived", label = "ds.sidebar.view.archived", icon = "archive-minimalistic" })
+	end
+	if (details :: any).empty_projects then
+		table.insert(SHOW, { key = "empty_projects", label = "ds.sidebar.view.empty_projects", icon = "inbox" })
 	end
 	-- Opens it. (A press anywhere outside it closes it, this one too, as
 	-- zgx closes any popover: toggling here would open it again.)

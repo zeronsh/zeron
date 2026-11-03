@@ -493,11 +493,13 @@
         "create_section": "Create section",
         "keep_active": "Active when collapsed",
         "devices_first": "Devices first",
-        "projects_first": "Projects first"
+        "projects_first": "Projects first",
+        "empty_projects": "Empty projects"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
-      "show_less": "Show less"
+      "show_less": "Show less",
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
     },
     "git": {
       "pull_request": "Pull request",
