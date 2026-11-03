@@ -320,6 +320,13 @@ struct BackgroundTaskParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ToolCallParams {
+    chat_id: String,
+    call_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RunProjectActionParams {
     space_id: String,
     chat_id: String,
@@ -2282,6 +2289,8 @@ fn forwardable(method: &str) -> bool {
             // Background processes run in the chat host's runtime.
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
+            // So do the calls of its live turn.
+            | methods::STOP_TOOL_CALL
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -3265,6 +3274,20 @@ impl RpcService for EngineRpc {
                 let p: BackgroundTaskParams = parse_params(params)?;
                 let stopping = self.sessions.stop_background_task(&p.chat_id, &p.task_id);
                 RpcReply::value(&serde_json::json!({ "stopping": stopping }))
+            }
+            methods::STOP_TOOL_CALL => {
+                let p: ToolCallParams = parse_params(params)?;
+                let outcome = self.sessions.stop_tool_call(&p.chat_id, &p.call_id).await;
+                let mut reply = serde_json::json!({
+                    "stopping": outcome == zeron_harness::ToolStop::Stopping,
+                    "outcome": outcome.as_str(),
+                });
+                if let zeron_harness::ToolStop::Unsupported(reason) = &outcome
+                    && !reason.is_empty()
+                {
+                    reply["reason"] = reason.clone().into();
+                }
+                RpcReply::value(&reply)
             }
             methods::READ_BACKGROUND_TASK_OUTPUT => {
                 let p: BackgroundTaskParams = parse_params(params)?;

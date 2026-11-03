@@ -371,6 +371,13 @@ impl Harness for MockHarness {
             ];
             return Ok(futures::stream::iter(events).boxed());
         }
+        // `/hang`: a command that never ends and a subagent that never
+        // reports, side by side, until each is stopped on its own (the host's
+        // `stop_tool_call`) — the only data-side way to exercise stopping one
+        // call while the turn goes on.
+        if request.prompt.trim() == "/hang" {
+            return Ok(hang_run(controls, delay));
+        }
         if let Some(count) = fanout_count(&request.prompt) {
             let settle = if delay_ms == 0 {
                 std::time::Duration::from_millis(2500)
@@ -892,6 +899,131 @@ impl Harness for MockHarness {
             })
             .boxed())
     }
+}
+
+/// `/hang`'s hung command and stuck subagent.
+pub const HANG_COMMAND_ID: &str = "mock-hang-command";
+pub const HANG_AGENT_ID: &str = "mock-hang-agent";
+
+/// `/hang`: one turn holding a command and a subagent that both run until
+/// each is stopped alone; the turn then reads their results and ends.
+fn hang_run(
+    controls: RunControls,
+    delay: std::time::Duration,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    let RunControls {
+        interrupt, turn, ..
+    } = controls;
+    turn.accept_tool_stops();
+    let pause = delay.max(std::time::Duration::from_millis(60));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    tokio::spawn(async move {
+        let agent = |event: AgentEvent| AgentEvent::Subagent {
+            parent_tool_use_id: HANG_AGENT_ID.into(),
+            event: Box::new(event),
+        };
+        let _ = tx.send(AgentEvent::TextDelta {
+            text: "I'll start the server and send a scout through the logs.\n\n".into(),
+        });
+        tokio::time::sleep(pause).await;
+        let _ = tx.send(AgentEvent::ToolCall {
+            id: HANG_COMMAND_ID.into(),
+            call: zeron_proto::ToolCall::Exec {
+                command: "npm run serve -- --watch".into(),
+            },
+        });
+        let _ = tx.send(AgentEvent::ToolCall {
+            id: HANG_AGENT_ID.into(),
+            call: zeron_proto::ToolCall::Unknown {
+                name: "Agent: Read the server logs".into(),
+                input: Some(serde_json::json!({
+                    "description": "Read the server logs",
+                    "prompt": "Read the server logs and report every error.",
+                })),
+            },
+        });
+        let _ = tx.send(agent(AgentEvent::UserMessage {
+            text: "Read the server logs and report every error.".into(),
+        }));
+        let _ = tx.send(agent(AgentEvent::TextDelta {
+            text: "Waiting for the log to settle.\n\n".into(),
+        }));
+        let mut command_open = true;
+        let mut agent_open = true;
+        while command_open || agent_open {
+            tokio::select! {
+                _ = interrupt.cancelled() => {
+                    let _ = tx.send(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    });
+                    return;
+                }
+                _ = turn.stop_requested() => {
+                    let _ = tx.send(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    });
+                    return;
+                }
+                request = turn.tool_stop_requested() => {
+                    let id = request.call_id.clone();
+                    if id == HANG_COMMAND_ID && command_open {
+                        request.answer(crate::ToolStop::Stopping);
+                        tokio::time::sleep(pause).await;
+                        command_open = false;
+                        let _ = tx.send(AgentEvent::ToolResult {
+                            id,
+                            is_error: true,
+                            output: Some("Exit code 137\n\n[killed]".into()),
+                            diff: None,
+                        });
+                        let _ = tx.send(AgentEvent::TextDelta {
+                            text: "The server was stopped; I'll go on without it.\n\n".into(),
+                        });
+                    } else if id == HANG_AGENT_ID && agent_open {
+                        request.answer(crate::ToolStop::Stopping);
+                        tokio::time::sleep(pause).await;
+                        agent_open = false;
+                        let _ = tx.send(agent(AgentEvent::Done {
+                            status: DoneStatus::Interrupted,
+                            result: None,
+                            error: None,
+                            session_id: None,
+                        }));
+                        let _ = tx.send(AgentEvent::ToolResult {
+                            id,
+                            is_error: true,
+                            output: Some("[Request interrupted by user for tool use]".into()),
+                            diff: None,
+                        });
+                        let _ = tx.send(AgentEvent::TextDelta {
+                            text: "The scout was stopped; I'll read the logs myself.\n\n".into(),
+                        });
+                    } else {
+                        request.answer(crate::ToolStop::NotRunning);
+                    }
+                }
+            }
+        }
+        let _ = tx.send(AgentEvent::TextDelta {
+            text: "Both are stopped, and the turn carried on.".into(),
+        });
+        let _ = tx.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        });
+    });
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (Ok(event), rx))
+    })
+    .boxed()
 }
 
 /// The background mode's processes: id, command, description, how long ago

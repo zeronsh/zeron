@@ -351,6 +351,77 @@ pub(crate) async fn terminate_tree(tracked: &[Tracked], grace: std::time::Durati
     }
 }
 
+/// The processes under `root` running `command` — the shell an agent
+/// started for one tool call — with everything under them, for
+/// [`terminate_tree`]. Empty when none is found (it ended, or the agent ran
+/// it some other way). A process runs the command when one of its arguments
+/// is the command (`bash -c '<command>'`) or its arguments are (a shell
+/// that exec'd it). The process-level stop for agents whose protocol stops
+/// only whole turns: killed, the call returns failed and the agent goes on.
+#[cfg(unix)]
+pub(crate) async fn command_tree(root: u32, command: &str) -> Vec<Tracked> {
+    let command = command.trim().to_owned();
+    if command.is_empty() {
+        return Vec::new();
+    }
+    let tree = descendants(root).await;
+    if tree.is_empty() {
+        return Vec::new();
+    }
+    let pids: Vec<i32> = tree.iter().map(|t| t.pid).collect();
+    let lines = tokio::task::spawn_blocking(move || {
+        pids.into_iter()
+            .filter_map(|pid| Some((pid, argv_of(pid)?)))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    let matched: Vec<Tracked> = tree
+        .iter()
+        .filter(|t| {
+            lines
+                .iter()
+                .any(|(pid, argv)| *pid == t.pid && runs_command(argv, &command))
+        })
+        .copied()
+        .collect();
+    let mut doomed = matched.clone();
+    for m in &matched {
+        for d in descendants(m.pid as u32).await {
+            if !doomed.iter().any(|x| x.pid == d.pid) {
+                doomed.push(d);
+            }
+        }
+    }
+    doomed
+}
+
+#[cfg(unix)]
+fn runs_command(argv: &[String], command: &str) -> bool {
+    argv.iter().any(|arg| arg.trim() == command) || argv.join(" ").trim() == command
+}
+
+/// A process's arguments (Linux's /proc; elsewhere none: there the
+/// process-level stop finds nothing and says so).
+#[cfg(unix)]
+fn argv_of(pid: i32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let argv: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|a| !a.is_empty())
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect();
+        (!argv.is_empty()).then_some(argv)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// A retry's wait leaves a multi-thread runtime's other tasks running, and
 /// is safe wherever a synchronous spawn can be called from.
 #[cfg(test)]
@@ -408,6 +479,45 @@ fn windows_spawn_retries_only_sharing_failures_and_fresh_images() {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// One command of several under an agent is found by its command line
+    /// and ended; its sibling runs on.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_command_tree_is_one_command_and_what_runs_under_it() {
+        let mut agent = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                "sh -c 'sleep 61; true' & sh -c 'sleep 62; true' & wait",
+            ])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let root = agent.id().unwrap();
+        let mut found = Vec::new();
+        for _ in 0..250 {
+            found = command_tree(root, "sleep 61; true").await;
+            if found.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(found.len() >= 2, "the shell and its sleep: {found:?}");
+        let sibling = command_tree(root, "sleep 62; true").await;
+        assert!(!sibling.is_empty());
+        assert!(command_tree(root, "sleep 63; true").await.is_empty());
+        terminate_tree(&found, std::time::Duration::from_millis(500)).await;
+        assert!(
+            command_tree(root, "sleep 61; true").await.is_empty(),
+            "ended"
+        );
+        assert!(
+            !command_tree(root, "sleep 62; true").await.is_empty(),
+            "its sibling runs on"
+        );
+        terminate_tree(&sibling, std::time::Duration::from_millis(500)).await;
+        let _ = agent.kill().await;
+    }
 
     /// A grandchild in its own process group (how agent CLIs start shells)
     /// survives its parent's death; the descendant snapshot still finds it

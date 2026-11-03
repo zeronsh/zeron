@@ -4917,6 +4917,24 @@ fn track_open_tools(ev: &AgentEvent, open_tools: &mut std::collections::HashSet<
     }
 }
 
+/// Track open shell commands (their command lines) for the process-level
+/// stop of one call. A call's later updates may name its command first.
+fn track_open_commands(ev: &AgentEvent, open: &mut std::collections::HashMap<String, String>) {
+    match ev {
+        AgentEvent::ToolCall {
+            id,
+            call: zeron_proto::ToolCall::Exec { command },
+        } if !command.trim().is_empty() => {
+            open.insert(id.clone(), command.clone());
+        }
+        AgentEvent::ToolResult { id, .. } => {
+            open.remove(id);
+        }
+        AgentEvent::Done { .. } => open.clear(),
+        _ => {}
+    }
+}
+
 /// A mid-turn `_session/steering` call. `idleBehavior: promptRequired`
 /// covers the turn-ended race: the agent hands the text back instead of
 /// firing an untracked turn.
@@ -5521,6 +5539,14 @@ async fn run_session(session: Session) {
     // ZERON_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
     let mut last_update_at = tokio::time::Instant::now();
     let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Open shell commands by call id: ACP's only stop is the whole turn's
+    // (`session/cancel`), so stopping one call is the process-level stop —
+    // its shell, found under the agent by its command line, is killed, and
+    // the call returns failed while the turn goes on.
+    let mut open_commands: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    #[cfg(target_os = "linux")]
+    turn_control.accept_tool_stops();
     // PREVENTION, ahead of all the recovery above: never send a
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
@@ -5882,6 +5908,7 @@ async fn run_session(session: Session) {
                         session_update_events(&method, &params, &session_id, &mut subagents);
                     for ev in events {
                         track_open_tools(&ev, &mut open_tools);
+                        track_open_commands(&ev, &mut open_commands);
                         if !send(&event_tx, ev).await {
                             break 'main;
                         }
@@ -6456,6 +6483,34 @@ async fn run_session(session: Session) {
                     }).await {
                         break 'main;
                     }
+                }
+            },
+
+            // One call stopped alone: a shell command's process, killed
+            // where it runs under the agent; nothing else has a stop short
+            // of the whole turn.
+            request = turn_control.tool_stop_requested(), if !interrupted => {
+                match (open_commands.get(&request.call_id).cloned(), child.id()) {
+                    #[cfg(unix)]
+                    (Some(command), Some(root)) => {
+                        tokio::spawn(async move {
+                            let doomed = crate::process::command_tree(root, &command).await;
+                            if doomed.is_empty() {
+                                request.answer(crate::ToolStop::Unsupported(
+                                    "Zeron couldn't find that command's process.".into(),
+                                ));
+                                return;
+                            }
+                            request.answer(crate::ToolStop::Stopping);
+                            crate::process::terminate_tree(&doomed, Duration::from_secs(2)).await;
+                        });
+                    }
+                    _ if open_tools.contains(&request.call_id) => {
+                        request.answer(crate::ToolStop::Unsupported(format!(
+                            "{agent_name} can only stop the whole turn; Zeron stops its shell commands one at a time."
+                        )));
+                    }
+                    _ => request.answer(crate::ToolStop::NotRunning),
                 }
             },
 

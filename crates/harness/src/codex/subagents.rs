@@ -64,6 +64,14 @@ impl Subagents {
         }
     }
 
+    /// The child thread a spawn call started, when it is known.
+    pub(super) fn child_of(&self, spawn: &str) -> Option<String> {
+        self.spawns
+            .iter()
+            .find(|(_, owner)| owner.as_str() == spawn)
+            .map(|(child, _)| child.clone())
+    }
+
     pub(super) fn notification(
         &mut self,
         child: &str,
