@@ -60,7 +60,7 @@ pub const MAX_OPTIONS: usize = 24;
 pub const MAX_TEXT: usize = 2000;
 const MAX_LABEL: usize = 80;
 const MAX_DESCRIPTION: usize = 400;
-const KINDS: &[&str] = &["switch", "choice", "text", "number", "shortcut", "folder", "permission", "wallpaper"];
+const KINDS: &[&str] = &["switch", "choice", "text", "number", "shortcut", "folder", "permission", "wallpaper", "action"];
 /// The place a plugin replaces to draw a new chat's wallpaper.
 pub const WALLPAPER_PLACE: &str = "#new-chat-background";
 
@@ -459,6 +459,22 @@ impl Book {
             self.held.insert(id.clone(), held);
         }
         changed
+    }
+
+    pub fn is_action(&self, plugin: &str, id: &str) -> bool {
+        self.held.get(plugin).is_some_and(|h| h.declared.iter().any(|s| s.id == id && s.kind == "action"))
+    }
+
+    /// Runtime choices are bounded and validated like manifest choices. They
+    /// never let a plugin set the person's stored selection.
+    pub fn set_options(&mut self, plugin: &str, id: &str, options: &Json) -> Result<(), String> {
+        let held = self.held.get_mut(plugin).ok_or("That plugin isn't on")?;
+        let setting = held.declared.iter_mut().find(|s| s.id == id && s.kind == "choice").ok_or("Not a choice setting")?;
+        let mut raw = setting.json.clone();
+        raw["options"] = options.clone();
+        let next = declared(plugin, &json!({"settings":[raw]}), false).into_iter().next().ok_or("No valid options")?;
+        *setting = next;
+        Ok(())
     }
 
     /// Plugin `id`'s values, defaults filled in (none declared: empty).

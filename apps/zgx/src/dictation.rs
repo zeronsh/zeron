@@ -151,7 +151,7 @@ impl Service {
                         .map(str::to_owned);
                     self.session = Some(backend.start(dir, device).map_err(|e| e.to_string())?);
                     self.serial += 1;
-                    self.state = json!({"phase":"starting", "serial":self.serial, "level":0});
+                    self.state = json!({"phase":"starting", "serial":self.serial, "level":0, "hold":args["hold"]});
                 }
             }
             _ => return Err("Unknown dictation operation".into()),

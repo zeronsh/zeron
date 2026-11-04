@@ -392,7 +392,7 @@ local function Composer(): Node
 		end
 	end)
 	local notice = ui.computed(function(): any
-		local mine = own_notice:get()
+		local mine = own_notice:get() or Dictation.notice:get()
 		if mine then
 			-- (Its words kept as a catalogue key, said in the language shown.)
 			if mine.key then
@@ -1020,7 +1020,10 @@ local function Composer(): Node
             on_cancel_dictation = Dictation.cancel,
             on_editor_change = Dictation.changed,
             on_editor_caret = Dictation.caret,
-            on_editor_blur = Dictation.cancel,
+            on_editor_blur = Dictation.blur,
+            on_send_press = Dictation.send_press,
+            on_editor_key_up = Dictation.key_up,
+            dictation_slot = true,
             before_send = Dictation.before_send,
 			on_send = send,
 			on_stop = function()
@@ -1091,6 +1094,7 @@ local function Composer(): Node
 			notice = notice,
 			on_dismiss_notice = function()
 				own_notice:set(nil)
+                Dictation.notice:set(nil)
 			end,
 			disabled = function(): boolean
 				local s = store.session:get()

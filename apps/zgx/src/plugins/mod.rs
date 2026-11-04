@@ -2159,6 +2159,16 @@ impl Bridge {
             shared.set(json_value(&Json::Object(values)));
             self.settings_own.borrow_mut().insert(id.to_string(), shared);
         }
+        host.action(format!("plugin.{id}.setting_options"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                if let Some(b) = me.upgrade() {
+                    let args = value_json(&asked);
+                    let result = b.settings.borrow_mut().set_options(&plugin, args["id"].as_str().unwrap_or(""), &args["options"]);
+                    if result.is_ok() { b.publish_settings(true, &[plugin.clone()]); }
+                }
+            }
+        });
         host.action(format!("plugin.{id}.setting_status"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |asked| {
@@ -2815,6 +2825,21 @@ impl Bridge {
     fn actions(&self) {
         let host = &self.host;
         let me = Rc::downgrade(&self.me());
+        host.action("plugins.setting_action", {
+            let me = me.clone();
+            move |asked| {
+                if let Some(b) = me.upgrade() {
+                    let args = value_json(&asked);
+                    let plugin = args["plugin"].as_str().unwrap_or("");
+                    let id = args["id"].as_str().unwrap_or("");
+                    if !b.settings.borrow().is_action(plugin, id) { return; }
+                    let shared = b.host.shared(&format!("plugin.{plugin}.setting_events"), Value::Nil);
+                    let previous = value_json(&shared.signal().with_untracked(Value::clone));
+                    let seq = previous["seq"].as_u64().unwrap_or(0) + 1;
+                    shared.set(json_value(&json!({"seq":seq, "id":id})));
+                }
+            }
+        });
         // Which device's plugins Settings → Plugins shows: another's (its
         // id), or this one's (nil). The same one again looks again.
         host.action("plugins.target", {

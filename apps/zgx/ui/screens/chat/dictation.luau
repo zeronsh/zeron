@@ -8,8 +8,24 @@ end)
 M.notice = ui.state("dictation_notice", nil :: any)
 local binding: any = nil
 local pending: any = nil
+local send_pressed = false
 local function control(op: string)
     ui.invoke("dictation.control", { op = op })
+end
+function M.send_press()
+    send_pressed = true
+    ui.after(0, function() send_pressed = false end)
+end
+function M.blur()
+    if not send_pressed and pending then M.cancel() end
+end
+function M.key_up(e: any): boolean
+    local s = M.state:peek()
+    if pending and s.hold then
+        control("stop")
+        return true
+    end
+    return false
 end
 function M.cancel()
     pending = nil
@@ -31,6 +47,7 @@ function M.begin(owner: string, serial: number)
     if el == nil then control("cancel") return end
     local a, b = el:selection_bytes()
     if a == nil or b == nil then control("cancel") return end
+    el:focus()
     pending = { owner = owner, serial = serial, binding = binding, key = binding.key(), text = binding.value:peek(), a = a, b = b, send = false }
 end
 function M.caret()

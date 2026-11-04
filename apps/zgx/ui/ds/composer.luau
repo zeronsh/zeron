@@ -157,6 +157,9 @@ export type Props = {
     on_editor_change: (() -> ())?,
     on_editor_caret: (() -> ())?,
     on_editor_blur: (() -> ())?,
+    on_send_press: (() -> ())?,
+    on_editor_key_up: ((any) -> boolean)?,
+    dictation_slot: boolean?,
 	on_stop: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
 	-- dictation): true if it did something with it.
@@ -1406,6 +1409,7 @@ return ui.component(function(props: Props): Node
 		disabled = function()
 			return disabled() or not (has_text() or has_cargo() or dictating())
 		end,
+		on_press = props.on_send_press,
 		on_click = send,
 		Icon { name = "arrow-up", size = 14 },
 	}
@@ -1821,6 +1825,7 @@ return ui.component(function(props: Props): Node
                 end,
                 on_change = props.on_editor_change,
                 on_blur = props.on_editor_blur,
+                on_key_up = props.on_editor_key_up,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
@@ -1944,7 +1949,7 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
-				mic,
+				if props.dictation_slot then ui.slot("zeron.composer.dictation", { direction = "row", items = "center", gap = "$space.2" }) else mic,
 				ui.show(stopping, stop_button),
 				ui.show(function()
 					return not stopping()

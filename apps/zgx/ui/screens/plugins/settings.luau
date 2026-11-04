@@ -262,7 +262,11 @@ local Control = ui.component(function(props: { plugin: string, setting: Setting,
 		return PermissionControl { permission = s.permission :: string }
 	end
 	local label = label_of(s)
-	if s.kind == "switch" then
+    if s.kind == "action" then
+        return ds.Button { label, tone = "secondary", size = "sm", on_click = function()
+            ui.invoke("plugins.setting_action", { plugin = plugin, id = s.id })
+        end }
+	elseif s.kind == "switch" then
 		return ds.Switch { value = bound(plugin, s), label = label }
 	elseif s.kind == "choice" then
 		local options = s.options or {}
