@@ -207,7 +207,7 @@ pub fn review(bridge: &Rc<Bridge>, id: &str, on: On) {
         let Some(bridge) = weak.upgrade() else { return };
         let host = host(cx, &bridge, ids.clone(), ons.clone(), slot.clone(), seen_.clone());
         // (`ZERON_ZGX_REVIEW`, development: devtools are this window's.)
-        crate::serve(cx, host, "consent.luau", crate::dev::switch("ZERON_ZGX_REVIEW").is_some());
+        crate::serve_sheet(cx, host, "consent.luau", crate::dev::switch("ZERON_ZGX_REVIEW").is_some());
         let weak = Rc::downgrade(&bridge);
         cx.on_closed(move || {
             if let Some(b) = weak.upgrade() {
