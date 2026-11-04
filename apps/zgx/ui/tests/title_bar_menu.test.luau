@@ -59,6 +59,8 @@ test("Alt turns the controls into the menus' titles in place, the first focused,
 	app:key("ArrowDown")
 	app:frames(20)
 	expect(app:has('role:menuitem "New chat"')).to_be(true)
+	-- Its shortcut as Linux and Windows write one.
+	expect(app:tree('role:menu "File"')).to_contain('"Ctrl+N"')
 	app:key("Escape")
 	app:frames(20)
 	app:key("Escape")
