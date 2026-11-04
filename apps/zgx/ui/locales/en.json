@@ -3130,7 +3130,7 @@
       "can_anything": "{name}: can do anything you can",
       "full_control": "It can run {name}, which gives it full control of your computer.",
       "any_site": "Any site on the internet",
-      "near_host": "{host}: this Mac or your network",
+      "near_host": "{host}: this computer or your network",
       "details": {
         "changes": "Parts of Zeron it changes",
         "replaces": "Screens it replaces",

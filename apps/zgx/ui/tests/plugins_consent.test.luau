@@ -233,7 +233,7 @@ test("a host named exactly says it can be on this computer or your network", fun
 	local tree = app:tree("#consent")
 	expect(tree).to_contain("A named host can be on this computer or your network.")
 	expect(tree).to_contain("box.example.ts.net")
-	expect(tree).to_contain("localhost:8080: this Mac or your network")
+	expect(tree).to_contain("localhost:8080: this computer or your network")
 	-- A wildcard never reaches a private address, so it isn't said.
 	app:command("wildcard_hosts")
 	app:frames(20)
