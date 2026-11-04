@@ -527,7 +527,9 @@ local function placed(project: string?, device: string): (string?, string)
 	local named: sessions.Project? = nil
 	for _, q in now.projects do
 		if q.device == device then
-			if p.github and q.github == p.github then
+			if p.repository and q.repository == p.repository then
+				return q.id, device
+			elseif p.github and q.github == p.github then
 				return q.id, device
 			elseif q.name == p.name or q.path == p.path then
 				named = named or q

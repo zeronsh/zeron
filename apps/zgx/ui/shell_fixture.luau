@@ -963,6 +963,21 @@ for id, url in {
 		end,
 	}
 end
+-- Atlas cloned on the devbox too, with a session there (tests/sidebar_repository).
+ui.command {
+	id = "atlas_cloned_on_box",
+	title = "Atlas is cloned on devbox",
+	run = function()
+		for _, p in model.projects do
+			if p.id == "atlas" then
+				p.repository, p.created = "commit:atlas", 100
+			end
+		end
+		table.insert(model.projects, { id = "atlas-clone", name = "atlas-clone", device = "box", path = "/srv/atlas-clone", git = true, repository = "commit:atlas", created = 200 })
+		table.insert(model.chats, { id = "cl1", title = "On the clone", project = "atlas-clone", device = "box", updated = NOW - 30 * HOUR, created = NOW - 30 * HOUR })
+		publish()
+	end,
+}
 -- A chat beside each of the five, to compose tabs from (tests/session_tabs).
 ui.command {
 	id = "partner_chats",

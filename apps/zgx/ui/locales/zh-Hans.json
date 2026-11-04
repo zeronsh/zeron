@@ -2216,6 +2216,8 @@
         "remove_title": "移除项目？",
         "this_project": "此项目",
         "its_device": "其设备",
+        "removing_where": "选择要从哪些设备移除“{name}”。这些设备上的会话将被永久删除。此操作无法撤销。",
+        "checkout": "{n, plural, other {# 个会话}} · {path}",
         "removing": "移除“{name}”会永久删除 {device} 上的{n, plural, other {# 个会话}}。此操作无法撤销。",
         "couldnt_remove": "无法移除项目",
         "edit": {

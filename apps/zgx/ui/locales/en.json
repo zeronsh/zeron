@@ -2216,6 +2216,8 @@
         "remove_title": "Remove project?",
         "this_project": "this project",
         "its_device": "its device",
+        "removing_where": "Choose where to remove “{name}”. Its sessions there are permanently deleted. This can’t be undone.",
+        "checkout": "{n, plural, one {# session} other {# sessions}} · {path}",
         "removing": "Removing “{name}” permanently deletes {n, plural, one {its # session} other {its # sessions}} on {device}. This can’t be undone.",
         "couldnt_remove": "Couldn't remove the project",
         "edit": {
