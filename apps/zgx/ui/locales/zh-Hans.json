@@ -3070,7 +3070,8 @@
           "title": "以你的身份在此 Mac 上运行 {list}",
           "title_on": "以你的身份在 {device} 上运行 {list}",
           "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。",
-          "detail_anything": "这些程序可以使用你的登录做你能做的任何事。"
+          "detail_anything": "这些程序可以使用你的登录做你能做的任何事。",
+          "detail_each": "它们以你的身份运行，使用你的登录。"
         },
         "native": {
           "title": "在此 Mac 上为你的智能体运行它自己的程序",
@@ -3123,6 +3124,7 @@
         "ui_replace": "用自己的界面替换{places}"
       },
       "can_anything": "{name}：可以做你能做的任何事",
+      "full_control": "它可以运行 {name}，这等于完全控制你的电脑。",
       "any_site": "互联网上的任何网站",
       "near_host": "{host}：这台 Mac 或你的网络",
       "details": {

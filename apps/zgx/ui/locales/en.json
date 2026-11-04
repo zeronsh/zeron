@@ -3070,7 +3070,8 @@
           "title": "Run {list} on this Mac as you",
           "title_on": "Run {list} on {device} as you",
           "detail": "It can do whatever {list} can do with your sign-ins.",
-          "detail_anything": "These can do anything you can, with your sign-ins."
+          "detail_anything": "These can do anything you can, with your sign-ins.",
+          "detail_each": "They run as you, with your sign-ins."
         },
         "native": {
           "title": "Run its own program on this Mac for your agents",
@@ -3123,6 +3124,7 @@
         "ui_replace": "Replace {places} with its own"
       },
       "can_anything": "{name}: can do anything you can",
+      "full_control": "It can run {name}, which gives it full control of your computer.",
       "any_site": "Any site on the internet",
       "near_host": "{host}: this Mac or your network",
       "details": {
