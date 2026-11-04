@@ -448,8 +448,10 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
+    // The menus to its title bar where the system has none (☰, Alt).
+    plugins::host_menu::serve(&host, cx.window.clone(), &cx.windows.menus());
     // The host's own bar above it (a template in preview, a switch you
-    // didn't make, and the menu bar where the system has none).
+    // didn't make) and its menus' layer where the system has none.
     let chrome = plugins::host_bar::view(cx);
     let view = serve_with(cx, host, "app.luau", inspect, Some(chrome));
     // What zgx reports of the window's elements, for plugins' places.
@@ -867,6 +869,8 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost) -> zgx::reactive::E
                 }
             }
         }
+        // The bar the host draws where the system has none: the menus taken.
+        plugins::host_menu::set(windows.menus());
         let keys = reserved.get().iter().filter_map(|key| accelerator(key)).collect();
         if let Err(error) = windows.set_reserved_shortcuts(keys) {
             eprintln!("zeron-zgx: reserved shortcuts: {error}");

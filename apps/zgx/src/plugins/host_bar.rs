@@ -7,8 +7,9 @@
 //! - a notice when the template changed without you choosing it here (an
 //!   agent's `use_template`, an update, a file written by hand);
 //! - on Linux and Windows, which have no system menu bar, the app's menu
-//!   bar (zgx's `app_menu_bar`): View → Use Zeron's Template is always in
-//!   it, the host's own item.
+//!   bar (host_menu.rs: the title bar's ☰ and Alt, or the host's own on
+//!   Alt under a template): View → Use Zeron's Template is always in it,
+//!   the host's own item.
 //!
 //! It sits above the scripts' view in the window's own layout. (A script's
 //! modal or layer mounts at the window's top and may still paint over it:
@@ -44,11 +45,11 @@ pub fn notice(words: String) {
     });
 }
 
-/// The strip, and the menu bar where there's no system one: above the
-/// scripts' view.
+/// The strip above the scripts' view, and the menus' layer where there's
+/// no system menu bar (taking no room).
 pub fn view(cx: &mut WindowContext) -> View {
     let strip = strip(&cx.ui.runtime);
-    column().child(strip).children((!zgx_desktop::has_native_app_menu()).then(|| cx.app_menu_bar()))
+    column().child(strip).children(super::host_menu::view(cx))
 }
 
 /// The main window's root: the host's `chrome` above the scripts' view,
@@ -95,6 +96,58 @@ fn strip(runtime: &zgx::reactive::Runtime) -> View {
             out
         },
     )
+}
+
+thread_local! {
+    /// The host's layers (the menus'): kept over the scripts'.
+    static ON_TOP: RefCell<Vec<zgx::scene::NodeId>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Keeps what holds `handle` (one of the host's layers) among the window
+/// root's last children, drawn over everything and hit first: as it mounts
+/// and after every layout that changes (a script's modal or layer opening
+/// raises itself to the end, which lays the root out again). The host's
+/// layers keep their order among themselves, so two never trade places.
+pub(super) fn keep_on_top(handle: zgx::compose::NodeHandle) {
+    let Some(scene) = handle.scene() else { return };
+    let node = handle.node();
+    ON_TOP.with(|t| {
+        let mut t = t.borrow_mut();
+        if !t.contains(&node) {
+            t.push(node);
+        }
+    });
+    let raise = move || {
+        let Ok(mut scene) = scene.try_borrow_mut() else { return };
+        let root = scene.root();
+        // Each of the host's layers, as the root's child that holds it.
+        let ours: Vec<zgx::scene::NodeId> = ON_TOP.with(|t| {
+            let mut t = t.borrow_mut();
+            t.retain(|n| scene.contains(*n));
+            t.iter()
+                .filter_map(|&n| {
+                    let mut at = n;
+                    loop {
+                        match scene.parent(at) {
+                            Some(parent) if parent == root => return Some(at),
+                            Some(parent) => at = parent,
+                            None => return None,
+                        }
+                    }
+                })
+                .collect()
+        });
+        let children = scene.children(root);
+        let mut order: Vec<_> = children.iter().copied().filter(|c| !ours.contains(c)).collect();
+        order.extend(children.iter().copied().filter(|c| ours.contains(c)));
+        if order.as_slice() == children {
+            return;
+        }
+        scene.reorder_children(root, &order);
+    };
+    let first = raise.clone();
+    first();
+    handle.on_layout(raise);
 }
 
 #[cfg(test)]

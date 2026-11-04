@@ -50,6 +50,7 @@ pub mod looks;
 pub mod template_consent;
 pub mod preview;
 pub mod host_bar;
+pub mod host_menu;
 pub mod locales;
 pub mod plugin_menus;
 pub mod notes;

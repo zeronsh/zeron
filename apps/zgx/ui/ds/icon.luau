@@ -56,6 +56,7 @@ export type Name =
 	| "arrow-right"
 	| "laptop"
 	| "list"
+	| "hamburger-menu"
 	| "bot"
 	| "remote-server"
 	| "project-default"

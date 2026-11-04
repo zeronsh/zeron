@@ -374,7 +374,9 @@
       "forward": "Forward",
       "minimize": "Minimize",
       "maximize": "Maximize",
-      "close": "Close"
+      "close": "Close",
+      "menu": "Menu",
+      "menus": "Menus"
     },
     "address_line": {
       "checking_label": "Checking the address",

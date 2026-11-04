@@ -374,7 +374,9 @@
       "forward": "前进",
       "minimize": "最小化",
       "maximize": "最大化",
-      "close": "关闭"
+      "close": "关闭",
+      "menu": "菜单",
+      "menus": "菜单栏"
     },
     "address_line": {
       "checking_label": "正在检查地址",

@@ -274,6 +274,8 @@ return {
 	["ds.title_bar.minimize"] = "Minimize",
 	["ds.title_bar.maximize"] = "Maximize",
 	["ds.title_bar.close"] = "Close",
+	["ds.title_bar.menu"] = "Menu",
+	["ds.title_bar.menus"] = "Menus",
 	["ds.address_line.checking_label"] = "Checking the address",
 	["ds.address_line.checking"] = "Checking",
 	["ds.address_line.available"] = "Available",
