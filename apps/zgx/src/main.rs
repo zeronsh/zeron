@@ -430,7 +430,14 @@ fn open(cx: &mut WindowContext, entry: &str, inspect: bool) {
     // (Development: `ZERON_ZGX_DEV_PLUGINS` loads plugin folders into a
     // fixture's window, no engine. src/plugins `dev_plugins`.)
     plugins::dev_plugins(&host);
-    serve(cx, host, entry, inspect);
+    // (Development: `ZERON_ZGX_HOST_TOASTS=1` lays the host's toasts over a
+    // fixture, a template in preview and a notice of each kind.)
+    let chrome = plugins::host_bar::dev_toasts(cx);
+    let floor = chrome.is_some().then(|| host.shared("toast_floor", 16.));
+    serve_with(cx, host, entry, inspect, chrome);
+    if let Some(floor) = floor {
+        plugins::host_bar::follow(floor);
+    }
 }
 
 /// The main window: app.luau as the shell (`window` = "main"), where setup
@@ -443,10 +450,14 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
-    // The host's own bar above it (a template in preview, a switch you
-    // didn't make, and the menu bar where the system has none).
+    // The host's own toasts over it (a template in preview, a switch you
+    // didn't make, signing keys, safe mode at launch) and the menu bar
+    // where the system has none.
     let chrome = plugins::host_bar::view(cx);
+    // Where the app's toasts stand, over the host's (host_bar.rs `follow`).
+    let floor = host.shared("toast_floor", 16.);
     let view = serve_with(cx, host, "app.luau", inspect, Some(chrome));
+    plugins::host_bar::follow(floor);
     // What zgx reports of the window's elements, for plugins' places.
     plugins::set_view(view);
     // Launch's allocator peak handed back once it has settled (src/heap.rs).
@@ -938,7 +949,7 @@ fn menus_noting(commands: &[zgx_script::Command]) -> (Vec<AppMenu>, Vec<(String,
         };
         menus[index].entries.push(entry);
     }
-    // "Use Zeron's Template", the host's own, after the scripts' View items:
+    // "Use Default Interface", the host's own, after the scripts' View items:
     // no template can take it away (src/plugins).
     let view = match menus.iter().position(|m| m.label == "View") {
         Some(index) => index,
@@ -954,7 +965,7 @@ fn menus_noting(commands: &[zgx_script::Command]) -> (Vec<AppMenu>, Vec<(String,
     if let Some(preview) = plugins::preview::current() {
         menus[view].entries.push(AppMenuEntry::item(format!("Keep {}…", preview.name), plugins::KEEP_TEMPLATE));
     }
-    menus[view].entries.push(AppMenuEntry::item("Use Zeron's Template", plugins::USE_ZERON_TEMPLATE));
+    menus[view].entries.push(AppMenuEntry::item("Use Default Interface", plugins::USE_ZERON_TEMPLATE));
     (menus, lost)
 }
 

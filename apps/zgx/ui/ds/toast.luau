@@ -59,6 +59,16 @@ local next_id = ui.state("ds_toasts_next", 0)
 -- How many hosts in front (`front`) are up: while one is, the stack shows
 -- there, over the modal that holds it, and not under it.
 local fronts = ui.state("ds_toasts_fronts", 0)
+-- Where the stack stands, in points up from the window's foot: over the
+-- host's own toasts (a template in preview, signing keys: drawn by Zeron
+-- itself, in the same corner), as the main window's host measures them
+-- (src/plugins/host_bar.rs `follow`). 16 where no host says (another
+-- window; a plugin, which can't read it).
+local floor_ok, floor = pcall(ui.shared, "toast_floor", 16)
+local function foot(): number
+	local at = if floor_ok and floor then floor:get() else nil
+	return if type(at) == "number" then at else 16
+end
 -- What the action of each toast runs (functions can't live in state: a
 -- toast kept across a hot reload loses its action's button).
 local runs: { [number]: () -> () } = {}
@@ -248,9 +258,10 @@ local function Stack(up: () -> boolean): Node
 		enter = motion.transition({ opacity = { 0, 1 }, y = { 16, 0 }, duration = 260, ease = "out(3)" }),
 		exit = motion.transition({ opacity = { 1, 0 }, scale = { 1, 0.96 }, duration = 160, ease = "in(2)" }),
 		absolute = true,
-		-- (Insets take points: space.4 off the corner.)
+		-- (Insets take points: space.4 off the corner, and up from the
+		-- foot as the host says.)
 		right = 16,
-		bottom = 16,
+		bottom = foot,
 		gap = "$space.2",
 		items = "end",
 		on_hover = function(inside: boolean)
