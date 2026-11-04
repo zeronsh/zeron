@@ -140,9 +140,10 @@ return function(props: Props): Node
 	local below_head = motion.tween(ui.computed(function(): number
 		return TITLE_H - gap_to:get()
 	end), motion.sidebar)
-	-- Whether the card has its corners, fill and edge: as soon as it
-	-- leaves the window's edges, and until the gap has closed going flat,
-	-- so no square card shows in the gap. (Its timer is the effect's: going
+	-- Whether the card has its corners (clipping the wallpaper) and its
+	-- edge's room: as soon as it leaves the window's edges, and until the gap
+	-- has closed going flat, so no square card shows in the gap. (Its fill
+	-- and edge fade meanwhile: `card_shown`. Its timer is the effect's: going
 	-- back before it's up keeps them.)
 	local edged = ui.use_state(not is_flat:peek())
 	ui.effect(function()
@@ -240,21 +241,40 @@ return function(props: Props): Node
 		end
 		return if type(r) == "number" then r else 12
 	end)()
-	pane.bg = function(): string
-		return if grouped() or not edged:get() then "#00000000" else "$zeron.inset.bg"
-	end
 	-- (Its corners whole while there's any gap round it, square as it
 	-- meets the window's edges: never between, where they'd show changing
 	-- and not match the other corners round them.)
 	pane.rounded = function(): number
 		return ui.raw(if edged:get() then RADIUS else 0, "the card's corners, whole while any gap is round it")
 	end
+	-- (Its edge's room; the edge itself is drawn with the fill, below.)
 	pane.border = function(): number
 		return if edged:get() then 1 else 0
 	end
-	pane.border_color = function(): string
-		return if grouped() then "#00000000" else "$zeron.inset.edge"
-	end
+	pane.border_color = "#00000000"
+	-- The card's fill and edge, under all it holds: faded in and out with
+	-- the sidebar's own motion as a new chat's page goes flat and back (the
+	-- fill lighter than the window, lifting it), by a tween zgx runs, so no
+	-- script runs and nothing is laid out as it fades, and nothing changes
+	-- in one frame. None in a split: there the panes are the cards.
+	local card_shown = motion.tween(ui.computed(function(): number
+		return if grouped() or is_flat:get() then 0 else 1
+	end), motion.sidebar)
+	table.insert(pane, ui.div {
+		id = "shell-page-card",
+		absolute = true,
+		-- (Over the card's edge's room too: the whole card.)
+		left = ui.raw(-1, "over the card's 1-point edge"),
+		right = ui.raw(-1, "over the card's 1-point edge"),
+		top = ui.raw(-1, "over the card's 1-point edge"),
+		bottom = ui.raw(-1, "over the card's 1-point edge"),
+		pointer_events = "none",
+		bg = "$zeron.inset.bg",
+		border = 1,
+		border_color = "$zeron.inset.edge",
+		rounded = "$zeron.inset.radius",
+		opacity = card_shown,
+	})
 	pane.pointer_events = function(): any
 		return if grouped() then "none" else "auto"
 	end

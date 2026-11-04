@@ -1194,3 +1194,35 @@ fn a_panel_toggle_lays_a_chat_of_visuals_out_once_a_way() {
     assert!(with as f64 <= plain as f64 * 1.25, "{with} script calls over visuals, {plain} over a plain chat");
 }
 
+
+// ── A new chat's page going flat ────────────────────────────────────────────
+
+/// The sidebar closing over a new chat's page: the card's fill and edge
+/// fade out with the sidebar's own motion, and back as it opens, never in
+/// one frame; the gap round the card eases with them.
+#[test]
+fn a_new_chat_s_card_fades_with_the_sidebar_never_in_one_frame() {
+    let mut app = mount(&scratch("flat"));
+    app.frames(30);
+    let sample = |app: &mut TestApp| -> (Vec<f32>, Vec<f32>) {
+        let (mut fill, mut gap) = (Vec::new(), Vec::new());
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(8));
+            app.frame();
+            fill.push(app.opacity("shell-page-card"));
+            gap.push(app.bounds("shell-page").y);
+        }
+        (fill, gap)
+    };
+    let between = |v: &[f32], lo: f32, hi: f32| v.iter().filter(|x| **x > lo + 0.01 && **x < hi - 0.01).count();
+    assert!((app.opacity("shell-page-card") - 1.).abs() < 0.01, "a card with the sidebar open");
+    app.click("#titlebar >> role:button \"Toggle sidebar\"");
+    let (fill, gap) = sample(&mut app);
+    assert!(between(&fill, 0., 1.) >= 2, "it fades out over frames: {fill:?}");
+    assert!(between(&gap, 0., 4.) >= 2, "the gap eases: {gap:?}");
+    assert!(fill.last().unwrap().abs() < 0.01 && gap.last().unwrap().abs() < 0.5, "flat at last");
+    app.click("#titlebar >> role:button \"Toggle sidebar\"");
+    let (fill, _) = sample(&mut app);
+    assert!(between(&fill, 0., 1.) >= 2, "and back in: {fill:?}");
+    assert!((fill.last().unwrap() - 1.).abs() < 0.01);
+}
