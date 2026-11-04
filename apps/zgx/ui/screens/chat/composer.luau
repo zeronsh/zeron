@@ -391,8 +391,9 @@ local function Composer(): Node
 			own_notice:set(nil)
 		end
 	end)
+	local dictation_notice = Dictation.notice_for("main")
 	local notice = ui.computed(function(): any
-		local mine = own_notice:get() or Dictation.notice:get()
+		local mine = own_notice:get() or dictation_notice:get()
 		if mine then
 			-- (Its words kept as a catalogue key, said in the language shown.)
 			if mine.key then
@@ -929,7 +930,7 @@ local function Composer(): Node
         return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{current.name}`
     end, function(): boolean
         return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
-    end, send)
+    end, send, "main")
 
 	local function composer(): Node
 		return ds.Composer {
@@ -1016,15 +1017,22 @@ local function Composer(): Node
 			end,
 			drop_overlay = false,
             editor = dictation_editor,
-            dictating = Dictation.active,
+            dictating = Dictation.active_for("main"),
+            voice_level = function() return Dictation.state:get().level or 0 end,
+            voice_status = function()
+                local p = Dictation.state:get().phase
+                return if p == "finalizing" then "Transcribing…" elseif p == "starting" then "Starting…" else "Listening"
+            end,
             on_cancel_dictation = Dictation.cancel,
             on_editor_change = Dictation.changed,
             on_editor_caret = Dictation.caret,
             on_editor_blur = Dictation.blur,
+            on_editor_focus = function() Dictation.focus(dictation_editor) end,
             on_send_press = Dictation.send_press,
             on_editor_key_up = Dictation.key_up,
             dictation_slot = true,
-            before_send = Dictation.before_send,
+            dictation_target = "main",
+            before_send = function() return Dictation.before_send("main") end,
 			on_send = send,
 			on_stop = function()
 				local id = session_id:peek()

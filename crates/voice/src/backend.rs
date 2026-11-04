@@ -53,3 +53,30 @@ impl DictationSession for crate::Session {
         self.take_level()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        mpsc,
+    };
+    #[test]
+    fn session_contract_signals_cancellation_without_waiting_for_inference() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (_sender, events) = mpsc::channel();
+        let mut session: Box<dyn DictationSession> = Box::new(crate::Session {
+            stop: stop.clone(),
+            cancel: cancel.clone(),
+            level: Arc::new(AtomicU32::new(0)),
+            events,
+        });
+        session.finish();
+        assert!(stop.load(Ordering::Acquire));
+        session.cancel();
+        assert!(cancel.load(Ordering::Acquire));
+        assert_eq!(session.take_level(), 0.0);
+    }
+}

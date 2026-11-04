@@ -42,6 +42,27 @@ pub fn directory(root: &Path, id: &str) -> Result<PathBuf> {
     model(id)?;
     Ok(root.join(id))
 }
+/// Installation dispatch belongs to the catalog, not to a UI or plugin.
+pub fn installed(root: &Path, id: &str) -> Result<bool> {
+    let dir = directory(root, id)?;
+    match id {
+        PARAKEET_V3 => Ok(super::installed(&dir)),
+        _ => bail!("No installer for this dictation model"),
+    }
+}
+pub fn download(
+    root: &Path,
+    id: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: impl FnMut(u64),
+) -> Result<()> {
+    let dir = directory(root, id)?;
+    match id {
+        PARAKEET_V3 => super::download(&dir, cancel, progress),
+        _ => bail!("No installer for this dictation model"),
+    }
+}
+
 /// The caller serializes model operations against capture and downloads.
 pub fn remove(root: &Path, id: &str) -> Result<()> {
     let dir = directory(root, id)?;

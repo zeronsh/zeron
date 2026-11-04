@@ -3864,3 +3864,71 @@ fn settings_pages_lay_out_at_full_width_with_plugins_loaded() {
         assert_eq!(app.error(), None);
     }
 }
+
+#[test]
+fn dictation_plugin_uses_the_public_slot_and_native_api_without_agent_tools() {
+    let item = builtin("dictation");
+    let played = world(json!({"ops":[], "args":[]}));
+    let heard = played.clone();
+    let mut app = TestApp::new(move |runtime| {
+        let entry = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
+        let host = super::lend_design_system(ScriptHost::new(runtime, &entry), &entry);
+        offline(&host);
+        expose_surface(&host);
+        expose_own(&host, "dictation");
+        host.shared("plugin.dictation.settings", zgx_script::Value::Nil).set(json_value(&json!({"model":zeron_voice::catalog::PARAKEET_V3,"input":"system","shortcut":"cmd+d"})));
+        host.shared("plugin.dictation.dictation", zgx_script::Value::Nil).set(json_value(&json!({"phase":"idle"})));
+        for name in ["toast", "cost", "problem", "setting_status", "setting_options"] {
+            host.action(format!("plugin.dictation.{name}"), |_| {});
+        }
+        let played = played.clone();
+        let microphone = host.shared("plugin.dictation.dictation", zgx_script::Value::Nil);
+        host.async_action("plugin.dictation.dictation", move |v: zgx_script::Value| {
+            let args = value_json(&v);
+            played.borrow_mut()["ops"].as_array_mut().unwrap().push(args["op"].clone());
+            played.borrow_mut()["args"].as_array_mut().unwrap().push(args.clone());
+            let answer = match args["op"].as_str() {
+                Some("catalog") => json!(zeron_voice::catalog::models()),
+                Some("inputs") => json!([]),
+                Some("installed") => json!(true),
+                Some("start") => json!({"phase":"starting", "serial":1}),
+                Some("cancel") => json!({"phase":"cancelled"}),
+                Some("stop") => json!({"phase":"finalizing"}),
+                _ => json!({"phase":"idle"}),
+            };
+            if matches!(args["op"].as_str(), Some("start" | "stop" | "cancel")) { microphone.set(json_value(&answer)); }
+            async move { Ok(json_value(&answer)) }
+        });
+        host.set_plugins(vec![item.plugin().unwrap()]);
+        host
+    });
+    app.ui.scene.borrow_mut().resize(1200.,800.); app.frames(30);
+    assert_eq!(app.error(), None, "{}", app.tree());
+    assert!(app.wait_until(|a| a.find("#dictation-microphone").is_some()), "{}", app.tree());
+    assert!(heard.borrow()["ops"].as_array().unwrap().contains(&json!("catalog")));
+    assert!(heard.borrow()["ops"].as_array().unwrap().contains(&json!("inputs")));
+    assert!(heard.borrow()["ops"].as_array().unwrap().contains(&json!("installed")));
+    let commands = app.host.commands().get();
+    assert!(commands.iter().any(|c| c.id == "dictation/dictate"));
+    let mut modifiers = zgx::input::Modifiers::default();
+    if cfg!(target_os = "macos") { modifiers.meta = true; } else { modifiers.control = true; }
+    zgx::input::set_held_modifiers(&app.ui.runtime, modifiers);
+    app.frames(2);
+    assert!(app.host.run_command("dictation/dictate"));
+    assert!(app.wait_until(|_| heard.borrow()["ops"].as_array().unwrap().contains(&json!("start"))));
+    assert!(app.host.run_command("dictation/dictate")); // key repeat must not start another session
+    app.frames(3);
+    assert_eq!(heard.borrow()["ops"].as_array().unwrap().iter().filter(|op| **op == "start").count(), 1);
+    zgx::input::set_held_modifiers(&app.ui.runtime, zgx::input::Modifiers::default());
+    assert!(app.wait_until(|_| heard.borrow()["ops"].as_array().unwrap().contains(&json!("cancel"))));
+    let button = app.bounds("#dictation-microphone");
+    let (x,y) = (button.x + button.width/2., button.y + button.height/2.);
+    app.ui.dispatch(zgx::input::InputEvent::PointerDown { x,y, button: zgx::input::PointerButton::Primary });
+    assert!(app.wait_until(|_| heard.borrow()["ops"].as_array().unwrap().iter().filter(|op| **op == "start").count() == 2));
+    let args = heard.borrow()["args"].as_array().unwrap().iter().rev().find(|a| a["op"] == "start").unwrap().clone();
+    assert_eq!(args["target"], "main", "the public slot supplies its compositor's target");
+    app.ui.dispatch(zgx::input::InputEvent::PointerMove { x:500., y:50. });
+    app.ui.dispatch(zgx::input::InputEvent::PointerUp { x:500., y:50., button: zgx::input::PointerButton::Primary });
+    assert!(app.wait_until(|_| heard.borrow()["ops"].as_array().unwrap().iter().filter(|op| **op == "cancel" || **op == "stop").count() >= 2), "release outside the microphone stops capture");
+    assert_eq!(app.error(), None);
+}

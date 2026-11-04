@@ -563,6 +563,27 @@ pub fn manifest_in(snapshot: &Path) -> Option<Json> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dictation_settings_support_actions_and_validated_dynamic_choices() {
+        let manifest = serde_json::json!({"settings":[
+            {"id":"download", "kind":"action", "label":"Download model"},
+            {"id":"input", "kind":"choice", "options":[{"value":"system", "label":"System default"}]}
+        ]});
+        let mut book = super::Book::new(None);
+        book.sync(&[super::On { id:"dictation".into(), name:"Dictation".into(), hash:"v1".into(), builtin:true }], |_| Some(manifest.clone()));
+        assert!(book.is_action("dictation", "download"));
+        assert!(!book.is_action("other", "download"));
+        assert!(!book.is_action("dictation", "input"));
+        assert!(book.set("dictation", "download", &serde_json::json!(true)).is_err());
+        book.set_options("dictation", "input", &serde_json::json!([{"value":"system"},{"value":"usb","label":"USB mic"}])).unwrap();
+        book.set("dictation", "input", &serde_json::json!("usb")).unwrap();
+        assert_eq!(book.values("dictation")["input"], "usb");
+        assert!(book.set_options("other", "input", &serde_json::json!([])).is_err());
+        assert!(book.set_options("dictation", "input", &serde_json::json!([])).is_err());
+        book.set_options("dictation", "input", &serde_json::json!([{"value":"system"}])).unwrap();
+        assert_eq!(book.values("dictation")["input"], "system");
+    }
+
     use super::*;
 
     fn manifest() -> Json {

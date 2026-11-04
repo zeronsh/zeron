@@ -9,6 +9,7 @@
 --   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
 local store = require("@app/screens/chat/store")
@@ -344,48 +345,7 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		end
 		return where.plan() :: any
 	end
-	return ds.Composer {
-		value = draft,
-		snap = if split then snap else nil,
-		cargo = if split then carried else nil,
-		-- (Its chips' × under the pointer, as the chat page's.)
-		on_remove_cargo = if split then remove_carried else nil,
-		-- (ds.Composer's placeholder is a string: read as the tab is made.)
-		-- (A split's pane is a chat of its own: the chat page's words.)
-		placeholder = locale.s(if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
-		running = running,
-		access = access,
-		model = model,
-		effort = effort,
-		notice = notice,
-		on_dismiss_notice = function()
-			notice:set(nil)
-		end,
-		harnesses = function(): { any }
-			return store.catalog:get().harnesses
-		end,
-		models = function(): { any }
-			return store.catalog:get().models
-		end,
-		-- What its context holds: the chat page's ring and card, from the
-		-- side chat's own numbers (once it has run and they're reported).
-		usage = function(): any
-			local s = session:get()
-			if not s or (s.context_tokens == nil and s.context_window == nil) then
-				return nil
-			end
-			return { tokens = s.context_tokens, window = s.context_window }
-		end,
-		project = project,
-		projects = where.projects,
-		device = device,
-		devices = devices,
-		checkout = checkout,
-		branch = branch,
-		branches = where.branches,
-		branches_empty = where.branches_empty,
-		branch_fixed = branch_fixed,
-		on_send = function(text: string)
+	local function send(text: string)
 			local words = string.match(text, "^%s*(.-)%s*$") or ""
 			if words == "" then
 				return
@@ -434,7 +394,65 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 					dismissable = true,
 				})
 			end)
+	end
+    local dictation_editor = ui.ref()
+    Dictation.bind(dictation_editor, draft, function(): string
+        return chat .. "|" .. name
+    end, function(): boolean
+        return (focused ~= nil and not focused()) or (asks ~= nil and (asks.question:get() ~= nil or asks.approval:get() ~= nil))
+    end, send, name)
+	local dictation_notice = Dictation.notice_for(name)
+	local shown_notice = ui.computed(function() return notice:get() or dictation_notice:get() end)
+	return ds.Composer {
+        editor = dictation_editor, dictation_slot = true, dictation_target = name,
+        dictating = Dictation.active_for(name),
+        voice_level = function() return Dictation.state:get().level or 0 end, on_cancel_dictation = Dictation.cancel,
+        on_editor_focus = function() Dictation.focus(dictation_editor) end,
+        on_editor_change = Dictation.changed, on_editor_caret = Dictation.caret,
+        on_editor_blur = Dictation.blur, on_editor_key_up = Dictation.key_up,
+        on_send_press = Dictation.send_press, before_send = function() return Dictation.before_send(name) end,
+		value = draft,
+		snap = if split then snap else nil,
+		cargo = if split then carried else nil,
+		-- (Its chips' × under the pointer, as the chat page's.)
+		on_remove_cargo = if split then remove_carried else nil,
+		-- (ds.Composer's placeholder is a string: read as the tab is made.)
+		-- (A split's pane is a chat of its own: the chat page's words.)
+		placeholder = locale.s(if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
+		running = running,
+		access = access,
+		model = model,
+		effort = effort,
+		notice = shown_notice,
+		on_dismiss_notice = function()
+            Dictation.notice:set(nil)
+			notice:set(nil)
 		end,
+		harnesses = function(): { any }
+			return store.catalog:get().harnesses
+		end,
+		models = function(): { any }
+			return store.catalog:get().models
+		end,
+		-- What its context holds: the chat page's ring and card, from the
+		-- side chat's own numbers (once it has run and they're reported).
+		usage = function(): any
+			local s = session:get()
+			if not s or (s.context_tokens == nil and s.context_window == nil) then
+				return nil
+			end
+			return { tokens = s.context_tokens, window = s.context_window }
+		end,
+		project = project,
+		projects = where.projects,
+		device = device,
+		devices = devices,
+		checkout = checkout,
+		branch = branch,
+		branches = where.branches,
+		branches_empty = where.branches_empty,
+		branch_fixed = branch_fixed,
+		on_send = send,
 		on_stop = function()
 			store.interrupt(chat)
 		end,

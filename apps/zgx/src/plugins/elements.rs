@@ -49,7 +49,7 @@ pub const ELEMENTS: &[Element] = &[
     e(".message", "a message", "A message in the transcript (.message-user, .message-assistant).", &["message"]),
     e(".message-actions", "a message", "A message's action row.", &[]),
     e("#chat-composer", "the message box", "The composer.", &[]),
-    e("slot:zeron.composer.dictation", "the message box", "Local dictation controls beside Send.", &[]),
+    e("slot:zeron.composer.dictation", "the message box", "Local dictation controls beside Send.", &["dictation_target"]),
     e("#composer-toolbar", "the message box", "The composer's toolbar.", &[]),
     e("#files-pane", "the files pane", "The files pane.", &[]),
     e("#file-tree", "the files pane", "The files pane's tree.", &[]),

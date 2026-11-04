@@ -157,9 +157,13 @@ export type Props = {
     on_editor_change: (() -> ())?,
     on_editor_caret: (() -> ())?,
     on_editor_blur: (() -> ())?,
+    on_editor_focus: (() -> ())?,
     on_send_press: (() -> ())?,
     on_editor_key_up: ((any) -> boolean)?,
     dictation_slot: boolean?,
+    dictation_target: string?,
+    voice_level: (() -> number)?,
+    voice_status: (() -> string)?,
 	on_stop: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
 	-- dictation): true if it did something with it.
@@ -840,7 +844,8 @@ fn fill(input: FillInput) -> vec4<f32> {
  let a1 = 0.5 + 0.5 * sin(i * 1.71 + t * 7.3);
  let a2 = 0.5 + 0.5 * sin(i * 0.37 - t * 2.9 + 1.3);
  let env = 0.55 + 0.45 * sin(t * 1.9 + i * 0.11);
- let h = 0.12 + 0.88 * a1 * a2 * env;
+ let level = input.params[1].x;
+ let h = 0.12 + 0.88 * a1 * a2 * env * level;
  let y = abs(input.p.y / input.size.y - 0.5) * 2.0;
  let a = clamp((h - y) * input.size.y * 0.5 * input.scale, 0.0, 1.0);
  return vec4(ink.rgb, ink.a * a);
@@ -1047,7 +1052,7 @@ return ui.component(function(props: Props): Node
 		value:set("")
 	end
 	local function stopping(): boolean
-		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking()
+		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking() and not dictating()
 	end
 
 	-- Mentions at the caret.
@@ -1564,7 +1569,7 @@ return ui.component(function(props: Props): Node
 						opacity = ui.loop { from = 0.35, to = 1, duration = 900, fps = 30 },
 					},
 					ui.text {
-						locale.t("ds.composer.listening"),
+						if props.voice_status then props.voice_status else locale.t("ds.composer.listening"),
 						shrink = 0,
 						text_size = "$font.size.sm",
 						weight = "$font.weight.medium",
@@ -1825,6 +1830,7 @@ return ui.component(function(props: Props): Node
                 end,
                 on_change = props.on_editor_change,
                 on_blur = props.on_editor_blur,
+                on_focus = props.on_editor_focus,
                 on_key_up = props.on_editor_key_up,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
@@ -1949,7 +1955,8 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
-				if props.dictation_slot then ui.slot("zeron.composer.dictation", { direction = "row", items = "center", gap = "$space.2" }) else mic,
+				-- Keep the width used by the collapsed editor and its caret hitbox.
+				if props.dictation_slot then ui.row { min_w = CONTROL, provide = { dictation_target = props.dictation_target }, ui.slot("zeron.composer.dictation", { direction = "row", items = "center", gap = "$space.2" }) } else mic,
 				ui.show(stopping, stop_button),
 				ui.show(function()
 					return not stopping()

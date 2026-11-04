@@ -46,6 +46,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `panel.tabs` | open tabs of its own in a chat's panel |
 | `pages.add` | add pages of its own to the sidebar |
 | `navigate` | open chats and pages (`zeron.open`) |
+| `dictation` | capture and transcribe speech locally, manage verified models; `compose` is also needed to start |
 | `compose` | put text in the message box (`zeron.compose`), or a review comment on it (`zeron.compose_comment`); you still send it |
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`) |
@@ -366,6 +367,7 @@ Each setting has an `id` (letters, digits, `- _ .`), a `kind`, a `label`, and op
 
 | kind | value | extra fields |
 |---|---|---|
+| `action` | no stored value | a button, handled by `zeron.on_setting_action` |
 | `switch` | `true` / `false` (default off) | |
 | `choice` | one option's `value` (default the first) | `options` `[{ value, label, description? }]` (an option's `description` stands in for the setting's while it's chosen), `style` `"select"` or `"segmented"` |
 | `text` | text, 2000 characters at most | `placeholder` |
@@ -578,3 +580,58 @@ Zeron's GitHub plugin (`plugins-builtin/github`) is built this way throughout, w
 ## Style
 
 Prefer Zeron's components (above). Where you draw your own, use Zeron's tokens, never raw values: colours (`$text.primary`, `$text.secondary`, `$accent`, `$border`), spacing (`$space.1`…`$space.8`), radii (`$radius.sm`…`$radius.xl`) and type (`$font.size.xs`…`$font.size.lg`). Your nodes then follow the person's theme and accent. Inside something rounded, a corner is the outer radius less the inset.
+
+## Local dictation
+
+The official **Dictation** plugin (`plugins-builtin/dictation`) turns speech into an editable draft. It uses no agent tools or Codex Voice connection. It ships with Parakeet TDT 0.6B v3 INT8 as its only verified model; future compatible models belong in this plugin's selector, not separate copies of its controls.
+
+`"dictation"` permits local microphone capture and text results. `"compose"` is also required to start: insertion belongs to Zeron's protected compositor. OS microphone authorization is separate. Dictation is a device permission, never automatically granted when signing a personal plugin. A remote engine does not capture the microphone; the desktop window does. Models use the existing device-local `models/<model-id>` cache, so an installed ZUI Parakeet model is reused when both interfaces use the same data directory.
+
+```lua
+local zeron = require("./zeron")("my-dictation")
+zeron.dictation({ op = "catalog" }):after(function(models)
+    -- id, backend, name, languages, download_bytes, capabilities
+end)
+local state = zeron.dictation_state() -- read-only to the plugin
+```
+
+`zeron.dictation(args)` returns a promise. Operations:
+
+| op | arguments | result |
+|---|---|---|
+| `catalog` | — | verified model metadata |
+| `inputs` | — | local `{ id, name }` microphones; enumeration runs off the UI thread |
+| `installed` | `model` | whether this model is installed |
+| `download` | `model` | starts a verified download; progress in state |
+| `remove` | `model` | removes cached weights; refused during native work/download |
+| `start` | `model`, optional `device`, `target`, `hold` | starts capture and a protected insertion lease |
+| `stop` | — | stops capture, waits for final transcription |
+| `cancel` | — | stops capture and invalidates results; cancels a download |
+| `status` | — | current state, only for its owner |
+
+State phases: `idle`, `downloading`, `ready`, `starting`, `listening`, `finalizing`, `final`, `failed`, `cancelled`. Fields include session `serial`, RMS `level`, download `bytes`/`total`, and transient `text` or `error`. The host consumes final text through the protected editor and retires it; do not use `zeron.compose` to insert it again. A different plugin cannot read or cancel an active owner's session. Native capture admits only one session across windows. Downloads are serialized across windows too.
+
+Place controls at **`slot:zeron.composer.dictation`**, whose context `dictation_target` identifies that compositor. Pass it as `target` to `start`; leave it out for the currently focused compositor. A hold shortcut may pass its combination as `hold` so the editor handles key-up even if the button no longer has focus. The official plugin also watches `ui.modifiers` for Command chords whose key-up macOS suppresses.
+
+The host captures the original selection, native editor revision, draft and destination. Editing, moving the selection, beginning IME composition, changing chat or queue draft, leaving focus, reloading/disabling the plugin or closing the window invalidates the session. Final insertion is one native paste/undo step. Explicit Send waits for the final result and sends once only if nonempty speech was inserted into the same unchanged destination. Failures, silence and cancellation preserve the existing draft and never send.
+
+### Actions and runtime choices in plugin settings
+
+Declare `{ "id": "download", "kind": "action", "label": "Download model" }` for a button. `zeron.on_setting_action(function(id) … end)` hears clicks from Zeron's settings page; it never allows a plugin to click another plugin's settings. `zeron.set_status` supplies bounded plain-text progress or errors beside the button.
+
+`zeron.set_options(id, { { value = "system", label = "System default" }, … })` updates the options of an existing `choice` setting. Options use the same validation and limits as manifest options. Only the person sets a stored value; a disconnected microphone falls back to the default without deleting that stored preference.
+
+### Adding a backend or model
+
+1. Implement `zeron_voice::backend::DictationBackend` and its `DictationSession`; keep samples inside the backend and expose only text/status/level. Cancellation must stop capture independently of native model loading.
+2. Add verified model metadata and a pinned download manifest to `zeron_voice::catalog`. Do not accept arbitrary paths, URLs or executable model code from a plugin. If a backend uses another artifact format, add its verified install/remove path there rather than reusing Parakeet's file assumptions.
+3. Declare actual capabilities (`local`, `partial_results`, recording limit). Parakeet emits final results only. Adding streaming requires extending the event/insertion protocol and tests first.
+4. Test lifecycle, memory limits, native runtime distribution and the new backend on its supported hardware. The Dictation plugin reads the catalog for its model selector; its controls remain shared.
+
+### Verification and packaging
+
+Run `cargo test -p zeron-voice --lib`, the ZGX tests named `dictation`, and `cargo test --manifest-path apps/zgx/Cargo.toml --test dictation`. These use deterministic adapters and the real editor without downloading weights or opening a microphone.
+
+The ZGX workspace pins the same ONNX runtime as ZUI through `zeron-voice`. Linux needs ALSA build headers and the `libasound.so.2` runtime. The beta macOS package already uses `dist/macos/Info.plist` and `Zeron.entitlements`, including microphone usage text and audio-input entitlement. Development microphone capture on macOS must run in an app bundle with that metadata. Intel macOS retains Parakeet's existing native-runtime limitation. The bundled engine must include support for the new `dictation` manifest permission; an older stable engine may reject this plugin.
+
+Hardware verification is separate from the deterministic tests: in a packaged build, download/cancel/retry/remove the model, grant/deny microphone access, test built-in/USB/Bluetooth inputs and disconnection, dictate Spanish, release outside the button, release shortcut modifiers, cancel during loading, and close/reload/disable while recording. Check a local chat, a remote-host chat, split panes and the Zeron v2 template. Confirm no audio files, network transcription, transcript logs or automatic sends. Physical microphone and macOS/Windows package validation must be recorded on those platforms; a Linux headless test does not establish them.
