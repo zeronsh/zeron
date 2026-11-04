@@ -317,8 +317,7 @@ end
 -- that scrolls with the page, as tall as all of them, and builds only those
 -- the page and the window show. `height(item)`: the row's own, its hairline
 -- counted here; `text(item)`, its plain text for a selection running over
--- rows not built. (Not under a box easing open from nothing: at zgx
--- e46ff6fc a list there builds nothing until the page moves.)
+-- rows not built.
 export type EachListOptions = {
 	key: (item: any) -> any,
 	height: (item: any) -> number,

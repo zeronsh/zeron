@@ -22,11 +22,10 @@ return ui.column {
 	relative = true,
 	-- The window's glass, or (opaque) its colour: the main window's.
 	bg = function(): string
-		return if material.see_through() then "$zeron.window" else "$background"
+		return if material.frosted:get() then "$zeron.window" else "$background"
 	end,
 	consent.View(),
 	-- Its title bar's room, above the sheet (its top padding), moves the
-	-- window: where the system draws no title bar (Windows, Linux), nothing
-	-- else would.
+	-- window: the sheet's content would take the drag otherwise.
 	ui.div { absolute = true, left = 0, right = 0, top = 0, h = "$space.7", window_drag = true },
 }
