@@ -159,13 +159,20 @@ fn bounded(item: &Json) -> Json {
     let local = |list: &Json| -> Json {
         json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|h| *h != "*" && zeron_plugin_guard::net::risky(h)).collect::<Vec<_>>())
     };
+    // A host named exactly that doesn't read as local: nothing can tell from
+    // its name where it points, so the sheet says it might be near.
+    let named = |list: &Json| -> Json {
+        json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|h| zeron_plugin_guard::net::names_exactly(h) && !zeron_plugin_guard::net::risky(h)).collect::<Vec<_>>())
+    };
     item["commands_anything"] = anything(&item["commands"]);
     item["commands_full_control"] = full(&item["commands"]);
     item["network_local"] = local(&item["network_hosts"]);
+    item["network_named"] = named(&item["network_hosts"]);
     if let Some(diff) = item.get_mut("digest_diff") {
         diff["commands_anything"] = anything(&diff["added_commands"]);
         diff["commands_full_control"] = full(&diff["added_commands"]);
         diff["network_local"] = local(&diff["network_added"]);
+        diff["network_named"] = named(&diff["network_added"]);
         tools(&mut diff["tools_added"]);
         for tool in diff["tools_changed"].as_array_mut().into_iter().flatten() {
             words(&mut tool["name"], NAME);
@@ -406,6 +413,19 @@ mod tests {
         assert_eq!(shown["commands_anything"], json!(["rg"]));
         assert_eq!(shown["digest_diff"]["commands_full_control"], json!(["node"]));
         assert_eq!(shown["digest_diff"]["commands_anything"], json!(["rg"]));
+    }
+
+    /// What the sheet says of a host: near, as its name reads, or named
+    /// exactly and so maybe near; `*.` and any site neither.
+    #[test]
+    fn the_sheet_is_told_how_each_host_reads() {
+        let shown = bounded(&json!({
+            "network_hosts": ["localhost:8080", "127.1", "box.tail1234.ts.net", "api.example.com", "*.example.org", "*"],
+            "digest_diff": { "network_added": ["rebind.example.com", "*.example.net"] },
+        }));
+        assert_eq!(shown["network_local"], json!(["localhost:8080", "127.1"]));
+        assert_eq!(shown["network_named"], json!(["box.tail1234.ts.net", "api.example.com"]));
+        assert_eq!(shown["digest_diff"]["network_named"], json!(["rebind.example.com"]));
     }
 
     /// R27: Allow is taken only for the sheet shown, once it has shown a
