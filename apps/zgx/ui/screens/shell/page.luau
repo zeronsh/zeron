@@ -603,7 +603,9 @@ return function(props: Props): Node
 				absolute = true,
 				left = 0,
 				right = 0,
-				top = TITLE_H - INSET,
+				-- (From the card's top, under the top bar, as Settings' pages
+				-- and a chat's transcript start: the page keeps its own top.)
+				top = 0,
 				bottom = 0,
 				ui.presence(function(): string
 					local c = route.current:get()
