@@ -160,6 +160,19 @@ function M.content(on: boolean, toward: number, at_once: boolean?): ElementParam
 		opacity = { to = opacity, duration = M.FADE_IN_OUT, ease = M.EASE },
 	} :: any)
 end
+-- The same for content made as it comes (a pane just added): from faded
+-- out, `NUDGE` points along `x` and `y` (signs: where it comes in from), to
+-- at rest.
+function M.arrive(x: number, y: number): ElementParams
+	if M.reduced_now() then
+		return { x = 0, y = 0, opacity = 1, duration = 0 } :: any
+	end
+	return ({
+		x = { from = x * M.NUDGE, to = 0, duration = M.BASE, ease = M.EASE },
+		y = { from = y * M.NUDGE, to = 0, duration = M.BASE, ease = M.EASE },
+		opacity = { from = 0, to = 1, duration = M.FADE_IN_OUT, ease = M.EASE },
+	} :: any)
+end
 
 -- Snappy: what answers a press at once (the lightbox's picture growing out
 -- of its thumbnail and going back, its zoom). It moves from the press's own

@@ -146,6 +146,40 @@ fn a_chat_dragged_to_a_chat_s_edge_sits_beside_it_and_is_focused() {
     assert!(near(page.height, alone.height));
 }
 
+/// A chat dropped beside another opens out of the gap at the page's right:
+/// what's in its pane fades in a step at a time as it drifts in from there
+/// (ds/motion `arrive`), and the pane it splits from never fades.
+#[test]
+fn a_pane_just_added_fades_in_from_its_gap() {
+    let mut app = mount(&scratch("arrive"));
+    open(&mut app, "Fix the build");
+    let page = app.bounds("shell-page");
+    let (sx, sy) = row_at(&mut app, "Tidy the tests");
+    let (x, y) = (page.x + page.width * 0.92, page.y + page.height / 2.);
+    let button = PointerButton::Primary;
+    pointer(&mut app, InputEvent::PointerMove { x: sx, y: sy });
+    pointer(&mut app, InputEvent::PointerDown { x: sx, y: sy, button });
+    for step in 1..=8 {
+        let part = step as f32 / 8.;
+        pointer(&mut app, InputEvent::PointerMove { x: sx + (x - sx) * part, y: sy + (y - sy) * part });
+    }
+    app.frames(4);
+    pointer(&mut app, InputEvent::PointerUp { x, y, button });
+    app.ui.input.forget_clicks();
+    let seen: Vec<(f32, f32)> = (0..24)
+        .map(|_| {
+            app.frames(1);
+            (app.opacity("split-lane-a3"), app.opacity("split-lane-a1"))
+        })
+        .collect();
+    let between = seen.iter().filter(|s| s.0 > 0.02 && s.0 < 0.98).count();
+    assert!(between >= 3, "fades in: {seen:?}");
+    assert!(seen.windows(2).all(|w| w[1].0 >= w[0].0 - 1e-3), "only in: {seen:?}");
+    assert!(seen.iter().all(|s| (s.1 - 1.).abs() < 1e-3), "the pane beside it stays: {seen:?}");
+    let last = seen.last().unwrap();
+    assert!((last.0 - 1.).abs() < 1e-3, "ends shown: {seen:?}");
+}
+
 #[test]
 fn command_w_closes_the_right_panel_tab_before_the_focused_split_chat() {
     let mut app = mount(&scratch("close-tab-before-chat"));
