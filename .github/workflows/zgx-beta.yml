@@ -1,10 +1,13 @@
 name: zgx beta
 
-# Zeron.app's beta channel: the zgx interface (apps/zgx, its `beta` feature)
-# as the Zeron app itself, with the latest stable release's own engine inside
-# (scripts/package-zgx-beta.sh). Testers keep Zeron.app's engine, data and
+# Zeron's beta channel: the zgx interface (apps/zgx, its `beta` feature) as the
+# Zeron app itself, with the latest stable release's own engine inside, on
+# macOS (scripts/package-zgx-beta.sh), Linux (scripts/package-linux.sh) and
+# Windows (scripts/package-windows.ps1). Testers keep Zeron's engine, data and
 # device; the app updates itself from the beta channel and goes back to
 # Stable when they turn beta off (crates/update `channel`).
+#
+# Signed as release.yml signs: macOS only. Linux and Windows aren't signed.
 #
 # Published to the beta channel only — R2 `comet-native-releases/beta/*`
 # (zeron.sh/releases/beta/*, the manifest last) — and as a GitHub
@@ -15,7 +18,7 @@ name: zgx beta
 # version being the next release's (newer than the latest stable):
 #   git tag beta-v0.2.136-beta.1 && git push origin beta-v0.2.136-beta.1
 # or run it by hand with a version (builds and uploads the artifacts, no
-# release, no channel).
+# release, no channel), and optionally only some of the platforms.
 #
 # Armed by the repository variable ZGX_BETA_ENABLED=true: until it's set,
 # every job is skipped. The `apple-release` and `cloudflare` environments
@@ -31,6 +34,10 @@ on:
         description: The beta's version, <workspace version>-beta.<n>.
         type: string
         required: true
+      platforms:
+        description: Which to build (a run by hand).
+        type: string
+        default: macos linux windows
 
 permissions:
   contents: read
@@ -41,21 +48,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Apple silicon only, as release.yml's macOS build.
-  macos:
+  version:
     if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 120
-    environment: ${{ startsWith(github.ref, 'refs/tags/beta-v') && 'apple-release' || '' }}
-    env:
-      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
-      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
-      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      engine: ${{ steps.inspect.outputs.engine }}
+      stable: ${{ steps.version.outputs.stable }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: version (beta-v<workspace version>-beta.<n>, newer than stable)
@@ -86,9 +84,25 @@ jobs:
             echo "version=$version"
             echo "stable=$stable"
           } >>"$GITHUB_OUTPUT"
+
+  # Apple silicon only, as release.yml's macOS build.
+  macos:
+    needs: version
+    if: github.event_name == 'push' || contains(inputs.platforms, 'macos')
+    runs-on: macos-latest
+    timeout-minutes: 120
+    environment: ${{ startsWith(github.ref, 'refs/tags/beta-v') && 'apple-release' || '' }}
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: the stable release's app (its engine goes in)
         env:
-          STABLE: ${{ steps.version.outputs.stable }}
+          STABLE: ${{ needs.version.outputs.stable }}
         run: |
           file="zeron-$STABLE-macos-arm64-app.tar.gz"
           curl -fsS --retry 3 -o "$RUNNER_TEMP/stable-manifest.json" https://zeron.sh/releases/manifest.json
@@ -144,13 +158,13 @@ jobs:
           } >>"$GITHUB_ENV"
       - name: package dmg
         env:
-          BETA_VERSION: ${{ steps.version.outputs.version }}
+          BETA_VERSION: ${{ needs.version.outputs.version }}
           CARGO_FLAGS: --locked
         run: ZGX_BETA_ENGINE="$STABLE_APP" scripts/package-zgx-beta.sh
       - name: inspect the bundle
-        id: inspect
         env:
-          BETA_VERSION: ${{ steps.version.outputs.version }}
+          BETA_VERSION: ${{ needs.version.outputs.version }}
+          STABLE: ${{ needs.version.outputs.stable }}
         run: |
           app="target/package-beta/Zeron.app"
           plist="$app/Contents/Info.plist"
@@ -166,7 +180,7 @@ jobs:
             spctl --assess --type execute --verbose=2 "$app"
             xcrun stapler validate "$app"
           fi
-          echo "engine=$(plutil -extract ZeronEngineVersion raw "$plist")" >>"$GITHUB_OUTPUT"
+          test "$(plutil -extract ZeronEngineVersion raw "$plist")" = "$STABLE"
           du -sh "$app"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -176,17 +190,147 @@ jobs:
             target/package-beta/*.tar.gz
           if-no-files-found: error
 
+  linux:
+    needs: version
+    if: github.event_name == 'push' || contains(inputs.platforms, 'linux')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04 # x86_64
+          - runner: ubuntu-24.04-arm # aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: the stable release's tarball (its engine goes in)
+        env:
+          STABLE: ${{ needs.version.outputs.stable }}
+        run: |
+          file="zeron-$STABLE-linux-$(uname -m).tar.gz"
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/stable-manifest.json" https://zeron.sh/releases/manifest.json
+          sha="$(jq -r --arg f "$file" '.files[$f].sha256 // empty' "$RUNNER_TEMP/stable-manifest.json")"
+          [ -n "$sha" ] || { echo "the stable manifest has no checksum for $file"; exit 1; }
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/$file" "https://zeron.sh/releases/$file"
+          echo "$sha  $RUNNER_TEMP/$file" | sha256sum -c -
+          echo "STABLE_TARBALL=$RUNNER_TEMP/$file" >>"$GITHUB_ENV"
+      - name: system deps (release.yml's)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcb1-dev libx11-xcb-dev \
+            libfontconfig1-dev libfreetype-dev libasound2-dev \
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-beta
+          workspaces: apps/zgx -> target
+      - name: package
+        env:
+          BETA_VERSION: ${{ needs.version.outputs.version }}
+        run: ZGX_BETA_ENGINE="$STABLE_TARBALL" scripts/package-linux.sh
+      - name: inspect and install the tarball
+        env:
+          BETA_VERSION: ${{ needs.version.outputs.version }}
+          STABLE: ${{ needs.version.outputs.stable }}
+        run: |
+          home="$RUNNER_TEMP/home"
+          mkdir -p "$RUNNER_TEMP/unpacked" "$home"
+          tar -xzf "target/package/zeron-$BETA_VERSION-linux-$(uname -m).tar.gz" -C "$RUNNER_TEMP/unpacked"
+          dir="$RUNNER_TEMP/unpacked/zeron-$BETA_VERSION-linux-$(uname -m)"
+          test "$("$dir/zeron" --version)" = "zeron $BETA_VERSION"
+          test "$("$dir/zeron-engine" --version)" = "zeron-engine $STABLE"
+          test -f "$dir/ui/app.luau"
+          test -d "$dir/plugins-builtin"
+          test ! -e "$dir/ui/tests"
+          # Its install.sh, in a home of its own: a beta's directory, `current` on it.
+          HOME="$home" "$dir/install.sh"
+          test "$(basename "$(readlink "$home/.zeron/app/current")")" = "beta-$BETA_VERSION"
+          test "$("$home/.zeron/app/current/zeron" --version)" = "zeron $BETA_VERSION"
+          du -sh "$dir"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zgx-beta-linux-${{ runner.arch }}
+          path: target/package/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    if: github.event_name == 'push' || contains(inputs.platforms, 'windows')
+    runs-on: windows-2022
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The scripts ship as they are on the other platforms: no CRLF.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: the stable release's zeron.exe (it's the engine)
+        env:
+          STABLE: ${{ needs.version.outputs.stable }}
+        run: |
+          $file = "zeron-$env:STABLE-windows-x86_64.exe"
+          $manifest = Invoke-RestMethod https://zeron.sh/releases/manifest.json
+          $sha = $manifest.files.$file.sha256
+          if (-not $sha) { throw "the stable manifest has no checksum for $file" }
+          $path = Join-Path $env:RUNNER_TEMP $file
+          Invoke-WebRequest -Uri "https://zeron.sh/releases/$file" -OutFile $path
+          if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $sha) { throw "checksum mismatch for $file" }
+          "STABLE_EXE=$path" >> $env:GITHUB_ENV
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-beta
+          workspaces: apps/zgx -> target
+      # The feed's base is the edge's: its `beta/` is the beta channel, and
+      # stable's manifest and files, for going back, are beside it.
+      - name: package installer and portable app
+        env:
+          BETA_VERSION: ${{ needs.version.outputs.version }}
+        run: ./scripts/package-windows.ps1 -ReleasesUrl https://zeron.sh/releases -BetaVersion $env:BETA_VERSION -BetaEngine $env:STABLE_EXE
+      - name: inspect the package
+        env:
+          BETA_VERSION: ${{ needs.version.outputs.version }}
+          STABLE: ${{ needs.version.outputs.stable }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'unpacked'
+          Expand-Archive -LiteralPath "target/package/zeron-$env:BETA_VERSION-windows-x86_64.zip" -DestinationPath $dir
+          $interface = (& "$dir/zeron.exe" --version | Out-String).Trim()
+          if ($interface -ne "zeron $env:BETA_VERSION") { throw "the interface says '$interface'" }
+          $beta = "$dir/beta/$env:BETA_VERSION"
+          $engine = (& "$beta/engine/zeron.exe" --version | Out-String).Trim()
+          if ($engine -ne "zeron $env:STABLE") { throw "the engine says '$engine'" }
+          foreach ($path in @("$beta/ui/app.luau", "$beta/plugins-builtin", "$dir/zeron-update.json")) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "no $path in the package" }
+          }
+          if (Test-Path -LiteralPath "$beta/ui/tests") { throw 'the tests are in the package' }
+          $feed = (Get-Content -Raw "$dir/zeron-update.json" | ConvertFrom-Json).releases_url
+          if ($feed -ne 'https://zeron.sh/releases') { throw "the feed is $feed" }
+          Get-ChildItem target/package -File | Select-Object Name, Length
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zgx-beta-windows-${{ runner.arch }}
+          path: |
+            target/package/*.zip
+            target/package/*.exe
+          if-no-files-found: error
+
   # The GitHub pre-release: never the latest release (Zeron's updater and
   # download links follow releases/latest), with the beta's manifest.
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/beta-v')
-    needs: macos
+    needs: [version, macos, linux, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
-      VERSION: ${{ needs.macos.outputs.version }}
-      ENGINE: ${{ needs.macos.outputs.engine }}
+      VERSION: ${{ needs.version.outputs.version }}
+      ENGINE: ${{ needs.version.outputs.stable }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -195,10 +339,17 @@ jobs:
       - name: artifacts and the beta manifest
         run: |
           ls -l dist/
-          test -f "dist/zeron-$VERSION-macos-arm64.dmg"
-          test -f "dist/zeron-$VERSION-macos-arm64-app.tar.gz"
+          # Stable's artifacts, but for a standalone Windows .exe: the beta
+          # can't run without the folder beside it.
+          for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
+              macos-arm64.dmg macos-arm64-app.tar.gz \
+              windows-x86_64.zip windows-x86_64-setup.exe; do
+            test -f "dist/zeron-$VERSION-$platform" \
+              || { echo "missing artifact for $VERSION: $platform"; exit 1; }
+          done
           # crates/update's Manifest: the beta's version, the stable engine it
-          # carries (a switch back to Stable weighs it) and its macOS floor.
+          # carries (a switch back to Stable weighs it) and its macOS floor,
+          # which only macOS reads.
           manifest=$(jq -n --arg version "$VERSION" --arg engine "$ENGINE" \
             '{version: $version, engineVersion: $engine, minimumMacOS: "13.0", files: {}}')
           for f in dist/*; do
@@ -210,24 +361,27 @@ jobs:
           cat beta-manifest.json
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          name: Zeron ${{ needs.macos.outputs.version }}
+          name: Zeron ${{ needs.version.outputs.version }}
           prerelease: true
           make_latest: "false"
+          # As release.yml: published releases are immutable, so re-running
+          # this job after a failed upload keeps the files already there.
+          overwrite_files: false
           files: |
             dist/*
             beta-manifest.json
           body: |
-            Zeron ${{ needs.macos.outputs.version }}, a beta of the next Zeron app.
+            Zeron ${{ needs.version.outputs.version }}, a beta of the next Zeron app.
 
-            - It replaces Zeron.app and keeps your Zeron: the same engine, data, account and device.
+            - It replaces Zeron and keeps your Zeron: the same engine, data, account and device.
             - Once installed, it updates from the beta channel. To go back, turn off **Get beta updates** in Settings → About & updates; Zeron then installs the latest stable release.
-            - macOS 13 or later, Apple silicon.
+            - macOS 13 or later on Apple silicon; Linux x86_64 and aarch64 (run `install.sh` from the tarball); Windows x86_64 (the installer or the zip).
 
   # The beta channel on R2: zeron.sh/releases/beta/*. Every key is under
   # `beta/`: never the stable manifest.json or latest.txt.
   channel:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/beta-v')
-    needs: [macos, release]
+    needs: [version, macos, linux, windows, release]
     runs-on: ubuntu-latest
     environment: cloudflare
     env:
@@ -250,7 +404,13 @@ jobs:
               beta/?*) ;;
               *) echo "refusing to write $1: only beta/* is this workflow's"; exit 1 ;;
             esac
-            npx wrangler@4 r2 object put "comet-native-releases/$1" --file "$2" --remote
+            # The Cloudflare API returns the odd 502; retry each object.
+            for attempt in 1 2 3 4 5; do
+              npx wrangler@4 r2 object put "comet-native-releases/$1" --file "$2" --remote && return 0
+              echo "upload of $1 failed (attempt $attempt), retrying" >&2
+              sleep $((attempt * 10))
+            done
+            return 1
           }
           for f in dist/*; do
             put "beta/$(basename "$f")" "$f"
