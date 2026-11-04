@@ -86,6 +86,7 @@ pub struct NativeImportReport {
     pub journals_copied: usize,
     pub spaces_imported: usize,
     pub spaces_mapped: usize,
+    pub chats_refiled: usize,
     pub unacknowledged: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -195,7 +196,21 @@ enum Disposition {
     /// Existing inert row addressed to the source device: this run is from its
     /// host, so merge the authoritative documents and re-home it.
     RehomeExisting,
+    /// Already re-homed here; only its project reference moves to this device's.
+    RepairSpace,
     Skip,
+}
+
+/// Stable id for a source host's project re-homed onto `device` when another
+/// device's row already holds the original id (a re-run derives the same id).
+fn rehomed_space_id(space_id: &str, device: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(format!("crew-native-import-space\0{space_id}\0{device}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 /// Map a source chat row onto the target identity and device.
@@ -325,8 +340,11 @@ impl NativeProfileImporter {
             }
         }
 
-        // Spaces: own-device spaces map onto an existing same-path space here,
-        // else are imported re-homed; foreign spaces are carried when referenced.
+        // Spaces: the source host's own projects belong to this device now — even
+        // when another host's earlier import already carried them as inert copies.
+        // They map onto an existing same-path space here, else are re-homed (under
+        // a derived id when another device's row already holds the original id;
+        // never rewrite that row). Foreign spaces are carried when referenced.
         let referenced: HashSet<String> = chats.iter().filter_map(|chat| chat.space_id.clone()).collect();
         let own_paths: BTreeMap<String, String> = self
             .workspace
@@ -338,20 +356,41 @@ impl NativeProfileImporter {
         let mut space_map = BTreeMap::new();
         let mut spaces_to_import: Vec<Space> = Vec::new();
         for space in source.registry.read_spaces()? {
-            if !referenced.contains(&space.id) || self.workspace.space(&space.id)?.is_some() {
+            if !referenced.contains(&space.id) {
                 continue;
             }
-            if space.device_id == source.device_id {
-                if let Some(existing) = own_paths.get(&space.path) {
-                    space_map.insert(space.id.clone(), existing.clone());
-                    report.spaces_mapped += 1;
-                    continue;
+            let existing = self.workspace.space(&space.id)?;
+            if space.device_id != source.device_id {
+                if existing.is_none() {
+                    spaces_to_import.push(space);
                 }
-                let mut space = space;
-                space.device_id = target_device.clone();
-                spaces_to_import.push(space);
-            } else {
-                spaces_to_import.push(space);
+                continue;
+            }
+            if let Some(own) = own_paths.get(&space.path) {
+                if *own != space.id {
+                    space_map.insert(space.id.clone(), own.clone());
+                    report.spaces_mapped += 1;
+                }
+                continue;
+            }
+            match existing {
+                None => {
+                    let mut space = space;
+                    space.device_id = target_device.clone();
+                    spaces_to_import.push(space);
+                }
+                Some(row) if row.device_id == target_device => {}
+                Some(_) => {
+                    let id = rehomed_space_id(&space.id, &target_device);
+                    space_map.insert(space.id.clone(), id.clone());
+                    report.spaces_mapped += 1;
+                    if self.workspace.space(&id)?.is_none() {
+                        let mut space = space;
+                        space.id = id;
+                        space.device_id = target_device.clone();
+                        spaces_to_import.push(space);
+                    }
+                }
             }
         }
 
@@ -365,10 +404,16 @@ impl NativeProfileImporter {
                 Some(row) if chat.device_id == source.device_id && row.device_id == source.device_id => {
                     Disposition::RehomeExisting
                 }
+                // Already re-homed here, but still filed under an inert copy of
+                // this host's project (an earlier run predates the mapping).
+                Some(row) if chat.device_id == source.device_id && row.device_id == target_device
+                    && row.space_id.as_ref().is_some_and(|space| space_map.contains_key(space)) => {
+                    Disposition::RepairSpace
+                }
                 Some(_) => Disposition::Skip,
             };
             match disposition {
-                Disposition::Skip => report.skipped_existing += 1,
+                Disposition::Skip | Disposition::RepairSpace => report.skipped_existing += 1,
                 Disposition::Remote => report.remote_hosted_chats += 1,
                 Disposition::Rehome | Disposition::RehomeExisting => report.rehomed_chats += 1,
             }
@@ -378,6 +423,7 @@ impl NativeProfileImporter {
         }
         if options.validate_only {
             report.spaces_imported = spaces_to_import.len();
+            report.chats_refiled = plan.iter().filter(|(_, d)| *d == Disposition::RepairSpace).count();
             return Ok(report);
         }
 
@@ -403,6 +449,19 @@ impl NativeProfileImporter {
         let target_journals = target_root.join("journals");
         let mut imported = Vec::new();
         for (chat, disposition) in plan {
+            if disposition == Disposition::RepairSpace {
+                let refiled = self.workspace.chat(&chat.id).and_then(|row| {
+                    let Some(mut row) = row else { return Ok(false) };
+                    row.space_id = row.space_id.as_ref().and_then(|space| space_map.get(space)).cloned().or(row.space_id);
+                    self.workspace.import_chat_row(&row).map(|()| true)
+                });
+                match refiled {
+                    Ok(true) => report.chats_refiled += 1,
+                    Ok(false) => {}
+                    Err(err) => report.errors.push(format!("chat {}: {err}", chat.id)),
+                }
+                continue;
+            }
             match self
                 .import_chat(&source, &target_store, &chat, &disposition, &source_journals, &target_journals,
                     &space_map, &mut report)
@@ -605,6 +664,15 @@ mod tests {
         );
         assert!(pending.is_empty());
         assert!(merge_document(&source, &target, "absent", false).unwrap().is_none());
+    }
+
+    #[test]
+    fn rehomed_space_ids_are_stable_per_device_and_uuid_shaped() {
+        let a = rehomed_space_id("adbfbe9c-e369-4036-a386-d8366a119092", "device-a");
+        assert_eq!(a, rehomed_space_id("adbfbe9c-e369-4036-a386-d8366a119092", "device-a"));
+        assert_ne!(a, rehomed_space_id("adbfbe9c-e369-4036-a386-d8366a119092", "device-b"));
+        assert_ne!(a, "adbfbe9c-e369-4036-a386-d8366a119092");
+        assert!(uuid::Uuid::parse_str(&a).is_ok(), "{a}");
     }
 
     #[test]
