@@ -493,9 +493,10 @@ ui.effect(function()
 		trees:set(out)
 	end
 end)
--- A chat focused with no tab gets a tab of its own, at the end. (As the focus
--- moves, not as the tabs change: a tab just closed, the focus on its way to another,
--- doesn't come back.)
+-- A chat focused with no tab takes the one tab for a chat alone, in its place, or a
+-- new one at the end: navigating replaces it, until chats are composed in it. (As the
+-- focus moves, not as the tabs change: a tab just closed, the focus on its way to
+-- another, doesn't come back.)
 ui.effect(function()
 	local id = M.focused:get()
 	if not id then
@@ -506,10 +507,47 @@ ui.effect(function()
 	if not t then
 		local tab = leaf(id)
 		tab.key = fresh_key(id, list)
-		local more = table.clone(list)
-		table.insert(more, tab)
+		local more: { Node } = {}
+		local placed = false
+		for _, other in list do
+			if #leaves(other) >= 2 then
+				table.insert(more, other)
+			elseif not placed then
+				table.insert(more, tab)
+				placed = true
+			end
+		end
+		if not placed then
+			table.insert(more, tab)
+		end
 		trees:set(more)
 	end
+end)
+-- One tab for a chat alone, however it came to be more (a split left with one, tabs
+-- kept from before): the focused chat's, else the last.
+ui.effect(function()
+	local list = trees:get()
+	local focused = M.focused:peek()
+	local keep: Node? = nil
+	local alone = 0
+	for _, t in list do
+		if #leaves(t) == 1 then
+			alone += 1
+			if not (keep and focused and holds(keep, focused)) then
+				keep = t
+			end
+		end
+	end
+	if alone <= 1 then
+		return
+	end
+	local out: { Node } = {}
+	for _, t in list do
+		if #leaves(t) >= 2 or t == keep then
+			table.insert(out, t)
+		end
+	end
+	trees:set(out)
 end)
 
 -- The tabs open, in their order, by key.
@@ -868,23 +906,6 @@ end
 function M.can_join(id: string, key: string): boolean
 	local t = tab_with_key(trees:peek(), key)
 	return t ~= nil and not holds(t, id) and #leaves(t) < M.MAX
-end
-
--- A chat dragged to the top bar: a tab of its own, before the tab `before` (none:
--- at the end), and out of the tab it was in, which goes if that was its last.
-function M.new_tab(id: string, before: string?)
-	local list = taken_out(trees:peek(), id, nil)
-	local tab = leaf(id)
-	tab.key = fresh_key(id, list)
-	local at = #list + 1
-	for i, t in list do
-		if key_of(t) == before then
-			at = i
-		end
-	end
-	table.insert(list, at, tab)
-	trees:set(list)
-	route.open_session(id)
 end
 
 -- A chat dragged onto a tab: at the end of it, and out of the tab it was in, which

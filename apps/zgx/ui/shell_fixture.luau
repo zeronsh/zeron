@@ -948,6 +948,32 @@ ui.command {
 		publish()
 	end,
 }
+-- Links clicked in a chat: a pull request's, an issue's, another site's
+-- (tests/plugin_links).
+for id, url in {
+	click_pr_link = "https://github.com/acme/atlas/pull/12/files",
+	click_issue_link = "https://github.com/acme/atlas/issues/12",
+	click_other_link = "https://example.com/acme/atlas/pull/12",
+} do
+	ui.command {
+		id = id,
+		title = id,
+		run = function()
+			require("@ds/links").take(url)
+		end,
+	}
+end
+-- A chat beside each of the five, to compose tabs from (tests/session_tabs).
+ui.command {
+	id = "partner_chats",
+	title = "Five more chats",
+	run = function()
+		for i = 1, 5 do
+			table.insert(model.chats, { id = `p{i}`, title = `Partner {i}`, project = "atlas", device = "mac", updated = NOW - 40 * HOUR - i, created = NOW - 40 * HOUR - i })
+		end
+		publish()
+	end,
+}
 -- A session starts in Cobalt (another device's, say): it has one again.
 ui.command {
 	id = "cobalt_arrives",
