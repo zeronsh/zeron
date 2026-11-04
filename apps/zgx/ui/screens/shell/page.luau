@@ -318,6 +318,10 @@ return function(props: Props): Node
 		absolute = true,
 		left = 0,
 		w = held_width(view_ref, whole),
+		-- (In a split, empty over the focused pane: the pointer goes to it.)
+		pointer_events = function(): any
+			return if grouped() then "none" else "auto"
+		end,
 		-- (The card is set down by the gap, so the page starts that much
 		-- less far down it, where it did in the window.)
 		top = below_head,

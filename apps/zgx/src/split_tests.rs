@@ -1193,3 +1193,4 @@ fn a_panel_toggle_lays_a_chat_of_visuals_out_once_a_way() {
     assert!(chart.len() <= 3, "a chart took {chart:?}");
     assert!(with as f64 <= plain as f64 * 1.25, "{with} script calls over visuals, {plain} over a plain chat");
 }
+
