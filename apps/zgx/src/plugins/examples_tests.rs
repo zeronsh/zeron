@@ -16,7 +16,7 @@ fn example(id: &str) -> Item {
 }
 
 /// A plugin of Zeron's own (plugins-builtin/).
-fn builtin(id: &str) -> Item {
+pub(super) fn builtin(id: &str) -> Item {
     from(Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins-builtin").join(id), id)
 }
 
@@ -31,7 +31,7 @@ fn from(dir: PathBuf, id: &str) -> Item {
     }
 }
 
-type Heard = std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>>;
+pub(super) type Heard = std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>>;
 
 /// GitHub as a test plays it, for the GitHub plugin (which asks it through
 /// gh, `plugin.github.run`): its pull request (`pr`, in the shape the
@@ -39,9 +39,9 @@ type Heard = std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>>;
 /// request (`branches`, GraphQL's shape), the board's pages (`list`), who
 /// you are (`viewer`), the repository a folder is (`repository`), and `fail`
 /// to say no to everything. Changed as a test goes.
-type World = std::rc::Rc<std::cell::RefCell<serde_json::Value>>;
+pub(super) type World = std::rc::Rc<std::cell::RefCell<serde_json::Value>>;
 
-fn world(value: serde_json::Value) -> World {
+pub(super) fn world(value: serde_json::Value) -> World {
     std::rc::Rc::new(std::cell::RefCell::new(value))
 }
 
@@ -283,7 +283,7 @@ fn shell_hearing(items: Vec<Item>) -> (TestApp, Heard) {
 }
 
 /// `shell_hearing`, GitHub played by `world`.
-fn shell_with(items: Vec<Item>, github: World) -> (TestApp, Heard) {
+pub(super) fn shell_with(items: Vec<Item>, github: World) -> (TestApp, Heard) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
     let heard: Heard = Heard::default();
     let log = heard.clone();
