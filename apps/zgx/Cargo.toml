@@ -181,3 +181,6 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[dev-dependencies]
+tempfile = "3"

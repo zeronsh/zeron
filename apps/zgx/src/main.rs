@@ -30,6 +30,7 @@ mod acp_registry;
 mod agents;
 mod appshots;
 mod auth;
+mod carried_settings;
 mod chat;
 mod cloud;
 mod dev;
@@ -465,6 +466,12 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // The active template laid over Zeron's own, in `<data>/templates/.live/`
     // (src/plugins/live.rs): the host's file is fixed as it's made, so it's
     // that folder's, whichever template is in use.
+    // (A beta: the sidebar as it was in the app it replaces.)
+    if cfg!(feature = "beta") {
+        let from = engine::data_dir().map(|dir| dir.join("ui-settings.json"));
+        let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
+        carried_settings::carry(from.as_deref(), state.as_deref());
+    }
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
