@@ -30,7 +30,7 @@ dependencies = [
 [[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -43,7 +43,7 @@ dependencies = [
 [[package]]
 name = "accesskit_consumer"
 version = "0.38.0"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "accesskit",
  "hashbrown 0.16.1",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "accesskit_macos"
 version = "0.26.3"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -79,7 +79,7 @@ dependencies = [
 [[package]]
 name = "accesskit_unix"
 version = "0.22.1"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "accesskit",
  "accesskit_atspi_common",
@@ -96,7 +96,7 @@ dependencies = [
 [[package]]
 name = "accesskit_windows"
 version = "0.34.0"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -2245,6 +2245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json5"
+version = "1.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0348cde6df2b507ba3c3753beba226baba8567af588d6568cdb9877f02c75b60"
+dependencies = [
+ "serde",
+ "ucd-trie",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2459,6 +2469,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mermaid-rs-renderer"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb5b469222ce6b9896edf0a969cf68464f5a028ef394fd6643f00bd943df117"
+dependencies = [
+ "anyhow",
+ "fontdb",
+ "json5 1.3.7",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "ttf-parser",
 ]
 
 [[package]]
@@ -3669,6 +3696,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3924,6 +3963,24 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rustybuzz"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3c7c96f8a08ee34eff8857b11b49b07d71d1c3f4e88f8a88d4c9e9f90b1702"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytemuck",
+ "core_maths",
+ "log",
+ "smallvec",
+ "ttf-parser",
+ "unicode-bidi-mirroring",
+ "unicode-ccc",
+ "unicode-properties",
+ "unicode-script",
+]
 
 [[package]]
 name = "ryu"
@@ -4840,6 +4897,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
+name = "unicode-bidi-mirroring"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dfa6e8c60bb66d49db113e0125ee8711b7647b5579dc7f5f19c42357ed039fe"
+
+[[package]]
+name = "unicode-ccc"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce61d488bcdc9bc8b5d1772c404828b17fc481c0a582b5581e95fb233aef503e"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4861,6 +4930,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unicode-properties"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993ad287eb20e8ba755312801cfe1413e0f25d604075863acaddca10b04c1833"
+
+[[package]]
 name = "unicode-script"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4871,6 +4946,12 @@ name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
+name = "unicode-vo"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
 
 [[package]]
 name = "unicode-width"
@@ -4964,16 +5045,21 @@ dependencies = [
  "base64 0.22.1",
  "data-url",
  "flate2",
+ "fontdb",
  "imagesize",
  "kurbo",
  "log",
  "pico-args",
  "roxmltree 0.21.2",
+ "rustybuzz",
  "simplecss",
  "siphasher",
  "strict-num",
  "svgtypes",
  "tiny-skia-path",
+ "unicode-bidi",
+ "unicode-script",
+ "unicode-vo",
  "xmlwriter",
 ]
 
@@ -5386,7 +5472,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "29.0.4"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "android_system_properties",
  "arrayvec",
@@ -5758,7 +5844,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "ahash",
  "android-activity",
@@ -6140,7 +6226,7 @@ version = "0.2.136"
 dependencies = [
  "anyhow",
  "clap",
- "json5",
+ "json5 0.4.1",
  "plist",
  "serde",
  "serde_json",
@@ -6194,23 +6280,28 @@ dependencies = [
  "block",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
+ "fontdb",
  "foreign-types",
  "image",
- "json5",
+ "json5 0.4.1",
  "libc",
+ "mermaid-rs-renderer",
  "objc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "open",
  "png 0.18.1",
+ "resvg",
  "rusqlite",
  "serde_json",
  "sha2",
  "similar",
  "tokio",
+ "ttf-parser",
  "tungstenite",
  "ureq 2.12.1",
+ "usvg",
  "windows-sys 0.61.2",
  "zatex",
  "zeron-cli",
@@ -6271,8 +6362,8 @@ dependencies = [
 
 [[package]]
 name = "zgx"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "fixed_decimal",
  "foldhash 0.2.0",
@@ -6298,7 +6389,7 @@ dependencies = [
 [[package]]
 name = "zgx-alacritty-terminal"
 version = "0.26.1"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -6320,8 +6411,8 @@ dependencies = [
 
 [[package]]
 name = "zgx-components"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "zgx",
 ]
@@ -6329,7 +6420,7 @@ dependencies = [
 [[package]]
 name = "zgx-cosmic-text"
 version = "0.19.10"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "bitflags 2.13.2",
  "fontdb",
@@ -6351,8 +6442,8 @@ dependencies = [
 
 [[package]]
 name = "zgx-desktop"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -6401,13 +6492,13 @@ dependencies = [
 
 [[package]]
 name = "zgx-ghostty-sys"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 
 [[package]]
 name = "zgx-gpu"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "block2 0.6.2",
  "bytemuck",
@@ -6440,7 +6531,7 @@ dependencies = [
 [[package]]
 name = "zgx-harfrust"
 version = "0.5.3"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -6452,7 +6543,7 @@ dependencies = [
 [[package]]
 name = "zgx-mlua"
 version = "0.12.7"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "bstr",
  "either",
@@ -6466,8 +6557,8 @@ dependencies = [
 
 [[package]]
 name = "zgx-run"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "serde_json",
  "ureq 3.5.0",
@@ -6478,8 +6569,8 @@ dependencies = [
 
 [[package]]
 name = "zgx-script"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "icu_locale_core",
  "icu_plurals",
@@ -6500,7 +6591,7 @@ dependencies = [
 [[package]]
 name = "zgx-taffy"
 version = "0.9.1"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "arrayvec",
  "grid",
@@ -6510,8 +6601,8 @@ dependencies = [
 
 [[package]]
 name = "zgx-terminal"
-version = "0.1.9"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+version = "0.1.10"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "libc",
  "polling",
@@ -6523,7 +6614,7 @@ dependencies = [
 [[package]]
 name = "zgx-zune-jpeg"
 version = "0.5.15"
-source = "git+https://github.com/zeronsh/zgx?rev=7066a9dc0cb2c906afb264c870ad7b68df239d8b#7066a9dc0cb2c906afb264c870ad7b68df239d8b"
+source = "git+https://github.com/zeronsh/zgx?rev=c85c72c65e6292f133ffd0d6a86ba73fab376401#c85c72c65e6292f133ffd0d6a86ba73fab376401"
 dependencies = [
  "zune-core",
 ]

@@ -26,6 +26,7 @@ local status = require("@ds/status")
 local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
+local motion = require("@ds/motion")
 local boundary = require("@app/screens/shell/boundary")
 local control = require("@ds/control")
 local locale = require("@ds/locale")
@@ -425,7 +426,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		by[p.id] = group
 		table.insert(out, group)
 	end
-	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "chat-round-line", sessions = {} }
+	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} }
 	-- (Which have sessions listed, and which archived ones.)
 	local listed: { [string]: boolean } = {}
 	for _, c in now.chats do
@@ -1275,6 +1276,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end :: any,
 		user = user,
 		top = props.top,
+		card = not props.island,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)
 			route.new_chat(project, if device then device_named(device, project) else nil)
@@ -1332,6 +1334,13 @@ M.Sidebar = ui.component(function(props: Props): Node
 		hook = "shell.sidebar",
 		h_full = true,
 		shrink = 0,
+		relative = true,
+		-- (The window's gap before its card, closing with it.)
+		pl = motion.tween(ui.computed(function(): number
+			return if fit.current:get().sidebar then 5 else 0
+		end), motion.sidebar),
+		-- (That gap's top moves the window, as the bar beside it does.)
+		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,
 		rename_dialog(),
 		delete_dialog(),

@@ -1,7 +1,7 @@
 -- The ACP registry's agents (account/registry), answered here as the host
 -- would: no engine in a test host. Required by ui/settings_stub.luau, so
 -- Settings → Providers → Add an agent builds headless; the tests drive it
--- (tests/add_agent.test.luau). Adding one puts it in this Mac's agents
+-- (tests/add_agent.test.luau). Adding one puts it in this computer's agents
 -- (account/agents) as the engine would: a harness `acp.<id>`.
 --
 -- What was asked is in `registry_stub_calls` ("registry.add:<id>", …).
@@ -33,7 +33,7 @@ local function agent(fields: any): registry.Agent
 	return a :: any
 end
 
--- The registry as this Mac sees it (a few of the real one's).
+-- The registry as this computer sees it (a few of the real one's).
 local model: { registry.Agent } = {
 	agent { id = "claude-acp", name = "Claude Agent", by = "Anthropic", version = "0.99.1", about = "Anthropic's Claude, through its ACP wrapper.", kind = "npx", host = "npmjs.com", built_in = "claude-code" },
 	agent { id = "fast-agent", name = "fast-agent", by = "fast-agent.ai", version = "0.10.1", about = "Code and build agents with multi-provider support.", kind = "uvx", readiness = "needs-uv", host = "pypi.org", license = "Apache-2.0" },
@@ -100,7 +100,7 @@ local function settled(word: string?): any
 	return p
 end
 
--- The added agent in this Mac's agents, as the engine lists it.
+-- The added agent in this computer's agents, as the engine lists it.
 local function list_agent(a: any, on: boolean)
 	local now = table.clone(agents.now:peek())
 	local list = {}
@@ -177,7 +177,7 @@ stub.env_set = function(id: string, env: string): any
 	end
 	return p
 end
--- One of your own: listed, and among this Mac's agents.
+-- One of your own: listed, and among this computer's agents.
 stub.add_own = function(name: string, command: string, env: string): any
 	calls:push(`registry.add_own:{name}:{command}`)
 	if string.find(command, "nowhere", 1, true) then
@@ -423,7 +423,7 @@ ui.command {
 			name = "Gemini CLI",
 			command = "printf 'Gemini CLI sign-in\\n\\nPaste your Gemini API key: '; read -r key; printf '\\nSigned in.\\n'",
 			device = nil,
-			device_name = "this Mac",
+			device_name = "this computer",
 		}
 	end,
 }

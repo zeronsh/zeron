@@ -77,9 +77,8 @@ const BAR: &[&str] = &[
     "role:button \"Forward\"",
     "role:button \"Sidebar view options\"",
     "role:button \"Panel\"",
-    // The panel's own controls, in the strip beside its tabs.
-    "role:tab",
-    "role:button \"New Tab\"",
+    // The chats' tabs along the bar, and the panel's Expand beside its toggle.
+    "#session-tabs >> role:tab",
     "role:button \"Expand panel\"",
     "role:button \"Show session details\"",
     "role:button \"Hide session details\"",
@@ -91,16 +90,18 @@ const BAR: &[&str] = &[
 #[test]
 fn the_title_bar_moves_the_window_across_its_width() {
     let mut app = mount();
+    // (Told at the end: what follows has its own say.)
+    let mut dead: Vec<(&str, Vec<f32>)> = Vec::new();
     // A new chat (the composer risen over the page, the wallpaper's room).
-    assert_eq!(dead_zones(&mut app, BAR), Vec::<f32>::new(), "a new chat's strip");
+    dead.push(("a new chat's strip", dead_zones(&mut app, BAR)));
 
     // A session with its files open beside it.
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
     app.frames(10);
     app.click("#titlebar >> role:button \"Panel\"");
     app.frames(40);
-    assert!(app.find("#panel-strip").is_some(), "the panel draws its own top band");
-    assert_eq!(dead_zones(&mut app, BAR), Vec::<f32>::new(), "a session's strip, its files open");
+    assert!(app.find("#panel-strip").is_some(), "the panel's tabs show in its card");
+    dead.push(("a session's strip, its files open", dead_zones(&mut app, BAR)));
 
     // The bar's controls keep their presses: no gesture, and they act.
     let files = app.bounds("#titlebar >> role:button \"Panel\"");
@@ -110,50 +111,52 @@ fn the_title_bar_moves_the_window_across_its_width() {
     assert_eq!(app.bounds("#shell-files").width, 0., "the files toggle closed them");
 
     // Collapsed: the sidebar folds away entirely (no rail), the page the
-    // window's width, the strip edge to edge.
+    // window's width but its edges, the strip edge to edge.
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     app.frames(40);
-    assert_eq!(dead_zones(&mut app, BAR), Vec::<f32>::new(), "the collapsed window's strip");
-    collapsed_alone(&mut app, "collapsed", true);
-    // The session's title in the strip: clear of the bar's controls, on
-    // their line.
-    let title = app.bounds("#page-title");
+    dead.push(("the collapsed window's strip", dead_zones(&mut app, BAR)));
+    collapsed_alone(&mut app, "collapsed");
+    // The session's tab on the strip: clear of the bar's controls, on their
+    // line.
+    let tab = app.bounds("#session-tabs >> role:tab \"Fix the build\"");
     let forward = app.bounds("#titlebar >> role:button \"Forward\"");
-    assert!(title.x >= forward.x + forward.width, "the title {title:?} runs under the controls (Forward {forward:?})");
+    assert!(tab.x >= forward.x + forward.width, "the tab {tab:?} runs under the controls (Forward {forward:?})");
     let mid = |b: Rect| b.y + b.height / 2.;
-    assert!((mid(title) - mid(forward)).abs() <= 1., "the title {title:?} isn't on the controls' line ({forward:?})");
+    assert!((mid(tab) - mid(forward)).abs() <= 1., "the tab {tab:?} isn't on the controls' line ({forward:?})");
     // Nor after the scripts reload, or the route moves (a new chat).
     app.host.reload().expect("the reload failed");
     app.frames(40);
-    collapsed_alone(&mut app, "reloaded", true);
+    collapsed_alone(&mut app, "reloaded");
     // (A new chat, as ⌘N asks: the shortcut is the menu bar's, which a
     // headless window hasn't.)
     assert!(app.host.run_command("shell.new_chat"));
     app.frames(40);
-    collapsed_alone(&mut app, "a new chat", false);
+    collapsed_alone(&mut app, "a new chat");
     app.click("#titlebar >> role:button \"Back\"");
     app.frames(40);
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     app.frames(40);
 
-    // Settings, a page of its own: its list's strip and its page's.
+    // Settings, under the top bar: the bar's strip is still what moves the window.
     app.click("#shell-sidebar >> role:button \"Local\"");
     app.frames(30);
-    assert!(app.find("#settings-drag").is_some(), "settings opened");
-    assert_eq!(dead_zones(&mut app, &[]), Vec::<f32>::new(), "settings' strip");
+    assert!(app.find("#settings").is_some(), "settings opened");
+    dead.push(("settings' strip", dead_zones(&mut app, BAR)));
+    let dead: Vec<_> = dead.into_iter().filter(|(_, zones)| !zones.is_empty()).collect();
+    assert!(dead.is_empty(), "points on the strip that don't move the window: {dead:?}");
 }
 
-/// The window's gap round the page's card (`zeron.inset.gap`).
-const GAP: f32 = 4.;
+/// The window's edge round the page's card.
+const EDGE: f32 = 5.;
 
 /// Collapsed, the sidebar is gone and nothing stands in for it: no rail
 /// (screens/shell/view `rail`, off), the sidebar no wider than nothing, the
-/// page the window's width: a session's a card, the window's gap round it;
-/// a new chat's the whole window, its wallpaper to the edges.
-fn collapsed_alone(app: &mut TestApp, when: &str, card: bool) {
+/// page the window's width but the window's edge each side, a card, a new
+/// chat's too.
+fn collapsed_alone(app: &mut TestApp, when: &str) {
     assert!(app.find("#shell-rail").is_none(), "{when}: a rail shows");
     assert_eq!(app.bounds("#shell-sidebar").width, 0., "{when}: the sidebar still shows");
-    let want = if card { W - 2. * GAP } else { W };
+    let want = W - 2. * EDGE;
     // (The gap round the card eases with the sidebar's motion: settled.)
     app.wait_until(|app| app.bounds("#shell-page").width == want);
     assert_eq!(app.bounds("#shell-page").width, want, "{when}: the page isn't the window's width");

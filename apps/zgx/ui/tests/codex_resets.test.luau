@@ -60,7 +60,7 @@ local function radios(app: any): { { label: string, checked: boolean, focused: b
 	return out
 end
 
--- This Mac's clock time for `at` ("3:45 PM"), as ds/locale says it.
+-- This computer's clock time for `at` ("3:45 PM"), as ds/locale says it.
 local function clock(at: number): string
 	local t = os.date("*t", at) :: any
 	local h = t.hour % 12

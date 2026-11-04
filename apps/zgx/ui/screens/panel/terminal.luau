@@ -88,7 +88,7 @@ M.Terminal = ui.component(function(props: Props): Node
 		-- A page's panel (a plugin's board) has no session: its terminal is
 		-- this Mac's, opening where a new terminal opens (the engine's
 		-- home folder for a terminal of no chat it knows).
-		if not target and string.sub(key, 1, 5) == "page:" then
+		if not target and (string.sub(key, 1, 5) == "page:" or key == state.NO_PROJECT) then
 			target = { chat = key }
 		end
 		if not target then

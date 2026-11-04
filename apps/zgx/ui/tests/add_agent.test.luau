@@ -1,7 +1,7 @@
 -- Settings → Providers → Add an agent: the ACP registry's agents, searched;
--- one read before it's added (who makes it, how it runs on this Mac, how
+-- one read before it's added (who makes it, how it runs on this computer, how
 -- its download is checked, what it may do); the add in place, done or
--- failed; an agent this Mac can't run yet saying why; and once added, its
+-- failed; an agent this computer can't run yet saying why; and once added, its
 -- card among the providers (its icon, a sign-in in place of accounts), the
 -- registry's newer version offered, and removing it. Settings on the shell
 -- in ui/shell_fixture.luau, the registry answered by ui/registry_stub.luau.
@@ -94,18 +94,18 @@ test("Add an agent: one agent read before it's added, then added in place and am
 		"0.66.0",
 		"Apache-2.0",
 		"github.com/google-gemini/gemini-cli",
-		"With Node.js, which this Mac has.",
+		"With Node.js, which this computer has.",
 		"Version 0.66.0 exactly, from npm",
 		"Gemini CLI's own, once it's added.",
-		"Gemini CLI runs on this Mac with your access.",
+		"Gemini CLI runs on this computer with your access.",
 	} do
 		expect(shows(app, text)).to_be(true)
 	end
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	expect(calls(app):find("registry.add:gemini", 1, true) ~= nil).to_be(true)
 	expect(shows(app, "Gemini CLI is ready")).to_be(true)
-	expect(shows(app, "It's in your providers on this Mac, switched on.")).to_be(true)
+	expect(shows(app, "It's in your providers on this computer, switched on.")).to_be(true)
 	app:click(`{PAGE} >> "Open Providers"`)
 	app:frames(40)
 	-- Its card: a sign-in where accounts would be, no "Connect an account".
@@ -116,10 +116,10 @@ end)
 test("Add an agent: a binary says it's checked, and a failed add says why and changes nothing", function()
 	local app = registry()
 	open(app, "Kimi CLI")
-	expect(shows(app, "Downloads its build for this Mac from github.com.")).to_be(true)
+	expect(shows(app, "Downloads its build for this computer from github.com.")).to_be(true)
 	expect(shows(app, "Against the checksum the registry publishes.")).to_be(true)
 	app:command("registry_stub.fail_next")
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	expect(shows(app, "Couldn't add Kimi CLI")).to_be(true)
 	expect(shows(app, "Kimi CLI's download doesn't match the registry's checksum")).to_be(true)
@@ -136,8 +136,8 @@ test("Add an agent: no checksum is said plainly, and one the Mac can't run yet c
 	app:click(`{PAGE} >> "Add an agent"`)
 	app:frames(40)
 	open(app, "fast-agent")
-	expect(shows(app, "Needs uv on this Mac, which isn't there yet.")).to_be(true)
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	expect(shows(app, "Needs uv on this computer, which isn't there yet.")).to_be(true)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(30)
 	expect(calls(app):find("registry.add:fast-agent", 1, true)).to_be(nil)
 end)
@@ -145,7 +145,7 @@ end)
 test("Add an agent: an added agent offers the registry's newer version, and is removed", function()
 	local app = registry()
 	open(app, "Gemini CLI")
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	app:command("registry_stub.newer")
 	-- On Providers, its card offers the update, as any agent's.
@@ -156,7 +156,7 @@ test("Add an agent: an added agent offers the registry's newer version, and is r
 	app:frames(40)
 	expect(shows(app, "Update")).to_be(true)
 	open(app, "Gemini CLI")
-	expect(shows(app, "On this Mac")).to_be(true)
+	expect(shows(app, "On this computer")).to_be(true)
 	expect(shows(app, "Version 0.66.0; the registry has 0.67.0.")).to_be(true)
 	app:click(`{PAGE} >> role:button "Update to 0.67.0"`)
 	app:frames(40)
@@ -167,17 +167,17 @@ test("Add an agent: an added agent offers the registry's newer version, and is r
 	expect(shows(app, "Version 0.67.0, the registry's latest.")).to_be(true)
 	app:click(`{PAGE} >> role:button "Remove"`)
 	app:frames(30)
-	expect(app:has(`"Remove Gemini CLI from this Mac?"`)).to_be(true)
+	expect(app:has(`"Remove Gemini CLI from this computer?"`)).to_be(true)
 	app:click(`role:dialog >> role:button "Remove"`)
 	app:frames(40)
 	expect(calls(app):find("registry.remove:gemini", 1, true) ~= nil).to_be(true)
-	expect(shows(app, "Add to this Mac")).to_be(true)
+	expect(shows(app, "Add to this computer")).to_be(true)
 end)
 
 test("Add an agent: an added agent signs in its own way, its device code said in the sign-in's row", function()
 	local app = registry()
 	open(app, "Gemini CLI")
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	app:click(`{PAGE} >> "Open Providers"`)
 	app:frames(40)
@@ -203,13 +203,13 @@ test("Add an agent: one of your own, from its command, joins the providers", fun
 	app:fill(`{PAGE} >> role:textbox "Name"`, "Halcyon agent")
 	app:fill(`{PAGE} >> role:textbox "Command"`, "/nowhere/agent --acp")
 	app:frames(10)
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(30)
 	expect(shows(app, "Couldn't add your agent")).to_be(true)
 	expect(shows(app, "/nowhere/agent isn't on this device")).to_be(true)
 	app:fill(`{PAGE} >> role:textbox "Command"`, "~/code/halcyon/bin/agent --acp")
 	app:frames(10)
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	expect(calls(app):find("registry.add_own:Halcyon agent:~/code/halcyon/bin/agent --acp", 1, true) ~= nil).to_be(true)
 	-- Back on Providers, its card, and not among the registry's rows.
@@ -222,14 +222,14 @@ end)
 test("Add an agent: an added agent's environment, in its settings, kept on the device", function()
 	local app = registry()
 	open(app, "Gemini CLI")
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	app:click(`{PAGE} >> "Open Providers"`)
 	app:frames(40)
 	app:click(`{PAGE} >> role:button "Gemini CLI settings"`)
 	app:frames(30)
 	expect(app:has(`role:dialog >> "Environment"`)).to_be(true)
-	expect(app:has(`role:dialog >> "Remove from this Mac"`)).to_be(true)
+	expect(app:has(`role:dialog >> "Remove from this computer"`)).to_be(true)
 	-- Its updates as any agent's: the policy, the registry their feed.
 	expect(app:has(`role:dialog >> "Updates"`)).to_be(true)
 	app:fill(`role:dialog >> role:textbox "Environment"`, "GEMINI_API_KEY=sk-1")
@@ -259,7 +259,7 @@ end)
 test("Add an agent: a sign-in that asks for typed input runs in a terminal on the agent's device", function()
 	local app = registry()
 	open(app, "Gemini CLI")
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	app:click(`{PAGE} >> "Open Providers"`)
 	app:frames(40)
@@ -289,7 +289,7 @@ test("Add an agent: an agent signed in already says so, as whom, and signs out",
 	-- only ever offered a sign-in that ended at once.)
 	local app = registry()
 	open(app, "Gemini CLI")
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	app:click(`{PAGE} >> "Open Providers"`)
 	app:frames(40)
@@ -308,7 +308,7 @@ end)
 test("Add an agent: each way an agent offers to sign in is a row, and a key it reads is pasted and kept", function()
 	local app = registry()
 	open(app, "Gemini CLI")
-	app:click(`{PAGE} >> role:button "Add to this Mac"`)
+	app:click(`{PAGE} >> role:button "Add to this computer"`)
 	app:frames(40)
 	app:click(`{PAGE} >> "Open Providers"`)
 	app:frames(40)

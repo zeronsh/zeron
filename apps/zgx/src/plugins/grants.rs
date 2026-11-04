@@ -49,6 +49,10 @@ pub const SHARED_READ: &[(&str, Option<&str>)] = &[
     // The window's corner radius where it follows the window's state
     // (Windows): the design system's inset cards stay concentric with it.
     ("window.corner_radius", None),
+    // How much the desktop blurs behind the window's glass (src/desktop_blur.rs):
+    // the design system lent to plugins reads it (ds/material), so a plugin's
+    // components tint as the app's do.
+    ("window.blur", None),
 ];
 
 /// What plugins may change of the app's own shared state, and the grant

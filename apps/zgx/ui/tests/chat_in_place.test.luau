@@ -744,11 +744,12 @@ test("the conversation width setting widens the transcript and the composer", fu
 		return w
 	end
 	expect(width("#chat-composer")).to_be(660)
-	expect(widest_reply() <= 660).to_be(true)
+	-- (The transcript a little wider than the composer each side, to fade behind it.)
+	expect(widest_reply() <= 660 + 24).to_be(true)
 	app:set_state("settings_conversation_width", 900)
 	app:wait("#never-shown", { timeout_ms = 900 })
 	settle(app)
 	expect(width("#chat-composer")).to_be(900)
 	local w = widest_reply()
-	expect(w > 660 and w <= 900).to_be(true)
+	expect(w > 660 + 24 and w <= 900 + 24).to_be(true)
 end)

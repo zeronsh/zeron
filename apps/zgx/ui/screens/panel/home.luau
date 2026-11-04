@@ -1123,6 +1123,10 @@ M.Page = ui.component(function(props: Props): Node
 			props.open_kind("terminal")
 		end },
 	}
+	-- (A new chat with no project: no folder for a file viewer to show.)
+	if props.key == "no-project" then
+		table.remove(choices, 2)
+	end
 	if sid and props.new_side_chat and props.fork then
 		local new_side, fork = props.new_side_chat, props.fork
 		table.insert(choices, { id = "panel-open-side-chat", icon = "side-chat", label = "panel.empty.side_chat", key = "S", run = function()
@@ -1202,7 +1206,6 @@ M.Page = ui.component(function(props: Props): Node
 			w_full = true,
 			max_w = 380,
 			px = "$space.4",
-			pt = ui.raw(16, "the transcript's own gap over its first message (ds/transcript TURN_GAP), so the two start level"),
 			pb = "$space.6",
 			gap = "$space.5",
 			table.unpack(parts),

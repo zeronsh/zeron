@@ -198,7 +198,8 @@ return function(props: Props): Node
 	return Onboarding.Step {
 		step = props.step,
 		count = props.count,
-		back = Onboarding.Back { on_click = props.on_back },
+		-- (Welcoming someone who already had Zeron, it's the first step: nothing behind it.)
+		back = if state.welcome then nil else Onboarding.Back { on_click = props.on_back },
 		middle = share,
 		continue = {
 			label = function()

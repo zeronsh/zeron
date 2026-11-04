@@ -468,6 +468,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
     let plugin_network = network::Network::default();
     host.fetch_policy(plugin_network.clone());
+    // What the app's VM (a template in preview, while it is one) may reach.
+    host.guard(preview::guard);
     let bridge = Rc::new(Bridge {
         host: host.clone(),
         network: plugin_network,
@@ -1350,6 +1352,11 @@ impl Bridge {
     }
 
     fn blame_as(&self, error: &str, loading: bool) {
+        // A preview asking for what it can't have yet isn't broken. (One that
+        // can't load without it makes way like any, until it's kept.)
+        if !loading && preview::refused(error) {
+            return;
+        }
         let loaded = self.loaded.borrow().clone();
         if let Some(id) = recovery::blame(error, &loaded) {
             self.plugin_failed(&id, error);
@@ -1505,7 +1512,23 @@ impl Bridge {
         let was = self.laid.borrow().id.clone();
         let name = template_name(root, &id);
         preview::set_template_running(id != live::BUILTIN);
+        // What a preview saved is kept with it, or goes with it; what failed
+        // only because it was one is tried again (`Bridge::blame_as`).
+        let was_previewing = preview::current();
+        let kept = trusted && was_previewing.as_ref().is_some_and(|p| p.id == id);
+        if kept {
+            self.host.keep_held_state();
+        } else if was_previewing.as_ref().is_some_and(|p| trusted || p.id != id) {
+            self.host.drop_held_state();
+        }
         preview::set((!trusted).then(|| preview::Preview { id: id.clone(), name: name.clone() }));
+        let retry = kept && {
+            let files = self.failed_files.borrow_mut().forget_under(&format!("{id}:"));
+            let whole = self.broken.borrow().why(&id).is_some();
+            self.broken.borrow_mut().forget(&id);
+            self.fallbacks.borrow_mut().remove(&id);
+            files || whole
+        };
         // A switch you didn't make here (an agent's use_template, a file
         // written by hand): said by the host, whatever the template shows.
         if was != id && !self.chose.replace(false) {
@@ -1532,12 +1555,15 @@ impl Bridge {
         }
         self.publish_templates();
         self.publish_page();
-        if changed > 0
-            && template
+        if (kept || (changed > 0 && template))
             && let Err(error) = self.host.reload()
         {
             eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
             self.blame_as(&error, true);
+        }
+        // What failed as a preview, laid down as it is now.
+        if retry {
+            self.look();
         }
     }
 
@@ -2785,18 +2811,7 @@ impl Bridge {
             }
         });
         // (Each of these acts on the device it names, `device`, or this one.)
-        host.async_action("plugins.set_off", {
-            let me = me.clone();
-            move |arg| {
-                let me = me.clone();
-                async move {
-                    let (id, device) = remote::id_and_device(&arg);
-                    let off = arg.field("off").is_some_and(Value::truthy);
-                    eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
-                    call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
-                }
-            }
-        });
+        set_off_action(host, me.clone());
         host.async_action("plugins.remove", {
             let me = me.clone();
             move |arg| {
@@ -3201,6 +3216,25 @@ async fn call(method: &str, params: Json) -> Result<Json, String> {
 
 /// `call`, on `device` (none: this one). A device out of reach says
 /// "offline", and the page showing it says so too.
+#[cfg(test)]
+pub(crate) fn set_off_action_for_tests(host: &ScriptHost) {
+    set_off_action(host, Weak::new());
+}
+
+/// `plugins.set_off`: a plugin off, or back on. Never an unkept preview's.
+fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
+    host.async_action("plugins.set_off", move |arg| {
+        let me = me.clone();
+        async move {
+            preview::refuse("plugins.set_off")?;
+            let (id, device) = remote::id_and_device(&arg);
+            let off = arg.field("off").is_some_and(Value::truthy);
+            eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
+            call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
+        }
+    });
+}
+
 async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
     let Some(device) = device else { return call(method, params).await };
     call(method, remote::addressed(Some(&device), params)).await.map_err(|error| {

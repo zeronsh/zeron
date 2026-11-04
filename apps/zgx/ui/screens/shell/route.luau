@@ -335,8 +335,12 @@ M.page = steady(function(): { plugin: string, id: string }?
 	return { plugin = c.plugin, id = c.page }
 end)
 
+-- What a new chat's composer has picked: where its panel works. (Not `chosen`: that's
+-- what someone chose, which a first launch with no projects asks them for.)
+M.new_chat_project = ui.state("shell_new_chat_project", nil :: string?)
 M.project = steady(function(): Project?
-	local p = project_of(M.chat:get().project)
+	local c = M.chat:get()
+	local p = project_of(c.project or (if c.name == "home" then M.new_chat_project:get() else nil))
 	if not p then
 		return nil
 	end

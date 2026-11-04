@@ -22,6 +22,7 @@ export type Props = {
 	step: number?,
 	count: number?,
 	on_back: () -> (),
+	on_not_now: () -> (),
 	-- Claimed: on to the card, with it.
 	on_claimed: (card: api.Card) -> (),
 	-- Signed out from here (or the session went): back to the start.
@@ -208,7 +209,12 @@ return function(props: Props): Node
 		-- Back to the look, and no skipping (a username is the card;
 		-- skipping was at sign-in). Signed into the wrong account: Sign out
 		-- is on the look, one step back.
-		back = Onboarding.Back { on_click = props.on_back },
+		-- (Welcoming someone who already had Zeron, there's no look to go back to, and
+		-- they aren't kept from their chats: they can leave it for now.)
+		back = if state.welcome then nil else Onboarding.Back { on_click = props.on_back },
+		aside = if state.welcome
+			then Onboarding.Quiet { label = ui.t("onboarding.not_now") :: any, on_click = props.on_not_now }
+			else nil,
 		continue = {
 			label = function()
 				return if saving:get()

@@ -1,4 +1,4 @@
-//! A picture on this Mac, for the lightbox (ui/ds/lightbox.luau): copied to
+//! A picture on this computer, for the lightbox (ui/ds/lightbox.luau): copied to
 //! the clipboard, or shown in Finder. A script can't load a file into a
 //! `Bitmap` for `ui.clipboard.write_image`, so the host does it.
 //!
@@ -44,7 +44,7 @@ fn path_of(arg: &Value) -> Result<String, String> {
         return Err("no path".into());
     }
     if !Path::new(&path).is_absolute() {
-        return Err("That image isn't a file on this Mac".into());
+        return Err("That image isn't a file on this computer".into());
     }
     Ok(path)
 }

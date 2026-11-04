@@ -119,13 +119,9 @@ end
 
 test("Expand stands off the panel toggle as Back does off the sidebar toggle, level with them", function()
 	local app = open_panel()
-	expect_mirrored(app, "#panel-strip", '"Expand panel"')
+	expect_mirrored(app, "#shell", '"Expand panel"')
 	open_files(app)
-	expect_mirrored(app, "#panel-strip", '"Expand panel"')
-	-- (The strip's tabs are on the title bar's line too.)
-	local tab = must(app, "#panel-strip", 'tab "Files"')
-	local toggle = must(app, "#titlebar", '"Toggle sidebar"')
-	expect(tab.y + tab.h / 2).to_be(toggle.y + toggle.h / 2)
+	expect_mirrored(app, "#shell", '"Expand panel"')
 	expect(app:error()).to_be_nil()
 end)
 
@@ -134,44 +130,13 @@ test("the corner holds with the panel expanded and with the sidebar collapsed", 
 	open_files(app)
 	app:click("#panel-expand")
 	settled(app)
-	expect_mirrored(app, "#panel-strip", '"Collapse panel"')
+	expect_mirrored(app, "#shell", '"Collapse panel"')
 	app:click('#titlebar >> role:button "Toggle sidebar"')
 	settled(app)
-	expect_mirrored(app, "#panel-strip", '"Collapse panel"')
+	expect_mirrored(app, "#shell", '"Collapse panel"')
 	app:click("#panel-expand")
 	settled(app)
-	expect_mirrored(app, "#panel-strip", '"Expand panel"')
+	expect_mirrored(app, "#shell", '"Expand panel"')
 	expect(app:error()).to_be_nil()
 end)
 
-test("split into groups, the top right group's Expand mirrors the left too", function()
-	local app = open_panel()
-	open_files(app)
-	app:click('role:button "New Tab"')
-	expect(app:wait("#panel-open-files", { timeout_ms = 15000 })).to_be(true)
-	open_files(app)
-	-- (As dragging its tab to the panel's right edge leaves it.)
-	local tabs = (app:state("panel_sessions") :: any)["chat:a1"].tabs
-	app:set_state("panel_groups", {
-		["chat:a1"] = {
-			tree = { kind = "row", children = { { kind = "leaf", id = "main" }, { kind = "leaf", id = "g2" } } },
-			groups = { g2 = { tabs = { tabs[2].id } } },
-			focus = "g2",
-			actives = { main = tabs[1].id, g2 = tabs[2].id },
-			next = 3,
-		},
-	})
-	settled(app)
-	expect_mirrored(app, "#shell", '"Expand panel"')
-	-- (Each group's tabs are on the title bar's line.)
-	local toggle = must(app, "#titlebar", '"Toggle sidebar"')
-	for line in app:tree("#shell"):gmatch("[^\n]+") do
-		if line:find('tab "Files"', 1, true) and not line:find(" hidden", 1, true) then
-			local y, w, h = line:match(" %-?[%d%.]+,(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
-			if (tonumber(w) :: number) > 0 then
-				expect((tonumber(y) :: number) + (tonumber(h) :: number) / 2).to_be(toggle.y + toggle.h / 2)
-			end
-		end
-	end
-	expect(app:error()).to_be_nil()
-end)

@@ -39,6 +39,9 @@
 -- goes to the end (a person sending goes there too, whatever they were
 -- reading).
 
+-- When a transcript was last made: a reply already streaming then keeps what it shows,
+-- only what comes after fading in.
+local opened_at = 0
 local Icon = require("@self/icon")
 local Markdown = require("@self/markdown")
 local UserMessage = require("@self/user_message")
@@ -129,6 +132,11 @@ export type Props = {
 	-- The widest the conversation runs (points; a function follows a
 	-- setting as it changes); by default the theme's measure.
 	measure: (number | () -> number)?,
+	-- Its rows' inset each side, in points; by default the theme's.
+	side: number?,
+	-- How far over what floats at its foot its fade starts. (A fade's first fifth
+	-- hardly shows: this has it show from where it should start.)
+	fade_lead: number?,
 	-- What floats over its foot (a composer, docked), in points: the
 	-- conversation runs under it, its end held clear of it, fading out as
 	-- it passes behind (Zeron's band, from the composer's top to the
@@ -550,6 +558,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			text = words,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}:{b.id}` else nil,
+			veil = m.streaming == true,
+			veil_seed = ui.now() - opened_at < 300,
 			track = track(m.id),
 			window = if view
 				then {
@@ -639,11 +649,14 @@ local function reply(
 			text = text,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}` else nil,
+			veil = m.streaming == true,
+			veil_seed = ui.now() - opened_at < 300,
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
 			link_menu = if view then view.link_menu else nil,
 			find = if view and view.find then view.find(`{m.id}:r`) else nil,
 			group = `reply:{m.id}`,
+			track = track(m.id),
 		},
 		-- Its foot, one lane: while the turn runs, that it's working and how
 		-- long; once it settles, its time and Copy on hover. The lane keeps
@@ -712,6 +725,7 @@ local named_shown: { [string]: () -> () } = {}
 local named_sending: { [string]: (push: () -> ()) -> () } = {}
 
 local function Transcript(props: Props): Node
+	opened_at = ui.now()
 	local messages = props.messages
 	-- (Its own kept states, by its name: a side chat's beside the chat
 	-- page's never shares the chat page's glide, runway or hover.)
@@ -1341,15 +1355,21 @@ local function Transcript(props: Props): Node
 				text,
 			}
 		end
+		-- Where it stands: the last place it was given, so it fades out there.
+		local stood: any = nil
+		local function standing(): any
+			stood = spot:get() or stood
+			return stood
+		end
 		local bar: ContainerProps = {
 			ref = pill,
 			absolute = true,
 			top = function(): number
-				local at = spot:get()
+				local at = standing()
 				return if at then at.y else 0
 			end,
 			left = function(): number
-				local at = spot:get()
+				local at = standing()
 				local el = list:peek()
 				if not at or not el then
 					return 0
@@ -1477,7 +1497,7 @@ local function Transcript(props: Props): Node
 			w_full = true,
 			justify = "center",
 			items = "start",
-			px = "$space.5",
+			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
 			pt = function(): number
 				return ui.raw(pt(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
@@ -1558,7 +1578,7 @@ local function Transcript(props: Props): Node
 				hover:set("")
 			end
 		end,
-		SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.on_mention or props.on_attach
+		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.on_mention or props.on_attach
 			then function()
 				-- (A turn on: the release ends the gesture first.)
 				ui.after(0, settle)
@@ -1717,7 +1737,7 @@ local function Transcript(props: Props): Node
 			-- (Zeron's 24 under the title bar; at the foot, the band the
 			-- composer covers, or 24.)
 			fade = function(): { number }
-				return { 24, math.max(24, foot()) }
+				return { 24, math.max(24, foot()) + (props.fade_lead or 0) }
 			end,
 			-- A row Tab (or ⇧Tab) focuses scrolls clear of both bands: the
 			-- title bar's fade at the top, the composer at the foot (followed
@@ -1732,7 +1752,7 @@ local function Transcript(props: Props): Node
 			-- On whole points, so a scroll moves its pixels rather than
 			-- painting them again (a view between device pixels can't).
 			snap = true,
-		} },
+		} } },
 		-- The scrollbar, over the list and never faded, running its whole
 		-- height: at the window's edge, beside the composer rather than
 		-- under it, so scrolled to the end it reaches the page's end.
