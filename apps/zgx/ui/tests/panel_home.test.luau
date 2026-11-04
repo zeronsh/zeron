@@ -454,6 +454,84 @@ test("hundreds of lanes: the first five and those needing you, then Show N more;
 	expect(built(app, 'button "Open side chat ')).to_be(6)
 end)
 
+test("Show N more and Show less ease the list, what's under it going with it, over rows that are still there", function()
+	local app = home()
+	app:command("many")
+	app:frames(30)
+	-- (The next part short, so the home's end is near the pager.)
+	local seen = {}
+	for i = 2, 202 do
+		seen[`chat-1--sub--{i}`] = os.time()
+	end
+	app:set_state("screens/panel/lanes_seen.luau::panel_lanes_seen", seen)
+	app:frames(30)
+	local function y_of(target: string): number
+		return tonumber(app:tree(target):match(",([%-%d.]+) [%d.]+x")) :: number
+	end
+	local function pager_y(): number
+		return y_of("#panel-home-side-list-pager")
+	end
+	local function under_y(): number
+		return y_of("#panel-home-subagents-head")
+	end
+	-- Opening: the pager and the next part travel together, a step at a time.
+	local from = pager_y()
+	local apart = under_y() - from
+	app:click("#panel-home-side-list-pager")
+	app:frames(4)
+	local moving = pager_y()
+	expect(under_y() - moving).to_be(apart)
+	app:frames(30)
+	expect(moving > from and moving < pager_y()).to_be(true)
+	expect(under_y() - pager_y()).to_be(apart)
+	-- Closing, from the home's end: the pager stays where the end stands, and
+	-- the rows it closes over are there as they go by, none of them late.
+	for _ = 1, 40 do
+		app:scroll("#panel-empty", 600)
+		app:frames(2)
+	end
+	local list_y = y_of("#panel-home-side-list")
+	app:click("#panel-home-side-list-pager")
+	app:frames(4)
+	local going = y_of("#panel-home-side-list")
+	expect(going > list_y).to_be(true)
+	expect(built(app, 'button "Open side chat ') > 6).to_be(true)
+	expect(under_y() - pager_y()).to_be(apart)
+	-- (It lands on the first few, with nothing left below them.)
+	app:frames(30)
+	expect(y_of("#panel-home-side-list") > going).to_be(true)
+	expect(built(app, 'button "Open side chat ')).to_be(6)
+	expect(app:has('#panel-home-side-list-pager >> "Show 296 more"')).to_be(true)
+	expect(under_y() - pager_y()).to_be(apart)
+end)
+
+test("with motion reduced, Show N more and Show less land at once, no row put away left behind", function()
+	local app = home()
+	app:set_state("motion_reduce", true)
+	app:command("many")
+	app:frames(30)
+	local function list_h(): number
+		local h = app:tree("#panel-home-side-list"):match("^%s*@%d+[^\n]- [%-%d.]+,[%-%d.]+ [%d.]+x([%d.]+)")
+		return tonumber(h) :: number
+	end
+	local function under_y(): number
+		return tonumber(app:tree("#panel-home-subagents-head"):match(",([%-%d.]+) [%d.]+x")) :: number
+	end
+	expect(list_h()).to_be(192)
+	app:click("#panel-home-side-list-pager")
+	app:frames(2)
+	local y = under_y()
+	expect(list_h() > 192).to_be(true)
+	app:frames(30)
+	expect(under_y()).to_be(y)
+	app:scroll("#panel-empty", y - 300)
+	app:frames(5)
+	app:click("#panel-home-side-list-pager")
+	app:frames(2)
+	-- (As tall as its six rows: none it put away still drawn under them.)
+	expect(list_h()).to_be(192)
+end)
+
 test("a part folded stays folded for its session, across sessions and a reload; another's is its own", function()
 	local app = home()
 	app:click("#panel-home-side-head")
