@@ -63,11 +63,27 @@ pub fn gpu_thread_costs() -> (u64, u64) {
 }
 
 /// This thread's CPU time, in nanoseconds.
+#[cfg(unix)]
 fn thread_cpu_ns() -> u64 {
     let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: a valid timespec to write into.
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
     t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
+}
+
+/// This thread's CPU time, in nanoseconds: its kernel and user times, which
+/// Windows counts in 100-nanosecond ticks.
+#[cfg(windows)]
+fn thread_cpu_ns() -> u64 {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let zero = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero(), zero(), zero(), zero());
+    // SAFETY: the current thread's pseudo-handle, and four FILETIMEs to
+    // write into.
+    unsafe { GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user) };
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    (ticks(kernel) + ticks(user)) * 100
 }
 
 #[cfg(test)]

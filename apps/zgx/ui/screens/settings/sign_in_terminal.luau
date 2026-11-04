@@ -71,7 +71,7 @@ local Terminal = ui.component(function(props: { who: Who, key: string, on_termin
 			elseif k == "opening" then
 				return ui.column { w_full = true, grow = 1 }
 			end
-			local term = api.term(props.key, { command = bridge:peek(), cwd = "~" })
+			local term = api.term(props.key, { command = bridge:peek(), cwd = api.cwd() })
 			ui.after(0, function()
 				if term and term.focus then
 					term:focus()

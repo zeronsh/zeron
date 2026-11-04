@@ -230,6 +230,13 @@ end
 bapi.open_externally = function(url: string)
 	web_note(`external:{url}`)
 end
+-- Pages can show, unless a test says why not (`test_web_unavailable`:
+-- "runtime", "renderer"), as a PC without WebView2 would.
+local web_unavailable = ui.state("test_web_unavailable", "")
+bapi.unavailable = function(): string?
+	local why = web_unavailable:get()
+	return if why ~= "" then why else nil
+end
 -- The page asking for a window (a popup, target=_blank): `test_web_window`
 -- to the view shown.
 local web_window = ui.state("test_web_window", "")

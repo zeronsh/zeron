@@ -187,7 +187,7 @@ M.Terminal = ui.component(function(props: Props): Node
 			local t = tab() :: Tab
 			local term = api.term(id, {
 				command = t.command,
-				cwd = "~",
+				cwd = api.cwd(),
 			})
 			-- The keyboard, when a person opened or turned to this tab.
 			ui.on_cleanup(state.focuser(props.key, id, function()

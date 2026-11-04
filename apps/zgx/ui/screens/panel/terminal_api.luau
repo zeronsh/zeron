@@ -10,8 +10,20 @@
 --   api.write(id, device, text)    typed into it, as from the keyboard
 --   api.term(key, options?)        zgx's session for `key` (ui.term)
 --   api.view(props)                zgx's terminal view (ui.terminal)
+--   api.cwd()                      the folder the bridge runs in: "~", or on
+--                                  Windows the home folder itself (src/terminal.rs)
 
 local M = {}
+
+-- (Asked once; a host without the call, a test's, has "~".)
+local bridge_cwd: string? = nil
+function M.cwd(): string
+	if not bridge_cwd then
+		local ok, dir = pcall(ui.call_sync, "terminal.cwd")
+		bridge_cwd = if ok and type(dir) == "string" and dir ~= "" then dir else "~"
+	end
+	return bridge_cwd :: string
+end
 
 function M.start(target: any): any
 	return ui.call("terminal.start", { target = target })

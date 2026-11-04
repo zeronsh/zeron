@@ -2762,6 +2762,12 @@
         "body": "Enter a website or a localhost address. Point at parts of a page to attach them to your message."
       },
       "web_page": "Web page",
+      "unavailable": {
+        "title": "The browser isn't available on this PC",
+        "runtime": "It needs the Microsoft Edge WebView2 Runtime. Install it, then restart Zeron.",
+        "renderer": "It needs Direct3D 12, and WGPU_BACKEND leaves it out. Unset it, then restart Zeron.",
+        "get_runtime": "Get WebView2"
+      },
       "offline_title": "You're offline",
       "offline_body": "Check the connection, then try again.",
       "failed_title": "Couldn't load this page",

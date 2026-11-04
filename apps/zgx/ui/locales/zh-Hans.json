@@ -2762,6 +2762,12 @@
         "body": "输入网站或 localhost 地址。指向页面中的部分内容，即可将其附加到消息。"
       },
       "web_page": "网页",
+      "unavailable": {
+        "title": "此电脑上无法使用浏览器",
+        "runtime": "浏览器需要 Microsoft Edge WebView2 运行时。安装后请重启 Zeron。",
+        "renderer": "浏览器需要 Direct3D 12，但 WGPU_BACKEND 未包含它。取消设置后请重启 Zeron。",
+        "get_runtime": "获取 WebView2"
+      },
       "offline_title": "当前处于离线状态",
       "offline_body": "请检查连接，然后重试。",
       "failed_title": "无法载入此页面",

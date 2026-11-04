@@ -1489,10 +1489,42 @@ Page = ui.component(function(props: Props): Node
 	-- The address of the load that failed last (a file's, for its page).
 	local failed_url: string? = nil
 
-	-- The page, or the start page before there is one.
+	-- The page, or the start page before there is one; where pages can't
+	-- show (Windows without WebView2), why, in their place, never zgx's
+	-- placeholder.
 	local content = ui.presence(function(): string
+		local why = api.unavailable()
+		if why then
+			return `unavailable:{why}`
+		end
 		return if has_page(web) then "page" else "start"
 	end, function(which: string): Node
+		if string.sub(which, 1, 12) == "unavailable:" then
+			local renderer = which == "unavailable:renderer"
+			return ui.column {
+				id = `panel-browser-unavailable-{id}`,
+				w_full = true,
+				grow = 1,
+				min_h = 0,
+				items = "center",
+				justify = "center",
+				p = "$space.4",
+				ds.EmptyState {
+					icon = "global",
+					size = "sm",
+					title = ui.t("panel.browser.unavailable.title") :: any,
+					body = (if renderer then ui.t("panel.browser.unavailable.renderer") else ui.t("panel.browser.unavailable.runtime")) :: any,
+					action = if renderer
+						then nil
+						else {
+							label = ui.t("panel.browser.unavailable.get_runtime") :: any,
+							on_click = function()
+								api.open_externally("https://developer.microsoft.com/microsoft-edge/webview2/")
+							end,
+						},
+				},
+			}
+		end
 		if which == "start" then
 			return ui.column {
 				id = `panel-browser-start-{id}`,

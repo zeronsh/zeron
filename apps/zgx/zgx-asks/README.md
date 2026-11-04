@@ -24,6 +24,8 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [i18n-message-props](i18n-message-props/ASK.md) | After a language change the menu bar keeps the old language until relaunch, tooltips until rebuilt; plugins can't ship their own translations. |
 | [atomic-selection](atomic-selection/ASK.md) | A selection that starts inside a formula copies half its TeX. |
 | [web-snapshot](web-snapshot/ASK.md) | The browser panel can't attach a picture of the page. |
+| [web-view-supported](web-view-supported/ASK.md) | A script can't tell a web view that's a page from zgx's placeholder: Zeron repeats zgx's Windows check (src/browser.rs) to say why in the browser tab, and can't see a composition that fails later. Seen on Windows, zgx `99a50ad5` and `e46ff6fc`. |
+| [terminal-home](terminal-home/ASK.md) | On Windows `ui.term { cwd = "~" }` doesn't start (`~` is expanded from `HOME` alone): Zeron passes the profile folder itself meanwhile (`terminal.cwd`). |
 | [markdown-offsets](markdown-offsets/ASK.md) | Review comments on a Markdown preview can't anchor to the block that holds their line. |
 
 ## Developers of Zeron (and of any zgx app)

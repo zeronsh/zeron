@@ -7,6 +7,9 @@
 --                               by id, history and all, across reloads
 --   api.view(props)             zgx's web view (ui.webview)
 --   api.open_externally(url)    the page in the default browser
+--   api.unavailable()           nil where pages show; else why they can't
+--                               (src/browser.rs): "runtime" (Windows without
+--                               WebView2) or "renderer" (no Direct3D 12)
 --   api.normalize(text)         the address a typed text means, or nil and why
 --                               (a message key: `ui.t(why)` says it)
 --   api.resolve(text, engine)   the address typed text goes to: `normalize`'s, or a
@@ -33,6 +36,19 @@ function M.open_externally(url: string)
 	if M.allowed(url) then
 		ui.invoke("open_url", url)
 	end
+end
+
+-- (Asked once: neither changes while the app runs. A host without the call,
+-- a test's, shows pages.)
+local asked = false
+local why_unavailable: string? = nil
+function M.unavailable(): string?
+	if not asked then
+		asked = true
+		local ok, why = pcall(ui.call_sync, "browser.unavailable")
+		why_unavailable = if ok and type(why) == "string" then why else nil
+	end
+	return why_unavailable
 end
 
 local LOCAL_FILE = "panel.browser_api.local_file"

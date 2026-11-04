@@ -22,6 +22,13 @@
 //! each terminal's bridge waking some 70 times a second while nothing
 //! happened.
 //!
+//! On Windows zgx's pseudoterminal is a pseudoconsole (ConPTY), which runs
+//! the bridge's command line as it is (no `/bin/sh -c`: its words are quoted
+//! for the program's own parser), and the bridge's terminal is a console: put
+//! in raw mode with keys as VT sequences, its size read from its buffer. A
+//! resize says nothing the bridge can wait on, so it looks at the size each
+//! time it wakes, and at least every [`console::LOOK`].
+//!
 //! The calls (`ui.call`, each a promise):
 //!   terminal.start { target }                a new terminal's bridge:
 //!                                            { command, claim }
@@ -34,6 +41,7 @@
 //!   terminal.write { id, device?, text }     typed into it, as if from the
 //!                                            keyboard (an agent's sign-in
 //!                                            command, run for you)
+//! and `ui.call_sync("terminal.cwd")`: the folder a bridge runs in.
 //! (`target` as src/files.rs's: { chat?, space?, device?, root? }).
 
 use std::{
@@ -42,8 +50,8 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
-#[cfg(not(unix))]
-use std::{io::Read, sync::mpsc};
+#[cfg(windows)]
+use std::sync::mpsc;
 
 use base64::Engine as _;
 use serde_json::{Map, Value as Json, json};
@@ -79,6 +87,21 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         call_for("WriteTerminal", &arg, params).await?;
         Ok(Value::Nil)
     });
+    host.function("terminal.cwd", |_| Value::from(bridge_dir().as_str()));
+}
+
+/// Where a bridge runs (its own folder, not the shell's: that's the
+/// engine's). The home folder: `~` where zgx expands it, from `HOME`; on
+/// Windows, which has no `HOME`, the profile's folder itself (zgx would
+/// hand `~` to CreateProcess as it is, and the process wouldn't start:
+/// zgx-asks/terminal-home), else the temporary folder.
+fn bridge_dir() -> String {
+    if cfg!(windows) {
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from).filter(|p| p.is_dir());
+        home.unwrap_or_else(std::env::temp_dir).to_string_lossy().into_owned()
+    } else {
+        "~".into()
+    }
 }
 
 fn text(value: Option<&Value>) -> String {
@@ -226,8 +249,40 @@ fn await_claim(claim: &std::path::Path, wait: Duration) -> Result<String, String
 const GONE: &str = "gone";
 
 /// A word for `/bin/sh -c`, quoted.
+#[cfg(unix)]
 fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// A word for a Windows command line, quoted as the program's own parser
+/// (the C runtime's, and Rust's `std::env::args`) reads it back: in double
+/// quotes, a quote inside escaped with a backslash, and the backslashes
+/// before a quote (or the closing one) doubled. ConPTY hands the line to
+/// `CreateProcessW` as it is; nothing else reads it (no `cmd.exe`).
+#[cfg(any(windows, test))]
+fn quote_windows(word: &str) -> String {
+    let mut out = String::with_capacity(word.len() + 2);
+    out.push('"');
+    let mut backslashes = 0;
+    for c in word.chars() {
+        match c {
+            '\\' => {
+                backslashes += 1;
+                continue;
+            }
+            '"' => out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1)),
+            _ => out.extend(std::iter::repeat_n('\\', backslashes)),
+        }
+        backslashes = 0;
+        out.push(c);
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    out
+}
+#[cfg(windows)]
+fn quote(word: &str) -> String {
+    quote_windows(word)
 }
 
 /// The bridge's command line for terminal `arg.id` (on `device`, another
@@ -329,9 +384,9 @@ fn window_size() -> Option<(u16, u16)> {
         (libc::ioctl(0, libc::TIOCGWINSZ, &mut size) == 0 && size.ws_col > 0).then_some((size.ws_col, size.ws_row))
     }
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn window_size() -> Option<(u16, u16)> {
-    None
+    console::size()
 }
 
 /// Its size once zgx has given it one and left it (two reads 40 ms apart
@@ -434,6 +489,273 @@ impl Drop for Raw {
     }
 }
 
+/// The bridge's terminal on Windows: the console of the pseudoconsole zgx
+/// runs it on (ConPTY).
+#[cfg(windows)]
+mod console {
+    use std::{net::TcpStream, os::windows::io::AsRawSocket, sync::mpsc, time::Duration};
+
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Networking::WinSock::{FD_CLOSE, FD_READ, FD_WRITE, SOCKET, WSACloseEvent, WSACreateEvent, WSAEVENT, WSAEventSelect, WSAResetEvent},
+        System::{
+            Console::{
+                CONSOLE_SCREEN_BUFFER_INFO, DISABLE_NEWLINE_AUTO_RETURN, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+                ENABLE_PROCESSED_INPUT, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+                ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle,
+                ReadConsoleW, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+            },
+            Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
+        },
+    };
+
+    /// How often a bridge with nothing to do looks at its size: a resize
+    /// reaches the console's buffer with nothing to wait on.
+    pub const LOOK: Duration = Duration::from_millis(100);
+
+    fn std_handle(which: u32) -> HANDLE {
+        // SAFETY: only reads the process's standard handle.
+        unsafe { GetStdHandle(which) }
+    }
+
+    /// Its size as zgx gave the pseudoconsole: the console's window.
+    pub fn size() -> Option<(u16, u16)> {
+        // SAFETY: fills the zeroed struct for the process's own console
+        // output; fails (0) on anything that isn't one.
+        let window = unsafe {
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(std_handle(STD_OUTPUT_HANDLE), &mut info) == 0 {
+                return None;
+            }
+            info.srWindow
+        };
+        let cols = i32::from(window.Right) - i32::from(window.Left) + 1;
+        let rows = i32::from(window.Bottom) - i32::from(window.Top) + 1;
+        (cols > 0 && rows > 0).then(|| (cols as u16, rows as u16))
+    }
+
+    /// The console in raw mode, put back as the bridge ends: what's typed
+    /// comes as the terminal sent it (no echo, no line editing; Ctrl+C a
+    /// byte for the shell at the other end, not a signal to the bridge;
+    /// keys as VT sequences), and what the shell writes, VT and all, is
+    /// drawn as written (a line feed only a line feed, as on a Unix
+    /// pseudoterminal in raw mode).
+    pub struct Raw {
+        input: Option<u32>,
+        output: Option<u32>,
+    }
+
+    impl Raw {
+        pub fn new() -> Self {
+            let set = |which: u32, mode: &dyn Fn(u32) -> u32| {
+                let handle = std_handle(which);
+                let mut was = 0;
+                // SAFETY: reads and sets the mode of the process's own
+                // console handle; both fail harmlessly on anything else.
+                unsafe { (GetConsoleMode(handle, &mut was) != 0 && SetConsoleMode(handle, mode(was)) != 0).then_some(was) }
+            };
+            Raw {
+                input: set(STD_INPUT_HANDLE, &|was| {
+                    (was & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT
+                }),
+                output: set(STD_OUTPUT_HANDLE, &|was| {
+                    was | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN
+                }),
+            }
+        }
+    }
+
+    impl Drop for Raw {
+        fn drop(&mut self) {
+            for (which, was) in [(STD_INPUT_HANDLE, self.input), (STD_OUTPUT_HANDLE, self.output)] {
+                if let Some(was) = was {
+                    // SAFETY: restores the mode read from the same handle.
+                    unsafe { SetConsoleMode(std_handle(which), was) };
+                }
+            }
+        }
+    }
+
+    /// An event the bridge waits on, set from another thread.
+    pub struct Event(usize);
+
+    impl Event {
+        pub fn set(&self) {
+            // SAFETY: the event lives as long as the process (never closed:
+            // the typing thread may set it until the bridge exits).
+            unsafe { SetEvent(self.0 as HANDLE) };
+        }
+    }
+
+    /// What's typed, read on a thread of its own: each read sent, and the
+    /// bridge woken. The channel closes as the console does (its tab).
+    /// (`ReadConsoleW` itself: std's console reads end at a Ctrl+Z, which a
+    /// shell at the other end may want.)
+    pub fn typed(wake: Event) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let input = std_handle(STD_INPUT_HANDLE);
+            let mut buf = [0u16; 1024];
+            // A character's first half, ending a read, waits for its second.
+            let mut high: Option<u16> = None;
+            loop {
+                let mut read = 0u32;
+                // SAFETY: reads at most `buf.len()` UTF-16 units into `buf`.
+                let ok = unsafe { ReadConsoleW(input, buf.as_mut_ptr().cast(), buf.len() as u32, &mut read, std::ptr::null()) };
+                if ok == 0 || read == 0 {
+                    break;
+                }
+                let mut units: Vec<u16> = high.take().into_iter().chain(buf[..read as usize].iter().copied()).collect();
+                if units.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+                    high = units.pop();
+                }
+                if units.is_empty() {
+                    continue;
+                }
+                if tx.send(String::from_utf16_lossy(&units).into_bytes()).is_err() {
+                    break;
+                }
+                wake.set();
+            }
+            drop(tx);
+            wake.set();
+        });
+        rx
+    }
+
+    /// The bridge's sleep: until the engine's socket has something (or
+    /// room again, or closed), something's typed, or it's time to look at
+    /// the size.
+    pub struct Waiter {
+        socket: WSAEVENT,
+        typed: HANDLE,
+    }
+
+    impl Waiter {
+        /// Selects the socket's events (which leaves it non-blocking); with
+        /// the event that says something was typed.
+        pub fn new(socket: &TcpStream) -> Option<(Self, Event)> {
+            // SAFETY: a new manual-reset event selected for the socket's
+            // reads, room and close; a new auto-reset event, unnamed.
+            unsafe {
+                let event = WSACreateEvent();
+                if event == 0 {
+                    return None;
+                }
+                if WSAEventSelect(socket.as_raw_socket() as SOCKET, event, (FD_READ | FD_WRITE | FD_CLOSE) as i32) != 0 {
+                    WSACloseEvent(event);
+                    return None;
+                }
+                let typed = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
+                if typed.is_null() {
+                    WSACloseEvent(event);
+                    return None;
+                }
+                Some((Waiter { socket: event, typed }, Event(typed as usize)))
+            }
+        }
+
+        pub fn wait(&self) {
+            // (A WSAEVENT is an event's handle.)
+            let handles = [self.socket as HANDLE, self.typed];
+            // SAFETY: two live event handles; returns on either or the time.
+            // The socket's event is reset after: what's come is read next,
+            // and anything after that read sets it again.
+            unsafe {
+                WaitForMultipleObjects(2, handles.as_ptr(), 0, LOOK.as_millis() as u32);
+                WSAResetEvent(self.socket);
+            }
+        }
+    }
+
+    impl Drop for Waiter {
+        fn drop(&mut self) {
+            // (`typed` stays: the typing thread may still set it.)
+            // SAFETY: the socket's event, made in `new`, closed once.
+            unsafe { WSACloseEvent(self.socket) };
+        }
+    }
+}
+
+/// What the shell wrote, as text for a console, which takes text, not
+/// bytes: a character a read ends in the middle of waits for its rest, and
+/// bytes that aren't UTF-8 read as U+FFFD (where writing them would fail
+/// the whole write).
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct Utf8Text {
+    carry: Vec<u8>,
+}
+
+#[cfg(any(windows, test))]
+impl Utf8Text {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(bytes);
+        let mut out = String::with_capacity(data.len());
+        let mut rest = &data[..];
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(text) => {
+                    out.push_str(text);
+                    return out;
+                }
+                Err(error) => {
+                    let (good, bad) = rest.split_at(error.valid_up_to());
+                    out.push_str(std::str::from_utf8(good).unwrap_or_default());
+                    match error.error_len() {
+                        Some(n) => {
+                            out.push('\u{FFFD}');
+                            rest = &bad[n..];
+                        }
+                        None => {
+                            self.carry = bad.to_vec();
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What the shell wrote, without its pseudoconsole's asks for
+/// win32-input-mode (`CSI ? 9001 h`, and `l`). On Windows the engine runs
+/// the shell in a pseudoconsole of its own, which asks its terminal for keys
+/// as win32 input records; written on to the bridge's console, the ask
+/// would switch zgx's pseudoconsole into that mode too, which then takes
+/// zgx's VT keys apart (Up's `ESC [ A` reached the shell as Escape, `[`, `A`).
+/// Kept from the bridge's console, keys go on as VT, which the engine's
+/// pseudoconsole reads as well. An ask split between reads waits for its rest.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct NoWin32Input {
+    carry: String,
+}
+
+#[cfg(any(windows, test))]
+impl NoWin32Input {
+    const ASKS: [&'static str; 2] = ["\x1b[?9001h", "\x1b[?9001l"];
+
+    fn pass(&mut self, text: &str) -> String {
+        let mut out = std::mem::take(&mut self.carry);
+        out.push_str(text);
+        for ask in Self::ASKS {
+            if out.contains(ask) {
+                out = out.replace(ask, "");
+            }
+        }
+        if let Some(at) = out.rfind('\x1b') {
+            let tail = &out[at..];
+            if Self::ASKS.iter().any(|ask| ask.len() > tail.len() && ask.starts_with(tail)) {
+                self.carry = tail.to_owned();
+                out.truncate(at);
+            }
+        }
+        out
+    }
+}
+
 /// Sends a call. On a socket that doesn't block, what doesn't go at once
 /// waits in tungstenite's buffer (`rpc::would_block`) for the socket to
 /// have room.
@@ -504,6 +826,8 @@ pub fn bridge(args: &[String]) -> i32 {
     let mut device = args.device.clone();
     #[cfg(unix)]
     let _raw = Raw::new();
+    #[cfg(windows)]
+    let _raw = console::Raw::new();
     let mut size = None;
     // A new one: opened here, at the size zgx gave this pseudoterminal, so
     // the shell's first prompt is drawn for it; its id left for the app.
@@ -548,39 +872,25 @@ pub fn bridge(args: &[String]) -> i32 {
     }
     let mut next_id = 2u64;
     // What's typed: read as the pseudoterminal has it (unix), else on a
-    // thread of its own.
+    // thread of its own (Windows), which wakes the bridge.
     #[cfg(unix)]
     let Some(resized) = resizes() else { return 1 };
-    #[cfg(unix)]
     let _ = socket.get_ref().set_nonblocking(true);
-    #[cfg(not(unix))]
-    let rx = {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 4096];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
-        rx
-    };
+    #[cfg(windows)]
+    let Some((waiter, wake)) = console::Waiter::new(socket.get_ref()) else { return 1 };
+    #[cfg(windows)]
+    let rx: mpsc::Receiver<Vec<u8>> = console::typed(wake);
+    #[cfg(windows)]
+    let (mut shown, mut keys_as_vt) = (Utf8Text::default(), NoWin32Input::default());
     let mut stdout = std::io::stdout();
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut typed: Vec<Vec<u8>> = Vec::new();
     let mut look_at_size = true;
     loop {
         // Its size, told as it changes (zgx resizes its pseudoterminal, and
-        // says so with SIGWINCH).
+        // says so with SIGWINCH; on Windows, looked at on every wake).
         let now = if look_at_size { window_size() } else { size };
-        look_at_size = cfg!(not(unix));
+        look_at_size = cfg!(windows);
         if now.is_some() && now != size {
             size = now;
             let (cols, rows) = now.unwrap_or((80, 24));
@@ -594,7 +904,7 @@ pub fn bridge(args: &[String]) -> i32 {
             next_id += 1;
         }
         // What's typed, on.
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         loop {
             match rx.try_recv() {
                 Ok(bytes) => typed.push(bytes),
@@ -641,6 +951,8 @@ pub fn bridge(args: &[String]) -> i32 {
                         match item["type"].as_str() {
                             Some("data") => {
                                 if let Some(bytes) = item["data"].as_str().and_then(|d| b64.decode(d).ok()) {
+                                    #[cfg(windows)]
+                                    let bytes = keys_as_vt.pass(&shown.push(&bytes)).into_bytes();
                                     let _ = stdout.write_all(&bytes);
                                     let _ = stdout.flush();
                                 }
@@ -690,14 +1002,20 @@ pub fn bridge(args: &[String]) -> i32 {
                 }
             }
         }
-        #[cfg(not(unix))]
-        let _ = unsent;
+        // (The socket's room is among what it waits for: `unsent` or not.)
+        #[cfg(windows)]
+        {
+            let _ = unsent;
+            waiter.wait();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, quote, said};
+    #[cfg(unix)]
+    use super::quote;
+    use super::{parse, said};
 
     #[test]
     fn a_claim_changes_hands_once_and_a_late_one_is_never_left_with_no_one() {
@@ -730,9 +1048,112 @@ mod tests {
         assert_eq!(said("no such terminal".into()), "no such terminal");
     }
 
+    /// A Windows command line's words as the C runtime (and Rust's
+    /// `std::env::args`) reads them back, for the arguments after the
+    /// program: the rules `quote_windows` writes for.
+    fn split_windows(line: &str) -> Vec<String> {
+        let (mut words, mut word, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    let mut n = 1;
+                    while chars.peek() == Some(&'\\') {
+                        chars.next();
+                        n += 1;
+                    }
+                    if chars.peek() == Some(&'"') {
+                        word.extend(std::iter::repeat_n('\\', n / 2));
+                        if n % 2 == 1 {
+                            chars.next();
+                            word.push('"');
+                        }
+                    } else {
+                        word.extend(std::iter::repeat_n('\\', n));
+                    }
+                    any = true;
+                }
+                '"' => {
+                    quoted = !quoted;
+                    any = true;
+                }
+                ' ' | '\t' if !quoted => {
+                    if any {
+                        words.push(std::mem::take(&mut word));
+                        any = false;
+                    }
+                }
+                c => {
+                    word.push(c);
+                    any = true;
+                }
+            }
+        }
+        if any {
+            words.push(word);
+        }
+        words
+    }
+
+    #[test]
+    fn windows_words_read_back_as_they_were() {
+        use super::quote_windows;
+        let words = [
+            r"C:\Users\Wing Lee\AppData\Local\Temp\zeron-zgx-terminals\12-34",
+            r#"{"chatId":"c1","cwd":"C:\\Users\\me\\my project\\"}"#,
+            r"ends in a backslash\",
+            r#"a "quoted" \"word\""#,
+            r"\\server\share\x",
+            "",
+            "plain",
+            "it's",
+        ];
+        let line = words.iter().map(|w| quote_windows(w)).collect::<Vec<_>>().join(" ");
+        assert_eq!(split_windows(&line), words);
+        assert_eq!(quote_windows(r"C:\Program Files\zeron-zgx.exe"), r#""C:\Program Files\zeron-zgx.exe""#);
+        assert_eq!(quote_windows(r"a\"), r#""a\\""#);
+        assert_eq!(quote_windows(r#"a"b"#), r#""a\"b""#);
+    }
+
+    #[test]
+    fn a_consoles_text_is_whole_characters() {
+        let mut text = super::Utf8Text::default();
+        // "é" (C3 A9) split across reads: the first half waits.
+        assert_eq!(text.push(b"caf\xC3"), "caf");
+        assert_eq!(text.push(b"\xA9 ok"), "\u{e9} ok");
+        // Bytes that aren't UTF-8 read as U+FFFD, and the rest goes on.
+        assert_eq!(text.push(b"a\xFFb"), "a\u{FFFD}b");
+        // A four-byte character in three reads.
+        assert_eq!(text.push(b"\xF0\x9F"), "");
+        assert_eq!(text.push(b"\x98"), "");
+        assert_eq!(text.push(b"\x80!"), "\u{1F600}!");
+    }
+
+    #[test]
+    fn the_shells_ask_for_win32_input_never_reaches_the_bridges_console() {
+        let mut out = super::NoWin32Input::default();
+        // A pseudoconsole's start, as the engine's sends it.
+        assert_eq!(out.pass("\x1b[?9001h\x1b[?1004hC:\\> "), "\x1b[?1004hC:\\> ");
+        // Split between reads: held, then dropped whole.
+        assert_eq!(out.pass("ok\x1b[?90"), "ok");
+        assert_eq!(out.pass("01l done"), " done");
+        // Another sequence that starts the same way goes on, once it's told apart.
+        assert_eq!(out.pass("\x1b[?9"), "");
+        assert_eq!(out.pass("h\x1b[2J"), "\x1b[?9h\x1b[2J");
+        // A lone escape at the end of a read isn't held for long: the next read
+        // brings it out.
+        assert_eq!(out.pass("a\x1b"), "a");
+        assert_eq!(out.pass("[0m"), "\x1b[0m");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quotes_for_the_shell() {
+        assert_eq!(quote("a b'c"), "'a b'\\''c'");
+    }
+
     #[test]
     fn quotes_and_parses_the_bridge_line() {
-        assert_eq!(quote("a b'c"), "'a b'\\''c'");
         let args: Vec<String> = ["--port", "27897", "--data", "/tmp/d", "--terminal", "t1", "--device", "dev"]
             .iter()
             .map(|s| s.to_string())

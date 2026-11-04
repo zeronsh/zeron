@@ -30,6 +30,7 @@ mod acp_registry;
 mod agents;
 mod appshots;
 mod auth;
+mod browser;
 mod chat;
 mod cloud;
 mod dev;
@@ -797,8 +798,10 @@ fn serve_with(
     images::install(&host, platform.clone());
     // A picture pasted into the composer, written out to send.
     pasted::install(&host, platform.clone());
-    // A page's icon, for the panel's browser tab.
+    // A page's icon, for the panel's browser tab; and whether its pages can
+    // show here (src/browser.rs).
     favicons::install(&host);
+    browser::install(&host);
     // The project's dev servers, for the browser tab's start page.
     previews::install(&host);
     let looks_up = host.shared("looks_up", false);

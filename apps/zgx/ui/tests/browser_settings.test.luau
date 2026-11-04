@@ -341,6 +341,30 @@ test("browser tab: a file the page can't show says so, and opens in the default 
 	expect(calls(app)).to_contain("external:https://example.com/archive.zip")
 end)
 
+test("browser tab: where pages can't show (Windows without WebView2), it says why in their place", function()
+	local app = panel()
+	app:set_state("test_web_unavailable", "runtime")
+	app:frames(20)
+	expect(app:wait("\"The browser isn't available on this PC\"", { timeout_ms = 3000 })).to_be(true)
+	expect(app:has('"It needs the Microsoft Edge WebView2 Runtime. Install it, then restart Zeron."')).to_be(true)
+	-- An address taken still lands nowhere blank: the words stay.
+	go(app, "example.com")
+	expect(app:has("#stub-web")).to_be(false)
+	expect(app:has("\"The browser isn't available on this PC\"")).to_be(true)
+	app:click('role:button "Get WebView2"')
+	app:frames(10)
+	expect(calls(app)).to_contain("external:https://developer.microsoft.com/microsoft-edge/webview2/")
+	-- No Direct3D 12: that's why, and there's nothing to get.
+	app:set_state("test_web_unavailable", "renderer")
+	app:frames(20)
+	expect(app:wait("\"It needs Direct3D 12, and WGPU_BACKEND leaves it out. Unset it, then restart Zeron.\"", { timeout_ms = 3000 })).to_be(true)
+	expect(app:has('role:button "Get WebView2"')).to_be(false)
+	-- Where they show, the page is back.
+	app:set_state("test_web_unavailable", "")
+	app:frames(20)
+	expect(app:wait("#stub-web", { timeout_ms = 3000 })).to_be(true)
+end)
+
 -- Suggestions ----------------------------------------------------------------
 
 local FIELD = 'role:combobox "Address"'
