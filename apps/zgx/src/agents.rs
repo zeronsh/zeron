@@ -253,7 +253,7 @@ thread_local! {
     static AGENTS: Rc<Agents> = Rc::new(Agents::new());
 }
 
-pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
+pub fn install(host: &ScriptHost) {
     let agents = AGENTS.with(Rc::clone);
     agents.shared.borrow_mut().push(host.shared("agents", agents.value()));
     ICONS_SHARED.with(|shared| shared.borrow_mut().push(host.shared("agent_icons", icons_value())));
@@ -320,7 +320,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             Some(id) => (text(&id), args.field("method").map(text).filter(|m| !m.is_empty())),
             None => (text(&args), None),
         };
-        async move { a.sign_in(id, method).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("agents.sign_in")?; a.sign_in(id, method).await.map_err(String::from) }
     });
     let a = agents.clone();
     host.async_action("agents.set_key", move |args| {
@@ -328,7 +328,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let id = args.field("id").map(text).unwrap_or_default();
         let var = args.field("var").map(text).unwrap_or_default();
         let value = args.field("value").map(text).unwrap_or_default();
-        async move { a.set_key(id, var, value).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("agents.set_key")?; a.set_key(id, var, value).await.map_err(String::from) }
     });
     let a = agents.clone();
     host.action("agents.cancel", move |id| a.cancel(&text(&id)));
@@ -336,7 +336,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let a = agents.clone();
     host.async_action("agents.sign_out", move |id| {
         let a = a.clone();
-        async move { a.sign_out(text(&id)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("agents.sign_out")?; a.sign_out(text(&id)).await.map_err(String::from) }
     });
     // The page a sign-in under way opened, again (a closed tab, a browser
     // that didn't come forward).
@@ -380,12 +380,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("agents.remove", move |args| {
         let a = a.clone();
         let (id, account) = harness_and_account(&args);
-        async move { a.account_call("ForgetAgentAccount", id, account).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("agents.remove")?; a.account_call("ForgetAgentAccount", id, account).await.map_err(String::from) }
     });
     let a = agents.clone();
     host.async_action("agents.install", move |id| {
         let a = a.clone();
-        async move { a.install(text(&id)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("agents.install")?; a.install(text(&id)).await.map_err(String::from) }
     });
     let a = agents.clone();
     host.action("agents.cancel_install", move |id| {

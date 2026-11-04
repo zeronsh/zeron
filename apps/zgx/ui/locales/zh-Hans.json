@@ -225,7 +225,7 @@
       "zoom_in": "放大",
       "zoom_out": "缩小",
       "fit_or_actual": "适合窗口或实际大小",
-      "fit_or_actual_tip": "适合窗口 ⌘0 · 实际大小 ⌘1",
+      "fit_or_actual_tip": "适合窗口 {fit} · 实际大小 {actual}",
       "preview_or_source": "预览或源代码",
       "show": "显示",
       "preview": "预览",
@@ -453,6 +453,7 @@
       "devices": "设备",
       "sessions": "会话",
       "new_chat_in": "在 {name} 中新建对话",
+      "new_chat_in_on": "在 {device} 上的 {name} 中新建对话",
       "new_chat": "新建对话",
       "search": "搜索",
       "pinned": "已置顶",
@@ -489,11 +490,14 @@
         "create_section": "创建分区",
         "keep_active": "折叠时显示活跃会话",
         "devices_first": "设备优先",
-        "projects_first": "项目优先"
+        "projects_first": "项目优先",
+        "empty_projects": "空项目"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
-      "show_less": "显示更少"
+      "show_less": "显示更少",
+      "empty_projects_word": "空项目",
+      "empty_projects": "{n, plural, other {# 个空项目}}"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -680,7 +684,15 @@
       "show_full": "{what, select, diff {显示完整差异} other {显示完整输出}}",
       "show_full_size": "{what, select, diff {显示完整差异（{size}）} other {显示完整输出（{size}）}}",
       "loading_full": "{what, select, diff {正在加载完整差异…} other {正在加载完整输出…}}",
-      "failed_full": "{what, select, diff {无法加载完整差异——点按以重试} other {无法加载完整输出——点按以重试}}"
+      "failed_full": "{what, select, diff {无法加载完整差异——点按以重试} other {无法加载完整输出——点按以重试}}",
+      "earlier_trimmed": "… 更早的输出已省略",
+      "exit_code": "退出码 {code}",
+      "loading_all_lines": "正在加载全部 {n} 行…",
+      "whole_offline": "运行此命令的设备已离线。等它重新上线后再试。",
+      "whole_update": "请在运行此命令的设备上更新 Zeron，以查看全部输出。",
+      "whole_unavailable": "此输出的其余部分未被保留。",
+      "whole_running": "此命令尚未完成。",
+      "whole_failed": "无法加载此输出的其余部分。请重试。"
     },
     "activity": {
       "phrase": {
@@ -753,7 +765,7 @@
     "comment": {
       "reply_placeholder": "回复…",
       "reply": "回复",
-      "send_hint": "按 ⌘↵ 发送",
+      "send_hint": "按 {key} 发送",
       "comment": "评论",
       "resolved": "已解决",
       "resolve": "标记为已解决",
@@ -785,7 +797,8 @@
       "show_fewer": "显示更少附件",
       "show_more": "再显示 {n} 个附件",
       "show_less": "显示更少",
-      "more": "另有 {n} 个"
+      "more": "另有 {n} 个",
+      "comment_from": "来自 {plugin}"
     },
     "composer_dock": {
       "fold": "折叠{title}",
@@ -797,7 +810,7 @@
       "send_now_hint": "立即发送，打断当前轮次",
       "steer_hint": "引导：在当前轮次中向智能体传话",
       "send_next_hint": "在下一轮发送",
-      "hint_last": "{what} · ⌘↵",
+      "hint_last": "{what} · {key}",
       "save_to_queue": "保存到队列",
       "cancel": "取消",
       "edit": "编辑",
@@ -1034,7 +1047,7 @@
       "language": {
         "label": "语言",
         "terms": "语言 区域 翻译 中文 简体 英文 language locale translation chinese english",
-        "system": "跟随 Mac 的首选语言。",
+        "system": "跟随 电脑的首选语言。",
         "chosen": "菜单栏将在下次打开 Zeron 时更改。"
       },
       "title": "通用",
@@ -1088,7 +1101,7 @@
         "model": "使用小型模型快速、低成本地生成标题。"
       },
       "git": "Git",
-      "git_description": "在此 Mac 上。",
+      "git_description": "在此电脑上。",
       "worktrees": {
         "label": "自定工作树位置",
         "terms": "文件夹 目录 路径 检出 分支 folder directory path checkout branches",
@@ -1107,8 +1120,8 @@
       }
     },
     "engine": {
-      "outdated": "更新此 Mac 上的 Zeron 以更改此设置。",
-      "offline": "Zeron 未在此 Mac 上运行。",
+      "outdated": "更新此电脑上的 Zeron 以更改此设置。",
+      "offline": "Zeron 未在此电脑上运行。",
       "couldnt_save": "无法保存"
     },
     "prefs": {
@@ -1117,7 +1130,7 @@
       "default_browser": "默认浏览器",
       "send_with": {
         "enter": "Enter",
-        "mod_enter": "⌘ Enter"
+        "mod_enter": "{key}"
       },
       "pull_requests": {
         "native": "拉取请求视图",
@@ -1132,7 +1145,7 @@
     "appearance": {
       "title": "外观",
       "terms": "主题 外观 颜色 theme look colors",
-      "description": "此 Mac 上 Zeron 的外观。",
+      "description": "此电脑上 Zeron 的外观。",
       "motion": "动态效果",
       "fonts": "字体与布局",
       "new_chat": "新建对话",
@@ -1140,12 +1153,20 @@
       "pt": "{n} 磅",
       "pt_default": "{n} 磅（默认）",
       "scheme": {
-        "label": "主题",
+        "label": "模式",
         "terms": "配色方案 系统 浅色 深色 模式 color scheme system light dark mode",
         "description": "浅色、深色或跟随系统。",
         "system": "跟随系统",
         "light": "浅色",
         "dark": "深色"
+      },
+      "theme": {
+        "light": "浅色主题",
+        "dark": "深色主题",
+        "one": "主题",
+        "terms": "主题 配色 颜色 调色板 vscode",
+        "more": "全部主题",
+        "more_description": "浏览所有主题，或从 VS Code 导入。"
       },
       "accent": {
         "label": "强调色",
@@ -1154,8 +1175,8 @@
       "reduce_motion": {
         "label": "减弱动态效果",
         "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring",
-        "system_on": "Mac 的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
-        "description": "移动立即完成，淡入淡出时间缩短。Mac 的“减弱动态效果”开启时始终启用。"
+        "system_on": "电脑的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
+        "description": "移动立即完成，淡入淡出时间缩短。电脑的“减弱动态效果”开启时始终启用。"
       },
       "glass": {
         "label": "毛玻璃",
@@ -1286,7 +1307,7 @@
         "name": "错误和断开连接提示音"
       },
       "unread": {
-        "title": "无法读取此 Mac 的通知设置",
+        "title": "无法读取此电脑的通知设置",
         "body": "横幅使用 Zeron 上次保存的设置。请稍后重试。"
       }
     },
@@ -1309,7 +1330,7 @@
       "word_wrap": {
         "label": "自动换行",
         "terms": "自动换行 长行 编辑器 soft wrap long lines editor",
-        "description": "将长行折行以适应编辑器宽度。⌥Z 仍可切换单个文件的换行设置。"
+        "description": "将长行折行以适应编辑器宽度。{key} 仍可切换单个文件的换行设置。"
       },
       "show_all": {
         "label": "显示隐藏和已忽略的文件",
@@ -1424,7 +1445,7 @@
         "terms": "安装 添加 新建 install add new",
         "description": "安装后会显示在上方，可随时登录。"
       },
-      "this_mac": "此 Mac",
+      "this_mac": "此电脑",
       "couldnt_update": "无法更新 {name}",
       "cant_reach": "Zeron 无法连接到 {device}。",
       "try_later": "请稍后重试。",
@@ -1534,7 +1555,7 @@
     },
     "devices": {
       "title": "设备",
-      "terms": "设备 电脑 远程 此设备 其他设备 重命名 machines computers remote this device other devices rename",
+      "terms": "设备 电脑远程 此设备 其他设备 重命名 machines computers remote this device other devices rename",
       "yours": {
         "label": "你的设备",
         "terms": "在线 上次在线 版本 系统 online last seen version system"
@@ -1556,7 +1577,7 @@
       "rename_name": "重命名 {name}",
       "dialog": {
         "title": "重命名设备",
-        "here": "此 Mac 在其他设备上显示的名称。",
+        "here": "此电脑在其他设备上显示的名称。",
         "other": "此设备在所有设备上显示的名称。",
         "field": "设备名称"
       }
@@ -1635,7 +1656,7 @@
       "version": {
         "label": "版本",
         "terms": "引擎 版本 构建 关于 zeron engine version build about",
-        "description": "此 Mac 上的引擎。"
+        "description": "此电脑上的引擎。"
       },
       "updates": {
         "label": "检查更新",
@@ -1670,10 +1691,10 @@
         "updated_running": "引擎正在运行新版本。",
         "updated_starting": "引擎正在以新版本重新启动。",
         "unmanaged": "从 Zeron App 更新",
-        "unmanaged_line": "此 Mac 的引擎随 Zeron App 安装，由该 App 更新：打开 Zeron 并选择“检查更新”。",
+        "unmanaged_line": "此电脑的引擎随 Zeron App 安装，由该 App 更新：打开 Zeron 并选择“检查更新”。",
         "check_again": "再次检查",
         "couldnt_check": "无法检查更新",
-        "offline_line": "此 Mac 似乎处于离线状态。",
+        "offline_line": "此电脑似乎处于离线状态。",
         "couldnt_update": "无法更新",
         "failed_line": "出错了。请稍后重试。",
         "not_connected": "未连接到引擎",
@@ -1715,7 +1736,7 @@
         "description": "用于问题报告的上述版本和构建信息。",
         "copied": "已拷贝版本信息"
       },
-      "updates_description": "更新会应用到此 Mac 上的引擎，与 Zeron App 的更新一样。此 App 尚未打包，因此不会在此更新。"
+      "updates_description": "更新会应用到此电脑上的引擎，与 Zeron App 的更新一样。此 App 尚未打包，因此不会在此更新。"
     },
     "archived": {
       "title": "已归档",
@@ -1752,33 +1773,10 @@
         "organization": "组织",
         "workspace": "工作区",
         "cloud": "Cloud",
+        "customize": "自定义",
         "plugins": "插件",
         "browser": "浏览器"
       }
-    },
-    "theme_library": {
-      "built_in": "内置",
-      "imported": "已导入",
-      "imported_toast": "{count, plural, =1 {已导入主题} other {已导入 # 个主题}}",
-      "imported_body": "在浅色主题或深色主题下选择。",
-      "skipped": "部分主题未能导入：{names}",
-      "choose_source": "选择主题来源",
-      "vscode_theme": "VS Code 主题",
-      "more_for": "{name}的更多选项",
-      "needs_look": "需要进一步检查。",
-      "dark": "深色",
-      "light": "浅色",
-      "rename": "重命名",
-      "remove": "移除",
-      "section": "已导入的主题",
-      "section_description": "VS Code 配色主题：主题的 .json 文件或扩展的 package.json 文件。",
-      "import": "导入主题",
-      "import_failed": "无法导入此主题",
-      "rename_title": "重命名主题",
-      "couldnt_rename": "无法重命名主题",
-      "name": "名称",
-      "remove_title": "移除此主题？",
-      "remove_body": "它将从你的图库中移除。使用此主题的地方将改用 Zeron 自带的主题。"
     },
     "store": {
       "says": {
@@ -1787,7 +1785,10 @@
         "not_found": "该项目已不存在。",
         "invalid": "内容似乎有误。",
         "too_large": "图片太大。请尝试较小的图片。",
-        "last_admin": "你是组织中唯一的管理员。请先将其他人设为管理员。"
+        "last_admin": "你是组织中唯一的管理员。请先将其他人设为管理员。",
+        "busy": "你的组织中有人正在更改角色。请稍后再试。",
+        "try_again": "暂时无法删除你的账户，所有内容均未删除。请稍后再试。",
+        "timed_out": "重新登录超时，所有内容均未删除。请重试。"
       },
       "couldnt_save_name": "无法保存你的名称",
       "couldnt_rename_org": "无法重命名组织",
@@ -1967,7 +1968,7 @@
         "label": "登录身份",
         "terms": "电子邮件 地址 邮件 账户 组织 同步 email address mail account organization sync",
         "not_signed_in": "未登录",
-        "local": "会话保留在此 Mac 上。",
+        "local": "会话保留在此电脑上。",
         "org": "属于 {org}。你的会话会在所有设备间同步。",
         "sync": "你的会话会在所有设备间同步。"
       },
@@ -1986,9 +1987,9 @@
         "label": "退出登录",
         "terms": "退出登录 离开 账户 会话 log out logout leave account session",
         "busy": "正在退出登录…",
-        "description": "此 Mac 将停止同步，直到你重新登录。",
+        "description": "此电脑将停止同步，直到你重新登录。",
         "confirm_title": "退出登录 Zeron？",
-        "confirm_body": "你的会话会保留在账户中。此 Mac 上将重新打开设置流程。"
+        "confirm_body": "你的会话会保留在账户中。此电脑上将重新打开设置流程。"
       },
       "delete": {
         "label": "删除账户",
@@ -1997,8 +1998,12 @@
         "description": "永久删除你的账户、会员卡和组织成员身份。",
         "failed": "无法删除你的账户",
         "confirm_title": "删除你的账户？",
-        "confirm_body_org": "你将离开 {org}，并在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。",
-        "confirm_body": "你将在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。"
+        "confirm_body_org": "你将离开 {org}，并在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。你需要重新登录以确认是你本人。",
+        "confirm_body": "你将在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。你需要重新登录以确认是你本人。",
+        "step_up": {
+          "title": "要删除你的账户，请重新登录",
+          "body": "请在浏览器中完成登录。登录后，你的账户将立即被删除。"
+        }
       },
       "claim": {
         "open": "领取用户名",
@@ -2019,11 +2024,29 @@
         "sessions": "随处可用的会话",
         "sessions_description": "在手机或另一台电脑上接着聊。",
         "sign_in": "登录"
+      },
+      "keys": {
+        "label": "签名密钥",
+        "terms": "密钥 签名 插件 模板 安全 撤销 指纹 设备 keys signing plugins templates revoke fingerprint",
+        "description": "你的设备使用这些密钥为你制作的插件和模板签名。如果有你不认识的密钥，请撤销它。",
+        "this_mac": "这台电脑",
+        "another_device": "其他设备",
+        "new": "新",
+        "added": "添加于 {date}",
+        "revoked": "撤销于 {date}",
+        "revoke": "撤销",
+        "revoke_title": "撤销此密钥？",
+        "revoke_body": "由它签名的插件和模板将不再算作你的。",
+        "revoke_failed": "无法撤销该密钥",
+        "none": "还没有签名密钥。",
+        "none_how": "签名插件时会自动创建一个。",
+        "failed": "无法加载你的签名密钥",
+        "retry": "重试"
       }
     },
     "browser": {
       "title": "浏览器",
-      "description": "你登录的网站会在这台 Mac 上保持登录，每个账户分开保存。",
+      "description": "你登录的网站会在这台电脑上保持登录，每个账户分开保存。",
       "terms": "浏览器 网页 网站 链接 搜索引擎 主页 缩放 历史记录 Cookie 登录 检查器 browser",
       "search_engine": {
         "label": "搜索引擎",
@@ -2043,7 +2066,7 @@
       },
       "default_zoom": {
         "label": "页面缩放",
-        "description": "用 ⌘+ 和 ⌘− 缩放某个网站，即可为它保留单独的缩放。",
+        "description": "用 {zoom_in} 和 {zoom_out} 缩放某个网站，即可为它保留单独的缩放。",
         "terms": "缩放 文字大小 放大 zoom"
       },
       "site_zoom": {
@@ -2054,7 +2077,7 @@
       },
       "history": "历史记录",
       "history_terms": "历史记录 访问过的页面 最近 history",
-      "history_description": "你访问过的页面，按账户保存在这台 Mac 上。",
+      "history_description": "你访问过的页面，按账户保存在这台电脑上。",
       "keep_history": {
         "label": "保留历史记录",
         "description": "方便你再次找到某个页面。关闭后，不再保留新的页面。",
@@ -2228,9 +2251,9 @@
             "too_large": "图片太大。",
             "open": "无法打开该图片，请选择 PNG 或 JPEG。",
             "save": "无法保存项目，请重试。",
-            "save_outdated": "这台 Mac 上的 Zeron 需要更新才能保存项目图标。更新后再保存。",
+            "save_outdated": "这台电脑上的 Zeron 需要更新才能保存项目图标。更新后再保存。",
             "save_gone": "此项目已在另一台设备上被移除。",
-            "save_offline": "这台 Mac 上的 Zeron 没有响应，请稍后再试。"
+            "save_offline": "这台电脑上的 Zeron 没有响应，请稍后再试。"
           }
         }
       },
@@ -2269,7 +2292,7 @@
       "hide_details": "隐藏会话详情",
       "show_details": "显示会话详情",
       "panel": "面板",
-      "panel_tooltip": "面板  ⌘R"
+      "panel_tooltip": "面板  {key}"
     },
     "page": {
       "plugin": "插件",
@@ -2297,7 +2320,9 @@
         "shell_palette": "搜索",
         "shell_settings": "设置",
         "shell_find": "查找",
-        "shell_close": "关闭"
+        "shell_close": "关闭",
+        "shell_reload": "重新启动 Zeron",
+        "shell_reload_interface": "重新加载界面"
       },
       "group": {
         "sessions": "会话",
@@ -2321,9 +2346,11 @@
         "light": "浅色",
         "dark": "深色"
       },
-      "theme": "主题",
+      "theme": "模式",
       "use_template": "使用模板：{name}",
       "templates": "模板",
+      "use_theme": "使用主题：{name}",
+      "themes": "主题",
       "use": "使用",
       "recent_files": "最近使用的文件",
       "files": "文件",
@@ -2337,7 +2364,13 @@
       "settings_page": "设置：{title}",
       "go_to": "前往",
       "frosted_glass": "磨砂玻璃",
-      "search": "搜索会话、命令和文件…"
+      "search": "搜索会话、命令和文件…",
+      "app": "应用",
+      "reload_zeron": "重新启动 Zeron",
+      "reload_interface": "重新加载界面",
+      "commands": "命令",
+      "run": "运行",
+      "default_interface": "使用 Zeron v3"
     },
     "add_project": {
       "something_went_wrong": "出错了",
@@ -2396,6 +2429,7 @@
   },
   "onboarding": {
     "skip_for_now": "暂时跳过",
+    "not_now": "以后再说",
     "signin": {
       "title": "欢迎使用\nZeron",
       "lines": {
@@ -2428,7 +2462,7 @@
         "description": "你的对话和智能体会在所有设备间同步。"
       },
       "local": {
-        "label": "对话保留在此 Mac 上",
+        "label": "对话保留在此电脑上",
         "description": "随时登录，将对话同步到其他设备。"
       },
       "open_org": "打开{org}",
@@ -2495,11 +2529,11 @@
     "providers": {
       "title_install": "安装智能体",
       "title": "你的智能体",
-      "looking": "正在此 Mac 上查找编码智能体…",
+      "looking": "正在此电脑上查找编码智能体…",
       "unavailable": "Zeron 运行你已经使用的编码智能体。",
-      "none": "此 Mac 上还没有智能体。请安装一个以继续。",
-      "found": "{n, plural, other {在此 Mac 上找到 # 个智能体。请登录你想使用的智能体。}}",
-      "this_mac": "此 Mac"
+      "none": "此电脑上还没有智能体。请安装一个以继续。",
+      "found": "{n, plural, other {在此电脑上找到 # 个智能体。请登录你想使用的智能体。}}",
+      "this_mac": "此电脑"
     },
     "try_again": "重试"
   },
@@ -2844,6 +2878,7 @@
       "port_open_external": "在默认浏览器中打开",
       "port_copy": "复制网址",
       "port_copied": "网址已复制",
+      "port_closed": "已关闭",
       "previews_unavailable": "本地预览暂时不可用"
     }
   },
@@ -2857,8 +2892,7 @@
     "comment": {
       "placeholder": "添加评论",
       "submit": "评论",
-      "you": "你",
-      "pending": "待发送"
+      "you": "你"
     },
     "unreachable": {
       "title": "无法连接到这些文件",
@@ -2971,11 +3005,11 @@
         },
         "ui_change": {
           "title": "更改{places}的显示方式",
-          "detail": "它可以隐藏、重新排序或重命名其中的内容。"
+          "detail": "它可以隐藏、重新排序、重命名或重新绘制其中的内容。"
         },
         "ui_replace": {
           "title": "用自己的界面替换{places}",
-          "detail": "它作为 Zeron 的一部分运行，可以执行 Zeron 能做的任何操作。"
+          "detail": "它的代码作为 Zeron 的一部分运行：可以做你能做的任何事。"
         },
         "profile_read": {
           "title": "查看你的姓名、用户名和照片"
@@ -3007,7 +3041,7 @@
         },
         "notifications": {
           "title": "向你发送通知",
-          "detail": "以 Zeron 的名义发送，可在“设置”→“通知”中管理。"
+          "detail": "与其他通知一样，可在“设置”→“通知”中管理。"
         },
         "links_open": {
           "title": "打开链接",
@@ -3021,7 +3055,9 @@
           "detail": "仍由你来发送。"
         },
         "network": {
-          "title": "连接互联网"
+          "title": "连接互联网",
+          "title_any": "连接到互联网上的任何网站",
+          "title_hosts": "连接到这些地方"
         },
         "clipboard": {
           "title": "读取和更改你的剪贴板"
@@ -3042,12 +3078,14 @@
           "title": "在你的设备之间发送数据"
         },
         "commands": {
-          "title": "以你的身份在此 Mac 上运行 {list}",
+          "title": "以你的身份在此电脑上运行 {list}",
           "title_on": "以你的身份在 {device} 上运行 {list}",
-          "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。"
+          "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。",
+          "detail_anything": "这些程序可以使用你的登录做你能做的任何事。",
+          "detail_each": "它们以你的身份运行，使用你的登录。"
         },
         "native": {
-          "title": "在此 Mac 上为你的智能体运行它自己的程序",
+          "title": "在此电脑上为你的智能体运行它自己的程序",
           "title_on": "在 {device} 上为你的智能体运行它自己的程序",
           "detail": "它可以执行你能做的任何操作。"
         },
@@ -3082,7 +3120,29 @@
       },
       "unverified": "未验证",
       "from": "来自 {where}",
-      "from_file": "来自文件"
+      "from_file": "来自文件",
+      "more": "另有 {n} 项",
+      "diff": {
+        "commands": "以你的身份运行更多程序",
+        "mcp": "在你的智能体旁运行另一个程序",
+        "mcp_gone": "停止在你的智能体旁运行它的程序",
+        "tools_added": "为你的智能体提供新工具",
+        "tools_changed": "对你的智能体说法已改变的工具",
+        "service": "运行另一个后台服务",
+        "entry": "从另一个文件启动",
+        "network": "连接到更多地方",
+        "settings": "它的设置已更改",
+        "ui_replace": "用自己的界面替换{places}"
+      },
+      "can_anything": "{name}：可以做你能做的任何事",
+      "full_control": "它可以运行 {name}，这等于完全控制你的电脑。",
+      "any_site": "互联网上的任何网站",
+      "near_host": "{host}：这台电脑或你的网络",
+      "details": {
+        "changes": "它更改的 Zeron 部分",
+        "replaces": "它替换的界面",
+        "changes_since": "自你允许以来还更改"
+      }
     },
     "page": {
       "title": "插件",
@@ -3136,7 +3196,9 @@
       "remove_body_device": "它会立即在 {device} 上的 Zeron 各处停止。它的文件夹会移到那台电脑插件文件夹的已移除项目中，以便你想找回。",
       "install_dialog_title_device": "在 {device} 上安装插件",
       "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
-      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台 Mac 的插件。"
+      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台电脑的插件。",
+      "setup_title": "完成账户设置",
+      "setup_body": "选择工作空间后，你的插件会立即加载。"
     },
     "consent": {
       "made_by_you": "由你制作",
@@ -3150,12 +3212,20 @@
       "tampered": "自你允许后已发生更改",
       "asks_again": "它现在还请求：",
       "asks": "它请求：",
-      "mine": "这是我的",
+      "mine": "这是我的…",
       "not_now": "暂不",
       "allow": "允许",
       "on_device": "在 {device} 上",
       "unverified_why": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许。",
-      "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。"
+      "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。",
+      "made_on_your_device": "由你的另一台设备制作",
+      "grew": "自你允许以来新增：",
+      "allow_there": "请在{device}上允许：它会在那台电脑的 Zeron 中询问。",
+      "mine_confirm": "将{name}签名为你自己的插件？仅当它是你亲自编写的：从现在起，Zeron 会在这台电脑上把它当作你的插件。",
+      "mine_cancel": "取消",
+      "mine_sign": "签名为我的",
+      "details": "详细信息",
+      "details_hide": "隐藏详细信息"
     },
     "permissions": {
       "screen_recording": {
@@ -3200,18 +3270,18 @@
       "review": "查看",
       "template_waiting_body": "来自其他人的模板。",
       "failed": "{name}已停止运行",
-      "failed_body": "更新或编辑插件前，Zeron 将继续运行但不使用它。",
+      "failed_body": "在插件更新或修复前，Zeron 会在不使用它的情况下继续运行。",
       "show_folder": "显示文件夹",
       "template_failed": "你的模板中的 {name} 有错误",
-      "template_failed_body": "修复并保存模板前，将显示 Zeron 自带界面。",
+      "template_failed_body": "修复并保存前，这部分将显示默认界面。",
       "template_broken": "{name}无法运行",
-      "template_broken_body": "修复并保存模板前，将显示 Zeron 自带界面。"
+      "template_broken_body": "修复并保存模板前，将显示默认界面。"
     }
   },
   "templates": {
     "page": {
       "title": "模板",
-      "description": "Zeron 可以运行的完整界面。模板未包含的部分使用 Zeron 自带界面。",
+      "description": "Zeron 的完整界面。模板未包含的部分使用默认界面。",
       "search": "搜索模板",
       "tabs": "模板",
       "installed": "已安装",
@@ -3224,8 +3294,8 @@
         "named": "由 {name} 制作"
       },
       "about": {
-        "broken": "无法运行，已显示 Zeron 自带界面：{error}",
-        "errors": "部分内容回退到 Zeron 自带界面：{error}",
+        "broken": "无法运行，已显示默认界面：{error}",
+        "errors": "部分内容显示默认界面：{error}",
         "out_of_date": "为 Zeron {version} 制作。此后 Zeron 已更新。",
         "out_of_date_unversioned": "为较早版本的 Zeron 制作。此后 Zeron 已更新。",
         "no_description": "无描述。"
@@ -3250,13 +3320,13 @@
       "couldnt_use": "无法使用 {name}",
       "in_use": "使用中",
       "none_yours": "你还没有模板",
-      "none_body": "请智能体创建一个，或从 Zeron 模板的副本开始。",
+      "none_body": "请智能体创建一个，或从默认界面的副本开始。",
       "show_templates_folder": "显示模板文件夹",
       "delete_title": "删除此模板？",
-      "delete_body": "模板会移到模板文件夹的已移除项目中，以便日后恢复。如果正在使用，Zeron 自带模板会取而代之。",
+      "delete_body": "模板会保留在模板文件夹中，以便日后恢复。如果正在使用，Zeron 会切换到默认界面。",
       "couldnt_delete": "无法删除模板",
       "new_title": "新建模板",
-      "new_body": "这是 Zeron 自带界面的副本，你可以自行更改。请智能体修改，或自行编辑其文件。",
+      "new_body": "默认界面的副本，供你修改。请智能体修改，或自行编辑其文件。",
       "make_it": "创建",
       "couldnt_make": "无法创建模板",
       "name": "名称",
@@ -3286,19 +3356,78 @@
       "nothing": "没有待处理的请求",
       "nothing_body": "此模板已处理。",
       "install_title": "安装 {name}？",
+      "keep_title": "保留 {name}？",
+      "keep_trust": "仅在信任其来源时保留",
+      "keep_body": "这个模板由代理创建、修改或切换而来，或在你上次保留后又有改动。保留之前它只是预览。保留后，它将拥有 Zeron 的全部能力。",
+      "keep_files": "{n, plural, other {# 个文件}}，以当前内容为准",
+      "keep_files_detail": "如果它们再次改动，Zeron 会再次询问。",
+      "keep": "保留",
       "trust": "仅在信任{whom}时安装",
-      "trust_body": "模板是 Zeron 自身的代码：它会替换 Zeron 的界面，并拥有 Zeron 的全部能力，可访问你的对话、文件、账户和智能体。",
+      "trust_body": "模板作为 Zeron 的一部分运行：它会替换 Zeron 的界面，并能做 Zeron 能做的一切，可访问你的对话、文件、账户和智能体。",
       "unknown_body": "Zeron 无法确定签名所用密钥的所有者。仅在信任来源时安装。",
       "signature": "签名有效",
       "signature_detail": "自使用密钥 {key} 签名后，内容未发生更改。",
       "files": "{n, plural, other {# 个文件}}",
       "files_made_for": "{n, plural, other {# 个文件}} · 为 Zeron {version} 制作",
       "left_out": "{n, plural, other {# 个文件未包含}}",
-      "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自带文件：{files}",
+      "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自己的版本：{files}",
       "not_now": "暂不",
       "install": "安装",
       "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",
       "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。"
+    }
+  },
+  "themes": {
+    "page": {
+      "title": "主题",
+      "description": "Zeron 的配色。你的主题可与任何模板搭配使用。",
+      "search": "搜索主题",
+      "tabs": "主题",
+      "all": "全部",
+      "builtin": "内置",
+      "from_templates": "来自模板",
+      "yours": "你的",
+      "import": "导入主题",
+      "hint": "主题只包含配色，因此适用于任何模板，也不能做其他事情。",
+      "about": {
+        "default": "默认主题，浅色和深色",
+        "both": "浅色和深色",
+        "light": "仅浅色",
+        "dark": "仅深色"
+      },
+      "byline": {
+        "builtin": "内置",
+        "template": "来自 {name}",
+        "imported": "已导入"
+      },
+      "needs_fixing": "此主题有需要修复的地方。",
+      "in_use": "使用中",
+      "for_light": "浅色",
+      "for_dark": "深色",
+      "use": "使用",
+      "couldnt_use": "无法使用此主题",
+      "use_light": "仅用于浅色",
+      "use_dark": "仅用于深色",
+      "show_template": "在“模板”中显示",
+      "more_for": "{name} 的更多选项",
+      "rename": "重命名",
+      "remove": "移除",
+      "rename_title": "重命名主题",
+      "couldnt_rename": "无法重命名主题",
+      "name": "名称",
+      "remove_title": "要移除此主题吗？",
+      "remove_body": "它将从“你的”中移除。使用此主题的地方将恢复为默认主题。",
+      "none_yours": "还没有你的主题",
+      "none_yours_body": "导入 VS Code 配色主题：主题的 .json 文件或扩展的文件夹。也可以将其拖放到此页面。",
+      "none_templates": "没有模板带有主题",
+      "none_templates_body": "当模板带有自己的配色时，会显示在这里，可与任何模板搭配使用。",
+      "choose_source": "选择主题",
+      "vscode_theme": "VS Code 主题",
+      "drop": "拖放以导入",
+      "import_failed": "无法导入此主题",
+      "skipped": "部分主题未能导入：{names}",
+      "imported_toast": "{count, plural, one {已导入主题} other {已导入 # 个主题}}",
+      "imported_body": "它在“你的”中。"
     }
   }
 }

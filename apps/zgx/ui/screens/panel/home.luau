@@ -194,15 +194,17 @@ local function info(sid: string): Node
 		return d ~= nil and not d.here and d.online == false
 	end
 
-	-- The branch as plugins read it in its row's slot (`panel_branch`:
-	-- { session, device, cwd, branch }): Git puts what the branch adds over
-	-- its base there. Core says nothing of git past the branch's name.
+	-- The branch as plugins read it in its row's slot (`panel_branch`, and
+	-- `panel_details` under the panel's details): the session, by its id
+	-- alone, while it has a branch. The SDK finds its device, branch and
+	-- folder in the plugin's records, as far as its grants reach
+	-- ("sessions.read", "files.read"): a place gives ids, never records.
+	-- Git puts what the branch adds over its base there. Core says nothing
+	-- of git past the branch's name.
 	local branch_info = ui.state(`panel_home_branch.{sid}`, nil :: any)
 	ui.effect(function()
 		local c = chat()
-		local now = if c and branch() ~= ""
-			then { session = sid, device = c.device, cwd = c.cwd, branch = branch() }
-			else nil
+		local now = if c and branch() ~= "" then { session = sid } else nil
 		local was = branch_info:peek()
 		if ui.json.encode(was) ~= ui.json.encode(now) then
 			branch_info:set(now)
@@ -910,8 +912,8 @@ local function lanes(props: Props, sid: string): Node
 	end
 	-- (`extra`: a part of something else than sessions, ports: its rows'
 	-- glyph, always leading. `flat`: never grouped. `archive`: its rows'
-	-- corner action.)
-	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?): Node
+	-- corner action. `tooltip`: its rows'.)
+	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, tooltip: ((any) -> string)?): Node
 		return ui.show(
 			function(): boolean
 				return #items() > 0
@@ -930,6 +932,7 @@ local function lanes(props: Props, sid: string): Node
 				view = view :: any,
 				flat = flat,
 				on_archive = archive,
+				tooltip = tooltip,
 				icon = if extra then extra.icon :: any else nil,
 				menu = menu,
 				items = items,
@@ -941,28 +944,43 @@ local function lanes(props: Props, sid: string): Node
 	-- Its ports: the dev servers running for it (the engine's previews,
 	-- watched while the home shows, screens/panel/previews), as the shipping
 	-- app's session card lists them (shell/session_info.rs `render_session_ports`):
-	-- what serves each and its port, opening it in a browser tab of the
-	-- panel; its menu opens it there or in the default browser, or copies
-	-- its address.
+	-- the process serving each (its command line in its tooltip) and its
+	-- port, opening it in a browser tab of the panel; its menu opens it
+	-- there or in the default browser, or copies its address. Held as
+	-- `Previews.hold` holds them: a test's server, open a moment, never
+	-- shows; one closed stays a while, faded.
 	ui.effect(function()
 		if props.showing() then
 			ui.on_cleanup(Previews.use(sid))
 		end
 	end)
+	local held = Previews.hold(function(): string?
+		return sid
+	end)
 	local ports = ui.computed(function(): { any }
 		local out = {}
-		for _, sv in Previews.services(sid) do
+		for _, sv in held() do
 			local host = string.match(sv.url or "", "^%a+://([^/]+)") or ""
+			local name = if sv.name and sv.name ~= "" then sv.name else host
+			local process = if type(sv.process) == "string" and sv.process ~= "" then sv.process else nil
 			table.insert(out, {
-				id = `port:{sv.id}`,
-				title = if sv.name and sv.name ~= "" then sv.name else host,
+				id = `port:{sv.id}:{sv.port}`,
+				-- (What runs it; else what the engine makes of it, "HTTP server".)
+				title = process or name,
 				corner = `:{sv.port}`,
 				detail = if sv.remote and sv.device and sv.device ~= "" then `{sv.device} · {host}` else host,
 				url = sv.url,
+				faded = sv.closed == true,
+				command = if type(sv.command) == "string" and sv.command ~= "" then sv.command else nil,
+				closed = sv.closed == true,
 			})
 		end
 		return out
 	end)
+	local function port_tip(l: any): string
+		local says = l.command or l.url or l.title
+		return if l.closed then `{locale.s("panel.home.port_closed")}\n{says}` else says
+	end
 	local function port_menu(l: any): { any }?
 		local url = l.url
 		if type(url) ~= "string" or url == "" then
@@ -975,9 +993,15 @@ local function lanes(props: Props, sid: string): Node
 		end)
 	end
 	-- Local previews that can't open now (the engine's proxy): one plain
-	-- line, its why only in its tooltip.
+	-- line, its why only in its tooltip; only while a port's open (one kept
+	-- a while, closed, has nothing to open).
 	local trouble = ui.computed(function(): string?
-		return if #ports:get() > 0 then Previews.trouble(sid) else nil
+		for _, l in ports:get() do
+			if not l.closed then
+				return Previews.trouble(sid)
+			end
+		end
+		return nil
 	end)
 	return ui.column {
 		id = "panel-home-lanes",
@@ -998,7 +1022,7 @@ local function lanes(props: Props, sid: string): Node
 				icon = function(_l: any): string?
 					return "global"
 				end,
-			}, true),
+			}, true, nil, port_tip),
 			ui.show(function(): boolean
 				return trouble:get() ~= nil
 			end, ui.row {
@@ -1099,6 +1123,10 @@ M.Page = ui.component(function(props: Props): Node
 			props.open_kind("terminal")
 		end },
 	}
+	-- (A new chat with no project: no folder for a file viewer to show.)
+	if props.key == "no-project" then
+		table.remove(choices, 2)
+	end
 	if sid and props.new_side_chat and props.fork then
 		local new_side, fork = props.new_side_chat, props.fork
 		table.insert(choices, { id = "panel-open-side-chat", icon = "side-chat", label = "panel.empty.side_chat", key = "S", run = function()
@@ -1178,7 +1206,6 @@ M.Page = ui.component(function(props: Props): Node
 			w_full = true,
 			max_w = 380,
 			px = "$space.4",
-			pt = ui.raw(16, "the transcript's own gap over its first message (ds/transcript TURN_GAP), so the two start level"),
 			pb = "$space.6",
 			gap = "$space.5",
 			table.unpack(parts),

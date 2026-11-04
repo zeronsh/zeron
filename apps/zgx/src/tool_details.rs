@@ -10,6 +10,19 @@
 //!   chat.tool_blob { ref }    the sidecar's: { kind = "diff", path, lines,
 //!                             added, removed, more } for a `….diff` ref, else
 //!                             { kind = "output", lines, more }
+//!   chat.tool_output { chat, id }
+//!                             a command's whole output, from the device that
+//!                             ran it (`ReadToolOutput`, redacted there as the
+//!                             doc's tail is): { kind = "output", text,
+//!                             trimmed, exit_code }; failing, one word:
+//!                             `offline`, `update` (that device's engine is
+//!                             too old), `unavailable` (not kept), `running`,
+//!                             `failed`
+//!
+//! The doc keeps a command's last ten lines (`outputTruncated` when there
+//! were more, with `outputLines`, the whole output's count, and its
+//! `exitCode`); its transcript row names the doc it is in (`chat`, stamped
+//! by src/chat.rs) so "Show all N lines" can ask that doc's host.
 //!
 //! A diff's lines are the changes pane's: hunks with three lines of context
 //! round each change, each line its kind (" ", "+", "-", "hunk"), its old
@@ -27,7 +40,37 @@ pub const OUTPUT_MAX_LINES: usize = 400;
 /// Characters kept of one output line (`OUTPUT_LINE_MAX_CHARS`).
 const LINE_MAX_CHARS: usize = 8 * 1024;
 
+/// Chunks a whole output may take: the engine serves at most its last MB,
+/// 48 KB at a time (`TOOL_OUTPUT_MAX_BYTES`, `TOOL_OUTPUT_CHUNK_BYTES`).
+const OUTPUT_MAX_CHUNKS: usize = 64;
+
 pub fn install(host: &ScriptHost) {
+    host.async_action("chat.tool_output", |arg| async move {
+        let doc = arg.field("chat").map(crate::auth::text).unwrap_or_default();
+        let id = arg.field("id").map(crate::auth::text).unwrap_or_default();
+        if doc.is_empty() || id.is_empty() {
+            return Err("failed".into());
+        }
+        let mut params = json!({ "chatId": doc, "toolId": id, "offset": 0 });
+        if let Some(device) = crate::chat::host_of(&doc) {
+            params["targetDeviceId"] = Json::String(device);
+        }
+        let mut text = String::new();
+        for _ in 0..OUTPUT_MAX_CHUNKS {
+            let chunk = engine::get().call("ReadToolOutput", params.clone()).await.map_err(|e| output_error(&e))?;
+            text.push_str(chunk["text"].as_str().unwrap_or_default());
+            if chunk["done"].as_bool() == Some(true) {
+                return Ok(whole_output_value(&text, &chunk));
+            }
+            let next = chunk["nextOffset"].as_u64().unwrap_or(0);
+            if next <= params["offset"].as_u64().unwrap_or(0) {
+                break;
+            }
+            params["offset"] = json!(next);
+        }
+        Err("failed".into())
+    });
+
     host.async_action("chat.tool_blob", |arg| async move {
         let blob = arg.field("ref").map(crate::auth::text).unwrap_or_default();
         if blob.is_empty() {
@@ -37,6 +80,37 @@ pub fn install(host: &ScriptHost) {
         let text = reply["text"].as_str().unwrap_or_default();
         blob_value(&blob, text).ok_or_else(|| "Nothing to show".to_string())
     });
+}
+
+/// A whole output read from its host, as the row shows it (its text, made
+/// clean by ds/tool_detail as the doc's is).
+fn whole_output_value(text: &str, last: &Json) -> Value {
+    let mut fields = vec![
+        ("kind", Value::from("output")),
+        ("text", Value::from(text)),
+        ("trimmed", Value::Bool(last["trimmed"].as_bool() == Some(true))),
+    ];
+    if let Some(code) = last["exitCode"].as_i64() {
+        fields.push(("exit_code", Value::Num(code as f64)));
+    }
+    Value::record(fields)
+}
+
+/// A failed whole-output read as the one word ds/tool_detail words for the
+/// reader.
+fn output_error(error: &str) -> String {
+    let word = if engine::outcome(error) == "offline" {
+        "offline"
+    } else if error.to_ascii_lowercase().contains("unknown method") {
+        "update"
+    } else if error.contains("tool_output.unavailable") || error.contains("chat not found") {
+        "unavailable"
+    } else if error.contains("tool_output.not_finished") {
+        "running"
+    } else {
+        "failed"
+    };
+    word.to_owned()
 }
 
 /// A fetched sidecar blob, as the row shows it.
@@ -169,6 +243,20 @@ pub fn tool_fields(part: &Json) -> Vec<(&'static str, Value)> {
     if let Some(n) = part["outputBytes"].as_u64() {
         fields.push(("output_bytes", Value::Num(n as f64)));
     }
+    if let Some(code) = part["exitCode"].as_i64() {
+        fields.push(("exit_code", Value::Num(code as f64)));
+    }
+    // The doc kept only the end of a command's output: how many lines the
+    // whole has, and the doc to ask its host for it in.
+    if part["outputTruncated"].as_bool() == Some(true) {
+        fields.push(("output_truncated", Value::Bool(true)));
+        if let Some(n) = part["outputLines"].as_u64() {
+            fields.push(("output_lines", Value::Num(n as f64)));
+        }
+        if let Some(doc) = text("chat") {
+            fields.push(("chat", Value::from(doc)));
+        }
+    }
     if let Some(r) = text("diffRef") {
         fields.push(("diff_ref", Value::from(r)));
     }
@@ -237,5 +325,28 @@ mod tests {
         assert_eq!(names, vec!["output", "output_ref", "output_bytes", "diff_ref", "stats"]);
         let old = json!({ "diff": { "path": "a.txt", "oldText": "a\n", "newText": "b\n" } });
         assert_eq!(tool_fields(&old).into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["diff"]);
+    }
+
+    #[test]
+    fn a_failed_whole_output_read_is_one_word() {
+        for (error, word) in [
+            ("offline", "offline"),
+            ("relay: device unreachable", "offline"),
+            ("unknown method: ReadToolOutput", "update"),
+            ("capability error: tool_output.unavailable", "unavailable"),
+            ("bad params: chat not found", "unavailable"),
+            ("capability error: tool_output.not_finished", "running"),
+            ("bad params: Only a command's output can be shown in full.", "failed"),
+        ] {
+            assert_eq!(output_error(error), word, "{error}");
+        }
+    }
+
+    #[test]
+    fn a_whole_output_brings_its_text_trim_and_exit_code() {
+        let value = whole_output_value("a\nb", &json!({ "done": true, "trimmed": true, "exitCode": 1 }));
+        assert_eq!(value.field("text"), Some(&Value::from("a\nb")));
+        assert_eq!(value.field("trimmed"), Some(&Value::Bool(true)));
+        assert!(matches!(value.field("exit_code"), Some(Value::Num(n)) if *n == 1.0));
     }
 }

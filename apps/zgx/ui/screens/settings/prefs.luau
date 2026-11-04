@@ -133,7 +133,7 @@ end
 function M.SEND_WITH(): { { value: string, label: string } }
 	return {
 		{ value = "enter", label = ui.t("settings.prefs.send_with.enter"):get() },
-		{ value = "mod_enter", label = ui.t("settings.prefs.send_with.mod_enter"):get() },
+		{ value = "mod_enter", label = ui.t("settings.prefs.send_with.mod_enter", { key = ui.shortcut_text("cmd+enter") }):get() },
 	}
 end
 function M.OPEN_LINKS(): { { value: string, label: string } }

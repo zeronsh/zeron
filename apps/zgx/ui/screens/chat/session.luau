@@ -177,6 +177,7 @@ local function Session(id: Id?): Node
 		drop_when = zone.drop_when,
 		on_drag_over = zone.on_drag_over,
 		on_drag_leave = zone.on_drag_leave,
+		on_hover = zone.on_hover,
 		on_drop = zone.on_drop,
 		w_full = true,
 		h_full = true,
@@ -241,9 +242,13 @@ local function Session(id: Id?): Node
 					end, function(id: string): Node
 						return T.Transcript {
 							-- Settings' "Conversation width", followed as it moves.
+							-- (A little wider than the composer each side, so it's
+							-- seen fading as it passes behind.)
 							measure = function(): number
-								return prefs.conversation_width:get()
+								return prefs.conversation_width:get() + 24
 							end,
+							side = 20,
+							fade_lead = 12,
 							messages = store.messages,
 							offset = offset,
 							-- Made again (a reload, a template saved), it comes

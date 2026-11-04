@@ -87,6 +87,24 @@ test("Tab reads each part of the shell in its order: the sidebar's rows, the pag
 		end
 	end
 end)
+test("I with no text field holding the keyboard goes into the composer; Escape there gives the keyboard back", function()
+	local app = open()
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(30)
+	app:click("role:textbox")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	app:key("Escape")
+	app:frames(5)
+	expect(focused(app)).never.to_contain("textbox")
+	app:key("i")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	-- Typed into the composer, I is a letter of the draft.
+	app:key("i")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+end)
 test("⌘F with nothing focused taking it opens a session's find bar, and nothing on a new chat", function()
 	local app = open()
 	-- (The bar draws over a transcript, which this fixture's chat has none

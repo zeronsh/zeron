@@ -20,6 +20,7 @@ fn service(device: &str, cwd: &std::path::Path, id: &str) -> PreviewService {
         started_at: 1,
         zeron_owned: true,
         chat_id: None,
+        process: String::new(),
     }
 }
 #[tokio::test]

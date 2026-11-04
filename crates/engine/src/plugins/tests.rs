@@ -27,6 +27,8 @@ async fn call(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    // Allowing and signing as Zeron's consent window does: with a review.
+    let params = super::authority_tests::as_consent_window(plugins, method, params).await;
     match plugins.dispatch(method, params).await {
         Ok(RpcReply::Value(value)) => Ok(value),
         Ok(RpcReply::Stream(_)) => panic!("{method} streamed"),
@@ -120,7 +122,7 @@ async fn plugins_new_plugin_scaffolds_signs_and_is_on() {
         serde_json::json!({ "id": "zeron", "name": "Z" }),
     )
     .await;
-    assert_eq!(reserved.unwrap_err(), "That name is Zeron's own");
+    assert_eq!(reserved.unwrap_err(), "Zeron already uses that name");
     assert!(
         call(
             &f.plugins,
@@ -409,6 +411,7 @@ async fn plugins_verified_author_and_different_author() {
             username: Some("ada".into()),
             mine: false,
             revoked: false,
+            verified: None,
         },
     );
     fake.keys.lock().unwrap().insert(
@@ -417,6 +420,7 @@ async fn plugins_verified_author_and_different_author() {
             username: Some("eve".into()),
             mine: false,
             revoked: false,
+            verified: None,
         },
     );
     f.plugins.set_directory(fake.clone());
@@ -547,7 +551,7 @@ async fn plugins_list_is_sorted_and_reports_broken() {
     };
     assert_eq!(by_id("bad")["status"], "broken");
     assert!(by_id("bad")["error"].as_str().unwrap().contains("native"));
-    assert_eq!(by_id("app")["error"], "That name is Zeron's own");
+    assert_eq!(by_id("app")["error"], "Zeron already uses that name");
     #[cfg(unix)]
     assert_eq!(by_id("linky")["error"], files::LINK_ERROR);
     assert!(
@@ -589,7 +593,7 @@ async fn plugins_list_is_sorted_and_reports_broken() {
 }
 
 #[tokio::test]
-async fn plugins_verify_and_sign_any_folder() {
+async fn plugins_verify_any_folder_and_sign_only_in_the_plugins_folder() {
     let f = fixture();
     let outside = tempfile::tempdir().unwrap();
     write_plugin(outside.path(), "ext", serde_json::json!({}), None);
@@ -603,16 +607,13 @@ async fn plugins_verify_and_sign_any_folder() {
     .await
     .unwrap();
     assert_eq!(unsigned["status"], "unsigned");
-    let signed = call(
-        &f.plugins,
-        methods::SIGN_PLUGIN,
-        serde_json::json!({ "path": path }),
-    )
-    .await
-    .unwrap();
+    // This device's key signs nothing outside the plugins folder (R4).
+    assert!(call(&f.plugins, methods::SIGN_PLUGIN, serde_json::json!({ "path": path })).await.is_err());
+    let key = signing::load_or_create_key(&f.data).unwrap();
+    sign_folder(&folder, &key).unwrap();
+    let signed = call(&f.plugins, methods::VERIFY_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
     assert_eq!(signed["status"], "ok");
     assert_eq!(signed["author"]["kind"], "you");
-    assert_eq!(signed["files"], 1);
     std::fs::write(folder.join("extra.luau"), "x").unwrap();
     let tampered = call(
         &f.plugins,
@@ -838,6 +839,7 @@ async fn plugins_deliver_checks_on_the_receiving_side() {
                 username: Some(user.into()),
                 mine: false,
                 revoked: false,
+                verified: None,
             },
         );
     }
@@ -1054,7 +1056,7 @@ async fn plugins_zeron_s_own_are_allowed_what_they_ask_turn_off_and_never_go() {
     let off = list["plugins"].as_array().unwrap().iter().find(|p| p["builtin"] == true).unwrap().clone();
     assert_eq!(off["status"], "off");
     let removed = call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await;
-    assert!(removed.unwrap_err().contains("turned off, not removed"));
+    assert!(removed.unwrap_err().contains("turned off, but not removed"));
     // A new version asking more is allowed it as it ships.
     write_plugin(&shipped, "github", serde_json::json!({ "name": "GitHub", "permissions": ["ui.add", "github", "panel.tabs"] }), None);
     call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "github", "off": false })).await.unwrap();
@@ -1091,7 +1093,7 @@ fn someone(f: &Fixture, fake: &Arc<FakeDirectory>, username: &str) -> SigningKey
     let (key, _) = SigningKey::generate().unwrap();
     fake.keys.lock().unwrap().insert(
         key.public(),
-        Lookup::Found { username: Some(username.into()), mine: false, revoked: false },
+        Lookup::Found { username: Some(username.into()), mine: false, revoked: false, verified: None },
     );
     f.plugins.set_directory(fake.clone());
     f.plugins.set_account(|| Some("user-1".into()));
@@ -1218,10 +1220,14 @@ async fn plugins_an_unknown_authors_update_keeps_consent_by_key() {
     call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "zed", "allow": true, "hash": installed["plugin"]["hash"] }))
         .await
         .unwrap();
-    // Updated, signed by the same key: still the one allowed.
+    // Updated, signed by the same key: nobody knows whose key that is, and
+    // the decision was for the content, so it waits for you again (R3).
     std::fs::write(&path, signed_package(&zed, "zed", "2", &["ui.add"], "return 2")).unwrap();
     let updated = call(&f.plugins, methods::UPDATE_PLUGIN, serde_json::json!({ "id": "zed" })).await.unwrap();
-    assert_eq!(updated["plugin"]["status"], "on", "same key, same asks: {updated}");
+    assert_eq!(updated["plugin"]["status"], "pending", "same key, same asks: {updated}");
+    call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "zed", "allow": true, "hash": updated["plugin"]["hash"] }))
+        .await
+        .unwrap();
     std::fs::write(&path, signed_package(&zed, "zed", "3", &["ui.add", "notifications"], "return 3")).unwrap();
     let updated = call(&f.plugins, methods::UPDATE_PLUGIN, serde_json::json!({ "id": "zed" })).await.unwrap();
     assert_eq!(updated["plugin"]["status"], "pending");
@@ -1337,4 +1343,32 @@ async fn plugins_export_packs_a_plugin_that_installs_elsewhere() {
     // Over a plugin you're making here, refused.
     let here = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap_err();
     assert!(here.contains("making a plugin called hello"), "{here}");
+}
+
+/// The theme tools' methods over this device's files, and the window told
+/// of each change (`WatchThemes`) so it reads them again.
+#[tokio::test]
+async fn theme_methods_write_this_device_s_files_and_tell_the_window() {
+    let f = fixture();
+    let mut told = match f.plugins.dispatch(methods::WATCH_THEMES, serde_json::json!({})).await {
+        Ok(RpcReply::Stream(stream)) => stream,
+        _ => panic!("stream"),
+    };
+    let nord = zeron_theme::builtin_registry().families.iter().flat_map(|fam| &fam.variants).find(|v| v.id == "nord").unwrap();
+    let dark = zeron_theme::catalog::Palette::of(nord).to_json(None);
+    let made = call(&f.plugins, methods::CREATE_THEME, serde_json::json!({ "name": "Ink", "dark": dark })).await.unwrap();
+    assert_eq!(made["id"], "custom-ink");
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert!(zeron_theme::CustomThemeLibrary::load(&f.data).unwrap().entry("custom-ink").is_some(), "in the data dir");
+    call(&f.plugins, methods::USE_THEME, serde_json::json!({ "id": "custom-ink" })).await.unwrap();
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert_eq!(zeron_theme::catalog::chosen(&f.data).dark.as_deref(), Some("custom-ink-dark"));
+    // Reading tells nothing; a refusal says why and changes nothing.
+    let listed = call(&f.plugins, methods::LIST_THEMES, serde_json::json!({})).await.unwrap();
+    assert_eq!(listed["wearing"]["dark"]["theme"], "custom-ink");
+    let refused = call(&f.plugins, methods::DELETE_THEME, serde_json::json!({ "id": "gruvbox" })).await.unwrap_err();
+    assert!(refused.contains("built in"), "{refused}");
+    call(&f.plugins, methods::DELETE_THEME, serde_json::json!({ "id": "custom-ink" })).await.unwrap();
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert!(zeron_theme::catalog::chosen(&f.data).is_empty());
 }

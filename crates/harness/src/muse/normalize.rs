@@ -159,6 +159,7 @@ impl Normalizer {
                     || item["exitCode"].as_i64().is_some_and(|c| c != 0),
                 output,
                 diff,
+                exit_code: None,
             });
         }
         events
@@ -201,6 +202,7 @@ impl Normalizer {
                     is_error: status != "completed",
                     output,
                     diff: None,
+                    exit_code: None,
                 });
             }
         }
@@ -233,6 +235,7 @@ impl Normalizer {
                         .or_else(|| item["failureReason"].as_str())
                         .map(|text| cap(text, 16384)),
                     diff: None,
+                    exit_code: None,
                 });
             }
         }

@@ -41,11 +41,13 @@ search.index(M.ID, ui.t("settings.profile.title"), ui.t("settings.profile.terms"
 	{ key = "email", title = ui.t("settings.profile.email.label"), terms = ui.t("settings.profile.email.terms") },
 	{ key = "card", title = ui.t("settings.profile.card.label"), terms = ui.t("settings.profile.card.terms") },
 	{ key = "devices", title = ui.t("settings.profile.devices.label"), terms = ui.t("settings.profile.devices.terms") },
+	{ key = "signing_keys", title = ui.t("settings.profile.keys.label"), terms = ui.t("settings.profile.keys.terms") },
 	{ key = "sign_out", title = ui.t("settings.profile.sign_out.label"), terms = ui.t("settings.profile.sign_out.terms") },
 	{ key = "delete_account", title = ui.t("settings.profile.delete.label"), terms = ui.t("settings.profile.delete.terms") },
 })
 
 local toast = require("@ds/toast")
+local signing_keys = require("@app/screens/settings/signing_keys")
 local function toast_failed(title: string, body: string)
 	toast.show { title = title, body = body, tone = "danger" }
 end
@@ -61,6 +63,8 @@ local function sign_out()
 	auth.sign_out(function()
 		store.forget()
 		leaving:set(false)
+		-- (The shell may ask too, as it sees this window signed out: the host opens
+		-- setup once a window.)
 		host.invoke("app.onboard")
 	end)
 end
@@ -324,12 +328,21 @@ end
 -- Deleting the account: the dialog's word to type is your address.
 local deleting = ui.state("settings_deleting_account", false)
 local delete_busy = ui.state("settings_delete_busy", false)
+-- Waiting for you to sign in again in the browser: only just after
+-- signing in can the account be deleted (no agent on this Mac can).
+local delete_signing_in = ui.state("settings_delete_signing_in", false)
 local function delete_account(email: string)
 	if delete_busy:peek() then
 		return
 	end
 	delete_busy:set(true)
 	store.delete_account(email, function(word: string?)
+		delete_signing_in:set(false)
+		if word == "cancelled" then
+			-- (Closed while signing in: you stopped it; nothing to say.)
+			delete_busy:set(false)
+			return
+		end
 		if word then
 			delete_busy:set(false)
 			deleting:set(false)
@@ -343,8 +356,16 @@ local function delete_account(email: string)
 			deleting:set(false)
 			host.invoke("app.onboard")
 		end)
+	end, function()
+		delete_signing_in:set(true)
 	end)
 end
+-- Closed while waiting for that sign-in (Cancel, Escape): stop waiting.
+ui.effect(function()
+	if not deleting:get() and delete_signing_in:peek() then
+		store.cancel_delete()
+	end
+end)
 
 -- Your photo's address now ("" none): the profile's, else the one kept.
 local function photo(): string
@@ -646,6 +667,9 @@ function M.view(): Node
 	visits.once("profile", function()
 		store.load_me()
 		store.load_card()
+		if auth.signed_in:peek() then
+			signing_keys.load(true)
+		end
 		if store.org:peek() == nil then
 			store.load_org()
 		end
@@ -842,6 +866,8 @@ function M.view(): Node
 						}),
 					}
 				),
+				-- The keys your devices sign what you make with.
+				search.anchor("signing_keys", signing_keys.section()),
 				-- Signing out, last: out of plugins' reach.
 				ui.column {
 					hook = false,
@@ -929,10 +955,36 @@ function M.view(): Node
 				confirm = {
 					label = ui.t("settings.profile.delete.label"),
 					keep_open = true,
+					busy = function(): boolean
+						return delete_busy:get()
+					end,
 					on_click = function()
 						delete_account(email)
 					end,
 				},
+				-- Signing in again, in the browser, before it goes.
+				ui.show(
+					delete_signing_in,
+					ui.column {
+						w_full = true,
+						gap = "$space.1",
+						ui.text {
+							ui.t("settings.profile.delete.step_up.title"),
+							text_size = "$font.size.md",
+							line_height = 20,
+							weight = "$font.weight.medium",
+							color = "$text.primary",
+							wrap = true,
+						},
+						ui.text {
+							ui.t("settings.profile.delete.step_up.body"),
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							color = "$text.secondary",
+							wrap = true,
+						},
+					}
+				),
 			}
 		end),
 	}

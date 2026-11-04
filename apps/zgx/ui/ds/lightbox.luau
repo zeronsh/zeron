@@ -42,6 +42,7 @@ local glass = require("@self/glass")
 local control = require("@self/control")
 local Motion = require("@self/motion")
 local locale = require("@self/locale")
+local toast = require("@self/toast")
 
 local M = {}
 
@@ -182,23 +183,23 @@ local function copy_image(item: Item)
 	local ok, promise = pcall(ui.call, "image.copy", { path = path })
 	if ok and promise then
 		promise:after(function()
-			ui.toast { title = locale.s("ds.lightbox.image_copied"), kind = "success" }
+			toast.show { title = locale.s("ds.lightbox.image_copied"), tone = "success" }
 		end, function(err: any)
-			ui.toast { title = locale.s("ds.lightbox.copy_failed"), body = tostring(err), kind = "error" }
+			toast.show { title = locale.s("ds.lightbox.copy_failed"), body = tostring(err), tone = "danger" }
 		end)
 	end
 end
 
 local function copy_path(item: Item)
 	ui.clipboard.write(item.path or item.src)
-	ui.toast { title = locale.s("ds.lightbox.path_copied"), kind = "success" }
+	toast.show { title = locale.s("ds.lightbox.path_copied"), tone = "success" }
 end
 
 local function reveal(item: Item)
 	local ok, promise = pcall(ui.call, "image.reveal", { path = item.path or item.src })
 	if ok and promise then
 		promise:after(nil, function(err: any)
-			ui.toast { title = locale.s("ds.lightbox.reveal_failed"), body = tostring(err), kind = "error" }
+			toast.show { title = locale.s("ds.lightbox.reveal_failed"), body = tostring(err), tone = "danger" }
 		end)
 	end
 end
@@ -1377,6 +1378,13 @@ local StageView = ui.component(function(st: Stage): Node
 				return math.clamp(if st.leaving:get() then lift else (lift - 0.6) / 0.4, 0, 1)
 			end,
 			ui.row(island_props),
+		},
+		-- What its actions say (copied, couldn't copy): over the stage while
+		-- it's up, as the window's own stack is under it.
+		toast.Host {
+			front = function(): boolean
+				return st.shown:get() ~= nil and not st.leaving:get()
+			end,
 		},
 	}
 end)

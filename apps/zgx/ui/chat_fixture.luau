@@ -569,7 +569,7 @@ ui.command { id = "learn_icons", title = "Hear of the registry icons", run = fun
 	agent_icons:set(ICONS)
 end }
 
--- The shell's sessions: one project, two chats, this Mac.
+-- The shell's sessions: one project, two chats, this computer.
 local function seed()
 	local chats: { any } = {}
 	for id, m in META do
@@ -581,7 +581,7 @@ local function seed()
 	sessions.now:set(({
 		state = "ready",
 		here = "mac",
-		-- This Mac; a box that's up (seen a moment ago); one gone quiet.
+		-- This computer; a box that's up (seen a moment ago); one gone quiet.
 		devices = {
 			{ id = "mac", name = "MacBook Pro", platform = "macos", here = true, online = true },
 			-- (Its beat a day ahead: up however long the fixture runs.)
@@ -1291,6 +1291,8 @@ return ui.overlay {
 	chat.Composer(),
 	-- A link's context menu, as the shell hangs it (ds/menu_at).
 	require("@ds/menu_at").Host {},
+	-- What's said for a moment, as the shell has it (ds/toast).
+	ds.toast.Host {},
 	-- In the title bar's strip, what a drag may come from: the files pane's
 	-- files (their paths), and something else (a sidebar section).
 	ui.row {

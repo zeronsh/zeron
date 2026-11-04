@@ -40,7 +40,7 @@ pub async fn run_template(
         Ok(client) => client,
         Err(_) if matches!(&command, TemplateCommand::Use { id } if id.trim() == templates::ZERON) =>
         {
-            templates::use_template(&data_dir.join(TEMPLATES_DIR), templates::ZERON)
+            templates::use_template(&data_dir.join(TEMPLATES_DIR), templates::ZERON, None)
                 .map_err(anyhow::Error::msg)?;
             println!("Using Zeron's own interface.");
             return Ok(());

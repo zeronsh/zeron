@@ -4,8 +4,9 @@
 //!
 //! - its `ds/themes/zeron-{light,dark}.json`, where it has its own (a whole
 //!   file over Zeron's: what the window loads for that appearance);
-//! - its `theme.luau` (src/plugins/theme_templates.rs), a palette for an
-//!   appearance worn over that theme (ds/palettes).
+//! - its `theme.luau`, a palette for an appearance worn over that theme
+//!   (ds/palettes): the template's own theme, worn where you haven't chosen
+//!   one (src/themes.rs).
 //!
 //! An appearance with neither is Zeron's. A template that changes none shows
 //! Zeron's own (no look); one that changes one appearance shows that one
@@ -28,7 +29,10 @@ use std::{
 
 use serde_json::{Map, Value as Json, json};
 
-use super::{live, theme_templates};
+use super::live;
+
+/// The file a template's own theme is in, at its root.
+pub const THEME_FILE: &str = "theme.luau";
 
 const SCHEMES: [&str; 2] = ["light", "dark"];
 
@@ -53,6 +57,12 @@ impl Cache {
         (stamp, value)
     }
 
+    /// Template `id`'s own theme: its `theme.luau` read as data (`{ name?,
+    /// light?, dark? }`), or Null for none, or a file that isn't data.
+    pub fn theme_file(&self, templates: &Path, id: &str) -> Json {
+        self.read(&templates.join(id).join(THEME_FILE), zeron_theme::luau_data::parse).1
+    }
+
     /// Template `id`'s look (Zeron's own for `live::BUILTIN`), or Null when
     /// it changes no colour of Zeron's.
     pub fn look(&self, templates: &Path, id: &str) -> Json {
@@ -60,7 +70,7 @@ impl Cache {
         let own = id == live::BUILTIN;
         let dir = if own { zeron.clone() } else { templates.join(id) };
         let mut stamps = Vec::new();
-        let (stamp, palettes) = if own { (String::new(), Json::Null) } else { self.read(&dir.join(theme_templates::FILE), luau_literal) };
+        let (stamp, palettes) = if own { (String::new(), Json::Null) } else { self.read(&dir.join(THEME_FILE), zeron_theme::luau_data::parse) };
         stamps.push(stamp);
         let mut out = Map::new();
         for scheme in SCHEMES {
@@ -100,176 +110,6 @@ fn json5_theme(text: &str) -> Option<Json> {
         "extends": file.get("extends").cloned().unwrap_or(Json::Null),
         "tokens": tokens,
     }))
-}
-
-/// A `theme.luau` read as data: `return` and a Luau table literal of
-/// strings, numbers, booleans and tables (what theme_templates writes, and
-/// a palette written by hand). Anything else (code) isn't a look: None.
-pub fn luau_literal(text: &str) -> Option<Json> {
-    let mut p = Parser { s: text.as_bytes(), at: 0 };
-    p.space();
-    if !p.word("return") {
-        return None;
-    }
-    let value = p.value()?;
-    p.space();
-    (p.at == p.s.len()).then_some(value)
-}
-
-struct Parser<'a> {
-    s: &'a [u8],
-    at: usize,
-}
-
-impl Parser<'_> {
-    fn peek(&self) -> Option<u8> {
-        self.s.get(self.at).copied()
-    }
-
-    /// Past white space and `--` comments (a line's, or a `--[[ ]]` block).
-    fn space(&mut self) {
-        loop {
-            while self.peek().is_some_and(|c| c.is_ascii_whitespace()) {
-                self.at += 1;
-            }
-            if self.s[self.at..].starts_with(b"--[[") {
-                match self.s[self.at..].windows(2).position(|w| w == b"]]") {
-                    Some(end) => self.at += end + 2,
-                    None => self.at = self.s.len(),
-                }
-            } else if self.s[self.at..].starts_with(b"--") {
-                while self.peek().is_some_and(|c| c != b'\n') {
-                    self.at += 1;
-                }
-            } else {
-                return;
-            }
-        }
-    }
-
-    fn word(&mut self, word: &str) -> bool {
-        self.space();
-        let end = self.at + word.len();
-        let next = self.s.get(end).copied();
-        if self.s[self.at..].starts_with(word.as_bytes()) && !next.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
-            self.at = end;
-            return true;
-        }
-        false
-    }
-
-    fn name(&mut self) -> Option<String> {
-        self.space();
-        let start = self.at;
-        while self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
-            self.at += 1;
-        }
-        (self.at > start && !self.s[start].is_ascii_digit()).then(|| String::from_utf8_lossy(&self.s[start..self.at]).into_owned())
-    }
-
-    fn string(&mut self) -> Option<String> {
-        self.space();
-        let quote = self.peek().filter(|c| *c == b'"' || *c == b'\'')?;
-        self.at += 1;
-        let mut out = Vec::new();
-        loop {
-            let c = self.peek()?;
-            self.at += 1;
-            match c {
-                b'\\' => {
-                    let e = self.peek()?;
-                    self.at += 1;
-                    out.push(match e {
-                        b'n' => b'\n',
-                        b't' => b'\t',
-                        other => other,
-                    });
-                }
-                c if c == quote => return String::from_utf8(out).ok(),
-                b'\n' => return None,
-                c => out.push(c),
-            }
-        }
-    }
-
-    fn value(&mut self) -> Option<Json> {
-        self.space();
-        match self.peek()? {
-            b'"' | b'\'' => self.string().map(Json::String),
-            b'{' => self.table(),
-            c if c == b'-' || c.is_ascii_digit() => {
-                let start = self.at;
-                self.at += 1;
-                while self.peek().is_some_and(|c| c.is_ascii_digit() || c == b'.') {
-                    self.at += 1;
-                }
-                std::str::from_utf8(&self.s[start..self.at]).ok()?.parse::<f64>().ok().and_then(|n| serde_json::Number::from_f64(n).map(Json::Number))
-            }
-            _ => {
-                if self.word("true") {
-                    Some(Json::Bool(true))
-                } else if self.word("false") {
-                    Some(Json::Bool(false))
-                } else if self.word("nil") {
-                    Some(Json::Null)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    /// `{ name = v, ["key"] = v, v, … }`: an object when it has a key, else
-    /// a list.
-    fn table(&mut self) -> Option<Json> {
-        self.at += 1;
-        let mut map = Map::new();
-        let mut list = Vec::new();
-        loop {
-            self.space();
-            match self.peek()? {
-                b'}' => {
-                    self.at += 1;
-                    break;
-                }
-                b'[' => {
-                    self.at += 1;
-                    let key = self.string()?;
-                    self.space();
-                    (self.peek()? == b']').then_some(())?;
-                    self.at += 1;
-                    self.equals()?;
-                    map.insert(key, self.value()?);
-                }
-                _ => {
-                    let save = self.at;
-                    match self.name() {
-                        Some(key) if !matches!(key.as_str(), "true" | "false" | "nil") && self.equals().is_some() => {
-                            map.insert(key, self.value()?);
-                        }
-                        _ => {
-                            self.at = save;
-                            list.push(self.value()?);
-                        }
-                    }
-                }
-            }
-            self.space();
-            if matches!(self.peek(), Some(b',' | b';')) {
-                self.at += 1;
-            }
-        }
-        match (map.is_empty(), list.is_empty()) {
-            (_, true) => Some(Json::Object(map)),
-            (true, false) => Some(Json::Array(list)),
-            (false, false) => None,
-        }
-    }
-
-    fn equals(&mut self) -> Option<()> {
-        self.space();
-        (self.peek()? == b'=' && self.s.get(self.at + 1) != Some(&b'=')).then(|| self.at += 1)
-    }
 }
 
 #[cfg(test)]
@@ -333,12 +173,15 @@ mod tests {
         assert!(cache.look(&t, "copy").is_null());
         write(&t, "bare/zeron-template.json", "{}");
         assert!(cache.look(&t, "bare").is_null());
-        // A palette (an official template's theme.luau, as written).
-        let id = theme_templates::install(&t, "tokyo-night").unwrap();
-        let tokyo = cache.look(&t, &id);
-        assert_eq!((tokyo["light"]["palette"]["background"].as_str(), tokyo["dark"]["palette"]["background"].as_str()), (Some("#d5d6db"), Some("#1a1b26")));
-        assert_eq!(tokyo["dark"]["palette"]["ansi"].as_array().unwrap().len(), 16);
-        assert!(tokyo["dark"].get("theme").is_none());
+        // A palette (a template's own theme.luau).
+        write(&t, "ink/zeron-template.json", "{}");
+        write(&t, "ink/theme.luau", "return {\n\tname = \"Ink\",\n\tlight = { background = \"#d5d6db\" },\n\tdark = { background = \"#1a1b26\", ansi = { \"#000000\", \"#111111\" } },\n}\n");
+        let ink = cache.look(&t, "ink");
+        assert_eq!((ink["light"]["palette"]["background"].as_str(), ink["dark"]["palette"]["background"].as_str()), (Some("#d5d6db"), Some("#1a1b26")));
+        assert_eq!(ink["dark"]["palette"]["ansi"].as_array().unwrap().len(), 2);
+        assert!(ink["dark"].get("theme").is_none());
+        assert_eq!(cache.theme_file(&t, "ink")["name"], "Ink");
+        assert!(cache.theme_file(&t, "copy").is_null());
     }
 
     #[test]
@@ -379,18 +222,5 @@ mod tests {
             let said: Vec<String> = SCHEMES.iter().filter_map(|s| accent(s)).collect();
             println!("{}: {}", i.id, if look.is_null() { "Zeron's own".to_string() } else { said.join(", ") });
         }
-    }
-
-    #[test]
-    fn a_theme_file_reads_as_data_and_code_does_not() {
-        let v = luau_literal("-- a palette\nreturn {\n\tname = \"Mine\", -- its name\n\tdark = { text = 'a\\'b', syntax = { \"#1\", \"#2\" }, n = 1.5, on = true },\n\t[\"light\"] = nil,\n}\n").unwrap();
-        assert_eq!(v["name"], "Mine");
-        assert_eq!(v["dark"]["text"], "a'b");
-        assert_eq!(v["dark"]["syntax"], json!(["#1", "#2"]));
-        assert_eq!(v["dark"]["n"], 1.5);
-        assert_eq!(luau_literal("return nil\n"), Some(Json::Null));
-        assert!(luau_literal("local x = 1\nreturn { a = x }").is_none());
-        assert!(luau_literal("return require(\"@ds/thing\")").is_none());
-        assert!(luau_literal("return { a = \"x\" } extra").is_none());
     }
 }

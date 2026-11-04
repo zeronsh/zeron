@@ -276,6 +276,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         harness_session_cwd: None,
         harness_session_harness: None,
         parent_chat_id: Some("parent-chat".into()),
+        child_kind: None,
         space_id: None,
         last_seen_at: None,
         room_gen: None,
@@ -1796,6 +1797,36 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
             .parent_chat_id
             .as_deref(),
         Some("main")
+    );
+}
+
+#[test]
+fn a_child_kind_syncs_and_survives_updates_and_restart() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let mut sub = chat("sub", "dev-a");
+    sub.parent_chat_id = Some("main".into());
+    sub.child_kind = Some(zeron_proto::ChildKind::Subagent);
+    a.upsert_chat(&sub).unwrap();
+    // A person's side chat records none.
+    let mut side = chat("side", "dev-a");
+    side.parent_chat_id = Some("main".into());
+    a.upsert_chat(&side).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(b.chat("sub").unwrap(), Some(sub.clone()));
+    assert_eq!(b.chat("side").unwrap().unwrap().child_kind, None);
+    b.rename_chat("sub", "Survey the tests").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(
+        a.chat("sub").unwrap().unwrap().child_kind,
+        Some(zeron_proto::ChildKind::Subagent)
+    );
+    let restored = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "dev-a").unwrap();
+    assert_eq!(
+        restored.chat("sub").unwrap().unwrap().child_kind,
+        Some(zeron_proto::ChildKind::Subagent)
     );
 }
 

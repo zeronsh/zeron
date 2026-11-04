@@ -7,10 +7,18 @@
 //! WebSocket handshake without `Authorization: Bearer <token>`. Clients read the
 //! file at dial time, so they keep working across engine restarts.
 //!
-//! Client resolution order ([`client_tokens`]): `$ZERON_IPC_TOKEN` (explicit
-//! value), then the file named by `$ZERON_IPC_TOKEN_FILE` (what the engine hands
-//! the `zeron mcp` servers it injects into agents), then `{data_dir}/ipc-token`.
+//! Client resolution order ([`client_tokens`]): the file named by
+//! `$ZERON_IPC_TOKEN_FILE` alone when set (what the engine hands the `zeron
+//! mcp` servers it injects into agents), else `$ZERON_IPC_TOKEN` (explicit
+//! value), then `{data_dir}/ipc-token`.
 //! In-process (in-memory) transports never see any of this.
+//!
+//! Two tokens, two authorities ([`crate::Caller`]): the full token
+//! (`ipc-token`) is the app's and the CLI's; the agent-scoped token
+//! (`ipc-token-agent`) is what the engine hands the `zeron mcp` servers it
+//! injects into agents' runs, and the server answers it only the methods
+//! [`crate::agent_allowed`] lists. A client given `$ZERON_IPC_TOKEN_FILE`
+//! uses that file alone: it never falls back to the full token.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -21,10 +29,46 @@ pub const TOKEN_FILE_NAME: &str = "ipc-token";
 pub const TOKEN_ENV: &str = "ZERON_IPC_TOKEN";
 /// Path of a token file for a client (the engine injects this into `zeron mcp`).
 pub const TOKEN_FILE_ENV: &str = "ZERON_IPC_TOKEN_FILE";
+/// File name of the agent-scoped token inside the engine's data dir.
+pub const AGENT_TOKEN_FILE_NAME: &str = "ipc-token-agent";
+/// Handshake header naming the chat an agent's MCP server serves: claimed,
+/// for the record only ([`crate::Caller::Agent`]).
+pub const CHAT_HEADER: &str = "x-zeron-chat";
 
 /// `{data_dir}/ipc-token`.
 pub fn token_path(data_dir: &Path) -> PathBuf {
     data_dir.join(TOKEN_FILE_NAME)
+}
+
+/// `{data_dir}/ipc-token-agent`.
+pub fn agent_token_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(AGENT_TOKEN_FILE_NAME)
+}
+
+/// The tokens one engine start serves: the full one and the agent-scoped one.
+#[derive(Clone)]
+pub struct IpcTokens {
+    pub full: String,
+    pub agent: String,
+}
+
+impl IpcTokens {
+    /// Fresh tokens, not written anywhere (tests, in-process servers).
+    pub fn generate() -> io::Result<Self> {
+        Ok(Self {
+            full: generate_token()?,
+            agent: generate_token()?,
+        })
+    }
+}
+
+/// Mint both tokens and publish them at `{data_dir}/ipc-token` and
+/// `{data_dir}/ipc-token-agent`.
+pub fn issue_tokens(data_dir: &Path) -> io::Result<IpcTokens> {
+    let agent = generate_token()?;
+    write_token(&agent_token_path(data_dir), &agent)?;
+    let full = issue_token(data_dir)?;
+    Ok(IpcTokens { full, agent })
 }
 
 /// 32 bytes from the OS CSPRNG, lowercase hex (64 chars).
@@ -98,8 +142,8 @@ pub fn read_token(path: &Path) -> io::Result<Option<String>> {
 }
 
 /// Every token a client should try, best first, deduplicated: the
-/// `$ZERON_IPC_TOKEN` value, the `$ZERON_IPC_TOKEN_FILE` file, then
-/// `{data_dir}/ipc-token`. Read at call time — after an engine restart the
+/// `$ZERON_IPC_TOKEN_FILE` file alone when it's set (an agent's MCP server),
+/// else the `$ZERON_IPC_TOKEN` value, then `{data_dir}/ipc-token`. Read at call time — after an engine restart the
 /// file already holds the new token. Empty when nothing is configured (an
 /// older engine that predates IPC auth still accepts a bare dial).
 pub fn client_tokens(data_dir: Option<&Path>) -> Vec<String> {
@@ -112,14 +156,31 @@ pub fn client_tokens(data_dir: Option<&Path>) -> Vec<String> {
             tokens.push(token);
         }
     };
-    push(std::env::var(TOKEN_ENV).ok());
     if let Some(file) = std::env::var_os(TOKEN_FILE_ENV).filter(|f| !f.is_empty()) {
+        // The file it was given is its authority (an agent's MCP server:
+        // the scoped token). Never reach past it for another token.
         push(read_logged(Path::new(&file)));
+        return tokens;
     }
+    push(std::env::var(TOKEN_ENV).ok());
     if let Some(dir) = data_dir {
         push(read_logged(&token_path(dir)));
     }
     tokens
+}
+
+/// The tokens an agent's MCP server tries: the `$ZERON_IPC_TOKEN_FILE` file
+/// when set, else `{data_dir}/ipc-token-agent`. Never the full token.
+pub fn agent_client_tokens(data_dir: Option<&Path>) -> Vec<String> {
+    let file = std::env::var_os(TOKEN_FILE_ENV)
+        .filter(|f| !f.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| data_dir.map(agent_token_path));
+    file.and_then(|file| read_logged(&file))
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+        .into_iter()
+        .collect()
 }
 
 fn read_logged(path: &Path) -> Option<String> {
@@ -127,6 +188,19 @@ fn read_logged(path: &Path) -> Option<String> {
         tracing::warn!(path = %path.display(), error = %err, "rpc: cannot read the IPC token");
         None
     })
+}
+
+/// Which of `tokens` an `Authorization` header carries: `Some(false)` the
+/// full one, `Some(true)` the agent-scoped one, `None` neither.
+pub(crate) fn bearer_scope(tokens: &IpcTokens, header: Option<&[u8]>) -> Option<bool> {
+    // Both compared, always, in constant time.
+    let full = bearer_matches(&tokens.full, header);
+    let agent = bearer_matches(&tokens.agent, header);
+    match (full, agent) {
+        (true, _) => Some(false),
+        (false, true) => Some(true),
+        _ => None,
+    }
 }
 
 /// Does an `Authorization` header value carry exactly `expected` as its bearer?
