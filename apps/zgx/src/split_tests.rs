@@ -1440,3 +1440,460 @@ fn a_dragged_edge_reflows_the_page_live_keeping_the_reading_place() {
         assert!((now.y - before.y).abs() <= 2., "{panes} pane(s): the reading place kept: {reading} from {} to {}", before.y, now.y);
     }
 }
+
+// ── Live reflow: what a frame of a moving column costs ─────────────────────
+
+/// Script calls a frame as the sidebar's edge is dragged, over 400 sessions
+/// and `panes` long chats.
+fn drag_script(panes_n: usize) -> u64 {
+    drag_script_of(&ui().join("shell_fixture.luau"), panes_n)
+}
+
+fn drag_script_of(fixture: &Path, panes_n: usize) -> u64 {
+    const IDS: [&str; 4] = ["a1", "a2", "a3", "b1"];
+    let mut app = mount_at(fixture, &scratch(&format!("drag-script-{panes_n}")));
+    assert!(app.host.run_command("many"));
+    app.frames(30);
+    long_chats(&app, &IDS, None);
+    split_of(&mut app, &IDS[..panes_n]);
+    open(&mut app, "Fix the build");
+    app.frames(60);
+    let calls = app.calls();
+    drag_sidebar(&mut app, 120., |_| ());
+    (app.calls() - calls) / 20
+}
+
+/// The sidebar's edge dragged, the sidebar's list isn't built again, and
+/// each pane adds only its own few script calls. (A ref's field read in the
+/// list's shape followed its whole box: about 110 more calls and 420 µs, at
+/// every frame of a drag or of a window resized.)
+#[test]
+fn a_dragged_sidebar_edge_builds_no_list() {
+    let (one, four) = (drag_script(1), drag_script(4));
+    assert!(one <= 170, "{one} script calls a frame with one chat");
+    assert!(four - one <= 3 * 45, "{one} script calls a frame with one chat, {four} with four");
+}
+
+/// v2 too: its sidebar's list isn't built again at each frame of the edge
+/// dragged (which woke every row's bindings: 225 script calls a frame, 115 without).
+#[test]
+fn v2_s_dragged_sidebar_edge_builds_no_list() {
+    let t = scratch("v2-drag").join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let calls = drag_script_of(&compose(&t, "zeron-v2").join("shell_fixture.luau"), 1);
+    assert!(calls <= 170, "{calls} script calls a frame");
+}
+
+/// A window resized by its edge reflows the page at every frame, as the
+/// panel's glide and an edge dragged do: nothing holds it at one width.
+#[test]
+fn a_window_resized_reflows_the_page_live() {
+    let mut app = mount(&scratch("resize-live"));
+    long_chats(&app, &["a1"], None);
+    open(&mut app, "Fix the build");
+    app.frames(30);
+    let mut widths = std::collections::BTreeSet::new();
+    for i in 1..=20 {
+        app.ui.scene.borrow_mut().resize(W - 8. * i as f32, H);
+        app.frame();
+        widths.insert(app.bounds("#chat-session >> #transcript").width.round() as i64);
+    }
+    assert_eq!(widths.len(), 20, "the transcript took {widths:?}");
+}
+
+/// A row in the sidebar follows the column's width: its edge dragged wider,
+/// a row and the words in it are that much wider.
+#[test]
+fn a_sidebar_row_and_its_words_follow_the_dragged_edge() {
+    let mut app = mount(&scratch("row-width"));
+    let row = "#shell-sidebar >> role:button \"Fix the build\"";
+    let words = "#shell-sidebar >> role:button \"Fix the build\" >> ~\"Fix the build\"";
+    let (row_was, words_right) = (app.bounds(row), app.bounds(words).x);
+    drag_sidebar(&mut app, 60., |_| ());
+    app.frames(10);
+    let (row_now, words_now) = (app.bounds(row), app.bounds(words));
+    assert!((row_now.width - row_was.width - 60.).abs() <= 1., "the row {} wide, was {}", row_now.width, row_was.width);
+    assert!((words_now.x - words_right).abs() <= 1., "its words start where they did");
+    assert!(words_now.x + words_now.width <= row_now.x + row_now.width + 1., "its words {words_now:?} end inside the row {row_now:?}");
+}
+
+/// How many boxes stand above `id`.
+fn depth_of(app: &mut TestApp, id: &str) -> usize {
+    let node = app.target(id).unwrap();
+    let scene = app.ui.scene.borrow();
+    let (mut depth, mut at) = (0, scene.parent(node));
+    while let Some(a) = at {
+        depth += 1;
+        at = scene.parent(a);
+    }
+    depth
+}
+
+/// v3's card stands one box deeper than v2's page, its panes' room. Every box
+/// between it and the window multiplied what a frame of the panel's glide
+/// measured: three more had a toggle's frame measure 1442 nodes to v2's 782.
+#[test]
+fn the_page_stands_about_as_deep_as_v2_s() {
+    let t = scratch("depth").join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let mut v2 = mount_at(&compose(&t, "zeron-v2").join("shell_fixture.luau"), &scratch("depth-v2"));
+    let mut v3 = mount(&scratch("depth-v3"));
+    let (two, three) = (depth_of(&mut v2, "#shell-page"), depth_of(&mut v3, "#shell-page"));
+    assert!(three <= two + 1, "#shell-page under {three} boxes, v2's under {two}");
+}
+
+/// Frames' work as a column moves, and where it went: p50/p95 (ms), the
+/// most, script calls a frame, and (with `ZGX_PROFILE=1`) each phase's
+/// share of a frame (µs).
+fn reflow_frames(app: &mut TestApp, mut step: impl FnMut(&mut TestApp, usize), n: usize) -> String {
+    let _ = zgx::profile::take();
+    let calls = app.calls();
+    let mut each = Vec::new();
+    for i in 0..n {
+        step(app, i);
+        each.push(timed(app));
+    }
+    let per = (app.calls() - calls) / n as u64;
+    let most = each.iter().copied().fold(0., f64::max);
+    let (p50, p95) = spread(each);
+    let phases: Vec<String> = zgx::profile::take()
+        .into_iter()
+        .filter(|(_, _, t)| !t.is_zero())
+        .map(|(p, _, t)| format!("{} {:.0}", p.name(), t.as_secs_f64() * 1e6 / n as f64))
+        .collect();
+    format!("p50 {p50:.2} p95 {p95:.2} max {most:.2} ms, {per} calls/frame [{}]", phases.join(" "))
+}
+
+/// The panel opened and closed again, a frame at a time.
+fn reflow_toggle(app: &mut TestApp) -> String {
+    app.wait_until(|app| app.find("~\"Loading \"").is_none());
+    app.frames(40);
+    reflow_frames(
+        app,
+        |app, i| {
+            if i % 30 == 0 {
+                app.click("#titlebar >> role:button \"Panel\"");
+            }
+        },
+        60,
+    )
+}
+
+/// The sidebar's edge dragged out and back, a move a frame.
+fn reflow_drag(app: &mut TestApp) -> String {
+    let edge = app.bounds("#shell-sidebar >> \"Resize sidebar\"");
+    let (x, y) = (edge.x + edge.width / 2., edge.y + edge.height / 2.);
+    let (button, m) = (PointerButton::Primary, Modifiers::default());
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, m);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, m);
+    let steps: Vec<i32> = (1..=30).chain((0..30).rev()).collect();
+    let out = reflow_frames(app, |app, i| {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x + 4. * steps[i] as f32, y }, m);
+    }, steps.len());
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, m);
+    app.ui.input.forget_clicks();
+    out
+}
+
+/// Chats `ids` side by side (one: alone).
+fn split_of(app: &mut TestApp, ids: &[&str]) {
+    if ids.len() > 1 {
+        use zgx_script::Value;
+        let kids: Vec<Value> = ids.iter().map(|id| Value::record([("kind", Value::from("leaf")), ("id", Value::from(*id))])).collect();
+        let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))]);
+        app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(std::rc::Rc::from(vec![tree]))).unwrap();
+    }
+}
+
+/// Live reflow, v2 against v3: a panel toggle over a chat of visuals and
+/// over a long chat, and the sidebar's edge dragged with 1–6 long chats.
+/// (`COSTS_UI`: another ui/ to compose; `REFLOW_ONLY`: v2 or v3.)
+#[test]
+#[ignore = "a measurement: ZGX_PROFILE=1 cargo test --release --bin zeron-zgx live_reflow_measured -- --ignored --nocapture"]
+fn live_reflow_measured() {
+    const IDS: [&str; 6] = ["a1", "a2", "a3", "b1", "b2", "m1"];
+    let root = scratch("reflow");
+    let t = root.join("templates");
+    let from = std::env::var("COSTS_UI").map(PathBuf::from).unwrap_or_else(|_| ui());
+    let only = std::env::var("REFLOW_ONLY").ok();
+    live::sync_zeron(&from, &t).unwrap();
+    for (label, id) in [("v2", "zeron-v2"), ("v3", live::BUILTIN)] {
+        if only.as_deref().is_some_and(|o| o != label) {
+            continue;
+        }
+        let at = root.join(format!("live-{label}"));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::rename(compose(&t, id), &at).unwrap();
+        let fixture = at.join("shell_fixture.luau");
+        let mut say = |what: String| eprintln!("REFLOW {label} {what}");
+        // A panel toggle over a chat of visuals, and over a long chat.
+        let mut app = mount_visuals(&fixture, &scratch(&format!("rv-{label}")), 1500.);
+        open(&mut app, "Fix the build");
+        reply_of_visuals(&app, &[("a1", true)]);
+        say(format!("toggle, visuals: {}", reflow_toggle(&mut app)));
+        say(format!("drag, visuals: {}", reflow_drag(&mut app)));
+        let mut app = mount_at(&fixture, &scratch(&format!("rl-{label}")));
+        app.ui.scene.borrow_mut().resize(1600., 1000.);
+        assert!(app.host.run_command("many"));
+        app.frames(30);
+        long_chats(&app, &IDS, None);
+        open(&mut app, "Fix the build");
+        app.frames(60);
+        say(format!("toggle, long chat: {}", reflow_toggle(&mut app)));
+        // The sidebar dragged, 1–6 long chats side by side (v2: one).
+        for n in if label == "v2" { vec![1] } else { vec![1, 2, 4, 6] } {
+            let mut app = mount_at(&fixture, &scratch(&format!("rd-{label}-{n}")));
+            app.ui.scene.borrow_mut().resize(1600., 1000.);
+            assert!(app.host.run_command("many"));
+            app.frames(30);
+            long_chats(&app, &IDS, None);
+            split_of(&mut app, &IDS[..n]);
+            open(&mut app, "Fix the build");
+            app.frames(60);
+            let shown = panes(&mut app).max(1);
+            say(format!("drag, {shown} pane(s): {}", reflow_drag(&mut app)));
+            say(format!("toggle, {shown} pane(s): {}", reflow_toggle(&mut app)));
+        }
+    }
+}
+
+/// What one frame of a moving column does, read from a probed zgx
+/// (docs/zgx-layout-probe.patch): its layout passes and what each measured,
+/// its script calls by source line, how often each node was measured, and
+/// the chain from the window down to a transcript. `REFLOW_CASE`: `panes<n>`
+/// (the sidebar's edge dragged over n long chats), `visuals` (over a chat of
+/// visuals) or `toggle` (a frame of the panel's glide); `REFLOW_V2=1`: v2.
+///
+///   git -C <a copy of zgx at the pin> apply docs/zgx-layout-probe.patch
+///   REFLOW_CASE=panes6 cargo test --release --features layout_probe \
+///     --config 'patch."https://github.com/zeronsh/zgx".zgx.path="<copy>/crates/zgx"' \
+///     --config 'patch."https://github.com/zeronsh/zgx".zgx-script.path="<copy>/crates/zgx-script"' \
+///     --bin zeron-zgx live_reflow_traced -- --ignored --nocapture
+#[cfg(feature = "layout_probe")]
+#[test]
+#[ignore = "a diagnosis: needs the probed zgx above"]
+fn live_reflow_traced() {
+    use std::collections::{BTreeMap, HashMap};
+    use zgx::scene::{NodeId, Scene};
+    const IDS: [&str; 6] = ["a1", "a2", "a3", "b1", "b2", "m1"];
+    let case = std::env::var("REFLOW_CASE").unwrap_or_else(|_| "panes6".into());
+    let fixture = if std::env::var_os("REFLOW_V2").is_some() {
+        let t = scratch("trace-v2").join("templates");
+        live::sync_zeron(&ui(), &t).unwrap();
+        compose(&t, "zeron-v2").join("shell_fixture.luau")
+    } else {
+        ui().join("shell_fixture.luau")
+    };
+    let panes: usize = case.strip_prefix("panes").and_then(|n| n.parse().ok()).unwrap_or(1);
+    let mut app = if case == "visuals" {
+        let mut app = mount_visuals(&fixture, &scratch("trace-v"), 1500.);
+        open(&mut app, "Fix the build");
+        reply_of_visuals(&app, &[("a1", true)]);
+        app.wait_until(|app| app.find("~\"Loading \"").is_none());
+        app
+    } else {
+        let mut app = mount_at(&fixture, &scratch("trace-p"));
+        app.ui.scene.borrow_mut().resize(1600., 1000.);
+        assert!(app.host.run_command("many"));
+        app.frames(30);
+        long_chats(&app, &IDS, None);
+        split_of(&mut app, &IDS[..panes]);
+        open(&mut app, "Fix the build");
+        app
+    };
+    app.frames(60);
+    let toggling = case == "toggle";
+    let edge = app.bounds("#shell-sidebar >> \"Resize sidebar\"");
+    let (x, y) = (edge.x + edge.width / 2., edge.y + edge.height / 2.);
+    let (button, m) = (PointerButton::Primary, Modifiers::default());
+    if toggling {
+        app.click("#titlebar >> role:button \"Panel\"");
+        app.frames(6);
+    } else {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, m);
+        app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, m);
+        for step in 1..=8 {
+            app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x + 4. * step as f32, y }, m);
+            app.frame();
+        }
+    }
+    // The frame looked at.
+    zgx::trace::set_enabled(true);
+    let _ = (zgx::trace::take_probe(), zgx::trace::take_probe_log());
+    if !toggling {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x + 40., y }, m);
+    }
+    app.frame();
+    let (measures, log) = (zgx::trace::take_probe(), zgx::trace::take_probe_log());
+    zgx::trace::set_enabled(false);
+    // Script calls, by where each function is defined.
+    let (calls, log): (Vec<_>, Vec<_>) = log.into_iter().partition(|l| l.0 == u32::MAX - 1);
+    let mut by_line: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
+    for (_, us, at) in &calls {
+        let e = by_line.entry(at).or_default();
+        e.0 += 1;
+        e.1 += us;
+    }
+    let mut by_line: Vec<_> = by_line.into_iter().collect();
+    by_line.sort_by_key(|(_, (_, us))| std::cmp::Reverse(*us));
+    eprintln!("CALLS {} script calls, {} us", calls.len(), calls.iter().map(|c| c.1).sum::<u64>());
+    for (at, (n, us)) in by_line.iter().take(20) {
+        eprintln!("CALL {n}x {us} us {at}");
+    }
+    // Who each node is: itself or its nearest ancestor the tree names.
+    let all = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: true };
+    let lines = zgx_script::driver::tree_lines_text(&zgx_script::driver::tree_lines(&app.ui, &app.handle, None, &all).0, 0);
+    let names: HashMap<u32, String> = lines
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let n: u32 = l.strip_prefix('@')?.split_whitespace().next()?.parse().ok()?;
+            Some((n, l.split_whitespace().take(2).collect::<Vec<_>>().join(" ")))
+        })
+        .collect();
+    let list = app.target(if panes > 1 { "#split-pane-a1 >> #transcript" } else { "#chat-session >> #transcript" }).unwrap();
+    let scene = app.ui.scene.borrow();
+    fn walk(s: &Scene, n: NodeId, out: &mut HashMap<u32, NodeId>) {
+        out.insert(n.number(), n);
+        for c in s.children(n) {
+            walk(s, *c, out);
+        }
+    }
+    let mut nodes = HashMap::new();
+    walk(&scene, scene.root(), &mut nodes);
+    let owner = |n: u32| -> String {
+        let mut at = nodes.get(&n).copied();
+        while let Some(a) = at {
+            if let Some(name) = names.get(&a.number()) {
+                return name.clone();
+            }
+            at = scene.parent(a);
+        }
+        "?".into()
+    };
+    // Each layout pass: what started it, and where its measures went.
+    let mut passes: BTreeMap<u64, Vec<&(u32, u64, String)>> = BTreeMap::new();
+    for l in &log {
+        passes.entry(l.1).or_default().push(l);
+    }
+    eprintln!("PASSES {}", passes.len());
+    for (pass, ls) in &passes {
+        let started = ls.iter().find(|l| l.0 == u32::MAX).map_or("", |l| l.2.as_str());
+        let mut owners: BTreeMap<String, usize> = BTreeMap::new();
+        for l in ls.iter().filter(|l| l.0 != u32::MAX) {
+            *owners.entry(owner(l.0)).or_default() += 1;
+        }
+        let mut owners: Vec<_> = owners.into_iter().collect();
+        owners.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        eprintln!("PASS {pass}: {} measures; {started}", ls.len() - 1);
+        eprintln!("     {}", owners.iter().take(8).map(|(o, n)| format!("{n} {o}")).collect::<Vec<_>>().join(" | "));
+    }
+    let total: u32 = measures.values().map(|v| v.0).sum();
+    eprintln!("MEASURES {} nodes, {total} measures, {:.0} us of their own", measures.len(), measures.values().map(|v| v.1).sum::<f32>());
+    // The chain from the window down to a transcript.
+    let mut chain = Vec::new();
+    let mut at = Some(list);
+    while let Some(a) = at {
+        chain.push(a);
+        at = scene.parent(a);
+    }
+    for a in chain.iter().rev() {
+        let kind: String = format!("{:?}", scene.kind(*a)).chars().take(22).collect();
+        let s = scene.style(*a);
+        eprintln!("CHAIN {:>4} @{} {kind} grow={} abs={} {}", measures.get(&a.number()).map_or(0, |v| v.0), a.number(), s.flex_grow, s.absolute, names.get(&a.number()).map_or("", |n| n.as_str()));
+    }
+}
+
+/// zgx alone: how many measures a frame takes as the window's width
+/// changes, against the nodes there are, for a few shapes of the same 40
+/// wrapped paragraphs. (A repro for zgx.)
+#[test]
+#[ignore = "a diagnosis: cargo test --release --bin zeron-zgx measures_per_width_change -- --ignored --nocapture"]
+fn measures_per_width_change() {
+    let dir = scratch("measures");
+    let para = "A paragraph long enough to wrap over a few lines at any of these widths, so its text lays out as a real reply's does, with more after it.";
+    let shapes: [(&str, &str); 14] = [
+        ("row > column(grow, basis 0)", "ui.row { w_full = true, ui.column { grow = 1, basis = 0, {TEXTS} } }"),
+        ("row > column(grow, basis 0, min_w 0)", "ui.row { w_full = true, ui.column { grow = 1, basis = 0, min_w = 0, {TEXTS} } }"),
+        ("absolute left, w 100% > column", "ui.div { w_full = true, h_full = true, ui.column { absolute = true, left = 0, top = 0, w = \"100%\", {TEXTS} } }"),
+        ("2 rows > column(grow)", "ui.row { w_full = true, ui.column { grow = 1, ui.row { ui.column { grow = 1, {TEXTS} } } } }"),
+        ("3 rows > column(grow)", "ui.row { w_full = true, ui.column { grow = 1, ui.row { ui.column { grow = 1, ui.row { ui.column { grow = 1, {TEXTS} } } } } } }"),
+        ("absolute in absolute", "ui.div { w_full = true, h_full = true, ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, ui.column { absolute = true, left = 0, right = 0, top = 0, {TEXTS} } } }"),
+        ("row > column(w = 50%)", "ui.row { w_full = true, ui.column { w = \"50%\", {TEXTS} } }"),
+        ("column of texts", "ui.column { w_full = true, {TEXTS} }"),
+        ("column > column(p)", "ui.column { w_full = true, ui.column { p = 12, gap = 8, {TEXTS} } }"),
+        ("row > column(grow)", "ui.row { w_full = true, ui.column { grow = 1, {TEXTS} } }"),
+        ("row > column(grow, min_w 0)", "ui.row { w_full = true, ui.column { grow = 1, min_w = 0, {TEXTS} } }"),
+        ("4 nested columns(p)", "ui.column { w_full = true, ui.column { p = 4, ui.column { p = 4, ui.column { p = 4, {TEXTS} } } } }"),
+        ("each text in a row > column(grow)", "ui.column { w_full = true, {ROWTEXTS} }"),
+        ("absolute left/right > column", "ui.div { w_full = true, h_full = true, ui.column { absolute = true, left = 0, right = 0, top = 0, {TEXTS} } }"),
+    ];
+    for (at, (label, shape)) in shapes.into_iter().enumerate() {
+        let texts: Vec<String> = (0..40).map(|_| format!("ui.text {{ wrap = true, \"{para}\" }}")).collect();
+        let rowtexts: Vec<String> = (0..40).map(|_| format!("ui.row {{ ui.column {{ grow = 1, ui.text {{ wrap = true, \"{para}\" }} }} }}")).collect();
+        let body = shape.replace("{TEXTS}", &texts.join(", ")).replace("{ROWTEXTS}", &rowtexts.join(", "));
+        let file = dir.join(format!("m{at}.luau"));
+        std::fs::write(&file, format!("return {body}\n")).unwrap();
+        let app = TestApp::new({
+            let file = file.clone();
+            move |runtime| ScriptHost::new(runtime, file)
+        });
+        app.ui.scene.borrow_mut().resize(900., 4000.);
+        app.frames(5);
+        let nodes = {
+            let scene = app.ui.scene.borrow();
+            fn walk(s: &zgx::scene::Scene, n: zgx::scene::NodeId) -> usize {
+                1 + s.children(n).iter().map(|c| walk(s, *c)).sum::<usize>()
+            }
+            walk(&scene, scene.root())
+        };
+        zgx::trace::set_kept(64);
+        zgx::trace::set_enabled(true);
+        let t = std::time::Instant::now();
+        for i in 0..20 {
+            app.ui.scene.borrow_mut().resize(900. - 3. * i as f32, 4000.);
+            app.frame();
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000. / 20.;
+        let frames = zgx::trace::frames(20);
+        zgx::trace::set_enabled(false);
+        let measured: u32 = frames.iter().map(|f| f.layout.measured).sum::<u32>() / frames.len().max(1) as u32;
+        eprintln!("MEASURES {label}: {nodes} nodes, {measured} measures a frame ({:.1} per node), {ms:.2} ms a frame", measured as f64 / nodes as f64);
+    }
+}
+
+/// zgx alone: layout passes and measures a frame as the window's width
+/// changes, against how many text inputs stand in a row of panes. (A repro
+/// for zgx: each input whose width changed lays the scene out itself.)
+#[cfg(feature = "layout_probe")]
+#[test]
+#[ignore = "a diagnosis: needs the probed zgx (live_reflow_traced says how)"]
+fn passes_per_text_input() {
+    let dir = scratch("passes");
+    for n in [0usize, 1, 2, 4, 8] {
+        let pane = "ui.column { grow = 1, basis = 0, min_w = 0, ui.column { grow = 1, min_h = 0, ui.text { wrap = true, \"Some words that wrap in the pane above its input, as a real one's would do.\" } }, ui.textarea { w_full = true, value = ui.state(\"v\", \"\") } }";
+        let panes: Vec<&str> = (0..n.max(1)).map(|_| if n == 0 { "ui.column { grow = 1, basis = 0, min_w = 0 }" } else { pane }).collect();
+        let file = dir.join(format!("p{n}.luau"));
+        std::fs::write(&file, format!("return ui.row {{ w_full = true, h_full = true, {} }}\n", panes.join(", "))).unwrap();
+        let app = TestApp::new({
+            let file = file.clone();
+            move |runtime| ScriptHost::new(runtime, file)
+        });
+        app.ui.scene.borrow_mut().resize(1400., 900.);
+        app.frames(5);
+        zgx::trace::set_kept(64);
+        zgx::trace::set_enabled(true);
+        let _ = zgx::trace::take_probe_log();
+        let t = std::time::Instant::now();
+        for i in 0..20 {
+            app.ui.scene.borrow_mut().resize(1400. - 6. * i as f32, 900.);
+            app.frame();
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000. / 20.;
+        let log = zgx::trace::take_probe_log();
+        zgx::trace::set_enabled(false);
+        let passes: std::collections::BTreeSet<u64> = log.iter().map(|l| l.1).collect();
+        let measures = log.iter().filter(|l| l.0 != u32::MAX).count();
+        eprintln!("INPUTS {n}: {:.1} layout passes a frame, {} measures a frame, {ms:.3} ms a frame", passes.len() as f64 / 20., measures / 20);
+    }
+}
