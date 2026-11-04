@@ -65,6 +65,45 @@ test("the sidebar's menu still takes a click with the tabs along the top bar", f
 	expect(app:error()).to_be_nil()
 end)
 
+-- Nothing laid over the page takes its clicks: the composer takes the keyboard, the
+-- model picker opens.
+local function page_takes_clicks(app: any)
+	app:click('#chat-composer-dock >> role:textbox "Message"')
+	app:frames(10)
+	local focused = ""
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(" focused", 1, true) then
+			focused = line
+		end
+	end
+	expect(focused).to_contain("textbox")
+	app:click('#chat-composer-dock >> role:button "Model"')
+	expect(app:wait(".dropdown-fold", { timeout_ms = 5000 })).to_be(true)
+	app:key("Escape")
+	app:frames(30)
+end
+
+test("the page takes clicks: a new chat, a chat alone, and panes side by side", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:frames(30)
+	page_takes_clicks(app)
+
+	open(app, "Fix the build")
+	page_takes_clicks(app)
+
+	app:set_state("inset_split_trees", { { kind = "row", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "a2" } } } })
+	app:frames(30)
+	page_takes_clicks(app)
+	-- (The other pane, under the same layers, comes to the front at a click.)
+	local before = (app:state("shell_tab_pane") :: any).chat
+	local other = if before == "a1" then "a2" else "a1"
+	app:click(`#split-pane-{other}`)
+	app:frames(30)
+	expect((app:state("shell_tab_pane") :: any).chat).to_be(other)
+	expect(app:error()).to_be_nil()
+end)
+
 test("each tab opened is in view, with the panel open and the strip narrow", function()
 	local app = all_open()
 	app:click('#titlebar >> role:button "Panel"')

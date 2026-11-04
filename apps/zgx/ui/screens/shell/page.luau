@@ -465,7 +465,11 @@ return function(props: Props): Node
 	-- Whether a pointer moving over a pane is near enough its top for the grip.
 	local NEAR_TOP = 32
 	local function tracks_near(props: { [any]: any }, near: any)
+		local was_move = props.on_pointer_move
 		props.on_pointer_move = function(e: any)
+			if was_move then
+				was_move(e)
+			end
 			local now = e.local_y < NEAR_TOP
 			if near:peek() ~= now then
 				near:set(now)
@@ -1185,8 +1189,13 @@ return function(props: Props): Node
 	-- (`pane`, under these); each other's is its transcript, watched in a
 	-- lane of its own, dimmed, a click on it focusing it. Its grip moves it; ⌘W
 	-- takes the focused one out of the split.
+	-- (None while expanded or while a chat is carried. Not a `ui.show` round
+	-- them: its box would lie over the page and take the pointer from it.)
 	local divider_ids = ui.computed(function(): { string }
 		local out: { string } = {}
+		if expanded() or splits.dragging:get() then
+			return out
+		end
 		for _, d in splits.dividers:get() do
 			table.insert(out, d.id)
 		end
@@ -1572,9 +1581,7 @@ return function(props: Props): Node
 		-- (The page's card, placed by its box in a split: there the frame of
 		-- the window's composer alone, over the panes.)
 		ui.column(pane),
-		ui.show(function(): boolean
-			return not expanded() and not splits.dragging:get()
-		end, ui.div {
+		ui.div {
 			absolute = true,
 			left = 0,
 			right = 0,
@@ -1589,7 +1596,7 @@ return function(props: Props): Node
 				h_full = true,
 				relative = true,
 			}),
-		}),
+		},
 		ui.show(function(): boolean
 			return splits.dragging:get() and not expanded()
 		end, ui.div {
