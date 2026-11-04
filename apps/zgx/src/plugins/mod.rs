@@ -221,7 +221,9 @@ pub struct Bridge {
     inbox: RefCell<HashMap<String, Inbox>>,
     item_menus: RefCell<BTreeMap<String, Vec<Value>>>,
     toasted: RefCell<HashMap<String, Instant>>,
-    /// Plugins whose waiting you were told of (id and what it was).
+    /// What was said once this run: a signing key's notice (`key-notice:<id>`),
+    /// and a template package whose window opened as it arrived
+    /// (`template:<name>`: no notice for it as well).
     told: RefCell<HashSet<String>>,
     /// `<data>/templates`, as the engine's data dir says (from its config).
     templates_root: Option<PathBuf>,
@@ -1155,15 +1157,6 @@ impl Bridge {
                 host_bar::notice(host_bar::Notice::key(notice["kind"].as_str().unwrap_or(""), notice["device"].as_str(), words));
             }
         }
-        // Each one newly waiting for you: said once.
-        for item in &list {
-            if matches!(item.status(), "pending" | "tampered") {
-                let what = format!("{}@{}", item.id(), item.json["hash"].as_str().unwrap_or(""));
-                if self.told.borrow_mut().insert(what) {
-                    self.request("waiting", item.name(), Value::from(item.id()));
-                }
-            }
-        }
         // One removed, or put back from elsewhere under the same id, starts
         // afresh: nothing it left (its queues, what it set, its saved state)
         // reaches what's installed now.
@@ -1210,7 +1203,6 @@ impl Bridge {
         self.problems.borrow_mut().remove(id);
         self.costs.borrow_mut().remove(id);
         self.failed_plugins.borrow_mut().forget(id);
-        self.told.borrow_mut().retain(|t| !t.starts_with(&format!("{id}@")));
         // (Set with no borrow held: a plugin's effects run at once.)
         for s in shared {
             s.set(vlist(Vec::new()));
@@ -1605,13 +1597,12 @@ impl Bridge {
             list.push(Value::record(fields));
         }
         // Packages waiting for you to allow them (an agent's import_template,
-        // or one brought in here): each newly waiting said once.
-        let pending = live::pending(&root);
-        for p in &pending {
-            let (name, title) = (p["pending"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or("A template"));
-            if self.told.borrow_mut().insert(format!("template:{name}")) {
-                self.request("template_waiting", title, Value::from(name));
-            }
+        // or one brought in here). `here`: its window opened as it came, so
+        // the app gives it no notice as well (screens/plugins/waiting).
+        let mut pending = live::pending(&root);
+        for p in &mut pending {
+            let name = p["pending"].as_str().unwrap_or("").to_string();
+            p["here"] = json!(self.told.borrow().contains(&format!("template:{name}")));
         }
         templates::write_if_changed(&root.join(live::STATUS), &Json::Object(status));
         self.templates_page.set(Value::record([
