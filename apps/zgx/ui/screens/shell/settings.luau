@@ -120,6 +120,10 @@ end
 -- The list's width (the sidebar's least), and the title bar's strip over
 -- the window (Zeron's: the window's buttons sit in it).
 local TITLE_H = 38
+-- The window's gap between cards, and its edge round them (`zeron.inset.gap`,
+-- `zeron.inset.rim`: ds/tokens).
+local GAP = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+local RIM = (ui.theme.get("zeron.inset.rim") :: number?) or 5
 -- The group the pages that come and go list ahead of.
 local EXTRAS_BEFORE = "Zeron"
 
@@ -274,7 +278,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 		min_h = 0,
 		-- (In the page's place: its row has the edges, but for the 1 more the sidebar
 		-- stands from the window than the page does from it.)
-		pl = if inset then ui.raw(1, "as far in as the sidebar") else nil,
+		pl = if inset then ui.raw(RIM - GAP, "as far in as the sidebar") else nil,
 		-- The pages (the design system's list of them; a page added later
 		-- joins it in place), and what plugins add under them.
 		ui.div {
@@ -293,7 +297,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 				else nil,
 			mr = if inset
 				then function(): number
-					return ui.raw(list_open:get() * 4, "the window's gap between cards, closing with the list")
+					return ui.raw(list_open:get() * GAP, "the window's gap between cards, closing with the list")
 				end
 				else nil,
 			hidden = if inset

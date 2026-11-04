@@ -18,8 +18,14 @@ M.CHAT_PANEL_MIN = 300
 -- opens out with its controls overlapping) and the reply a 240-point column.
 M.PANE_MIN = 288
 -- What stands round a split's panes beside the sidebar and the panel: the window's
--- edge each side (5) and the gaps after the sidebar and before the panel (4).
-M.PAGE_EDGES = 18
+-- edge each side and the gaps after the sidebar and before the panel
+-- (`zeron.inset.rim`, 5, and `zeron.inset.gap`, 4: ds/tokens).
+-- (Read where there's a theme: the policy alone, under test, has none.)
+local function inset(name: string, fallback: number): number
+	local theme = if ui ~= nil then ui.theme else nil
+	return (if theme then theme.get(`zeron.inset.{name}`) :: number? else nil) or fallback
+end
+M.PAGE_EDGES = 2 * inset("rim", 5) + 2 * inset("gap", 4)
 
 export type Column = { open: boolean, at: number }
 export type Fit = { sidebar: boolean, right: boolean, files: boolean, sidebar_limit: number }
