@@ -1170,8 +1170,8 @@ return function(props: Props): Node
 			over:set(nil)
 			splits.dragging:set(false)
 			if d then
-				-- (A chat from the sidebar is focused as it lands; a pane
-				-- moved leaves the focus where it was.)
+				-- (A chat from the sidebar is focused as it lands; a pane moved
+				-- already is, by the press on its grip.)
 				splits.drop(d, id, side, payload.split_pane == nil)
 			end
 		end
