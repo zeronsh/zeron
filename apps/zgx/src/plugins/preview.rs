@@ -371,10 +371,19 @@ fn option_held() -> bool {
     flags & 0x0008_0000 != 0
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Alt held as Zeron opens, on Windows (or `ZERON_SAFE_MODE=1`).
+#[cfg(windows)]
 fn option_held() -> bool {
-    // Linux and Windows: `ZERON_SAFE_MODE=1` (and `--zeron-template`) until
-    // the platform's modifier state is read here.
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU};
+    // SAFETY: a plain query of the keyboard's state; the high bit is "down".
+    let alt = unsafe { GetAsyncKeyState(i32::from(VK_MENU)) } as u16 & 0x8000 != 0;
+    alt || std::env::var_os("ZERON_SAFE_MODE").is_some()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn option_held() -> bool {
+    // Linux: `ZERON_SAFE_MODE=1` (and `--zeron-template`) until the
+    // platform's modifier state is read here.
     std::env::var_os("ZERON_SAFE_MODE").is_some()
 }
 

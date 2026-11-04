@@ -44,7 +44,7 @@ fn path_of(arg: &Value) -> Result<String, String> {
         return Err("no path".into());
     }
     if !Path::new(&path).is_absolute() {
-        return Err("That image isn't a file on this Mac".into());
+        return Err("That image isn't a file on this computer".into());
     }
     Ok(path)
 }
@@ -83,7 +83,12 @@ fn reveal_with(program: &str, path: &Path) -> std::io::Result<u32> {
     crate::files::spawn_reaped(std::process::Command::new(program).arg("-R").arg(path))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn reveal(path: &Path) -> std::io::Result<()> {
+    crate::files::select_in_explorer(path)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn reveal(path: &Path) -> std::io::Result<()> {
     open::that_detached(path.parent().unwrap_or(path))
 }

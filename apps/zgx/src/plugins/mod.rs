@@ -845,7 +845,47 @@ fn with_catalog(host: ScriptHost, ui: &Path) -> ScriptHost {
     if !locales.join("en.json").exists() {
         return host;
     }
+    let locales = if cfg!(windows) { windows_locales(&locales).unwrap_or(locales) } else { locales };
     host.i18n(locales, "en")
+}
+
+/// The English the screens say about this computer, as Windows names it:
+/// File Explorer where macOS's is Finder, a PC where it's a Mac. In
+/// `en.json` as written (the source of every language), each phrase whole.
+const WINDOWS_WORDS: &[(&str, &str)] = &[
+    ("Reveal in Finder", "Show in File Explorer"),
+    ("in Finder", "in File Explorer"),
+    ("This Mac's", "This PC's"),
+    ("this Mac's", "this PC's"),
+    ("This Mac", "This PC"),
+    ("this Mac", "this PC"),
+    ("your Mac's", "your PC's"),
+];
+
+/// On Windows, Zeron's words with [`WINDOWS_WORDS`] in place of macOS's:
+/// ui/locales copied to the app's own data (`locales-windows`) each launch,
+/// English changed, the other languages as they are. None if it can't be
+/// written; then the words as they are.
+fn windows_locales(locales: &Path) -> Option<PathBuf> {
+    let out = zgx_script::app_data_dir(crate::APP_ID)?.join("locales-windows");
+    std::fs::create_dir_all(&out).ok()?;
+    for entry in std::fs::read_dir(locales).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let mut text = std::fs::read_to_string(&path).ok()?;
+        if path.file_stem().and_then(|s| s.to_str()) == Some("en") {
+            for (mac, windows) in WINDOWS_WORDS {
+                text = text.replace(mac, windows);
+            }
+        }
+        let target = out.join(entry.file_name());
+        if std::fs::read_to_string(&target).ok().as_deref() != Some(text.as_str()) {
+            std::fs::write(&target, text).ok()?;
+        }
+    }
+    Some(out)
 }
 
 /// Zeron's own plugins, shipped beside the app's scripts (`ui/`).

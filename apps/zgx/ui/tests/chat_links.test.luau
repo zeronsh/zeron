@@ -19,6 +19,26 @@ test("relative, absolute and file:// links resolve inside the project, with thei
 	expect(at("zeron-file:src/a%20file%23%5Bx%5D.rs")).to_be("src/a file#[x].rs|-|-|in")
 end)
 
+test("Windows paths: drives, backslashes and file:///C:/ resolve as the others do", function()
+	local function win(target: string): string?
+		local r = links.resolve(target, [[C:\Users\me\comet]])
+		if not r then
+			return nil
+		end
+		return `{r.path}|{r.line or "-"}|{r.column or "-"}|{if r.outside then "outside" else "in"}`
+	end
+	expect(win([[C:\Users\me\comet\crates\ui\src\lib.rs:42:7]])).to_be("crates/ui/src/lib.rs|42|7|in")
+	expect(win("c:/users/me/comet/README.md#L12")).to_be("README.md|12|-|in")
+	expect(win("file:///C:/Users/me/comet/a%20b.md")).to_be("a b.md|-|-|in")
+	expect(win([[src\main.rs:3]])).to_be("src/main.rs|3|-|in")
+	expect(win([[D:\notes\todo.md]])).to_be("D:/notes/todo.md|-|-|outside")
+	-- (Zeron's own app left drive paths unlinked, which it couldn't open;
+	-- these open in the files pane, or show their path's menu outside it.)
+	expect(at("C:\\dir\\file.md")).to_be("C:/dir/file.md|-|-|outside")
+	expect(at("C:/dir/file.md")).to_be("C:/dir/file.md|-|-|outside")
+	expect(win([[C:\Users\me\comet\..\secret.md]])).to_be(nil)
+end)
+
 test("paths decode once; unsafe decodes never resolve", function()
 	expect(at("2026-09-26/Some%20Folder/it's%20here.txt")).to_be("2026-09-26/Some Folder/it's here.txt|-|-|in")
 	expect(at("file:///work/comet/a%20b.md")).to_be("a b.md|-|-|in")
@@ -89,8 +109,6 @@ test("only file-shaped paths are links", function()
 			"src/Makefile",
 			"Makefile",
 			"a:b/file.md",
-			"C:\\dir\\file.md",
-			"C:/dir/file.md",
 			"https://example.com/file.rs",
 			"mailto:dev@example.com",
 			"../secret.rs",

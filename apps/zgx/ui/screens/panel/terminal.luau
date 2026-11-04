@@ -39,7 +39,14 @@ function M.title(tab: Tab): string?
 	local ok, title = pcall(function()
 		return t.title
 	end)
-	return if ok and type(title) == "string" and title ~= "" then title else nil
+	if not ok or type(title) ~= "string" or title == "" then
+		return nil
+	end
+	-- A Windows console names itself by its program's whole path
+	-- (`C:\WINDOWS\system32\cmd.exe`, `… - npm run dev` while it runs one):
+	-- its name alone, and what it runs, as a shell's title elsewhere is short.
+	local program, running = string.match(title, "^%a:\\.-([^\\]-)%.[Ee][Xx][Ee](.*)$")
+	return if program and program ~= "" then program .. running else title
 end
 
 function M.closing(tab: Tab, done: (boolean) -> ())
