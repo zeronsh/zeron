@@ -1183,6 +1183,13 @@ return function(props: Props): Node
 			return splits.focused:get() == id
 		end
 		local hovered = ui.use_state(false)
+		-- Its ×: there while the pointer is over its head or the keyboard is on
+		-- it. (Its room stays, so nothing in the head moves as it comes.)
+		local head_over = ui.use_state(false)
+		local close_focused = ui.use_state(false)
+		local close_shown = ui.computed(function(): number
+			return if head_over:get() or close_focused:get() then 1 else 0
+		end)
 		local card_ref = ui.ref()
 		-- Files (and the files pane's, and a sidebar chat) carried over it,
 		-- dropped anywhere on it, as on the chat page: attached to its draft
@@ -1360,6 +1367,7 @@ return function(props: Props): Node
 			gap = "$zeron.space.tight",
 			items = "center",
 			on_hover = function(inside: boolean)
+				head_over:set(inside)
 				if not focused() then
 					hovered:set(inside)
 				end
@@ -1411,10 +1419,26 @@ return function(props: Props): Node
 				w = CLOSE,
 				h = CLOSE,
 				rounded = "$radius.sm",
+				-- (Unseen, a press there is the head's: focus or drag.)
+				pointer_events = function(): string
+					return if close_shown:get() == 1 then "auto" else "none"
+				end,
+				on_focus = function()
+					close_focused:set(true)
+				end,
+				on_blur = function()
+					close_focused:set(false)
+				end,
 				on_click = function()
 					splits.close(id)
 				end,
-				ds.Icon { name = "close", size = 12 },
+				-- (The glyph fades, not the button: a node of no opacity
+				-- leaves the Tab order, and with no wash at rest the button
+				-- alone shows nothing.)
+				ui.div {
+					opacity = motion.tween(close_shown, { duration = 120 }),
+					ds.Icon { name = "close", size = 12 },
+				},
 			},
 		}
 		local item: { [any]: any } = {
