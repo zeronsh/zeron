@@ -551,21 +551,97 @@ function M.Lanes(props: LanesProps): Node
 		end
 		return M.LANE_H
 	end
+	local function total_h(rows: { Item }): number
+		local h = 0
+		for _, it in rows do
+			h += item_h(it)
+		end
+		return h
+	end
+	-- As tall as all its rows ("Show N more" keeps a group short).
+	local height = ui.computed(function(): number
+		return total_h(items:get())
+	end)
+	-- The rows the list draws: the part's and, while "Show less" closes it up,
+	-- those it has just put away, after them, so what it closes over is still
+	-- there. (Only a lone group's, whose pager is under the list: with several,
+	-- the rows put away would stand under the wrong group.)
+	local was = items:peek()
+	local was_whole = solo ~= nil and solo.whole == true
+	local away: { Item }? = nil
+	local settles = ui.use_state(0)
+	local drawn = ui.computed(function(): { Item }
+		settles:get()
+		local now = items:get()
+		local whole = solo ~= nil and solo.whole == true
+		local here = {}
+		for _, it in now do
+			here[it.key] = true
+		end
+		if whole or solo == nil then
+			away = nil
+		elseif was_whole then
+			away = was
+		end
+		was, was_whole = now, whole
+		if not away then
+			return now
+		end
+		local out = table.clone(now)
+		for _, it in away do
+			if not here[it.key] then
+				table.insert(out, it)
+			end
+		end
+		return out
+	end)
 	local heights = ui.computed(function(): { number }
 		local out = {}
-		for i, it in items:get() do
+		for i, it in drawn:get() do
 			out[i] = item_h(it)
 		end
 		return out
 	end)
-	-- As tall as all its rows ("Show N more" keeps a group short).
-	local height = ui.computed(function(): number
-		local h = 0
-		for _, x in heights:get() do
-			h += x
-		end
-		return h
+	local drawn_h = ui.computed(function(): number
+		return total_h(drawn:get())
 	end)
+	-- How much of the list shows: easing to its height, and never past the
+	-- rows there are. (Ours, not a tween on the box: the fold around it, and
+	-- so what's under it, go with it.)
+	local shown = ui.use_state(height:peek())
+	local target = shown:peek()
+	local going: any = nil
+	ui.effect(function()
+		local to = height:get()
+		if to == target then
+			return
+		end
+		target = to
+		-- (With motion reduced it lands at once: what it puts away is known first.)
+		drawn:peek()
+		if going then
+			going:cancel()
+		end
+		local this: any = nil
+		this = anime.animate(shown, motion.params({
+			value = to,
+			duration = SLIDE.duration,
+			ease = SLIDE.ease,
+			onComplete = function()
+				if going == this then
+					going = nil
+				end
+				if away then
+					away = nil
+					settles:set(settles:peek() + 1)
+				end
+			end,
+		}))
+		going = this
+	end)
+	local function list_h(): number
+		return math.floor(math.min(shown:get(), drawn_h:get()) + 0.5)
+	end
 	-- Under a group's tile: the trunk at the tile's middle, as the
 	-- sidebar's groups draw it (a project's tile hidden by the view, a
 	-- little further in, as the sidebar's); an inner group's past its
@@ -799,30 +875,36 @@ function M.Lanes(props: LanesProps): Node
 		SessionRow.Fold {
 			open = props.open,
 			h = function(): number
-				return height:get() + (if solo_state:get() then M.LANE_H else 0)
+				return list_h() + (if solo_state:get() then M.LANE_H else 0)
 			end,
 			-- (No gap between the list and its pager: each row keeps its
 			-- own under it, the trunk running through it.)
 			body = ui.column {
 				w_full = true,
 				gap = 0,
-				ui.list {
-				id = props.list,
-				data = items,
-				key = function(it: Item): string
-					return it.key
-				end,
-				row = row,
-				height = M.LANE_H,
-				heights = function(): { number }
-					return heights:get()
-				end,
-				w_full = true,
-				h = motion.tween(height, SLIDE),
-				-- (Never a scroll of its own: the home is the one that
-				-- scrolls, the wheel over these rows going on to it.)
-				scrollbar = false,
-				overscroll = "auto",
+				ui.div {
+					w_full = true,
+					overflow = "hidden",
+					h = list_h,
+					ui.list {
+						id = props.list,
+						data = drawn,
+						key = function(it: Item): string
+							return it.key
+						end,
+						row = row,
+						height = M.LANE_H,
+						heights = function(): { number }
+							return heights:get()
+						end,
+						w_full = true,
+						-- Never a scroll of its own: the home is the one that
+						-- scrolls (the wheel over these rows is its), and the list,
+						-- as tall as all its rows, builds only those the home and
+						-- the window show, as the home scrolls (hundreds of side
+						-- chats shown whole build a screenful).
+						virtualize = "ancestor",
+					},
 				},
 				ui.show(function(): boolean
 					return solo_state:get() ~= nil
