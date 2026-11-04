@@ -101,10 +101,29 @@ fff on such a folder (fff-search 0.11, reported on Windows with a
   re-reads every file under it while holding the index's write lock, so
   name searches wait behind it.
 
-The names-only index reads directory listings only, has no watcher (stale
-after 60 s, rewalked in the background on next use) and no content search.
-Telling a large folder apart costs one walk that stops at the limit, once
-per index creation. `MAX_LIVE` now counts home and names-only indexes too.
+The names-only index reads directory listings only and has no watcher (stale
+after 60 s, rewalked in the background on next use). Telling a large folder
+apart costs one walk that stops at the limit, once per index creation.
+`MAX_LIVE` now counts home and names-only indexes too.
+
+Name search uses fff's fuzzy matcher (frizbee, smart case). A path ranks by
+the better of its path score and its file name score; an empty query lists
+files by modification time, which the walk reads from the listing on
+Windows and with one stat per file elsewhere.
+
+Content search (not in home) reads the listed files when someone searches,
+most recently changed first, on up to 16 threads, and stops at the result
+limit or the 2 s budget. It skips known binary extensions, files over
+10 MB, cloud-only files, and files with a NUL byte in their first 8 KB, as
+git does. A file is read only while a search needs it, so nothing is read
+in the background.
+
+On the folder below (77,078 searchable files), a name query took 4–110 ms.
+A content search read about 9,000 files per second with a warm disk cache,
+so it covered the 18,000 most recently changed files in its 2 s and
+returned those results flagged truncated. fff's grep also opens each file
+per search here, since Zeron runs it without a content index; its speed on
+this folder was not measured.
 
 Measured on Windows 11 with a real folder of projects (25 entries, most of
 them repositories and worktrees; fff indexes 83,484 files in 12,585

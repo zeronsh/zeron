@@ -20,7 +20,8 @@
 //! can't apply the nested repositories' ignore rules: their build output
 //! fills its overflow, and every full overflow is another full rescan and
 //! read. On Windows it also re-walks and re-reads a whole folder for each
-//! write inside it, under the index's write lock. See
+//! write inside it, under the index's write lock. Such a folder's content
+//! search reads its listed files per query instead. See
 //! docs/performance-workspace-search.md.
 
 use std::borrow::Cow;
@@ -341,9 +342,22 @@ impl WorkspaceSearch {
         limit: usize,
         per_file: usize,
     ) -> Result<ContentSearch, WorkspaceSearchError> {
-        let Index::Live(picker) = self.acquire(root, false)? else {
-            // A names-only index has no contents (see the module docs).
-            return Ok(ContentSearch::default());
+        let picker = match self.acquire(root, false)? {
+            Index::Live(picker) => picker,
+            // Home has no content search (see the module docs).
+            Index::Names(names) if names.home => return Ok(ContentSearch::default()),
+            Index::Names(names) => {
+                let Some(index) = names.index(SCAN_WAIT) else {
+                    return Ok(ContentSearch {
+                        indexing: true,
+                        ..Default::default()
+                    });
+                };
+                if limit == 0 || per_file == 0 || query.trim().is_empty() {
+                    return Ok(ContentSearch::default());
+                }
+                return Ok(index.search_content(root, query, limit, per_file, CONTENT_TIME_BUDGET));
+            }
         };
         let indexing = !picker.wait_for_scan(SCAN_WAIT);
         if limit == 0 || per_file == 0 || query.trim().is_empty() {
@@ -1062,30 +1076,50 @@ mod tests {
     }
 
     #[test]
-    fn a_large_plain_folder_is_indexed_by_name_only() {
+    fn a_large_plain_folder_gets_a_names_index_that_searches_contents() {
         // A folder of projects: past the limit and outside any repository.
         let (_dir, root) = folder(&[
             ("api/src/plan.rs", b"needle"),
-            ("api/src/main.rs", b"needle"),
+            ("api/src/main.rs", b"fn main() {\n    let needle = 1;\n}\n"),
             ("web/src/plan.ts", b"needle"),
+            ("web/src/logo.dat", b"needle\0"),
             ("web/node_modules/pkg/plan.js", b"needle"),
         ]);
         let search = limited(2);
         let found = search
-            .search_names_within(&root, "plan", 20, NameKinds::Files, NAME_SCAN_WAIT)
+            .search_names_within(&root, "pln", 20, NameKinds::Files, NAME_SCAN_WAIT)
             .unwrap();
         assert!(!found.indexing);
         let paths: Vec<_> = found.matches.iter().map(|m| m.path.as_str()).collect();
-        assert_eq!(paths, ["api/src/plan.rs", "web/src/plan.ts"]);
+        assert_eq!(paths, ["api/src/plan.rs", "web/src/plan.ts"], "fuzzy");
         assert!(is_names_only(&search, &root), "no fff picker");
         assert_eq!(search.warm(&root).unwrap(), IndexState::Ready);
+
+        let found = search.search_content(&root, "Needle", 50, 3).unwrap();
         assert!(
-            search
-                .search_content(&root, "needle", 50, 3)
-                .unwrap()
-                .matches
-                .is_empty()
+            found.matches.is_empty(),
+            "an uppercase query is case-sensitive"
         );
+        let found = search.search_content(&root, "needle", 50, 3).unwrap();
+        assert!(!found.truncated && !found.indexing);
+        let mut paths: Vec<_> = found.matches.iter().map(|m| m.path.as_str()).collect();
+        paths.sort_unstable();
+        // The binary file and the dependency folder are skipped.
+        assert_eq!(
+            paths,
+            ["api/src/main.rs", "api/src/plan.rs", "web/src/plan.ts"]
+        );
+        let main = found
+            .matches
+            .iter()
+            .find(|m| m.path == "api/src/main.rs")
+            .unwrap();
+        assert_eq!((main.line, main.column), (2, 8));
+        assert_eq!(main.preview, "let needle = 1;");
+        assert_eq!(main.ranges, [(4, 10)]);
+        let found = search.search_content(&root, "needle", 2, 3).unwrap();
+        assert_eq!(found.matches.len(), 2);
+        assert!(found.truncated);
         assert!(!search.release_unless_warmed(&root), "a chat warmed it");
         search.release_all();
         assert_eq!(search.live(), 0);
