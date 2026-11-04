@@ -2811,18 +2811,7 @@ impl Bridge {
             }
         });
         // (Each of these acts on the device it names, `device`, or this one.)
-        host.async_action("plugins.set_off", {
-            let me = me.clone();
-            move |arg| {
-                let me = me.clone();
-                async move {
-                    let (id, device) = remote::id_and_device(&arg);
-                    let off = arg.field("off").is_some_and(Value::truthy);
-                    eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
-                    call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
-                }
-            }
-        });
+        set_off_action(host, me.clone());
         host.async_action("plugins.remove", {
             let me = me.clone();
             move |arg| {
@@ -3227,6 +3216,25 @@ async fn call(method: &str, params: Json) -> Result<Json, String> {
 
 /// `call`, on `device` (none: this one). A device out of reach says
 /// "offline", and the page showing it says so too.
+#[cfg(test)]
+pub(crate) fn set_off_action_for_tests(host: &ScriptHost) {
+    set_off_action(host, Weak::new());
+}
+
+/// `plugins.set_off`: a plugin off, or back on. Never an unkept preview's.
+fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
+    host.async_action("plugins.set_off", move |arg| {
+        let me = me.clone();
+        async move {
+            preview::refuse("plugins.set_off")?;
+            let (id, device) = remote::id_and_device(&arg);
+            let off = arg.field("off").is_some_and(Value::truthy);
+            eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
+            call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
+        }
+    });
+}
+
 async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
     let Some(device) = device else { return call(method, params).await };
     call(method, remote::addressed(Some(&device), params)).await.map_err(|error| {

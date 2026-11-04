@@ -54,6 +54,7 @@ pub const BLOCKED: &[&str] = &[
     "plugins.new",
     "plugins.remove",
     "plugins.setting_set",
+    "plugins.set_off",
     "templates.use",
     "templates.create",
     "templates.duplicate",
@@ -78,12 +79,17 @@ pub const BLOCKED: &[&str] = &[
     "agents.install",
     "agents.set_key",
     "agents.sign_in",
+    "agents.sign_out",
+    "agents.remove",
     "acp_registry.add",
     "acp_registry.add_own",
     "acp_registry.env_set",
     "home.run_action",
     "home.save_action",
+    "sessions.delete",
     "projects.clone",
+    "projects.delete",
+    "github.disconnect",
     "engine.restart",
     "billing.checkout",
 ];
@@ -146,6 +152,14 @@ pub fn refuse(action: &str) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// `refuse`, for an action with no promise to reject: the same words, as one
+/// of the host's toasts. Whether it refused.
+pub fn refuse_aloud(action: &str) -> bool {
+    let Err(why) = refuse(action) else { return false };
+    super::host_bar::notice(super::host_bar::Notice { title: why, body: String::new(), tone: super::host_bar::Tone::Neutral, action: None, stays: false });
+    true
 }
 
 /// Actions the guard refuses itself, rather than each with a friendly answer
@@ -657,8 +671,48 @@ return ui.column {{
             }
         }
         for action in BLOCKED {
-            let checked = format!("refuse(\"{action}");
-            assert!(sources.contains(&checked), "nothing refuses {action}");
+            let (checked, aloud) = (format!("refuse(\"{action}"), format!("refuse_aloud(\"{action}"));
+            assert!(sources.contains(&checked) || sources.contains(&aloud), "nothing refuses {action}");
+        }
+    }
+
+    /// Wing's call: an unkept preview can't delete what you have or undo your
+    /// sign-ins. The real actions, as they're installed: each refused at once
+    /// with the same words, and without a preview each goes on to the engine
+    /// (none here, so it waits for one rather than answering).
+    #[test]
+    fn a_preview_can_t_remove_what_you_have() {
+        let installed = |host: &ScriptHost| {
+            crate::projects::install(host);
+            crate::agents::install(host);
+            crate::sessions::delete_action_for_tests(host);
+            super::super::set_off_action_for_tests(host);
+        };
+        for (action, arg) in [
+            ("sessions.delete", r#""s1""#),
+            ("projects.delete", r#""p1""#),
+            ("agents.remove", r#"{ id = "claude", account = "a1" }"#),
+            ("agents.sign_out", r#""acp.tool""#),
+            ("plugins.set_off", r#"{ id = "focus", off = true }"#),
+        ] {
+            let body = format!(r#"ui.call("{action}", {arg}):after(function() say("ok") end, function(e) say(`rejected {{e}}`) end)"#);
+            set(Some(sleek()));
+            let out = answered(&mut guarded(showing(&body), installed));
+            assert!(out.starts_with("rejected") && out.contains("Sleek is a preview"), "{action}: {out}");
+            set(None);
+            let mut app = guarded(showing(&body), installed);
+            for _ in 0..20 {
+                app.frames(2);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(!app.text("out").contains("is a preview"), "{action} without a preview: {}", app.text("out"));
+            assert_eq!(app.error(), None, "{action}");
+        }
+        for action in ["github.disconnect", "sessions.delete", "plugins.set_off"] {
+            set(Some(sleek()));
+            assert!(refuse(action).is_err(), "{action}");
+            set(None);
+            assert!(refuse(action).is_ok(), "{action}");
         }
     }
 
