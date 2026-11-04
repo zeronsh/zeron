@@ -3,7 +3,7 @@
 One upstream-based implementation produces the native desktop and headless Crew
 runtime. Internal Cargo packages and artwork filenames may remain `zeron`; the
 published compatibility executable is **`comet`**. The workspace release is
-**0.2.137**. This release is staging-only: do not publish production or
+**0.2.138**. This release is staging-only: do not publish production or
 repin production Scaffold. The authoritative lifecycle is
 [`skills/comet-work/SKILL.md`](../skills/comet-work/SKILL.md).
 
