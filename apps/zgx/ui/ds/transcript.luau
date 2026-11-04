@@ -39,6 +39,9 @@
 -- goes to the end (a person sending goes there too, whatever they were
 -- reading).
 
+-- When a transcript was last made: a reply already streaming then keeps what it shows,
+-- only what comes after fading in.
+local opened_at = 0
 local Icon = require("@self/icon")
 local Markdown = require("@self/markdown")
 local UserMessage = require("@self/user_message")
@@ -555,6 +558,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			text = words,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}:{b.id}` else nil,
+			veil = m.streaming == true,
+			veil_seed = ui.now() - opened_at < 300,
 			track = track(m.id),
 			window = if view
 				then {
@@ -644,6 +649,8 @@ local function reply(
 			text = text,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}` else nil,
+			veil = m.streaming == true,
+			veil_seed = ui.now() - opened_at < 300,
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
 			link_menu = if view then view.link_menu else nil,
@@ -718,6 +725,7 @@ local named_shown: { [string]: () -> () } = {}
 local named_sending: { [string]: (push: () -> ()) -> () } = {}
 
 local function Transcript(props: Props): Node
+	opened_at = ui.now()
 	local messages = props.messages
 	-- (Its own kept states, by its name: a side chat's beside the chat
 	-- page's never shares the chat page's glide, runway or hover.)
