@@ -232,10 +232,12 @@ local function other_gives_way(opened: "sidebar" | "right")
 	end
 end
 
--- The panel opened by anything (`view.set_files`): shown if it was hidden for
--- room, and the other side giving way. (`was_open`, showing: nothing's opened.)
+-- The panel opened by anything (`view.set_files`: its toggle, a chat's file
+-- link, ⌘E): ranked newest if it's hidden, as its toggle does, so what asks
+-- for it sees it; and the other side giving way. (`was_open`, showing:
+-- nothing's opened.)
 function M.panel_opened(was_open: boolean)
-	if M.page_floor:peek() <= M.CHAT_PANEL_MIN or (was_open and M.current:peek().right) then
+	if was_open and M.current:peek().right then
 		return
 	end
 	promote("right")

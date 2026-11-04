@@ -152,6 +152,28 @@ test("a chat alone goes as it always has: the sidebar stays, or hides for room a
 	expect(sidebar_shows(app)).to_be(true)
 end)
 
+test("a chat alone in a narrow window: anything opening its panel shows it, as its toggle does", function()
+	-- (Files' key, as a file link or a browser link opens it: under 902 the
+	-- panel came up hidden behind the sidebar, open and nowhere to be seen.)
+	local app = split(880)
+	expect(sidebar_shows(app)).to_be(true)
+	app:command("shell.toggle_files_tab")
+	app:frames(60)
+	expect(panel_w(app)).to_be(360)
+	expect(sidebar_shows(app)).to_be(false)
+	-- Closed by its toggle, the sidebar's back, as ever.
+	toggle(app)
+	expect(panel_w(app) <= 1).to_be(true)
+	expect(sidebar_shows(app)).to_be(true)
+	-- With room for both, the sidebar stays.
+	app:resize(1000, 800)
+	app:frames(30)
+	app:command("shell.toggle_files_tab")
+	app:frames(60)
+	expect(panel_w(app)).to_be(360)
+	expect(sidebar_shows(app)).to_be(true)
+end)
+
 test("panes stacked are as wide as the page: one across, as a chat alone", function()
 	local app = split(1100, { kind = "col", children = { leaf("a1"), leaf("a2") } })
 	toggle(app)
