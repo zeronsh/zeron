@@ -2,8 +2,7 @@
 //! view, so no template can take it away:
 //!
 //! - while a template runs as a preview (`preview`), a toast: "Previewing
-//!   <name>", what it can't do until you keep it, with Keep (the host's
-//!   keep sheet) and Revert (the default interface, in safe mode). It stays
+//!   <name>", with Keep (the host's keep sheet) and Revert (the default interface, in safe mode). It stays
 //!   while the preview lasts; its minimise button folds it to a pill that
 //!   opens it again;
 //! - notices, toasts that go by themselves (`notice`): the template
@@ -357,7 +356,7 @@ fn card(id: &str, title: &str, body: &str, tone: Tone, ink: Ink, corner_button: 
                 .gap(2.)
                 .pt(12. - INSET)
                 .child(words(title, 13., 18., ink.text).font_weight(500))
-                .child(words(body, 12., 16., ink.muted)),
+                .children((!body.is_empty()).then(|| words(body, 12., 16., ink.muted))),
         )
         .child(corner_button);
     let mut out = column()
@@ -471,7 +470,7 @@ fn toasts(runtime: &zgx::reactive::Runtime) -> View {
                     out = out.child(card(
                         "host-preview",
                         &title,
-                        "It can't run programs, use your account or change your files until you keep it.",
+                        "",
                         Tone::Neutral,
                         ink,
                         minimise,
@@ -717,7 +716,9 @@ mod tests {
         assert!(card.y > 400., "near the foot, far from the title bar: {card:?}");
         let texts = app.texts().join("|");
         assert!(texts.contains("Previewing Sleek"), "{texts}");
-        assert!(texts.contains("It can't run programs, use your account or change your files until you keep it."), "{texts}");
+        // (It claims no safety a preview doesn't have: zgx's `ui.term` isn't
+        // under the host's refusals.)
+        assert!(!texts.contains("can't run programs"), "{texts}");
         let (revert, keep) = (bounds(&mut app, "role:button \"Revert\""), bounds(&mut app, "role:button \"Keep\""));
         assert!(revert.x < keep.x && (revert.y - keep.y).abs() < 0.5, "Revert then Keep, side by side: {revert:?} {keep:?}");
         // In the bottom-end corner, `INSET` in from the border: concentric
@@ -729,8 +730,6 @@ mod tests {
         assert!((card.x + card.width - BORDER - INSET - (corner.x + corner.width)).abs() < 0.5, "{card:?} {corner:?}");
         assert!((corner.y - (card.y + BORDER + INSET)).abs() < 0.5, "as far from the top as the end: {card:?} {corner:?}");
         assert!(!host_texts(&mut app).contains('…'), "no ellipses");
-        let body = bounds(&mut app, "#host-preview >> \"It can't run programs, use your account or change your files until you keep it.\"");
-        assert!(body.height >= 32., "the line wraps, never cut: {body:?}");
         preview::set(None);
         app.frames(6);
         assert!(app.find("#host-preview").is_none(), "gone with the preview");

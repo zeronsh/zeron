@@ -3347,7 +3347,7 @@
       "install_title": "Install {name}?",
       "keep_title": "Keep {name}?",
       "keep_trust": "Keep it only if you trust what made it",
-      "keep_body": "An agent made, changed or switched to this template, or it hasn't been kept since it changed. Until you keep it, it's a preview: Zeron won't let it run programs, use your account, change plugins, templates or files, or send to agents. Kept, it runs with everything Zeron can do.",
+      "keep_body": "An agent made, changed or switched to this template, or it hasn't been kept since it changed. Until you keep it, it's a preview. Kept, it runs with everything Zeron can do.",
       "keep_files": "{n, plural, one {# file} other {# files}} of its own, as they are now",
       "keep_files_detail": "If they change again, Zeron asks again.",
       "keep": "Keep",
