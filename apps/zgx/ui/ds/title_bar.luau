@@ -476,13 +476,7 @@ local TitleBar = ui.component(function(props: Props): Node
 	end
 	local bar: { [any]: any } = {
 		w_full = true,
-		-- (A strip of no height its controls hang from, each placed on the
-		-- bar's line: a box the bar's size, even one passing the pointer
-		-- through, stands in front of what's under it for the pointer's
-		-- cursor, and the panel's tabs, a split pane's ×, the top of a
-		-- resize edge showed none of theirs. The bar's room is `H`.)
-		h = 0,
-		overflow = "visible",
+		h = H,
 		relative = true,
 		-- The bar lets the pointer through to what is under it, but for its
 		-- controls.
