@@ -1120,6 +1120,11 @@ async fn capture_git_in<S: AsRef<OsStr>>(
         }
         out.extend_from_slice(&buf[..n]);
     }
+    // Close our read end before waiting. On Windows `git` is a launcher and
+    // start_kill only ends the launcher; the real git keeps writing, blocks on
+    // the full pipe, and holds stderr open, so wait_with_output below never
+    // returns and the git is orphaned. A closed pipe makes it exit.
+    drop(stdout);
     let output = child
         .wait_with_output()
         .await
