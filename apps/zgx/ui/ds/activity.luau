@@ -388,10 +388,10 @@ end
 
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
 -- one; `running`: it is the one in flight, its glyph the working loader.)
--- A tool's pictures under its opened row: one alone, or several on a tray,
--- in a lightbox group of their own.
+-- A tool's pictures under its opened row: small thumbnails in a row (the
+-- theme's `zeron.prose.picture.thumb`), each opening in the lightbox among
+-- the others, a lightbox group of their own.
 local function tool_pictures(now: () -> Tool, shown: ReplyPicture.Pictures): Node
-	local group = `tool:{now().id}`
 	local function entries(): { ReplyPicture.Entry }
 		local out = {}
 		for _, it in now().pictures or {} do
@@ -399,15 +399,7 @@ local function tool_pictures(now: () -> Tool, shown: ReplyPicture.Pictures): Nod
 		end
 		return out
 	end
-	return ui.presence(function(): string
-		return if #(now().pictures or {}) > 1 then "run" else "one"
-	end, function(kind: string): Node
-		if kind == "run" then
-			return ReplyPicture.Run { pictures = shown, items = entries, group = group, set = entries }
-		end
-		local first = entries()[1] or { src = "", alt = "" }
-		return ReplyPicture.Single { pictures = shown, src = first.src, alt = first.alt, group = group, set = entries }
-	end, { w_full = true, min_w = 0 })
+	return ReplyPicture.Thumbs { pictures = shown, items = entries, group = `tool:{now().id}`, set = entries }
 end
 
 local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean, open_subagent: ((sub: any) -> ())?, pictures: ReplyPicture.Pictures?): Node
