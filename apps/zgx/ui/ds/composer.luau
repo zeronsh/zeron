@@ -1693,13 +1693,13 @@ return ui.component(function(props: Props): Node
 		border = 1,
 		border_color = "$zeron.composer.edge",
 		bg = function()
-			return if material.frosted:get() then "$zeron.composer.tint" else "$zeron.composer.solid"
+			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
 		end,
 		backdrop_blur = function()
-			return if material.frosted:get() then 16 else 0
+			return if material.see_through() then 16 else 0
 		end,
 		shadow = function()
-			return if material.frosted:get() then "$zeron.composer.rest" else "$zeron.composer.shadow"
+			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
 		end,
 		on_file_hover = function(inside: boolean)
 			dropping:set(inside)
@@ -2223,10 +2223,10 @@ return ui.component(function(props: Props): Node
 				rounded_tl = 0,
 				rounded_tr = 0,
 				bg = function(): string
-					return if material.frosted:get() then "$zeron.composer.tint" else "$zeron.composer.solid"
+					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
 				end,
 				backdrop_blur = function(): number
-					return if material.frosted:get() then 16 else 0
+					return if material.see_through() then 16 else 0
 				end,
 			}
 		end, {

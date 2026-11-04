@@ -57,29 +57,79 @@ local MIDDLE = (H + TOP_PAD) / 2
 -- macOS's buttons, as macOS 26 draws them (measured off Zeron's window): 14
 -- across, 23 apart, the first centred 21 in, so 21, 44 and 67.
 local LIGHT, LIGHT_FIRST, LIGHT_PITCH = 14, 21, 23
--- The toggle: 88 in (Zeron's `titlebar_cluster_start`). The controls, their
--- gaps and the island round them are the theme's island (`zeron.island`),
--- read as the bar is built; its row runs 10 past its last control (Zeron's
--- `TITLEBAR_CLUSTER_PAD`).
+-- The toggle: 88 in beside the traffic lights (Zeron's
+-- `titlebar_cluster_start`), 10 in with nothing at the left (the shipping
+-- app's elsewhere). The controls, their gaps and the island round them are
+-- the theme's island (`zeron.island`), read as the bar is built; its row
+-- runs 10 past its last control (Zeron's `TITLEBAR_CLUSTER_PAD`).
 local TOGGLE_IN, ROW_PAD = 88, 10
 
--- How far in from the window's right edge the window's own buttons reach:
--- Windows' caption buttons, and on Linux the buttons zgx draws where the
--- desktop's `button-layout` asks (GNOME's `appmenu:close`, close at the
--- right). 0 where they stand at the left (macOS's traffic lights, which
--- TOGGLE_IN already clears), are not reported, or there are none. A plugin
--- reads no `ui.window.controls`: 0.
-local function window_buttons_right(): number
+-- The window's own buttons as the window reports them, and the side they
+-- stand at: the left (macOS's traffic lights; on Linux a `close:…` layout)
+-- or the right (Windows' caption buttons; GNOME's `appmenu:close`). Nil
+-- where none are reported: in full screen, in a plugin (which reads no
+-- `ui.window.controls`) and headless.
+type Side = "left" | "right"
+local function window_buttons(): (Side?, any)
 	local window = ui.window :: any
 	local area_state, controls_state = window.titlebar_area, window.controls
 	if area_state == nil or controls_state == nil then
-		return 0
+		return nil, nil
 	end
 	local area, buttons = area_state:get(), controls_state:get()
-	if area and buttons and buttons.x >= area.x + area.width then
-		return buttons.width
+	if not area or not buttons then
+		return nil, nil
 	end
-	return 0
+	return if buttons.x >= area.x + area.width then "right" else "left", buttons
+end
+
+-- How far in from the window's right edge the window's own buttons reach;
+-- 0 where they stand at the left, or none are reported.
+local function window_buttons_right(): number
+	local side, buttons = window_buttons()
+	return if side == "right" then buttons.width else 0
+end
+
+-- How far in from the window's right edge the page's controls (the bar's
+-- `actions`) end: their row's padding; beside the window's own buttons at
+-- the right, past them and a divider standing a group's gap either side of
+-- it (Zeron's controls one group, the window's another).
+local DIVIDER = 1
+local function actions_right(): number
+	local side, buttons = window_buttons()
+	if side == "right" then
+		return buttons.width + island.metrics().group * 2 + DIVIDER
+	end
+	return ROW_PAD
+end
+
+-- Where the toggle stands from the window's left: past the window's buttons
+-- there (never nearer than beside the traffic lights), 10 in with them at
+-- the right. None reported (full screen, a plugin), beside the lights.
+local function toggle_in(): number
+	local side, buttons = window_buttons()
+	if side == "right" then
+		return ROW_PAD
+	elseif side == "left" then
+		return math.max(TOGGLE_IN, buttons.x + buttons.width)
+	end
+	return TOGGLE_IN
+end
+
+-- The title line's middle, from the window's top: where everything on the
+-- bar centres. 21, as beside the traffic lights; where the window's buttons
+-- stand at the right in a strip shorter than the bar (Windows' 32-point
+-- caption buttons), on their middle, so Zeron's controls and theirs share
+-- one line; never nearer the window's top than an island's middle, its
+-- controls held their padding in from the edge (zgx reports the buttons
+-- shorter in a zoomed window than it draws them: zgx-asks/
+-- windows-caption-buttons).
+local function middle(): number
+	local side, buttons = window_buttons()
+	if side == "right" and buttons.height < H then
+		return math.max(buttons.y + buttons.height / 2, island.thickness() / 2)
+	end
+	return MIDDLE
 end
 
 -- A bar control: the design system's icon button at the island's size,
@@ -108,6 +158,24 @@ local function control(label: Label, glyph: Node, enabled: (() -> boolean)?, on_
 	}
 end
 
+-- The bar's own controls' row, its width: the toggle, then back and
+-- forward.
+local function row_width(m: island.Metrics): number
+	return m.control + m.group + m.control + m.gap + m.control
+end
+
+-- Where the bar's controls end, from the window's left (its island's
+-- right edge): what lies on the title line beside them starts past it.
+-- Beside the window's buttons, the row runs ROW_PAD past its last control;
+-- alone at the left, its island holds it evenly, as far past its end as
+-- before its start.
+local function controls_end(): number
+	local m = island.metrics()
+	local start = toggle_in()
+	local tail = if start == ROW_PAD then ROW_PAD - m.inset else ROW_PAD
+	return start + row_width(m) + tail
+end
+
 local TitleBar = ui.component(function(props: Props): Node
 	local m = island.metrics()
 	local CONTROL, GROUP_GAP, CONTROL_GAP = m.control, m.group, m.gap
@@ -115,7 +183,6 @@ local TitleBar = ui.component(function(props: Props): Node
 	-- as an island (a control and its padding), a padding's worth less as it
 	-- comes (Zeron's 28 to 32).
 	local ISLAND_LEFT = m.inset
-	local ISLAND_RIGHT = TOGGLE_IN + CONTROL + GROUP_GAP + CONTROL + CONTROL_GAP + CONTROL + ROW_PAD
 	local ISLAND_TO = island.thickness()
 	local ISLAND_FROM = ISLAND_TO - m.pad
 	local collapsed = props.collapsed
@@ -159,9 +226,11 @@ local TitleBar = ui.component(function(props: Props): Node
 	local left_island: ContainerProps = {
 		absolute = true,
 		left = ISLAND_LEFT,
-		w = ISLAND_RIGHT - ISLAND_LEFT,
+		w = function(): number
+			return controls_end() - ISLAND_LEFT
+		end,
 		top = motion.tween(ui.computed(function(): number
-			return MIDDLE - (if shown() then ISLAND_TO else ISLAND_FROM) / 2
+			return middle() - (if shown() then ISLAND_TO else ISLAND_FROM) / 2
 		end), motion.sidebar),
 		h = island_h,
 		opacity = ui.tween(here, { duration = 220, ease = "out(3)" }),
@@ -178,8 +247,10 @@ local TitleBar = ui.component(function(props: Props): Node
 		bar,
 		ui.row {
 			absolute = true,
-			left = TOGGLE_IN,
-			top = MIDDLE - CONTROL / 2,
+			left = toggle_in,
+			top = function(): number
+				return middle() - CONTROL / 2
+			end,
 			items = "center",
 			pointer_events = "auto",
 			-- (Between its controls, the bar is still the window's to move:
@@ -224,29 +295,81 @@ local TitleBar = ui.component(function(props: Props): Node
 		local function holds(): boolean
 			return row_w() > 1
 		end
+		-- The window's own buttons where they stand at the right (Windows'
+		-- caption buttons): over artwork they need the glass too, thin glyphs
+		-- on a picture, so the island takes them in, hanging from the
+		-- window's corner as their strip does (flush with its top and its
+		-- edge, the window's own corner rounding it there), its inner foot
+		-- rounded; and shows whether the row holds anything or not.
+		local function caption(): any
+			local at, buttons = window_buttons()
+			return if at == "right" then buttons else nil
+		end
 		local on_art = ui.computed(function(): number
-			return if props.actions_island and props.actions_island() and holds() then 1 else 0
+			return if props.actions_island and props.actions_island() and (holds() or caption() ~= nil) then 1 else 0
 		end)
 		local side = ROW_PAD - m.inset
+		local function hung(): any
+			return if caption() ~= nil then 0 else "$zeron.island.radius"
+		end
 		local actions_island: ContainerProps = {
 			id = "titlebar-actions-island",
 			absolute = true,
 			right = function(): number
-				return m.inset + window_buttons_right()
+				return if caption() ~= nil then 0 else m.inset
 			end,
 			w = function(): number
+				if caption() ~= nil then
+					return if holds() then actions_right() + row_w() + side else caption().width
+				end
 				return row_w() + side * 2
 			end,
 			top = motion.tween(ui.computed(function(): number
-				return MIDDLE - (if on_art:get() == 1 then ISLAND_TO else ISLAND_FROM) / 2
+				local buttons = caption()
+				if buttons then
+					return buttons.y
+				end
+				return middle() - (if on_art:get() == 1 then ISLAND_TO else ISLAND_FROM) / 2
 			end), { duration = 260, ease = "out(3)" }),
 			h = motion.tween(ui.computed(function(): number
+				local buttons = caption()
+				if buttons then
+					return buttons.height
+				end
 				return if on_art:get() == 1 then ISLAND_TO else ISLAND_FROM
 			end), { duration = 260, ease = "out(3)" }),
 			opacity = ui.tween(on_art, { duration = 220, ease = "out(3)" }),
 		}
 		island.glass(actions_island)
+		actions_island.rounded_tl = hung
+		actions_island.rounded_tr = hung
+		actions_island.rounded_br = hung
+		actions_island.rounded_bl = "$zeron.island.radius"
 		table.insert(bar, ui.div(actions_island))
+		-- Between the page's controls and the window's buttons at the right, a
+		-- hairline on the line: two groups, as the left cluster's are, read
+		-- apart. There while the row holds anything.
+		table.insert(
+			bar,
+			ui.div {
+				id = "titlebar-divider",
+				absolute = true,
+				right = function(): number
+					local buttons = caption()
+					return if buttons then buttons.width + m.group else 0
+				end,
+				top = function(): number
+					return middle() - CONTROL / 3
+				end,
+				w = ui.raw(DIVIDER, "a hairline"),
+				h = ui.raw(CONTROL * 2 / 3, "two thirds of a control, on its line"),
+				bg = "$border.subtle",
+				pointer_events = "none",
+				opacity = function(): number
+					return if caption() ~= nil and holds() then 1 else 0
+				end,
+			}
+		)
 		-- The page's controls, as far in from the right as the row runs past
 		-- its last control at the left, and clear of the window's own
 		-- buttons where they stand at the right.
@@ -260,10 +383,10 @@ local TitleBar = ui.component(function(props: Props): Node
 					end
 				end,
 				absolute = true,
-				right = function(): number
-					return ROW_PAD + window_buttons_right()
+				right = actions_right,
+				top = function(): number
+					return middle() - CONTROL / 2
 				end,
-				top = MIDDLE - CONTROL / 2,
 				h = CONTROL,
 				items = "center",
 				gap = ui.raw(CONTROL_GAP, "the island's gap between its controls, counted in its width"),
@@ -277,16 +400,18 @@ local TitleBar = ui.component(function(props: Props): Node
 	return ui.div(bar)
 end)
 
--- A control for the bar's `actions`: its size, a quiet glyph, its tooltip
--- below (`enabled`, `on_click` as the bar's own).
--- Where the bar's controls end, from the window's left (its island's
--- right edge): what lies on the title line beside them starts past it.
-local function controls_end(): number
-	local m = island.metrics()
-	return TOGGLE_IN + m.control + m.group + m.control + m.gap + m.control + ROW_PAD
-end
-
-local M = setmetatable({ control = control, controls_end = controls_end, window_buttons_right = window_buttons_right }, {
+-- `control`: a control for the bar's `actions` (its size, a quiet glyph,
+-- its tooltip below; `enabled`, `on_click` as the bar's own).
+-- `controls_end()`, `window_buttons_right()`, `actions_right()`, `middle()`: where what lies on
+-- the title line beside the bar stands (read in a binding: they follow the
+-- window).
+local M = setmetatable({
+	control = control,
+	controls_end = controls_end,
+	window_buttons_right = window_buttons_right,
+	actions_right = actions_right,
+	middle = middle,
+}, {
 	__call = function(_, props: Props): Node
 		return TitleBar(props)
 	end,

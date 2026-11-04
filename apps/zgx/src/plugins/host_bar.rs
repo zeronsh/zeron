@@ -11,9 +11,12 @@
 //!   update, a file written by hand), the account's signing keys (one added
 //!   on another device, this device's revoked), and the default interface
 //!   at launch because the template crashed Zeron (safe mode);
-//! - on Linux and Windows, which have no system menu bar, the app's menu
-//!   bar (zgx's `app_menu_bar`): View → Use Default Interface is always in
-//!   it, the host's own item.
+//!
+//! No menu bar where the system has none (Windows, Linux): zgx's drawn one
+//! (`app_menu_bar`) was a row of its own across the window's top, over the
+//! app's title bar. The menus' shortcuts don't need it (zgx binds them on
+//! every window's root as `set_menus` sets them), and what the menus hold
+//! is in the command palette (src/main.rs `serve_commands`).
 //!
 //! The toasts look like the app's own (ds/toast.luau: its width, corner,
 //! padding and type) and share their corner, the window's bottom right,
@@ -176,11 +179,9 @@ fn dismiss(signal: &zgx::reactive::Signal<Vec<Shown>>, id: u64) {
     }
 }
 
-/// The toasts, and the menu bar where there's no system one: above the
-/// scripts' view.
+/// The toasts: a layer over the scripts' view.
 pub fn view(cx: &mut WindowContext) -> View {
-    let toasts = toasts(&cx.ui.runtime);
-    column().child(toasts).children((!zgx_desktop::has_native_app_menu()).then(|| cx.app_menu_bar()))
+    column().child(toasts(&cx.ui.runtime))
 }
 
 /// Development (debug builds): `ZERON_ZGX_HOST_TOASTS=1` lays the toasts

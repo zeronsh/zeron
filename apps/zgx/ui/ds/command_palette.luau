@@ -2072,10 +2072,10 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		-- Frosted: the palette's glass over a blur of the page under it.
 		-- Opaque: a solid card.
 		bg = function()
-			return if material.frosted:get() then "$zeron.palette.tint" else "$zeron.palette.solid"
+			return if material.see_through() then "$zeron.palette.tint" else "$zeron.palette.solid"
 		end,
 		backdrop_blur = function()
-			return if material.frosted:get() then "$zeron.menu.blur" else 0
+			return if material.see_through() then "$zeron.menu.blur" else 0
 		end,
 		border = 1,
 		border_color = "$border",

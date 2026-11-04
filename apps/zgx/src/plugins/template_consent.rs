@@ -197,14 +197,19 @@ fn host(
     let host = ScriptHost::new(&cx.ui.runtime, crate::ui_dir().join("template_consent.luau")).app_id(crate::APP_ID);
     host.window_chrome(cx.window_info.titlebar_area.clone(), cx.window_info.controls.clone());
     host.window_zoom(&cx.ui);
+    crate::transparency::install(cx, &host);
     let shared = host.shared("template_consent", record(None, true, None));
     *slot.borrow_mut() = Some(shared.clone());
     fetch(shared.clone(), last.clone(), pending.borrow().clone(), generation.clone(), None);
-    host.action("appearance", |value| {
-        crate::set_appearance(match value {
-            Value::Bool(dark) => Some(dark),
-            _ => None,
-        })
+    let window = cx.window.clone();
+    host.action("appearance", move |value| {
+        crate::set_appearance(
+            &window,
+            match value {
+                Value::Bool(dark) => Some(dark),
+                _ => None,
+            },
+        )
     });
     let window = cx.window.clone();
     host.action("close", move |_| window.close());

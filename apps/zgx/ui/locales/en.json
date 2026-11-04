@@ -2360,7 +2360,10 @@
       "search": "Search sessions, commands and files…",
       "app": "App",
       "reload_zeron": "Reload Zeron",
-      "reload_interface": "Reload interface"
+      "reload_interface": "Reload interface",
+      "commands": "Commands",
+      "run": "Run",
+      "default_interface": "Use the default interface"
     },
     "add_project": {
       "something_went_wrong": "Something went wrong",

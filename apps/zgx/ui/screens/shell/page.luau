@@ -34,6 +34,9 @@ local TITLE_H = 38
 -- The title line's own room: under the bar's 4 of top padding, its
 -- controls centred 21 down; and what its right end keeps for them.
 local TITLE_TOP, TITLE_RIGHT = 4, 64
+-- Of that room, what lies past the controls' row (ds/title_bar's ROW_PAD),
+-- which `TitleBar.actions_right` gives as it is now.
+local TITLE_ROW_PAD = 10
 -- How wide a session's files stand beside it: at least, and by default
 -- (room for the tree beside a file, ds/files_pane's 288 + 360).
 -- The panel's least (Zeron's surface host's: screens/shell/fit) and its
@@ -227,13 +230,20 @@ return function(props: Props): Node
 					end),
 				},
 				absolute = true,
-				top = TITLE_TOP,
+				-- (Centred on the bar's line: 21 down, or the window's own
+				-- buttons' middle where they set it.)
+				top = function(): number
+					return ds.TitleBar.middle() - (TITLE_H - TITLE_TOP) / 2
+				end,
 				h = TITLE_H - TITLE_TOP,
 				left = motion.tween(ui.computed(function(): number
 					return if shell_view.collapsed:get() or not fit.current:get().sidebar then ds.TitleBar.controls_end() + after_controls else inset
 				end), motion.sidebar),
-				-- (Clear of the bar's own controls at its right.)
-				right = ui.raw(TITLE_RIGHT, "the title bar's controls at the right, and their room"),
+				-- (Clear of the bar's own controls at its right, and of the
+				-- window's buttons where they stand there.)
+				right = function(): number
+					return ui.raw(TITLE_RIGHT - TITLE_ROW_PAD + ds.TitleBar.actions_right(), "the title bar's controls at the right, and their room")
+				end,
 				gap = "$zeron.space.tight",
 				items = "center",
 				pointer_events = "none",
