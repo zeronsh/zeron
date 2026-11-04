@@ -346,6 +346,11 @@ return ui.component(function(props: Props): Node
 	local shown_w = ui.use_state(target())
 	local resizing = false
 	local dragging = ui.use_state(false)
+	-- (Its edge dragged, told to the page beside it, which holds what it
+	-- shows at one width until the drag ends: screens/shell/page. Made
+	-- here, in the app's sidebar, never at the module's top, which plugins
+	-- are lent.)
+	local edge_dragging = ui.shared("shell.edge_dragging", false)
 	local edge_over = ui.use_state(false)
 	local from_x, from_w = 0, 0
 	local easing: any = nil
@@ -4891,6 +4896,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				from_x, from_w = e.x, wide:peek()
 				resizing = true
 				dragging:set(true)
+				edge_dragging:set(true)
 			end,
 			on_pointer_move = function(e)
 				if resizing then
@@ -4900,6 +4906,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 			on_release = function()
 				resizing = false
 				dragging:set(false)
+				edge_dragging:set(false)
 			end,
 		},
 	}
