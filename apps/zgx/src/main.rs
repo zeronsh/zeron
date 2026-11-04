@@ -513,6 +513,21 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     host.window_zoom(&cx.ui);
     // `ui.window.size` (the lightbox fills the window with it).
     host.window_size(cx.viewport.clone());
+    // `ui.window.full_screen` and its transition (macOS's animation, going
+    // in or out, and how long it takes): the title bar's controls slide
+    // over to where the traffic lights were, in step with it.
+    {
+        let transition = cx.full_screen_transition.clone();
+        host.window_full_screen(cx.window_info.fullscreen.clone(), move || {
+            transition.get().map(|transition| match transition {
+                zgx_desktop::FullScreenTransition::Entering(duration) => (true, duration.as_secs_f64()),
+                zgx_desktop::FullScreenTransition::Leaving(duration) => (false, duration.as_secs_f64()),
+            })
+        });
+    }
+    // The platform the window is on ("macos", "linux", "windows"): what the
+    // window's own buttons are (ds/title_bar: macOS's traffic lights).
+    host.shared("platform", std::env::consts::OS);
     if let Ok(step) = std::env::var("ZERON_ZGX_STEP") {
         host.shared("onboarding.start", step.as_str());
     }
@@ -527,6 +542,12 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     }
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
+    // Full screen, entered or left (`ui.invoke("window.full_screen", on)`),
+    // as the green button does: macOS animates it, and `ui.window`'s
+    // full_screen and its transition say so (a fixture drives the title
+    // bar's slide with it).
+    let window = cx.window.clone();
+    host.action("window.full_screen", move |on| window.set_fullscreen(matches!(on, Value::Bool(true))));
     // Reload Zeron: the app quits and starts again, the same launch
     // (src/relaunch.rs).
     let windows = cx.windows.clone();
