@@ -362,7 +362,7 @@ test("the side chats and subagents lists open their lanes' tabs", function()
 	end)).to_be(true)
 end)
 
-test("hundreds of lanes: the first five and those needing you, then Show N more; shown whole, only the rows in view are built", function()
+test("hundreds of lanes: the first five and those needing you, then Show N more; shown whole, the home scrolls to the last", function()
 	local app = home()
 	app:command("many")
 	app:frames(30)
@@ -393,37 +393,33 @@ test("hundreds of lanes: the first five and those needing you, then Show N more;
 	app:frames(30)
 	expect(built(app, 'button "Open subagent ')).to_be(5)
 	expect(app:has('#panel-home-subagent-list-pager >> "Show 197 more"')).to_be(true)
-	-- Shown whole: still only what's in view is built.
+	-- Shown whole: every row of the group, the list as tall as they are,
+	-- and the home is what scrolls to reach the last of them (no list
+	-- scrolls inside the panel). (Only the rows in the home's view will be
+	-- built once zgx's ui.list builds against its scrolling ancestor:
+	-- zgx-asks/list-ancestor-viewport.)
 	app:scroll("#panel-empty", 1200)
 	app:frames(5)
 	app:click("#panel-home-side-list-pager")
 	app:frames(30)
 	expect(app:has('#panel-home-side-list-pager >> "Show less"')).to_be(true)
-	expect(built(app, 'button "Open side chat ') < 24).to_be(true)
-	-- (A new gesture: the page's wheel lets go first, as a hand's does.)
-	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
-	for _ = 1, 60 do
-		app:scroll("#panel-home-side-list", 400)
+	-- (Down the home to its end, where the last rows stand.)
+	for _ = 1, 40 do
+		app:scroll("#panel-empty", 600)
 		app:frames(2)
-		if app:has('role:button "Open side chat Side chat 300"') then
-			break
-		end
 	end
 	expect(app:has('role:button "Open side chat Side chat 300"')).to_be(true)
-	-- (To the list's end: the last rows in view.)
-	for _ = 1, 4 do
-		app:scroll("#panel-home-side-list", 400)
-		app:frames(2)
-	end
-	expect(built(app, 'button "Open side chat ') < 24).to_be(true)
 	app:click('role:button "Open side chat Side chat 300"')
 	expect(eventually(app, function(): boolean
 		return calls(app):find("watch:side-300", 1, true) ~= nil
 	end)).to_be(true)
-	-- Back home, Show less: the first few again.
+	-- Back home, Show less (under the last row, at the home's end): the
+	-- first few again.
 	back_home(app)
-	app:scroll("#panel-empty", 1200)
-	app:frames(5)
+	for _ = 1, 40 do
+		app:scroll("#panel-empty", 600)
+		app:frames(2)
+	end
 	app:click("#panel-home-side-list-pager")
 	app:frames(30)
 	expect(built(app, 'button "Open side chat ')).to_be(6)
@@ -875,35 +871,32 @@ test("the wheel over a part's rows scrolls the home while the part has nothing t
 	end
 end)
 
-test("a part shown whole scrolls itself first; past its end, the next gesture scrolls the home", function()
+test("a part never scrolls on its own: the wheel over its rows scrolls the home, shown whole or not", function()
 	local app = home()
 	app:command("many")
 	app:frames(30)
-	app:scroll("#panel-empty", 1200)
-	app:frames(5)
-	app:click("#panel-home-side-list-pager")
+	-- (Down to its pager, under its first rows, and Show all.)
+	for _ = 1, 20 do
+		if pcall(function()
+			app:click("#panel-home-side-list-pager")
+		end) then
+			break
+		end
+		app:scroll("#panel-empty", 120)
+		app:frames(3)
+	end
 	app:frames(30)
+	expect(app:has('#panel-home-side-list-pager >> "Show less"')).to_be(true)
 	app:scroll("#panel-empty", -3000)
 	app:frames(10)
 	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
-	app:scroll("#panel-empty", 250)
-	app:frames(10)
-	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
 	local page = y_of(app, "#panel-home-device") :: number
-	-- Over its rows: the list moves, the home stays.
-	app:scroll("#panel-home-side-list", 400)
-	app:frames(5)
-	expect(y_of(app, '#panel-home-side-list >> role:button "Open side chat Side chat 1"')).to_be_nil()
-	expect(y_of(app, "#panel-home-device")).to_be(page)
-	-- To its end, then a new gesture: the home moves.
-	for _ = 1, 40 do
-		app:scroll("#panel-home-side-list", 400)
-		app:frames(2)
-	end
-	expect(app:has('role:button "Open side chat Side chat 300"')).to_be(true)
-	expect(y_of(app, "#panel-home-device")).to_be(page)
-	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
-	app:scroll("#panel-home-side-list", 300)
+	local first = y_of(app, '#panel-home-side-list >> role:button "Open side chat Side chat 1"') :: number
+	-- The wheel over its rows: the whole home moves, the rows with it, by
+	-- the same (the list never scrolls on its own).
+	app:scroll('#panel-home-side-list >> role:button "Open side chat Side chat 1"', 300)
 	app:frames(10)
-	expect((y_of(app, "#panel-home-device") :: number) < page).to_be(true)
+	local moved = page - (y_of(app, "#panel-home-device") :: number)
+	expect(moved > 0).to_be(true)
+	expect(first - (y_of(app, '#panel-home-side-list >> role:button "Open side chat Side chat 1"') :: number)).to_be(moved)
 end)

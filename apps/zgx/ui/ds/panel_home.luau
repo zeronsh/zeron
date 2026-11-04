@@ -13,7 +13,7 @@
 --                                         its key's cap at its end
 --   PanelHome.Heading { label, trail? }   a part's title
 --   PanelHome.Lanes { id, list, label, icon, open, on_toggle, items, name,
---                     on_open, expanded, on_expand, harness?, max_rows? }
+--                     on_open, expanded, on_expand, harness? }
 --                                         a part of lanes (side chats,
 --                                         subagents) drawn as the sidebar's
 --                                         groups (ds/session_row): it folds,
@@ -49,10 +49,9 @@ local PAD_PT = 8
 -- A lane's row: a list's, shorter, as the lanes card's.
 M.LANE_H = 32
 -- How many lanes show before "Show N more" (as the sidebar's groups: those
--- at work or waiting on you show past them), and how many rows a list
--- shown whole stands before it scrolls.
+-- at work or waiting on you show past them). A list is always as tall as
+-- its rows: the panel scrolls, never a part inside it.
 M.LANE_FIRST = 5
-M.LANE_ROWS = 12
 -- How a list opens and closes: the sidebar's own move.
 local SLIDE = { duration = 260, ease = "out(3)" }
 
@@ -211,7 +210,6 @@ export type LanesProps = {
 	-- What it's read out as ("Open side chat {title}").
 	name: (lane: Lane) -> string,
 	on_open: (lane: Lane) -> (),
-	max_rows: number?,
 	-- Each group's fold and whether it's shown whole ("Show less"), by the
 	-- group's key ("all" with no groups).
 	group_open: (key: string) -> boolean,
@@ -286,10 +284,9 @@ type Item = {
 -- listing those in a state while the view keeps them. Its rows are the
 -- sidebar's session rows (ds/session_row), off their group's trunk. One
 -- list, rows by what they are (a lane by its id, moving between groups the
--- same node), only those in view built; as tall as its rows up to
--- `max_rows`, then it scrolls.
+-- same node); as tall as all its rows, so the home scrolls and never a
+-- list inside it.
 function M.Lanes(props: LanesProps): Node
-	local max_rows = props.max_rows or M.LANE_ROWS
 	-- The sidebar's view, read as ds/sidebar reads it.
 	local function view(): View
 		return if props.view then props.view() else {}
@@ -561,13 +558,10 @@ function M.Lanes(props: LanesProps): Node
 		end
 		return out
 	end)
-	-- As tall as its first `max_rows` rows, then it scrolls.
+	-- As tall as all its rows ("Show N more" keeps a group short).
 	local height = ui.computed(function(): number
 		local h = 0
-		for i, x in heights:get() do
-			if i > max_rows then
-				break
-			end
+		for _, x in heights:get() do
 			h += x
 		end
 		return h
@@ -825,10 +819,9 @@ function M.Lanes(props: LanesProps): Node
 				end,
 				w_full = true,
 				h = motion.tween(height, SLIDE),
-				scrollbar = true,
-				-- (The wheel goes on to the home past its ends, or when it fits
-				-- and has nothing to scroll: "contain" kept it, and the home
-				-- didn't scroll under these lists' rows.)
+				-- (Never a scroll of its own: the home is the one that
+				-- scrolls, the wheel over these rows going on to it.)
+				scrollbar = false,
 				overscroll = "auto",
 				},
 				ui.show(function(): boolean
