@@ -1226,3 +1226,128 @@ fn a_new_chat_s_card_fades_with_the_sidebar_never_in_one_frame() {
     assert!(between(&fill, 0., 1.) >= 2, "and back in: {fill:?}");
     assert!((fill.last().unwrap() - 1.).abs() < 0.01);
 }
+
+// ── v2, Inset as uploaded, v3: what each costs ─────────────────────────────
+
+/// The chats as the host has them, each a long conversation (twelve
+/// exchanges of paragraphs), `streaming` one's reply growing.
+fn long_chats(app: &TestApp, ids: &[&str], streaming: Option<(&str, usize)>) {
+    use zgx_script::Value;
+    let s = |v: &str| Value::from(v);
+    let para = "The layout pass runs first and measures each row, then the paint pass draws what changed; a long reply wraps over several lines at the chat's width, as a real one does, with a list and some code after it.";
+    let chats: Vec<(String, Value)> = ids
+        .iter()
+        .map(|id| {
+            let mut messages = Vec::new();
+            for n in 0..12 {
+                messages.push(Value::record([("id", s(&format!("{id}-q{n}"))), ("role", s("user")), ("text", s("And then?"))]));
+                messages.push(Value::record([("id", s(&format!("{id}-r{n}"))), ("role", s("assistant")), ("text", s(&format!("{para}\n\n{para}\n\n- one\n- two\n\n```rust\nfn main() {{}}\n```")))]));
+            }
+            let mut draft = Value::record([("id", s("")), ("text", s(""))]);
+            if let Some((sid, words)) = streaming
+                && sid == *id
+            {
+                messages.push(Value::record([("id", s(&format!("{id}-live"))), ("role", s("assistant")), ("text", s("")), ("streaming", Value::Bool(true))]));
+                let text: Vec<&str> = para.split(' ').cycle().take(words).collect();
+                draft = Value::record([("id", s(&format!("{id}-live"))), ("text", s(&text.join(" ")))]);
+            }
+            let session = Value::record([("id", s(id)), ("state", s("ready")), ("running", Value::Bool(streaming.is_some_and(|(sid, _)| sid == *id)))]);
+            (id.to_string(), Value::record([("messages", Value::List(std::rc::Rc::from(messages))), ("draft", draft), ("session", session)]))
+        })
+        .collect();
+    app.host.shared("fixture.chats", Value::Nil).set(Value::record(chats));
+}
+
+/// Frames' work (ms): the median and the 95th percentile.
+fn spread(mut v: Vec<f64>) -> (f64, f64) {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    (v[v.len() / 2], v[(v.len() * 95 / 100).min(v.len() - 1)])
+}
+
+fn timed(app: &mut TestApp) -> f64 {
+    let t = std::time::Instant::now();
+    app.frame();
+    t.elapsed().as_secs_f64() * 1000.
+}
+
+/// A variant's costs, with `panes` chats side by side (1: alone).
+fn costs(fixture: &Path, count: usize) -> String {
+    const IDS: [&str; 6] = ["a1", "a2", "a3", "b1", "b2", "m1"];
+    let mut app = mount_at(fixture, &scratch(&format!("perf-{count}")));
+    app.ui.scene.borrow_mut().resize(1600., 1000.);
+    assert!(app.host.run_command("many"));
+    app.frames(30);
+    let ids = &IDS[..count];
+    long_chats(&app, &IDS, None);
+    if count > 1 {
+        use zgx_script::Value;
+        let leaf = |id: &str| Value::record([("kind", Value::from("leaf")), ("id", Value::from(id))]);
+        let kids: Vec<Value> = ids.iter().map(|id| leaf(id)).collect();
+        let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))]);
+        let set = app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(std::rc::Rc::from(vec![tree])));
+        assert!(set.is_ok(), "{set:?}");
+    }
+    open(&mut app, "Fix the build");
+    app.frames(60);
+    let shown = panes(&mut app).max(1);
+    let opts = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: true };
+    app.ui.prepare_frame();
+    let nodes = zgx_script::driver::tree_lines(&app.ui, &app.handle, None, &opts).0.len();
+    // Idle: nothing changing.
+    let calls = app.calls();
+    let idle: f64 = (0..120).map(|_| timed(&mut app)).sum();
+    let idle_calls = app.calls() - calls;
+    // A reply streaming in the focused chat, a few words a frame.
+    let calls = app.calls();
+    let mut stream = Vec::new();
+    for n in 1..=60 {
+        long_chats(&app, &IDS, Some(("a1", 4 * n)));
+        stream.push(timed(&mut app));
+    }
+    let stream_calls = (app.calls() - calls) / 60;
+    // The sidebar's edge dragged out and back, a move a frame.
+    let edge = app.bounds("#shell-sidebar >> \"Resize sidebar\"");
+    let (x, y) = (edge.x + edge.width / 2., edge.y + edge.height / 2.);
+    let button = PointerButton::Primary;
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, Modifiers::default());
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, Modifiers::default());
+    let mut drag = Vec::new();
+    for step in (1..=30).chain((0..30).rev()) {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x + 4. * step as f32, y }, Modifiers::default());
+        drag.push(timed(&mut app));
+    }
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, Modifiers::default());
+    let ((s50, s95), (d50, d95)) = (spread(stream), spread(drag));
+    format!(
+        "{shown} pane(s) | {nodes} nodes | idle 120 frames {idle:.2} ms, {idle_calls} script calls | stream p50 {s50:.2} p95 {s95:.2} ms, {stream_calls} calls/frame | sidebar drag p50 {d50:.2} p95 {d95:.2} ms"
+    )
+}
+
+#[test]
+#[ignore = "a measurement: cargo test --release --bin zeron-zgx costs_of_v2_inset_and_v3 -- --ignored --nocapture"]
+fn costs_of_v2_inset_and_v3_measured() {
+    let root = scratch("costs");
+    let t = root.join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    // Inset as uploaded, laid over today's default as the app lays it (its
+    // shell/init.luau fails there on its missing scroll_probe and falls
+    // back to the default's: left out).
+    let pkg = std::env::var("INSET_PKG").expect("INSET_PKG: the decoded Inset package");
+    for (rel, path) in live::files(Path::new(&pkg), |rel| rel.ends_with(".luau") && rel != "screens/shell/init.luau") {
+        let to = t.join("inset").join(&rel);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(path, to).unwrap();
+    }
+    std::fs::write(t.join("inset/zeron-template.json"), r#"{"id":"inset","name":"Inset"}"#).unwrap();
+    let mut rows = Vec::new();
+    for (label, id, panes) in [("v2", "zeron-v2", vec![1]), ("Inset", "inset", vec![1, 2, 4, 6]), ("v3", live::BUILTIN, vec![1, 2, 4, 6])] {
+        let at = root.join(format!("live-{label}"));
+        let _ = std::fs::remove_dir_all(&at);
+        let fixture = compose(&t, id);
+        std::fs::rename(&fixture, &at).unwrap();
+        for n in panes {
+            rows.push(format!("{label}: {}", costs(&at.join("shell_fixture.luau"), n)));
+            eprintln!("COST {}", rows.last().unwrap());
+        }
+    }
+}
