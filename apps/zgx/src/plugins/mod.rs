@@ -309,6 +309,9 @@ pub struct Bridge {
 /// What plugins may read and ask of the app, each behind its permission,
 /// and every declared hook behind "ui.add".
 pub fn expose_surface(host: &ScriptHost) {
+    // Names under `zeron` are the app's alone, whatever a plugin is called
+    // (its slots and commands are its own names anyway).
+    host.reserve_prefix("zeron");
     // Adding before or after any element, by any selector, is "ui.add"'s
     // (replacing is "ui.change"'s, an OverrideElement of the selector as
     // written).
@@ -791,6 +794,7 @@ pub(crate) fn shortcut_notice(lost: &[crate::menu_bar::Dropped], name_of: impl F
         Why::Zerons(title) => format!("Its {key} for “{}” is already Zeron's ({title}), so it's in the menu bar without one.", first.title),
         Why::Plugins(other) => format!("Its {key} for “{}” is already {}'s, so it's in the menu bar without one.", first.title, name_of(other)),
         Why::NoKey => format!("Its {key} for “{}” isn't a key a menu can show, so it's in the menu bar without one.", first.title),
+        Why::NoModifier => format!("Its {key} for “{}” has no ⌘, ⌃ or ⌥, so it would take that key from everything you type in. It's in the menu bar without one.", first.title),
     };
     match lost.len() {
         1 => {}
@@ -1368,7 +1372,7 @@ impl Bridge {
     /// new version or an edit of it arrives.
     pub(crate) fn plugin_failed(&self, id: &str, error: &str) {
         let Some(item) = self.item(id) else { return };
-        if !self.failed_plugins.borrow_mut().fail(id, item.hash(), error) {
+        if !self.failed_plugins.borrow_mut().fail(id, item.hash(), &recovery::reason(error)) {
             return;
         }
         eprintln!("zeron-zgx: plugin {id} failed and is withdrawn: {}", recovery::first_line(error));
