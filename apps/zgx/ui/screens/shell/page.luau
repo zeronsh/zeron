@@ -56,6 +56,10 @@ local CLOSE = 22
 local panel_groups = ui.shared("panel.groups_shown", false)
 -- How far up from a split pane's foot a click is on its composer.
 local COMPOSER_ROOM = 130
+-- What the page wants beside the columns: its panes, each at its least.
+fit.page_holds(function(): number
+	return fit.floor_of(splits.across:get(), splits.GAP)
+end)
 
 return function(props: Props): Node
 	local box = ui.ref()
@@ -617,11 +621,11 @@ return function(props: Props): Node
 	local function right_pref(): number
 		return math.max(files_w:get() - reserve(), 0)
 	end
-	local alloc = { vw = fit.viewport:peek(), side = sidebar_settled(), tree = tree_part(), pref = right_pref() }
+	local alloc = { vw = fit.viewport:peek(), side = sidebar_settled(), tree = tree_part(), pref = right_pref(), floor = fit.page_floor:peek() }
 	ui.effect(function()
-		local vw, side, tree, pref = fit.viewport:get(), sidebar_settled(), tree_part(), right_pref()
+		local vw, side, tree, pref, floor = fit.viewport:get(), sidebar_settled(), tree_part(), right_pref(), fit.page_floor:get()
 		local was = alloc
-		alloc = { vw = vw, side = side, tree = tree, pref = pref }
+		alloc = { vw = vw, side = side, tree = tree, pref = pref, floor = floor }
 		-- (Hidden (another chat with none, a new chat), its width holds as
 		-- it was: what it shows at again is worked out as it opens (`split`).
 		-- Followed while hidden, the fit took its tree away there, and the
@@ -631,7 +635,7 @@ return function(props: Props): Node
 		if vw <= 0 or not shown:get() then
 			return
 		end
-		local allowed = vw - side - tree - fit.CHAT_PANEL_MIN
+		local allowed = fit.panel_room(vw, side, tree, floor)
 		local r = right_w:peek()
 		if pref ~= was.pref then
 			-- Split or dragged: what it would take, as far as there's room.
@@ -641,13 +645,14 @@ return function(props: Props): Node
 			r = allowed
 		elseif vw > was.vw and r < pref then
 			-- Widening while it gave way: back first, the chat at its least.
-			local was_allowed = was.vw - was.side - was.tree - fit.CHAT_PANEL_MIN
+			local was_allowed = fit.panel_room(was.vw, was.side, was.tree, was.floor)
 			if r >= was_allowed - 0.5 then
 				r = math.min(pref, allowed)
 			end
-		elseif side < was.side and r < pref then
-			-- The sidebar gone that it gave way to: back to its own width, as
-			-- far as there's room. (Not its tree floating: the file holds.)
+		elseif (side < was.side or floor < was.floor) and r < pref then
+			-- The sidebar gone that it gave way to, or a pane: back to its own
+			-- width, as far as there's room. (Not its tree floating: the file
+			-- holds.)
 			r = math.min(pref, allowed)
 		end
 		-- Never under the panel's least as it shows: a width dragged narrow
@@ -833,11 +838,11 @@ return function(props: Props): Node
 			local side = sidebar_settled()
 			if not chosen:peek() then
 				local keep = reserve()
-				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0)))
+				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0), fit.page_floor:peek()))
 			else
 				-- (The width chosen, as far as there's room: not what it had
 				-- given way to before it closed.)
-				local allowed = vw - side - tree_part() - fit.CHAT_PANEL_MIN
+				local allowed = fit.panel_room(vw, side, tree_part(), fit.page_floor:peek())
 				local r = math.max(math.min(math.max(right_pref(), fit.RIGHT_PANE_MIN - tree_part()), allowed), 0)
 				if r ~= right_w:peek() then
 					right_w:set(r)
@@ -857,11 +862,11 @@ return function(props: Props): Node
 		return open_w:get()
 	end
 	-- Its width asked for (its edge dragged, or keyed): never past what
-	-- leaves the chat its least; kept as the width it takes with its tree
+	-- leaves the page what it wants; kept as the width it takes with its tree
 	-- docked.
 	local function set_width(want: number)
 		local tree = if fit.current:peek().files then TREE else 0
-		local most = math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.CHAT_PANEL_MIN)
+		local most = math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
 		local w = math.clamp(want, FILES_MIN, most)
 		files_w:set(reserve() + w - tree)
 		if not chosen:peek() then
@@ -1345,13 +1350,14 @@ return function(props: Props): Node
 			},
 		}
 		-- (Past the bar's controls, it glides with them as the window goes in
-		-- or out of full screen.)
+		-- or out of full screen, and eases there as the sidebar comes and goes,
+		-- as the session's head does.)
 		local head_ref = ui.ref()
 		ds.TitleBar.follow(head_ref, {
 			paddingLeft = function(full: boolean): number
 				return title_left(id, full)
 			end,
-		})
+		}, motion.sidebar)
 		local head = ui.row {
 			ref = head_ref,
 			absolute = true,
@@ -1361,9 +1367,11 @@ return function(props: Props): Node
 			h = TITLE_H - INSET,
 			-- (Kept by `follow` above, from here.)
 			pl = ui.raw(title_left(id, ds.TitleBar.full_screen_now(), false), "where its title starts, as the session's head"),
-			pr = function(): number
-				return ui.raw(close_right(id), "its × clear of the title bar's panel toggle")
-			end,
+			-- (Its × clear of the title bar's panel toggle, easing as the panel
+			-- comes and goes.)
+			pr = motion.tween(ui.computed(function(): number
+				return close_right(id)
+			end), motion.sidebar),
 			gap = "$zeron.space.tight",
 			items = "center",
 			on_hover = function(inside: boolean)
@@ -1515,6 +1523,11 @@ return function(props: Props): Node
 		min_w = 0,
 		h_full = true,
 		relative = true,
+		-- (In a split, the frame of the window's composer alone, over the
+		-- panes: the pointer goes through to them, but for the composer.)
+		pointer_events = function(): any
+			return if grouped() then "none" else "auto"
+		end,
 		-- (The split's panes, under the page's card: in a split, their cards
 		-- are the chats, and the page's card is the composer's frame over
 		-- the focused one's.)
@@ -1536,19 +1549,9 @@ return function(props: Props): Node
 				relative = true,
 			}),
 		},
-		-- (What the page's card stands in, placed by its box in a split.)
-		ui.column {
-			grow = 1,
-			min_w = 0,
-			h_full = true,
-			relative = true,
-			-- (In a split, the frame of the window's composer alone, over the
-			-- panes: the pointer goes through to them, but for the composer.)
-			pointer_events = function(): any
-				return if grouped() then "none" else "auto"
-			end,
-			ui.column(pane),
-		},
+		-- (The page's card, placed by its box in a split: there the frame of
+		-- the window's composer alone, over the panes.)
+		ui.column(pane),
 		ui.show(function(): boolean
 			return splits.dragging:get() and not expanded()
 		end, ui.div {
@@ -1574,24 +1577,19 @@ return function(props: Props): Node
 	-- round them, along the title bar's strip (over them, beside them and
 	-- between them), moves the window as the bar does: a strip under the
 	-- cards, which let the pointer through but for what takes it.
-	return ui.column {
+	return ui.row {
+		ref = row_ref,
 		grow = 1,
 		min_w = 0,
 		h_full = true,
 		relative = true,
+		pt = gap,
+		pb = gap,
+		pl = gap,
+		pr = gap,
+		pointer_events = "none",
 		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
-		ui.row {
-			ref = row_ref,
-			w_full = true,
-			grow = 1,
-			min_h = 0,
-			pt = gap,
-			pb = gap,
-			pl = gap,
-			pr = gap,
-			pointer_events = "none",
-			split_area,
-			beside,
-		},
+		split_area,
+		beside,
 	}
 end
