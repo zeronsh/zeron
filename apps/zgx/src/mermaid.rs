@@ -46,6 +46,14 @@ const MAX_SIDE: f32 = 8192.0;
 const MAX_PIXELS: f32 = 12.0 * 1024.0 * 1024.0;
 /// The largest outlined SVG handed over (zgx draws up to 4 MiB of one).
 const MAX_SVG_BYTES: usize = 3 * 1024 * 1024;
+/// The layers drawing a diagram may take, in square points. The renderer
+/// doesn't escape every value it writes, so a `style` or `classDef` in an
+/// agent's source can add elements of its own: nested opacity groups or
+/// filters ran to gigabytes and minutes from 16 KB. A layer's cost shows in
+/// usvg's tree whatever wrote it. Real diagrams stay under 150 thousand here.
+const MAX_LAYERS_AREA: f32 = 16.0 * 1024.0 * 1024.0;
+/// A filter pass's cost over a layer's (a blur's, measured).
+const FILTER_COST: f32 = 10.0;
 /// Pictures kept on disk; past this the oldest go.
 const KEEP_FILES: usize = 600;
 /// Failures remembered this run.
@@ -430,6 +438,9 @@ fn draw(svg: &str, palette: &Palette) -> Result<Pictures, String> {
     if !(w >= 1. && h >= 1.) {
         return Err("Diagram is empty".into());
     }
+    if layers_area(tree.root()) > MAX_LAYERS_AREA {
+        return Err("Diagram exceeds preview complexity limit".into());
+    }
     // (Text written as the paths it was laid out to: `preserve_text` off.)
     let outlined = tree.to_string(&usvg::WriteOptions::default());
     let plate_svg = on_plate(&outlined, w, h, &palette.plate.hex());
@@ -448,6 +459,34 @@ fn draw(svg: &str, palette: &Palette) -> Result<Pictures, String> {
     plate.fill(tiny_skia::Color::from_rgba(r, g, b, a).unwrap_or(tiny_skia::Color::BLACK));
     plate.draw_pixmap(0, 0, clear.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
     Ok(Pictures { svg: outlined, plate_svg, plate, w, h })
+}
+
+/// The area of the layers drawing `group` takes, in square points: resvg
+/// allocates and composites one for each isolated group and each pattern's
+/// tile, here and in `ui.svg`, which draws on the frame's path.
+fn layers_area(group: &usvg::Group) -> f32 {
+    let mut area = 0.;
+    if group.should_isolate() {
+        let bbox = group.abs_layer_bounding_box();
+        let passes: usize = group.filters().iter().map(|f| f.primitives().len()).sum();
+        area += bbox.width() * bbox.height() * (1. + FILTER_COST * passes as f32);
+    }
+    for node in group.children() {
+        match node {
+            usvg::Node::Group(child) => area += layers_area(child),
+            usvg::Node::Path(path) => {
+                for paint in [path.fill().map(|f| f.paint()), path.stroke().map(|s| s.paint())].into_iter().flatten() {
+                    if let usvg::Paint::Pattern(pattern) = paint {
+                        area += pattern.rect().width() * pattern.rect().height();
+                    }
+                }
+            }
+            usvg::Node::Text(text) => area += layers_area(text.flattened()),
+            usvg::Node::Image(_) => {}
+        }
+        node.subroots(|root| area += layers_area(root));
+    }
+    area
 }
 
 /// `svg` with a `w` by `h` ground of `fill` under everything it draws.
@@ -724,6 +763,31 @@ mod tests {
             assert!(!drawn.svg.contains("<image") && !drawn.plate_svg.contains("<image"));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layers_past_the_budget_are_refused() {
+        let palette = Palette::from_request(&request(FLOWCHART, true));
+        let nest = |attr: &str, n: usize| {
+            format!("<g {attr}>").repeat(n) + "<rect width='3000' height='2000' fill='red'/>" + &"</g>".repeat(n)
+        };
+        let blur = "<filter id='f'><feGaussianBlur stdDeviation='50'/></filter>";
+        // As an agent would write them: out of a `style` value, a canvas wide
+        // enough to matter (these took gigabytes and minutes to draw).
+        for body in [nest("opacity='.9'", 300), format!("{blur}{}", nest("filter='url(#f)'", 60))] {
+            let source = format!("flowchart TD\n  A[\"{}\"]\n  style A fill:#fff\"/>{body}<rect x=\"0", "w".repeat(420));
+            let svg = render(&source, &palette).unwrap();
+            assert_eq!(draw(&svg, &palette).err().as_deref(), Some("Diagram exceeds preview complexity limit"));
+        }
+        // A pattern's tiles, and layers inside a mask, count too.
+        let doc = |body: String| format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400">{body}</svg>"##);
+        let tiles = "<pattern id='p' width='3000' height='3000' patternUnits='userSpaceOnUse'><rect width='9' height='9'/></pattern>".to_string()
+            + &"<rect width='400' height='400' fill='url(#p)'/>".repeat(4);
+        assert!(draw(&doc(tiles), &palette).is_err());
+        let masked = format!("<mask id='m'>{}</mask><rect width='400' height='400' mask='url(#m)'/>", nest("opacity='.9'", 10));
+        assert!(draw(&doc(masked), &palette).is_err());
+        // One layer the size of the diagram is ordinary.
+        assert!(draw(&doc(nest("opacity='.9'", 1)), &palette).is_ok());
     }
 
     #[test]
