@@ -1544,6 +1544,11 @@ return function(props: Props): Node
 		end
 		return ui.div(item)
 	end
+	-- (Each pane's landing, only while a chat is carried. Not a `ui.show` round them:
+	-- its box would lie over the page and keep a drop from the chat under it.)
+	local landing_ids = ui.computed(function(): { string }
+		return if splits.dragging:get() and not expanded() then members:get() else {}
+	end)
 	-- The page's room: the page's card at the focused chat's place, the
 	-- split's panes under it.
 	local split_area = ui.row {
@@ -1599,16 +1604,14 @@ return function(props: Props): Node
 				relative = true,
 			}),
 		},
-		ui.show(function(): boolean
-			return splits.dragging:get() and not expanded()
-		end, ui.div {
+		ui.div {
 			absolute = true,
 			left = 0,
 			right = 0,
 			top = 0,
 			bottom = 0,
 			pointer_events = "none",
-			ui.each(members, landing, {
+			ui.each(landing_ids, landing, {
 				key = function(id: string): string
 					return id
 				end,
@@ -1616,7 +1619,7 @@ return function(props: Props): Node
 				h_full = true,
 				relative = true,
 			}),
-		}),
+		},
 	}
 
 	-- Two cards, the page and its panel, set in from the window's edges and
