@@ -310,7 +310,8 @@ pub struct Bridge {
 /// and every declared hook behind "ui.add".
 pub fn expose_surface(host: &ScriptHost) {
     // Adding before or after any element, by any selector, is "ui.add"'s
-    // (replacing is "ui.change"'s, an Override of the selector as written).
+    // (replacing is "ui.change"'s, an OverrideElement of the selector as
+    // written).
     host.require_contribution_capability(Capability::Named(grants::UI_ADD.into()));
     // What a file or a reply's block is, as an element gives it: a token
     // (`tokens`), never the path or the text.
@@ -3294,7 +3295,7 @@ mod tests {
         let p = on.plugin().unwrap();
         assert_eq!(p.name, "focus");
         assert_eq!(p.entry, PathBuf::from("/d/plugins/.loaded/focus/0123/init.luau"));
-        assert!(p.grants.contains(&Capability::Override("#sidebar-actions".into())));
+        assert!(p.grants.contains(&Capability::OverrideElement("#sidebar-actions".into())));
         for status in ["off", "pending", "tampered", "broken"] {
             let mut json = on.json.clone();
             json["status"] = json!(status);
