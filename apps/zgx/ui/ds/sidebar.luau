@@ -93,8 +93,9 @@ export type PullRequest = { number: number, state: ("open" | "merged" | "closed"
 -- Grouped by project first, those are listed after the rest, folded into
 -- one row of their own ("21 empty projects"), closed until it's opened;
 -- `details.empty_projects` off, not listed at all. A project with none at
--- all, just added, isn't: a new chat starts in it.)
-export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, sessions: { Session } }
+-- all, just added, isn't: a new chat starts in it. `unused` says so, and it's
+-- listed with the rest, until `details.empty_projects` is off.)
+export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, unused: boolean?, sessions: { Session } }
 -- You: your name, and an id your avatar is drawn from.
 export type User = { id: string?, name: string, avatar: string? }
 -- How its sessions are grouped (Zeron's Organize), as a key: its levels
@@ -1674,6 +1675,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- A project's with none but archived sessions (its `empty`), at the
 		-- top level: listed in the empty projects' fold.
 		empty: boolean?,
+		-- A project's that has never had a session (its `unused`), at the top
+		-- level: listed with the rest, unless the empty projects are off.
+		unused: boolean?,
 	}
 	-- How long ago a session moved, in seconds (its `time`: a time, or as
 	-- it reads: "now", "5m", "3h", "1d", "2w"), for the most recent first.
@@ -1777,6 +1781,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						device = outer_device,
 						-- (Only at the top, and only while it holds none.)
 						empty = if subset == nil and p.empty == true and #p.sessions == 0 then true else nil,
+						unused = if subset == nil and p.unused == true and #p.sessions == 0 then true else nil,
 						shows_tile = function(): boolean
 							return details.project_icon:get()
 						end,
@@ -2637,6 +2642,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local empties: { Group } = {}
 		local show_empties = empties_shown()
 		for _, g in all_groups do
+			if g.unused and not show_empties then
+				continue
+			end
 			if not g.empty then
 				table.insert(gs, g)
 			elseif show_empties then
@@ -4242,7 +4250,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				for _, g in (groups_of(by, placed_in(p))) do
 					-- (The empty projects aren't on the rail: their fold is
 					-- the list's.)
-					if not g.empty then
+					if not g.empty and not (g.unused and not empties_shown()) then
 						table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
 					end
 				end

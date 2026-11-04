@@ -291,7 +291,9 @@ end
 -- A project is empty when every session it has had is archived: none
 -- listed, one or more on the Archived shelf. The sidebar folds those into
 -- one row at the projects' end. One with no sessions at all (just added)
--- isn't: it's where a new chat is about to start. Counted on all of them,
+-- isn't: it's where a new chat is about to start, listed with the rest, until
+-- Show → Empty projects is off, which hides it too (it's still in the project
+-- selector). Counted on all of them,
 -- not what a filter shows, so narrowing never moves a project in or out
 -- (the status filter hides every group with none anyway); the project the
 -- project filter is narrowed to is never folded away. Archived sessions
@@ -434,10 +436,20 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			listed[c.project] = true
 		end
 	end
+	local archived: { [string]: boolean } = {}
 	for _, c in now.archived or {} do
 		local group = if c.project then by[c.project] else nil
 		if group and not listed[c.project :: string] and c.project ~= just then
 			group.empty = true
+		end
+		if c.project then
+			archived[c.project] = true
+		end
+	end
+	-- (And which have never had one: gone with the empty ones when those are off.)
+	for id, group in by do
+		if not listed[id] and not archived[id] and id ~= just then
+			group.unused = true
 		end
 	end
 	for _, c in now.chats do
