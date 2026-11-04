@@ -137,11 +137,11 @@ fn the_title_bar_moves_the_window_across_its_width() {
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     app.frames(40);
 
-    // Settings, a page of its own: its list's strip and its page's.
+    // Settings, under the top bar: the bar's strip is still what moves the window.
     app.click("#shell-sidebar >> role:button \"Local\"");
     app.frames(30);
-    assert!(app.find("#settings-drag").is_some(), "settings opened");
-    dead.push(("settings' strip", dead_zones(&mut app, &[])));
+    assert!(app.find("#settings").is_some(), "settings opened");
+    dead.push(("settings' strip", dead_zones(&mut app, BAR)));
     let dead: Vec<_> = dead.into_iter().filter(|(_, zones)| !zones.is_empty()).collect();
     assert!(dead.is_empty(), "points on the strip that don't move the window: {dead:?}");
 }

@@ -35,6 +35,9 @@ local Glass = require("@ds/glass")
 export type Props = {
 	files: State<boolean>,
 	width: () -> number,
+	-- Settings stand where the page and its panel do: only the top bar's left.
+	away: (() -> boolean)?,
+	settings: (() -> Node)?,
 }
 
 -- The title bar's height (Zeron's): the pages start under it, the
@@ -72,6 +75,9 @@ fit.page_holds(function(): number
 end)
 
 return function(props: Props): Node
+	local function away(): boolean
+		return props.away ~= nil and props.away()
+	end
 	local box = ui.ref()
 	local px = ui.state("shell_wallpaper_px", 0.5)
 	local py = ui.state("shell_wallpaper_py", 0.5)
@@ -633,7 +639,7 @@ return function(props: Props): Node
 	-- room, it stays open, and comes back as the window widens.)
 	-- (A plugin's page has a panel of its own too: its plugin's tabs.)
 	local shown = ui.computed(function(): boolean
-		return props.files:get() and (in_session() or on_plugin()) and fit.current:get().right
+		return props.files:get() and (in_session() or on_plugin() or home()) and fit.current:get().right
 	end)
 	-- Where the sidebar settles in the window's fit (its width, or none).
 	local function sidebar_settled(): number
@@ -789,6 +795,12 @@ return function(props: Props): Node
 			-- (The row's room less the window round the cards; the
 			-- page's card gone, there's no gap before the panel's.)
 			local room: number = (row_ref.width or 0) - 2 * INSET
+			-- (Settings' list stands where the sidebar does, in this row: as beside the
+			-- sidebar, the panel has what's past it.)
+			if away() and not shell_view.collapsed:get() then
+				local sidebar: any = require("@app/screens/shell/sidebar")
+				room -= math.clamp(sidebar.width:get(), fit.SIDEBAR_MIN, fit.SIDEBAR_MAX) + 6
+			end
 			if room > 0 then
 				return room
 			end
@@ -987,6 +999,7 @@ return function(props: Props): Node
 						project = route.project,
 						session = route.session,
 						page = route.page,
+						no_project = true,
 					}
 				end)
 				else boundary.screen(boundary.named("shell.boundary.screen.files"), "@app/screens/files", function(files): Node
@@ -1557,6 +1570,9 @@ return function(props: Props): Node
 		min_w = 0,
 		h_full = true,
 		relative = true,
+		hidden = function(): boolean
+			return away()
+		end,
 		on_mount = function(el: any)
 			splits.set_area(el)
 		end,
@@ -1645,6 +1661,21 @@ return function(props: Props): Node
 		pointer_events = "none",
 		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
 		split_area,
+		-- (Settings, in the page's place.)
+		if props.settings
+			then ui.column {
+				grow = 1,
+				min_w = 0,
+				h_full = true,
+				overflow = "hidden",
+				-- (This row lets the pointer through but for what takes it.)
+				pointer_events = "auto",
+				hidden = function(): boolean
+					return not away()
+				end,
+				props.settings(),
+			}
+			else nil,
 		beside,
 		panel_edge,
 		-- The sessions open, along the whole top bar: from just past the sidebar's

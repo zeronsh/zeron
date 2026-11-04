@@ -1050,6 +1050,9 @@ return ui.component(function(props: Props): Node
 		enabled = props.mention_enabled,
 		empty = props.mention_empty,
 		on_choose = props.on_mention,
+		in_view = function(): boolean
+			return (pill_w:get() or 0) > 0
+		end,
 	}
 	-- Asked to: the keys, the caret at the end.
 	if props.focus then

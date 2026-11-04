@@ -228,6 +228,9 @@ function M.press_moved()
 	pressed_in = false
 end
 
+-- Whether the page has a panel for a new chat with no project (`no_project`).
+local no_project_panel = false
+
 -- The session showing's tabs' key (the shell's route), if there is one.
 local function route_key(): string?
 	local ok, route = pcall(function(): any
@@ -239,7 +242,11 @@ local function route_key(): string?
 	local session = if route.session then route.session:peek() else nil
 	local project = if route.project then route.project:peek() else nil
 	local page = if route.page then route.page:peek() else nil
-	return state.key(session, project, page)
+	local k = state.key(session, project, page)
+	if k or not no_project_panel then
+		return k
+	end
+	return if route.chat and route.chat:peek().name == "home" then state.NO_PROJECT else nil
 end
 
 -- Whether the session showing has its panel open (the shell's).
@@ -610,8 +617,11 @@ M.Panel = ui.component(function(props: Props): Node
 	end
 	-- Whose tabs: the session's (its project's with none open), or a
 	-- plugin's page's.
+	if props.no_project then
+		no_project_panel = true
+	end
 	local key = ui.computed(function(): string?
-		return state.key(read(session), read(project), read(page))
+		return state.key(read(session), read(project), read(page)) or (if props.no_project then state.NO_PROJECT else nil)
 	end)
 	local function tabs(): { Tab }
 		return state.of(key:get()).tabs
@@ -1388,7 +1398,7 @@ M.Panel = ui.component(function(props: Props): Node
 
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "on_last_closed" and k ~= "children" then
+		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "no_project" and k ~= "on_last_closed" and k ~= "children" then
 			box[k] = v
 		end
 	end

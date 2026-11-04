@@ -56,6 +56,10 @@ local next_id = ui.state("panel_next_id", 1)
 
 local EMPTY: Session = { tabs = {}, visited = {} }
 
+-- A new chat with no project's tabs (v3's page asks for it): a panel of its own all the
+-- same, with what needs no folder.
+M.NO_PROJECT = "no-project"
+
 -- Which session's tabs: its id's, or its project's; a plugin's page's,
 -- on one (`page`: `{ plugin, id }`).
 function M.key(session: any, project: any, page: any?): string?
