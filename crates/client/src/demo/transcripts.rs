@@ -40,6 +40,7 @@ pub(crate) fn tool(id: &str, call: ToolCall, is_error: bool, output: Option<&str
         subagent_tail: None,
         exit_code: None,
         output_truncated: false,
+        output_lines: None,
     }
 }
 

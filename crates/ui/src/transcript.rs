@@ -13258,6 +13258,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            output_lines: None,
         };
         let entry = assistant(
             "a1",
@@ -14454,6 +14455,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            output_lines: None,
         }
     }
 
@@ -14578,6 +14580,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            output_lines: None,
         }
     }
 

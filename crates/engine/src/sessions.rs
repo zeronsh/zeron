@@ -517,6 +517,27 @@ impl SessionsEngine {
             .flatten()
     }
 
+    /// One chunk of a command's whole output, read from this host's run
+    /// journal and redacted (`ReadToolOutput`, [`crate::tool_output`]).
+    pub async fn read_tool_output(
+        &self,
+        doc_id: &str,
+        tool_id: &str,
+        offset: u64,
+    ) -> Result<zeron_proto::ToolOutputChunk, crate::tool_output::ToolOutputError> {
+        let journal = self.inner.journal.clone();
+        let (doc_id, tool_id) = (doc_id.to_owned(), tool_id.to_owned());
+        tokio::task::spawn_blocking(move || {
+            crate::tool_output::read(&journal, &doc_id, &tool_id, offset)
+        })
+        .await
+        .map_err(|e| {
+            crate::tool_output::ToolOutputError::Journal(crate::run_journal::JournalError::Io(
+                std::io::Error::other(e.to_string()),
+            ))
+        })?
+    }
+
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
     /// `activeRuns`).
     pub fn active_count(&self) -> usize {
@@ -3342,6 +3363,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_tail,
                 exit_code,
                 output_truncated,
+                output_lines,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -3362,6 +3384,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_tail: subagent_tail.clone(),
                 exit_code: *exit_code,
                 output_truncated: *output_truncated,
+                output_lines: *output_lines,
             },
             other => other.clone(),
         })
