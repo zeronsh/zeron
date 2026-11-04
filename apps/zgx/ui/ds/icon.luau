@@ -141,7 +141,10 @@ export type Name =
 
 -- `name` may be a function: the icon follows it (a checkout's folder or
 -- worktree).
-export type Props = { name: Name | () -> Name, size: number? }
+-- `glyph_stroke`: its lines in the theme's glyph stroke, not its own: for an
+-- icon that stands beside the panel toggles (ds/sidebar_icon), so it weighs as
+-- they do in either theme.
+export type Props = { name: Name | () -> Name, size: number?, glyph_stroke: boolean? }
 
 -- One glyph for search everywhere: the sidebar's (an older name for the
 -- magnifying glass draws it too).
@@ -156,13 +159,22 @@ local function file(name: string): string
 	return if code then `code:{code}` else `assets/icons/ui/{key}.svg`
 end
 
+-- `src`, its stroke the theme's. (The token is in points at 16; the source is
+-- 24 units across, so it scales with the icon as the source's line does.)
+local function in_glyph_stroke(src: string): string
+	local points = (ui.theme.get("zeron.glyph.stroke") :: number?) or 1.1667
+	return (string.gsub(src, 'stroke%-width="[%d%.]+"', `stroke-width="{points * 24 / 16}"`))
+end
+
 return function(props: Props): Node
 	local size = props.size or 16
 	local name = props.name
+	local themed = props.glyph_stroke == true
 	return ui.svg {
-		src = if type(name) == "function"
+		src = if type(name) == "function" or themed
 			then function()
-				return file(name())
+				local src = file(if type(name) == "function" then name() else name)
+				return if themed then in_glyph_stroke(src) else src
 			end
 			else file(name),
 		w = size,
