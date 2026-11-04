@@ -1109,39 +1109,50 @@ local function Transcript(props: Props): Node
 			return
 		end
 		local top = el.y :: number
-		local row_id: string? = nil
-		local row_el: any = nil
+		-- The rows in view, top first.
+		local shown: { { id: string, el: any } } = {}
 		for id, r in rows do
 			local row = r.outer:peek()
-			if row and row.y and row.height and row.y + row.height > top and (not row_el or row.y < row_el.y) then
-				row_id, row_el = id, row
+			if row and row.y and row.height and row.y + row.height > top and row.y < top + el.height then
+				table.insert(shown, { id = id, el = row })
 			end
 		end
-		local set = if row_id then BLOCKS[row_id] else nil
-		if not row_id or not row_el or not set then
-			return
-		end
+		table.sort(shown, function(a, b)
+			return a.el.y < b.el.y
+		end)
 		-- The first block starting in view (what is read, whole lines of it
-		-- in sight); else the one the view's top crosses.
-		local pick: Ref? = nil
-		local at: number? = nil
-		local crossing: Ref? = nil
-		local crossing_at: number? = nil
-		for b in set do
-			local be = b:peek()
-			if be and be.y and be.height and be.y + be.height > top then
-				if be.y >= top and (not at or be.y < at) then
-					pick, at = b, be.y
-				elseif be.y < top then
-					crossing, crossing_at = b, be.y
+		-- in sight), in whichever row: a row of no blocks (a prompt) is
+		-- itself one. Else, nothing starting in view, the block the view's
+		-- top crosses.
+		local crossing: { row: string, block: Ref, at: number, row_y: number }? = nil
+		for _, r in shown do
+			local set = BLOCKS[r.id]
+			if not set then
+				if r.el.y >= top then
+					reading = { row = r.id, block = rows[r.id].outer, within = 0, view = r.el.y - top }
+					return
+				end
+			else
+				local pick: Ref? = nil
+				local at: number? = nil
+				for b in set do
+					local be = b:peek()
+					if be and be.y and be.height and be.y + be.height > top then
+						if be.y >= top and (not at or be.y < at) then
+							pick, at = b, be.y
+						elseif be.y < top and not crossing then
+							crossing = { row = r.id, block = b, at = be.y, row_y = r.el.y }
+						end
+					end
+				end
+				if pick and at then
+					reading = { row = r.id, block = pick, within = at - r.el.y, view = at - top }
+					return
 				end
 			end
 		end
-		if not pick then
-			pick, at = crossing, crossing_at
-		end
-		if pick and at then
-			reading = { row = row_id, block = pick, within = at - row_el.y, view = at - top }
+		if crossing then
+			reading = { row = crossing.row, block = crossing.block, within = crossing.at - crossing.row_y, view = crossing.at - top }
 		end
 	end
 	local function keep_reading()

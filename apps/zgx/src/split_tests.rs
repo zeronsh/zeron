@@ -1241,7 +1241,7 @@ fn long_chats(app: &TestApp, ids: &[&str], streaming: Option<(&str, usize)>) {
             let mut messages = Vec::new();
             for n in 0..12 {
                 messages.push(Value::record([("id", s(&format!("{id}-q{n}"))), ("role", s("user")), ("text", s("And then?"))]));
-                messages.push(Value::record([("id", s(&format!("{id}-r{n}"))), ("role", s("assistant")), ("text", s(&format!("{para}\n\n{para}\n\n- one\n- two\n\n```rust\nfn main() {{}}\n```")))]));
+                messages.push(Value::record([("id", s(&format!("{id}-r{n}"))), ("role", s("assistant")), ("text", s(&format!("Reply {n} of {id}. {para}\n\n{para}\n\n- one\n- two\n\n```rust\nfn main() {{}}\n```")))]));
             }
             let mut draft = Value::record([("id", s("")), ("text", s(""))]);
             if let Some((sid, words)) = streaming
@@ -1317,9 +1317,11 @@ fn costs(fixture: &Path, count: usize) -> String {
         drag.push(timed(&mut app));
     }
     app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, Modifiers::default());
+    // (Let go: laid out once.)
+    let settle = (0..5).map(|_| timed(&mut app)).fold(0., f64::max);
     let ((s50, s95), (d50, d95)) = (spread(stream), spread(drag));
     format!(
-        "{shown} pane(s) | {nodes} nodes | idle 120 frames {idle:.2} ms, {idle_calls} script calls | stream p50 {s50:.2} p95 {s95:.2} ms, {stream_calls} calls/frame | sidebar drag p50 {d50:.2} p95 {d95:.2} ms"
+        "{shown} pane(s) | {nodes} nodes | idle 120 frames {idle:.2} ms, {idle_calls} script calls | stream p50 {s50:.2} p95 {s95:.2} ms, {stream_calls} calls/frame | sidebar drag p50 {d50:.2} p95 {d95:.2} ms, settle {settle:.2} ms"
     )
 }
 
@@ -1328,7 +1330,11 @@ fn costs(fixture: &Path, count: usize) -> String {
 fn costs_of_v2_inset_and_v3_measured() {
     let root = scratch("costs");
     let t = root.join("templates");
-    live::sync_zeron(&ui(), &t).unwrap();
+    // (`COSTS_UI`: another ui/ to compose, an earlier commit's; `COSTS_ONLY`:
+    // one variant.)
+    let from = std::env::var("COSTS_UI").map(PathBuf::from).unwrap_or_else(|_| ui());
+    let only = std::env::var("COSTS_ONLY").ok();
+    live::sync_zeron(&from, &t).unwrap();
     // Inset as uploaded, laid over today's default as the app lays it (its
     // shell/init.luau fails there on its missing scroll_probe and falls
     // back to the default's: left out).
@@ -1341,6 +1347,9 @@ fn costs_of_v2_inset_and_v3_measured() {
     std::fs::write(t.join("inset/zeron-template.json"), r#"{"id":"inset","name":"Inset"}"#).unwrap();
     let mut rows = Vec::new();
     for (label, id, panes) in [("v2", "zeron-v2", vec![1]), ("Inset", "inset", vec![1, 2, 4, 6]), ("v3", live::BUILTIN, vec![1, 2, 4, 6])] {
+        if only.as_deref().is_some_and(|o| o != label) {
+            continue;
+        }
         let at = root.join(format!("live-{label}"));
         let _ = std::fs::remove_dir_all(&at);
         let fixture = compose(&t, id);
@@ -1350,4 +1359,102 @@ fn costs_of_v2_inset_and_v3_measured() {
             eprintln!("COST {}", rows.last().unwrap());
         }
     }
+}
+
+// ── Dragging a column's edge ───────────────────────────────────────────────
+
+/// A text node's box: the first line of the tree under `scope` holding
+/// `words`.
+fn text_box(app: &mut TestApp, scope: &str, words: &str) -> Option<Rect> {
+    let node = app.target(&format!("{scope} >> ~\"{words}\"")).ok()?;
+    Some(app.ui.scene.borrow().bounds(node))
+}
+
+/// The sidebar's edge dragged `by` points, a move a frame, then let go:
+/// `watch` read after each frame of it.
+fn drag_sidebar<T>(app: &mut TestApp, by: f32, mut watch: impl FnMut(&mut TestApp) -> T) -> Vec<T> {
+    let edge = app.bounds("#shell-sidebar >> \"Resize sidebar\"");
+    let (x, y) = (edge.x + edge.width / 2., edge.y + edge.height / 2.);
+    let (button, m) = (PointerButton::Primary, Modifiers::default());
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, m);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, m);
+    let mut seen = Vec::new();
+    for step in 1..=20 {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x + by * step as f32 / 20., y }, m);
+        app.frame();
+        seen.push(watch(app));
+    }
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x: x + by, y, button }, m);
+    app.ui.input.forget_clicks();
+    seen
+}
+
+/// Dragging the sidebar's edge, what's in the page keeps one width: no
+/// transcript, composer or pane is laid out again at each move (each holds
+/// the width it had as the drag began, its card following the edge), and
+/// a frame's script (the sidebar's own, following its width) is the same
+/// whatever the panes; let go, each takes its own width once, the reading
+/// place where it stood.
+#[test]
+fn a_dragged_edge_lays_the_page_out_once_on_release_keeping_the_reading_place() {
+    let mut script = Vec::new();
+    for panes in [1usize, 4] {
+        const IDS: [&str; 4] = ["a1", "a2", "a3", "b1"];
+        let mut app = mount(&scratch(&format!("edge-{panes}")));
+        long_chats(&app, &IDS, None);
+        if panes > 1 {
+            use zgx_script::Value;
+            let kids: Vec<Value> = IDS[..panes].iter().map(|id| Value::record([("kind", Value::from("leaf")), ("id", Value::from(*id))])).collect();
+            let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))]);
+            app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(std::rc::Rc::from(vec![tree]))).unwrap();
+        }
+        open(&mut app, "Fix the build");
+        app.frames(30);
+        let scope = if panes > 1 { "#split-pane-a1" } else { "#chat-session" };
+        // Read from the middle of a1's conversation, settled there.
+        let list = format!("{scope} >> #transcript");
+        app.scroll(&list, -2500.);
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.frame();
+        }
+        // What's being read: the first text starting in view, as the
+        // transcript takes it.
+        let view = app.bounds(&list);
+        let node = app.target(&list).unwrap();
+        let opts = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: false };
+        let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, Some(node), &opts);
+        let reading = zgx_script::driver::tree_lines_text(&lines, hidden)
+            .lines()
+            .filter_map(|l| {
+                let id = l.split_whitespace().next()?.to_owned();
+                let (_, rest) = l.split_once("text \"")?;
+                let (words, at) = rest.split_once("\" ")?;
+                let y: f32 = at.split_whitespace().next()?.split(',').nth(1)?.parse().ok()?;
+                (y >= view.y && words.len() > 12).then_some((y, id))
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+            .map(|(_, id)| id)
+            .expect("text in view");
+        let before = app.bounds(&reading);
+        let calls = app.calls();
+        let widths = drag_sidebar(&mut app, 120., |app| app.bounds(&list).width.round() as i64);
+        let per_frame = (app.calls() - calls) / 20;
+        let distinct: std::collections::BTreeSet<i64> = widths.iter().copied().collect();
+        assert_eq!(distinct.len(), 1, "{panes} pane(s): the transcript held one width through the drag: {widths:?}");
+        script.push(per_frame);
+        // Let go: its own width, once.
+        let mut after = Vec::new();
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.frame();
+            after.push(app.bounds(&list).width.round() as i64);
+        }
+        let settled: std::collections::BTreeSet<i64> = after.iter().copied().collect();
+        assert_eq!(settled.len(), 1, "{panes} pane(s): laid out once on release: {after:?}");
+        assert_ne!(after[0], widths[0], "{panes} pane(s): and to its own width");
+        let now = app.bounds(&reading);
+        assert!((now.y - before.y).abs() <= 2., "{panes} pane(s): the reading place kept: {reading} from {} to {}", before.y, now.y);
+    }
+    assert!(script[1] as f64 <= script[0] as f64 * 1.1 + 4., "a frame of the drag's script, 1 pane then 4: {script:?}");
 }
