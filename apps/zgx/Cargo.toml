@@ -132,8 +132,12 @@ foreign-types = "0.5"
 # with Zig 0.16 (cached in ~/Library/Caches/zgx-ghostty).
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "7cd25fc145e81df496bb00359a579af92102566e", features = ["ghostty"] }
 
+# `webview2`: on Windows, the panel's browser tabs as WebView2 pages, in a
+# DirectComposition tree of the window's own. The runtime ships with Windows
+# 11 (and with Edge on Windows 10); without it, pages are placeholders.
 # A visual's thread CPU time (src/visuals.rs).
 [target.'cfg(windows)'.dependencies]
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "7cd25fc145e81df496bb00359a579af92102566e", features = ["webview2"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
