@@ -11,8 +11,8 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | What users see today |
 |---|---|
-| [host-top-layer](host-top-layer/ASK.md) | A template in preview (or a plugin) can paint a modal over Zeron's own Keep / Revert strip and the Linux/Windows menu bar. |
-| [host-guard](host-guard/ASK.md) | A template in preview can still use `ui.fetch`/`ui.socket`; every host action is guarded one by one. |
+| [host-top-layer](host-top-layer/ASK.md) | Landed (`View::top_layer`, e379b925, in the pin); not adopted, waiting on the user's call. A template in preview (or a plugin) can still paint a popover over Zeron's own Keep / Revert strip and the Linux/Windows menu bar. |
+| [host-guard](host-guard/ASK.md) | Landed (`ScriptHost::guard`, 1526e899, in the pin); not adopted, waiting on the user's call. A template in preview can still use `ui.fetch`; every host action is guarded one by one. |
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
 
