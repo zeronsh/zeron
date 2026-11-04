@@ -1757,13 +1757,15 @@ impl Bridge {
             value_json(&value)
         };
         let messages_wanted = self.items.borrow().iter().any(|i| i.status() == "on" && records::reads_messages(&i.permissions()));
-        let messages = if messages_wanted {
-            read("chat.messages")
-        } else {
-            value_json(&self.host.shared("chat.messages", Value::Nil).signal().with_untracked(Value::clone))
-        };
+        // (No plugin reading them: nothing is made of a whole transcript.)
+        let messages = if messages_wanted { read("chat.messages") } else { Json::Null };
+        // Only what records are made of: this runs each time the list moves, on the
+        // main thread, and an account's archive is no small thing.
+        let signal = self.host.shared("sessions", Value::Nil).signal();
+        let all = if track { signal.get() } else { signal.with_untracked(Value::clone) };
+        let part = |key: &str| all.field(key).map_or(Json::Null, value_json);
         records::Sources {
-            sessions: read("sessions"),
+            sessions: json!({ "here": part("here"), "chats": part("chats"), "projects": part("projects") }),
             messages,
             profile: read("plugins.profile"),
             hide_emails: read("plugins.hide_emails").as_bool().unwrap_or(false),
