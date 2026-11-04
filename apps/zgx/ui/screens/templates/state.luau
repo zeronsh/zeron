@@ -61,7 +61,8 @@ export type Template = {
 export type Scheme = { theme: { type: string?, extends: string?, tokens: any }?, palette: any? }
 export type Look = { stamp: string, light: Scheme?, dark: Scheme? }
 -- A package waiting for you to allow it.
-export type Pending = { pending: string, name: string, source: string?, files: number?, ignored: { string }? }
+-- (`here`: its window opened as it came, so it has no notice in the corner.)
+export type Pending = { pending: string, name: string, source: string?, files: number?, ignored: { string }?, here: boolean? }
 export type Now = { state: string, active: string?, dir: string?, list: { Template }?, pending: { Pending }? }
 
 M.now = ui.shared("templates", { state = "loading" } :: Now)
