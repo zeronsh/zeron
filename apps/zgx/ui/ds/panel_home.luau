@@ -806,23 +806,31 @@ function M.Lanes(props: LanesProps): Node
 			body = ui.column {
 				w_full = true,
 				gap = 0,
-				ui.list {
-				id = props.list,
-				data = items,
-				key = function(it: Item): string
-					return it.key
-				end,
-				row = row,
-				height = M.LANE_H,
-				heights = function(): { number }
-					return heights:get()
-				end,
-				w_full = true,
-				h = motion.tween(height, SLIDE),
-				-- (Never a scroll of its own: the home is the one that
-				-- scrolls, the wheel over these rows going on to it.)
-				scrollbar = false,
-				overscroll = "auto",
+				-- ("Show N more" and "Show less" ease it, what's under it
+				-- following.)
+				ui.div {
+					w_full = true,
+					overflow = "hidden",
+					h = motion.tween(height, SLIDE),
+					ui.list {
+						id = props.list,
+						data = items,
+						key = function(it: Item): string
+							return it.key
+						end,
+						row = row,
+						height = M.LANE_H,
+						heights = function(): { number }
+							return heights:get()
+						end,
+						w_full = true,
+						-- Never a scroll of its own: the home is the one that
+						-- scrolls (the wheel over these rows is its), and the list,
+						-- as tall as all its rows, builds only those the home and
+						-- the window show, as the home scrolls (hundreds of side
+						-- chats shown whole build a screenful).
+						virtualize = "ancestor",
+					},
 				},
 				ui.show(function(): boolean
 					return solo_state:get() ~= nil

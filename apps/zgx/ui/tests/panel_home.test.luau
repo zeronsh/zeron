@@ -362,7 +362,7 @@ test("the side chats and subagents lists open their lanes' tabs", function()
 	end)).to_be(true)
 end)
 
-test("hundreds of lanes: the first five and those needing you, then Show N more; shown whole, the home scrolls to the last", function()
+test("hundreds of lanes: the first five and those needing you, then Show N more; shown whole, the home scrolls to the last, building only the rows it shows", function()
 	local app = home()
 	app:command("many")
 	app:frames(30)
@@ -383,31 +383,60 @@ test("hundreds of lanes: the first five and those needing you, then Show N more;
 	expect(app:has('role:button "Open side chat Side chat 4"')).to_be(false)
 	expect(app:has('#panel-home-side-list-pager >> "Show 296 more"')).to_be(true)
 	-- (Finished and unseen, they'd all show as those needing you do: seen,
-	-- their first five.)
-	expect(built(app, 'button "Open subagent ') > 5).to_be(true)
+	-- their first five. How many show is how tall the list stands: this far
+	-- down the window, only those in view are built.)
+	local function subagents_shown(): number
+		local h = app:tree("#panel-home-subagent-list"):match("^%s*@%d+[^\n]- [%-%d.]+,[%-%d.]+ [%d.]+x([%d.]+)")
+		return (tonumber(h) :: number) / 32
+	end
+	expect(subagents_shown() > 5).to_be(true)
 	local seen = {}
 	for i = 2, 202 do
 		seen[`chat-1--sub--{i}`] = os.time()
 	end
 	app:set_state("screens/panel/lanes_seen.luau::panel_lanes_seen", seen)
 	app:frames(30)
-	expect(built(app, 'button "Open subagent ')).to_be(5)
+	expect(subagents_shown()).to_be(5)
 	expect(app:has('#panel-home-subagent-list-pager >> "Show 197 more"')).to_be(true)
 	-- Shown whole: every row of the group, the list as tall as they are,
 	-- and the home is what scrolls to reach the last of them (no list
-	-- scrolls inside the panel). (Only the rows in the home's view will be
-	-- built once zgx's ui.list builds against its scrolling ancestor:
-	-- zgx-asks/list-ancestor-viewport.)
+	-- scrolls inside the panel); the list builds only the rows the home
+	-- and the window show (zgx's `virtualize = "ancestor"`), all the way
+	-- down.
 	app:scroll("#panel-empty", 1200)
 	app:frames(5)
+	-- (It eases open, what's under it following.)
+	local function pager_y(): number
+		return tonumber(app:tree("#panel-home-side-list-pager"):match(",([%-%d.]+) [%d.]+x")) :: number
+	end
+	local from = pager_y()
 	app:click("#panel-home-side-list-pager")
+	app:frames(4)
+	local moving = pager_y()
 	app:frames(30)
+	expect(moving > from and moving < pager_y()).to_be(true)
 	expect(app:has('#panel-home-side-list-pager >> "Show less"')).to_be(true)
+	-- (What the home's view holds, in rows of 32, and the two the list
+	-- builds beyond each edge.)
+	local view = app:tree("#panel-empty"):match("^%s*@%d+[^\n]- [%-%d.]+,[%-%d.]+ [%d.]+x([%d.]+)")
+	local fits = math.ceil((tonumber(view) :: number) / 32) + 4
+	expect(built(app, 'button "Open side chat ') <= fits).to_be(true)
+	-- Folded and opened again where it stands: the rows it shows are
+	-- built, as the fold eases open (no scroll needed to bring them).
+	app:click("#panel-home-side-head")
+	app:frames(30)
+	app:click("#panel-home-side-head")
+	app:frames(30)
+	local shown = built(app, 'button "Open side chat ')
+	expect(shown > 0 and shown <= fits).to_be(true)
 	-- (Down the home to its end, where the last rows stand.)
+	local most = 0
 	for _ = 1, 40 do
 		app:scroll("#panel-empty", 600)
 		app:frames(2)
+		most = math.max(most, built(app, 'button "Open side chat '))
 	end
+	expect(most > 0 and most <= fits).to_be(true)
 	expect(app:has('role:button "Open side chat Side chat 300"')).to_be(true)
 	app:click('role:button "Open side chat Side chat 300"')
 	expect(eventually(app, function(): boolean
@@ -849,6 +878,13 @@ test("the wheel over a part's rows scrolls the home while the part has nothing t
 		-- middle, so the home can scroll on both ways.)
 		app:scroll("#panel-empty", -3000)
 		app:frames(10)
+		-- (A row past the home's view isn't built yet: down to it.)
+		local steps = 0
+		while not app:has(over) and steps < 40 do
+			app:scroll("#panel-empty", 150)
+			app:frames(3)
+			steps += 1
+		end
 		app:wait('"never shown, only waited past"', { timeout_ms = 700 })
 		local at = y_of(app, over) :: number
 		if at > 380 then
