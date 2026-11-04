@@ -28,8 +28,11 @@
 //! so nothing here comes from the scripts: the toasts are on the host's top
 //! layer (zgx's `View::top_layer`), over whatever a script opens in the window
 //! and live under its modals, so nothing there covers them or takes their
-//! clicks. (A popover in a window of its own is over the whole window, this
-//! layer too, until zgx's `PopupsInWindow`.) their colours, type and glyphs are fixed here, never the
+//! clicks. While a preview shows, what the scripts open stays in the window
+//! (`PopupsInWindow`), since a popover in a window of its own would be over
+//! this layer too. (zgx provides that around a plugin's nodes itself, following
+//! decision controls, so a plugin's own popup in its own window is still over
+//! these.) their colours, type and glyphs are fixed here, never the
 //! theme's tokens (a template sets those), only following whether the
 //! theme is light or dark; and their buttons run host commands.
 
@@ -135,6 +138,9 @@ thread_local! {
     static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Whether Zeron shows Chinese now, as the toasts last read it.
     static CHINESE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether a preview shows: the scripts' popups stay in the window then,
+    /// under the toasts (`compose`).
+    static POPUPS_HELD: RefCell<Option<zgx::reactive::Signal<bool>>> = const { RefCell::new(None) };
 }
 
 /// A notice as shown, with its id.
@@ -212,7 +218,14 @@ pub fn links_need_keeping() {
 /// chrome leaves (the scripts' root, `#shell`, sizes itself to it). (The
 /// toasts in it are a layer over the window and take no room.)
 pub fn compose(chrome: View, scripts: View) -> View {
-    column().w_full().h_full().child(chrome).child(scripts.grow().min_h(0.))
+    let scripts = scripts.grow().min_h(0.);
+    // A popup in a window of its own is over this one, the toasts too: while
+    // a preview shows, what the scripts open stays in the window.
+    let scripts = match POPUPS_HELD.with(|h| h.borrow().clone()) {
+        Some(held) => zgx::compose::provide(zgx::compose::PopupsInWindow(held), scripts),
+        None => scripts,
+    };
+    column().w_full().h_full().child(chrome).child(scripts)
 }
 
 // ── Look ────────────────────────────────────────────────────────────────────
@@ -425,9 +438,12 @@ fn pill(title: &str, ink: Ink, open: impl FnMut() + 'static) -> View {
 fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_script::Value>) -> View {
     let now = runtime.signal(preview::current());
     let minimised = runtime.signal(false);
+    let popups_held = runtime.signal(now.with_untracked(Option::is_some));
+    POPUPS_HELD.with(|h| *h.borrow_mut() = Some(popups_held.clone()));
     {
         let (now, minimised) = (now.clone(), minimised.clone());
         preview::on_change(move |p| {
+            popups_held.set(p.is_some());
             // Another template in preview: shown open again.
             if now.with_untracked(|was| was.as_ref().map(|w| &w.id) != p.map(|p| &p.id)) {
                 minimised.set(false);
@@ -688,9 +704,10 @@ mod tests {
         }
     }
 
-    /// A preview asked for a link: one toast, however often.
+    /// A preview asked for a link: one toast, however often, in the language
+    /// shown; and while it shows, popups stay in the window.
     #[test]
-    fn a_link_in_a_preview_says_to_keep_it() {
+    fn a_link_in_a_preview_says_to_keep_it_and_popups_stay_in_the_window() {
         preview::set(Some(sleek()));
         let mut app = mount();
         app.frames(4);
@@ -699,7 +716,11 @@ mod tests {
         app.frames(6);
         let texts = host_texts(&mut app);
         assert_eq!(texts.matches("Keep this template to open links").count(), 1, "{texts}");
+        let held = POPUPS_HELD.with(|h| h.borrow().clone()).expect("the toasts hold it");
+        assert!(held.get(), "popups stay in the window during a preview");
         preview::set(None);
+        app.frames(4);
+        assert!(!held.get(), "and go where they like once it's over");
     }
 
     /// Its line follows the language Zeron shows; the rest of the host's
