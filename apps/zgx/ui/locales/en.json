@@ -1721,7 +1721,8 @@
         "label": "Get beta updates",
         "terms": "beta early test channel stable preview next",
         "on": "You're getting beta updates. Turn this off to go back to Stable.",
-        "off": "Try the next Zeron early. Needs macOS {version} or later."
+        "off": "Try the next Zeron early. Needs macOS {version} or later.",
+        "off_any": "Try the next Zeron early."
       },
       "updates_self_description": "Zeron updates itself: a new version downloads in the background and installs when you restart.",
       "version_info": {

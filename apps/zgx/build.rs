@@ -26,6 +26,15 @@ fn main() {
         .unwrap_or_else(|| version.clone());
     println!("cargo:rustc-env=ZERON_VERSION={version}");
     println!("cargo:rustc-env=ZERON_APP_VERSION={app}");
+    // The Windows beta is the Zeron app: its icon, as apps/zeron/build.rs embeds it.
+    #[cfg(windows)]
+    if std::env::var_os("CARGO_FEATURE_BETA").is_some() {
+        println!("cargo:rerun-if-changed=../../dist/windows/zeron.rc");
+        println!("cargo:rerun-if-changed=../../dist/windows/zeron.ico");
+        embed_resource::compile_for("../../dist/windows/zeron.rc", &["zeron-zgx"], embed_resource::NONE)
+            .manifest_required()
+            .expect("Windows app icon resource compilation failed");
+    }
 }
 
 /// `version = "…"` under `[workspace.package]`.

@@ -1721,7 +1721,8 @@
         "label": "获取测试版更新",
         "terms": "测试版 抢先 渠道 稳定版 beta stable",
         "on": "正在获取测试版更新。关闭即可回到稳定版。",
-        "off": "抢先试用下一版 Zeron。需要 macOS {version} 或更高版本。"
+        "off": "抢先试用下一版 Zeron。需要 macOS {version} 或更高版本。",
+        "off_any": "抢先试用下一版 Zeron。"
       },
       "updates_self_description": "Zeron 会自动更新：新版本在后台下载，重新启动时安装。",
       "version_info": {

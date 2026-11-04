@@ -140,6 +140,10 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "7cd25fc145e81df49
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "7cd25fc145e81df496bb00359a579af92102566e", features = ["webview2"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
+# The Windows beta's icon (build.rs), as apps/zeron embeds it.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.11"
+
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
 [patch.crates-io]

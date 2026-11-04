@@ -125,11 +125,11 @@ impl Desktop {
         let data_dir = engine::data_dir()?;
         zeron_update::set_app_version(APP_VERSION);
         zeron_update::channel::set_data_dir(&data_dir);
-        // A beta's first launch puts this Mac on the beta channel (once per
+        // A beta's first launch puts this install on the beta channel (once per
         // build: a later choice of Stable in it sticks).
         if zeron_update::Channel::of_version(APP_VERSION) == Channel::Beta {
             match zeron_update::channel::claim_for_beta_build(&data_dir, APP_VERSION) {
-                Ok(true) => eprintln!("zeron-zgx: updates: this Mac now gets beta updates"),
+                Ok(true) => eprintln!("zeron-zgx: updates: this install now gets beta updates"),
                 Ok(false) => {}
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
             }
@@ -256,9 +256,12 @@ impl Desktop {
         let status = status.as_ref();
         let channel = zeron_update::channel::read(&self.data_dir).channel;
         fields.push(("self_updating", Value::Bool(self.self_updating())));
-        fields.push(("channels", Value::Bool(matches!(self.install, InstallKind::MacApp { .. }))));
+        fields.push(("channels", Value::Bool(self.install.follows_channels())));
         fields.push(("channel", Value::from(channel.as_str())));
-        fields.push(("beta_minimum", Value::from(zeron_update::channel::BETA_MINIMUM_MACOS)));
+        // (The floor is macOS's alone.)
+        if matches!(self.install, InstallKind::MacApp { .. }) {
+            fields.push(("beta_minimum", Value::from(zeron_update::channel::BETA_MINIMUM_MACOS)));
+        }
         if let Some(note) = self.note.borrow().as_deref() {
             fields.push(("channel_note", Value::from(note)));
         }
