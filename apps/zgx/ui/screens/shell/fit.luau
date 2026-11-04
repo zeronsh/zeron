@@ -19,7 +19,14 @@
 -- the others hiding for it, instead of closing it. Before the sidebar
 -- hides, it narrows to what's left (`sidebar_limit`).
 --
+-- A split's panes want their least (`page_floor`). Opening one side when they
+-- wouldn't have it with both open closes the other, which stays closed until
+-- it's asked for. With one side open and still too little, the panes narrow:
+-- nothing else gives way for them but the panel's width, down to its least,
+-- and its docked tree, floating.
+--
 --   fit.current:get()     { sidebar, right, files, sidebar_limit }, now
+--   fit.page_floor:get()  what the page wants beside the columns
 --   fit.toggle_sidebar()  fit.toggle_panel()
 --   fit.panels(viewport, sidebar_width, sidebar, right, files, expanded)
 --                         the policy alone, each column { open, opened_at }
@@ -36,6 +43,8 @@ M.FILES_PANEL_MIN, M.FILES_PANEL_DEFAULT, M.FILES_PANEL_MAX = policy.FILES_PANEL
 M.RIGHT_PANE_MIN, M.RIGHT_PANE_DEFAULT = policy.RIGHT_PANE_MIN, policy.RIGHT_PANE_DEFAULT
 M.CHAT_PANEL_MIN = policy.CHAT_PANEL_MIN
 M.panels = policy.panels
+M.floor_of = policy.page_floor
+M.panel_room = policy.panel_room
 M.content_split = policy.content_split
 M.right_pane_max_width = policy.right_pane_max_width
 M.right_pane_takeover_width = policy.right_pane_takeover_width
@@ -100,6 +109,17 @@ function M.sidebar_width(read: () -> number)
 	preferred = read
 	registered:set(registered:peek() + 1)
 end
+-- What the page wants beside the columns: said by the page that lays it out
+-- (a template's without a split says nothing: one chat's least).
+local page_floor_of: (() -> number)? = nil
+function M.page_holds(read: () -> number)
+	page_floor_of = read
+	registered:set(registered:peek() + 1)
+end
+M.page_floor = ui.computed(function(): number
+	registered:get()
+	return if page_floor_of then page_floor_of() else M.CHAT_PANEL_MIN
+end)
 -- The fit now. (Nothing hides before the window's width is known.)
 M.current = ui.computed(function(): Fit
 	local vw = M.viewport:get()
@@ -116,6 +136,11 @@ M.current = ui.computed(function(): Fit
 	local open_tree = on_session and view.files:get()
 	if vw <= 0 then
 		return { sidebar = open_sidebar, right = open_panel, files = false, sidebar_limit = width }
+	end
+	-- (A split's panes keep their least before its tree docks: it floats.)
+	local floor = M.page_floor:get()
+	if floor > M.CHAT_PANEL_MIN and not policy.panes_fit(vw, floor, if open_sidebar then width else 0, M.RIGHT_PANE_MIN + M.TREE) then
+		open_tree = false
 	end
 	return M.panels(
 		vw,
@@ -141,13 +166,11 @@ function M.files_part(f: Fit): number
 end
 function M.panel_share(f: Fit, viewport: number, sidebar: number): number
 	local files = M.files_part(f)
-	return files + M.content_split(math.max(viewport - sidebar - files, 0))
+	return files + M.content_split(math.max(viewport - sidebar - files, 0), M.page_floor:peek())
 end
--- The widest the panel may be (dragged, or kept from before): the chat
--- keeps its least beside it.
+-- The widest the panel may be (dragged, or kept from before).
 function M.panel_max(f: Fit, viewport: number, sidebar: number): number
-	local files = M.files_part(f)
-	return files + M.right_pane_max_width(viewport - files, sidebar, M.CHAT_PANEL_MIN)
+	return M.files_part(f) + M.panel_room(viewport, sidebar, M.files_part(f), M.page_floor:peek())
 end
 
 -- The width the sidebar lays out at: its limit while it shows; while it
@@ -190,22 +213,54 @@ local function promote(column: "sidebar" | "right"): boolean
 	return false
 end
 
+-- `opened` just opened, in a split: the other side closes if the panes
+-- wouldn't have their least with both open. (A chat alone goes by the fit;
+-- an expanded panel stands over the panes.)
+local function other_gives_way(opened: "sidebar" | "right")
+	local floor = M.page_floor:peek()
+	if floor <= M.CHAT_PANEL_MIN or view.collapsed:peek() or not view.files:peek() or view.expanded:peek() then
+		return
+	end
+	local sidebar = if preferred then preferred() else M.SIDEBAR_DEFAULT
+	if policy.panes_fit(M.viewport:peek(), floor, sidebar, M.RIGHT_PANE_MIN) then
+		return
+	end
+	if opened == "right" then
+		view.collapsed:set(true)
+	else
+		view.set_files(false)
+	end
+end
+
+-- The panel opened by anything (`view.set_files`): shown if it was hidden for
+-- room, and the other side giving way. (`was_open`, showing: nothing's opened.)
+function M.panel_opened(was_open: boolean)
+	if M.page_floor:peek() <= M.CHAT_PANEL_MIN or (was_open and M.current:peek().right) then
+		return
+	end
+	promote("right")
+	other_gives_way("right")
+end
+
 -- The sidebar's toggle (the title bar's, ⌘B): hidden for room, brought
 -- back; else folded or opened, opening it ranked newest.
 function M.toggle_sidebar()
 	if not view.collapsed:peek() and promote("sidebar") then
+		other_gives_way("sidebar")
 		return
 	end
 	local open = view.collapsed:peek()
 	view.collapsed:set(not open)
 	if open then
 		M.record("sidebar")
+		other_gives_way("sidebar")
 	end
 end
 
 -- The session's panel's toggle (the title bar's Panel, ⌘R): the same.
 function M.toggle_panel()
 	if view.files:peek() and promote("right") then
+		other_gives_way("right")
 		return
 	end
 	local open = not view.files:peek()
