@@ -411,11 +411,9 @@ local BAND_H = 38 - INSET_GAP
 -- (Its tabs centred under the pad: Zeron's 4, less what the card is set
 -- down by.)
 local BAND_PAD_PT = math.max(0, 4 - INSET_GAP)
-local BAND_PAD = ui.raw(BAND_PAD_PT, "level with the title bar's controls, the card set in from the top")
 -- (The card's hairline: a strip starts under it, so its middle is raised by
 -- as much to stay on the title bar's line.)
 local CARD_EDGE = 1
-local BAND_LEVEL = ui.raw(CARD_EDGE * 2, "level with the title bar's line, the strip starting under the card's edge")
 -- (Its tabs as far in from its card's left and right as from its top: the
 -- band's room over a tab, which its tabs centre in.)
 local STRIP_EDGE = BAND_PAD_PT + (BAND_H - BAND_PAD_PT - CARD_EDGE * 2 - 26) / 2
@@ -428,6 +426,30 @@ local STRIP_START = ui.raw(STRIP_EDGE, "a strip's tabs as far in from the card's
 -- the card's edge); a group's, the inset and the edge, inside its own card.)
 local TOGGLE_ROOM = 34 - INSET_GAP + CARD_EDGE + ds.island.metrics().group
 local GROUP_TOGGLE_ROOM = TOGGLE_ROOM - CARD_EDGE * 2
+-- The band's room above and below its tabs (centred in what's left), so
+-- they stand on the title bar's line (`ds.TitleBar.middle`, from the
+-- window's top; the card is set INSET_GAP down, and a strip starts under
+-- its edge): under BAND_PAD_PT with the card's edge twice at the foot where
+-- the bar's line is Zeron's own, more room at the foot where the window's
+-- buttons draw it higher (Windows' caption buttons).
+local function band_line(): number
+	return ds.TitleBar.middle() - INSET_GAP - CARD_EDGE
+end
+local function band_pt(): any
+	local line = band_line()
+	return ui.raw(math.max(BAND_PAD_PT, line * 2 - BAND_H), "the title bar's line")
+end
+local function band_pb(): any
+	local line = band_line()
+	return ui.raw(math.max(0, BAND_H - line * 2), "the title bar's line, the strip starting under the card's edge")
+end
+-- What a strip's end keeps for the title bar's panel toggle over it (the
+-- panel's, `room`, or a group's), and past it the window's own buttons and
+-- the divider where they stand at the right (the rooms count the bar's row
+-- padding, 10, which `actions_right` gives as it is).
+local function toggle_room(room: number?): number
+	return (room or TOGGLE_ROOM) - 10 + ds.TitleBar.actions_right()
+end
 local STRIP_FADE = 36
 local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 -- The title bar's controls' size (the Expand button stands with them).
@@ -640,8 +662,6 @@ end
 -- decides by its own width.
 export type Props = { project: any?, session: any?, page: any?, left: (() -> number)?, hold: (() -> number)?, on_last_closed: (() -> ())?, docked: (() -> boolean)?, [any]: any }
 
--- Where the title bar's controls end, from the window's left (ds/title_bar).
-local CONTROLS_END = ds.TitleBar.controls_end()
 local STRIP_START_PT = STRIP_EDGE
 
 M.Panel = ui.component(function(props: Props): Node
@@ -1129,7 +1149,9 @@ M.Panel = ui.component(function(props: Props): Node
 		w_full = true,
 		h = BAND_H,
 		shrink = 0,
-		pt = BAND_PAD,
+		-- (Its tabs on the title bar's line.)
+		pt = band_pt,
+		pb = band_pb,
 		-- (Clear of the title bar's controls when they stand over it; its
 		-- own start otherwise. It follows the edge as it moves, so expanding
 		-- and back glide with it.)
@@ -1138,14 +1160,13 @@ M.Panel = ui.component(function(props: Props): Node
 		pl = if left_of
 			then function(): number
 				local left = left_of() + (if hold then hold() else 0)
-				return ui.raw(math.max(STRIP_START_PT, CONTROLS_END - left), "clear of the title bar's controls, as its edge moves")
+				return ui.raw(math.max(STRIP_START_PT, ds.TitleBar.controls_end() - left), "clear of the title bar's controls, as its edge moves")
 			end
 			else STRIP_START,
 		-- (And the window's own buttons, where they stand at the right.)
 		pr = function(): number
-			return ui.raw(TOGGLE_ROOM + ds.TitleBar.window_buttons_right(), "the title bar's panel toggle, and the window's buttons, stand over the strip's end")
+			return ui.raw(toggle_room(), "the title bar's panel toggle, and the window's buttons, stand over the strip's end")
 		end,
-		pb = BAND_LEVEL,
 		items = "center",
 		window_drag = true,
 		-- (No hairline under it: the strip and what's under it are one
@@ -1804,16 +1825,16 @@ M.Panel = ui.component(function(props: Props): Node
 			w_full = true,
 			h = BAND_H,
 			shrink = 0,
-			pt = BAND_PAD,
-			pb = BAND_LEVEL,
+			pt = band_pt,
+			pb = band_pb,
 			pl = function(): number
 				if top_left() and left_of then
-					return ui.raw(math.max(STRIP_START_PT, CONTROLS_END - left_of()), "clear of the title bar's controls")
+					return ui.raw(math.max(STRIP_START_PT, ds.TitleBar.controls_end() - left_of()), "clear of the title bar's controls")
 				end
 				return ui.raw(STRIP_START_PT, "the strip's start")
 			end,
 			pr = function(): number
-				return ui.raw(if top_right() then GROUP_TOGGLE_ROOM + ds.TitleBar.window_buttons_right() else STRIP_EDGE, "the title bar's panel toggle over the top right group's end, else as far in as from its top")
+				return ui.raw(if top_right() then toggle_room(GROUP_TOGGLE_ROOM) else STRIP_EDGE, "the title bar's panel toggle over the top right group's end, else as far in as from its top")
 			end,
 			items = "center",
 			window_drag = true,

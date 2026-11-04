@@ -16,6 +16,8 @@
 --   split.focused:get()     the focused chat (the route's session), or nil
 --   split.frames:get()      each chat's box in the page ({ [id]: Box }),
 --                           as edges that don't depend on the page's size
+--   split.across:get()      how many panes wide the page must be for the
+--                           narrowest to have its least (1 for none)
 --   split.place(props, box) a node placed at `box()` by its insets
 --   split.can_take(id)      whether a drop of `id` can join what shows
 --   split.drop(id, target, side, focus)  `id` put at `target`'s side
@@ -277,6 +279,20 @@ function M.top_right(box: Box): boolean
 	return box.top.p == 0 and box.top.q == 0 and box.right.p == 1 and box.right.q == 0
 end
 
+-- How many panes wide the page must be for the narrowest of them to have
+-- one pane's width: a row's parts share its width equally, each needing the
+-- widest any of them needs; a column's are each as wide as it.
+local function across_of(node: Node?): number
+	if not node or node.kind == "leaf" then
+		return 1
+	end
+	local most = 1
+	for _, c in node.children or {} do
+		most = math.max(most, across_of(c))
+	end
+	return if node.kind == "row" then most * #(node.children or {}) else most
+end
+
 -- The tree's own workings, for any split of things (the panel's tabs too:
 -- screens/panel), and its boxes.
 M.tree = { leaf = leaf, leaves = leaves, normalize = normalize, without = without, insert = insert, frames = frames_of, steady = steady }
@@ -341,6 +357,10 @@ end)
 
 M.frames = ui.computed(function(): { [string]: Box }
 	return frames_of(M.shown:get(), M.GAP)
+end)
+
+M.across = ui.computed(function(): number
+	return across_of(M.shown:get())
 end)
 
 ui.effect(function()

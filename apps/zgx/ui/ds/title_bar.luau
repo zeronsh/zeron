@@ -57,10 +57,11 @@ local MIDDLE = (H + TOP_PAD) / 2
 -- macOS's buttons, as macOS 26 draws them (measured off Zeron's window): 14
 -- across, 23 apart, the first centred 21 in, so 21, 44 and 67.
 local LIGHT, LIGHT_FIRST, LIGHT_PITCH = 14, 21, 23
--- The toggle: 88 in (Zeron's `titlebar_cluster_start`). The controls, their
--- gaps and the island round them are the theme's island (`zeron.island`),
--- read as the bar is built; its row runs 10 past its last control (Zeron's
--- `TITLEBAR_CLUSTER_PAD`).
+-- The toggle: 88 in beside the traffic lights (Zeron's
+-- `titlebar_cluster_start`), 10 in with nothing at the left (the shipping
+-- app's elsewhere). The controls, their gaps and the island round them are
+-- the theme's island (`zeron.island`), read as the bar is built; its row
+-- runs 10 past its last control (Zeron's `TITLEBAR_CLUSTER_PAD`).
 local TOGGLE_IN, ROW_PAD = 88, 10
 -- On macOS the toggle stands this far past the traffic lights' right edge
 -- (`ui.window.controls`: 12 in and 60 across in zgx's inset title bar, so
@@ -107,12 +108,37 @@ local function full_screen(): boolean
 	return read(window_state("full_screen"), true) == true
 end
 
+-- The window's own buttons as the window reports them, and the side they
+-- stand at: the left (macOS's traffic lights; on Linux a `close:…` layout)
+-- or the right (Windows' caption buttons; GNOME's `appmenu:close`). Nil
+-- where none are reported: in full screen, in a plugin (which reads no
+-- `ui.window.controls`) and headless. Read tracked unless `tracked` is
+-- false.
+type Side = "left" | "right"
+local function window_buttons(tracked: boolean?): (Side?, any)
+	local area = read(window_state("titlebar_area"), tracked ~= false)
+	local buttons = read(window_state("controls"), tracked ~= false)
+	if not area or not buttons then
+		return nil, nil
+	end
+	return if buttons.x >= area.x + area.width then "right" else "left", buttons
+end
+
 -- Where the toggle stands from the window's left, in full screen (`full`)
--- or out of it: past the traffic lights, or at the edge once they're hidden.
--- (Leaving full screen, the lights aren't reported again until the
--- system's animation ends: 88 meanwhile, where they put it.)
+-- or out of it. On macOS: past the traffic lights, or at the edge once
+-- they're hidden. (Leaving full screen, the lights aren't reported again
+-- until the system's animation ends: 88 meanwhile, where they put it.)
+-- Elsewhere, by where the window's buttons stand: 10 in with them at the
+-- right (the shipping app's), past them at the left (never nearer than
+-- the lights' 88), 88 with none reported.
 local function toggle_in(full: boolean, tracked: boolean?): number
 	if not on_macos() then
+		local side, buttons = window_buttons(tracked)
+		if side == "right" then
+			return ROW_PAD
+		elseif side == "left" then
+			return math.max(TOGGLE_IN, buttons.x + buttons.width)
+		end
 		return TOGGLE_IN
 	end
 	if full then
@@ -122,10 +148,14 @@ local function toggle_in(full: boolean, tracked: boolean?): number
 	return if lights then lights.x + lights.width + LIGHTS_GAP else TOGGLE_IN
 end
 
--- The row's controls' width, past the toggle's start, to the row's end.
-local function controls_w(): number
+-- The row's controls' width, past the toggle's start (`start`), to the
+-- row's end: ROW_PAD past its last control; alone at the window's left
+-- (off macOS, the window's buttons at the right), its island holds it
+-- evenly, as far past its end as before its start.
+local function controls_w(start: number): number
 	local m = island.metrics()
-	return m.control + m.group + m.control + m.gap + m.control + ROW_PAD
+	local tail = if not on_macos() and start == ROW_PAD then ROW_PAD - m.inset else ROW_PAD
+	return m.control + m.group + m.control + m.gap + m.control + tail
 end
 
 -- Whether the window is in full screen, untracked (a value to start from).
@@ -200,23 +230,58 @@ local function follow(target: any, at: { [string]: (full: boolean) -> number }, 
 	end)
 end
 
--- How far in from the window's right edge the window's own buttons reach:
--- Windows' caption buttons, and on Linux the buttons zgx draws where the
--- desktop's `button-layout` asks (GNOME's `appmenu:close`, close at the
--- right). 0 where they stand at the left (macOS's traffic lights, which
--- TOGGLE_IN already clears), are not reported, or there are none. A plugin
--- reads no `ui.window.controls`: 0.
+-- How far in from the window's right edge the window's own buttons reach;
+-- 0 where they stand at the left, or none are reported.
 local function window_buttons_right(): number
-	local window = ui.window :: any
-	local area_state, controls_state = window.titlebar_area, window.controls
-	if area_state == nil or controls_state == nil then
-		return 0
+	local side, buttons = window_buttons()
+	return if side == "right" then buttons.width else 0
+end
+
+-- Windows' caption glyph (zgx's: a 10-point square in each button) and how
+-- much of a control's box its glyph inks (the island's 16-point glyphs, the
+-- panel toggle's frame among them, are 12 across): what the page's controls
+-- are spaced from the window's buttons by.
+local CAPTION_GLYPH, CONTROL_INK = 10, 12
+
+-- How far in from the window's right edge the page's controls (the bar's
+-- `actions`) end: their row's padding; beside the window's own buttons at
+-- the right, past them by one rhythm, measured by ink: from the last
+-- control's glyph to Minimize's as far as from one caption glyph to the
+-- next (a button's width less its glyph), so the two read as one group.
+local function actions_right(): number
+	local side, buttons = window_buttons()
+	-- (Linux's buttons, circles in a strip the bar's height or more, keep
+	-- the row's padding before them.)
+	if side == "right" and buttons.height >= H then
+		return buttons.width + ROW_PAD
 	end
-	local area, buttons = area_state:get(), controls_state:get()
-	if area and buttons and buttons.x >= area.x + area.width then
-		return buttons.width
+	if side == "right" then
+		-- (Three buttons: the main window's, which has the page's controls.)
+		local pitch = buttons.width / 3
+		local ink_gap = pitch - CAPTION_GLYPH
+		-- Minimize's glyph starts half its button's spare room in; the
+		-- last control's ink ends half its own spare room in from its box.
+		local into_caption = (pitch - CAPTION_GLYPH) / 2
+		local into_control = (island.metrics().control - CONTROL_INK) / 2
+		return buttons.width + ink_gap - into_caption - into_control
 	end
-	return 0
+	return ROW_PAD
+end
+
+-- The title line's middle, from the window's top: where everything on the
+-- bar centres. 21, as beside the traffic lights; where the window's buttons
+-- stand at the right in a strip shorter than the bar (Windows' 32-point
+-- caption buttons), on their middle, so Zeron's controls and theirs share
+-- one line; never nearer the window's top than an island's middle, its
+-- controls held their padding in from the edge (zgx reports the buttons
+-- shorter in a zoomed window than it draws them: zgx-asks/
+-- windows-caption-buttons). Read tracked unless `tracked` is false.
+local function middle(tracked: boolean?): number
+	local side, buttons = window_buttons(tracked)
+	if side == "right" and buttons.height < H then
+		return math.max(buttons.y + buttons.height / 2, island.thickness() / 2)
+	end
+	return MIDDLE
 end
 
 -- A bar control: the design system's icon button at the island's size,
@@ -253,7 +318,8 @@ local TitleBar = ui.component(function(props: Props): Node
 	-- comes (Zeron's 28 to 32). Its end follows the row (full screen).
 	local ISLAND_LEFT = m.inset
 	local function island_w(full: boolean, tracked: boolean?): number
-		return toggle_in(full, tracked) + controls_w() - ISLAND_LEFT
+		local start = toggle_in(full, tracked)
+		return start + controls_w(start) - ISLAND_LEFT
 	end
 	local ISLAND_TO = island.thickness()
 	local ISLAND_FROM = ISLAND_TO - m.pad
@@ -309,7 +375,7 @@ local TitleBar = ui.component(function(props: Props): Node
 		-- (Kept by `follow` below, from here.)
 		w = island_w(full_screen_now(), false),
 		top = motion.tween(ui.computed(function(): number
-			return MIDDLE - (if shown() then ISLAND_TO else ISLAND_FROM) / 2
+			return middle() - (if shown() then ISLAND_TO else ISLAND_FROM) / 2
 		end), motion.sidebar),
 		h = island_h,
 		opacity = ui.tween(here, { duration = 220, ease = "out(3)" }),
@@ -327,6 +393,10 @@ local TitleBar = ui.component(function(props: Props): Node
 		left = function(full: boolean): number
 			return toggle_in(full)
 		end,
+		-- (On the bar's line: the window's buttons' where they set it.)
+		top = function(): number
+			return middle() - CONTROL / 2
+		end,
 	})
 	follow(island_ref, {
 		w = function(full: boolean): number
@@ -340,7 +410,7 @@ local TitleBar = ui.component(function(props: Props): Node
 			absolute = true,
 			-- (Kept by `follow` above, from here.)
 			left = toggle_in(full_screen_now(), false),
-			top = MIDDLE - CONTROL / 2,
+			top = middle(false) - CONTROL / 2,
 			items = "center",
 			pointer_events = "auto",
 			-- (Between its controls, the bar is still the window's to move:
@@ -385,28 +455,56 @@ local TitleBar = ui.component(function(props: Props): Node
 		local function holds(): boolean
 			return row_w() > 1
 		end
+		-- The window's own buttons where they stand at the right (Windows'
+		-- caption buttons): over artwork they need the glass too, thin glyphs
+		-- on a picture, so the island takes them in, hanging from the
+		-- window's corner as their strip does (flush with its top and its
+		-- edge, the window's own corner rounding it there), its inner foot
+		-- rounded; and shows whether the row holds anything or not.
+		local function caption(): any
+			local at, buttons = window_buttons()
+			return if at == "right" then buttons else nil
+		end
 		local on_art = ui.computed(function(): number
-			return if props.actions_island and props.actions_island() and holds() then 1 else 0
+			return if props.actions_island and props.actions_island() and (holds() or caption() ~= nil) then 1 else 0
 		end)
 		local side = ROW_PAD - m.inset
+		local function hung(): any
+			return if caption() ~= nil then 0 else "$zeron.island.radius"
+		end
 		local actions_island: ContainerProps = {
 			id = "titlebar-actions-island",
 			absolute = true,
 			right = function(): number
-				return m.inset + window_buttons_right()
+				return if caption() ~= nil then 0 else m.inset
 			end,
 			w = function(): number
+				if caption() ~= nil then
+					return if holds() then actions_right() + row_w() + side else caption().width
+				end
 				return row_w() + side * 2
 			end,
 			top = motion.tween(ui.computed(function(): number
-				return MIDDLE - (if on_art:get() == 1 then ISLAND_TO else ISLAND_FROM) / 2
+				local buttons = caption()
+				if buttons then
+					return buttons.y
+				end
+				return middle() - (if on_art:get() == 1 then ISLAND_TO else ISLAND_FROM) / 2
 			end), { duration = 260, ease = "out(3)" }),
 			h = motion.tween(ui.computed(function(): number
+				local buttons = caption()
+				if buttons then
+					return buttons.height
+				end
 				return if on_art:get() == 1 then ISLAND_TO else ISLAND_FROM
 			end), { duration = 260, ease = "out(3)" }),
 			opacity = ui.tween(on_art, { duration = 220, ease = "out(3)" }),
 		}
 		island.glass(actions_island)
+		actions_island.rounded_tl = hung
+		actions_island.rounded_tr = hung
+		actions_island.rounded_br = hung
+		actions_island.rounded_bl = "$zeron.island.radius"
 		table.insert(bar, ui.div(actions_island))
 		-- The page's controls, as far in from the right as the row runs past
 		-- its last control at the left, and clear of the window's own
@@ -421,10 +519,10 @@ local TitleBar = ui.component(function(props: Props): Node
 					end
 				end,
 				absolute = true,
-				right = function(): number
-					return ROW_PAD + window_buttons_right()
+				right = actions_right,
+				top = function(): number
+					return middle() - CONTROL / 2
 				end,
-				top = MIDDLE - CONTROL / 2,
 				h = CONTROL,
 				items = "center",
 				gap = ui.raw(CONTROL_GAP, "the island's gap between its controls, counted in its width"),
@@ -446,13 +544,19 @@ end)
 -- of it (`full`); read tracked unless `tracked` is false.
 local function controls_end(full: boolean?, tracked: boolean?): number
 	local at = if full == nil then (if tracked == false then full_screen_now() else full_screen()) else full
-	return toggle_in(at, tracked ~= false) + controls_w()
+	local start = toggle_in(at, tracked ~= false)
+	return start + controls_w(start)
 end
 
+-- `window_buttons_right()`, `actions_right()`, `middle()`: where the
+-- window's own buttons and the page's controls stand on the bar, and its
+-- line (read in a binding: they follow the window).
 local M = setmetatable({
 	control = control,
 	controls_end = controls_end,
 	window_buttons_right = window_buttons_right,
+	actions_right = actions_right,
+	middle = middle,
 	-- What lies beside the controls follows them: `follow(ref, { prop =
 	-- function(full) … end }, settle?)`, with `controls_end(full)`, its
 	-- prop's own style a plain number to start from (`full_screen_now()`).

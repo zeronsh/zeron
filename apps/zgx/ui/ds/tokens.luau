@@ -666,6 +666,29 @@ function M.setup()
 		}
 	end)
 	local control = require("@self/control")
+	-- The cards set into the window keep their corners concentric with the
+	-- window's where the host says what it is now (Windows, `window.corner_
+	-- radius`: 8 on Windows 11, 0 maximized, in full screen and on Windows
+	-- 10): its radius less the gap they're set in by, square once that's
+	-- nothing. Elsewhere they keep the theme's (macOS's window and its 12).
+	local ok, corner = pcall(ui.shared, "window.corner_radius", nil :: number?)
+	if ok then
+		ui.effect(function()
+			local radius = (corner :: any):get()
+			if type(radius) ~= "number" then
+				return
+			end
+			local gap = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+			local card = math.max(0, radius - gap)
+			ui.theme.tokens {
+				zeron = {
+					-- (And what follows its corner inside its 1-point edge,
+					-- as the effect below has it.)
+					inset = { radius = card, inner_radius = math.max(0, card - 1) },
+				},
+			}
+		end)
+	end
 	ui.effect(function()
 		local chip = control.nest("$zeron.composer.radius", 1, "$zeron.composer.chip.inset")
 		local option = control.nest("$zeron.composer.radius", 1, control.nest("$zeron.composer.chip.inset", 8))

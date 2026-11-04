@@ -11,9 +11,27 @@ M.SIDEBAR_MIN, M.SIDEBAR_MAX, M.SIDEBAR_DEFAULT = 242, 400, 256
 M.FILES_PANEL_MIN, M.FILES_PANEL_DEFAULT, M.FILES_PANEL_MAX = 220, 286, 440
 M.RIGHT_PANE_MIN, M.RIGHT_PANE_DEFAULT = 360, 520
 M.CHAT_PANEL_MIN = 300
+-- A chat's card at the page's least: the window's three gaps round it (each
+-- side, and before the panel) come out of CHAT_PANEL_MIN. What a split's panes
+-- each want beside the two sides: it leaves a draft 93 points of the
+-- composer's line beside its controls (45 at 240, 5 at 200, then the line
+-- opens out with its controls overlapping) and the reply a 240-point column.
+M.PANE_MIN = 288
 
 export type Column = { open: boolean, at: number }
 export type Fit = { sidebar: boolean, right: boolean, files: boolean, sidebar_limit: number }
+
+-- What the page wants: `across` panes side by side (panes stacked in a column
+-- are one across), each at its least, the gaps between them and the window's
+-- round them. One across is the chat's least.
+function M.page_floor(across: number, gap: number): number
+	return M.CHAT_PANEL_MIN + (across - 1) * (M.PANE_MIN + gap)
+end
+
+-- Whether the page has what it wants beside columns this wide.
+function M.panes_fit(viewport: number, page_floor: number, sidebar: number, panel: number): boolean
+	return page_floor + sidebar + panel <= viewport
+end
 
 -- The policy: which of the columns show in a window `viewport` wide, the
 -- sidebar preferring `sidebar_width`, the panel expanded or not. (`files_min`:
@@ -80,10 +98,16 @@ function M.panels(
 end
 
 -- The panel's share of `available` (what the tools leave the chat and the
--- panel): half, the panel keeping its least and the chat as much of its own
--- as fits.
-function M.content_split(available: number): number
-	return math.min(math.max(available / 2, M.RIGHT_PANE_MIN), math.max(available - M.CHAT_PANEL_MIN, M.RIGHT_PANE_MIN))
+-- panel): half, the panel keeping its least and the page as much of what it
+-- wants (`page_floor`, one chat's least unless it's split) as fits.
+function M.content_split(available: number, page_floor: number?): number
+	return math.min(math.max(available / 2, M.RIGHT_PANE_MIN), math.max(available - (page_floor or M.CHAT_PANEL_MIN), M.RIGHT_PANE_MIN))
+end
+
+-- The most the panel's part beside its tree may take: what leaves the page
+-- what it wants, but never under the panel's least. Past that the panes narrow.
+function M.panel_room(viewport: number, sidebar: number, tree: number, page_floor: number): number
+	return math.max(viewport - sidebar - tree - page_floor, M.RIGHT_PANE_MIN - tree)
 end
 
 -- The widest the panel may be dragged: the chat keeps its least.
