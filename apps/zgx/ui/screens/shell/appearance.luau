@@ -47,7 +47,7 @@ end)
 M.SLOT = "new-chat-background"
 M.SELECTOR = `#{M.SLOT}`
 
-export type Image = { path: string, name: string, w: number, h: number, x: number, y: number, zoom: number }
+export type Image = { path: string, name: string, w: number, h: number, x: number, y: number, zoom: number, poster: string? }
 
 local EFFECTS = { none = true, dither = true, ascii = true, halftone = true, scanlines = true }
 
@@ -118,7 +118,15 @@ M.showing = ui.computed(function(): string
 end)
 
 function M.effect_now(): string
-	return if M.provider:get() then M.plugin_effect:get() else M.effect:get()
+	if M.provider:get() then
+		return M.plugin_effect:get()
+	end
+	-- (A video or GIF plays in a web view, which no effect draws through.)
+	local image = M.image:get()
+	if M.showing:get() == "image" and image and image.poster and image.poster ~= "" then
+		return "none"
+	end
+	return M.effect:get()
 end
 
 function M.use_plugin(id: string, on: boolean)

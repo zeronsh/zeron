@@ -146,8 +146,11 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f01b47a00a6f5e938
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f01b47a00a6f5e9386b5fd7fb35dcdbef4991e93", features = ["webview2"] }
 # The terminal bridge's console (src/terminal.rs): raw mode, its size; Alt
 # held at launch (src/plugins/preview.rs); the screens' sizes
-# (src/settings.rs); and upstream's registry and thread times.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse"] }
+# (src/settings.rs); upstream's registry and thread times; and the window
+# minimized (src/video_wallpaper.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+# Background videos (src/video_wallpaper.rs): Media Foundation.
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.

@@ -18,6 +18,7 @@ local locale = require("@ds/locale")
 local route = require("@app/screens/shell/route")
 local shell_view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
+local wallpaper = require("@app/screens/settings/wallpaper")
 local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
@@ -285,7 +286,7 @@ return function(props: Props): Node
 			content = function(key: string): Node
 				local image = appearance.image:peek()
 				if string.find(key, "^image:") and image then
-					return ds.wallpaper.Picture { src = image.path, w = image.w, h = image.h, x = image.x, y = image.y, zoom = image.zoom }
+					return wallpaper.Background(image)
 				end
 				-- Where a plugin draws: nothing of Zeron's own.
 				return ui.div { id = "new-chat-background", absolute = true, left = 0, right = 0, top = 0, bottom = 0 }

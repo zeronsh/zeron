@@ -73,7 +73,7 @@ local function thumbnail(): Node
 			if path == "" or not image then
 				return ui.div {}
 			end
-			return ds.wallpaper.Picture { src = image.path, w = image.w, h = image.h, x = image.x, y = image.y, zoom = image.zoom }
+			return ds.wallpaper.Picture { src = wallpaper.still(image), w = image.w, h = image.h, x = image.x, y = image.y, zoom = image.zoom }
 		end, { w_full = true, h_full = true, relative = true }),
 	})
 end
@@ -103,7 +103,7 @@ local function adjust_dialog(): Node
 		if not image then
 			return nil
 		end
-		return { src = image.path, w = image.w, h = image.h, x = d.x, y = d.y, zoom = d.zoom }
+		return { src = wallpaper.still(image), w = image.w, h = image.h, x = d.x, y = d.y, zoom = d.zoom }
 	end
 	local function at(): { left: number, top: number, w: number, h: number }
 		local p = picture()

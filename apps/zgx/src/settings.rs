@@ -67,9 +67,16 @@
 //!                                       copy of the picked file kept in the
 //!                                       engine's data folder (the shipping
 //!                                       app's managed copy), checked to
-//!                                       decode first: { path, name, w, h }
-//!   wallpaper.forget({ path })          a copy `keep` made, removed (nothing
-//!                                       outside that folder is touched)
+//!                                       decode first: { path, name, w, h,
+//!                                       poster }, `poster` a video's or
+//!                                       GIF's first frame ("" a picture's)
+//!   wallpaper.forget({ path })          a copy `keep` made, removed, with
+//!                                       its poster (nothing outside that
+//!                                       folder is touched)
+//!   wallpaper.player()                  (call_sync) the page a video or
+//!                                       GIF plays in, written beside them
+//!   wallpaper.exists({ path })          (call_sync) whether a kept file is
+//!                                       there
 //!
 //! An id here is a membership's or an invitation's: no account's id reaches
 //! the scripts.
@@ -304,14 +311,32 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 ("name", Value::from(kept.name.as_str())),
                 ("w", Value::from(kept.w as f64)),
                 ("h", Value::from(kept.h as f64)),
+                // (A video's or GIF's first frame, "" for a picture.)
+                ("poster", Value::from(kept.poster.as_deref().unwrap_or_default())),
             ]))
         }
     });
+    #[cfg(windows)]
+    crate::video_wallpaper::watch_minimized(host);
     host.action("wallpaper.forget", |args| {
         let path = args.field("path").map(text).unwrap_or_default();
         if let Some(dir) = engine::data_dir() {
-            forget_wallpaper(&path, &dir.join(WALLPAPER_DIR));
+            let dir = dir.join(WALLPAPER_DIR);
+            forget_wallpaper(&path, &dir);
+            forget_wallpaper(&poster_of(&path), &dir);
         }
+    });
+    // The page a kept video or GIF plays in (a web view: WebView2 decodes it
+    // on the GPU), written beside the kept files: its path, "" if it can't be.
+    host.function("wallpaper.player", |_| {
+        let path = engine::data_dir().and_then(|dir| write_player(&dir.join(WALLPAPER_DIR)));
+        Value::from(path.unwrap_or_default().as_str())
+    });
+    // Whether a kept file is still there (a video has no header
+    // `ui.image_size` reads).
+    host.function("wallpaper.exists", |args| {
+        let path = args.field("path").map(text).unwrap_or_default();
+        Value::from(std::path::Path::new(&path).is_file())
     });
     host.async_action("settings.engine", |args| {
         let method = args.field("method").map(text).unwrap_or_default();
@@ -339,16 +364,143 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
 
 /// The largest background image taken.
 const WALLPAPER_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The largest background video taken.
+const WALLPAPER_VIDEO_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// A kept video's or GIF's still: its first frame, beside it.
+fn poster_of(path: &str) -> String {
+    format!("{path}.poster.png")
+}
+
+/// Whether `path` is a video (one this platform plays).
+fn is_video(path: &str) -> bool {
+    #[cfg(windows)]
+    return crate::video_wallpaper::is_video(path);
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// A video's first frame, once it decodes.
+fn video_frame(path: &str) -> Result<std::sync::Arc<zgx::image::ImageData>, String> {
+    #[cfg(windows)]
+    return crate::video_wallpaper::first_frame(path);
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("invalid".into())
+    }
+}
+
+/// `pixels` (RGBA, `w` by `h`) as a PNG, no larger than it takes to cover
+/// `screen`: its bytes and size.
+fn png_covering(pixels: &[u8], w: u32, h: u32, screen: Option<(u32, u32)>) -> Result<(Vec<u8>, u32, u32), String> {
+    let (mut pixels, mut w, mut h) = (std::borrow::Cow::Borrowed(pixels), w, h);
+    if let Some((nw, nh)) = kept_size(w, h, screen) {
+        let full = image::RgbaImage::from_raw(w, h, pixels.to_vec()).ok_or("invalid")?;
+        let small = image::imageops::resize(&full, nw, nh, image::imageops::FilterType::CatmullRom);
+        (pixels, w, h) = (std::borrow::Cow::Owned(small.into_raw()), nw, nh);
+    }
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().and_then(|mut e| e.write_image_data(&pixels)).map_err(|_| "failed".to_string())?;
+    }
+    Ok((png, w, h))
+}
+
+/// `bytes` at `target`: written beside it, then moved into place.
+fn write_kept(target: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let mut temp = target.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = std::path::PathBuf::from(temp);
+    if std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, target)).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return Err("failed".into());
+    }
+    Ok(())
+}
+
+/// The page a kept video or GIF plays in: `#src=<its name beside the
+/// page>&x=&y=&zoom=&fade=&play=` (0 to 1, as `Picture` frames it; zoom 1
+/// to 4; `play=0` while the window doesn't show). It covers its box as
+/// `Picture` does, faded from the top to nothing at its foot, and pauses
+/// while the window is hidden, minimized or covered, or while the system
+/// asks for less motion.
+const PLAYER: &str = r#"<!doctype html>
+<meta charset="utf-8">
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+#m { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; user-select: none; }
+body.fade #m { -webkit-mask-image: linear-gradient(to bottom, #000, transparent); mask-image: linear-gradient(to bottom, #000, transparent); }
+</style>
+<body>
+<script>
+let el = null, play = true;
+const still = matchMedia("(prefers-reduced-motion: reduce)");
+function sync() {
+  if (!el || el.tagName !== "VIDEO") return;
+  if (!play || document.hidden || still.matches) el.pause(); else el.play().catch(() => {});
+}
+function apply() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const src = p.get("src") || "";
+  const kind = /\.gif$/i.test(src) ? "IMG" : "VIDEO";
+  if (!el || el.dataset.src !== src || el.tagName !== kind) {
+    if (el) el.remove();
+    el = document.createElement(kind);
+    el.id = "m";
+    el.dataset.src = src;
+    if (kind === "VIDEO") {
+      Object.assign(el, { muted: true, loop: true, playsInline: true, autoplay: true, disablePictureInPicture: true });
+    } else {
+      el.alt = "";
+    }
+    el.src = src;
+    document.body.appendChild(el);
+  }
+  const num = (k, d) => { const v = parseFloat(p.get(k)); return Number.isFinite(v) ? v : d; };
+  const x = num("x", 0.5) * 100, y = num("y", 0.5) * 100, zoom = Math.min(4, Math.max(1, num("zoom", 1)));
+  el.style.objectPosition = `${x}% ${y}%`;
+  el.style.transformOrigin = `${x}% ${y}%`;
+  el.style.transform = `scale(${zoom})`;
+  document.body.classList.toggle("fade", p.get("fade") !== "0");
+  play = p.get("play") !== "0";
+  sync();
+}
+addEventListener("hashchange", apply);
+document.addEventListener("visibilitychange", sync);
+still.addEventListener("change", sync);
+apply();
+</script>
+"#;
+
+/// `PLAYER` in `dir` (written again only if it differs): its path.
+fn write_player(dir: &std::path::Path) -> Option<String> {
+    let path = dir.join("player.html");
+    if std::fs::read(&path).ok().as_deref() != Some(PLAYER.as_bytes()) {
+        std::fs::create_dir_all(dir).ok()?;
+        write_kept(&path, PLAYER.as_bytes()).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
 /// Where the kept copies are, in the engine's data folder.
 const WALLPAPER_DIR: &str = "new-chat-backgrounds";
 
-/// A background image kept: its copy, the original's name, its size in pixels.
+/// A background kept: its copy, the original's name, its size in pixels,
+/// and (a video or GIF, which plays) its first frame.
 #[derive(Debug)]
 struct KeptWallpaper {
     path: String,
     name: String,
     w: u32,
     h: u32,
+    poster: Option<String>,
 }
 
 /// The largest screen here, in pixels (its current mode's, not its
@@ -410,6 +562,9 @@ fn kept_size(w: u32, h: u32, screen: Option<(u32, u32)>) -> Option<(u32, u32)> {
 fn keep_wallpaper(path: &str, dir: &std::path::Path, screen: Option<(u32, u32)>) -> Result<KeptWallpaper, String> {
     let source = std::path::Path::new(path);
     let meta = std::fs::metadata(source).map_err(|_| "not_found".to_string())?;
+    if is_video(path) {
+        return keep_video(source, meta.len(), dir, screen);
+    }
     if meta.len() > WALLPAPER_MAX_BYTES {
         return Err("invalid".into());
     }
@@ -418,28 +573,61 @@ fn keep_wallpaper(path: &str, dir: &std::path::Path, screen: Option<(u32, u32)>)
     let (mut w, mut h) = (image.width(), image.height());
     std::fs::create_dir_all(dir).map_err(|_| "failed".to_string())?;
     let mut ext = source.extension().and_then(|e| e.to_str()).filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("png").to_ascii_lowercase();
-    let mut bytes = bytes;
-    if let Some((nw, nh)) = kept_size(w, h, screen) {
-        let full = image::RgbaImage::from_raw(w, h, image.pixels().to_vec()).ok_or("invalid")?;
-        let small = image::imageops::resize(&full, nw, nh, image::imageops::FilterType::CatmullRom);
-        let mut png = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut png, nw, nh);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder.write_header().and_then(|mut w| w.write_image_data(small.as_raw())).map_err(|_| "failed".to_string())?;
-        }
-        (bytes, w, h, ext) = (png, nw, nh, "png".to_string());
+    let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // A GIF is kept as it is (shrunk, it would be a still) and plays in the
+    // player, its first frame its still: on Windows, where zgx would decode
+    // a large one's frames on the UI thread and WebView2 composites the page
+    // without a copy.
+    if cfg!(windows) && ext == "gif" {
+        let kept = kept_name(dir, &ext);
+        write_kept(&kept, &bytes)?;
+        let path = kept.to_string_lossy().into_owned();
+        let (png, ..) = png_covering(image.pixels(), w, h, screen)?;
+        write_kept(std::path::Path::new(&poster_of(&path)), &png)?;
+        return Ok(KeptWallpaper { poster: Some(poster_of(&path)), path, name, w, h });
     }
+    let mut bytes = bytes;
+    if kept_size(w, h, screen).is_some() {
+        (bytes, w, h) = png_covering(image.pixels(), w, h, screen)?;
+        ext = "png".to_string();
+    }
+    let kept = kept_name(dir, &ext);
+    write_kept(&kept, &bytes)?;
+    Ok(KeptWallpaper { path: kept.to_string_lossy().into_owned(), name, w, h, poster: None })
+}
+
+/// A new name in `dir` for a kept file (a new one each time, so nothing
+/// cached under the old one shows).
+fn kept_name(dir: &std::path::Path, ext: &str) -> std::path::PathBuf {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
-    let target = dir.join(format!("new-chat-{stamp:x}-{}.{ext}", std::process::id()));
-    let temp = target.with_extension(format!("{ext}.tmp"));
-    if std::fs::write(&temp, &bytes).and_then(|()| std::fs::rename(&temp, &target)).is_err() {
+    dir.join(format!("new-chat-{stamp:x}-{}.{ext}", std::process::id()))
+}
+
+/// A video kept as `keep_wallpaper` keeps a picture, once a frame of it
+/// decodes: the file as it is (WebView2 plays it), its first frame its still.
+fn keep_video(source: &std::path::Path, len: u64, dir: &std::path::Path, screen: Option<(u32, u32)>) -> Result<KeptWallpaper, String> {
+    if len > WALLPAPER_VIDEO_MAX_BYTES {
+        return Err("invalid".into());
+    }
+    let frame = video_frame(&source.to_string_lossy())?;
+    let (w, h) = (frame.width(), frame.height());
+    std::fs::create_dir_all(dir).map_err(|_| "failed".to_string())?;
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_ascii_lowercase();
+    let target = kept_name(dir, &ext);
+    let mut temp = target.as_os_str().to_owned();
+    temp.push(".tmp");
+    if std::fs::copy(source, &temp).and_then(|_| std::fs::rename(&temp, &target)).is_err() {
         let _ = std::fs::remove_file(&temp);
         return Err("failed".into());
     }
+    let path = target.to_string_lossy().into_owned();
+    let (png, ..) = png_covering(frame.pixels(), w, h, screen)?;
+    if let Err(error) = write_kept(std::path::Path::new(&poster_of(&path)), &png) {
+        let _ = std::fs::remove_file(&target);
+        return Err(error);
+    }
     let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    Ok(KeptWallpaper { path: target.to_string_lossy().into_owned(), name, w, h })
+    Ok(KeptWallpaper { poster: Some(poster_of(&path)), path, name, w, h })
 }
 
 /// `keep_wallpaper` for another module's test: its path and size.
