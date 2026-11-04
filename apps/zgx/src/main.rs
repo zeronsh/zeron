@@ -578,6 +578,11 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // `mailto:` in the mail app: what a link's `href` opens. Anything else
     // is ignored.
     host.action("open_url", |url| {
+        // A link carries out what a preview put in it.
+        if plugins::preview::current().is_some() {
+            plugins::host_bar::links_need_keeping();
+            return;
+        }
         if let Value::Str(url) = url
             && (url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:"))
             && !url.chars().any(char::is_control)
