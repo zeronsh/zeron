@@ -244,9 +244,6 @@
       "changed_on_disk": "Changed on disk",
       "keep_mine": "Keep Mine",
       "choose": "Choose a file to see it here",
-      "hint_filter": "Filter",
-      "hint_move": "Move",
-      "hint_open": "Open",
       "binary": {
         "title": "{name} isn't text",
         "body_size": "It's a {size} binary file, so there's nothing here to read.",

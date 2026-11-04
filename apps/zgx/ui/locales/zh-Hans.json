@@ -244,9 +244,6 @@
       "changed_on_disk": "磁盘上的文件已更改",
       "keep_mine": "保留我的版本",
       "choose": "选择文件以在此查看",
-      "hint_filter": "筛选",
-      "hint_move": "移动",
-      "hint_open": "打开",
       "binary": {
         "title": "{name} 不是文本",
         "body_size": "这是一个 {size} 的二进制文件，无法在此读取。",

@@ -889,3 +889,41 @@ test("changes on disk in quick succession all reach the tree", function()
 		return app:has('role:treeitem "01-new.txt"') and app:has('role:treeitem "04-new.txt"')
 	end)).to_be(true)
 end)
+
+
+-- No file open, too little room for one beside the tree: the tree has the pane,
+-- until a file is chosen. (Its width, and the words that ask for a file.)
+test("with no file and no room for one, the tree takes the whole pane until a file is chosen", function()
+	local app = mount("files_fixture.luau")
+	local function width(target: string): number
+		local w = (app:tree(target):match("[^\n]+") or ""):match(" %-?%d+,%-?%d+ (%d+)x%d+")
+		return tonumber(w) or 0
+	end
+	app:resize(420, 700)
+	app:frames(60)
+	expect(app:error()).to_be_nil()
+	local pane = width("#files-pane")
+	expect(pane < 288 + 240).to_be(true)
+	expect(math.abs(width("#files-tree-beside") - pane) <= 1).to_be(true)
+	-- A file chosen: the tree's own width, the file beside it.
+	app:click('"notes.md"')
+	app:frames(60)
+	expect(width("#files-tree-beside")).to_be(288)
+	expect(width("#file-viewer") > 0).to_be(true)
+	-- Roomy, the tree's own width beside the file's side, and what that side says.
+	app:resize(1000, 700)
+	app:frames(60)
+	expect(width("#files-tree-beside")).to_be(288)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a roomy pane with no file asks for one, and offers no keys", function()
+	local app = mount("files_fixture.luau")
+	app:resize(1000, 700)
+	app:frames(60)
+	local viewer = app:tree("#file-viewer")
+	expect(viewer).to_contain("Choose a file to see it here")
+	for _, word in { "Filter", "Move", "Open" } do
+		expect(string.find(viewer, `"{word}"`, 1, true)).to_be(nil)
+	end
+end)
