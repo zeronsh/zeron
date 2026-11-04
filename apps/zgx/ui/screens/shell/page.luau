@@ -1491,6 +1491,11 @@ return function(props: Props): Node
 		min_w = 0,
 		h_full = true,
 		relative = true,
+		-- (In a split, the frame of the window's composer alone, over the
+		-- panes: the pointer goes through to them, but for the composer.)
+		pointer_events = function(): any
+			return if grouped() then "none" else "auto"
+		end,
 		-- (The split's panes, under the page's card: in a split, their cards
 		-- are the chats, and the page's card is the composer's frame over
 		-- the focused one's.)
@@ -1512,19 +1517,9 @@ return function(props: Props): Node
 				relative = true,
 			}),
 		},
-		-- (What the page's card stands in, placed by its box in a split.)
-		ui.column {
-			grow = 1,
-			min_w = 0,
-			h_full = true,
-			relative = true,
-			-- (In a split, the frame of the window's composer alone, over the
-			-- panes: the pointer goes through to them, but for the composer.)
-			pointer_events = function(): any
-				return if grouped() then "none" else "auto"
-			end,
-			ui.column(pane),
-		},
+		-- (The page's card, placed by its box in a split: there the frame of
+		-- the window's composer alone, over the panes.)
+		ui.column(pane),
 		ui.show(function(): boolean
 			return splits.dragging:get() and not expanded()
 		end, ui.div {
@@ -1550,24 +1545,19 @@ return function(props: Props): Node
 	-- round them, along the title bar's strip (over them, beside them and
 	-- between them), moves the window as the bar does: a strip under the
 	-- cards, which let the pointer through but for what takes it.
-	return ui.column {
+	return ui.row {
+		ref = row_ref,
 		grow = 1,
 		min_w = 0,
 		h_full = true,
 		relative = true,
+		pt = gap,
+		pb = gap,
+		pl = gap,
+		pr = gap,
+		pointer_events = "none",
 		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
-		ui.row {
-			ref = row_ref,
-			w_full = true,
-			grow = 1,
-			min_h = 0,
-			pt = gap,
-			pb = gap,
-			pl = gap,
-			pr = gap,
-			pointer_events = "none",
-			split_area,
-			beside,
-		},
+		split_area,
+		beside,
 	}
 end
