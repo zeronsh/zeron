@@ -1184,6 +1184,7 @@ impl View {
             // (Where a reply's visuals are read from: the chat's host, when
             // it isn't this device.)
             let device = chats.target(&chat);
+            let open_id = open.id.clone();
             let Open { entries, built, .. } = open;
             let mut list: Vec<Value> = entries
                 .iter()
@@ -1193,7 +1194,7 @@ impl View {
                     };
                     built
                         .entry(id.to_owned())
-                        .or_insert_with(|| match with_visual_device(e, device.as_deref()) {
+                        .or_insert_with(|| match with_host(e, &open_id, device.as_deref()) {
                             Some(e) => message(&e, model.as_deref()),
                             None => message(e, model.as_deref()),
                         })
@@ -2347,21 +2348,39 @@ fn apply(entries: &mut Vec<Json>, frame: &Json) -> Result<Change, ()> {
     })
 }
 
-/// `entry` with its visual parts naming `device`, their host, when it has
-/// any and that isn't this one (nil otherwise: the entry as it is).
-fn with_visual_device(entry: &Json, device: Option<&str>) -> Option<Json> {
-    let device = device?;
+/// `entry` with what its parts read from the chat's host: each visual names
+/// `device`, its host, when that isn't this one; each command whose output
+/// the doc cut to its last lines names `doc`, the doc it is in, so its row
+/// can ask the host for the rest (`chat.tool_output`). Nil when it has
+/// neither: the entry as it is.
+fn with_host(entry: &Json, doc: &str, device: Option<&str>) -> Option<Json> {
     let parts = entry["parts"].as_array()?;
-    if !parts.iter().any(|p| p["kind"].as_str() == Some("visual")) {
+    let visual = |p: &Json| device.is_some() && p["kind"].as_str() == Some("visual");
+    let cut = |p: &Json| p["kind"].as_str() == Some("tool") && p["outputTruncated"].as_bool() == Some(true);
+    if !parts.iter().any(|p| visual(p) || cut(p)) {
         return None;
     }
     let mut entry = entry.clone();
     for part in entry["parts"].as_array_mut().into_iter().flatten() {
-        if part["kind"].as_str() == Some("visual") {
+        if visual(part)
+            && let Some(device) = device
+        {
             part["device"] = Json::String(device.to_owned());
+        }
+        if cut(part) {
+            part["chat"] = Json::String(doc.to_owned());
         }
     }
     Some(entry)
+}
+
+/// The device a read of `doc`'s host data goes to (`targetDeviceId`), when
+/// that isn't this one: a subagent's doc (`{chat}--sub--{id}`) is its root
+/// chat's.
+pub(crate) fn host_of(doc: &str) -> Option<String> {
+    let chats = CHATS.with(Rc::clone);
+    let source = doc.split_once("--sub--").map_or(doc, |(chat, _)| chat);
+    chats.target(&chats.chat(source)?)
 }
 
 /// An entry's words: its text parts, each a paragraph.
@@ -4254,10 +4273,37 @@ mod tests {
         assert_eq!(list[1].field("id"), Some(&Value::from("v:1")));
         assert!(list[1].field("device").is_none_or(|d| *d == Value::Nil), "this device's: no device");
         // A chat on another device: its visuals are read from there.
-        assert!(with_visual_device(&entry, None).is_none());
-        let remote = with_visual_device(&entry, Some("dev-2")).expect("it has a visual");
+        assert!(with_host(&entry, "c1", None).is_none());
+        let remote = with_host(&entry, "c1", Some("dev-2")).expect("it has a visual");
         let shown = blocks(&remote);
         assert_eq!(shown.list()[1].field("device"), Some(&Value::from("dev-2")));
+    }
+
+    /// A command whose output the doc cut names the doc it is in (its row
+    /// asks that doc's host for the rest), with its exit code and the whole
+    /// output's lines; one kept whole names nothing.
+    #[test]
+    fn a_cut_command_output_names_its_doc_lines_and_exit_code() {
+        let exec = |id: &str, cut: bool| {
+            let mut part = json!({ "kind": "tool", "id": id, "resolved": true, "isError": true, "exitCode": 2,
+                                   "output": "error: boom", "call": { "kind": "exec", "command": "make" } });
+            if cut {
+                part["outputTruncated"] = json!(true);
+                part["outputLines"] = json!(300);
+            }
+            part
+        };
+        let entry = json!({ "id": "a1", "role": "assistant", "status": "complete",
+                            "parts": [exec("t1", true), exec("t2", false)] });
+        let stamped = with_host(&entry, "c1--sub--x", None).expect("a cut output");
+        let row = tool(&stamped["parts"][0]).unwrap();
+        assert_eq!(row.field("chat"), Some(&Value::from("c1--sub--x")));
+        assert_eq!(row.field("output_truncated"), Some(&Value::Bool(true)));
+        assert!(matches!(row.field("output_lines"), Some(Value::Num(n)) if *n == 300.0));
+        assert!(matches!(row.field("exit_code"), Some(Value::Num(n)) if *n == 2.0));
+        let whole = tool(&stamped["parts"][1]).unwrap();
+        assert!(whole.field("chat").is_none() && whole.field("output_truncated").is_none());
+        assert!(with_host(&json!({ "parts": [exec("t2", false)] }), "c1", None).is_none());
     }
 
     #[test]
