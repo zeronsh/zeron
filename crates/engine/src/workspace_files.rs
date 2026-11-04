@@ -66,8 +66,31 @@ struct WorkspaceFilesInner {
     mutation_gates: Mutex<HashMap<String, Weak<tokio::sync::RwLock<()>>>>,
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
+    /// Checkouts resolved lately, by the folders asked about ([`CHECKOUT_REUSE`]).
+    checkouts: Mutex<HashMap<CheckoutKey, (Instant, Arc<tokio::sync::OnceCell<Checkout>>)>>,
     cancel: CancellationToken,
 }
+
+/// How long a checkout's resolution (two git runs: the project's worktrees,
+/// the folder's identity) answers again for the same folders, and is shared
+/// by the requests that arrive while it runs. On Windows a git run costs
+/// about a second, and a files pane opening asks a dozen things of its
+/// folder at once: resolving each afresh left reads past
+/// [`WORKSPACE_FILE_RPC_TIMEOUT`] ("workspace file read timed out"). Elsewhere
+/// a git run is cheap, and each request resolves afresh as it always has.
+const CHECKOUT_REUSE: Duration = if cfg!(windows) {
+    Duration::from_secs(10)
+} else {
+    Duration::ZERO
+};
+
+/// A chat's (true) or a project's checkout: its project's folder, and the
+/// folder asked about.
+type CheckoutKey = (bool, PathBuf, PathBuf);
+
+/// A resolved checkout: its root, if the folder is one of the project's
+/// checkouts; its git identity, if it's a repository.
+type Checkout = (Option<PathBuf>, Option<crate::repos::CheckoutIdentity>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WorkspaceFileKey {
@@ -269,6 +292,7 @@ impl WorkspaceFiles {
                 mutation_gates: Mutex::new(HashMap::new()),
                 write_locks: Mutex::new(HashMap::new()),
                 watches: Mutex::new(HashMap::new()),
+                checkouts: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
             }),
         }
@@ -352,10 +376,7 @@ impl WorkspaceFiles {
                         "chat space belongs to another device".into(),
                     ));
                 };
-                let (checkout, identity) = tokio::join!(
-                    self.inner.repos.workspace_checkout(&space_path, &cwd),
-                    self.inner.repos.checkout_identity(&cwd),
-                );
+                let (checkout, identity) = self.checkout(true, &space_path, &cwd).await;
                 let root = checkout.ok_or_else(|| {
                     WorkspaceFilesError::Authorization(
                         "chat folder is not a workspace checkout".into(),
@@ -385,17 +406,12 @@ impl WorkspaceFiles {
                     .checkout_path
                     .as_deref()
                     .map_or_else(|| space_path.clone(), PathBuf::from);
-                let root = self
-                    .inner
-                    .repos
-                    .workspace_checkout(&space_path, &requested)
-                    .await
-                    .ok_or_else(|| {
-                        WorkspaceFilesError::BadParams(
-                            "checkoutPath is not a workspace checkout".into(),
-                        )
-                    })?;
-                let identity = self.inner.repos.checkout_identity(&root).await;
+                let (checkout, identity) = self.checkout(false, &space_path, &requested).await;
+                let root = checkout.ok_or_else(|| {
+                    WorkspaceFilesError::BadParams(
+                        "checkoutPath is not a workspace checkout".into(),
+                    )
+                })?;
                 (root, identity)
             }
         };
@@ -404,15 +420,61 @@ impl WorkspaceFiles {
         // git-dir identity; plain roots get a device-scoped stable key so the
         // existing SearchFiles behavior and shared watcher semantics remain intact.
         match identity {
-            Ok(identity) => Ok(ResolvedWorkspace {
+            Some(identity) => Ok(ResolvedWorkspace {
                 checkout_id: identity.id,
                 root: identity.root,
             }),
-            Err(_) => Ok(ResolvedWorkspace {
+            None => Ok(ResolvedWorkspace {
                 checkout_id: plain_folder_identity(&self.inner.device_id, &root),
                 root,
             }),
         }
+    }
+
+    /// Whether `candidate` is one of the checkouts of the project at
+    /// `space_path`, and its git identity: a chat's folder (`chat`, its
+    /// identity read beside), or a project's (its identity read from the
+    /// checkout found). Shared and reused for [`CHECKOUT_REUSE`]; a folder
+    /// found not to be a checkout isn't kept, so the next request asks again.
+    async fn checkout(&self, chat: bool, space_path: &Path, candidate: &Path) -> Checkout {
+        let resolve = || async {
+            let repos = &self.inner.repos;
+            if chat {
+                let (checkout, identity) = tokio::join!(
+                    repos.workspace_checkout(space_path, candidate),
+                    repos.checkout_identity(candidate),
+                );
+                (checkout, identity.ok())
+            } else {
+                let checkout = repos.workspace_checkout(space_path, candidate).await;
+                let identity = match &checkout {
+                    Some(root) => repos.checkout_identity(root).await.ok(),
+                    None => None,
+                };
+                (checkout, identity)
+            }
+        };
+        if CHECKOUT_REUSE.is_zero() {
+            return resolve().await;
+        }
+        let key: CheckoutKey = (chat, space_path.to_path_buf(), candidate.to_path_buf());
+        let cell = {
+            let mut checkouts = lock(&self.inner.checkouts);
+            checkouts.retain(|_, (at, _)| at.elapsed() < CHECKOUT_REUSE);
+            checkouts
+                .entry(key.clone())
+                .or_insert_with(|| (Instant::now(), Arc::new(tokio::sync::OnceCell::new())))
+                .1
+                .clone()
+        };
+        let checkout = cell.get_or_init(resolve).await.clone();
+        if checkout.0.is_none() {
+            let mut checkouts = lock(&self.inner.checkouts);
+            if checkouts.get(&key).is_some_and(|(_, kept)| Arc::ptr_eq(kept, &cell)) {
+                checkouts.remove(&key);
+            }
+        }
+        checkout
     }
 
     pub async fn list_directory(
@@ -3639,6 +3701,59 @@ mod tests {
 mod image_tests {
     use super::*;
     use zeron_proto::{ReadWorkspaceImageRequest, WORKSPACE_IMAGE_CHUNK_BYTES, WorkspaceTarget};
+
+    /// A files pane asks a dozen things of its folder at once. On Windows,
+    /// where a git run costs about a second, they share one resolution of
+    /// its checkout, reused a while (a repository gone meanwhile still reads
+    /// as the one found); elsewhere each request resolves afresh, as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_of_requests_shares_one_checkout_resolution_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("app");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&checkout)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        let host = WorkspaceHost::open(
+            Arc::new(zeron_sync::DocsStore::open(&dir.path().join("docs")).unwrap()),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "pc".into(),
+                device_name: "PC".into(),
+                platform: "windows".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        let path = checkout.to_string_lossy().into_owned();
+        host.create_space("space", "pc", &path, None, true).unwrap();
+        host.create_chat_hosted("chat", Some("space"), None, Some("pc"), None, Some(path), None, None)
+            .unwrap();
+        let files = WorkspaceFiles::new(Repos::new(&dir.path().join("data"), "pc"), host, "pc");
+        let target = WorkspaceTarget {
+            chat_id: Some("chat".into()),
+            space_id: None,
+            checkout_path: None,
+        };
+        let burst = futures::future::join_all((0..12).map(|_| files.resolve_target(&target))).await;
+        let first = burst[0].as_ref().unwrap().clone();
+        assert!(!first.checkout_id.starts_with("folder-"), "a repository: {first:?}");
+        assert!(burst.iter().all(|r| r.as_ref().ok() == Some(&first)));
+        // The repository goes: reused on Windows, read afresh elsewhere.
+        std::fs::rename(checkout.join(".git"), dir.path().join("moved.git")).unwrap();
+        let after = files.resolve_target(&target).await.unwrap();
+        if cfg!(windows) {
+            assert_eq!(after, first);
+        } else {
+            assert!(after.checkout_id.starts_with("folder-"), "{after:?}");
+        }
+    }
 
     /// A Cloud session machine's chat belongs to it, but its project was
     /// made on the laptop: files resolve to the machine's own checkout, and

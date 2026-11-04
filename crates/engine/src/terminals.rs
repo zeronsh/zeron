@@ -1159,6 +1159,42 @@ mod windows_tests {
         (terminals, session.id, pid)
     }
 
+    /// An engine started in a process group of its own ignores Ctrl+C, and
+    /// its shells inherit that: a terminal's Ctrl+C (a 0x03 written) must
+    /// still interrupt the program running in it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conpty_ctrl_c_interrupts_a_program_though_the_engine_ignores_it() {
+        // As `CREATE_NEW_PROCESS_GROUP` leaves the engine (zeron-launch).
+        // SAFETY: no handler, TRUE: this process ignores Ctrl+C.
+        unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 1) };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (terminals, id, _pid) = open_pid_fixture(tmp.path()).await;
+        let mut live = terminals.subscribe(&id, None).expect("subscribe");
+        write_line(&terminals, &id, "ping.exe -t 127.0.0.1");
+        let mut events = Vec::new();
+        collect_until(&mut live, &mut events, |events| {
+            decoded(events).contains("Reply from 127.0.0.1")
+        })
+        .await;
+        terminals
+            .write(&id, &BASE64.encode("\x03"))
+            .expect("write Ctrl+C");
+        // Interrupted, ping says what it sent and the prompt comes back.
+        collect_until(&mut live, &mut events, |events| {
+            let output = decoded(events);
+            output
+                .split_once("Ping statistics")
+                .is_some_and(|(_, after)| after.contains("PS "))
+        })
+        .await;
+        write_line(&terminals, &id, "[Console]::WriteLine('AFTER' + 'CTRLC')");
+        collect_until(&mut live, &mut events, |events| {
+            decoded(events).contains("AFTERCTRLC")
+        })
+        .await;
+        terminals.close(&id).ok();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn conpty_unicode_cwd_resize_replay_and_exit() {
         let tmp = tempfile::tempdir().expect("tempdir");

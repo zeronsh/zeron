@@ -12,6 +12,7 @@ use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, Pt
 use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+    SetConsoleCtrlHandler,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
@@ -370,6 +371,20 @@ mod resolution_tests {
     }
 }
 
+/// Ctrl+C handled again, as Windows' default is, before a shell starts: the
+/// shell inherits whether its parent ignores it. The engine is started in a
+/// process group of its own (zeron-launch's `CREATE_NEW_PROCESS_GROUP`), which
+/// turns Ctrl+C off for it and everything it starts, and a launcher or agent
+/// shell that ignores it passes that on too; a terminal's Ctrl+C then never
+/// interrupted a program. Detached, the engine has no console to be
+/// interrupted from; in one (`zeron headless`), its own Ctrl+C handler
+/// (lib.rs) still answers first.
+fn restore_ctrl_c() {
+    // SAFETY: no handler, FALSE: restores the default handling of Ctrl+C for
+    // this process and the children it starts.
+    unsafe { SetConsoleCtrlHandler(None, 0) };
+}
+
 pub(super) fn open(
     shell: &str,
     cwd: &str,
@@ -448,6 +463,7 @@ pub(super) fn open(
     startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
     startup.lpAttributeList = attrs.ptr();
     let mut info = PROCESS_INFORMATION::default();
+    restore_ctrl_c();
     // SAFETY: all buffers and the initialized attribute list remain alive through
     // CreateProcessW. Job membership is established as part of creation, even
     // if the owner exits before this call returns. Suspension is only for the
