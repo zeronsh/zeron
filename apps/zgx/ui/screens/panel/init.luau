@@ -665,7 +665,7 @@ end
 
 -- `visible`: whether the shell currently shows the panel (including window fit).
 -- Not given, a standalone panel is visible. Used by the app's ⌘W.
-export type Props = { project: any?, session: any?, page: any?, visible: (() -> boolean)?, on_last_closed: (() -> ())?, [any]: any }
+export type Props = { project: any?, session: any?, page: any?, visible: (() -> boolean)?, on_last_closed: (() -> ())?, content: { [any]: any }?, [any]: any }
 
 
 M.Panel = ui.component(function(props: Props): Node
@@ -1523,7 +1523,7 @@ M.Panel = ui.component(function(props: Props): Node
 
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "no_project" and k ~= "visible" and k ~= "on_last_closed" and k ~= "children" then
+		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "no_project" and k ~= "visible" and k ~= "on_last_closed" and k ~= "children" and k ~= "content" then
 			box[k] = v
 		end
 	end
@@ -1604,7 +1604,31 @@ M.Panel = ui.component(function(props: Props): Node
 	box.ref = box.ref or own
 	measured = box.ref
 	box.relative = true
-	-- (Its card, its tabs at the top of it.)
+	-- (Its card, its tabs at the top of it. The card is the panel's box, its
+	-- edges following it as it moves; what it holds is laid out by `content`
+	-- when the shell gives it (a width it keeps while the edge sweeps over
+	-- it, where it stands, its motion: screens/shell/page), else the card's.)
+	local inner: { [any]: any } = {
+		w_full = true,
+		grow = 1,
+		min_h = 0,
+		ui.column { w_full = true, shrink = 0, hidden = closed, strip_row },
+		panes,
+	}
+	-- (The card's edge, inside its box.)
+	local CARD_EDGE = 1
+	for k, v in props.content or {} do
+		inner[k] = v
+	end
+	if inner.w ~= nil then
+		-- (The shell's width is the panel's: the card's edge comes off it.)
+		local w = inner.w
+		inner.w_full = nil
+		inner.w = function(): number
+			local v = if type(w) == "function" then w() else w
+			return ui.raw(math.max(v - 2 * CARD_EDGE, 0), "the width the shell lays it out at, inside the card's edge")
+		end
+	end
 	box[#box + 1] = ui.column {
 		w_full = true,
 		grow = 1,
@@ -1613,10 +1637,9 @@ M.Panel = ui.component(function(props: Props): Node
 		overflow = "hidden",
 		rounded = "$zeron.inset.radius",
 		bg = "$zeron.inset.bg",
-		border = 1,
+		border = CARD_EDGE,
 		border_color = "$zeron.inset.edge",
-		ui.column { w_full = true, shrink = 0, hidden = closed, strip_row },
-		panes,
+		ui.column(inner),
 	}
 	box[#box + 1] = question
 	return ui.column(box)

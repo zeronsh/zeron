@@ -82,3 +82,44 @@ fn a_new_chat_and_a_session_switch_the_composer_at_once() {
         seen.iter().map(|s| s.2).collect::<Vec<_>>()
     );
 }
+
+/// What comes and goes with the panel fades as it drifts with the edge
+/// (ds/motion `content`), never popping: the panel's tabs as it opens and
+/// closes, the page as the panel expands over it and gives it back. Over
+/// each, its opacity passes through between, a step at a time, and ends
+/// where it goes; settled, the layout warns of nothing new.
+/// (ui/tests/shell_route_motion.test.luau has their widths.)
+#[test]
+fn the_panel_s_content_and_the_page_fade_as_they_come_and_go() {
+    let mut app = mount();
+    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    watch(&mut app, 20);
+    let warnings = |app: &mut TestApp| -> Vec<String> {
+        app.ui.prepare_frame();
+        zgx::inspect::layout_warnings(&app.ui).iter().map(|w| w.to_string()).collect()
+    };
+    // (What the fixture has before the panel ever opens.)
+    let before = warnings(&mut app);
+    let mut fade = |click: &str, id: &str, to: f32, what: &str| {
+        app.click(click);
+        let seen: Vec<f32> = (0..30)
+            .map(|_| {
+                app.frames(1);
+                std::thread::sleep(Duration::from_millis(12));
+                app.opacity(id)
+            })
+            .collect();
+        let between = seen.iter().filter(|o| **o > 0.02 && **o < 0.98).count();
+        let jump = seen.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0., f32::max);
+        assert!(between >= 2 && jump <= 0.6, "{what}: {id} at {seen:?}");
+        assert!((seen.last().unwrap() - to).abs() < 0.01, "{what}: {id} ends at {seen:?}");
+        // At rest, nothing it holds is laid out in a box that shows none of
+        // it (`zgx inspect errors` names nothing new).
+        app.frames(30);
+        assert_eq!(warnings(&mut app), before, "{what}: settled, the layout's warnings");
+    };
+    fade("#titlebar >> role:button \"Panel\"", "shell-files-content", 1., "opening");
+    fade("#panel-expand", "shell-page-room", 0., "expanding");
+    fade("#panel-expand", "shell-page-room", 1., "collapsing");
+    fade("#titlebar >> role:button \"Panel\"", "shell-files-content", 0., "closing");
+}

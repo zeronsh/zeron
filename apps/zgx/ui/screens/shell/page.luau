@@ -640,9 +640,9 @@ return function(props: Props): Node
 		)
 	)
 
-	-- A session's files, beside it: sliding in from the window's edge as
-	-- the toggle opens them, at their own width (the pane keeps it as it
-	-- slides, so nothing re-lays out on the way).
+	-- A session's files, beside it: its card growing in from the window's
+	-- edge as the toggle opens them, what's in it standing still at its own width as the card's edge
+	-- uncovers it (nothing re-lays out on the way).
 	-- Its docked tree's room while the window's fit shows Zeron's Files:
 	-- the tree's own width, so that as the tree goes to float over the file
 	-- the panel narrows by just that, and the file stays where it was.
@@ -836,11 +836,26 @@ return function(props: Props): Node
 		return if shown:get() then rest_w:get() else 0
 	end
 	local open_w = ui.state("shell_files_shown_width", target())
-	-- Opening or closing (the edge revealing what stands at its width):
-	-- its content keeps the width it rests at. Otherwise it fills the panel.
-	-- (The build's own, as the animation is: a reload mid-step starts the
-	-- step again from where it shows, never counting what's left twice.)
-	local revealing = ui.use_state(false)
+	-- Where its width is going (`base` below, told), and whether a step that
+	-- opens, closes, expands or collapses it is under way: then what's in it
+	-- is laid out at that from the step's first frame, so nothing in it
+	-- squeezes as its edge moves. (A column the fit takes away or gives as
+	-- the window is resized, it follows the edge: that's the window's edge
+	-- under the hand.) (The build's own, as the animation is.)
+	local goal = ui.use_state(open_w:peek())
+	local holding = ui.use_state(false)
+	-- What's in it (its tabs and what they show) and the page's own content
+	-- (held under the panel expanded over it: `page_hold`), for their drift
+	-- and fade as they come and go (ds/motion `content`).
+	local content_el: any = nil
+	local page_el: any = nil
+	-- The page's content width while the panel expands over it or gives it
+	-- back: it keeps the width it had (expanding) or takes the one it's
+	-- going to (coming back), clipped by its edge, never squeezed to nothing
+	-- or growing from it. nil: the page's own.
+	local page_hold = ui.use_state(nil :: number?)
+	-- (Its width as the panel expanded, with the window's and the panel's.)
+	local held_from: { w: number, vw: number, panel: number }? = nil
 	-- Its width is where it's going (`base`, which a window resize moves at
 	-- once) and, after a step (opened, closed, expanded, a column going or
 	-- coming beside it, a neighbour's share), what's left of that step
@@ -888,7 +903,37 @@ return function(props: Props): Node
 		local flipped = opened or now.sidebar ~= seen.sidebar or now.files ~= seen.files
 		local resized = now.vw ~= seen.vw
 		local moved = now.owner ~= seen.owner
+		local was = seen
 		seen = now
+		-- What comes or goes with it drifts with its edge and fades: its
+		-- content as it opens or closes (toward the window's right), the
+		-- page's as the panel expands over it (toward the sidebar). The route
+		-- moving shows each as it is there, at once.
+		if now.shown ~= was.shown and content_el then
+			anime.animate(content_el, motion.content(now.shown, 1, moved))
+		end
+		if now.expanded ~= was.expanded then
+			if page_el then
+				anime.animate(page_el, motion.content(not now.expanded, -1, moved))
+			end
+			-- (Measured before this step changes anything: the page's room now,
+			-- and the row it shares with the panel.)
+			local area = splits.area().w
+			if moved and not now.expanded then
+				page_hold:set(nil)
+			elseif now.expanded then
+				page_hold:set(area)
+				held_from = { w = area, vw = now.vw, panel = base + off:peek() }
+			elseif held_from and held_from.vw == now.vw and held_from.panel == to then
+				-- (Back to where it was: the width it had.)
+				page_hold:set(held_from.w)
+			else
+				-- (The row less where the panel goes and the gap before it; none
+				-- while it stood expanded.)
+				local whole = area + base + off:peek()
+				page_hold:set(math.max(whole - to - (if to > 0 then INSET else 0), 0))
+			end
+		end
 		if to == base and not moved then
 			return
 		end
@@ -899,7 +944,7 @@ return function(props: Props): Node
 				easing:cancel()
 				easing = nil
 			end
-			revealing:set(false)
+			holding:set(false)
 			off:set(0)
 			base = to
 		elseif resizing then
@@ -908,6 +953,7 @@ return function(props: Props): Node
 				easing:cancel()
 				easing = nil
 			end
+			holding:set(false)
 			off:set(0)
 			base = to
 		elseif flipped or not (resized or (now.expanded and not opened)) then
@@ -919,7 +965,7 @@ return function(props: Props): Node
 				easing = nil
 			end
 			if opened then
-				revealing:set(true)
+				holding:set(true)
 			end
 			off:set(showing - to)
 			local params = motion.panel(0)
@@ -929,7 +975,12 @@ return function(props: Props): Node
 			params.onComplete = function()
 				if steps == this then
 					easing = nil
-					revealing:set(false)
+					holding:set(false)
+					-- (The page given back: its own width again, the one it was
+					-- held at.)
+					if not (shown:peek() and shell_view.expanded:peek()) and page_hold:peek() ~= nil then
+						page_hold:set(nil)
+					end
 				end
 			end
 			easing = anime.animate(off, params)
@@ -937,6 +988,12 @@ return function(props: Props): Node
 			-- The window resized (or the room it fills while expanded moved):
 			-- where it goes moves at once; a step under way goes on.
 			base = to
+		end
+		if not easing and not now.expanded and page_hold:peek() ~= nil then
+			page_hold:set(nil)
+		end
+		if goal:peek() ~= base then
+			goal:set(base)
 		end
 		open_w:set(base + off:peek())
 	end)
@@ -948,16 +1005,16 @@ return function(props: Props): Node
 			open_w:set(w)
 		end
 	end)
-	-- The panel's content width: opening or closing, the width it rests at
-	-- (its edge reveals it, its strip held: see `hold`); else the panel's
-	-- own, filling it as it moves (a column going or coming beside it, its
-	-- tree going to float: the file stays where it was as the tree slides
-	-- away).
+	-- The panel's content width: opening, expanding or collapsing, where its
+	-- width is going, from the step's first frame, its edge sweeping over it
+	-- as it gets there; closing and shut, the width it rested at. Otherwise
+	-- its own, under the hand as it's dragged or the window is resized.
 	local function inner_w(): number
-		if revealing:get() then
-			return math.max(rest_w:get(), open_w:get())
+		if not holding:get() and shown:get() then
+			return open_w:get()
 		end
-		return open_w:get()
+		local g = goal:get()
+		return if g > 0 then g else rest_w:get()
 	end
 	-- Its width asked for (its edge dragged, or keyed): never past what
 	-- leaves the page what it wants; kept as the width it takes with its tree
@@ -970,11 +1027,6 @@ return function(props: Props): Node
 		if not chosen:peek() then
 			chosen:set(true)
 		end
-	end
-	-- (The page's card goes, not to a sliver of its edge, while the
-	-- panel stands over it.)
-	pane.opacity = function(): number
-		return if expanded() then 0 else 1
 	end
 	-- Whether any of it shows: none at all under 2 points. (Shut is shut:
 	-- what's left of its width as it eases closed, a point or so, would
@@ -1017,10 +1069,17 @@ return function(props: Props): Node
 		-- (From the window's top: the panel's own band is the title strip
 		-- over it, its tabs in it, a window-drag region of its own, room
 		-- left at its right for the title bar's Panel toggle.)
+		-- (Its card is its box, as the sidebar's is; what's in it stands at
+		-- its right, the side it's attached to, at `inner_w`: the edge
+		-- sweeping in from the left reveals it and covers it again. Shut, and
+		-- its width run out, out of layout until it opens: kept as it was,
+		-- not laid out at its width in a box of none.)
 		ui.column {
-			-- (Its own width, or, expanding, the one it grows to.)
-			w = inner_w,
+			w_full = true,
 			h_full = true,
+			hidden = function(): boolean
+				return not shown:get() and not panel_seen:get()
+			end,
 			-- The session's panel (its tabs: the files, a terminal), or, until
 			-- that screen is there, the files pane alone.
 			if boundary.load("@app/screens/panel")
@@ -1033,11 +1092,25 @@ return function(props: Props): Node
 						session = route.session,
 						page = route.page,
 						no_project = true,
+						content = {
+							id = "shell-files-content",
+							w = inner_w,
+							self = "end",
+							on_mount = function(el: any)
+								content_el = el
+								anime.animate(el, motion.content(shown:peek(), 1, true))
+							end,
+						},
 					}
 				end)
-				else boundary.screen(boundary.named("shell.boundary.screen.files"), "@app/screens/files", function(files): Node
-					return files.Pane { project = route.project, session = route.session }
-				end),
+				else ui.column {
+					w = inner_w,
+					self = "end",
+					h_full = true,
+					boundary.screen(boundary.named("shell.boundary.screen.files"), "@app/screens/files", function(files): Node
+						return files.Pane { project = route.project, session = route.session }
+					end),
+				},
 		},
 	}
 	panel_open = function(): boolean
@@ -1440,10 +1513,6 @@ return function(props: Props): Node
 			overflow = function(): string
 				return if splits.opening_size(id) then "hidden" else "visible"
 			end,
-			-- (The panel expanded over the page: none of the split shows.)
-			opacity = function(): number
-				return if expanded() then 0 else 1
-			end,
 			ui.show(grouped, card),
 		}
 		splits.place(item, function(): any
@@ -1617,61 +1686,88 @@ return function(props: Props): Node
 		pointer_events = function(): any
 			return if grouped() then "none" else "auto"
 		end,
-		-- (The split's panes, under the page's card: in a split, their cards
-		-- are the chats, and the page's card is the composer's frame over
-		-- the focused one's.)
+		-- (While the panel expands over the page or gives it back, what's in
+		-- it is held at a width (`page_hold`) and this clips it, in the cards'
+		-- corners: its edge reads as the page's card's own.)
+		overflow = function(): string
+			return if page_hold:get() then "hidden" else "visible"
+		end,
+		rounded = "$zeron.inset.radius",
 		ui.div {
+			id = "shell-page-room",
 			absolute = true,
 			left = 0,
-			right = 0,
 			top = 0,
 			bottom = 0,
-			pointer_events = "none",
-			ui.each(members, function(id: string): Node
-				return pane_item(id)
-			end, {
-				key = function(id: string): string
-					return id
-				end,
-				w_full = true,
-				h_full = true,
-				relative = true,
-			}),
-		},
-		-- (The page's card, placed by its box in a split: there the frame of
-		-- the window's composer alone, over the panes.)
-		ui.column(pane),
-		ui.div {
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			pointer_events = "none",
-			ui.each(divider_ids, divider, {
-				key = function(id: string): string
-					return id
-				end,
-				w_full = true,
-				h_full = true,
-				relative = true,
-			}),
-		},
-		ui.div {
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			pointer_events = "none",
-			ui.each(landing_ids, landing, {
-				key = function(id: string): string
-					return id
-				end,
-				w_full = true,
-				h_full = true,
-				relative = true,
-			}),
+			w = function(): any
+				local held = page_hold:get()
+				return if held then ui.raw(held, "the page's width held as the panel expands over it") else "100%"
+			end,
+			pointer_events = function(): any
+				return if grouped() then "none" else "auto"
+			end,
+			-- (Its drift and fade as the panel expands over it: ds/motion
+			-- `content`. Gone, it takes no clicks.)
+			on_mount = function(el: any)
+				page_el = el
+				anime.animate(el, motion.content(not expanded(), -1, true))
+			end,
+			-- (The split's panes, under the page's card: in a split, their cards
+			-- are the chats, and the page's card is the composer's frame over
+			-- the focused one's.)
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				ui.each(members, function(id: string): Node
+					return pane_item(id)
+				end, {
+					key = function(id: string): string
+						return id
+					end,
+					w_full = true,
+					h_full = true,
+					relative = true,
+				}),
+			},
+			-- (The page's card, placed by its box in a split: there the frame of
+			-- the window's composer alone, over the panes.)
+			ui.column(pane),
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				ui.each(divider_ids, divider, {
+					key = function(id: string): string
+						return id
+					end,
+					w_full = true,
+					h_full = true,
+					relative = true,
+				}),
+			},
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				ui.each(landing_ids, landing, {
+					key = function(id: string): string
+						return id
+					end,
+					w_full = true,
+					h_full = true,
+					relative = true,
+				}),
+			},
 		},
 	}
 
