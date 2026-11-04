@@ -18,6 +18,18 @@ local sessions = require("@account/sessions")
 require("@app/screens/shell/route").launched:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
+-- The host's lane views (a split's other chats are watched in lanes of
+-- their own): a watched chat says its title in its transcript, and what's
+-- watched is kept in `split_lanes` for the tests to read.
+local lanes = require("@app/screens/chat/lanes")
+local split_lanes = ui.state("split_lanes", {} :: { [string]: string })
+local stub_lanes = lanes :: any
+stub_lanes.watch = function(slot: string, id: string?)
+	split_lanes:set_key(slot, id)
+	if id then
+		lanes.view(slot).messages:set({ { id = `{id}-m`, role = "assistant", text = `This is {id}` } })
+	end
+end
 -- Settings' host calls, answered as the host would (settings_stub.luau).
 require("./settings_stub")
 
