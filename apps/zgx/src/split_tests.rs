@@ -1474,6 +1474,16 @@ fn a_dragged_sidebar_edge_builds_no_list() {
     assert!(four - one <= 3 * 45, "{one} script calls a frame with one chat, {four} with four");
 }
 
+/// v2 too: its sidebar's list isn't built again at each frame of the edge
+/// dragged (which woke every row's bindings: 225 script calls a frame, 115 without).
+#[test]
+fn v2_s_dragged_sidebar_edge_builds_no_list() {
+    let t = scratch("v2-drag").join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let calls = drag_script_of(&compose(&t, "zeron-v2").join("shell_fixture.luau"), 1);
+    assert!(calls <= 170, "{calls} script calls a frame");
+}
+
 /// A window resized by its edge reflows the page at every frame, as the
 /// panel's glide and an edge dragged do: nothing holds it at one width.
 #[test]
