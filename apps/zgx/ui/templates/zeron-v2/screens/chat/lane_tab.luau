@@ -21,6 +21,7 @@ local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
+local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 
@@ -312,12 +313,7 @@ local function composer(chat: string, view: any, name: string): Node
 			req.message_id = mid
 			local sent: any = nil
 			T.send(function()
-				local here = false
-				for _, m in view.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
 					-- (On its way from this moment: the line under it says so.)
 					view.messages:push { id = mid, role = "user", text = words, waiting = "sending" }
@@ -474,6 +470,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		open_link = open_link,
+		chat_of = Shared.chat_of,
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),

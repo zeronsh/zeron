@@ -264,6 +264,13 @@ end }
 -- its labels in `test_menu_labels`; `port_menu_pick` does the one
 -- `test_menu_pick` names. Opening outside is noted (`external:<url>`).
 local stub_browser = require("@app/screens/panel/browser_api") :: any
+-- (As the host says them: this fixture has no host.)
+do
+	local said = ui.shared("chat.subagents", {} :: { any })
+	ui.effect(function()
+		said:set(require("@app/screens/chat/lanes").subagents_of(require("@app/screens/chat/store").messages:get()))
+	end)
+end
 stub_browser.open_externally = function(url: string)
 	note(`external:{url}`)
 end

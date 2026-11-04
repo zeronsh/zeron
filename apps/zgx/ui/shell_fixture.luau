@@ -948,6 +948,47 @@ ui.command {
 		publish()
 	end,
 }
+-- Links clicked in a chat: a pull request's, an issue's, another site's
+-- (tests/plugin_links).
+for id, url in {
+	click_pr_link = "https://github.com/acme/atlas/pull/12/files",
+	click_issue_link = "https://github.com/acme/atlas/issues/12",
+	click_other_link = "https://example.com/acme/atlas/pull/12",
+} do
+	ui.command {
+		id = id,
+		title = id,
+		run = function()
+			require("@ds/links").take(url)
+		end,
+	}
+end
+-- Atlas cloned on the devbox too, with a session there (tests/sidebar_repository).
+ui.command {
+	id = "atlas_cloned_on_box",
+	title = "Atlas is cloned on devbox",
+	run = function()
+		for _, p in model.projects do
+			if p.id == "atlas" then
+				p.repository, p.created = "commit:atlas", 100
+			end
+		end
+		table.insert(model.projects, { id = "atlas-clone", name = "atlas-clone", device = "box", path = "/srv/atlas-clone", git = true, repository = "commit:atlas", created = 200 })
+		table.insert(model.chats, { id = "cl1", title = "On the clone", project = "atlas-clone", device = "box", updated = NOW - 30 * HOUR, created = NOW - 30 * HOUR })
+		publish()
+	end,
+}
+-- A chat beside each of the five, to compose tabs from (tests/session_tabs).
+ui.command {
+	id = "partner_chats",
+	title = "Five more chats",
+	run = function()
+		for i = 1, 5 do
+			table.insert(model.chats, { id = `p{i}`, title = `Partner {i}`, project = "atlas", device = "mac", updated = NOW - 40 * HOUR - i, created = NOW - 40 * HOUR - i })
+		end
+		publish()
+	end,
+}
 -- A session starts in Cobalt (another device's, say): it has one again.
 ui.command {
 	id = "cobalt_arrives",

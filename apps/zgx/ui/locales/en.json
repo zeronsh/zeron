@@ -244,9 +244,6 @@
       "changed_on_disk": "Changed on disk",
       "keep_mine": "Keep Mine",
       "choose": "Choose a file to see it here",
-      "hint_filter": "Filter",
-      "hint_move": "Move",
-      "hint_open": "Open",
       "binary": {
         "title": "{name} isn't text",
         "body_size": "It's a {size} binary file, so there's nothing here to read.",
@@ -660,6 +657,13 @@
       "view_named": "View {name}",
       "done": "Done"
     },
+    "mermaid": {
+      "show_source": "Show source",
+      "show_diagram": "Show diagram",
+      "failed": "Couldn't draw this diagram: {reason}",
+      "view": "View diagram",
+      "name": "Mermaid diagram"
+    },
     "math": {
       "style": {
         "fira": "Sans",
@@ -710,6 +714,7 @@
     "transcript": {
       "copy_message": "Copy message",
       "switched": "Switched from {from} to {to}",
+      "message_from": "Message from",
       "not_delivered": "Not delivered — send again",
       "reply": "Reply",
       "you": "You",
@@ -1175,6 +1180,19 @@
         "label": "Frosted glass",
         "terms": "glass translucent opaque transparency blur vibrancy material",
         "description": "The desktop shows through the window. Off, it's solid."
+      },
+      "font_default": "Default ({name})",
+      "font_search": "Search fonts",
+      "font_none": "No fonts match.",
+      "interface_font": {
+        "label": "Interface font",
+        "terms": "typeface family font menus conversations geist system installed",
+        "description": "Menus and conversations."
+      },
+      "code_font": {
+        "label": "Code font",
+        "terms": "monospace typeface family font editor terminal diffs tool output geist mono installed",
+        "description": "Code, diffs, and terminals · monospaced only."
       },
       "text_size": {
         "label": "Interface text size",
@@ -2199,6 +2217,8 @@
         "remove_title": "Remove project?",
         "this_project": "this project",
         "its_device": "its device",
+        "removing_where": "Choose where to remove “{name}”. Its sessions there are permanently deleted. This can’t be undone.",
+        "checkout": "{n, plural, one {# session} other {# sessions}} · {path}",
         "removing": "Removing “{name}” permanently deletes {n, plural, one {its # session} other {its # sessions}} on {device}. This can’t be undone.",
         "couldnt_remove": "Couldn't remove the project",
         "edit": {

@@ -1073,6 +1073,29 @@ fn viewer_with(github: serde_json::Value) -> (TestApp, Heard) {
 }
 
 #[test]
+fn github_s_viewer_and_board_can_have_their_words_selected() {
+    let detail = json!({
+        "title": "Plugins: class targets", "body": "Selectors by class.",
+        "url": "https://github.com/zeronsh/zgx/pull/1264", "number": 1264, "author": { "login": "ada" },
+        "baseRefName": "main", "headRefName": "plugin/targets", "state": "OPEN", "isDraft": false,
+    });
+    let mut app = viewer(json!({ "viewer": "ada", "pr": detail }));
+    app.frames(10);
+    let page = app.target(".github-pr").expect("the viewer");
+    assert!(app.ui.select_all_text(page), "the viewer's text selects");
+    assert!(app.ui.selected_text().contains("Selectors by class."), "{:?}", app.ui.selected_text());
+
+    let (mut app, _) = board();
+    app.click("role:button \"Project\"");
+    app.frames(10);
+    app.click("\"Atlas\"");
+    app.frames(10);
+    let page = app.target(".github-board").expect("the board");
+    assert!(app.ui.select_all_text(page), "the board's text selects");
+    assert!(app.ui.selected_text().contains("zeronsh/zgx"), "{:?}", app.ui.selected_text());
+}
+
+#[test]
 fn github_s_viewer_shows_the_pull_request_s_header_and_description() {
     let detail = json!({
         "title": "Plugins: class targets", "body": "## Why\n\nSelectors by class.\n\n- one\n- two",
@@ -1707,7 +1730,15 @@ fn board() -> (TestApp, Heard) {
         expose_own(&host, "github");
         super::locales::publish(&host, "github", &super::builtin_dir().join("github"));
         // (Its projects' folders: "files.read".)
-        host.shared("plugin.github.records", zgx_script::Value::Nil).set(json_value(&json!({ "profile": {}, "projects": { "p1": { "name": "Atlas", "path": "/work/atlas" }, "p2": { "name": "Borealis", "path": "/work/borealis" } } })));
+        host.shared("plugin.github.records", zgx_script::Value::Nil).set(json_value(&json!({ "profile": {}, "projects": {
+            "p1": { "name": "Atlas", "path": "/work/atlas", "repository": "commit:atlas", "created": 200, "here": true },
+            "p2": { "name": "Borealis", "path": "/work/borealis" },
+            // (Atlas again, newer, on another device.)
+            "p3": { "name": "atlas-box", "path": "/srv/atlas", "repository": "commit:atlas", "created": 300, "here": false },
+            // (A repository first added elsewhere: its name, this device's clone.)
+            "p4": { "name": "Cedar", "path": "/srv/cedar", "repository": "commit:cedar", "created": 100, "here": false },
+            "p5": { "name": "cedar-clone", "path": "/work/cedar", "repository": "commit:cedar", "created": 200, "here": true },
+        } })));
         for name in ["result", "ack", "menus", "toast", "add_page", "github_watch", "open_url", "cost"] {
             host.action(format!("plugin.github.{name}"), |_| {});
         }
@@ -1737,6 +1768,25 @@ fn board() -> (TestApp, Heard) {
     app.ui.scene.borrow_mut().resize(1100., 900.);
     app.frames(10);
     (app, asked)
+}
+
+#[test]
+fn github_s_board_lists_a_repository_once_however_many_clones_it_has() {
+    let (mut app, asked) = board();
+    app.click("role:button \"Project\"");
+    app.frames(10);
+    let tree = app.tree();
+    for shown in ["Atlas", "Borealis", "Cedar"] {
+        assert!(tree.contains(&format!("\"{shown}\"")), "{shown}: {tree}");
+    }
+    for clone in ["atlas-box", "cedar-clone"] {
+        assert!(!tree.contains(clone), "{clone} is one of a repository's clones: {tree}");
+    }
+    // Named by its oldest, opened from the clone on this device.
+    app.click("\"Cedar\"");
+    app.frames(10);
+    assert!(runs(&asked).iter().any(|r| ran(r, &["repo", "view"]) && r["cwd"] == "/work/cedar"), "{:?}", runs(&asked));
+    assert!(asked.borrow().iter().any(|(k, v)| k == "store_set" && v.contains("\"p5\"")), "{:?}", asked.borrow());
 }
 
 #[test]

@@ -16,6 +16,9 @@
 -- the file taking the room as it goes (the sidebar's motion); showing is
 -- the same back. `shown` is the caller's, so it can be remembered.
 --
+-- With no file open and too little room for one beside it, the tree takes the
+-- whole pane, until a file is chosen.
+--
 -- `FilesPane { shown = state, tree = { FileTree's props }, viewer = { FileViewer's props }, head = "line" }`.
 
 local FileTree = require("@self/file_tree")
@@ -49,6 +52,8 @@ local SLIDE = { duration = 260, ease = "out(3)" }
 local INK = { duration = 160 }
 -- The keys that hide and show it.
 local KEYS = "cmd+shift+e"
+-- The least a file's side is worth having, with no file to show yet.
+local FILE_LEAST = 240
 
 local function num(token: string, fallback: number): number
 	return (ui.theme.get(token) :: number?) or fallback
@@ -73,20 +78,32 @@ local made = ui.component(function(props: Props): Node
 	local function out(): boolean
 		return shown:get()
 	end
+	-- No file open, and no room for one beside the tree: the tree has it all.
+	local doc = props.viewer.doc :: any
+	local function whole(): boolean
+		local open = if type(doc) == "function" then doc() else doc:get()
+		local w = room:get()
+		return shown:get() and open == nil and w > 0 and w < tree_w + FILE_LEAST
+	end
 	-- The tree's room beside the file, eased as it comes and goes by the tree's own
 	-- slide.
 	local function dock_target(): number
-		return if shown:get() then tree_w else 0
+		return if whole() then room:get() elseif shown:get() then tree_w else 0
 	end
 	local dock_w = ui.use_state(dock_target())
 	local dock_easing: any = nil
+	local was_whole = whole()
 	ui.effect(function()
 		local to = dock_target()
+		local now_whole = whole()
+		-- (All of it already, the pane resizing: with the pane, not after it.)
+		local follows = now_whole and was_whole
+		was_whole = now_whole
 		if dock_easing then
 			dock_easing:cancel()
 			dock_easing = nil
 		end
-		if not settled then
+		if not settled or follows then
 			dock_w:set(to)
 		else
 			dock_easing = anime.animate(dock_w, motion.params({ value = to, duration = SLIDE.duration, ease = SLIDE.ease }))
@@ -118,6 +135,11 @@ local made = ui.component(function(props: Props): Node
 		props.commands.toggle = toggle
 	end
 
+	-- The tree's width: its own, or all it's been given (it never slides narrower,
+	-- only away).
+	local function tree_now(): number
+		return math.max(tree_w, dock_w:get())
+	end
 	-- The tree's props, beside the file.
 	local function tree_props(): FileTree.Props
 		local tp: FileTree.Props = table.clone(props.tree)
@@ -128,9 +150,9 @@ local made = ui.component(function(props: Props): Node
 		-- there, so it never shows under the toggle. At rest that's left
 		-- of the head's field (`lead`), so nothing changes there.
 		tp.head_cut = function(): number
-			return pad + square - (dock_w:get() - tree_w)
+			return pad + square - (dock_w:get() - tree_now())
 		end
-		tp.w = tree_w
+		tp.w = tree_now :: any
 		tp.h_full = true
 		return tp
 	end
@@ -143,9 +165,9 @@ local made = ui.component(function(props: Props): Node
 			left = 0,
 			top = 0,
 			bottom = 0,
-			w = tree_w,
+			w = tree_now,
 			x = function(): number
-				return dock_w:get() - tree_w
+				return dock_w:get() - tree_now()
 			end,
 			-- (Its ink goes as the user hides it.)
 			opacity = function(): number
@@ -158,7 +180,18 @@ local made = ui.component(function(props: Props): Node
 			FileTree(tree_props()),
 			-- Its edge, from under the band (the band's hairline runs across
 			-- both heads).
-			ui.div { absolute = true, right = 0, top = head_h, bottom = 0, w = 1, bg = "$border.subtle" },
+			-- (None with no file's side to part it from.)
+			ui.div {
+				absolute = true,
+				right = 0,
+				top = head_h,
+				bottom = 0,
+				w = 1,
+				bg = "$border.subtle",
+				opacity = function(): number
+					return if dock_w:get() >= room:get() - 0.5 then 0 else 1
+				end,
+			},
 		}
 	end
 	local tree = ui.div { absolute = true, left = 0, top = 0, right = 0, bottom = 0, pointer_events = "none", beside() }
@@ -173,6 +206,11 @@ local made = ui.component(function(props: Props): Node
 	viewer_props.grow = 1
 	viewer_props.min_w = 0
 	viewer_props.h_full = true
+	-- (With no file, what its side says goes before it has no room to say it.)
+	viewer_props.opacity = function(): number
+		local open = if type(doc) == "function" then doc() else doc:get()
+		return if open then 1 else math.clamp((room:get() - dock_w:get() - 100) / 100, 0, 1)
+	end
 
 	-- The toggle, at the band's start, over whichever head is under it.
 	local toggle_button = ui.div {

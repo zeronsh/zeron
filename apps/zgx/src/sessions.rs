@@ -9,7 +9,7 @@
 //!   { state = "loading" | "ready" | "offline",
 //!     here = this Mac's device id?,
 //!     devices = { { id, name, platform, here, online, seen?, version? } },
-//!     projects = { { id, name, device, path, git, github?,
+//!     projects = { { id, name, device, path, git, github?, repository?, created?,
 //!                    icon? = { emoji?, image?, hue? } } },
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
 //!                 updated, created, harness?, agent?, model?,
@@ -419,6 +419,10 @@ impl Sessions {
                     // Its GitHub repository (`owner/name`), the one a Cloud
                     // chat of it clones.
                     ("github", p["githubRepo"].as_str().filter(|r| !r.is_empty()).map_or(Value::Nil, Value::from)),
+                    // Which repository it's a clone of, on any device (opaque:
+                    // equal ones are one repository), and when it was added.
+                    ("repository", p["repositoryId"].as_str().filter(|r| !r.is_empty()).map_or(Value::Nil, Value::from)),
+                    ("created", p["createdAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
                     // The picture its people chose: `{ emoji?, image?, hue? }`,
                     // nil for its default tile.
                     ("icon", project_icon(&p["icon"])),

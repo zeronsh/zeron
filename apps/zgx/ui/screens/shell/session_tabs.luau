@@ -1,10 +1,9 @@
--- The tabs on the top bar over the page (`splits` keeps them): a chat opened goes to
--- its tab, or gets a new one; a split is one, and a chat is in one at a time. Each
+-- The tabs on the top bar over the page (`splits` keeps them): one for each two chats
+-- or more composed together, and one for a chat alone, which navigating replaces. Each
 -- shows its panes' tiles stacked (three at most) with the pane focused last in front,
--- and its title. A pane dragged here is a new
--- tab (near a tab's edge, or past the last), or joins a tab (on its middle). A click
--- goes there, a drag reorders them, its × closes the tab, and a split with it (the sessions go on, in the
--- sidebar; one opened again gets a tab of its own).
+-- and its title. A chat dragged onto one joins it. A click goes there, a
+-- drag reorders them, its × closes the tab, and a split with it (the sessions go on,
+-- in the sidebar).
 --
 --   session_tabs.Strip { left = fn, right = fn }
 
@@ -105,45 +104,12 @@ local function face(key: string): string
 	return stack_of(key)[1] or splits.panes(key)[1] or key
 end
 
--- Where a chat held over the tabs would open as a tab of its own: before this tab,
--- "" at the end, nil nowhere. (Near a tab's edge, or past the last.)
-local slot = ui.state("shell_tabs_slot", nil :: string?)
-ui.effect(function()
-	if not splits.dragging:get() and slot:peek() ~= nil then
-		slot:set(nil)
-	end
-end)
-local GHOST = "\0slot"
--- The tabs, and the slot among them while there's one.
-local rows = ui.computed(function(): { string }
-	local at = slot:get()
-	local list = shown:get()
-	if at == nil then
-		return list
-	end
-	local out: { string } = {}
-	for _, key in list do
-		if key == at then
-			table.insert(out, GHOST)
-		end
-		table.insert(out, key)
-	end
-	if at == "" or not table.find(list, at) then
-		table.insert(out, GHOST)
-	end
-	return out
-end)
 -- A chat a drag carries, for the tabs: not a tab of them being moved.
 local function carried(payload: any): string?
 	if type(payload) ~= "table" or payload.session_tab then
 		return nil
 	end
 	return splits.dragged(payload)
-end
-local function set_slot(to: string?)
-	if slot:peek() ~= to then
-		slot:set(to)
-	end
 end
 
 -- A chat focused goes first among the focused. (Its tab: `splits`.)
@@ -166,13 +132,14 @@ end)
 
 local function close(key: string)
 	local before = shown:peek()
-	local at = table.find(before, key) or 1
+	local at = table.find(before, key)
+	local alone = #splits.panes(key) == 1
 	local was_showing = splits.current_key() == key
 	splits.close_tabs({ key })
 	if was_showing then
-		-- The one beside it, else a new chat.
+		-- The one beside it, else a new chat. (A chat alone: always a new chat.)
 		local after = shown:peek()
-		local next_key = after[math.min(at, #after)]
+		local next_key = if at and not alone then after[math.min(at, #after)] else nil
 		if next_key then
 			route.open_session(face(next_key))
 		else
@@ -181,7 +148,7 @@ local function close(key: string)
 	end
 end
 
--- The tab showing closed (⌘W): true if there was one.
+-- The tab showing closed, or the chat alone (⌘W): true if there was one.
 function M.close_showing(): boolean
 	local key = splits.current_key()
 	if not key then
@@ -440,25 +407,7 @@ local Tab = ui.component(function(props: { chat: string }): Node
 					if not chat then
 						return
 					end
-					-- Its edges (thin, as the gaps between tabs are) open a new tab
-					-- beside it; the rest is the tab: dropped there, the chat joins it.
-					local edge = math.min(10, e.w * 0.15)
-					local list = shown:peek()
-					local near_start = e.local_x < edge
-					local near_end = e.local_x > e.w - edge
-					if near_start or near_end then
-						if held:peek() then
-							held:set(false)
-						end
-						if near_start then
-							set_slot(id)
-						else
-							local at = table.find(list, id) or #list
-							set_slot(list[at + 1] or "")
-						end
-						return
-					end
-					set_slot(nil)
+					-- Dropped on it, the chat joins it.
 					local can = splits.can_join(chat, id)
 					if held:peek() ~= can then
 						held:set(can)
@@ -489,13 +438,7 @@ local Tab = ui.component(function(props: { chat: string }): Node
 				if not chat then
 					return
 				end
-				local before = slot:peek()
-				set_slot(nil)
-				if before ~= nil then
-					splits.new_tab(chat, before)
-				else
-					splits.join_tab(chat, id)
-				end
+				splits.join_tab(chat, id)
 			end,
 			-- A sidebar's chat resting on its middle shows it, so it can go among its
 			-- panes. (Not a pane's: its source would go, ending the drag.)
@@ -640,24 +583,6 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			pr = function(): any
 				return ui.raw(props.right(), "clear of the title bar's controls at the right")
 			end,
-			-- A chat held past the tabs: a tab of its own, at the end.
-			on_drag_over = function(payload: any)
-				local chat = carried(payload)
-				if chat then
-					set_slot("")
-				end
-			end,
-			on_drag_leave = function()
-				set_slot(nil)
-			end,
-			on_drop = function(payload: any)
-				local chat = carried(payload)
-				local before = slot:peek()
-				set_slot(nil)
-				if chat then
-					splits.new_tab(chat, before or "")
-				end
-			end,
 			ui.scroll_x {
 				id = "session-tabs-scroll",
 				ref = view,
@@ -670,27 +595,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 					ref = content,
 					gap = "$zeron.space.hair",
 					items = "center",
-					ui.each(rows, function(id: string): Node
-						if id == GHOST then
-							-- Where it would open: a dim slot, that takes the drop too.
-							return ui.div {
-								id = "session-tab-slot",
-								w = 120,
-								h = TAB_H,
-								rounded = "$radius.lg",
-								bg = "$zeron.inset.drop",
-								border = 1,
-								border_color = "$zeron.inset.drop_edge",
-								on_drop = function(payload: any)
-									local chat = carried(payload)
-									local before = slot:peek()
-									set_slot(nil)
-									if chat and before ~= nil then
-										splits.new_tab(chat, before)
-									end
-								end,
-							}
-						end
+					ui.each(shown, function(id: string): Node
 						return Tab { chat = id }
 					end, {
 						key = function(id: string): string

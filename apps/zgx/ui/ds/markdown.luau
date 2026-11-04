@@ -44,8 +44,11 @@ local Links = require("@ds/links")
 local FileIcon = require("@self/file_icons")
 -- LaTeX math: `$$…$$` and `$…$` read before markdown is (ds/math).
 local Math = require("@self/math")
+-- ```mermaid fences drawn as their diagrams (ds/mermaid).
+local Mermaid = require("@self/mermaid")
 local MarkdownFind = require("@self/markdown_find")
 local locale = require("@self/locale")
+local look = require("@self/look")
 
 -- A link's context menu entry (ds/links, ds/context_menu's).
 export type LinkEntry = Links.Entry
@@ -260,6 +263,9 @@ type Ctx = {
 	find: { q: string, cur: number, n: number }?,
 	-- Set a step smaller (Props' `small`).
 	small: boolean?,
+	-- The whole text now: a ```mermaid fence reads its end to know whether
+	-- it's still being written (ds/mermaid).
+	source: (() -> string)?,
 }
 
 -- A reply's pictures in the order it wrote them, by its group (each of its
@@ -558,7 +564,9 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.strike = true
 		end
 		if r.c then
-			span.font = "mono"
+			-- In code's font (Settings → Appearance; a span takes a family,
+			-- not a token), as code blocks are.
+			span.font = look.code_family()
 			span.bg = "$zeron.code.wash"
 			span.padding = { 4, 1 }
 			-- Zeron's inline code corner (markdown/render.rs's 4.5), each
@@ -1045,6 +1053,30 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 		end
 		-- (Its fade kept here, in the block's order: what it has shown is by its place.)
 		local veil = if ctx then ctx.veil else nil
+		local code_veil = if veil then { veil = veil, fading = veil_chunks(veil, code_shown(b.text)) } else nil
+		if lang == "mermaid" then
+			-- Its diagram once the fence has closed and the host has drawn
+			-- it; the code until then, or if it can't be (ds/mermaid).
+			local source = if ctx then ctx.source else nil
+			local code = b.text
+			return ui.div {
+				provide = { code = token.block({ lang = b.lang or "", source = b.text }) },
+				w_full = true,
+				min_w = 0,
+				Mermaid.Diagram {
+					text = b.text,
+					lang = b.lang,
+					writing = if source
+						then function(): boolean
+							return Mermaid.writing(source(), code)
+						end
+						else nil,
+					code = function(): Node
+						return CodeBlock { lang = b.lang, text = b.text, find = find, veil = code_veil, class = `md-code lang-{lang}` }
+					end,
+				},
+			}
+		end
 		return ui.div {
 			provide = { code = token.block({ lang = b.lang or "", source = b.text }) },
 			w_full = true,
@@ -1053,7 +1085,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				lang = b.lang,
 				text = b.text,
 				find = find,
-				veil = if veil then { veil = veil, fading = veil_chunks(veil, code_shown(b.text)) } else nil,
+				veil = code_veil,
 				class = if lang ~= "" then `md-code lang-{lang}` else "md-code",
 			},
 		}
@@ -1314,6 +1346,12 @@ return function(props: Props): Node
 	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small
 		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
+	-- A text that grows: what a ```mermaid fence reads to know whether
+	-- it's still being written (ds/mermaid).
+	if type(text) == "function" then
+		ctx = ctx or { tasks = {} }
+		;(ctx :: Ctx).source = text
+	end
 	-- Fading in as it streams (`veil`, with `key`), unless motion is reduced. `veil_seed`:
 	-- what's there as it's first built stays as it is (a chat opened mid-reply).
 	if props.veil and props.key and not Motion.reduced_now() then

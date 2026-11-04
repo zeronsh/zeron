@@ -266,6 +266,7 @@ local function Session(id: Id?): Node
 								return prefs.compact_transcript:get()
 							end,
 							on_mention = shared.mention,
+							chat_of = shared.chat_of,
 							on_retry = function(message: string)
 								local s = which()
 								if s then

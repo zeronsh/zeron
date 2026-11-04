@@ -342,6 +342,15 @@ local answers: { [string]: (arg: any) -> any } = {
 		end
 		return settled({ version = "0.2.140" })
 	end,
+	-- This computer's fonts (src/fonts.rs), a few of each kind.
+	["fonts.list"] = function()
+		return settled({
+			{ family = "Fira Code", mono = true },
+			{ family = "Inter", mono = false },
+			{ family = "JetBrains Mono", mono = true },
+			{ family = "Noto Serif", mono = false },
+		})
+	end,
 	-- A background image kept: the picked file itself (the app's own PNG,
 	-- so a headless host can draw it), 512 square.
 	["wallpaper.keep"] = function(arg: any)
@@ -536,8 +545,8 @@ ui.command {
 		require("@app/screens/shell/route").settings("account")
 	end,
 }
--- What the main window's theme overrides now (ds.look): its accent and a
--- syntax colour, for a test to read.
+-- What the main window's theme overrides now (ds.look): its accent, a
+-- syntax colour and its fonts, for a test to read.
 local window_theme = ui.state("settings_stub_window_theme", {} :: { [string]: any })
 ui.command {
 	id = "settings_stub.read_theme",
@@ -549,6 +558,8 @@ ui.command {
 			keyword = t["zeron.syntax.keyword"],
 			body = t["font.size.md"],
 			window = t["zeron.window"],
+			sans = t["font.sans"],
+			mono = t["font.mono"],
 		})
 	end,
 }

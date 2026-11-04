@@ -32,15 +32,18 @@ mod acp_registry;
 mod agents;
 mod appshots;
 mod auth;
+mod carried_settings;
 mod chat;
 mod cloud;
 mod dev;
 mod completion;
+mod desktop_blur;
 mod engine;
 mod engine_update;
 mod editor_menu;
 mod favicons;
 mod files;
+mod fonts;
 mod github;
 mod haptics;
 mod heap;
@@ -49,6 +52,7 @@ mod links;
 mod pasted;
 mod math;
 mod menu_bar;
+mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
@@ -470,6 +474,12 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // The active template laid over Zeron's own, in `<data>/templates/.live/`
     // (src/plugins/live.rs): the host's file is fixed as it's made, so it's
     // that folder's, whichever template is in use.
+    // (A beta: the sidebar as it was in the app it replaces.)
+    if cfg!(feature = "beta") {
+        let from = engine::data_dir().map(|dir| dir.join("ui-settings.json"));
+        let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
+        carried_settings::carry(from.as_deref(), state.as_deref());
+    }
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
@@ -585,6 +595,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if std::env::var("ZERON_ZGX_TRACE_TRANSCRIPT").is_ok_and(|v| v == "1") {
         host.shared("debug.trace_transcript", true);
     }
+    // How much the desktop blurs behind the glass (`window.blur`), for the
+    // glass's tint (ds/material).
+    desktop_blur::install(cx, &host);
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
     // Full screen, entered or left (`ui.invoke("window.full_screen", on)`),
@@ -687,6 +700,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     transparency::install(cx, &host);
     // LaTeX math laid out for `ds/math` (src/math.rs): every window.
     math::install(&host);
+    // Mermaid diagrams drawn for `ds/mermaid` (src/mermaid.rs).
+    mermaid::install(&host);
     // A slider's detents tapped under the trackpad (src/haptics.rs).
     haptics::install(&host);
     // The engine's account (src/auth.rs), this Mac's agents (src/agents.rs)
@@ -722,6 +737,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
+        // The installed fonts, for Settings → Appearance's font pickers
+        // (src/fonts.rs).
+        fonts::install(&host);
         // Settings → About & updates: versions and the engine's updater
         // (src/about.rs).
         about::install(cx, &host);

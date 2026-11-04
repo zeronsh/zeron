@@ -101,6 +101,8 @@ export type Message = {
 	to: string?,
 	from_mark: Mark.Name?,
 	to_mark: Mark.Name?,
+	-- A person's that another chat sent: which, and its title when it was sent.
+	sender: { chat: string, title: string }?,
 }
 
 export type Props = {
@@ -157,6 +159,9 @@ export type Props = {
 	-- names, a prompt's file mention): what opens it. Without it, it's
 	-- styled only.
 	open_link: ((target: string) -> ())?,
+	-- A chat as it's listed now: its title and agent's mark. Nil for one that
+	-- isn't listed, which a message from it can't open.
+	chat_of: ((id: string) -> { title: string, mark: Mark.Name? }?)?,
 	-- Those links' context menus where they aren't the web's (ds/markdown's
 	-- `link_menu`).
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
@@ -358,6 +363,70 @@ local function seam(m: Message): Node
 			switch_side(m.to, m.to_mark),
 		},
 	}
+end
+
+-- A message another chat sent: `Message from [mark] Chat`, muted, on the right
+-- over its bubble (Zeron's `render_agent_sender`). The chat's title as it is
+-- now, and a click opens it; one that isn't listed reads as it did when sent.
+local function sender_line(m: Message, props: Props): Node
+	local from = m.sender :: { chat: string, title: string }
+	local function now(): { title: string, mark: Mark.Name? }?
+		return if props.chat_of then props.chat_of(from.chat) else nil
+	end
+	return ui.presence(function(): string
+		local c = now()
+		return if c then `known:{c.mark or ""}` else "unknown"
+	end, function(kind: string): Node
+		local known = kind ~= "unknown"
+		local c = now()
+		local mark = if c then c.mark else nil
+		local line: { [any]: any } = {
+			gap = ui.raw(6, "Zeron's caption gap"),
+			items = "center",
+			min_w = 0,
+			max_w = "80%",
+			text_size = "$font.size.md",
+			color = "$text.secondary",
+			selectable = false,
+			ui.text { locale.t("ds.transcript.message_from"), shrink = 0 },
+			ui.row {
+				gap = ui.raw(5, "Zeron's caption mark-to-name gap"),
+				items = "center",
+				min_w = 0,
+				ui.div {
+					aria_hidden = true,
+					if mark then Mark { name = mark, size = 14, bare = true } else Icon { name = "chat-round-line", size = 14 },
+				},
+				ui.text {
+					function(): string
+						local live = now()
+						return if live then live.title else from.title
+					end,
+					literal = true,
+					truncate = true,
+					weight = "$font.weight.medium",
+				},
+			},
+		}
+		if known then
+			line.label = function(): string
+				local live = now()
+				return `{locale.s("ds.transcript.message_from")} {if live then live.title else from.title}`
+			end
+			line.cursor = "pointer"
+			-- (A line of text that opens, not a control: no box of its own.)
+			line.h, line.px, line.py, line.bg = "auto" :: any, 0, 0, "#00000000"
+			line.hover = { color = "$text.primary" }
+			line.active = { color = "$text.primary" }
+			line.on_click = function()
+				if props.open_link then
+					props.open_link(`zeron-chat:{from.chat}`)
+				end
+			end
+			return ui.row { w_full = true, justify = "end", ui.button(line) }
+		end
+		return ui.row { w_full = true, justify = "end", ui.row(line) }
+	end, { w_full = true, pb = ui.raw(6, "Zeron's USER_CAPTION_GAP") })
 end
 
 -- A reply's row: its tools, its text, and while it waits for either, that it
@@ -1355,15 +1424,21 @@ local function Transcript(props: Props): Node
 				text,
 			}
 		end
+		-- Where it stands: the last place it was given, so it fades out there.
+		local stood: any = nil
+		local function standing(): any
+			stood = spot:get() or stood
+			return stood
+		end
 		local bar: ContainerProps = {
 			ref = pill,
 			absolute = true,
 			top = function(): number
-				local at = spot:get()
+				local at = standing()
 				return if at then at.y else 0
 			end,
 			left = function(): number
-				local at = spot:get()
+				local at = standing()
 				local el = list:peek()
 				if not at or not el then
 					return 0
@@ -1536,6 +1611,7 @@ local function Transcript(props: Props): Node
 						class = "message message-user",
 						provide = { message = m.id },
 						w_full = true,
+						if m.sender then sender_line(m, props) else nil,
 						UserMessage {
 							id = m.id,
 							text = m.text,
@@ -1596,15 +1672,7 @@ local function Transcript(props: Props): Node
 			-- top, as far above it as it was.
 			on_mount = function(el)
 				local at = if keep and not was_at_end then keep:peek() else nil
-				local index: number? = nil
-				if at then
-					for i, m in messages:peek() do
-						if m.id == at.id then
-							index = i
-							break
-						end
-					end
-				end
+				local index: number? = if at then messages:index_of("id", at.id) else nil
 				if not at or not index then
 					placing:set(false)
 					to_end(list, offset, count:peek())
