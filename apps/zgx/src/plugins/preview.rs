@@ -815,6 +815,40 @@ return ui.column { ui.text { id = "accent", function() return accent:get() end }
         saved_as("preview");
     }
 
+    /// A setting first written in a preview, with nothing saved before it, is
+    /// on disk once it's kept, as much as one that was (zgx #1468).
+    #[test]
+    fn a_key_first_written_in_a_preview_is_saved_on_keep() {
+        let storage = dir("held-new").join("state");
+        let script = r#"
+local first = ui.persist("first_written", "default")
+ui.command { id = "set", run = function() first:set("written") end }
+return ui.column { ui.text { id = "first", function() return first:get() end } }
+"#;
+        set(Some(sleek()));
+        let mut app = TestApp::new({
+            let storage = storage.clone();
+            move |runtime| {
+                let host = ScriptHost::inline(runtime, "app", script).storage(storage);
+                host.guard(guard);
+                host
+            }
+        });
+        app.frames(2);
+        assert!(app.host.run_command("set"));
+        app.frames(2);
+        app.host.save();
+        assert!(!storage.join("app").join("first_written.json").exists(), "saved while it's a preview");
+        assert_eq!(app.host.keep_held_state(), 1);
+        set(None);
+        app.host.reload().unwrap();
+        app.frames(2);
+        assert_eq!(app.text("first"), "written");
+        app.host.save();
+        let saved = std::fs::read_to_string(storage.join("app").join("first_written.json")).expect("saved on keep");
+        assert!(saved.contains("written"), "{saved}");
+    }
+
     #[test]
     fn what_you_kept_is_bound_to_the_template_s_content() {
         let root = dir("digest");
