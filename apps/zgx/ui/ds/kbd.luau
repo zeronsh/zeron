@@ -165,7 +165,8 @@ return function(props: Props): Node
 					for _, p in parts do
 						table.insert(out, shown(p))
 					end
-					return table.concat(out)
+					-- (As a menu writes them: ⇧⌘C on macOS, Ctrl+Shift+C elsewhere.)
+					return table.concat(out, if mac then "" else "+")
 				end,
 				literal = true,
 				aria_hidden = true,
