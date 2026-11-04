@@ -749,6 +749,110 @@ fn a_pane_out_of_focus_is_live_and_gaining_focus_changes_nothing() {
 /// transcript, reply, tools, status, question and draft), and one pane is
 /// focused: the route's; and each tab opened landed in the panel's focused
 /// group.
+/// In a split, the side opened wins: the panel opened when the panes would go
+/// under their least closes the sidebar, the sidebar opened closes the panel,
+/// and neither is back until it's asked for. Under their least with one side
+/// open, the panes just narrow. (ui/tests/pane_floor.test.luau has the rest,
+/// which CI doesn't run.)
+#[test]
+fn the_side_opened_wins_in_a_split() {
+    use zgx_script::Value;
+    let row = |ids: &[&str]| {
+        let leaf = |id: &str| Value::record([("kind", Value::from("leaf")), ("id", Value::from(id))]);
+        let kids: Vec<Value> = ids.iter().map(|id| leaf(id)).collect();
+        Value::List(std::rc::Rc::from(vec![Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))])]))
+    };
+    const PANEL: &str = "#titlebar >> role:button \"Panel\"";
+    const SIDEBAR: &str = "#titlebar >> role:button \"Toggle sidebar\"";
+    for (ids, least) in [(&["a1", "a2"][..], 288.), (&["a1", "a2", "a3"][..], 230.)] {
+        let mut app = mount(&scratch(&format!("wins-{}", ids.len())));
+        app.ui.scene.borrow_mut().resize(1100., H);
+        app.frames(30);
+        app.host.set_state("screens/shell/split.luau::inset_split_trees", row(ids)).unwrap();
+        open(&mut app, "Fix the build");
+        app.frames(40);
+        let when = format!("{} panes at 1100", ids.len());
+        let shown = |app: &mut TestApp, what: &str| app.bounds(what).width > 1.;
+        app.click(PANEL);
+        app.frames(60);
+        assert_eq!(app.bounds("shell-files").width, 360., "{when}: the panel, at its least");
+        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar closed for it");
+        for id in ids {
+            let w = app.bounds(&format!("#split-pane-{id}")).width;
+            assert!(w >= least, "{when}: {id} is {w} wide, beside the panel");
+        }
+        // The panel closed: the sidebar isn't back on its own.
+        app.click(PANEL);
+        app.frames(60);
+        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar stays closed");
+        // Open both ways: the sidebar closes the panel, for good too.
+        app.click(PANEL);
+        app.frames(60);
+        app.click(SIDEBAR);
+        app.frames(60);
+        assert!(shown(&mut app, "shell-sidebar"), "{when}: the sidebar opened");
+        assert!(!shown(&mut app, "shell-files"), "{when}: the panel closed for it");
+        app.click(SIDEBAR);
+        app.frames(60);
+        assert!(!shown(&mut app, "shell-files"), "{when}: the panel stays closed");
+    }
+}
+
+/// A side closing for the other slides, and nothing steps with it: the first
+/// pane's title easing past the bar's controls as the sidebar goes (it stood
+/// there at once, 164 points in a frame), the last pane's × easing clear of the
+/// panel's toggle, each pane's edges and the panel gliding, every frame.
+#[test]
+fn a_side_giving_way_steps_nothing() {
+    use zgx_script::Value;
+    let leaf = |id: &str| Value::record([("kind", Value::from("leaf")), ("id", Value::from(id))]);
+    let kids = vec![leaf("a1"), leaf("a2")];
+    let tree = Value::List(std::rc::Rc::from(vec![Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))])]));
+    let mut app = mount(&scratch("no-steps"));
+    app.ui.scene.borrow_mut().resize(1100., H);
+    app.frames(30);
+    app.host.set_state("screens/shell/split.luau::inset_split_trees", tree).unwrap();
+    open(&mut app, "Fix the build");
+    app.frames(60);
+    // Where the pane's title's mark and its × stand in the window, from its tree.
+    fn head(app: &mut TestApp, id: &str) -> (f32, f32) {
+        let node = app.target(&format!("#split-pane-{id}")).unwrap();
+        app.ui.prepare_frame();
+        let opts = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: false };
+        let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, Some(node), &opts);
+        let tree = zgx_script::driver::tree_lines_text(&lines, hidden);
+        let x_of = |l: &str| l.split_whitespace().find(|w| w.contains(',')).and_then(|w| w.split(',').next()?.parse::<f32>().ok());
+        let mark = tree.lines().find(|l| l.contains("img") && l.contains(",14 ")).and_then(x_of).expect("its mark");
+        let close = tree.lines().find(|l| l.contains("Close pane")).and_then(x_of).expect("its ×");
+        (mark, close)
+    }
+    // The most the columns' own glide moves anything in a frame here, with
+    // room to spare, and the most the × moves in its pane (it stepped 26).
+    const MOST: f32 = 80.;
+    const IN_PANE: f32 = 12.;
+    for (when, click) in [("the panel opened", "#titlebar >> role:button \"Panel\""), ("the sidebar opened", "#titlebar >> role:button \"Toggle sidebar\"")] {
+        let sample = |app: &mut TestApp| {
+            let (a1, a2) = (app.bounds("#split-pane-a1"), app.bounds("#split-pane-a2"));
+            let (title, _) = head(app, "a1");
+            let (_, close) = head(app, "a2");
+            [title, a1.x, a1.width, app.bounds("shell-files").x, a2.x + a2.width - close]
+        };
+        const NAMES: [&str; 5] = ["a1's title", "a1's left", "a1's width", "the panel's left", "a2's × in its pane"];
+        let mut was = sample(&mut app);
+        app.click(click);
+        for f in 0..24 {
+            let now = sample(&mut app);
+            for i in 0..NAMES.len() {
+                let most = if i == 4 { IN_PANE } else { MOST };
+                assert!((was[i] - now[i]).abs() <= most, "{when}, frame {f}: {} stepped from {} to {}", NAMES[i], was[i], now[i]);
+            }
+            was = now;
+            app.frame();
+        }
+        app.frames(30);
+    }
+}
+
 #[test]
 fn two_hundred_random_steps_keep_every_pane_its_own_chat() {
     let mut app = mount(&scratch("random"));
@@ -794,6 +898,11 @@ fn two_hundred_random_steps_keep_every_pane_its_own_chat() {
             4 if route.is_some() && !host.chats.get(route.as_ref().unwrap()).is_some_and(|r| r.asking) => {
                 let r = route.clone().unwrap();
                 let text = format!("{r} draft {step}");
+                // (The pointer off the sidebar row it last clicked: that row's
+                // hover card can stand over the composer, as it can't for a
+                // person, whose pointer leaves the row to get there.)
+                app.hover("#shell-drag");
+                app.frames(30);
                 app.fill("#chat-composer >> role:textbox", &text);
                 app.frames(4);
                 c.get_mut(&r).unwrap().draft = text;
