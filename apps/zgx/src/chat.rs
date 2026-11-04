@@ -120,6 +120,8 @@ enum CatalogState {
 struct View {
     session: Shared,
     messages: Shared,
+    /// Its transcript's subagents, so reading them doesn't read a transcript.
+    subagents: Shared,
     draft: Shared,
     rpc: RefCell<Option<Rpc>>,
     open: RefCell<Option<Open>>,
@@ -227,6 +229,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let view = Rc::new(View {
         session: host.shared("chat.session", Value::Nil),
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
+        subagents: host.shared("chat.subagents", Value::List(Rc::from([]))),
         draft: host.shared("chat.draft", draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
@@ -377,6 +380,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
     let view = Rc::new(View {
         session: host.shared(&format!("chat.lane.{slot}.session"), Value::Nil),
         messages: host.shared(&format!("chat.lane.{slot}.messages"), Value::List(Rc::from([]))),
+        subagents: host.shared(&format!("chat.lane.{slot}.subagents"), Value::List(Rc::from([]))),
         draft: host.shared(&format!("chat.lane.{slot}.draft"), draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
@@ -996,6 +1000,7 @@ impl View {
         self.snapshot.set(false);
         *self.open.borrow_mut() = id.map(|id| Open { id, ..Open::default() });
         self.messages.set(Value::List(Rc::from([])));
+        self.subagents.set(Value::List(Rc::from([])));
         self.draft.set(draft_value("", ""));
         self.subscribe();
         self.publish_session();
@@ -1018,6 +1023,7 @@ impl View {
         self.snapshot.set(true);
         *self.open.borrow_mut() = Some(Open { id: id.clone(), ..Open::default() });
         self.messages.set(Value::List(Rc::from([])));
+        self.subagents.set(Value::List(Rc::from([])));
         self.draft.set(draft_value("", ""));
         self.publish_session();
         let generation = self.generation.get();
@@ -1235,6 +1241,7 @@ impl View {
         };
         // The list first: a reply that ended takes its words into its row
         // before the draft lets them go.
+        self.subagents.set(subagents_of(&list));
         self.messages.set(Value::List(list.into()));
         self.publish_draft();
     }
@@ -2404,6 +2411,30 @@ fn entry_text(entry: &Json) -> String {
         out.push_str(&words);
     }
     out
+}
+
+/// A transcript's subagents: each spawn that names its doc, once, in the order they
+/// were spawned, with when their turn began (a message's `tools` hold all of its).
+fn subagents_of(messages: &[Value]) -> Value {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for message in messages {
+        let Some(Value::List(tools)) = message.field("tools") else { continue };
+        for tool in tools.iter() {
+            let Some(sub) = tool.field("subagent") else { continue };
+            let Some(Value::Str(reference)) = sub.field("ref") else { continue };
+            if seen.insert(reference.clone()) {
+                let field = |key: &str| sub.field(key).cloned().unwrap_or(Value::Nil);
+                out.push(Value::record([
+                    ("ref", Value::Str(reference.clone())),
+                    ("title", field("title")),
+                    ("status", field("status")),
+                    ("at", message.field("started").cloned().unwrap_or(Value::Nil)),
+                ]));
+            }
+        }
+    }
+    Value::List(out.into())
 }
 
 /// An entry as ds/transcript's message; nil for one it doesn't show.
@@ -4041,6 +4072,27 @@ mod tests {
         // Out of step: a length that doesn't add up.
         let wrong = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "!", "len": 9 }], "count": 2 });
         assert!(apply(&mut entries, &wrong).is_err());
+    }
+
+    #[test]
+    fn a_transcript_s_subagents_are_listed_once_each_in_order() {
+        let tool = |r: &str, title: &str| {
+            Value::record([("id", Value::from(r)), ("subagent", Value::record([("ref", Value::from(r)), ("title", Value::from(title))]))])
+        };
+        let message = |started: f64, tools: Vec<Value>| {
+            Value::record([("started", Value::Num(started)), ("tools", Value::List(tools.into()))])
+        };
+        let plain = Value::record([("id", Value::from("t")), ("verb", Value::from("Ran"))]);
+        let list = [
+            message(1., vec![tool("a", "first"), plain]),
+            Value::record([("role", Value::from("user"))]),
+            message(2., vec![tool("a", "again"), tool("b", "second")]),
+        ];
+        let Value::List(found) = subagents_of(&list) else { panic!("a list") };
+        let refs: Vec<String> = found.iter().map(|s| s.field("ref").map(text).unwrap_or_default()).collect();
+        assert_eq!(refs, ["a", "b"]);
+        assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
+        assert_eq!(found[1].field("at").and_then(Value::as_f64), Some(2.));
     }
 
     #[test]

@@ -1672,15 +1672,7 @@ local function Transcript(props: Props): Node
 			-- top, as far above it as it was.
 			on_mount = function(el)
 				local at = if keep and not was_at_end then keep:peek() else nil
-				local index: number? = nil
-				if at then
-					for i, m in messages:peek() do
-						if m.id == at.id then
-							index = i
-							break
-						end
-					end
-				end
+				local index: number? = if at then messages:index_of("id", at.id) else nil
 				if not at or not index then
 					placing:set(false)
 					to_end(list, offset, count:peek())

@@ -778,12 +778,7 @@ local function Composer(): Node
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
 			T.send(function()
-				local here = false
-				for _, m in store.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = store.messages:index_of("id", mid) ~= nil
 				if not here then
 					store.messages:push {
 						id = mid,

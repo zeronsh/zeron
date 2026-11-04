@@ -83,7 +83,8 @@ function M.side(id: string?): { sessions.Child }
 end
 
 -- A transcript's subagents: each spawn chip that names its doc, once, in
--- the order they were spawned, with when their turn began.
+-- the order they were spawned, with when their turn began. (As the host says
+-- them: for a fixture, which has no host.)
 function M.subagents_of(messages: { any }): { any }
 	local out, seen = {}, {}
 	local function walk(tools: { any }?, at: number?)
@@ -108,8 +109,14 @@ function M.subagents_of(messages: { any }): { any }
 	return out
 end
 
+-- (The host says them, so this doesn't read a whole transcript each time it moves.)
+local published = ui.shared("chat.subagents", {} :: { any })
 local subagents = ui.computed(function(): { any }
-	return M.subagents_of(store.messages:get())
+	local out: { any } = {}
+	for _, s in published:get() do
+		table.insert(out, { ref = s.ref, title = s.title or locale.s("chat.lanes.subagent"), status = s.status, at = s.at })
+	end
+	return out
 end)
 
 function M.subagents(): { any }

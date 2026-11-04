@@ -313,12 +313,7 @@ local function composer(chat: string, view: any, name: string): Node
 			req.message_id = mid
 			local sent: any = nil
 			T.send(function()
-				local here = false
-				for _, m in view.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
 					-- (On its way from this moment: the line under it says so.)
 					view.messages:push { id = mid, role = "user", text = words, waiting = "sending" }
