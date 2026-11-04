@@ -2,7 +2,8 @@
 //! view, so no template can take it away:
 //!
 //! - while a template runs as a preview (`preview`), a toast: "Previewing
-//!   <name>", with Keep (the host's keep sheet) and Revert (the default interface, in safe mode). It stays
+//!   <name>", a line that it runs the template's code, with Keep (the host's
+//!   keep sheet) and Revert (the default interface, in safe mode). It stays
 //!   while the preview lasts; its minimise button folds it to a pill that
 //!   opens it again;
 //! - notices, toasts that go by themselves (`notice`): the template
@@ -177,8 +178,8 @@ fn dismiss(signal: &zgx::reactive::Signal<Vec<Shown>>, id: u64) {
 
 /// The toasts, and the menu bar where there's no system one: above the
 /// scripts' view.
-pub fn view(cx: &mut WindowContext) -> View {
-    let toasts = toasts(&cx.ui.runtime);
+pub fn view(cx: &mut WindowContext, locale: zgx::reactive::Signal<zgx_script::Value>) -> View {
+    let toasts = toasts(&cx.ui.runtime, locale);
     column().child(toasts).children((!zgx_desktop::has_native_app_menu()).then(|| cx.app_menu_bar()))
 }
 
@@ -190,7 +191,7 @@ pub fn dev_toasts(cx: &mut WindowContext) -> Option<View> {
         return None;
     }
     preview::set(Some(preview::Preview { id: "inset".into(), name: "Inset".into() }));
-    let chrome = toasts(&cx.ui.runtime);
+    let chrome = toasts(&cx.ui.runtime, cx.ui.runtime.signal(zgx_script::Value::from("en")));
     notice(Notice::switched("Inset", false, true, true));
     notice(Notice::key("key_added", Some("Wing's iPhone"), ""));
     Some(chrome)
@@ -277,6 +278,9 @@ const OFF_CORNER: f32 = 16.;
 const GAP: f32 = 8.;
 /// The pill a minimised preview folds to: a small button's height.
 const PILL_H: f32 = 28.;
+
+const PREVIEW_LINE: &str = "A preview runs this template's code. Only preview templates you trust.";
+const PREVIEW_LINE_ZH: &str = "预览会运行这个模板的代码。只预览你信任的模板。";
 
 const INFO: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path stroke-linecap="round" d="M12 17v-6"/><path stroke-linecap="round" d="M12 7.5h.01"/></g></svg>"#;
 const WARNING: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="none"><path stroke="currentColor" stroke-width="1.5" d="M5.312 10.762C8.23 5.587 9.689 3 12 3s3.77 2.587 6.688 7.762l.364.644c2.425 4.3 3.638 6.45 2.542 8.022S17.786 21 12.364 21h-.728c-5.422 0-8.134 0-9.23-1.572s.117-3.722 2.542-8.022z"/><path stroke="currentColor" stroke-linecap="round" stroke-width="1.5" d="M12 8v5"/><circle cx="12" cy="16" r="1" fill="currentColor"/></g></svg>"#;
@@ -408,7 +412,7 @@ fn pill(title: &str, ink: Ink, open: impl FnMut() + 'static) -> View {
 /// The toasts as they come and go: the notices above, the preview's at
 /// the foot (it stays), in a layer of the host's at the window's
 /// bottom-left corner.
-fn toasts(runtime: &zgx::reactive::Runtime) -> View {
+fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_script::Value>) -> View {
     let now = runtime.signal(preview::current());
     let minimised = runtime.signal(false);
     {
@@ -433,9 +437,9 @@ fn toasts(runtime: &zgx::reactive::Runtime) -> View {
     let stack = switch(
         move || {
             themes.current();
-            (now.get(), heard.get(), folded.get(), themes.kind().is_dark())
+            (now.get(), heard.get(), folded.get(), themes.kind().is_dark(), matches!(locale.get(), zgx_script::Value::Str(l) if l.starts_with("zh")))
         },
-        move |(preview, list, mini, dark), _| {
+        move |(preview, list, mini, dark, chinese), _| {
             let ink = if dark { DARK } else { LIGHT };
             let mut out = column().items_end().gap(GAP);
             for shown in list {
@@ -470,7 +474,10 @@ fn toasts(runtime: &zgx::reactive::Runtime) -> View {
                     out = out.child(card(
                         "host-preview",
                         &title,
-                        "",
+                        // (True of every preview: don't word one as safe,
+                        // preview.rs. Here, not in the catalog: a template
+                        // can rewrite that.)
+                        if chinese { PREVIEW_LINE_ZH } else { PREVIEW_LINE },
                         Tone::Neutral,
                         ink,
                         minimise,
@@ -614,6 +621,11 @@ mod tests {
     use super::*;
     use zgx_script::{ScriptHost, testing::TestApp};
 
+    thread_local! {
+        /// The language a test's toasts show in.
+        static TEST_LOCALE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("en") };
+    }
+
     /// `entry` (under ui/) under the host's chrome, as the main window
     /// composes them (`compose`).
     fn mount_at(path: std::path::PathBuf, with_host: impl FnOnce(&ScriptHost) + 'static) -> TestApp {
@@ -621,7 +633,8 @@ mod tests {
         let made = chrome.clone();
         let app = TestApp::wrapped(
             move |runtime| {
-                *made.borrow_mut() = Some(column().child(toasts(runtime)));
+                let locale = runtime.signal(zgx_script::Value::from(TEST_LOCALE.with(|l| l.get())));
+                *made.borrow_mut() = Some(column().child(toasts(runtime, locale)));
                 let host = ScriptHost::new(runtime, path);
                 with_host(&host);
                 host
@@ -699,6 +712,21 @@ mod tests {
         }
     }
 
+    /// Its line follows the language Zeron shows; the rest of the host's
+    /// toasts are English (docs/i18n.md).
+    #[test]
+    fn the_preview_s_line_is_in_chinese_when_zeron_is() {
+        TEST_LOCALE.with(|l| l.set("zh-Hans"));
+        preview::set(Some(sleek()));
+        let mut app = mount();
+        TEST_LOCALE.with(|l| l.set("en"));
+        app.frames(6);
+        let texts = app.texts().join("|");
+        assert!(texts.contains(PREVIEW_LINE_ZH), "{texts}");
+        assert!(!texts.contains(PREVIEW_LINE), "{texts}");
+        preview::set(None);
+    }
+
     /// The preview's toast: its title and line, Revert and Keep; in the
     /// bottom-left corner, 16 points in, ds's toast's width; never over the
     /// title bar; gone with the preview.
@@ -716,8 +744,8 @@ mod tests {
         assert!(card.y > 400., "near the foot, far from the title bar: {card:?}");
         let texts = app.texts().join("|");
         assert!(texts.contains("Previewing Sleek"), "{texts}");
-        // (It claims no safety a preview doesn't have: zgx's `ui.term` isn't
-        // under the host's refusals.)
+        // (It claims no safety a preview doesn't have.)
+        assert!(texts.contains(PREVIEW_LINE), "{texts}");
         assert!(!texts.contains("can't run programs"), "{texts}");
         let (revert, keep) = (bounds(&mut app, "role:button \"Revert\""), bounds(&mut app, "role:button \"Keep\""));
         assert!(revert.x < keep.x && (revert.y - keep.y).abs() < 0.5, "Revert then Keep, side by side: {revert:?} {keep:?}");
@@ -730,6 +758,8 @@ mod tests {
         assert!((card.x + card.width - BORDER - INSET - (corner.x + corner.width)).abs() < 0.5, "{card:?} {corner:?}");
         assert!((corner.y - (card.y + BORDER + INSET)).abs() < 0.5, "as far from the top as the end: {card:?} {corner:?}");
         assert!(!host_texts(&mut app).contains('…'), "no ellipses");
+        let body = bounds(&mut app, &format!("#host-preview >> \"{PREVIEW_LINE}\""));
+        assert!(body.height >= 32., "the line wraps, never cut: {body:?}");
         preview::set(None);
         app.frames(6);
         assert!(app.find("#host-preview").is_none(), "gone with the preview");

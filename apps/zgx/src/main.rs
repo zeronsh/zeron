@@ -460,7 +460,7 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // The host's own toasts over it (a template in preview, a switch you
     // didn't make, signing keys, safe mode at launch) and the menu bar
     // where the system has none.
-    let chrome = plugins::host_bar::view(cx);
+    let chrome = plugins::host_bar::view(cx, host.shared("zeron.locale", "en").signal());
     // Where the app's toasts stand, over the host's (host_bar.rs `follow`).
     let floor = host.shared("toast_floor", 16.);
     let view = serve_with(cx, host, "app.luau", inspect, Some(chrome), menu_bar::Role::Bar);
