@@ -33,6 +33,7 @@ mod auth;
 mod chat;
 mod cloud;
 mod dev;
+mod dictation;
 mod completion;
 mod engine;
 mod engine_update;
