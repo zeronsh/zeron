@@ -729,7 +729,9 @@ local function connection_line(): Node
 			id = "connection-line",
 			w_full = true,
 			shrink = 0,
-			px = "$space.3",
+			-- (Its dot on the foot's left edge: Star on GitHub's glyph's, the
+			-- filter's and the empty list's words'.)
+			px = "$space.2",
 			pb = "$space.2",
 			gap = "$space.2",
 			items = "center",
