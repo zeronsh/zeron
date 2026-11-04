@@ -329,6 +329,57 @@ fn a_pane_s_grown_composer_takes_a_drop_as_a_mention() {
 
 // ── Zeron v2 ────────────────────────────────────────────────────────────────
 
+/// The window going to the back closes the composer's menu, as every popover; it
+/// isn't dismissed, so back at the front it opens again. Escape does dismiss it.
+#[test]
+fn the_composers_menu_comes_back_with_the_window_and_stays_shut_after_escape() {
+    let mut app = mount(&scratch("menu-window"));
+    open(&mut app, "Fix the build");
+    // A window so short its menu shows past it: those are what the window's going to
+    // the back closes.
+    app.ui.set_popup_screens(vec![zgx::scene::Rect::new(-4000., -4000., 8000., 8000.)]);
+    app.ui.scene.borrow_mut().resize(1200., 260.);
+    app.ui.set_window_active(true);
+    app.host.window_state(&app.ui);
+    app.frames(20);
+    let field = "#chat-composer-dock >> role:textbox \"Message\"";
+    app.click(field);
+    app.type_text(field, "@");
+    app.frames(20);
+    let open_now = |app: &mut TestApp| {
+        app.tree().lines().any(|l| l.contains("#mention-panel") && !l.contains(" hidden"))
+    };
+    assert!(open_now(&mut app), "typed: its menu\n{}", app.tree());
+    // Either order of the two, as the platform has them.
+    for popups_first in [true, false] {
+        if popups_first {
+            app.ui.dismiss_popups();
+            app.frames(2);
+            app.ui.set_window_active(false);
+        } else {
+            app.ui.set_window_active(false);
+            app.frames(2);
+            app.ui.dismiss_popups();
+        }
+        app.frames(20);
+        assert!(!open_now(&mut app), "at the back: closed");
+        app.ui.set_window_active(true);
+        app.frames(20);
+        assert!(open_now(&mut app), "back at the front: open again (popups first: {popups_first})");
+    }
+    app.keys("Escape");
+    app.frames(20);
+    assert!(!open_now(&mut app), "Escape: closed");
+    // (A while later: a popover closing just as the window leaves counts as its doing.)
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    app.ui.dismiss_popups();
+    app.ui.set_window_active(false);
+    app.frames(20);
+    app.ui.set_window_active(true);
+    app.frames(20);
+    assert!(!open_now(&mut app), "dismissed stays dismissed");
+}
+
 /// A templates folder as a launch leaves it (the default's copy, and the
 /// official templates installed beside it), with `.live` composed for
 /// `id` and the shell's fixture (and what it loads, beside app.luau) in it.
