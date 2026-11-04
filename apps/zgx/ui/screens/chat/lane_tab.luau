@@ -25,6 +25,7 @@ local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
+local Asks = require("@app/screens/chat/asks")
 
 -- Two places in a transcript (ds/transcript's `keep`), the same.
 local function same(a: any, b: any): boolean
@@ -99,62 +100,53 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			end
 		end)
 	end
-	-- (The chat page's drafts: the one it shows (`here`'s), and the others
-	-- kept, by chat.)
-	local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
-	local here = ui.shared("chat.composer.here", "")
 	-- A chip taken off a split pane's draft, wherever the draft is now.
 	local function remove_carried(cid: string)
-		if here:peek() == chat then
-			Shared.remove_cargo(cid)
-			return
-		end
-		local all = table.clone(kept:peek())
-		local d = all[chat]
-		if not d then
-			return
-		end
-		d = table.clone(d)
-		local left = {}
-		for _, item in d.cargo or {} do
-			if item.id ~= cid then
-				table.insert(left, item)
-			end
-		end
-		d.cargo = left
-		all[chat] = d
-		kept:set(all)
+		Shared.remove_cargo_of(chat, cid)
 	end
+	-- (A split's pane: the options picked in a question its chat asks.)
+	local chosen = ui.use_state({} :: { [string]: boolean })
 	if split then
-		-- (Wherever its words are now: the chat page's composer's own while
-		-- it shows this chat, else kept for it. Read from both, never empty
-		-- as they move from one to the other, so the composer never shrinks
-		-- and grows again as the focus moves.)
+		-- (Its chat's draft, by its id: its words, chips and a question's
+		-- picks, one draft per chat (screens/chat/shared), shown here and
+		-- written back as they change, wherever it's kept. Never the focused
+		-- chat's: the focus moving changes nothing this shows.)
 		ui.effect(function()
-			local text: string
-			if here:get() == chat then
-				text = Shared.text:get()
-			else
-				local d = kept:get()[chat]
-				text = if d and type(d.text) == "string" then d.text else ""
+			local d = Shared.draft_of(chat)
+			if draft:peek() ~= d.text then
+				draft:set(d.text)
 			end
-			if draft:peek() ~= text then
-				draft:set(text)
+			carried:set(d.cargo)
+			chosen:set(d.chosen)
+		end)
+		ui.effect(function()
+			local text = draft:get()
+			if Shared.draft_of(chat).text ~= text then
+				Shared.set_draft_of(chat, "text", text)
 			end
 		end)
-		-- (What the draft carries, its chips (files, pictures, comments,
-		-- chats mentioned), from the same place as its words.)
 		ui.effect(function()
-			local items: { any }
-			if here:get() == chat then
-				items = Shared.cargo:get()
-			else
-				local d = kept:get()[chat]
-				items = if d and type(d.cargo) == "table" then d.cargo else {}
+			local picked = chosen:get()
+			if Shared.draft_of(chat).chosen ~= picked then
+				Shared.set_draft_of(chat, "chosen", picked)
 			end
-			carried:set(items)
 		end)
 	end
+	-- (A split's pane: what its chat asks, and its queue, todos and tasks,
+	-- from its own session, as the window's composer shows them.)
+	local asks = if split
+		then Asks.bind {
+			id = function(): string?
+				return chat
+			end,
+			session = function(): any
+				return view.session:get()
+			end,
+			chosen = chosen,
+			asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		}
+		else nil
+	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
 	local running = ui.computed(function(): boolean
@@ -446,6 +438,32 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		on_stop = function()
 			store.interrupt(chat)
 		end,
+		-- (A split's pane, its chat's own.)
+		question = if asks then asks.question else nil,
+		chosen = if asks then asks.chosen else nil,
+		on_pick = if asks then asks.on_pick else nil,
+		on_answer = if asks then asks.on_answer else nil,
+		on_close_question = if asks then asks.on_close_question else nil,
+		on_back = if asks then asks.on_back else nil,
+		approval = if asks then asks.approval else nil,
+		can_always = if asks then asks.can_always else nil,
+		on_approve = if asks then asks.on_approve else nil,
+		on_deny = if asks then asks.on_deny else nil,
+		queue = if asks then asks.queue else nil,
+		can_steer = if asks then function(): boolean
+			return running:get()
+		end else nil,
+		on_queue_send = if asks then asks.on_queue_send else nil,
+		on_queue_remove = if asks then asks.on_queue_remove else nil,
+		on_queue_reorder = if asks then asks.on_queue_reorder else nil,
+		todos = if asks then asks.todos else nil,
+		tasks = if asks then asks.tasks else nil,
+		on_stop_task = if asks then function(task: string)
+			store.stop_task(chat, task):after(function() end, function()
+				notice:set({ tone = "danger", text = locale.s("chat.composer.couldnt_stop_task"), dismissable = true })
+			end)
+		end else nil,
+		tray = if split then tray else nil,
 	}
 end
 
@@ -495,8 +513,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- Watched once there's a chat to watch, while its tab is open: the
 	-- panel lets it go as the tab closes. (A reload asks for the same chat
 	-- again, which the host already has: nothing more happens.)
-	-- (A split's pane is watched by the page, only while it isn't
-	-- the focused one.)
+	-- (A split's pane is watched by the page, for as long as it's in the
+	-- split, focused or not.)
 	local split = data.split == true
 	ui.effect(function()
 		if kind:get() == "chat" and not split then
@@ -511,13 +529,12 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- from its own folder, links, quotes into its own draft.
 	local offset = ui.state(if split then `chat_split_offset_{chat}` else `chat_lane_offset_{slot}`, T.PAST_END)
 	local anchor = ui.state(if split then `chat_split_anchor_{chat}` else `chat_lane_anchor_{slot}`, nil :: any)
-	-- (A split's pane. Its transcript is its own for as long as it's
-	-- in the split, focused or not: never made again, so the focus moving
-	-- never moves it. Focused, it reads the chat as the window watches it
-	-- (the chat page's store); not, as its lane does. Between the two (the
-	-- focus just moved, the other not come yet), it keeps the latest it
-	-- had, so nothing it shows goes and comes back. It's made once there's
-	-- something to show, opening where the chat page left the chat
+	-- (A split's pane. Its transcript is its own chat's, from its own
+	-- lane, focused or not, and made once for as long as it's in the
+	-- split: the focus moving changes nothing it shows. Only what stands
+	-- at its foot follows the focus: the window's composer over the
+	-- focused one, its own composer over another. It's made once there's
+	-- something to show, opening where the chat was last read
 	-- (`shared.places`).)
 	local function focused_now(): boolean
 		local f = data.focused
@@ -527,48 +544,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		local s = view.session:get()
 		return s ~= nil and s.id == chat and s.state ~= "loading"
 	end)
-	local function main_ready(): boolean
-		local s = store.session:get()
-		return s ~= nil and s.id == chat and s.state == "ready"
-	end
-	local latest: { any } = {}
 	local messages: any = view.messages
 	local reply: any = view.draft
-	if split then
-		-- (The same conversation: its first message the one it had. As the
-		-- window's chat moves to this one, its list holds the last chat's for
-		-- a moment, ready by its session's word; taken then, the transcript
-		-- would show another conversation, lose its place and land at its
-		-- end.)
-		local function same_chat(list: { any }): boolean
-			if #latest == 0 or #list == 0 then
-				return #list > 0
-			end
-			return list[1].id == latest[1].id
-		end
-		messages = ui.computed(function(): { any }
-			if focused_now() and main_ready() then
-				local list = store.messages:get()
-				if same_chat(list) then
-					latest = list
-					return list
-				end
-				return latest
-			end
-			local list = view.messages:get()
-			if loaded:get() and #list >= #latest then
-				latest = list
-				return list
-			end
-			return latest
-		end)
-		reply = ui.computed(function(): any
-			if focused_now() and main_ready() then
-				return store.draft:get()
-			end
-			return view.draft:get()
-		end)
-	end
 	-- Where the chat was left: as the chat page last showed it (its place
 	-- now, if that's this chat), else its place kept for it.
 	local function place_of(): any
@@ -603,7 +580,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		if ever then
 			return true
 		end
-		ever = #messages:get() > 0 or loaded:get() or (focused_now() and main_ready())
+		ever = #messages:get() > 0 or loaded:get()
 		return ever
 	end)
 	local dock_h = ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
@@ -626,6 +603,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.
 	local function home_session(): string?
+		-- (A split's pane: its own chat's panel, which shows as it's
+		-- focused.)
+		if split then
+			return chat
+		end
 		local s = route.session:peek()
 		return if s then s.id else nil
 	end
@@ -639,6 +621,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		local r = FileLinks.resolve(target, if s then s.cwd else nil)
 		local panel: any = boundary.load("@app/screens/panel")
 		local home = home_session()
+		-- (A split's pane: focused, so its panel, where the file opens, shows.)
+		if split and r and not r.outside then
+			route.open_session(chat)
+		end
 		if r and not r.outside and panel and panel.open_file and home then
 			(panel.open_file :: any)(home, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
@@ -646,6 +632,15 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- A passage quoted (its menu's Mention, or Attach): into its own draft.
 	local draft = ui.state(`chat_lane_draft_{chat}`, "")
 	local function quote(q: any)
+		-- (A split's pane: into its chat's own draft, which the window's
+		-- composer types into once it's focused.)
+		if split then
+			route.open_session(chat)
+			ui.after(0, function()
+				Shared.mention(q)
+			end)
+			return
+		end
 		draft:set(Quote.add(draft:peek(), Quote.line(q)))
 	end
 	local function make_transcript(): Node

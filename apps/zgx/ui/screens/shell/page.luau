@@ -1006,21 +1006,17 @@ return function(props: Props): Node
 			over:set(nil)
 		end
 	end)
-	-- Which of the split's chats the host watches in lanes of their own:
-	-- each but the focused one (the window's chat, which the host watches
-	-- as that: a lane watching it too isn't sent its reply as it streams).
-	-- One let go as it's focused or leaves, watched afresh as the focus
-	-- leaves it, as a side chat's lane is. (A reload asks for the same
-	-- chats again, which the host already has: nothing more happens.)
+	-- Every chat of the split is watched by the host in a lane of its own,
+	-- focused or not, for as long as it's in the split: each pane shows its
+	-- own chat from its own lane, and the focus moving changes no pane's
+	-- source. (Let go as it leaves. A reload asks for the same chats again,
+	-- which the host already has: nothing more happens.)
 	local watched: { [string]: boolean } = {}
 	ui.effect(function()
 		local want: { [string]: boolean } = {}
 		if grouped() then
-			local focused = splits.focused:get()
 			for _, id in members:get() do
-				if id ~= focused then
-					want[id] = true
-				end
+				want[id] = true
 			end
 		end
 		for id in watched do
@@ -1236,6 +1232,18 @@ return function(props: Props): Node
 					end)
 				end
 			end,
+			-- (The keyboard landing in a pane that isn't focused (Tab into
+			-- its composer): it's focused, and the window's composer, its
+			-- chat's draft in it, takes the keys. Only the window's composer
+			-- types: one writer for each chat's draft.)
+			on_focus = function()
+				if not focused() then
+					splits.focus(id)
+					ui.after(0, function()
+						chat_shared.focus:add(1)
+					end)
+				end
+			end,
 			ui.column {
 				absolute = true,
 				left = 0,
@@ -1271,11 +1279,13 @@ return function(props: Props): Node
 			-- What's carried over it, while it isn't focused (focused, the
 			-- chat page's overlay stands over it).
 			DropOverlay {
+				id = `split-drop-{id}`,
 				shown = function(): boolean
 					return carrying:get() == "files"
 				end,
 			},
 			DropOverlay {
+				id = `split-drop-mention-{id}`,
 				shown = function(): boolean
 					return carrying:get() == "session"
 				end,
@@ -1355,6 +1365,11 @@ return function(props: Props): Node
 			},
 		}
 		local item: { [any]: any } = {
+			-- (`#split-pane-<session>`, `.split-pane`: a chat's pane, the
+			-- session under it.)
+			id = `split-pane-{id}`,
+			class = "split-pane",
+			provide = { session = id },
 			pointer_events = "none",
 			-- (The panel expanded over the page: none of the split shows.)
 			opacity = function(): number

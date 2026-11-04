@@ -53,8 +53,16 @@ fn open(app: &mut TestApp, title: &str) {
     app.frames(20);
 }
 
+/// The whole interface, a node a line (`tree` stops at 200).
+fn full_tree(app: &mut TestApp) -> String {
+    app.ui.prepare_frame();
+    let opts = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: false };
+    let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, None, &opts);
+    zgx_script::driver::tree_lines_text(&lines, hidden)
+}
+
 fn panes(app: &mut TestApp) -> usize {
-    app.tree().matches("\"Close pane\"").count()
+    full_tree(app).matches("\"Close pane\"").count()
 }
 
 fn pointer(app: &mut TestApp, event: InputEvent) {
@@ -193,8 +201,10 @@ fn a_split_is_kept_across_a_reload_and_a_launch() {
 /// The panes are placed by edges that are each a share of the page plus
 /// points, so resizing the window lays them out with no script of the
 /// split's own: what runs is each pane's content following its width (its
-/// transcript's measure), as one chat's does. So a resize's script grows
-/// with the panes, by about what one chat's costs each, never faster.
+/// transcript's measure, its composer's). So a resize's script grows with
+/// the panes, each one more costing about what one pane does, never
+/// faster. (A chat alone is the chat page, its fixture's transcript empty:
+/// told, not compared.)
 #[test]
 fn resizing_split_panes_costs_each_about_what_one_chat_does() {
     fn resize_calls(app: &mut TestApp) -> u64 {
@@ -217,13 +227,13 @@ fn resizing_split_panes_costs_each_about_what_one_chat_does() {
     }
     assert_eq!(panes(&mut app), 4);
     eprintln!("resize script calls, 1 to 4 chats: {calls:?}");
-    let alone = calls[0] as f64;
-    for (n, c) in calls.iter().enumerate().skip(1) {
+    let pane = calls[1] as f64 / 2.;
+    for (n, c) in calls.iter().enumerate().skip(2) {
         let per = *c as f64 / (n + 1) as f64;
-        assert!(per <= alone * 1.5, "{} chats cost {c} script calls in a resize ({per:.0} each), one alone {alone}: {calls:?}", n + 1);
+        assert!(per <= pane * 1.25, "{} chats cost {c} script calls in a resize ({per:.0} each), two {pane:.0} each: {calls:?}", n + 1);
     }
     let steps: Vec<i64> = calls.windows(2).skip(1).map(|w| w[1] as i64 - w[0] as i64).collect();
-    assert!(steps.iter().all(|s| (*s as f64) <= alone * 1.5), "each pane more costs about one chat: {calls:?}");
+    assert!(steps.iter().all(|s| (*s as f64) <= pane * 1.25), "each pane more costs about one pane: {calls:?}");
 }
 
 /// A chat carried from the sidebar: over a pane's edge it's a split (the
@@ -341,3 +351,496 @@ fn zeron_v2_is_installed_as_zeron_s_and_runs_one_page() {
     open(&mut app, "Fix the build");
     assert!(near(app.bounds("shell-page").y, 4.));
 }
+
+// ── Drop indicators stand over the composers ────────────────────────────────
+
+/// Whether `over` is in front of `under` at `(x, y)`: both under the point,
+/// `over` first in the scene's front-to-back order.
+fn in_front(app: &mut TestApp, over: &str, under: &str, (x, y): (f32, f32)) -> Result<(), String> {
+    let a = app.target(over)?;
+    let b = app.target(under)?;
+    let hits = app.ui.scene.borrow().hit_test_all(x, y);
+    let (ia, ib) = (hits.iter().position(|h| *h == a), hits.iter().position(|h| *h == b));
+    match (ia, ib) {
+        (Some(ia), Some(ib)) if ia < ib => Ok(()),
+        _ => Err(format!("{over} at {ia:?}, {under} at {ib:?}, of {} under ({x}, {y})", hits.len())),
+    }
+}
+
+/// Each drop indicator, held, draws in front of the composer it covers:
+/// a split's landing over the focused pane's composer (the window's) and
+/// over another's (its own), "Drop to mention" over both, and the panel's
+/// tab-group landing over a side chat's composer in the panel.
+#[test]
+fn every_drop_indicator_stands_over_the_composer_it_covers() {
+    let mut app = mount(&scratch("indicators"));
+    open(&mut app, "Fix the build");
+    split_right(&mut app, "Tidy the tests");
+    // (a3 focused, at the right; a1 at the left.)
+    let composer = middle(app.bounds("#chat-composer"));
+    let left_composer = middle(app.bounds("#lane-composer-split-a1"));
+    let left = app.bounds("#split-pane-a1");
+    let right = app.bounds("#split-pane-a3");
+    // A split's landing, the bottom half: over the window's composer, and
+    // over the left pane's own.
+    let from = row_at(&mut app, "Write the docs");
+    let low = (right.x + right.width / 2., composer.1 - 110.);
+    carry(&mut app, from, low, |app| {
+        assert_eq!(showing(app), (true, false));
+        in_front(app, "split-landing", "#chat-composer", composer).unwrap();
+    });
+    // (Dropped: a2 under a3. Back to two: a2 out.)
+    app.host.run_command("shell.close");
+    app.frames(20);
+    let from = row_at(&mut app, "Write the docs");
+    let left_low = (left.x + left.width / 2., left_composer.1 - 110.);
+    carry(&mut app, from, left_low, |app| {
+        in_front(app, "split-landing", "#lane-composer-split-a1", left_composer).unwrap();
+    });
+    app.host.run_command("shell.close");
+    app.frames(20);
+    // "Drop to mention": over the focused pane's middle (the window's
+    // composer under it), and over the other's.
+    open(&mut app, "Tidy the tests");
+    let right = app.bounds("#split-pane-a3");
+    let composer = middle(app.bounds("#chat-composer"));
+    let from = row_at(&mut app, "Answer the review");
+    carry(&mut app, from, middle(right), |app| {
+        assert_eq!(showing(app), (false, true));
+        in_front(app, "#chat-drop-mention", "#chat-composer", composer).unwrap();
+    });
+    let left = app.bounds("#split-pane-a1");
+    let left_composer = middle(app.bounds("#lane-composer-split-a1"));
+    let from = row_at(&mut app, "Answer the review");
+    carry(&mut app, from, (left.x + left.width / 2., left.y + left.height * 0.45), |app| {
+        in_front(app, "#split-drop-mention-a1", "#lane-composer-split-a1", left_composer).unwrap();
+    });
+    // The panel's tab-group landing over a side chat's composer in it.
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(40);
+    app.click("#panel-open-files");
+    app.frames(30);
+    app.click("#panel-strip >> role:button \"New Tab\"");
+    app.frames(20);
+    app.click("#panel-open-side-chat");
+    app.frames(40);
+    let side = full_tree(&mut app)
+        .lines()
+        .find_map(|l| l.split_whitespace().find(|w| w.starts_with("#lane-composer-") && !w.contains("split-")).map(str::to_owned))
+        .expect("the side chat's composer in the panel");
+    let c = app.bounds(&side);
+    // (Into the side chat's composer, at the panel body's left edge: the
+    // files tab would start a group there.)
+    let at = (c.x + 20., c.y + c.height / 2.);
+    let tab = middle(app.bounds("#panel-strip >> role:tab \"Files\""));
+    carry(&mut app, tab, at, |app| {
+        in_front(app, "panel-drop-main", &side, at).unwrap();
+    });
+}
+
+// ── Focus: one source of truth ──────────────────────────────────────────────
+
+/// The host's chats, as the fixture plays them (`fixture.chats`): one record
+/// a chat, shown by every view watching it, the window's open chat and each
+/// lane, as the engine's are.
+#[derive(Default)]
+struct Host {
+    chats: std::collections::BTreeMap<String, Record>,
+}
+
+#[derive(Default, Clone)]
+struct Record {
+    reply: Option<String>,
+    tools: usize,
+    running: bool,
+    asking: bool,
+}
+
+impl Host {
+    fn publish(&self, app: &TestApp) {
+        use zgx_script::Value;
+        let s = |v: &str| Value::from(v);
+        let chats = self.chats.iter().map(|(id, r)| {
+            let marker = Value::record([("id", s(&format!("{id}-m"))), ("role", s("assistant")), ("text", s(&format!("This is {id}")))]);
+            let mut messages = vec![marker];
+            let live = format!("live-{id}");
+            if r.reply.is_some() || r.tools > 0 {
+                let tools: Vec<Value> = (1..=r.tools)
+                    .map(|n| Value::record([("id", s(&format!("t{n}"))), ("kind", s("exec")), ("verb", s("Ran")), ("target", s(&format!("tool {id} {n}")))]))
+                    .collect();
+                messages.push(Value::record([
+                    ("id", s(&live)),
+                    ("role", s("assistant")),
+                    ("text", s("")),
+                    ("streaming", Value::Bool(true)),
+                    ("tools", Value::List(std::rc::Rc::from(tools))),
+                ]));
+            }
+            let mut session = vec![
+                ("id", s(id)),
+                ("state", s("ready")),
+                ("running", Value::Bool(r.running)),
+                ("harness", s("claude-code")),
+                ("model", s("claude/opus")),
+                ("effort", s("medium")),
+                ("access", s("full")),
+                ("project", s("atlas")),
+                ("device", s("mac")),
+            ];
+            if r.asking {
+                let option = |v: &str| Value::record([("value", s(v)), ("label", s(v))]);
+                let question = Value::record([
+                    ("header", s("Question")),
+                    ("text", s(&format!("Which way for {id}?"))),
+                    ("options", Value::List(std::rc::Rc::from(vec![option("left"), option("right")]))),
+                ]);
+                session.push(("ask", Value::record([("request", s(&format!("q-{id}"))), ("kind", s("question")), ("question", question)])));
+            }
+            let draft = Value::record([("id", s(&live)), ("text", s(r.reply.as_deref().unwrap_or("")))]);
+            let record = Value::record([
+                ("messages", Value::List(std::rc::Rc::from(messages))),
+                ("draft", draft),
+                ("session", Value::record(session)),
+            ]);
+            (id.clone(), record)
+        });
+        app.host.shared("fixture.chats", Value::Nil).set(Value::record(chats.collect::<Vec<_>>()));
+        // (What leaves, a question answered, goes as it eases out.)
+        app.frames(30);
+    }
+    fn chat(&mut self, id: &str) -> &mut Record {
+        self.chats.entry(id.to_string()).or_default()
+    }
+}
+
+/// A reply streaming into chat `id`: its words so far.
+fn stream(app: &TestApp, host: &mut Host, id: &str, text: &str) {
+    host.chat(id).reply = Some(text.to_string());
+    host.publish(app);
+}
+
+/// Chat `id` running a turn, or not.
+fn run(app: &TestApp, host: &mut Host, id: &str, running: bool) {
+    host.chat(id).running = running;
+    host.publish(app);
+}
+
+fn route_session(app: &TestApp) -> Option<String> {
+    let path = app.host.states().into_iter().find(|(n, _)| n.ends_with("shell_route_path")).map(|(_, v)| match v {
+        zgx_script::Value::Str(s) => s.to_string(),
+        _ => String::new(),
+    })?;
+    path.strip_prefix("/session/").map(str::to_owned)
+}
+
+/// A textbox's value, from its line in the tree.
+fn value_of(app: &mut TestApp, target: &str) -> Option<String> {
+    let node = app.target(target).ok()?;
+    let opts = zgx_script::driver::TreeOptions { depth: Some(0), budget: 2, all: false };
+    let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, Some(node), &opts);
+    let line = zgx_script::driver::tree_lines_text(&lines, hidden);
+    let (_, rest) = line.split_once(" =\"")?;
+    Some(rest.rsplit_once('"')?.0.to_owned())
+}
+
+fn has(app: &mut TestApp, target: &str) -> bool {
+    app.find(target).is_some()
+}
+
+/// The panes showing, by session id, left to right then top to bottom.
+fn shown_panes(app: &mut TestApp) -> Vec<String> {
+    let tree = full_tree(app);
+    let mut ids: Vec<(f32, f32, String)> = tree
+        .lines()
+        .filter_map(|l| {
+            let id = l.split_whitespace().find_map(|w| w.strip_prefix("#split-pane-"))?.to_owned();
+            let at = l.split_whitespace().find(|w| w.contains(',') && w.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-'))?;
+            let (x, y) = at.split_once(',')?;
+            Some((y.parse().ok()?, x.parse().ok()?, id))
+        })
+        .collect();
+    ids.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // (A chat alone has its place kept, with nothing of a pane showing.)
+    if ids.len() < 2 {
+        return Vec::new();
+    }
+    ids.into_iter().map(|(_, _, id)| id).collect()
+}
+
+/// What the test expects each chat to show, besides what the host has
+/// (`Host`): its title and its draft.
+#[derive(Default, Clone)]
+struct Chat {
+    title: String,
+    draft: String,
+}
+
+/// The composer that stands at chat `id`'s foot: the window's over the
+/// focused pane, its own over another.
+fn composer_of(id: &str, focused: bool) -> String {
+    if focused { "#chat-composer-dock".to_string() } else { format!("#lane-composer-split-{id}") }
+}
+
+/// What chat `id` shows in its pane, focused or not, as `Host` and `Chat`
+/// say: its transcript (its own words, its reply, its tools), its status,
+/// its question, its draft.
+fn shows_its_own(app: &mut TestApp, host: &Host, c: &Chat, id: &str, scope: &str, focused: bool, when: &str) {
+    let r = host.chats.get(id).cloned().unwrap_or_default();
+    assert!(has(app, &format!("{scope} >> ~\"This is {id}\"")), "{when}: {id} shows its own transcript");
+    if let Some(s) = &r.reply {
+        assert!(has(app, &format!("{scope} >> ~\"{s}\"")), "{when}: {id} shows its reply as it streams: {s}");
+    }
+    if r.tools > 0 {
+        // (Its tool calls, as a reply's run of them shows: "Ran 2 commands".)
+        let n = r.tools;
+        assert!(has(app, &format!("{scope} >> ~\"Ran {n} command\"")), "{when}: {id} shows its {n} tool calls");
+    }
+    let composer = composer_of(id, focused);
+    let question = has(app, &format!("{composer} >> role:radiogroup \"Which way for {id}?\""));
+    assert_eq!(question, r.asking, "{when}: {id}'s question shows ({})", r.asking);
+    if !r.asking {
+        let textbox = format!("{composer} >> role:textbox");
+        assert_eq!(value_of(app, &textbox).unwrap_or_default(), c.draft, "{when}: {id}'s own draft");
+        // (Running: Stop, or Queue message with words in the draft. Not:
+        // Send message.)
+        let running = has(app, &format!("{composer} >> role:button \"Stop\"")) || has(app, &format!("{composer} >> role:button \"Queue message\""));
+        assert_eq!(running, r.running, "{when}: {id} shows its own status (running {})", r.running);
+    }
+}
+
+/// Every pane shows its own chat, live, focused or not, and one pane is
+/// focused: the route's. A chat alone shows its draft in the chat page.
+fn check(app: &mut TestApp, host: &Host, chats: &std::collections::BTreeMap<String, Chat>, when: &str) {
+    let route = route_session(app);
+    let panes = shown_panes(app);
+    if panes.is_empty() {
+        if let Some(r) = &route
+            && !host.chats.get(r).is_some_and(|c| c.asking)
+        {
+            let c = &chats[r];
+            assert_eq!(value_of(app, "#chat-composer >> role:textbox").unwrap_or_default(), c.draft, "{when}: {r} alone, its draft");
+        }
+        return;
+    }
+    let route = route.unwrap_or_else(|| panic!("{when}: a split showing off a session"));
+    assert!(panes.contains(&route), "{when}: the route {route} isn't one of the panes {panes:?}");
+    let page = app.bounds("shell-page");
+    let mut focused = Vec::new();
+    for id in &panes {
+        let c = &chats[id];
+        let pane = format!("#split-pane-{id}");
+        let b = app.bounds(&pane);
+        if near(b.x, page.x) && near(b.y, page.y) && near(b.width, page.width) && near(b.height, page.height) {
+            focused.push(id.clone());
+        }
+        assert!(has(app, &format!("{pane} >> role:button \"{}\"", c.title)), "{when}: {id}'s head says {}", c.title);
+        for other in panes.iter().filter(|o| *o != id) {
+            assert!(!has(app, &format!("{pane} >> ~\"This is {other}\"")), "{when}: {id} shows {other}'s transcript");
+        }
+        shows_its_own(app, host, c, id, &pane, *id == route, when);
+        // Following its end as it streams, focused or not.
+        let at_end = app
+            .host
+            .states()
+            .into_iter()
+            .find(|(n, _)| n.ends_with(&format!("transcript_at_end.lane.split-{id}")))
+            .map(|(_, v)| matches!(v, zgx_script::Value::Bool(true)));
+        assert_ne!(at_end, Some(false), "{when}: {id} follows its end");
+    }
+    assert_eq!(focused, vec![route.clone()], "{when}: exactly one pane focused, the route's ({panes:?})");
+}
+
+fn split_into(app: &mut TestApp, title: &str, side: &str) {
+    let page = app.bounds("shell-page");
+    let to = match side {
+        "left" => (page.x + 20., page.y + page.height * 0.4),
+        "right" => (page.x + page.width - 20., page.y + page.height * 0.4),
+        _ => (page.x + page.width / 2., page.y + 40.),
+    };
+    drag_row_to(app, title, to.0, to.1);
+}
+
+fn focus_pane(app: &mut TestApp, id: &str) {
+    let b = app.bounds(&format!("#split-pane-{id}"));
+    let (x, y) = (b.x + b.width / 2., b.y + 17.);
+    let button = PointerButton::Primary;
+    pointer(app, InputEvent::PointerMove { x, y });
+    pointer(app, InputEvent::PointerDown { x, y, button });
+    pointer(app, InputEvent::PointerUp { x, y, button });
+    app.ui.input.forget_clicks();
+    app.frames(10);
+}
+
+const TITLES: [(&str, &str); 5] =
+    [("a1", "Fix the build"), ("a2", "Write the docs"), ("a3", "Tidy the tests"), ("b1", "Ship the release"), ("b2", "Answer the review")];
+
+fn chats() -> std::collections::BTreeMap<String, Chat> {
+    TITLES.iter().map(|(id, t)| (id.to_string(), Chat { title: t.to_string(), ..Default::default() })).collect()
+}
+
+/// A pane out of focus is as live as the one in focus, and gaining focus
+/// changes nothing it shows: it streams and follows its end, shows a new
+/// tool call, shows its turn running and the question its agent asks, and
+/// keeps its draft, while another pane is focused; then focused, the same.
+/// (Nothing slows a pane out of focus: each shows its own chat's every
+/// update, as it comes.)
+#[test]
+fn a_pane_out_of_focus_is_live_and_gaining_focus_changes_nothing() {
+    let mut app = mount(&scratch("live"));
+    let mut host = Host::default();
+    let mut c = chats();
+    open(&mut app, "Fix the build");
+    split_right(&mut app, "Tidy the tests");
+    check(&mut app, &host, &c, "split");
+    // a1 isn't focused (a3 is): its reply streams in, tool calls and all.
+    for n in 1..=5 {
+        stream(&app, &mut host, "a1", &format!("stream a1 {n}"));
+        if n == 3 {
+            host.chat("a1").tools = 1;
+            host.publish(&app);
+        }
+        check(&mut app, &host, &c, &format!("a1 streaming {n}"));
+    }
+    run(&app, &mut host, "a1", true);
+    check(&mut app, &host, &c, "a1 running");
+    // A draft typed in the focused chat stays with it as the focus moves.
+    app.fill("#chat-composer >> role:textbox", "for a3");
+    app.frames(5);
+    c.get_mut("a3").unwrap().draft = "for a3".into();
+    check(&mut app, &host, &c, "a3's draft");
+    // Focused: a1 shows the same, its draft the window's composer's now.
+    focus_pane(&mut app, "a1");
+    check(&mut app, &host, &c, "a1 focused");
+    app.fill("#chat-composer >> role:textbox", "for a1");
+    app.frames(5);
+    c.get_mut("a1").unwrap().draft = "for a1".into();
+    // a1's agent asks, while a3 is focused; a3 focused again, then a1.
+    focus_pane(&mut app, "a3");
+    host.chat("a1").asking = true;
+    host.publish(&app);
+    check(&mut app, &host, &c, "a1 asks, out of focus");
+    focus_pane(&mut app, "a1");
+    check(&mut app, &host, &c, "a1 asks, focused");
+    host.chat("a1").asking = false;
+    host.publish(&app);
+    check(&mut app, &host, &c, "a1 answered");
+    // The panel: the focused chat's, and in no pane.
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(40);
+    assert!(app.bounds("#shell-files").width > 1., "a1's panel opened");
+    for id in ["a1", "a3"] {
+        assert!(!has(&mut app, &format!("#split-pane-{id} >> #panel")), "the panel isn't in {id}'s pane");
+    }
+    focus_pane(&mut app, "a3");
+    app.frames(40);
+    check(&mut app, &host, &c, "a3 focused, a1's panel");
+    // Each pane's place is its chat's own: kept by its id.
+    let places: Vec<String> = app.host.states().into_iter().map(|(n, _)| n).filter(|n| n.contains("chat_split_anchor_")).collect();
+    assert!(places.iter().any(|n| n.ends_with("_a1")) && places.iter().any(|n| n.ends_with("_a3")), "{places:?}");
+}
+
+/// 200 steps, from a fixed seed: focus a pane, open a chat from the
+/// sidebar, split one in by a drop, close a pane, type a draft in the
+/// focused composer, stream a reply (and a tool call) into a chat that
+/// isn't focused, change a chat's status, a chat's agent asking, reload,
+/// resize. After each, every pane shows exactly its own chat, live as if
+/// focused (its title, transcript, reply, tools, status, question and
+/// draft), and one pane is focused: the route's.
+#[test]
+fn two_hundred_random_steps_keep_every_pane_its_own_chat() {
+    let mut app = mount(&scratch("random"));
+    let mut host = Host::default();
+    let mut c = chats();
+    let mut seed: u64 = 0x5eed_0f_2e0;
+    let mut next = |n: usize| -> usize {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n
+    };
+    open(&mut app, "Fix the build");
+    let mut log: Vec<String> = Vec::new();
+    for step in 0..200 {
+        let panes = shown_panes(&mut app);
+        let route = route_session(&app);
+        let others: Vec<String> = panes.iter().filter(|p| Some((*p).clone()) != route).cloned().collect();
+        let what = match next(10) {
+            0 if panes.len() >= 2 => {
+                let id = panes[next(panes.len())].clone();
+                focus_pane(&mut app, &id);
+                format!("focus {id}")
+            }
+            1 => {
+                let (id, title) = TITLES[next(TITLES.len())];
+                open(&mut app, title);
+                format!("open {id}")
+            }
+            2 if route.is_some() && panes.len() < 4 => {
+                let out: Vec<&(&str, &str)> = TITLES.iter().filter(|(id, _)| !panes.iter().any(|p| p == id) && Some(id.to_string()) != route).collect();
+                if out.is_empty() {
+                    continue;
+                }
+                let (id, title) = *out[next(out.len())];
+                let side = ["left", "right", "top"][next(3)];
+                split_into(&mut app, title, side);
+                format!("split {id} {side}")
+            }
+            3 if panes.len() >= 2 => {
+                app.host.run_command("shell.close");
+                app.frames(20);
+                format!("close {route:?}")
+            }
+            4 if route.is_some() && !host.chats.get(route.as_ref().unwrap()).is_some_and(|r| r.asking) => {
+                let r = route.clone().unwrap();
+                let text = format!("{r} draft {step}");
+                app.fill("#chat-composer >> role:textbox", &text);
+                app.frames(4);
+                c.get_mut(&r).unwrap().draft = text;
+                format!("type in {r}")
+            }
+            5 if !others.is_empty() => {
+                let id = others[next(others.len())].clone();
+                stream(&app, &mut host, &id, &format!("stream {id} {step}"));
+                if next(3) == 0 {
+                    host.chat(&id).tools += 1;
+                    host.publish(&app);
+                }
+                format!("stream into {id}")
+            }
+            6 if !panes.is_empty() => {
+                let id = panes[next(panes.len())].clone();
+                let on = !host.chats.get(&id).is_some_and(|r| r.running);
+                run(&app, &mut host, &id, on);
+                format!("{id} running {on}")
+            }
+            7 if !panes.is_empty() => {
+                let id = panes[next(panes.len())].clone();
+                let on = !host.chats.get(&id).is_some_and(|r| r.asking);
+                host.chat(&id).asking = on;
+                host.publish(&app);
+                format!("{id} asking {on}")
+            }
+            8 => {
+                app.host.reload().expect("the reload failed");
+                app.frames(30);
+                "reload".to_string()
+            }
+            9 => {
+                let w = 1100. + next(400) as f32;
+                app.ui.scene.borrow_mut().resize(w, H);
+                app.frames(6);
+                app.ui.scene.borrow_mut().resize(W, H);
+                app.frames(10);
+                format!("resize {w}")
+            }
+            _ => continue,
+        };
+        log.push(what.clone());
+        let when = format!("step {step} ({what}; after {:?})", &log[log.len().saturating_sub(6)..]);
+        check(&mut app, &host, &c, &when);
+        assert!(app.error().is_none(), "{when}: {:?}", app.error());
+    }
+    assert!(log.len() >= 120, "most steps did something: {}", log.len());
+}
+
+
+
+

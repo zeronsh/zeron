@@ -2040,6 +2040,7 @@ M.Panel = ui.component(function(props: Props): Node
 		return ui.show(function(): boolean
 			return side() ~= ""
 		end, ui.div {
+			id = `panel-drop-{gid}`,
 			absolute = true,
 			left = edge("left"),
 			right = edge("right"),
