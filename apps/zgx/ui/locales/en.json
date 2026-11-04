@@ -373,7 +373,11 @@
       "toggle_sidebar": "Toggle sidebar",
       "forward": "Forward",
       "menu": "Menu",
-      "menus": "Menus"
+      "menus": "Menus",
+      "close": "Close",
+      "minimize": "Minimize",
+      "maximize": "Maximize",
+      "restore": "Restore"
     },
     "address_line": {
       "checking_label": "Checking the address",
@@ -1172,6 +1176,14 @@
         "terms": "animation accessibility movement fade spring",
         "system_on": "On while your Mac's Reduce motion is on: moves land at once and fades stay short.",
         "description": "Moves land at once and fades stay short. On whenever your Mac's Reduce motion is on."
+      },
+      "window_controls": {
+        "label": "Window controls",
+        "terms": "window buttons close minimize maximize traffic lights title bar tiling hyprland sway",
+        "description": "Close, minimize and maximize at the title bar's left. Automatic hides them where a tiling window manager arranges windows.",
+        "auto": "Automatic",
+        "show": "Show",
+        "hide": "Hide"
       },
       "glass": {
         "label": "Frosted glass",

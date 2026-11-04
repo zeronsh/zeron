@@ -373,7 +373,11 @@
       "toggle_sidebar": "切换侧边栏",
       "forward": "前进",
       "menu": "菜单",
-      "menus": "菜单栏"
+      "menus": "菜单栏",
+      "close": "关闭",
+      "minimize": "最小化",
+      "maximize": "最大化",
+      "restore": "还原"
     },
     "address_line": {
       "checking_label": "正在检查地址",
@@ -1172,6 +1176,14 @@
         "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring",
         "system_on": "Mac 的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
         "description": "移动立即完成，淡入淡出时间缩短。Mac 的“减弱动态效果”开启时始终启用。"
+      },
+      "window_controls": {
+        "label": "窗口控制按钮",
+        "terms": "窗口 按钮 关闭 最小化 最大化 标题栏 平铺 window buttons close minimize maximize traffic lights title bar tiling hyprland sway",
+        "description": "标题栏左侧的关闭、最小化和最大化按钮。自动：在平铺窗口管理器中隐藏。",
+        "auto": "自动",
+        "show": "显示",
+        "hide": "隐藏"
       },
       "glass": {
         "label": "毛玻璃",

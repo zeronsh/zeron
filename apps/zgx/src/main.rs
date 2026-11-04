@@ -57,6 +57,7 @@ mod terminal;
 mod tool_details;
 mod themes;
 mod visuals;
+mod window_controls;
 #[cfg(test)]
 mod audit_shots;
 #[cfg(test)]
@@ -526,6 +527,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     }
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
+    // The window's own controls where the platform draws none (src/window_controls.rs).
+    window_controls::serve(cx, &host);
     // Reload Zeron: the app quits and starts again, the same launch
     // (src/relaunch.rs).
     let windows = cx.windows.clone();
@@ -1040,7 +1043,10 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         width,
         height,
         decorations: cfg!(target_os = "macos"),
-        titlebar: Titlebar::Inset,
+        // Off macOS the title bar draws the window's controls itself, where
+        // macOS's traffic lights stand (src/window_controls.rs): zgx draws
+        // none (its edges still resize the window).
+        titlebar: if window_controls::drawn() { Titlebar::Hidden } else { Titlebar::Inset },
         glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
         ..Default::default()
     }

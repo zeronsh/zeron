@@ -30,6 +30,7 @@ search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.
 	{ key = "accent", title = ui.t("settings.appearance.accent.label"), terms = ui.t("settings.appearance.accent.terms") },
 	{ key = "reduce_motion", title = ui.t("settings.appearance.reduce_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.reduce_motion.terms") },
 	{ key = "glass", title = ui.t("settings.appearance.glass.label"), terms = ui.t("settings.appearance.glass.terms") },
+	{ key = "window_controls", title = ui.t("settings.appearance.window_controls.label"), terms = ui.t("settings.appearance.window_controls.terms") },
 	{ key = "text_size", title = ui.t("settings.appearance.text_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.text_size.terms") },
 	{ key = "code_font_size", title = ui.t("settings.appearance.code_font_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.code_font_size.terms") },
 	{ key = "conversation_width", title = ui.t("settings.appearance.conversation_width.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.conversation_width.terms") },
@@ -309,6 +310,24 @@ function M.view(): Node
 					description = ui.t("settings.appearance.glass.description"),
 					control = ds.Switch { value = material.frosted, label = ui.t("settings.appearance.glass.label") },
 				}),
+				-- The window's own controls, where the platform draws none (Linux,
+				-- Windows: ds/title_bar): Automatic hides them on a tiling
+				-- window manager.
+				later(function(): boolean
+					return ui.shared("window.chrome", nil :: any):get() ~= nil
+				end, row("window_controls", {
+					label = ui.t("settings.appearance.window_controls.label"),
+					description = ui.t("settings.appearance.window_controls.description"),
+					control = ds.Segmented {
+						value = ds.TitleBar.window_controls,
+						label = ui.t("settings.appearance.window_controls.label"),
+						options = {
+							{ value = "auto", label = ui.t("settings.appearance.window_controls.auto") },
+							{ value = "show", label = ui.t("settings.appearance.window_controls.show") },
+							{ value = "hide", label = ui.t("settings.appearance.window_controls.hide") },
+						} :: any,
+					},
+				})),
 			},
 		},
 		-- Every move the app makes asks ds/motion: on, they land at once.
