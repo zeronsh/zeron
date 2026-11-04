@@ -290,10 +290,18 @@ end
 -- controls held their padding in from the edge (zgx reports the buttons
 -- shorter in a zoomed window than it draws them: zgx-asks/
 -- windows-caption-buttons). Read tracked unless `tracked` is false.
+-- On macOS the traffic lights decide it: zgx's inset bar centres them in its
+-- 40-point strip, so 20 down, not old Zeron's 21 (which left every control a
+-- point under them). Their own middle where they're reported; 20 in full
+-- screen, so nothing moves going in.
+local LIGHTS_LINE = 20
 local function middle(tracked: boolean?): number
 	local side, buttons = window_buttons(tracked)
 	if side == "right" and buttons.height < H then
 		return math.max(buttons.y + buttons.height / 2, island.thickness() / 2)
+	end
+	if on_macos() then
+		return if side == "left" then buttons.y + buttons.height / 2 else LIGHTS_LINE
 	end
 	return MIDDLE
 end
