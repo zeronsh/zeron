@@ -203,6 +203,7 @@ struct PrWatch {
 }
 
 pub struct Bridge {
+    dictation: RefCell<crate::dictation::Service>,
     host: ScriptHost,
     windows: WindowFactory,
     page: Shared,
@@ -452,6 +453,7 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
     let bridge = Rc::new(Bridge {
+        dictation: RefCell::new(crate::dictation::Service::new(engine::data_dir().expect("engine data directory").join("dictation-models"))),
         host: host.clone(),
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
@@ -507,6 +509,28 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     *bridge.me.borrow_mut() = Rc::downgrade(&bridge);
     BRIDGE.with(|b| *b.borrow_mut() = Rc::downgrade(&bridge));
     bridge.actions();
+    let weak = Rc::downgrade(&bridge);
+    host.action("dictation.control", move |asked| {
+        if let Some(b) = weak.upgrade() {
+            let owner = b.dictation.borrow().owner().map(str::to_owned);
+            if let Some(owner) = owner {
+                let args = value_json(&asked);
+                if matches!(args["op"].as_str(), Some("stop" | "cancel")) {
+                    let _ = b.dictation.borrow_mut().call(&owner, &args);
+                    b.publish_dictation();
+                }
+            }
+        }
+    });
+    let weak = Rc::downgrade(&bridge);
+    cx.tasks.spawn(async move {
+        loop {
+            zgx::timer::sleep(Duration::from_millis(40)).await;
+            let Some(b) = weak.upgrade() else { break };
+            b.dictation.borrow_mut().poll();
+            b.publish_dictation();
+        }
+    });
 
     // Each plugin's records, as what they're made of changes.
     let weak = Rc::downgrade(&bridge);
@@ -1282,12 +1306,34 @@ impl Bridge {
         if *self.loaded.borrow() == want {
             return;
         }
+        self.dictation.borrow_mut().release();
+        self.publish_dictation();
         *self.loaded.borrow_mut() = want.clone();
         self.host.set_plugins(want);
         self.reload();
     }
 
+    fn publish_dictation(&self) {
+        let (owner, state) = {
+            let d = self.dictation.borrow();
+            (d.owner().map(str::to_owned), d.snapshot())
+        };
+        // Only the host's compositor and the owning plugin see transcript text.
+        let mut app = state.clone();
+        app["owner"] = json!(owner);
+        let app = json_value(&app);
+        let shared = self.host.shared("dictation", Value::Nil);
+        if shared.signal().with_untracked(Value::clone) != app { shared.set(app); }
+        if let Some(id) = owner {
+            let value = json_value(&state);
+            let shared = self.host.shared(&format!("plugin.{id}.dictation"), Value::Nil);
+            if shared.signal().with_untracked(Value::clone) != value { shared.set(value); }
+        }
+    }
+
     fn reload(&self) {
+        self.dictation.borrow_mut().release();
+        self.publish_dictation();
         if let Err(error) = self.host.reload() {
             eprintln!("zeron-zgx: the window didn't reload with its plugins: {error}");
             self.blame(&error);
@@ -1934,6 +1980,30 @@ impl Bridge {
             return;
         }
         let host = &self.host;
+        host.async_action(format!("plugin.{id}.dictation"), {
+            let (me, plugin) = (self.me.borrow().clone(), id.to_string());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let b = me.upgrade().ok_or("The window closed")?;
+                    let item = b.item(&plugin).filter(|i| i.status() == "on" && i.may("dictation")).ok_or("This plugin wasn't allowed dictation")?;
+                    let args = value_json(&asked);
+                    if args["op"] == "inputs" {
+                        let inputs = off_thread(|| zeron_voice::input_devices().into_iter().map(|d| json!({"id": d.id, "name":d.name})).collect::<Vec<_>>()).await.ok_or("Could not list microphones")?;
+                        return Ok(json_value(&json!(inputs)));
+                    }
+                    if args["op"] == "start" && !item.may("compose") {
+                        return Err("Dictation insertion also requires compose permission".to_string());
+                    }
+                    let result = b.dictation.borrow_mut().call(&plugin, &args)?;
+                    if args["op"] == "start" {
+                        b.request("dictation_begin", &plugin, json_value(&result));
+                    }
+                    b.publish_dictation();
+                    Ok(json_value(&result))
+                }
+            }
+        });
         let calls_key = format!("plugin.{id}.calls");
         let inbox_key = format!("plugin.{id}.inbox");
         expose_own(host, id);

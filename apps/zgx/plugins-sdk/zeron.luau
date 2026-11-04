@@ -1178,6 +1178,15 @@ return function(id: string): any
 		ui.invoke(`{prefix}.open_url`, url)
 	end
 
+	-- Local transcription; requires "dictation" (and "compose" to start).
+    -- ops: catalog, inputs, installed, download, remove, start, stop, cancel, status.
+    function M.dictation(args: any): any
+        return ui.call(`{prefix}.dictation`, args)
+    end
+    function M.dictation_state(): any
+        return ui.shared(`{prefix}.dictation`, { phase = "idle" })
+    end
+
 	function M.compose(text: string)
 		ui.invoke("zeron.compose.insert", text)
 	end
