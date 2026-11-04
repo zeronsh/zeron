@@ -60,19 +60,21 @@ local FadeText = require("@ds/fade_text")
 local ContextMenu = require("@ds/context_menu")
 local IconButton = require("@ds/icon_button").IconButton
 
+local state = require("@app/screens/panel/state")
 -- Tab groups. A panel's tabs can be split into groups laid out side
 -- by side and above one another (the tree of screens/shell/split), each
--- with a strip of its own and the tab it shows; the group holding the
--- active tab is the focused one, the others dimmed. By panel key:
---   { tree, groups = { [gid] = { tabs = { id } } }, focus, actives, next }
--- The group "main" is every tab no other group holds (a tab opened lands
--- in the focused group). A tab dragged to a group's edge starts a group
--- there; onto a group's strip or its middle, it moves into that group.
--- With one group left, the panel is as it always was.
-local panel_groups = ui.state("inset_panel_groups", {} :: { [string]: any })
-local tab_dragging = ui.state("inset_panel_tab_dragging", false)
-local MAIN = "main"
-local state = require("@app/screens/panel/state")
+-- with a strip of its own and the tab it shows; the focused one lifted,
+-- the others dimmed. Kept with the tabs (screens/panel/state's `groups`,
+-- by panel key: `{ tree, groups = { [gid] = { tabs = { id } } }, focus,
+-- actives, next }`), where the focus moves with them: a tab opened,
+-- whatever opens it, lands in the focused group; one turned to focuses
+-- its group. The group "main" is every tab no other group holds. A tab
+-- dragged to a group's edge starts a group there; onto a group's strip or
+-- its middle, it moves into that group. With one group left, the panel is
+-- as it always was.
+local panel_groups = state.groups
+local tab_dragging = ui.state("panel_tab_dragging", false)
+local MAIN = state.MAIN
 -- Lanes seen as their tabs come to the front (the panel home's done checks).
 require("@app/screens/panel/lanes_seen")
 local Files = require("@app/screens/files")
@@ -1467,27 +1469,12 @@ M.Panel = ui.component(function(props: Props): Node
 	local function multi(): boolean
 		return groups_now:get() ~= nil
 	end
-	local function group_of(g: any, id: string): string?
-		for gid, l in g.lists do
-			if table.find(l, id) then
-				return gid
-			end
-		end
-		return nil
-	end
-	-- The focused group: the active tab's, else (its empty page shown) the
-	-- one last focused.
+	-- The focused group: the one kept with the tabs (screens/panel/state
+	-- moves it as tabs open, turn and close), while it's shown.
 	local function focused_group(): string?
 		local g = groups_now:get()
 		if not g then
 			return nil
-		end
-		local a = active()
-		if a then
-			local gid = group_of(g, a)
-			if gid then
-				return gid
-			end
 		end
 		local leaves = tree.leaves(g.tree)
 		if g.focus and table.find(leaves, g.focus) then
@@ -1627,76 +1614,6 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 		state.activate(k, d)
 	end
-	-- The focused group, as the active tab moves (a tab chosen, opened,
-	-- closed): kept, with the tab each group showed last.
-	ui.effect(function()
-		local a = active()
-		local g = groups_now:get()
-		local k = key:peek()
-		if not g or not k or not a then
-			return
-		end
-		local gid = group_of(g, a)
-		local rec = panel_groups:peek()[k]
-		if not gid or not rec then
-			return
-		end
-		if rec.focus ~= gid or (rec.actives or {})[gid] ~= a then
-			local all = table.clone(panel_groups:peek())
-			local r = table.clone(rec)
-			r.focus = gid
-			r.actives = table.clone(rec.actives or {})
-			r.actives[gid] = a
-			all[k] = r
-			panel_groups:set(all)
-		end
-	end)
-	-- A tab opened lands in the focused group.
-	local known: { [string]: { [string]: boolean } } = {}
-	ui.effect(function()
-		local k = key:get()
-		if not k then
-			return
-		end
-		local ids: { [string]: boolean } = {}
-		for _, t in state.of(k).tabs do
-			ids[t.id] = true
-		end
-		local was = known[k]
-		known[k] = ids
-		local rec = panel_groups:peek()[k]
-		if not was or not rec or not rec.focus or rec.focus == MAIN then
-			return
-		end
-		local fresh = {}
-		for id in ids do
-			if not was[id] then
-				local held = false
-				for _, gg in rec.groups do
-					if table.find(gg.tabs, id) then
-						held = true
-					end
-				end
-				if not held then
-					table.insert(fresh, id)
-				end
-			end
-		end
-		if #fresh > 0 then
-			local all = table.clone(panel_groups:peek())
-			local r = table.clone(rec)
-			r.groups = table.clone(rec.groups)
-			local gg = r.groups[rec.focus]
-			local l = table.clone(if gg then gg.tabs else {})
-			for _, id in fresh do
-				table.insert(l, id)
-			end
-			r.groups[rec.focus] = { tabs = l }
-			all[k] = r
-			panel_groups:set(all)
-		end
-	end)
-
 	-- Where the groups stand in the panel (all of it, from its top: the top
 	-- ones' strips in the panel's own band), as the page's split chats are:
 	-- edges that are a share of the panel plus points, so resizing it or
@@ -2132,11 +2049,11 @@ M.Panel = ui.component(function(props: Props): Node
 			border_color = function(): string
 				return if is_focus() then "$zeron.inset.focus_edge" else "$zeron.inset.edge"
 			end,
+			-- (Pressed anywhere in it, a terminal or an editor included: a
+			-- press bubbles up here past what took it. Not as the keyboard
+			-- lands in it: a terminal taking the keys as it's shown, or as
+			-- the panel comes back, would move the focus nobody chose.)
 			on_press = focus_me,
-			-- (A terminal, an editor, takes its press itself; the keyboard
-			-- landing in it reaches here as focus does, so a click into it
-			-- focuses the group too.)
-			on_focus = focus_me,
 			group_strip(gid),
 			ui.column(body_props),
 			-- Dimmed all over while another group is focused (taking no
@@ -2153,6 +2070,8 @@ M.Panel = ui.component(function(props: Props): Node
 				end,
 			},
 		}
+		-- (`#panel-group-<gid>`: a group of the panel's tabs.)
+		card.id = `panel-group-{gid}`
 		Split.place(card, function(): any
 			return gbox(gid)
 		end)

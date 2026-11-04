@@ -743,9 +743,12 @@ fn a_pane_out_of_focus_is_live_and_gaining_focus_changes_nothing() {
 /// sidebar, split one in by a drop, close a pane, type a draft in the
 /// focused composer, stream a reply (and a tool call) into a chat that
 /// isn't focused, change a chat's status, a chat's agent asking, reload,
-/// resize. After each, every pane shows exactly its own chat, live as if
-/// focused (its title, transcript, reply, tools, status, question and
-/// draft), and one pane is focused: the route's.
+/// resize; and in the focused chat's panel: open a tab from any source,
+/// focus a tab group, split one off, merge one into another. After each,
+/// every pane shows exactly its own chat, live as if focused (its title,
+/// transcript, reply, tools, status, question and draft), and one pane is
+/// focused: the route's; and each tab opened landed in the panel's focused
+/// group.
 #[test]
 fn two_hundred_random_steps_keep_every_pane_its_own_chat() {
     let mut app = mount(&scratch("random"));
@@ -762,7 +765,7 @@ fn two_hundred_random_steps_keep_every_pane_its_own_chat() {
         let panes = shown_panes(&mut app);
         let route = route_session(&app);
         let others: Vec<String> = panes.iter().filter(|p| Some((*p).clone()) != route).cloned().collect();
-        let what = match next(10) {
+        let what = match next(14) {
             0 if panes.len() >= 2 => {
                 let id = panes[next(panes.len())].clone();
                 focus_pane(&mut app, &id);
@@ -823,6 +826,51 @@ fn two_hundred_random_steps_keep_every_pane_its_own_chat() {
                 app.frames(30);
                 "reload".to_string()
             }
+            10..=13 if route.is_some() => {
+                let r = route.clone().unwrap();
+                if app.bounds("#shell-files").width < 2. {
+                    app.click("#titlebar >> role:button \"Panel\"");
+                    app.frames(40);
+                }
+                let groups = panel_groups_shown(&mut app);
+                // (Focusing a group as often as there are groups to focus.)
+                let pick = if groups.len() >= 2 { [0, 2, 2, 3, 4][next(5)] } else { [0, 1, 3][next(3)] };
+                match pick {
+                    0 | 1 => {
+                        let source = ["pr", "file", "url", "terminal"][next(4)];
+                        opens_into_focus(&mut app, &r, source, &format!("step {step}"));
+                        format!("panel {r}: open a {source}")
+                    }
+                    2 if groups.len() >= 2 => {
+                        let gid = groups[next(groups.len())].clone();
+                        let tab = full_tree(&mut app)
+                            .lines()
+                            .skip_while(|l| !l.contains(&format!("#panel-group-{gid} ")))
+                            .find_map(|l| l.split_whitespace().find_map(|w| w.strip_prefix("#panel-tab-")).map(str::to_owned));
+                        let Some(tab) = tab else { continue };
+                        app.click(&format!("#panel-tab-{tab}"));
+                        app.frames(10);
+                        assert_eq!(panel_focus(&app, &r).1, gid, "step {step}: a press on {tab} focuses its group");
+                        format!("panel {r}: focus {gid}")
+                    }
+                    3 if groups.len() < 3 => {
+                        let (active, focus) = panel_focus(&app, &r);
+                        let Some(active) = active else { continue };
+                        let over = if groups.len() >= 2 { format!("#panel-group-{focus}") } else { "#shell-files".to_string() };
+                        let side = ["right", "bottom"][next(2)];
+                        tab_to(&mut app, &active, &over, side);
+                        format!("panel {r}: split {active} {side}")
+                    }
+                    _ if groups.len() >= 2 => {
+                        let (active, focus) = panel_focus(&app, &r);
+                        let Some(active) = active else { continue };
+                        let into = groups.iter().find(|g| **g != focus).unwrap().clone();
+                        tab_to(&mut app, &active, &format!("#panel-group-{into}"), "middle");
+                        format!("panel {r}: merge {active} into {into}")
+                    }
+                    _ => continue,
+                }
+            }
             9 => {
                 let w = 1100. + next(400) as f32;
                 app.ui.scene.borrow_mut().resize(w, H);
@@ -839,8 +887,162 @@ fn two_hundred_random_steps_keep_every_pane_its_own_chat() {
         assert!(app.error().is_none(), "{when}: {:?}", app.error());
     }
     assert!(log.len() >= 120, "most steps did something: {}", log.len());
+    for kind in ["open a", "focus g", ": focus", "focus main", "split tab", "merge tab", "split a", "focus a", "close", "reload", "asking true", "stream into"] {
+        let n = log.iter().filter(|w| w.contains(kind)).count();
+        eprintln!("{kind}: {n}");
+    }
+    let panel = log.iter().filter(|w| w.starts_with("panel ")).count();
+    let group_focus = log.iter().filter(|w| w.starts_with("panel ") && w.contains(": focus")).count();
+    assert!(panel >= 20 && group_focus >= 5, "the panel's groups got their share: {panel} of {}, {group_focus} focused", log.len());
 }
 
 
 
 
+
+// ── The panel's tab groups: one focus, every tab opened into it ────────────
+
+/// A named state's value (`ui.state`s are named `module.luau::name`).
+fn state_of(app: &TestApp, name: &str) -> zgx_script::Value {
+    app.host
+        .states()
+        .into_iter()
+        .find(|(n, _)| n == name || n.ends_with(&format!("::{name}")))
+        .map(|(_, v)| v)
+        .unwrap_or_default()
+}
+
+fn text(v: Option<&zgx_script::Value>) -> Option<String> {
+    match v? {
+        zgx_script::Value::Str(s) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+/// Chat `chat`'s panel: its active tab, the focused group, and the group a
+/// tab is in (by the groups as the panel keeps them; none: one group).
+fn panel_focus(app: &TestApp, chat: &str) -> (Option<String>, String) {
+    let key = format!("chat:{chat}");
+    let sessions = state_of(app, "panel_sessions");
+    let active = text(sessions.field(&key).and_then(|s| s.field("active")));
+    let groups = state_of(app, "panel_groups");
+    let focus = text(groups.field(&key).and_then(|r| r.field("focus"))).unwrap_or_else(|| "main".into());
+    (active, focus)
+}
+
+fn group_of_tab(app: &TestApp, chat: &str, tab: &str) -> String {
+    let groups = state_of(app, "panel_groups");
+    let Some(zgx_script::Value::Map(gs)) = groups.field(&format!("chat:{chat}")).and_then(|r| r.field("groups")).cloned() else {
+        return "main".into();
+    };
+    for (gid, g) in gs.iter() {
+        if let Some(zgx_script::Value::List(tabs)) = g.field("tabs")
+            && tabs.iter().any(|t| matches!(t, zgx_script::Value::Str(s) if s.as_ref() == tab))
+        {
+            return gid.to_string();
+        }
+    }
+    "main".into()
+}
+
+/// The groups showing, by their ids (`#panel-group-<gid>`).
+fn panel_groups_shown(app: &mut TestApp) -> Vec<String> {
+    let mut out: Vec<String> = full_tree(app).lines().filter_map(|l| l.split_whitespace().find_map(|w| w.strip_prefix("#panel-group-")).map(str::to_owned)).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A panel tab (its id) carried to `side` of the panel body or of group
+/// `gid`'s body: a new group there.
+fn tab_to(app: &mut TestApp, tab: &str, over: &str, side: &str) {
+    let b = app.bounds(over);
+    // (The body: under the strip's band.)
+    let (top, h) = (b.y + 40., b.height - 40.);
+    let to = match side {
+        "right" => (b.x + b.width - 12., top + h / 2.),
+        "left" => (b.x + 12., top + h / 2.),
+        "bottom" => (b.x + b.width / 2., top + h - 12.),
+        _ => (b.x + b.width / 2., top + h / 2.),
+    };
+    let from = middle(app.bounds(&format!("#panel-tab-{tab}")));
+    carry(app, from, to, |_| {});
+}
+
+/// Opening a tab from source `source` lands it in the focused group: the
+/// new tab active, in the group that was focused, still focused.
+fn opens_into_focus(app: &mut TestApp, chat: &str, source: &str, when: &str) {
+    let (_, focus) = panel_focus(app, chat);
+    assert!(app.host.run_command(&format!("fixture.open_{source}")), "{when}: fixture.open_{source}");
+    app.frames(20);
+    let (active, now) = panel_focus(app, chat);
+    let active = active.unwrap_or_else(|| panic!("{when}: {source} opened no tab"));
+    assert_eq!(now, focus, "{when}: opening a {source} moved the focus");
+    assert_eq!(group_of_tab(app, chat, &active), focus, "{when}: the {source} landed outside the focused group");
+    if panel_groups_shown(app).len() >= 2 {
+        assert!(has(app, &format!("#panel-group-{focus} >> #panel-tab-{active}")), "{when}: the {source}'s tab shows in the focused group");
+    }
+}
+
+#[test]
+fn every_tab_opened_lands_in_the_focused_panel_group() {
+    let mut app = mount(&scratch("groups"));
+    open(&mut app, "Fix the build");
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(40);
+    app.click("#panel-open-files");
+    app.frames(30);
+    assert!(app.host.run_command("fixture.open_terminal"));
+    app.frames(20);
+    let (term, _) = panel_focus(&app, "a1");
+    let term = term.unwrap();
+    // Two groups: the terminal to the panel's right.
+    tab_to(&mut app, &term, "#shell-files", "right");
+    assert_eq!(panel_groups_shown(&mut app).len(), 2, "two groups");
+    for round in 0..2 {
+        for gid in panel_groups_shown(&mut app) {
+            // Focused by a press on a tab of its own.
+            let (_, before) = panel_focus(&app, "a1");
+            let tab = full_tree(&mut app)
+                .lines()
+                .skip_while(|l| !l.contains(&format!("#panel-group-{gid} ")))
+                .find_map(|l| l.split_whitespace().find_map(|w| w.strip_prefix("#panel-tab-")).map(str::to_owned))
+                .expect("a tab in the group");
+            app.click(&format!("#panel-tab-{tab}"));
+            app.frames(10);
+            assert_eq!(panel_focus(&app, "a1").1, gid, "a press focuses its group (from {before})");
+            for source in ["pr", "file", "url", "terminal"] {
+                opens_into_focus(&mut app, "a1", source, &format!("round {round}, {gid}"));
+            }
+        }
+        if round == 0 {
+            // Three: one of the right group's tabs under it.
+            let right = panel_groups_shown(&mut app).into_iter().find(|g| g != "main").unwrap();
+            let (active, _) = panel_focus(&app, "a1");
+            tab_to(&mut app, &active.unwrap(), &format!("#panel-group-{right}"), "bottom");
+            assert_eq!(panel_groups_shown(&mut app).len(), 3, "three groups");
+        }
+    }
+    // The focus survives a reload and a switch of chats.
+    let (_, focus) = panel_focus(&app, "a1");
+    app.host.reload().expect("the reload failed");
+    app.frames(30);
+    assert_eq!(panel_focus(&app, "a1").1, focus, "a reload keeps the focus");
+    opens_into_focus(&mut app, "a1", "pr", "after a reload");
+    open(&mut app, "Tidy the tests");
+    open(&mut app, "Fix the build");
+    app.frames(30);
+    assert_eq!(panel_focus(&app, "a1").1, focus, "a switch of chats keeps it");
+    opens_into_focus(&mut app, "a1", "pr", "after a switch");
+    // A tab already open (the same PR) focuses where it is.
+    let groups = panel_groups_shown(&mut app);
+    let other = groups.iter().find(|g| **g != focus).unwrap().clone();
+    let tab = full_tree(&mut app)
+        .lines()
+        .skip_while(|l| !l.contains(&format!("#panel-group-{other} ")))
+        .find_map(|l| l.split_whitespace().find_map(|w| w.strip_prefix("#panel-tab-")).map(str::to_owned))
+        .unwrap();
+    app.click(&format!("#panel-tab-{tab}"));
+    app.frames(10);
+    assert_eq!(panel_focus(&app, "a1").1, other);
+}

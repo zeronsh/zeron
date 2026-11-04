@@ -557,6 +557,78 @@ projects_stub.delete = function(id: string): any
 	return answer(nil)
 end
 
+-- What opens tabs in the panel, as plugins, links and the panel home do:
+-- each its own tab (a PR from the GitHub plugin's board, a file, a page, a
+-- terminal), named by a count.
+local opened_tabs = ui.state("fixture_opened_tabs", 0)
+local function panel_screen(): any
+	return require("@app/screens/panel")
+end
+local function here(): string?
+	local s = require("@app/screens/shell/route").session:peek()
+	return if s then s.id else nil
+end
+-- (A terminal's host and zgx's terminal, stood in for: an engine terminal
+-- a number, its view a column saying which, as ui/panel_fixture's.)
+local tapi = require("@app/screens/panel/terminal_api") :: any
+local terms = ui.state("fixture_terms", 0)
+local term_sessions: { [string]: any } = {}
+tapi.start = function(_target: any): any
+	terms:add(1)
+	return settle({ command = `bridge term-{terms:peek()}`, claim = `claim-{terms:peek()}` })
+end
+tapi.claimed = function(claim: string): any
+	return settle(`term-{string.match(claim, "%d+")}`)
+end
+tapi.command = function(id: string): any
+	return settle(`bridge {id}`)
+end
+tapi.status = function(): any
+	return settle({ busy = false, exited = false })
+end
+tapi.close = function(): any
+	return settle(nil)
+end
+tapi.write = function(): any
+	return settle(nil)
+end
+tapi.term = function(key: string, options: any?): any
+	local s = term_sessions[key]
+	if not s and options then
+		s = { title = nil, close = function()
+			term_sessions[key] = nil
+		end, focus = function() end }
+		term_sessions[key] = s
+	end
+	return s
+end
+tapi.view = function(props: any): Node
+	return ui.column { grow = 1, label = "Terminal", ui.text { `terminal {props.label}`, literal = true } }
+end
+for _, source in { "pr", "file", "url", "terminal" } do
+	ui.command {
+		id = `fixture.open_{source}`,
+		title = `Fixture: open a {source} in the panel`,
+		run = function()
+			opened_tabs:add(1)
+			local n, p = opened_tabs:peek(), panel_screen()
+			if source == "pr" then
+				p.open_plugin_tab(here(), { plugin = "github", kind = "pr", title = `PR #{n}`, data = { key = `pr{n}` } })
+			elseif source == "file" then
+				p.open_file(here(), `src/file{n}.rs`)
+			elseif source == "url" then
+				p.open_url(here(), `https://example.com/{n}`)
+			else
+				local state = require("@app/screens/panel/state")
+				local k = state.key(here(), nil)
+				if k then
+					state.open(k, "terminal")
+				end
+			end
+		end,
+	}
+end
+
 -- What changes on the engine's side.
 ui.command {
 	id = "work",
