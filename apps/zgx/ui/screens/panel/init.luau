@@ -411,21 +411,29 @@ local BAND_H = 38 - INSET_GAP
 -- (Its tabs centred under the pad: Zeron's 4, less what the card is set
 -- down by.)
 local BAND_PAD_PT = math.max(0, 4 - INSET_GAP)
+-- (The card's hairline: a strip starts under it, so its middle is raised by
+-- as much to stay on the title bar's line.)
+local CARD_EDGE = 1
 -- (Its tabs as far in from its card's left and right as from its top: the
 -- band's room over a tab, which its tabs centre in.)
-local STRIP_EDGE = BAND_PAD_PT + (BAND_H - BAND_PAD_PT - 26) / 2
+local STRIP_EDGE = BAND_PAD_PT + (BAND_H - BAND_PAD_PT - CARD_EDGE * 2 - 26) / 2
 local STRIP_START = ui.raw(STRIP_EDGE, "a strip's tabs as far in from the card's side as from its top")
 -- (At the panel's top right, the title bar's panel toggle stands over the
--- strip's end (10 in from the window's right, 24 wide): the strip ends
--- before it, by the title bar's own gap between its controls.)
-local TOGGLE_ROOM = 34 - INSET_GAP + 2
+-- strip's end (10 in from the window's right, 24 wide). Expand stands off it
+-- by the left cluster's gap between the sidebar toggle and Back, the two
+-- sides mirrored. The panel's strip ends the card's inset from the window's
+-- right, less its edge (its column is the card's whole width, starting inside
+-- the card's edge); a group's, the inset and the edge, inside its own card.)
+local TOGGLE_ROOM = 34 - INSET_GAP + CARD_EDGE + ds.island.metrics().group
+local GROUP_TOGGLE_ROOM = TOGGLE_ROOM - CARD_EDGE * 2
 -- The band's room above and below its tabs (centred in what's left), so
 -- they stand on the title bar's line (`ds.TitleBar.middle`, from the
--- window's top; the card is set INSET_GAP down): under BAND_PAD_PT where
--- the bar's line is Zeron's own, with room at the foot instead where the
--- window's buttons draw it higher (Windows' caption buttons).
+-- window's top; the card is set INSET_GAP down, and a strip starts under
+-- its edge): under BAND_PAD_PT with the card's edge twice at the foot where
+-- the bar's line is Zeron's own, more room at the foot where the window's
+-- buttons draw it higher (Windows' caption buttons).
 local function band_line(): number
-	return ds.TitleBar.middle() - INSET_GAP
+	return ds.TitleBar.middle() - INSET_GAP - CARD_EDGE
 end
 local function band_pt(): any
 	local line = band_line()
@@ -433,18 +441,23 @@ local function band_pt(): any
 end
 local function band_pb(): any
 	local line = band_line()
-	return ui.raw(math.max(0, BAND_H - line * 2), "the title bar's line")
+	return ui.raw(math.max(0, BAND_H - line * 2), "the title bar's line, the strip starting under the card's edge")
 end
--- What a strip's end keeps for the title bar's panel toggle over it, and
--- past it the window's own buttons where they stand at the right (TOGGLE_ROOM
--- counts the bar's row padding, 10, which `actions_right` gives as it is).
-local function toggle_room(): number
-	return TOGGLE_ROOM - 10 + ds.TitleBar.actions_right()
+-- What a strip's end keeps for the title bar's panel toggle over it (the
+-- panel's, `room`, or a group's), and past it the window's own buttons and
+-- the divider where they stand at the right (the rooms count the bar's row
+-- padding, 10, which `actions_right` gives as it is).
+local function toggle_room(room: number?): number
+	return (room or TOGGLE_ROOM) - 10 + ds.TitleBar.actions_right()
 end
 local STRIP_FADE = 36
 local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 -- The title bar's controls' size (the Expand button stands with them).
 local CONTROL = ds.island.metrics().control
+-- Expand's glyph (icons.zeron.sh's arrows), weighing as the panel toggle's.
+local function expand_glyph(which: string): Node
+	return Icon { name = if which == "collapse" then "collapse-arrows" else "expand-arrows", size = 16, glyph_stroke = true }
+end
 
 -- A prop's value now (`control.value`: a function's answer, a state's,
 -- tracked, or the value itself); a path's file name.
@@ -1213,7 +1226,7 @@ M.Panel = ui.component(function(props: Props): Node
 						on_click = function()
 							shell_view.toggle_expanded()
 						end,
-						Icon { name = if which == "collapse" then "collapse-arrows" else "expand-arrows", size = 16 },
+						expand_glyph(which),
 					}
 				end),
 			}
@@ -1819,7 +1832,7 @@ M.Panel = ui.component(function(props: Props): Node
 				return ui.raw(STRIP_START_PT, "the strip's start")
 			end,
 			pr = function(): number
-				return ui.raw(if top_right() then toggle_room() else STRIP_EDGE, "the title bar's panel toggle over the top right group's end, else as far in as from its top")
+				return ui.raw(if top_right() then toggle_room(GROUP_TOGGLE_ROOM) else STRIP_EDGE, "the title bar's panel toggle over the top right group's end, else as far in as from its top")
 			end,
 			items = "center",
 			window_drag = true,
@@ -1890,7 +1903,7 @@ M.Panel = ui.component(function(props: Props): Node
 							on_click = function()
 								shell_view.toggle_expanded()
 							end,
-							Icon { name = if which == "collapse" then "collapse-arrows" else "expand-arrows", size = 16 },
+							expand_glyph(which),
 						}
 					end),
 				})

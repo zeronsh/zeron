@@ -26,6 +26,7 @@ local SectionTitle = require("@self/section_title")
 local Hint = require("@self/hint")
 local FadeText = require("@self/fade_text")
 local PrivateText = require("@self/private_text")
+local look = require("@self/look")
 local Tabs = require("@self/tabs")
 local SearchField = require("@self/search_field")
 local EmptyState = require("@self/empty_state")
@@ -309,6 +310,80 @@ function M.Each(list: State<{ any }>, row: (item: any, i: number, now: State<any
 			}),
 		}
 	)
+end
+
+-- `Each` for a list that can run to thousands (a row's height known, so
+-- none is measured): the same card and hairlines, its rows in a `ui.list`
+-- that scrolls with the page, as tall as all of them, and builds only those
+-- the page and the window show. `height(item)`: the row's own, its hairline
+-- counted here; `text(item)`, its plain text for a selection running over
+-- rows not built. (Not under a box easing open from nothing: at zgx
+-- e46ff6fc a list there builds nothing until the page moves.)
+export type EachListOptions = {
+	key: (item: any) -> any,
+	height: (item: any) -> number,
+	text: ((item: any) -> string)?,
+}
+
+function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: EachListOptions): Node
+	local text = opts.text
+	return ui.show(
+		function(): boolean
+			return #list:get() > 0
+		end,
+		ui.column {
+			w_full = true,
+			rounded = "$radius.xl",
+			bg = "$zeron.settings.card",
+			border = 1,
+			border_color = "$zeron.settings.edge",
+			overflow = "hidden",
+			ui.list {
+				data = list,
+				key = opts.key,
+				heights = function(): { number }
+					local out: { number } = {}
+					for i, item in list:get() do
+						out[i] = opts.height(item) + (if i > 1 then 1 else 0)
+					end
+					return out
+				end,
+				row_text = if text
+					then function(i: number): string
+						local item = list:peek()[i]
+						return if item ~= nil then text(item) else ""
+					end
+					else nil,
+				w_full = true,
+				virtualize = "ancestor",
+				row = function(item: any, i: State<number>, now: State<any>): Node
+					return ui.column {
+						w_full = true,
+						ui.show(
+							function(): boolean
+								return i:get() > 1
+							end,
+							M.Rule()
+						),
+						row(item, i, now),
+					}
+				end,
+			},
+		}
+	)
+end
+
+-- How tall a `truncate`d Row with a line under its name stands (each one line,
+-- so its height is known; a line with nothing to say still takes its height):
+-- its padding round its words or its `lead`, at the row's least. In the
+-- window's text size, which scales the lines.
+function M.truncated_row_h(lead: number?): number
+	local scaled = look.text_theme() or {}
+	local function token(name: string, default: number): number
+		return scaled[name] or (ui.theme.get(name) :: number?) or default
+	end
+	local words = token("font.line.md", 18) + token("zeron.space.hair", 2) + token("font.line.sm", 16)
+	return math.max(token("zeron.settings.row", 52), 2 * token("space.3", 12) + math.max(words, lead or 0))
 end
 
 export type RowProps = {
