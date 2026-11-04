@@ -10060,7 +10060,7 @@ impl Composer {
                     let wake_executor = cx.background_executor().clone();
                     let wake = async {
                         let request = engine.client().call_scoped(methods::WAKE_DEVICE, serde_json::json!({ "deviceId": target }));
-                        let deadline = wake_executor.timer(Duration::from_secs(180));
+                        let deadline = wake_executor.timer(crate::settings::devices::WAKE_REPLY_DEADLINE);
                         futures::pin_mut!(request, deadline);
                         match futures::future::select(request, deadline).await {
                             futures::future::Either::Left((result, _)) => result.map_err(|error| error.to_string()),
@@ -14104,7 +14104,12 @@ mod tests {
                 });
             }
             if outcome == "timeout" {
-                cx.executor().advance_clock(Duration::from_secs(180));
+                // A cold wake can outlast the old 180 s cap: wait out the engine's budget.
+                let deadline = crate::settings::devices::WAKE_REPLY_DEADLINE;
+                cx.executor().advance_clock(deadline - Duration::from_secs(1));
+                cx.run_until_parked();
+                composer.read_with(cx, |composer, _| assert!(composer.sending, "still within the wake budget"));
+                cx.executor().advance_clock(Duration::from_secs(1));
             } else if outcome == "cancelled" {
                 composer.update(cx, |composer, cx| composer.cancel_boat_wake(cx));
             } else {

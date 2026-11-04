@@ -13,7 +13,14 @@ use zeron_rpc::{LinkCache, PeerLiveness};
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const START_TIMEOUT: Duration = Duration::from_secs(180);
-const WAKE_TIMEOUT: Duration = Duration::from_secs(180);
+/// The exact Crew peer becoming ready once its start command returned.
+const PEER_TIMEOUT: Duration = Duration::from_secs(180);
+/// The whole wake: gate contention, provider lookup, resume, start and readiness.
+const WAKE_TIMEOUT: Duration = Duration::from_secs(zeron_proto::DEVBOX_WAKE_TIMEOUT_SECS);
+// The whole wake's deadline must never cut a step off inside its own limit.
+const _: () = assert!(
+    CLI_TIMEOUT.as_secs() + 2 * START_TIMEOUT.as_secs() + PEER_TIMEOUT.as_secs() <= WAKE_TIMEOUT.as_secs()
+);
 // ponytail: one explicit wake at a time; use per-device gates if parallel wakes are needed.
 static GATE: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -463,7 +470,7 @@ async fn await_peer(
 ) -> Result<Device, String> {
     let mut devices = workspace.watch_devices();
     let mut online = zeron_sync::wake::subscribe_online();
-    tokio::time::timeout(WAKE_TIMEOUT, async {
+    tokio::time::timeout(PEER_TIMEOUT, async {
         loop {
             {
                 let rows = devices.borrow_and_update();

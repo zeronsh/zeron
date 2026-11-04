@@ -72,6 +72,20 @@ impl SidebarPreferencesState {
     }
 }
 
+/// Longest one explicit devbox wake may take, end to end:
+/// - provider lookup (30 s);
+/// - resume (180 s);
+/// - the channel's start command (180 s);
+/// - the Crew peer becoming ready (180 s).
+///
+/// A cold Boat wake took 167 s on 2026-11-03, too close to the 180 s the
+/// whole wake used to get. The engine enforces this budget. Callers wait
+/// [`DEVBOX_WAKE_REPLY_GRACE_SECS`] longer so that the engine's own error
+/// reaches them first.
+pub const DEVBOX_WAKE_TIMEOUT_SECS: u64 = 30 + 180 + 180 + 180;
+/// See [`DEVBOX_WAKE_TIMEOUT_SECS`].
+pub const DEVBOX_WAKE_REPLY_GRACE_SECS: u64 = 15;
+
 /// Immutable host provider identity, independent of OS and peer routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -289,7 +289,15 @@ async fn wake_deadline_includes_waiting_for_another_wake() {
         result = &mut operation => panic!("wake escaped its occupied gate: {result:?}"),
         _ = tokio::task::yield_now() => {}
     }
-    tokio::time::advance(Duration::from_secs(180)).await;
+    // Failure mode: the whole wake gets less than its steps' combined limits, so a
+    // cold Boat wake (167 s on 2026-11-03) times out while each step is in bounds.
+    let budget = Duration::from_secs(zeron_proto::DEVBOX_WAKE_TIMEOUT_SECS);
+    tokio::time::advance(budget - Duration::from_secs(1)).await;
+    tokio::select! {
+        result = &mut operation => panic!("wake gave up before its budget: {result:?}"),
+        _ = tokio::task::yield_now() => {}
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
     assert!(matches!(operation.await, Err(error) if error.contains("timed out")));
     core.sessions.shutdown().await;
 }

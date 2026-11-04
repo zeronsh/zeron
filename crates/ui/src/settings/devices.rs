@@ -30,6 +30,12 @@ pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bo
 
 /// Provider operations are only initiated by explicit user actions. The reply
 /// must prove the same immutable binding before its fresh capabilities are used.
+/// How long a caller waits for a wake reply: the engine's whole wake budget,
+/// plus a grace so that the engine's own timeout error arrives first.
+pub(crate) const WAKE_REPLY_DEADLINE: Duration = Duration::from_secs(
+    zeron_proto::DEVBOX_WAKE_TIMEOUT_SECS + zeron_proto::DEVBOX_WAKE_REPLY_GRACE_SECS,
+);
+
 pub(crate) async fn wake_host(
     engine: &crate::state::EngineHandle,
     executor: &gpui::BackgroundExecutor,
@@ -39,7 +45,7 @@ pub(crate) async fn wake_host(
         methods::WAKE_DEVICE,
         serde_json::json!({"deviceId": device.id}),
     );
-    let deadline = executor.timer(Duration::from_secs(180));
+    let deadline = executor.timer(WAKE_REPLY_DEADLINE);
     futures::pin_mut!(request, deadline);
     let value = match futures::future::select(request, deadline).await {
         futures::future::Either::Left((result, _)) => result.map_err(|error| error.to_string())?,
@@ -684,9 +690,10 @@ mod tests {
         let page = cx.new(|cx| DevicesPage::new(state.clone(), cx));
         page.update(cx, |page, cx| page.wake_device("remote".into(), cx));
         rpc.settle(cx, &runtime, |_| started.load(Ordering::SeqCst) == 1);
-        cx.executor().advance_clock(Duration::from_secs(179));
+        // A cold wake can outlast the old 180 s cap: wait out the engine's budget.
+        cx.executor().advance_clock(WAKE_REPLY_DEADLINE - Duration::from_secs(1));
         cx.run_until_parked();
-        page.read_with(cx, |page, _| assert!(page.wake_task.is_some()));
+        page.read_with(cx, |page, _| assert!(page.wake_task.is_some(), "still within the wake budget"));
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         page.read_with(cx, |page, _| {
