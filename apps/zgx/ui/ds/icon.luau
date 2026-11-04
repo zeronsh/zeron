@@ -108,6 +108,7 @@ export type Name =
 	| "danger-triangle"
 	-- A row's grip, dragged to reorder it (the view menu's Organize rows).
 	| "grip"
+	| "grip-horizontal"
 	| "file-code"
 	| "info-circle"
 	| "info-square"

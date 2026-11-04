@@ -390,18 +390,7 @@ return function(props: Props): Node
 		card_props.rounded = "$radius.md"
 		return ui.row(card_props)
 	end
-	-- A grip's two rows of dots.
-	local function grip_dots(): Node
-		local function dots(): Node
-			local row: { [any]: any } = { gap = ui.raw(3, "a grip's dots apart"), items = "center" }
-			for _ = 1, 3 do
-				table.insert(row, ui.div { w = 3, h = 3, rounded = "$radius.full", bg = "$text.secondary" })
-			end
-			return ui.row(row)
-		end
-		return ui.column { gap = ui.raw(3, "a grip's dots apart"), items = "center", dots(), dots() }
-	end
-	-- What a pane is dragged by: two rows of dots on glass, centred at
+	-- What a pane is dragged by: two rows of dots on the composer's fill, centred at
 	-- the pane's top, there while the pointer is near it and the pane has
 	-- somewhere to go (beside another, or into another tab). While dragged, only
 	-- the dragged pane's. (Unseen, not gone: hiding the source would end the drag.)
@@ -415,11 +404,18 @@ return function(props: Props): Node
 		end
 		local face: { [any]: any } = {
 			class = "pane-grip",
-			w = 36,
-			h = 22,
+			w = 26,
+			h = 16,
 			items = "center",
 			justify = "center",
 			color = "$text.secondary",
+			rounded = "$radius.md",
+			bg = function(): string
+				return if ds.material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+			end,
+			backdrop_blur = function(): number
+				return if ds.material.see_through() then 16 else 0
+			end,
 			pointer_events = "auto",
 			cursor = function(): string
 				return if held:get() then "grabbing" else "grab"
@@ -445,10 +441,8 @@ return function(props: Props): Node
 				held:set(false)
 				splits.dragging:set(false)
 			end,
-			grip_dots(),
+			ds.Icon { name = "grip-horizontal", size = (ui.theme.get("zeron.menu.glyph.size") :: number?) or 16 },
 		}
-		ds.island.glass(face)
-		face.rounded = "$radius.md"
 		return ui.row {
 			absolute = true,
 			top = ui.raw(6, "off the card's top"),

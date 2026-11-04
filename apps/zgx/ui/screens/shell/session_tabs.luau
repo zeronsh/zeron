@@ -1,7 +1,7 @@
--- The tabs on the top bar over the page (`splits` keeps them): a chat opened with
--- none and nothing open gets one, a split is one, and a chat is in one at a time. Each shows its
--- panes' tiles stacked (three at most) with the pane focused last in front, and
--- its title. A chat opened replaces the pane focused; a pane dragged here is a new
+-- The tabs on the top bar over the page (`splits` keeps them): a chat opened goes to
+-- its tab, or gets a new one; a split is one, and a chat is in one at a time. Each
+-- shows its panes' tiles stacked (three at most) with the pane focused last in front,
+-- and its title. A pane dragged here is a new
 -- tab (near a tab's edge, or past the last), or joins a tab (on its middle). A click
 -- goes there, a drag reorders them, its × closes the tab (the sessions go on, in the sidebar; a split stays a
 -- split).

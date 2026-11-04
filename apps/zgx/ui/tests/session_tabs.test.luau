@@ -17,8 +17,7 @@ local function open(app: any, title: string)
 	app:frames(30)
 end
 
--- A tab for each chat, the last showing. (A chat opened replaces the pane focused,
--- so these are set out as a drag to the top bar would leave them.)
+-- A tab for each chat, the last showing.
 local function all_open(): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 800)
@@ -95,12 +94,14 @@ test("the page takes clicks: a new chat, a chat alone, and panes side by side", 
 	app:set_state("inset_split_trees", { { kind = "row", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "a2" } } } })
 	app:frames(30)
 	page_takes_clicks(app)
-	-- (The other pane, under the same layers, comes to the front at a click.)
-	local before = (app:state("shell_tab_pane") :: any).chat
-	local other = if before == "a1" then "a2" else "a1"
-	app:click(`#split-pane-{other}`)
+	-- (Each pane, under the same layers, takes the focus at a click: the composer
+	-- goes to it.)
+	app:click("#split-pane-a1")
 	app:frames(30)
-	expect((app:state("shell_tab_pane") :: any).chat).to_be(other)
+	local at_a1 = box(app, "#chat-composer-dock").x
+	app:click("#split-pane-a2")
+	app:frames(30)
+	expect(box(app, "#chat-composer-dock").x ~= at_a1).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -402,7 +403,7 @@ test("a tab's corner says a chat awaits you over one at work, and its × comes u
 	expect(app:error()).to_be_nil()
 end)
 
-test("a chat opened replaces the pane focused, and its tab keeps its place", function()
+test("a chat opened with no tab gets a new one, replacing nothing", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)
@@ -410,23 +411,26 @@ test("a chat opened replaces the pane focused, and its tab keeps its place", fun
 	open(app, "Write the docs")
 	open(app, "Tidy the tests")
 	local kept = app:state("inset_split_trees") :: any
-	expect(#kept).to_be(1)
-	expect(kept[1].id).to_be("a3")
+	expect(#kept).to_be(3)
+	expect(kept[1].id).to_be("a1")
+	expect(kept[2].id).to_be("a2")
+	expect(kept[3].id).to_be("a3")
 	expect(app:error()).to_be_nil()
 end)
 
-test("a chat opened replaces the focused pane of a split, the other staying", function()
+test("a chat opened from a split gets a new tab, the split left as it is", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)
 	open(app, "Fix the build")
 	app:set_state("inset_split_trees", { { kind = "row", key = "pair", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "a2" } } } })
 	app:frames(30)
-	open(app, "Write the docs")
-	app:frames(20)
 	open(app, "Ship the release")
 	app:frames(30)
-	expect(table.concat(panes_of(app, "pair"), ",")).to_be("a1,b1")
+	expect(table.concat(panes_of(app, "pair"), ",")).to_be("a1,a2")
+	local kept = app:state("inset_split_trees") :: any
+	expect(#kept).to_be(2)
+	expect(kept[2].id).to_be("b1")
 	expect(app:error()).to_be_nil()
 end)
 
@@ -439,7 +443,7 @@ test("a chat in another tab goes to that tab, replacing nothing", function()
 	expect(app:error()).to_be_nil()
 end)
 
-test("a new chat's page opens a tab of its own, replacing nothing", function()
+test("from a new chat's page a chat opened gets a new tab too", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)

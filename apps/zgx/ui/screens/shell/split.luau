@@ -62,8 +62,6 @@ export type Box = { left: Edge, right: Edge, top: Edge, bottom: Edge }
 local trees = ui.persist("inset_split_trees", {} :: { Node })
 -- (The tabs' order before a tab was a thing of its own: `trees` held only splits.)
 local old_order = ui.persist("shell_session_tabs", {} :: { string })
--- The pane focused last, and its tab: a chat opened that has no tab takes its place.
-local last_pane = ui.persist("shell_tab_pane", nil :: { key: string, chat: string }?)
 
 -- A chat being dragged (shared with the sidebar's rows, which set it).
 M.dragging = ui.shared("split.dragging", false)
@@ -495,61 +493,23 @@ ui.effect(function()
 		trees:set(out)
 	end
 end)
--- The tree with the chat `from` swapped for `to`.
-local function swapped(node: Node, from: string, to: string): Node
-	if node.kind == "leaf" then
-		return if node.id == from then leaf(to) else node
-	end
-	local kids: { Node } = {}
-	for _, c in node.children or {} do
-		table.insert(kids, swapped(c, from, to))
-	end
-	return { kind = node.kind, children = kids, shares = node.shares }
-end
-
--- A chat focused with no tab takes the place of the pane focused last, or, with
--- none to replace (from a new chat's page), gets a tab of its own. (New tabs come of dragging to the top
--- bar: `new_tab`.) As the focus moves, not as the tabs change: a tab just closed,
--- the focus on its way to another, doesn't come back.
+-- A chat focused with no tab gets a tab of its own, at the end. (As the focus
+-- moves, not as the tabs change: a tab just closed, the focus on its way to another,
+-- doesn't come back.)
 ui.effect(function()
 	local id = M.focused:get()
 	if not id then
-		-- (On a new chat: what it becomes is a tab of its own, replacing nothing.)
-		if last_pane:peek() ~= nil then
-			last_pane:set(nil)
-		end
 		return
 	end
 	local list = trees:peek()
 	local t = M.current:peek()
 	if not t then
-		local was = last_pane:peek()
-		local replaced = was and tab_with_key(list, was.key)
-		if was and replaced and not replaced.closed and holds(replaced, was.chat) then
-			local more: { Node } = {}
-			for _, other in list do
-				if key_of(other) == was.key then
-					table.insert(more, keyed(swapped(other, was.chat, id), was.key))
-				else
-					table.insert(more, other)
-				end
-			end
-			trees:set(more)
-			last_pane:set({ key = was.key, chat = id })
-			return
-		end
 		local tab = leaf(id)
 		tab.key = fresh_key(id, list)
 		local more = table.clone(list)
 		table.insert(more, tab)
 		trees:set(more)
-		last_pane:set({ key = tab.key :: string, chat = id })
 		return
-	end
-	local here = key_of(t)
-	local was = last_pane:peek()
-	if not was or was.key ~= here or was.chat ~= id then
-		last_pane:set({ key = here, chat = id })
 	end
 	if t.closed then
 		local key = key_of(t)

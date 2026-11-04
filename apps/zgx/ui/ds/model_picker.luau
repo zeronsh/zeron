@@ -68,6 +68,9 @@ export type Props = {
 	open_with: State<number>?,
 	-- Set to whether it is open (Dropdown's `showing`).
 	showing: State<boolean>?,
+	-- How far its chip folds (Dropdown's `fold`): 1, without the effort; 2, its
+	-- mark alone.
+	fold: (() -> number)?,
 }
 
 -- Devin Fusion's lead (what runs), listed first among its options.
@@ -501,6 +504,7 @@ return ui.component(function(props: Props): Node
 	end
 
 	return Dropdown {
+		fold = props.fold,
 		value = props.model,
 		items = items :: any,
 		tone = props.tone or "chip",
