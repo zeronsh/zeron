@@ -679,7 +679,13 @@
       "loading_full": "{what, select, diff {Loading full diff…} other {Loading full output…}}",
       "failed_full": "{what, select, diff {Couldn't load full diff — tap to retry} other {Couldn't load full output — tap to retry}}",
       "earlier_trimmed": "… earlier output trimmed",
-      "exit_code": "Exit code {code}"
+      "exit_code": "Exit code {code}",
+      "loading_all_lines": "Loading all {n} lines…",
+      "whole_offline": "The device that ran this command is offline. Try again when it's back.",
+      "whole_update": "Update Zeron on the device that ran this command to see all of its output.",
+      "whole_unavailable": "The rest of this output wasn't kept.",
+      "whole_running": "This command hasn't finished yet.",
+      "whole_failed": "Couldn't load the rest of this output. Try again."
     },
     "activity": {
       "phrase": {

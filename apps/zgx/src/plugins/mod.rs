@@ -45,6 +45,7 @@ pub mod recovery;
 pub mod remote;
 pub mod templates;
 pub mod retired_themes;
+pub mod official;
 pub mod tokens;
 pub mod looks;
 pub mod template_consent;
@@ -680,14 +681,22 @@ pub fn prepare_live() -> PathBuf {
     }
 }
 
-/// The host's own menu item's action ("Use Zeron's Template").
+/// The host's own menu item's action ("Use Zeron v3").
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
 /// The host's own "Keep <template>…": the keep sheet for the one in preview.
 pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
 
-/// One of the host's own commands (its menu items and its bar's buttons:
+/// One of the host's own commands (its menu items and its toasts' buttons:
 /// never a script's, `zeron.` being the host's).
 pub fn host_command(id: &str) {
+    // (A test hears what ran instead: Revert's safe mode would be written
+    // to the app's own data folder.)
+    #[cfg(test)]
+    {
+        HOST_COMMANDS_RAN.with(|r| r.borrow_mut().push(id.to_owned()));
+        return;
+    }
+    #[allow(unreachable_code)]
     match id {
         USE_ZERON_TEMPLATE => use_zeron_template(),
         KEEP_TEMPLATE => {
@@ -699,7 +708,13 @@ pub fn host_command(id: &str) {
     }
 }
 
-/// `work` on the main window's tasks (the host's bar's timers).
+#[cfg(test)]
+thread_local! {
+    /// The host commands a test ran (`host_command`).
+    pub(crate) static HOST_COMMANDS_RAN: RefCell<Vec<String>> = RefCell::default();
+}
+
+/// `work` on the main window's tasks (the host's toasts' timers).
 pub(crate) fn spawn_on_bridge(work: impl std::future::Future<Output = ()> + 'static) {
     if let Some(b) = BRIDGE.with(|b| b.borrow().upgrade()) {
         b.tasks.spawn(work);
@@ -965,7 +980,7 @@ pub fn set_view(handle: zgx::compose::ViewHandle) {
     }
 }
 
-/// "Use Zeron's Template" (the host's own menu item and bar button, which no
+/// "Use Zeron v3" (the host's own menu item, and Revert in its toast, which no
 /// template can take away): safe mode (preview.rs), so Zeron's own runs
 /// whatever `.active` says until you pick a template on the Templates page,
 /// and the terminals templates started are closed. The window follows.
@@ -1137,7 +1152,7 @@ impl Bridge {
             if let (Some(id), Some(words)) = (notice["id"].as_str(), notice["words"].as_str())
                 && self.told.borrow_mut().insert(format!("key-notice:{id}"))
             {
-                host_bar::notice(words.to_owned());
+                host_bar::notice(host_bar::Notice::key(notice["kind"].as_str().unwrap_or(""), notice["device"].as_str(), words));
             }
         }
         // Each one newly waiting for you: said once.
@@ -1477,17 +1492,11 @@ impl Bridge {
         // A switch you didn't make here (an agent's use_template, a file
         // written by hand): said by the host, whatever the template shows.
         if was != id && !self.chose.replace(false) {
-            let by = std::fs::read(root.join(".active.by.json"))
+            let by_chat = std::fs::read(root.join(".active.by.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice::<Json>(&b).ok())
-                .and_then(|v| v["chat"].as_str().map(|c| format!(" (asked by chat {})", &c[..c.len().min(8)])))
-                .unwrap_or_default();
-            let words = if id == live::BUILTIN {
-                format!("The default interface is back: the template was switched without you choosing it here{by}.")
-            } else {
-                format!("The template changed to {name} without you choosing it here{by}.")
-            };
-            host_bar::notice(words);
+                .is_some_and(|v| v["chat"].as_str().is_some_and(|c| !c.is_empty()));
+            host_bar::notice(host_bar::Notice::switched(&name, id == live::BUILTIN, by_chat, !trusted));
         }
         let laid = {
             let (root, want) = (root.to_path_buf(), want.clone());
@@ -1568,7 +1577,7 @@ impl Bridge {
                 ("author", Value::from(t.author.as_str())),
                 ("version", Value::from(t.version.as_str())),
                 ("zeron_version", Value::from(t.zeron_version.as_str())),
-                ("builtin", Value::from(t.id == live::BUILTIN)),
+                ("builtin", Value::from(t.id == live::BUILTIN || t.official.is_some())),
                 ("active", Value::from(t.id == active)),
                 ("status", Value::from(state)),
             ];
@@ -3311,13 +3320,13 @@ mod markdown_tests;
 
 #[cfg(test)]
 mod menu_tests {
-    /// "Use Zeron's Template" is the host's own, in View, whatever the
+    /// "Use Zeron v3" is the host's own, in View, whatever the
     /// scripts declare (none here, as when a template broke before any).
     #[test]
     fn the_host_s_menu_always_has_a_way_back_to_zeron_s_template() {
         let menus = format!("{:?}", crate::menu_bar::Bar::of(&[], &[], &[], None).menus);
         assert!(menus.contains("View"), "{menus}");
-        assert!(menus.contains("Use Zeron's Template"), "{menus}");
+        assert!(menus.contains("Use Zeron v3"), "{menus}");
         assert!(menus.contains(super::USE_ZERON_TEMPLATE), "{menus}");
     }
 
@@ -3341,7 +3350,7 @@ mod menu_tests {
         let shown = format!("{bar:?}");
         assert!(zgx_desktop::app_menu_bar(bar, |_| {}).is_ok(), "the platform takes the bar: {shown}");
         assert_eq!(shown.matches(super::USE_ZERON_TEMPLATE).count(), 1, "{shown}");
-        assert!(shown.contains("Use Zeron's Template") && !shown.contains("Stay Here") && !shown.contains("Keep Me"), "{shown}");
+        assert!(shown.contains("Use Zeron v3") && !shown.contains("Stay Here") && !shown.contains("Keep Me"), "{shown}");
         assert!(!shown.contains("zeron.anything") && shown.contains("New Chat"), "{shown}");
     }
 }

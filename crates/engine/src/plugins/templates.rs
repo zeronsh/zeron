@@ -74,6 +74,10 @@ struct Manifest {
     version: Option<String>,
     #[serde(default)]
     zeron_version: Option<String>,
+    /// One of Zeron's official templates (Zeron v2), as the app installs
+    /// it: its id.
+    #[serde(default)]
+    builtin_template: Option<String>,
 }
 
 /// `.status.json[id]`.
@@ -291,6 +295,24 @@ fn set_active(dir: &Path, id: &str) -> Result<(), String> {
     write_atomic(dir, ACTIVE, id.as_bytes())
 }
 
+/// Whether `folder` (template `id`) is one of Zeron's official templates as
+/// the app installs it (apps/zgx `plugins::official`): marked with its id,
+/// at that id (or `<id>-N`, where someone's has it), and no one's package.
+/// Built in, as the default is: it comes and updates with Zeron, and it
+/// isn't deleted. (Whether it's this build's, byte for byte, is the app's to
+/// say before it runs it with Zeron's powers; this only keeps it listed.)
+fn official(id: &str, folder: &Path, manifest: &Manifest) -> bool {
+    let Some(mark) = manifest.builtin_template.as_deref().filter(|m| !m.is_empty()) else {
+        return false;
+    };
+    let at_its_id = id == mark
+        || id
+            .strip_prefix(mark)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    at_its_id && super::template_packages::imported(folder).is_none()
+}
+
 /// One template, as `ListTemplates` lists it.
 fn entry(
     dir: &Path,
@@ -299,8 +321,8 @@ fn entry(
     active: &str,
     zeron_version: &str,
 ) -> Value {
-    let builtin = id == ZERON;
     let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    let builtin = id == ZERON || official(id, folder, &manifest);
     let made_for = manifest.zeron_version.clone().unwrap_or_default();
     let health = health(dir, id);
     let (status, error) = if let Some(root) = health.root {
@@ -558,6 +580,11 @@ pub fn delete(dir: &Path, id: &str) -> Result<Value, String> {
     }
     let folder = template_dir(dir, id)
         .ok_or_else(|| format!("There's no template {id}. list_templates names them."))?;
+    let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    if official(id, &folder, &manifest) {
+        let name = manifest.name.unwrap_or_else(|| id.to_owned());
+        return Err(format!("{name} comes with Zeron and can't be deleted."));
+    }
     let was_active = active(dir) == id;
     let removed = dir.join(REMOVED);
     std::fs::create_dir_all(&removed).map_err(|e| format!("Couldn't set it aside: {e}"))?;
@@ -967,6 +994,38 @@ mod tests {
         );
         assert_eq!(ids(&list(&d).unwrap()), ["zeron"]);
         assert!(d.join(ZERON_DIR).join("app.luau").is_file());
+    }
+
+    /// Zeron v2, as the app installs it, is built in: listed so, and never
+    /// deleted. One that only says so (someone's package, another id) is
+    /// an ordinary template.
+    #[test]
+    fn plugins_templates_an_official_template_is_built_in() {
+        let d = with_zeron("official");
+        let marked = |id: &str| {
+            write(
+                &d.join(id).join(MANIFEST),
+                &format!(r#"{{"id":"{id}","name":"Zeron v2","author":"Zeron","builtin_template":"zeron-v2"}}"#),
+            );
+            write(&d.join(id).join("screens/shell/page.luau"), "-- v2");
+        };
+        marked("zeron-v2");
+        marked("zeron-v2-2");
+        marked("my-v2");
+        marked("posing");
+        write(&d.join("posing").join(".imported.json"), r#"{"key":"k","author":{"kind":"unknown"}}"#);
+        let list = list(&d).unwrap();
+        let builtin = |id: &str| {
+            list["templates"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()["builtin"].clone()
+        };
+        assert_eq!(builtin("zeron-v2"), true);
+        assert_eq!(builtin("zeron-v2-2"), true);
+        assert_eq!(builtin("my-v2"), false);
+        assert_eq!(builtin("posing"), false);
+        assert!(delete(&d, "zeron-v2").unwrap_err().contains("Zeron v2 comes with Zeron and can't be deleted"));
+        assert!(d.join("zeron-v2").is_dir());
+        assert!(delete(&d, "my-v2").is_ok());
+        assert!(delete(&d, "posing").is_ok());
     }
 
     #[test]

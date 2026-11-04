@@ -103,7 +103,7 @@ impl crate::menu_bar::Platform for Platform {
 /// the bar's keys bound at its root.
 pub(crate) struct Window {
     // (Fields drop in order: its part in the bar before its runtime.)
-    pub served: Option<Served>,
+    _served: Served,
     keys: Option<KeymapBinding>,
     heard: Rc<RefCell<Vec<String>>>,
     pub app: TestApp,
@@ -143,7 +143,7 @@ impl Window {
         std::mem::forget(listener);
         let preview = app.ui.runtime.signal(None);
         let served = bar.serve(&app.ui.runtime, &app.host, preview, role);
-        Window { served: Some(served), keys: None, heard, app }
+        Window { _served: served, keys: None, heard, app }
     }
 
     /// The bar's keymap at the root, as zgx-desktop binds it in every window
@@ -407,4 +407,27 @@ return ui.column {}
     drop(over);
     let wrong = unreached(&mut main, &desktop, &expected);
     assert!(wrong.is_empty(), "after it closed:\n{}", wrong.join("\n"));
+}
+
+/// The host's own View items: "Use Zeron v3" always, "Keep <template>…"
+/// while one is in preview, after the scripts' View items; a script's
+/// command with a host id (`zeron.`) is left out, never a second item.
+#[test]
+fn the_host_s_own_items_follow_a_preview_and_no_script_takes_their_ids() {
+    let command = |id: &str, title: &str| zgx_script::Command { id: id.into(), title: title.into(), menu: "View".into(), key: None, separator: false };
+    let commands = vec![command("shell.toggle_sidebar", "Toggle sidebar"), command(crate::plugins::KEEP_TEMPLATE, "Mine")];
+    let preview = crate::plugins::preview::Preview { id: "t".into(), name: "Dusk".into() };
+    let bar = crate::menu_bar::Bar::of(&commands, &[], &[], Some(&preview));
+    assert_eq!(refusal(&bar.menus), None);
+    let view: Vec<(String, String)> = items(&bar.menus).into_iter().map(|(label, action, _)| (label, action)).collect();
+    assert_eq!(
+        view,
+        vec![
+            ("Toggle sidebar".into(), "shell.toggle_sidebar".into()),
+            ("Keep Dusk…".into(), crate::plugins::KEEP_TEMPLATE.into()),
+            ("Use Zeron v3".into(), crate::plugins::USE_ZERON_TEMPLATE.into()),
+        ]
+    );
+    let none = crate::menu_bar::Bar::of(&commands, &[], &[], None);
+    assert!(!items(&none.menus).iter().any(|(label, _, _)| label.starts_with("Keep")), "no preview, no Keep");
 }

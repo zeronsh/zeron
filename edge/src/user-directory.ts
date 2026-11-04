@@ -88,6 +88,9 @@ import { deleteUserBlobs } from "./user-images";
 
 export const USER_DIRECTORY_NAME = "users1";
 
+/** The badge a card shows first, ahead of the order badges were defined in. */
+const LEADING_BADGE = "maintainer";
+
 /** A new row's user number. Conflict updates never set `user_number`, so a
  * number is taken only on first insert. */
 const NEXT_USER_NUMBER = "(SELECT COALESCE(MAX(user_number), 0) + 1 FROM users)";
@@ -362,6 +365,9 @@ export class UserDirectory extends DurableObject<Env> {
       user_id TEXT NOT NULL, badge_id TEXT NOT NULL, granted_at INTEGER NOT NULL, note TEXT,
       PRIMARY KEY (user_id, badge_id))`);
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS user_badges_by_badge ON user_badges (badge_id)");
+    // An earned badge an operator took back from a user: the award skips them.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS earned_badge_waivers (
+      user_id TEXT NOT NULL, badge_id TEXT NOT NULL, waived_at INTEGER NOT NULL, PRIMARY KEY (user_id, badge_id))`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS organizations (
       org_id TEXT PRIMARY KEY, name TEXT, external_id TEXT, domains TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, recorded_at INTEGER NOT NULL)`);
@@ -431,7 +437,9 @@ export class UserDirectory extends DurableObject<Env> {
       const unawarded = this.ctx.storage.sql
         .exec(
           `SELECT user_id FROM users u WHERE u.deleted_at IS NULL AND u.first_claimed_at IS NOT NULL
-             AND NOT EXISTS (SELECT 1 FROM user_badges ub WHERE ub.user_id = u.user_id AND ub.badge_id = ?)`,
+             AND NOT EXISTS (SELECT 1 FROM user_badges ub WHERE ub.user_id = u.user_id AND ub.badge_id = ?)
+             AND NOT EXISTS (SELECT 1 FROM earned_badge_waivers w WHERE w.user_id = u.user_id AND w.badge_id = ?)`,
+          V3_BETA.id,
           V3_BETA.id
         )
         .toArray();
@@ -446,6 +454,9 @@ export class UserDirectory extends DurableObject<Env> {
     if (!row || row.deleted_at !== null) return;
     const firstClaimedAt = row.first_claimed_at as number | null;
     if (!earnsV3Beta(firstClaimedAt)) return;
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM earned_badge_waivers WHERE user_id = ? AND badge_id = ?", userId, V3_BETA.id).toArray().length) {
+      return;
+    }
     this.ctx.storage.sql.exec(
       "INSERT OR IGNORE INTO user_badges (user_id, badge_id, granted_at, note) VALUES (?, ?, ?, NULL)",
       userId,
@@ -537,8 +548,19 @@ export class UserDirectory extends DurableObject<Env> {
   /** Take `badgeId` back from each user. Answers how many held it. */
   revokeBadge(badgeId: string, userIds: readonly string[]): number {
     let revoked = 0;
+    const earned = isEarnedBadge(badgeId);
     this.ctx.storage.transactionSync(() => {
       for (const userId of userIds) {
+        // An earned badge stays taken: the award (and the restart backfill)
+        // skips a waived user, whatever they earned.
+        if (earned) {
+          this.ctx.storage.sql.exec(
+            "INSERT OR IGNORE INTO earned_badge_waivers (user_id, badge_id, waived_at) VALUES (?, ?, ?)",
+            userId,
+            badgeId,
+            Date.now()
+          );
+        }
         revoked += [
           ...this.ctx.storage.sql.exec(
             "DELETE FROM user_badges WHERE user_id = ? AND badge_id = ? RETURNING user_id",
@@ -549,6 +571,24 @@ export class UserDirectory extends DurableObject<Env> {
       }
     });
     return revoked;
+  }
+
+  /** Lift an operator's waiver of an earned badge and award it again to each
+   * user who earned it, dated by what earned it. Answers how many now newly
+   * hold it. */
+  restoreEarnedBadge(badgeId: string, userIds: readonly string[]): number {
+    let restored = 0;
+    this.ctx.storage.transactionSync(() => {
+      for (const userId of userIds) {
+        this.ctx.storage.sql.exec("DELETE FROM earned_badge_waivers WHERE user_id = ? AND badge_id = ?", userId, badgeId);
+        const held = () =>
+          this.ctx.storage.sql.exec("SELECT 1 FROM user_badges WHERE user_id = ? AND badge_id = ?", userId, badgeId).toArray().length > 0;
+        if (held()) continue;
+        this.awardEarnedBadges(userId);
+        if (held()) restored += 1;
+      }
+    });
+    return restored;
   }
 
   private badgeExists(badgeId: string): boolean {
@@ -586,6 +626,7 @@ export class UserDirectory extends DurableObject<Env> {
     // (Their photo's object goes with the caller: `photoKey` first.)
     this.retireUsername(user.id);
     this.ctx.storage.sql.exec("DELETE FROM user_badges WHERE user_id = ?", user.id);
+    this.ctx.storage.sql.exec("DELETE FROM earned_badge_waivers WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec("DELETE FROM onboarding_done WHERE user_id = ?", user.id);
     // Their plugins stop reading as theirs (or anyone's).
     this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", Date.now(), user.id);
@@ -793,8 +834,9 @@ export class UserDirectory extends DurableObject<Env> {
     const badges = this.ctx.storage.sql
       .exec(
         `SELECT b.badge_id, b.name, b.icon FROM user_badges ub JOIN badges b ON b.badge_id = ub.badge_id
-         WHERE ub.user_id = ? ORDER BY b.created_at, b.rowid`,
-        row.user_id
+         WHERE ub.user_id = ? ORDER BY b.badge_id = ? DESC, b.created_at, b.rowid`,
+        row.user_id,
+        LEADING_BADGE
       )
       .toArray();
     // Field by field, never spread from a row: a new column must not go public.
@@ -1438,7 +1480,7 @@ const optionalText = (value: unknown, max: number): string | null | false =>
   value === undefined || value === null ? null : typeof value === "string" && value.length <= max ? value || null : false;
 
 const earnedBadgeError = (id: string): Response =>
-  jsonError(409, "earned_badge", `${id} is earned, never defined, granted or revoked by hand (earned-badges.ts).`);
+  jsonError(409, "earned_badge", `${id} is earned: never defined, nor granted to "all" (earned-badges.ts).`);
 
 /**
  * `/admin/badges`:
@@ -1446,7 +1488,10 @@ const earnedBadgeError = (id: string): Response =>
  *   POST {id, name, description?, icon?}  — define (or rename) a badge
  *   POST /grant  {badgeId, userIds | "all", note?} — answers {granted}
  *   POST /revoke {badgeId, userIds}       — answers {revoked}
- * An earned badge's id (earned-badges.ts) is refused by all three: 409.
+ * An earned badge (earned-badges.ts) can't be defined, and can be granted only
+ * to listed users (409 otherwise). Revoking one waives it for those users, so
+ * the award never gives it back; granting it lifts the waiver and awards it
+ * again only if they earned it, dated by what earned it.
  */
 const handleBadgeRoute = async (
   request: Request,
@@ -1497,9 +1542,12 @@ const handleBadgeRoute = async (
       `Expected {badgeId, userIds (1–${MAX_BADGE_USERS} user ids${action === "grant" ? ' or "all"' : ""})${action === "grant" ? ", note?" : ""}}.`
     );
   }
-  if (isEarnedBadge(body.badgeId)) return earnedBadgeError(body.badgeId);
   const ids = userIds === "all" ? "all" : [...new Set(userIds as string[])];
   if (action === "revoke") return json({ revoked: await directory.revokeBadge(body.badgeId, ids as string[]) });
+  if (isEarnedBadge(body.badgeId)) {
+    if (ids === "all") return earnedBadgeError(body.badgeId);
+    return json({ granted: await directory.restoreEarnedBadge(body.badgeId, ids) });
+  }
   const granted = await directory.grantBadge(body.badgeId, ids, note);
   if (granted === undefined) return jsonError(404, "unknown_badge", "Define the badge first (POST /admin/badges).");
   return json({ granted });

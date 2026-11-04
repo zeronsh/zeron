@@ -180,8 +180,10 @@ export type Block = {
 	-- another: each a path on the chat's host and its name (ds/reply_picture).
 	images: { { id: string, path: string, name: string? } }?,
 	-- A visual's (ds/visual): its script on the chat's host, its title, and
-	-- that host's device when it isn't this one.
+	-- that host's device when it isn't this one; or its script itself, when
+	-- the message carries it (a fixture's).
 	path: string?,
+	source: string?,
 	title: string?,
 	device: string?,
 	tools: { Tool }?,
@@ -491,7 +493,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
-			return Visual { id = b.id, path = b.path, title = b.title, device = b.device }
+			return Visual { id = b.id, path = b.path, source = b.source, title = b.title, device = b.device }
 		end
 		-- Pictures an agent showed: one alone, or several on a tray, among
 		-- the reply's pictures in the lightbox. More arriving while it works
@@ -1072,7 +1074,7 @@ local function Transcript(props: Props): Node
 	-- lines above the block rewrap inside it: the view moves by however far
 	-- the block moved in its message, so the block stays put, as Zeron's
 	-- rows (each a block) do.
-	local reading: { row: string, block: Ref, within: number }? = nil
+	local reading: { row: string, block: Ref, within: number, view: number? }? = nil
 	local last_w: number? = nil
 	local last_h: number? = nil
 	-- At the end before the view's size changed: it stays at the end through
@@ -1107,39 +1109,50 @@ local function Transcript(props: Props): Node
 			return
 		end
 		local top = el.y :: number
-		local row_id: string? = nil
-		local row_el: any = nil
+		-- The rows in view, top first.
+		local shown: { { id: string, el: any } } = {}
 		for id, r in rows do
 			local row = r.outer:peek()
-			if row and row.y and row.height and row.y + row.height > top and (not row_el or row.y < row_el.y) then
-				row_id, row_el = id, row
+			if row and row.y and row.height and row.y + row.height > top and row.y < top + el.height then
+				table.insert(shown, { id = id, el = row })
 			end
 		end
-		local set = if row_id then BLOCKS[row_id] else nil
-		if not row_id or not row_el or not set then
-			return
-		end
+		table.sort(shown, function(a, b)
+			return a.el.y < b.el.y
+		end)
 		-- The first block starting in view (what is read, whole lines of it
-		-- in sight); else the one the view's top crosses.
-		local pick: Ref? = nil
-		local at: number? = nil
-		local crossing: Ref? = nil
-		local crossing_at: number? = nil
-		for b in set do
-			local be = b:peek()
-			if be and be.y and be.height and be.y + be.height > top then
-				if be.y >= top and (not at or be.y < at) then
-					pick, at = b, be.y
-				elseif be.y < top then
-					crossing, crossing_at = b, be.y
+		-- in sight), in whichever row: a row of no blocks (a prompt) is
+		-- itself one. Else, nothing starting in view, the block the view's
+		-- top crosses.
+		local crossing: { row: string, block: Ref, at: number, row_y: number }? = nil
+		for _, r in shown do
+			local set = BLOCKS[r.id]
+			if not set then
+				if r.el.y >= top then
+					reading = { row = r.id, block = rows[r.id].outer, within = 0, view = r.el.y - top }
+					return
+				end
+			else
+				local pick: Ref? = nil
+				local at: number? = nil
+				for b in set do
+					local be = b:peek()
+					if be and be.y and be.height and be.y + be.height > top then
+						if be.y >= top and (not at or be.y < at) then
+							pick, at = b, be.y
+						elseif be.y < top and not crossing then
+							crossing = { row = r.id, block = b, at = be.y, row_y = r.el.y }
+						end
+					end
+				end
+				if pick and at then
+					reading = { row = r.id, block = pick, within = at - r.el.y, view = at - top }
+					return
 				end
 			end
 		end
-		if not pick then
-			pick, at = crossing, crossing_at
-		end
-		if pick and at then
-			reading = { row = row_id, block = pick, within = at - row_el.y }
+		if crossing then
+			reading = { row = crossing.row, block = crossing.block, within = crossing.at - crossing.row_y, view = crossing.at - top }
 		end
 	end
 	local function keep_reading()
@@ -1614,9 +1627,35 @@ local function Transcript(props: Props): Node
 			-- the window resized): the reading place put back, then taken
 			-- again where it now stands.
 			on_resize = function(size: { w: number, h: number })
-				local changed = (last_w ~= nil and math.abs(size.w - last_w) >= 0.5)
-					or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
+				local widened = last_w ~= nil and math.abs(size.w - last_w) >= 0.5
+				local changed = widened or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
 				last_w, last_h = size.w, size.h
+				-- (Its width changed in one step (the window maximized, a
+				-- panel's page taking its width at once): every row above the
+				-- reading place rewraps too, in the same layout, past what the
+				-- reading row's own line puts back. A frame on, and twice more
+				-- as the rows it brought into view measure, the reading place
+				-- goes back where it stood in the view, by where it really is,
+				-- as a place returned to is.)
+				local r = reading
+				if widened and r and not end_held and r.view ~= nil then
+					local function settle()
+						if end_held or reading ~= r then
+							return
+						end
+						local be, list_el = r.block:peek(), list:peek()
+						if not be or not list_el or be.y == nil or list_el.y == nil then
+							return
+						end
+						local off = ((be.y :: number) - (list_el.y :: number)) - r.view
+						if math.abs(off) >= 0.5 then
+							offset:set(math.max(0, offset:peek() + off))
+						end
+					end
+					ui.after(0, settle)
+					ui.after(16, settle)
+					ui.after(48, settle)
+				end
 				if changed then
 					resizing_until = ui.now() + 300
 					-- At the end: on it still, every frame of the change.

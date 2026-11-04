@@ -31,6 +31,7 @@ local LinkNotice = require("@app/screens/chat/link_notice")
 local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
+local Asks = require("@app/screens/chat/asks")
 local mentions = require("@ds/composer_mentions")
 local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
@@ -364,42 +365,19 @@ local function Composer(): Node
 		return s ~= nil and s.running == true
 	end)
 	-- What the agent asks, and which of a question's options are chosen
-	-- (fresh for each question).
-	local ask = ui.computed(function(): store.Ask?
-		local s = open()
-		return if s then s.ask else nil
-	end)
-	local question = ui.computed(function(): any
-		local a = ask:get()
-		return if a and a.kind == "question" then a.question else nil
-	end)
-	local approval = ui.computed(function(): any
-		local a = ask:get()
-		return if a and a.kind == "approval" then a.approval else nil
-	end)
-	local chosen = shared.chosen
-	-- The request the options were picked for: kept, so a reload keeps them.
-	local asked = ui.state("chat_asked", nil :: string?)
-	ui.effect(function()
-		local a = ask:get()
-		local r = if a then a.request else nil
-		if r ~= asked:peek() then
-			asked:set(r)
-			chosen:set({})
-		end
-	end)
-	local queue = ui.computed(function(): { any }
-		local s = open()
-		return if s and s.queue then s.queue else {}
-	end)
-	local todos = ui.computed(function(): { any }
-		local s = open()
-		return if s and s.todos then s.todos else {}
-	end)
-	local tasks = ui.computed(function(): { any }
-		local s = open()
-		return if s and s.tasks then s.tasks else {}
-	end)
+	-- (fresh for each question); its queue, todos and tasks. (The same as
+	-- a split pane's composer shows them: screens/chat/asks.)
+	local asks = Asks.bind {
+		id = function(): string?
+			return session_id:peek()
+		end,
+		session = open,
+		chosen = shared.chosen,
+		-- (The request the options were picked for: kept, so a reload keeps
+		-- them.)
+		asked = ui.state("chat_asked_by", nil :: any),
+	}
+	local ask, queue = asks.ask, asks.queue
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
@@ -1045,12 +1023,7 @@ local function Composer(): Node
 			can_steer = function(): boolean
 				return running:get()
 			end,
-			on_queue_send = function(item: string)
-				local id = session_id:peek()
-				if id then
-					store.queue(id, { op = "send", item = item })
-				end
-			end,
+			on_queue_send = asks.on_queue_send,
 			on_queue_edit = function(item: string)
 				local id = session_id:peek()
 				if not id or editing:peek() then
@@ -1074,21 +1047,10 @@ local function Composer(): Node
 			on_queue_cancel = function()
 				end_edit("cancel")
 			end,
-			on_queue_remove = function(item: string)
-				local id = session_id:peek()
-				if id then
-					store.queue(id, { op = "remove", item = item })
-				end
-			end,
-			on_queue_reorder = function(from: number, to: number)
-				local id = session_id:peek()
-				local list = queue:peek()
-				if id and list[from] then
-					store.queue(id, { op = "move", item = list[from].id, to = to })
-				end
-			end,
-			todos = todos,
-			tasks = tasks,
+			on_queue_remove = asks.on_queue_remove,
+			on_queue_reorder = asks.on_queue_reorder,
+			todos = asks.todos,
+			tasks = asks.tasks,
 			-- Stop on a background process: its host stops it, and its row
 			-- goes as the session stops listing it (production's tray).
 			on_stop_task = function(task: string)
@@ -1100,58 +1062,16 @@ local function Composer(): Node
 					own_notice:set { tone = "danger", key = "chat.composer.couldnt_stop_task", dismissable = true }
 				end)
 			end,
-			question = question,
-			chosen = chosen,
-			on_pick = function(value: string)
-				local q = question:peek()
-				local now = table.clone(chosen:peek())
-				if q and q.multi then
-					now[value] = not now[value] or nil
-				else
-					now = { [value] = true }
-				end
-				chosen:set(now)
-			end,
-			on_answer = function(answer: any)
-				local id, a = session_id:peek(), ask:peek()
-				if id and a then
-					store.answer(id, a.request, answer)
-				end
-			end,
-			on_close_question = function()
-				local id, a = session_id:peek(), ask:peek()
-				if id and a then
-					store.deny(id, a.request)
-				end
-			end,
-			-- Back a page: it shows again with what was picked on it.
-			on_back = function()
-				local id, a = session_id:peek(), ask:peek()
-				if id and a then
-					store.question_back(id, a.request):after(function(picked: any)
-						local now: { [string]: boolean } = {}
-						for _, v in picked or {} do
-							now[v] = true
-						end
-						chosen:set(now)
-					end, function() end)
-				end
-			end,
-			approval = approval,
-			-- The engine allows once, each time it's asked.
-			can_always = false,
-			on_approve = function(scope: string)
-				local id, a = session_id:peek(), ask:peek()
-				if id and a then
-					store.approve(id, a.request, scope)
-				end
-			end,
-			on_deny = function()
-				local id, a = session_id:peek(), ask:peek()
-				if id and a then
-					store.deny(id, a.request)
-				end
-			end,
+			question = asks.question,
+			chosen = asks.chosen,
+			on_pick = asks.on_pick,
+			on_answer = asks.on_answer,
+			on_close_question = asks.on_close_question,
+			on_back = asks.on_back,
+			approval = asks.approval,
+			can_always = asks.can_always,
+			on_approve = asks.on_approve,
+			on_deny = asks.on_deny,
 			notice = notice,
 			on_dismiss_notice = function()
 				own_notice:set(nil)
@@ -1280,6 +1200,33 @@ local function Composer(): Node
 			return
 		end
 		glide_to(y)
+	end)
+	-- (Moving to another chat, as the focus moves between a split's
+	-- panes, is shown for something else too: its draft, and its size for
+	-- it, there at once rather than growing or shrinking into it.)
+	local chat_was: string? = route.chat:peek().session
+	ui.effect(function()
+		local now = route.chat:get().session
+		if now ~= chat_was then
+			chat_was = now
+			snap_until = ui.now() + SNAP_MS
+			snap:set(snap:peek() + 1)
+		end
+	end)
+	-- (The sidebar opening or closing moves the page's edges (a new
+	-- chat's page goes to the window's edges as it closes): its place
+	-- follows the page as it moves, at once, rather than easing after it on
+	-- a clock of its own, which drew a small loop as the two went their own
+	-- ways.)
+	local shell_view = require("@app/screens/shell/view")
+	local fit = require("@app/screens/shell/fit")
+	local sidebar_was = not shell_view.collapsed:peek() and fit.current:peek().sidebar
+	ui.effect(function()
+		local now = not shell_view.collapsed:get() and fit.current:get().sidebar
+		if now ~= sidebar_was then
+			sidebar_was = now
+			snap_until = ui.now() + SNAP_MS
+		end
 	end)
 	-- Over the whole pane, the pointer passing through it to the page
 	-- (its wheel too) but for the composer itself. (Under settings the shell

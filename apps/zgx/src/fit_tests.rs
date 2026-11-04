@@ -237,7 +237,8 @@ fn the_panels_strip_settles_where_a_fresh_one_stands() {
     app.click("#panel-open-files");
     app.frames(60);
     let fresh = strip_rest(&mut app);
-    assert_eq!(fresh.0, 0., "a fresh strip stands at the panel's start");
+    // (Inside the panel card's 1-point edge.)
+    assert_eq!(fresh.0, 1., "a fresh strip stands at the panel's start");
     assert_eq!(fresh.2, fresh.3, "a fresh strip's first tab shows whole");
     let mut faults = Vec::new();
     let mut check = |app: &mut TestApp, what: &str| {

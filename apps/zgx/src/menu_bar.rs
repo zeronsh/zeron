@@ -255,8 +255,10 @@ impl Menus {
     }
 
     /// The bar, with the host's own after the scripts' View items:
-    /// "Use Zeron's Template", which no template can take away (and,
-    /// with a template in preview, keeping it, as the host's bar's Keep).
+    /// "Use Zeron v3" (the default's way back), which no template can take
+    /// away, and, with a template in preview, "Keep <name>…" (its ellipsis
+    /// the macOS one for an item that asks before acting: it opens the keep
+    /// sheet).
     fn finish(mut self, preview: Option<&Preview>) -> Vec<AppMenu> {
         let view = match self.menus.iter().position(|m| m.label == "View") {
             Some(index) => index,
@@ -272,7 +274,7 @@ impl Menus {
         if let Some(preview) = preview {
             entries.push(AppMenuEntry::item(format!("Keep {}…", clean(&preview.name)), plugins::KEEP_TEMPLATE));
         }
-        entries.push(AppMenuEntry::item("Use Zeron's Template", plugins::USE_ZERON_TEMPLATE));
+        entries.push(AppMenuEntry::item("Use Zeron v3", plugins::USE_ZERON_TEMPLATE));
         self.menus.retain(|m| !m.entries.is_empty());
         self.menus
     }
