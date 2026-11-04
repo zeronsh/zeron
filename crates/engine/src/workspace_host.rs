@@ -726,6 +726,17 @@ impl WorkspaceHost {
         self.read(|doc| doc.directory_reconciliation_required())
     }
 
+    /// See [`RegistryDoc::clear_directory_reconciliation`]; saves the registry
+    /// when the flag clears. `sent` is the registry fence this device sent the
+    /// directory for a chat.
+    pub(crate) fn clear_directory_reconciliation(&self, sent: impl Fn(&str) -> Option<u64>) -> bool {
+        let cleared = lock(&self.inner.reg).clear_directory_reconciliation(sent);
+        if cleared {
+            self.inner.bump_changed();
+        }
+        cleared
+    }
+
     /// Includes server ACKs even when the optimistic sidebar did not change.
     pub(crate) fn watch_registry(&self) -> watch::Receiver<u64> {
         self.inner.changed_tx.subscribe()

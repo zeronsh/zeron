@@ -631,6 +631,86 @@ impl zeron_sync::registry::RegistryTransport for FlakyAckTransport {
     }
 }
 
+/// HTTPS-transport seam for a pull the socket overtakes: while the first pull
+/// is in flight, the socket side applies a newer broadcast, and the pull then
+/// answers for the cursor it was sent with. Later pulls find nothing new.
+struct OvertakenPullTransport {
+    doc: Arc<Mutex<RegistryDoc>>,
+    pulls: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl zeron_sync::registry::RegistryTransport for OvertakenPullTransport {
+    fn fetch(
+        &self,
+        since: u64,
+    ) -> futures::future::BoxFuture<'static, Result<String, zeron_sync::SyncError>> {
+        let first = self.pulls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        let doc = self.doc.clone();
+        Box::pin(async move {
+            let mut doc = doc.lock().unwrap();
+            let seq = if first {
+                let renamed = zeron_doc::registry::RegistryRow {
+                    kind: zeron_doc::registry::KIND_CHATS.into(),
+                    id: "chat-1".into(),
+                    seq: since + 1,
+                    deleted: false,
+                    del_hlc: None,
+                    fields: std::collections::BTreeMap::from([("title".into(), serde_json::json!("renamed"))]),
+                    clocks: std::collections::BTreeMap::new(),
+                };
+                assert!(doc.apply_rows(since + 1, vec![renamed]));
+                since
+            } else {
+                doc.cursor()
+            };
+            Ok(format!(r#"{{"seq":{seq},"full":false,"gcFloor":0,"rows":[],"presence":{{}}}}"#))
+        })
+    }
+
+    fn push(
+        &self,
+        _body: String,
+    ) -> futures::future::BoxFuture<'static, Result<String, zeron_sync::SyncError>> {
+        Box::pin(async { panic!("nothing is pending, so nothing is pushed") })
+    }
+}
+
+// Failure modes: a pull answer the socket overtook rolls the cursor back, and
+// its sequence below the cursor reads as a server reset, which blocks Crew
+// directory publication.
+#[tokio::test]
+async fn a_pull_answer_the_socket_overtook_never_reads_as_a_server_reset() {
+    let doc = new_doc("dev-a");
+    let _ = doc.lock().unwrap().apply_state(10, true, 0, vec![zeron_doc::registry::RegistryRow {
+        kind: zeron_doc::registry::KIND_CHATS.into(),
+        id: "chat-1".into(),
+        seq: 10,
+        deleted: false,
+        del_hlc: None,
+        fields: std::collections::BTreeMap::from([("title".into(), serde_json::json!("original"))]),
+        clocks: std::collections::BTreeMap::new(),
+    }]);
+    let pulls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // The WS side never connects (dead port): every sync runs over HTTPS.
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(zeron_sync::StaticUrl("ws://127.0.0.1:1/ws".into())),
+        doc.clone(),
+        "dev-a",
+        zeron_sync::RegistryTuning::default(),
+        Arc::new(OvertakenPullTransport { doc: doc.clone(), pulls: pulls.clone() }),
+    )
+    .await
+    .expect("transport clients construct immediately");
+    wait_until(|| pulls.load(std::sync::atomic::Ordering::SeqCst) >= 2).await;
+    client.shutdown().await;
+
+    let doc = doc.lock().unwrap();
+    assert!(!doc.directory_reconciliation_required(), "a stale pull is not a server reset");
+    assert_eq!(doc.cursor(), 11);
+    let row = doc.acknowledged_row(zeron_doc::registry::KIND_CHATS, "chat-1").unwrap();
+    assert_eq!(row.fields["title"], serde_json::json!("renamed"));
+}
+
 #[tokio::test]
 async fn unreadable_http_ack_retries_instead_of_stranding_the_batch() {
     let push_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));

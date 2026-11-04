@@ -748,12 +748,19 @@ impl Actor {
         };
         {
             let mut doc = lock(&self.doc);
-            let outcome = doc.apply_state(seq, full, gc_floor, rows);
-            if full {
-                self.stats.full_resyncs.fetch_add(1, Relaxed);
-            }
-            if outcome == StateOutcome::Reseeded {
-                tracing::info!("registry: server behind local state; re-seeding");
+            // An HTTPS pull may have moved the cursor since the hello went out.
+            let asked = cursor.unwrap_or(0);
+            match doc.apply_answer(asked, seq, full, gc_floor, rows) {
+                None => tracing::info!(asked, cursor = doc.cursor(),
+                    "registry: dropped a hello answer a pull overtook"),
+                Some(outcome) => {
+                    if full {
+                        self.stats.full_resyncs.fetch_add(1, Relaxed);
+                    }
+                    if outcome == StateOutcome::Reseeded {
+                        tracing::info!("registry: server behind local state; re-seeding");
+                    }
+                }
             }
         }
         {
@@ -938,7 +945,12 @@ impl Actor {
                     match serde_json::from_str::<PullBody>(&body) {
                         Ok(pull) => {
                             let mut d = lock(&doc);
-                            d.apply_state(pull.seq, pull.full, pull.gc_floor, pull.rows);
+                            // The socket may have applied newer frames while
+                            // this pull was in flight.
+                            if d.apply_answer(since, pull.seq, pull.full, pull.gc_floor, pull.rows).is_none() {
+                                tracing::debug!(since, cursor = d.cursor(),
+                                    "registry: dropped a pull answer the socket overtook");
+                            }
                             drop(d);
                             let now = tokio::time::Instant::now();
                             let mut map = lock(&presence);
@@ -1013,24 +1025,12 @@ impl Actor {
             ServerFrame::ProbeOk { .. } => {
                 self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
             }
-            ServerFrame::State {
-                seq,
-                full,
-                gc_floor,
-                rows,
-                presence,
-            } => {
-                // Servers only send state as a hello answer, but applying a
-                // late duplicate is harmless and simpler than special-casing.
-                let mut doc = lock(&self.doc);
-                doc.apply_state(seq, full, gc_floor, rows);
-                drop(doc);
-                let now = tokio::time::Instant::now();
-                let mut map = lock(&self.presence);
-                for (device, at) in presence {
-                    map.insert(device, (at, now));
-                }
-                let _ = self.events.send(RegistryEvent::Applied);
+            ServerFrame::State { seq, .. } => {
+                // Servers send state only as the hello answer, applied during
+                // the handshake. A late duplicate answers a cursor this session
+                // has since moved past: applying it would roll the cursor back
+                // and, below the cursor, read as a server reset.
+                tracing::debug!(seq, "registry: ignored a late state frame");
             }
             ServerFrame::Error { code, message } => {
                 self.stats.rejected.fetch_add(1, Relaxed);

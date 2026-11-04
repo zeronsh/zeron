@@ -2336,3 +2336,84 @@ fn directory_sequence_reset_requires_reconciliation_even_after_reseed_and_restar
     let restored = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
     assert!(restored.directory_reconciliation_required());
 }
+
+fn titled_chat(seq: u64, title: &str) -> RegistryRow {
+    RegistryRow {
+        kind: KIND_CHATS.into(), id: "chat-1".into(), seq, deleted: false, del_hlc: None,
+        fields: BTreeMap::from([("title".into(), json!(title))]), clocks: BTreeMap::new(),
+    }
+}
+
+// Failure modes: an answer to a cursor the replica has since moved past (a
+// pull the socket overtook, a hello answered after a pull) rolls the cursor
+// back, and its sequence below the cursor reads as a server reset, which
+// blocks directory publication; an answer newer than the moved cursor is
+// dropped, hiding rows; a reset answer is dropped because the cursor moved,
+// so the reset is never detected or re-seeded; an answer from before a reset
+// the replica already applied is applied over the new server's state.
+#[test]
+fn answers_to_a_cursor_the_replica_has_moved_past_are_dropped() {
+    let mut doc = RegistryDoc::new("dev-a");
+    assert!(doc.apply_answer(0, 10, true, 0, vec![titled_chat(10, "old")]).is_some());
+    // The socket applies a newer broadcast while a pull for cursor 10 is in flight.
+    assert!(doc.apply_rows(11, vec![titled_chat(11, "new")]));
+    assert_eq!(doc.apply_answer(10, 10, false, 0, Vec::new()), None);
+    assert!(!doc.directory_reconciliation_required(), "a stale answer is not a server reset");
+    assert_eq!(doc.cursor(), 11);
+    assert_eq!(doc.acknowledged_row(KIND_CHATS, "chat-1").unwrap().fields["title"], json!("new"));
+    // An answer newer than the moved cursor still applies.
+    assert_eq!(doc.apply_answer(10, 12, false, 0, vec![titled_chat(12, "newer")]), Some(StateOutcome::Delta));
+    assert_eq!(doc.cursor(), 12);
+    // A server below the cursor its request carried lost state, however the cursor moved since.
+    assert_eq!(doc.apply_answer(11, 3, true, 0, Vec::new()), Some(StateOutcome::Reseeded));
+    assert!(doc.directory_reconciliation_required());
+    // An answer computed before that reset is dropped.
+    assert_eq!(doc.apply_answer(12, 13, false, 0, vec![titled_chat(13, "before the reset")]), None);
+    assert_eq!(doc.cursor(), 3);
+}
+
+// Failure modes: a reset flag raised by a stale answer (as older builds did)
+// blocks directory publication forever; clearing it after a real server reset
+// lets renumbered rows reuse fences this device already published; clearing
+// it while a kept row still awaits the wiped server's acknowledgement; the
+// cleared flag returns after a restart.
+#[test]
+fn a_reset_flag_clears_only_when_nothing_this_device_published_was_renumbered() {
+    let published = |id: &str| (id == "chat-1").then_some(40);
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.apply_state(40, true, 0, vec![titled_chat(40, "a")]);
+    // Older builds applied a stale delta below the cursor as a server reset,
+    // rolling the cursor back behind chat-1 until the next resync.
+    doc.apply_state(39, false, 0, Vec::new());
+    assert!(doc.directory_reconciliation_required());
+    assert!(!doc.clear_directory_reconciliation(published), "chat-1 is ahead of the cursor");
+    doc.apply_state(41, false, 0, Vec::new());
+    assert!(doc.clear_directory_reconciliation(published), "nothing was renumbered");
+    assert!(!doc.directory_reconciliation_required());
+    let restored = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    assert!(!restored.directory_reconciliation_required(), "the cleared flag stays cleared");
+
+    // A real reset: every row is re-acknowledged under a fresh, lower sequence.
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.apply_state(40, true, 0, vec![titled_chat(40, "a")]);
+    assert_eq!(doc.apply_state(2, true, 0, Vec::new()), StateOutcome::Reseeded);
+    assert!(!doc.clear_directory_reconciliation(published), "kept chat-1 awaits the wiped server");
+    for batch in doc.take_pushable() {
+        assert!(doc.ack_batch(&batch.batch, 3));
+    }
+    assert!(doc.apply_rows(3, vec![titled_chat(3, "a")]));
+    assert!(!doc.clear_directory_reconciliation(published), "chat-1 fell below its published fence");
+    assert!(doc.directory_reconciliation_required());
+
+    // A device that sent no fences clears after a real reset, but only once
+    // its own re-seed is merged: another device's re-seed may carry older rows.
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.apply_state(40, true, 0, vec![titled_chat(40, "a")]);
+    doc.apply_state(2, true, 0, Vec::new());
+    assert!(doc.apply_rows(3, vec![titled_chat(3, "another device's re-seed")]));
+    assert!(!doc.clear_directory_reconciliation(|_| None), "this device's re-seed awaits the server");
+    for batch in doc.take_pushable() {
+        assert!(doc.ack_batch(&batch.batch, 4));
+    }
+    assert!(doc.clear_directory_reconciliation(|_| None));
+}

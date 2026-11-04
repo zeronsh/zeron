@@ -516,6 +516,52 @@ impl RegistryDoc {
         self.sequence_reset
     }
 
+    /// Apply a hello or pull answer to a request this replica sent at cursor
+    /// `asked`; the socket and the pull answer concurrently. An answer below
+    /// `asked` means the server lost state, and always applies. An answer at
+    /// or above it is `None`, applying nothing, when the cursor has since
+    /// moved past it (it would roll the cursor back and read as a server
+    /// reset) or fallen below `asked` (a reset applied meanwhile, so the
+    /// answer describes the server from before it).
+    pub fn apply_answer(&mut self, asked: u64, seq: u64, full: bool, gc_floor: u64,
+        rows: Vec<RegistryRow>) -> Option<StateOutcome> {
+        let cursor = self.server_seq;
+        let stale = seq >= asked && cursor != asked && (cursor < asked || seq < cursor);
+        (!stale).then(|| self.apply_state(seq, full, gc_floor, rows))
+    }
+
+    /// Clear the directory-reconciliation flag when nothing this device sent
+    /// the directory can have been renumbered: no chat write (or re-seed)
+    /// awaits the server, no chat row is ahead of the cursor (a row kept
+    /// across a reset keeps its old sequence until the wiped server
+    /// acknowledges it again), and no chat's acknowledged `seq` is below the
+    /// registry fence `published` says this device sent for it.
+    ///
+    /// When a stale answer raised the flag (older builds applied those),
+    /// this holds at once. After a real reset, which re-acknowledges every
+    /// row under a fresh, lower sequence, it holds only once the new
+    /// sequence has passed this device's fences, or at once if it sent none.
+    /// From then on its fences never fall below or collide with its own, and
+    /// the directory still refuses them below another device's pre-reset
+    /// fence. Returns whether the flag was cleared.
+    pub fn clear_directory_reconciliation(&mut self, published: impl Fn(&str) -> Option<u64>) -> bool {
+        let chat_writes_pending = self.pending.iter()
+            .any(|batch| batch.ops.iter().any(|op| op.kind == KIND_CHATS));
+        if !self.sequence_reset || chat_writes_pending {
+            return false;
+        }
+        let renumbered = self.authoritative.get(KIND_CHATS).is_some_and(|chats| {
+            chats.values().any(|row| row.seq > self.server_seq
+                || published(&row.id).is_some_and(|fence| row.seq < fence))
+        });
+        if renumbered {
+            return false;
+        }
+        self.sequence_reset = false;
+        self.generation += 1;
+        true
+    }
+
     /// Server-acknowledged state only. Pending local fields must never acquire
     /// the server sequence of an older row when used as a projection fence.
     pub fn acknowledged_row(&self, kind: &str, id: &str) -> Option<&RegistryRow> {
