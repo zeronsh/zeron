@@ -770,6 +770,36 @@ ui.command {
 		publish()
 	end,
 }
+-- Thousands archived (Settings → Archived builds what it shows): `Chat <n>`,
+-- each seventh with no project nor a device still known, so nothing under
+-- its name. (Kept across a reload, as the host's sessions are.)
+local thousands = ui.state("fixture_archive_thousands", false)
+local function archive_thousands()
+	for i = 1, 2000 do
+		local plain = i % 7 == 0
+		table.insert(model.archived, {
+			id = `many{i}`,
+			title = `Chat {i}`,
+			project = if plain then nil else "atlas",
+			device = if plain then "gone" else "mac",
+			updated = NOW - (200 + i) * HOUR,
+			created = NOW - (300 + i) * HOUR,
+			agent = "claude",
+		})
+	end
+	publish()
+end
+if thousands:peek() then
+	archive_thousands()
+end
+ui.command {
+	id = "archive_thousands",
+	title = "Two thousand sessions archived",
+	run = function()
+		thousands:set(true)
+		archive_thousands()
+	end,
+}
 -- Subagents running under Fix the build (`subagents_<n>`).
 for _, n in { 0, 3, 120 } do
 	ui.command {
