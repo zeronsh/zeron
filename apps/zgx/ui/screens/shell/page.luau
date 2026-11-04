@@ -1446,6 +1446,7 @@ return function(props: Props): Node
 			end,
 			ui.column((function()
 				local lane: { [any]: any } = {
+					id = `split-lane-{id}`,
 					absolute = true,
 					left = 0,
 					right = 0,
@@ -1466,6 +1467,14 @@ return function(props: Props): Node
 						return near:get()
 					end, card_ref),
 				}
+				-- (Made as it's added to the split: it comes in from the gap
+				-- it opens out of, faded in, as its edge reveals it.)
+				lane.on_mount = function(el: any)
+					local x, y = splits.opening_from(id)
+					if x ~= nil then
+						anime.animate(el, motion.arrive(x, y :: number))
+					end
+				end
 				tracks_near(lane, near)
 				return lane
 			end)()),
