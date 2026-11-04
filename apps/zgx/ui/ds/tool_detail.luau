@@ -15,6 +15,15 @@
 -- them. While the command runs, what it has written so far shows, and
 -- grows in place.
 --
+-- A command's output the chat cut to its last ten lines (`output_truncated`)
+-- shows them at once, its exit code under them, and "Show all N lines" (N
+-- the whole output's, `output_lines`): that asks the device that ran it for
+-- the whole output (`chat.tool_output`, by the doc it is in, `chat`),
+-- "Loading all N lines…" while it comes, then shows it as any output, kept
+-- by the tool's id; "Show fewer lines" folds back to the ten. When it can't
+-- come, a quiet line under the output says why (that device offline, too
+-- old, or it didn't keep the output) and the button asks again.
+--
 -- The chat keeps little of a tool: its output as the harness gave it (or a
 -- summary of it), each file's counts, and refs to the whole output and the
 -- whole diff, which come only when asked for. The whole output comes as
@@ -45,6 +54,11 @@ export type Tool = {
 	id: string,
 	output: string?,
 	exit_code: number?,
+	-- `output` is the end of a longer command output, of `output_lines`
+	-- lines, whose whole the host of doc `chat` serves.
+	output_truncated: boolean?,
+	output_lines: number?,
+	chat: string?,
 	failed: boolean?,
 	output_ref: string?,
 	output_bytes: number?,
@@ -55,7 +69,8 @@ export type Tool = {
 -- An output as it shows: its lines, whether earlier ones were let go, and
 -- the exit code its text led with (Claude Code's "Exit code 1").
 export type Clean = { lines: { string }, earlier: boolean, exit_code: number? }
-type Blob = { state: "loading" | "ready" | "failed", value: any?, order: number? }
+-- (`error`: a failed whole output's word, from `chat.tool_output`.)
+type Blob = { state: "loading" | "ready" | "failed", value: any?, order: number?, error: string? }
 
 -- The lines an output shows folded, before "Show all N lines".
 M.FOLD_LINES = 10
@@ -84,15 +99,26 @@ M.fetch = function(blob_ref: string): any
 	return ui.call("chat.tool_blob", { ref = blob_ref })
 end
 
+-- How a command's whole output is read from the device that ran it, by the
+-- doc it is in and its id (a test brings its own).
+M.fetch_output = function(chat: string, id: string): any
+	return ui.call("chat.tool_output", { chat = chat, id = id })
+end
+
 local function put(blob_ref: string, blob: Blob)
 	local now = table.clone(BLOBS:peek())
 	now[blob_ref] = blob
 	BLOBS:set(now)
 end
 
--- Fetches `blob_ref` (again, if it failed); fetched already, it just comes
--- to the front.
-local function request(blob_ref: string)
+-- A failure's word: an error's message, or what it is.
+local function word(err: any): string
+	return if type(err) == "table" and err.message then tostring(err.message) else tostring(err)
+end
+
+-- Fetches `blob_ref` (again, if it failed) through `fetch` (the sidecar's,
+-- by default); fetched already, it just comes to the front.
+local function request(blob_ref: string, fetch: (() -> any)?)
 	asked += 1
 	local was = BLOBS:peek()[blob_ref]
 	if was and was.state == "ready" then
@@ -104,15 +130,17 @@ local function request(blob_ref: string)
 	end
 	local order = asked
 	put(blob_ref, { state = "loading", order = order })
-	local ok, promise = pcall(M.fetch, blob_ref)
+	local ok, promise = pcall(fetch or function(): any
+		return M.fetch(blob_ref)
+	end)
 	if not ok or not promise then
-		put(blob_ref, { state = "failed", order = order })
+		put(blob_ref, { state = "failed", order = order, error = if ok then nil else word(promise) })
 		return
 	end
 	promise:after(function(value: any)
 		put(blob_ref, if type(value) == "table" then { state = "ready", value = value, order = order } else { state = "failed", order = order })
-	end, function()
-		put(blob_ref, { state = "failed", order = order })
+	end, function(err: any)
+		put(blob_ref, { state = "failed", order = order, error = word(err) })
 	end)
 end
 
@@ -257,9 +285,26 @@ function M.clean(text: string): Clean
 	return { lines = out, earlier = earlier, exit_code = exit_code }
 end
 
--- What an output view shows: the output's text, and how many lines past it
--- weren't sent (a fetched output's cut).
-type Source = { text: string, more: number }
+-- What an output view shows: the output's text, how many lines past it
+-- weren't sent (a fetched output's cut), and whether its host let earlier
+-- output go.
+type Source = { text: string, more: number, earlier: boolean? }
+
+-- Where a command's whole output is kept here once read from its host.
+local function whole_key(t: Tool): string?
+	if t.output_truncated and t.chat then
+		return `output:{t.chat}/{t.id}`
+	end
+	return nil
+end
+
+-- Why a whole output didn't come, for the line under it.
+local WHY = {
+	offline = "ds.tool_detail.whole_offline",
+	update = "ds.tool_detail.whole_update",
+	unavailable = "ds.tool_detail.whole_unavailable",
+	running = "ds.tool_detail.whole_running",
+}
 
 local function mono_note(text: () -> string, color: string): Node
 	return ui.text {
@@ -280,14 +325,49 @@ local function output_view(id: string, source: () -> Source, tool: () -> Tool): 
 		return M.clean(source().text)
 	end)
 	local line = (ui.theme.get("font.line.xs") :: number?) or 14
+	-- The whole output, on the device that ran it (its key here), when
+	-- the chat kept only its end.
+	local function whole(): string?
+		return whole_key(tool())
+	end
+	local function blob(): Blob?
+		local k = whole()
+		return if k then BLOBS:get()[k] else nil
+	end
 	local function is_open(): boolean
-		return OUTPUT_OPEN:get()[id] == true
+		if OUTPUT_OPEN:get()[id] ~= true then
+			return false
+		end
+		-- (Asked for from its host: open once it came.)
+		local b = blob()
+		return whole() == nil or (b ~= nil and b.state == "ready")
 	end
 	local function long(): boolean
-		return #cleaned:get().lines > M.FOLD_LINES
+		return #cleaned:get().lines > M.FOLD_LINES or whole() ~= nil
 	end
 	local function folded(): boolean
 		return long() and not is_open()
+	end
+	-- The lines "Show all" counts: the whole output's, when the chat kept
+	-- its end.
+	local function all_lines(): number
+		local t = tool()
+		if whole() and t.output_lines and not is_open() then
+			return t.output_lines
+		end
+		return #cleaned:get().lines
+	end
+	local function loading(): boolean
+		local b = blob()
+		return OUTPUT_OPEN:get()[id] == true and b ~= nil and b.state == "loading"
+	end
+	-- Why the whole output didn't come, or nil.
+	local function trouble(): string?
+		local b = blob()
+		if not b or b.state ~= "failed" then
+			return nil
+		end
+		return locale.s(WHY[b.error or ""] or "ds.tool_detail.whole_failed")
 	end
 	local function text(): string
 		local c = cleaned:get()
@@ -307,9 +387,12 @@ local function output_view(id: string, source: () -> Source, tool: () -> Tool): 
 		return if folded() then 0 else source().more
 	end
 	local function label(): string
+		if loading() then
+			return locale.s("ds.tool_detail.loading_all_lines", { n = tostring(all_lines()) })
+		end
 		return if is_open()
 			then locale.s("ds.activity.show_fewer_lines")
-			else locale.s("ds.activity.show_all_lines", { n = tostring(#cleaned:get().lines) })
+			else locale.s("ds.activity.show_all_lines", { n = tostring(all_lines()) })
 	end
 	return ui.column {
 		w_full = true,
@@ -327,7 +410,7 @@ local function output_view(id: string, source: () -> Source, tool: () -> Tool): 
 			end,
 			overflow = "hidden",
 			ui.show(function(): boolean
-				return cleaned:get().earlier
+				return cleaned:get().earlier or source().earlier == true
 			end, mono_note(function(): string
 				return locale.s("ds.tool_detail.earlier_trimmed")
 			end, "$text.tertiary")),
@@ -338,8 +421,10 @@ local function output_view(id: string, source: () -> Source, tool: () -> Tool): 
 				ui.column {
 					w_full = true,
 					min_w = 0,
+					-- (Only a cut that hides lines below fades: the chat's
+					-- end of an output is its end.)
 					fade = function(): { number }
-						return if folded() then { 0, line * FADE_LINES } else { 0, 0 }
+						return if folded() and #cleaned:get().lines > M.FOLD_LINES then { 0, line * FADE_LINES } else { 0, 0 }
 					end,
 					-- (Each line whole: a long one scrolls sideways, as a code
 					-- block's, fading at the edge it runs past.)
@@ -382,15 +467,41 @@ local function output_view(id: string, source: () -> Source, tool: () -> Tool): 
 			),
 		},
 		ui.show(
+			function(): boolean
+				return trouble() ~= nil
+			end,
+			ui.text {
+				function(): string
+					return trouble() or ""
+				end,
+				class = "tool-output-trouble",
+				px = "$space.1",
+				text_size = "$font.size.xs",
+				line_height = "$font.line.xs",
+				color = "$text.tertiary",
+			}
+		),
+		ui.show(
 			long,
 			FoldButton.FoldButton {
 				label = label,
 				open = is_open,
 				class = "tool-output-fold",
 				on_click = function()
+					if loading() then
+						return
+					end
+					local opening = not is_open()
 					local all = table.clone(OUTPUT_OPEN:peek())
-					all[id] = if is_open() then nil else true
+					all[id] = if opening then true else nil
 					OUTPUT_OPEN:set(all)
+					local k, t = whole(), tool()
+					if opening and k and t.chat then
+						local chat = t.chat
+						request(k, function(): any
+							return M.fetch_output(chat, t.id)
+						end)
+					end
 				end,
 				place = { self = "start" },
 			}
@@ -591,9 +702,17 @@ M.ToolDetail = ui.component(function(props: { tool: () -> Tool }): Node
 			elseif key == "stats" then
 				return stats_view(s.value)
 			elseif key == "output" then
-				-- (It follows its tool, in place: a running command's grows.)
+				-- (It follows its tool, in place: a running command's grows.
+				-- Opened, a command the chat kept the end of shows its whole
+				-- output, once its host sent it.)
 				return output_view(now().id, function(): Source
-					return { text = now().output or "", more = 0 }
+					local t = now()
+					local k = whole_key(t)
+					local b = if k and OUTPUT_OPEN:get()[t.id] then BLOBS:get()[k] else nil
+					if b and b.state == "ready" and type(b.value) == "table" and b.value.text then
+						return { text = b.value.text, more = 0, earlier = b.value.trimmed == true }
+					end
+					return { text = t.output or "", more = 0 }
 				end, now)
 			end
 			local v = s.value

@@ -928,6 +928,7 @@ impl Plugins {
                     self.key_notice(
                         &format!("key-added:{}", row.key),
                         "key_added",
+                        Some(&device),
                         "A new signing key",
                         &format!(
                             "A new signing key was added to your account on {device}. If that wasn't you, revoke it in Settings → Account. (Fingerprint {}.)",
@@ -1013,6 +1014,7 @@ impl Plugins {
         self.key_notice(
             &format!("key-revoked:{key}"),
             "own_key_revoked",
+            None,
             "Signing key revoked",
             &format!(
                 "{here} signing key was revoked from another device. Plugins it signed no longer count as yours; your own plugins' programs, services and other code-running powers wait for you to allow them again. Sign in again to register a new key."
@@ -1039,15 +1041,16 @@ impl Plugins {
         });
     }
 
-    /// Said by the host (the app's strip, from the plugin list) and as a
-    /// desktop banner: once per `id`.
-    fn key_notice(&self, id: &str, kind: &str, title: &str, words: &str) {
+    /// Said by the host (the app's toasts, from the plugin list, in its
+    /// own words from `kind` and `device`, the other device's name) and as
+    /// a desktop banner: once per `id`.
+    fn key_notice(&self, id: &str, kind: &str, device: Option<&str>, title: &str, words: &str) {
         {
             let mut notices = lock(&self.inner.key_notices);
             if notices.iter().any(|n| n["id"] == id) {
                 return;
             }
-            notices.push(serde_json::json!({ "id": id, "kind": kind, "words": words }));
+            notices.push(serde_json::json!({ "id": id, "kind": kind, "device": device, "words": words }));
             let excess = notices.len().saturating_sub(20);
             notices.drain(..excess);
         }

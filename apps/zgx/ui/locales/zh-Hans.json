@@ -679,7 +679,13 @@
       "loading_full": "{what, select, diff {正在加载完整差异…} other {正在加载完整输出…}}",
       "failed_full": "{what, select, diff {无法加载完整差异——点按以重试} other {无法加载完整输出——点按以重试}}",
       "earlier_trimmed": "… 更早的输出已省略",
-      "exit_code": "退出码 {code}"
+      "exit_code": "退出码 {code}",
+      "loading_all_lines": "正在加载全部 {n} 行…",
+      "whole_offline": "运行此命令的设备已离线。等它重新上线后再试。",
+      "whole_update": "请在运行此命令的设备上更新 Zeron，以查看全部输出。",
+      "whole_unavailable": "此输出的其余部分未被保留。",
+      "whole_running": "此命令尚未完成。",
+      "whole_failed": "无法加载此输出的其余部分。请重试。"
     },
     "activity": {
       "phrase": {
