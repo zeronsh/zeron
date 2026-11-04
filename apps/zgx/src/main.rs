@@ -34,6 +34,7 @@ mod chat;
 mod cloud;
 mod dev;
 mod completion;
+mod desktop_blur;
 mod engine;
 mod engine_update;
 mod editor_menu;
@@ -578,6 +579,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if std::env::var("ZERON_ZGX_TRACE_TRANSCRIPT").is_ok_and(|v| v == "1") {
         host.shared("debug.trace_transcript", true);
     }
+    // How much the desktop blurs behind the glass (`window.blur`), for the
+    // glass's tint (ds/material).
+    desktop_blur::install(cx, &host);
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
     // Full screen, entered or left (`ui.invoke("window.full_screen", on)`),
