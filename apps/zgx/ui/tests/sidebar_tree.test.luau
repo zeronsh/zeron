@@ -380,3 +380,20 @@ test("an inner group with a session in a state, or the session open, shows past 
 	expect(shows(app, "Proj 5")).to_be(true)
 	expect(shows(app, "Show 1 more")).to_be(false)
 end)
+
+test("a chat moved to pinned gains its project's tile, and moved back loses it, the row staying itself", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 860)
+	app:frames(30)
+	local function tile(): boolean
+		-- (Atlas's tile draws its initial.)
+		return app:tree('#shell-sidebar >> role:button "Write the docs"'):find('text "A"', 1, true) ~= nil
+	end
+	expect(tile()).to_be(false)
+	app:set_state("shell_places", { pinned = { "a2" }, sections = {} })
+	app:frames(30)
+	expect(tile()).to_be(true)
+	app:set_state("shell_places", { pinned = {}, sections = {} })
+	app:frames(30)
+	expect(tile()).to_be(false)
+end)

@@ -28,6 +28,18 @@ function M.page_floor(across: number, gap: number): number
 	return M.CHAT_PANEL_MIN + (across - 1) * (M.PANE_MIN + gap)
 end
 
+-- What the page asks of the sidebar: its panes no narrower than the panel
+-- beside them. The sidebar gives way before they are, though they can narrow
+-- to their least (`PANE_MIN`) and past it.
+function M.page_comfort(page_floor: number): number
+	if page_floor <= M.CHAT_PANEL_MIN then
+		return page_floor
+	end
+	-- (`gap` is small beside a pane: the count comes out whole.)
+	local across = 1 + math.round((page_floor - M.CHAT_PANEL_MIN) / M.PANE_MIN - 0.02)
+	return page_floor + across * (M.RIGHT_PANE_MIN - M.PANE_MIN)
+end
+
 -- Whether the page has what it wants beside columns this wide.
 function M.panes_fit(viewport: number, page_floor: number, sidebar: number, panel: number): boolean
 	return page_floor + sidebar + panel <= viewport

@@ -650,6 +650,16 @@ return function(props: Props): Node
 		elseif r > allowed then
 			-- No room left for the chat's least: it gives way.
 			r = allowed
+		elseif floor > fit.CHAT_PANEL_MIN then
+			-- A split's panes keep their size: the panel never grows by
+			-- itself, all new room is theirs, and it gives up its own first:
+			-- as the window narrows, and as a pane comes beside it.
+			local least = fit.RIGHT_PANE_MIN - tree
+			if floor > was.floor then
+				r = least
+			elseif vw < was.vw then
+				r = math.max(r - (was.vw - vw), least)
+			end
 		elseif vw > was.vw and r < pref then
 			-- Widening while it gave way: back first, the chat at its least.
 			local was_allowed = fit.panel_room(was.vw, was.side, was.tree, was.floor)
@@ -843,7 +853,15 @@ return function(props: Props): Node
 		local vw = fit.viewport:peek()
 		if changed and on and not shell_view.expanded:peek() and vw > 0 then
 			local side = sidebar_settled()
-			if not chosen:peek() then
+			if fit.page_floor:peek() > fit.CHAT_PANEL_MIN then
+				-- Beside a split it opens at its least: the room is the panes'.
+				-- (Dragged wider, it stays so until it closes; the width chosen
+				-- is kept for a chat alone.)
+				local r = math.max(fit.RIGHT_PANE_MIN - tree_part(), 0)
+				if r ~= right_w:peek() then
+					right_w:set(r)
+				end
+			elseif not chosen:peek() then
 				local keep = reserve()
 				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0), fit.page_floor:peek()))
 			else

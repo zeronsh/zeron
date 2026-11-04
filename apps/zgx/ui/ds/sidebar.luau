@@ -1076,7 +1076,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- trunk ending at it.)
 	-- (In the sidebar's list, `list_now` and `tree_of` follow the row as it
 	-- moves between lists, the row staying itself.)
-	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
+	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, by_now: (() -> Organize)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
 	-- A row under its group's header (`tree_of`: its tree as it stands;
 	-- nil, out of any): a branch off the group's trunk (ds/session_row).
 	local function on_tree(body: Node, now_tree: () -> Tree?): Node
@@ -1270,13 +1270,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return cur().title
 			end, strong, nil)
 		)
-		if p and not SessionRow.groups_by(by, "project") then
+		-- (Its project's tile, unless the group it stands in now is its project:
+		-- a row dragged to another list keeps its node.)
+		if p then
 			title = ui.row {
 				grow = 1,
 				min_w = 0,
 				gap = "$zeron.space.tight",
 				items = "center",
-				ui.show(details.project_icon, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
+				ui.show(function(): boolean
+					local by_now = if place and place.by_now then place.by_now() else by
+					return details.project_icon:get() and not SessionRow.groups_by(by_now, "project")
+				end, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
 					local hue, src, emoji = look(p)
 					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16 }
 				end)() }),
@@ -3863,6 +3868,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 					list_now = function(): string
 						local now = item_of(key)
 						return if now and now.list then now.list else it.list :: string
+					end,
+					by_now = function(): Organize
+						local now = item_of(key)
+						return if now and now.by then now.by :: Organize else it.by :: Organize
 					end,
 					at = at,
 					-- Its trunk while it sits in a group that draws one.
