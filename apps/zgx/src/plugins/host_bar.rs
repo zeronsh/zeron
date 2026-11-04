@@ -133,6 +133,8 @@ impl Notice {
 thread_local! {
     static NOTICES: RefCell<Option<zgx::reactive::Signal<Vec<Shown>>>> = const { RefCell::new(None) };
     static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Whether Zeron shows Chinese now, as the toasts last read it.
+    static CHINESE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A notice as shown, with its id.
@@ -196,6 +198,13 @@ pub fn dev_toasts(cx: &mut WindowContext) -> Option<View> {
     notice(Notice::switched("Inset", false, true, true));
     notice(Notice::key("key_added", Some("Wing's iPhone"), ""));
     Some(chrome)
+}
+
+/// A preview asked to open a link or a page: it can once you keep it. Asked
+/// again, the same toast starts over (`notice`).
+pub fn links_need_keeping() {
+    let title = if CHINESE.with(std::cell::Cell::get) { "保留这个模板后才能打开链接" } else { "Keep this template to open links" };
+    notice(Notice { title: title.into(), body: String::new(), tone: Tone::Neutral, action: None, stays: false });
 }
 
 /// The main window's root: the host's `chrome` above the scripts' view,
@@ -441,6 +450,7 @@ fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_sc
             (now.get(), heard.get(), folded.get(), themes.kind().is_dark(), matches!(locale.get(), zgx_script::Value::Str(l) if l.starts_with("zh")))
         },
         move |(preview, list, mini, dark, chinese), _| {
+            CHINESE.with(|c| c.set(chinese));
             let ink = if dark { DARK } else { LIGHT };
             let mut out = column().items_end().gap(GAP);
             for shown in list {
@@ -676,6 +686,20 @@ mod tests {
             }
             preview::set(None);
         }
+    }
+
+    /// A preview asked for a link: one toast, however often.
+    #[test]
+    fn a_link_in_a_preview_says_to_keep_it() {
+        preview::set(Some(sleek()));
+        let mut app = mount();
+        app.frames(4);
+        links_need_keeping();
+        links_need_keeping();
+        app.frames(6);
+        let texts = host_texts(&mut app);
+        assert_eq!(texts.matches("Keep this template to open links").count(), 1, "{texts}");
+        preview::set(None);
     }
 
     /// Its line follows the language Zeron shows; the rest of the host's

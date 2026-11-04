@@ -86,6 +86,14 @@ impl Failures {
         self.by.remove(what);
     }
 
+    /// Everything named under `prefix` is forgotten, to be tried again:
+    /// whether any was.
+    pub fn forget_under(&mut self, prefix: &str) -> bool {
+        let before = self.by.len();
+        self.by.retain(|what, _| !what.starts_with(prefix));
+        self.by.len() != before
+    }
+
     pub fn why(&self, what: &str) -> Option<&str> {
         self.by.get(what).map(|(_, why)| why.as_str())
     }
