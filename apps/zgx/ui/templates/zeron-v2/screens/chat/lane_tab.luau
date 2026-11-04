@@ -21,6 +21,7 @@ local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
+local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 
@@ -474,6 +475,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		open_link = open_link,
+		chat_of = Shared.chat_of,
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),

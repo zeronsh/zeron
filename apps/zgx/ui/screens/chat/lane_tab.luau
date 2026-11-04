@@ -688,6 +688,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		open_link = open_link,
+		chat_of = Shared.chat_of,
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),

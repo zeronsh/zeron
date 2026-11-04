@@ -2419,7 +2419,14 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            let (words, mut paths) = split_attachments(&text);
+            // A message from another chat: its routing header is the agent's to
+            // read; the transcript shows who sent it, over its words.
+            let sender = zeron_proto::agent_messages::agent_message_sender(&text);
+            let body = sender.as_ref().map_or(text.as_str(), |(_, body)| *body);
+            let sender = sender.as_ref().map_or(Value::Nil, |(from, _)| {
+                Value::record([("chat", Value::from(from.chat_id.as_str())), ("title", Value::from(from.title.as_str()))])
+            });
+            let (words, mut paths) = split_attachments(body);
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
             let (words, shots) = crate::appshots::split_appshots(&words);
@@ -2444,6 +2451,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments), &shots)),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
                 ("copy", copy_value(&words)),
+                ("sender", sender),
             ]))
         }
         "assistant" => {
@@ -4033,6 +4041,25 @@ mod tests {
         // Out of step: a length that doesn't add up.
         let wrong = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "!", "len": 9 }], "count": 2 });
         assert!(apply(&mut entries, &wrong).is_err());
+    }
+
+    #[test]
+    fn a_message_from_another_chat_says_who_over_its_words() {
+        let id = "cd27c5c2-0000-4000-8000-000000000000";
+        let said = |text: String| json!({ "id": "u", "role": "user", "parts": [{ "kind": "text", "id": "t", "text": text }] });
+        let m = message(&said(zeron_proto::agent_messages::agent_message("Layout pass (cd27c5c2)", id, "All done.")), None).unwrap();
+        let sender = m.field("sender").unwrap();
+        let is = |v: Option<&Value>, want: &str| matches!(v, Some(Value::Str(s)) if s.as_ref() == want);
+        assert!(is(sender.field("chat"), id));
+        assert!(is(sender.field("title"), "Layout pass"));
+        // Its words alone, to show and to copy: the header is the agent's.
+        assert!(is(m.field("text"), "All done."));
+        assert!(is(m.field("copy"), "All done."));
+        // A person's that merely starts alike is theirs, as written.
+        let typed = "[Message from Zeron chat x]\n\nhi";
+        let m = message(&said(typed.to_owned()), None).unwrap();
+        assert!(m.field("sender").is_none_or(|s| matches!(s, Value::Nil)));
+        assert!(is(m.field("text"), typed));
     }
 
     #[test]

@@ -717,6 +717,7 @@
     "transcript": {
       "copy_message": "拷贝消息",
       "switched": "已从 {from} 切换到 {to}",
+      "message_from": "消息来自",
       "not_delivered": "未送达——重新发送",
       "reply": "回复",
       "you": "你",

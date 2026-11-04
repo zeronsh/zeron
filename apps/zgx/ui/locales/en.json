@@ -717,6 +717,7 @@
     "transcript": {
       "copy_message": "Copy message",
       "switched": "Switched from {from} to {to}",
+      "message_from": "Message from",
       "not_delivered": "Not delivered — send again",
       "reply": "Reply",
       "you": "You",
