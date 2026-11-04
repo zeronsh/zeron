@@ -20,9 +20,27 @@ use crate::state::EngineHandle;
 
 /// Previews per chip; further paths stay in the text output.
 pub(crate) const MAX_IMAGES_PER_TOOL: usize = 4;
-/// Decoded thumbnail bounds: the 560×220 frame at 2× density (≤ 1.9 MiB
-/// BGRA per copy).
-const THUMB_MAX: (u32, u32) = (1120, 440);
+/// A tool result's picture in its open chip: a thumbnail at most this wide
+/// and tall (points), its own shape, never larger than its pixels. A click
+/// opens it in the lightbox, so the chip stays compact.
+pub(crate) const THUMB_FRAME: (f32, f32) = (240.0, 160.0);
+/// Decoded thumbnail bounds: [`THUMB_FRAME`] at 2× density (≤ 600 KiB BGRA
+/// per copy).
+const THUMB_MAX: (u32, u32) = (480, 320);
+
+/// A thumbnail's size in points for a picture of `pixels` (as decoded, at
+/// most [`THUMB_MAX`], which keeps its shape): within [`THUMB_FRAME`],
+/// never scaled up. A screenshot's shape (16:10) while it isn't known.
+pub(crate) fn thumb_size(pixels: Option<(f32, f32)>) -> (f32, f32) {
+    let (frame_w, frame_h) = THUMB_FRAME;
+    match pixels {
+        Some((w, h)) if w > 0.0 && h > 0.0 => {
+            let k = (frame_w / w).min(frame_h / h).min(1.0);
+            ((w * k).round().max(1.0), (h * k).round().max(1.0))
+        }
+        _ => (frame_w, (frame_w / 1.6).min(frame_h)),
+    }
+}
 /// Collapsed chips keep pixels this long, so open/close spam never re-decodes.
 pub(crate) const RELEASE_GRACE: Duration = Duration::from_millis(600);
 /// Expanded-but-offscreen previews may be dropped past this (CPU + GPU bytes).
@@ -673,6 +691,24 @@ mod tests {
             paths(ToolCall::Exec { command: many }, None).len(),
             MAX_IMAGES_PER_TOOL
         );
+    }
+
+    #[test]
+    fn thumbnails_fit_the_frame_keep_their_shape_and_never_grow() {
+        let (fw, fh) = THUMB_FRAME;
+        // A screenshot, larger than the frame: as tall as it allows.
+        let (w, h) = thumb_size(Some((1884.0, 2066.0)));
+        assert!(w <= fw && h <= fh, "{w}x{h}");
+        assert_eq!(h, fh);
+        assert!((w / h - 1884.0 / 2066.0).abs() < 0.01);
+        // A wide strip: as wide as it allows.
+        let (w, h) = thumb_size(Some((480.0, 60.0)));
+        assert_eq!((w, h), (fw, 30.0));
+        // A small icon stays its own size.
+        assert_eq!(thumb_size(Some((32.0, 24.0))), (32.0, 24.0));
+        // Unknown yet: a placeholder inside the frame.
+        let (w, h) = thumb_size(None);
+        assert!(w <= fw && h <= fh);
     }
 
     #[test]
