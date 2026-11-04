@@ -62,6 +62,7 @@ mod terminal;
 mod tool_details;
 mod themes;
 mod visuals;
+mod window_controls;
 #[cfg(test)]
 mod audit_shots;
 #[cfg(test)]
@@ -521,7 +522,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     desktop_blur::install(cx, &host);
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
-    window_buttons(cx, &host);
+    // The window's own controls where the platform draws none (src/window_controls.rs).
+    window_controls::serve(cx, &host);
     // Reload Zeron: the app quits and starts again, the same launch
     // (src/relaunch.rs).
     let windows = cx.windows.clone();
@@ -1037,54 +1039,6 @@ fn intro_window() -> WindowOptions {
     }
 }
 
-thread_local! {
-    /// The effects keeping each window's `window.buttons` current.
-    static WINDOW_BUTTONS: std::cell::RefCell<Vec<zgx::reactive::Effect>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// The window buttons the desktop asks for, for the title bar to draw as
-/// its own (`ui.shared("window.buttons")`: `{ left = {…}, right = {…} }`
-/// of "minimize", "maximize", "close", or nil where the platform draws
-/// its own), and what they do (`window.minimize`, `window.maximize`,
-/// `window.close`: as the window manager's own buttons).
-fn window_buttons(cx: &mut WindowContext, host: &ScriptHost) {
-    fn names(side: &[zgx_desktop::WindowButton]) -> Value {
-        Value::List(
-            side.iter()
-                .map(|button| {
-                    Value::from(match button {
-                        zgx_desktop::WindowButton::Minimize => "minimize",
-                        zgx_desktop::WindowButton::Maximize => "maximize",
-                        zgx_desktop::WindowButton::Close => "close",
-                    })
-                })
-                .collect(),
-        )
-    }
-    let buttons = cx.window_info.buttons.clone();
-    let shared = host.shared("window.buttons", Value::Nil);
-    let follow = cx.ui.runtime.effect_now(move || {
-        shared.set(buttons.with(|now| match now {
-            Some(b) => Value::record([("left", names(&b.left)), ("right", names(&b.right))]),
-            None => Value::Nil,
-        }));
-    });
-    WINDOW_BUTTONS.with(|all| all.borrow_mut().push(follow));
-    let window = cx.window.clone();
-    host.action("window.minimize", move |_| window.set_minimized(true));
-    // (zgx keeps no maximized state of its own to read: the window's size
-    // against its display's work area says.)
-    let (window, info) = (cx.window.clone(), cx.window_info.clone());
-    host.action("window.maximize", move |_| {
-        let size = info.bounds.with_untracked(|b| b.size);
-        let display = info.current_display.with_untracked(|i| *i).and_then(|i| info.displays.with_untracked(|d| d.get(i).map(|d| d.size)));
-        let filled = display.is_some_and(|d| size.0 >= d.0.saturating_sub(64) && size.1 >= d.1.saturating_sub(128));
-        window.set_maximized(!filled);
-    });
-    let window = cx.window.clone();
-    host.action("window.close", move |_| window.request_close());
-}
-
 /// Zeron's window: an inset title bar over the colourless under-window
 /// blur, which the theme's `background` tints (the shipping app's glass).
 fn zeron_window(width: f64, height: f64) -> WindowOptions {
@@ -1093,10 +1047,10 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         width,
         height,
         decorations: cfg!(target_os = "macos"),
-        // On Linux the window's buttons are the title bar's own controls
-        // (ds/title_bar's `window_buttons`, where the desktop asks for
-        // them: `ui.shared("window.buttons")`): zgx draws none of its own.
-        titlebar: if cfg!(target_os = "linux") { Titlebar::Hidden } else { Titlebar::Inset },
+        // Off macOS the title bar draws the window's controls itself, where
+        // macOS's traffic lights stand (src/window_controls.rs): zgx draws
+        // none (its edges still resize the window).
+        titlebar: if window_controls::drawn() { Titlebar::Hidden } else { Titlebar::Inset },
         glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
         ..Default::default()
     }

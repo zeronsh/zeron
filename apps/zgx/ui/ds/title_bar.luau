@@ -22,6 +22,14 @@
 -- `app.menu_alt`) turns the controls into the menus' titles in place, the
 -- first focused: Left and Right go between them, Enter or Down opens one,
 -- Escape, a click elsewhere or Alt again turns them back.
+--
+-- Where the platform draws no window buttons (Linux, Windows: the host's
+-- `window.chrome`, src/window_controls.rs), the bar draws close, minimize
+-- and maximize itself, where macOS's traffic lights stand and in their
+-- order: monochrome dots, their symbols always shown. On a tiling
+-- compositor (Hyprland, sway, i3, niri) they don't show unless asked
+-- (`TitleBar.window_controls`, Settings → Appearance), and the bar's
+-- controls start at its edge.
 
 local Icon = require("@self/icon")
 local SidebarIcon = require("@self/sidebar_icon")
@@ -30,6 +38,7 @@ local IconButton = require("@self/icon_button").IconButton
 local motion = require("@self/motion")
 local locale = require("@self/locale")
 local ContextMenu = require("@self/context_menu")
+local control_style = require("@self/control")
 
 -- (Read-only: a call through the module's `__call` checks its table
 -- exactly otherwise.)
@@ -114,7 +123,7 @@ local function entries_of(list: { MenuEntry }, chosen: (() -> ())?): { ContextMe
 					end
 					-- The host runs it, as its menu bar would (a script's
 					-- command, or the way back to the default interface).
-					pcall(ui.invoke, "app.menu_choose", id)
+					host.call("app.menu_choose", id)
 				end,
 			})
 		end
@@ -135,71 +144,62 @@ local LIGHT, LIGHT_FIRST, LIGHT_PITCH = 14, 21, 23
 -- `TITLEBAR_CLUSTER_PAD`).
 local TOGGLE_IN, ROW_PAD = 88, 10
 
--- The window's buttons the bar draws as its own controls (Linux: the
--- window is undecorated and zgx draws none; the app's host says which the
--- desktop asks for and where, GNOME's `button-layout`, as
--- `{ left = {…}, right = {…} }` of "minimize", "maximize", "close"). Nil
--- where the platform draws its own: macOS's traffic lights (TOGGLE_IN
--- clears them), Windows' caption buttons.
-type WindowButtons = { left: { string }, right: { string } }
-local window_buttons_state = ui.shared("window.buttons", nil :: WindowButtons?)
-local function window_buttons(): WindowButtons?
-	return window_buttons_state:get()
+-- What the bar asks the host (its window controls, a menu's item): one
+-- place, so a test's fixture can hear it (`TitleBar.host.call`).
+local host = {
+	call = function(name: string, arg: any?)
+		pcall(ui.invoke, name, arg)
+	end,
+}
+
+-- The window's own controls, where the host says the platform draws none:
+-- `{ tiling = bool }`, nil on macOS (its traffic lights) or with no host.
+type Chrome = { tiling: boolean? }
+local chrome_state = ui.shared("window.chrome", nil :: Chrome?)
+local maximized = ui.shared("window.maximized", false)
+-- Whether they show: "auto" (not on a tiling compositor), "show", "hide".
+local window_controls = ui.persist("window_controls", "auto")
+
+local function chrome(): Chrome?
+	local c = chrome_state:get()
+	return if type(c) == "table" then c else nil
 end
 
--- A row of `n` bar controls, their gaps between: its width.
-local function controls_w(n: number): number
-	if n == 0 then
-		return 0
+-- Whether the bar draws the window's controls.
+local function own_controls(): boolean
+	local c = chrome()
+	if c == nil then
+		return false
 	end
-	local m = island.metrics()
-	return n * m.control + (n - 1) * m.gap
+	local want = window_controls:get()
+	return want == "show" or (want ~= "hide" and not c.tiling)
 end
 
--- Where the toggle stands from the window's left: past the traffic lights
--- on macOS (Zeron's 88), past the window's buttons where the bar draws them
--- at its left, else as far in as the bar's right end stands from its edge.
+-- Where the bar's own controls start from the window's left: past the
+-- window's controls (macOS's, or the bar's own where they stand), else at
+-- the bar's edge inset.
 local function toggle_in(): number
-	local buttons = window_buttons()
-	if buttons == nil then
-		return TOGGLE_IN
-	end
-	if #buttons.left > 0 then
-		return ROW_PAD + controls_w(#buttons.left) + island.metrics().group
-	end
-	return ROW_PAD
+	return if chrome() == nil or own_controls() then TOGGLE_IN else ROW_PAD
 end
 
--- How far in from the window's right edge the window's own buttons reach,
--- for what lies on the title line beside them (the panel's strip): the
--- bar's own, a group's gap before them, where it draws them at its right;
--- Windows' caption buttons; 0 where they stand at the left or there are
--- none. A plugin reads neither: 0.
+-- How far in from the window's right edge the window's own buttons reach:
+-- Windows' caption buttons, and on Linux the buttons zgx draws where the
+-- desktop's `button-layout` asks (GNOME's `appmenu:close`, close at the
+-- right). 0 where they stand at the left (macOS's traffic lights, which
+-- TOGGLE_IN already clears), are not reported, or there are none. A plugin
+-- reads no `ui.window.controls`: 0.
 local function window_buttons_right(): number
-	local buttons = window_buttons()
-	if buttons then
-		local n = #buttons.right
-		return if n > 0 then controls_w(n) + island.metrics().group else 0
-	end
 	local window = ui.window :: any
 	local area_state, controls_state = window.titlebar_area, window.controls
 	if area_state == nil or controls_state == nil then
 		return 0
 	end
-	local area, rect = area_state:get(), controls_state:get()
-	if area and rect and rect.x >= area.x + area.width then
-		return rect.width
+	local area, buttons = area_state:get(), controls_state:get()
+	if area and buttons and buttons.x >= area.x + area.width then
+		return buttons.width
 	end
 	return 0
 end
-
--- The window's button `name` as a bar control: what the window manager's
--- own would do.
-local WINDOW_BUTTON: { [string]: { icon: string, label: string, action: string } } = {
-	minimize = { icon = "minus", label = "ds.title_bar.minimize", action = "window.minimize" },
-	maximize = { icon = "square", label = "ds.title_bar.maximize", action = "window.maximize" },
-	close = { icon = "close", label = "ds.title_bar.close", action = "window.close" },
-}
 
 -- A bar control: the design system's icon button at the island's size,
 -- a quiet glyph, a wash under the pointer; when it can't (nothing to go
@@ -224,6 +224,57 @@ local function control(label: Label, glyph: Node, enabled: (() -> boolean)?, on_
 			end
 		end,
 		glyph,
+	}
+end
+
+-- The window's controls as macOS's traffic lights stand, in their order:
+-- close, minimize, maximize (restore while maximized). Monochrome dots of
+-- the controls' wash with their symbols always shown (no colours to tell
+-- them apart, as macOS's have, so the symbol says which); close washes red
+-- under the pointer, the others as a control does.
+local WINDOW_CONTROLS = {
+	{ kind = "close", label = "ds.title_bar.close", action = "window.close" },
+	{ kind = "minimize", label = "ds.title_bar.minimize", action = "window.minimize" },
+	{ kind = "maximize", label = "ds.title_bar.maximize", action = "window.maximize" },
+}
+local function window_control(i: number): Node
+	local c = WINDOW_CONTROLS[i]
+	local close, maximize = c.kind == "close", c.kind == "maximize"
+	return ui.button {
+		id = `titlebar-window-{c.kind}`,
+		label = function(): string
+			local key = if maximize and maximized:get() == true then "ds.title_bar.restore" else c.label
+			return locale.t(key):get()
+		end,
+		absolute = true,
+		left = LIGHT_FIRST + (i - 1) * LIGHT_PITCH - LIGHT / 2,
+		top = MIDDLE - LIGHT / 2,
+		w = LIGHT,
+		h = LIGHT,
+		p = 0,
+		items = "center",
+		justify = "center",
+		rounded = "$radius.full",
+		bg = "$zeron.secondary.bg",
+		border = 1,
+		border_color = "$border.subtle",
+		color = "$text.secondary",
+		pointer_events = "auto",
+		hover = if close then { bg = "$zeron.menu.danger", color = "$danger" } else { bg = "$zeron.secondary.hover", color = "$text.primary" },
+		active = if close then { bg = "$zeron.menu.danger", color = "$danger" } else { bg = "$zeron.secondary.active", color = "$text.primary" },
+		focus = control_style.ring,
+		on_click = function()
+			host.call(c.action)
+		end,
+		Icon {
+			name = function(): any
+				if maximize and maximized:get() == true then
+					return "window-restore"
+				end
+				return `window-{c.kind}`
+			end,
+			size = 10,
+		},
 	}
 end
 
@@ -389,33 +440,9 @@ local TitleBar = ui.component(function(props: Props): Node
 		return menu_alt:get() == true and menus() ~= nil and not props.lights
 	end
 	local function island_right(): number
-		local controls = toggle_in() + menu_room() + CONTROL + GROUP_GAP + CONTROL + CONTROL_GAP + CONTROL + ROW_PAD
-		return if alt_on() then math.max(controls, toggle_in() + alt_w:get() + ROW_PAD) else controls
-	end
-	-- The window's buttons, as the bar's own controls: not in a preview
-	-- (`lights`), which draws a window's look, not this window's.
-	local function side_buttons(side: "left" | "right"): { string }
-		local buttons = if props.lights then nil else window_buttons()
-		return if buttons then buttons[side] else {}
-	end
-	local function window_button(name: string): Node
-		local b = WINDOW_BUTTON[name]
-		return control(locale.t(b.label), Icon { name = b.icon :: any, size = 16 }, nil, function()
-			pcall(ui.invoke, b.action)
-		end)
-	end
-	local function window_button_row(side: "left" | "right"): Node
-		return ui.each(ui.computed(function(): { string }
-			return side_buttons(side)
-		end), function(name: string): Node
-			return window_button(name)
-		end, {
-			key = function(name: string): string
-				return name
-			end,
-			direction = "row",
-			gap = ui.raw(CONTROL_GAP, "the island's gap between its controls"),
-		})
+		local from = if props.lights then TOGGLE_IN else toggle_in()
+		local controls = from + menu_room() + CONTROL + GROUP_GAP + CONTROL + CONTROL_GAP + CONTROL + ROW_PAD
+		return if alt_on() then math.max(controls, from + alt_w:get() + ROW_PAD) else controls
 	end
 	local ISLAND_TO = island.thickness()
 	local ISLAND_FROM = ISLAND_TO - m.pad
@@ -449,7 +476,13 @@ local TitleBar = ui.component(function(props: Props): Node
 	end
 	local bar: { [any]: any } = {
 		w_full = true,
-		h = H,
+		-- (A strip of no height its controls hang from, each placed on the
+		-- bar's line: a box the bar's size, even one passing the pointer
+		-- through, stands in front of what's under it for the pointer's
+		-- cursor, and the panel's tabs, a split pane's ×, the top of a
+		-- resize edge showed none of theirs. The bar's room is `H`.)
+		h = 0,
+		overflow = "visible",
 		relative = true,
 		-- The bar lets the pointer through to what is under it, but for its
 		-- controls.
@@ -475,27 +508,23 @@ local TitleBar = ui.component(function(props: Props): Node
 	for _, light in lights do
 		table.insert(bar, light)
 	end
-	-- The window's buttons the desktop puts at the left, before the toggle.
-	table.insert(
-		bar,
-		ui.row {
-			absolute = true,
-			left = ROW_PAD,
-			top = MIDDLE - CONTROL / 2,
-			h = CONTROL,
-			items = "center",
-			pointer_events = "auto",
-			window_drag = true,
-			window_button_row("left"),
-		}
-	)
+	-- The window's own controls, where the platform draws none (not in a
+	-- preview, whose `lights` draw a window's look).
+	local function from(): number
+		return if props.lights then TOGGLE_IN else toggle_in()
+	end
+	if not props.lights then
+		for i = 1, #WINDOW_CONTROLS do
+			table.insert(bar, ui.show(own_controls, window_control(i)))
+		end
+	end
 	-- (Its own controls first, then the page's: Tab reads the bar left to
 	-- right.)
 	table.insert(
 		bar,
 		ui.row {
 			absolute = true,
-			left = toggle_in,
+			left = from,
 			top = MIDDLE - CONTROL / 2,
 			items = "center",
 			-- (Under Alt the menus' titles stand in their place.)
@@ -541,7 +570,7 @@ local TitleBar = ui.component(function(props: Props): Node
 			alt_on,
 			ui.row {
 				absolute = true,
-				left = toggle_in,
+				left = from,
 				top = MIDDLE - CONTROL / 2,
 				h = CONTROL,
 				items = "center",
@@ -551,7 +580,7 @@ local TitleBar = ui.component(function(props: Props): Node
 			}
 		)
 	)
-	do
+	if props.actions then
 		-- Over artwork, its island: the left island's glass and height,
 		-- round the row as far as the row stands in from the window's edge
 		-- (the island's inset from it, as at the left), there while the row
@@ -574,7 +603,9 @@ local TitleBar = ui.component(function(props: Props): Node
 		local actions_island: ContainerProps = {
 			id = "titlebar-actions-island",
 			absolute = true,
-			right = m.inset,
+			right = function(): number
+				return m.inset + window_buttons_right()
+			end,
 			w = function(): number
 				return row_w() + side * 2
 			end,
@@ -589,16 +620,8 @@ local TitleBar = ui.component(function(props: Props): Node
 		island.glass(actions_island)
 		table.insert(bar, ui.div(actions_island))
 		-- The page's controls, as far in from the right as the row runs past
-		-- its last control at the left; then the window's buttons the desktop
-		-- puts at the right, a group's gap after them, on the same island.
-		local row_children: { Node } = {}
-		if props.actions then
-			table.insert(row_children, props.actions)
-			table.insert(row_children, ui.show(function(): boolean
-				return #side_buttons("right") > 0
-			end, ui.div { w = ui.raw(GROUP_GAP - CONTROL_GAP, "a group's gap before the window's buttons, less the row's own"), shrink = 0 }))
-		end
-		table.insert(row_children, window_button_row("right"))
+		-- its last control at the left, and clear of the window's own
+		-- buttons where they stand at the right.
 		table.insert(
 			bar,
 			ui.row {
@@ -609,7 +632,9 @@ local TitleBar = ui.component(function(props: Props): Node
 					end
 				end,
 				absolute = true,
-				right = ROW_PAD,
+				right = function(): number
+					return ROW_PAD + window_buttons_right()
+				end,
 				top = MIDDLE - CONTROL / 2,
 				h = CONTROL,
 				items = "center",
@@ -617,9 +642,7 @@ local TitleBar = ui.component(function(props: Props): Node
 				pointer_events = "auto",
 				-- (Between its controls, the bar is still the window's to move.)
 				window_drag = true,
-				-- (Its children appended: `actions` may be nil, and a nil mid-table
-				-- would end the list there.)
-				table.unpack(row_children),
+				props.actions,
 			}
 		)
 	end
@@ -635,7 +658,7 @@ local function controls_end(): number
 	return toggle_in() + menu_room() + m.control + m.group + m.control + m.gap + m.control + ROW_PAD
 end
 
-local M = setmetatable({ control = control, controls_end = controls_end, window_buttons_right = window_buttons_right }, {
+local M = setmetatable({ control = control, controls_end = controls_end, window_controls = window_controls, host = host, window_buttons_right = window_buttons_right }, {
 	__call = function(_, props: Props): Node
 		return TitleBar(props)
 	end,
