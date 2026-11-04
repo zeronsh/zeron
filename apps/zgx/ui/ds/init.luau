@@ -144,6 +144,8 @@ return {
 	Link = layout.Link,
 	Breadcrumbs = layout.Breadcrumbs,
 	KeyValue = layout.KeyValue,
+	-- A page's gutters in its card, as wide as it is: `ds.page.gutter(w)`.
+	page = { gutter = layout.gutter, narrow = layout.narrow, top = layout.TOP },
 	SplitButton = require("@self/split_button"),
 	Toolbar = toolbar.Toolbar,
 	ToolbarGroup = toolbar.Group,

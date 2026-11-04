@@ -37,6 +37,8 @@ local banner = require("@ds/banner")
 local skeleton = require("@ds/skeleton")
 local people = require("@ds/people")
 local control = require("@ds/control")
+-- A page's gutters in its card, Settings' and the viewer's rule.
+local layout = require("@ds/layout")
 
 export type Item = {
 	number: number,
@@ -66,9 +68,6 @@ end
 -- shown and asked again behind it (Zeron's five minutes: GitHub's rate
 -- limits are tight).
 local FRESH_SECONDS = 5 * 60
-
--- Under this width (a pane's), the page's gutters tighten.
-local NARROW = 640
 
 local CI: { [string]: string } = { failed = "ci_failing", pending = "ci_pending", passed = "ci_passed" }
 
@@ -602,9 +601,9 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 			end, { w_full = true, grow = 1, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" })
 		end
 
+		-- (A page's gutters, tighter in a pane: ds/layout.)
 		local function gutter(): string
-			local w = width:get()
-			return if w > 0 and w < NARROW then "$space.4" else "$space.6"
+			return layout.gutter(width:get())
 		end
 
 		local function board_page(): Node
@@ -632,13 +631,17 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 						min_h = "100%",
 						items = "center",
 						px = gutter,
-						pt = gutter,
+						-- (Its first words as far under the card's top as a
+						-- settings page's and a transcript's.)
+						pt = layout.TOP,
 						pb = "$space.6",
 						-- (A column the gallery's git pages' width at most, centred: on
-						-- a wide window the rows hold together rather than stretch.)
+						-- a wide window the rows hold together rather than stretch.
+						-- Wider than a page that reads: a board's rows carry their
+						-- status, checks and who, at their ends.)
 						ui.column {
 							w_full = true,
-							max_w = ui.raw(960, "the gallery's git window"),
+							max_w = layout.WIDE,
 							gap = "$space.5",
 							head(),
 							filters(),
