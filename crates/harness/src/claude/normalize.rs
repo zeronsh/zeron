@@ -301,22 +301,81 @@ fn subagent_message(parent: &str, f: &MessageFrame) -> Vec<AgentEvent> {
 }
 
 /// A subagent's tool results, attributed like its calls.
-fn subagent_results(parent: &str, f: &MessageFrame) -> Vec<AgentEvent> {
+fn subagent_results(
+    parent: &str,
+    f: &MessageFrame,
+    commands: &mut std::collections::HashMap<String, bool>,
+) -> Vec<AgentEvent> {
     f.message
         .blocks()
         .filter(|b: &ContentBlock| b.kind == "tool_result")
-        .map(|b| {
-            tag(
-                parent,
-                AgentEvent::ToolResult {
-                    id: b.tool_use_id.clone(),
-                    is_error: b.is_error.unwrap_or(false),
-                    output: None,
-                    diff: None,
-                },
-            )
-        })
+        .map(|b| tag(parent, tool_result(&b, commands)))
         .collect()
+}
+
+/// Records `f`'s Bash calls, so their results carry the command's output.
+fn note_commands(f: &MessageFrame, commands: &mut std::collections::HashMap<String, bool>) {
+    for b in f.message.blocks() {
+        if b.kind == "tool_use" && b.name == "Bash" {
+            let background = b
+                .input
+                .get("run_in_background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            commands.insert(b.id, background);
+        }
+    }
+}
+
+/// A `tool_result` block as its event. A Bash call's carries its output (the
+/// end of it, [`zeron_proto::command_output_cap`]) and exit code: Claude Code
+/// leads a failed command's text with `Exit code N`; one that succeeded says
+/// nothing, so it exited 0 — unless it went to the background, which says
+/// only that it started. Every other tool's output stays off the event.
+fn tool_result(
+    b: &ContentBlock,
+    commands: &mut std::collections::HashMap<String, bool>,
+) -> AgentEvent {
+    let is_error = b.is_error.unwrap_or(false);
+    let (output, exit_code) = match commands.remove(&b.tool_use_id) {
+        Some(background) => {
+            let text = result_text(&b.content);
+            let (code, rest) = match text
+                .strip_prefix("Exit code ")
+                .map(|r| r.split_once('\n').unwrap_or((r, "")))
+                // (`Exit code 137 [killed]` for one stopped alone.)
+                .and_then(|(n, rest)| {
+                    Some((n.split_whitespace().next()?.parse::<i32>().ok()?, rest))
+                }) {
+                Some((code, rest)) => (Some(code), rest),
+                None => (None, text.as_str()),
+            };
+            let exit = code.or((!is_error && !background).then_some(0));
+            (zeron_proto::command_output_cap(rest), exit)
+        }
+        None => (None, None),
+    };
+    AgentEvent::ToolResult {
+        id: b.tool_use_id.clone(),
+        is_error,
+        output,
+        diff: None,
+        exit_code,
+    }
+}
+
+/// A `tool_result`'s text: its string, or its text blocks joined.
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 /// An id the CLI minted, safe in a path.
@@ -418,6 +477,9 @@ pub(crate) struct Normalizer {
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
     agent_spawn_tools: std::collections::HashSet<String>,
+    /// Bash calls not yet answered, tool_use id → whether it runs in the
+    /// background: their results carry the command's output and exit code.
+    command_calls: std::collections::HashMap<String, bool>,
     /// The typed fork of the turn under way (a turn runs one at most). Its
     /// replay feeds its chip only until the turn ends: a `forked-command-*`
     /// id after that stays the CLI's own, which no chip carries.
@@ -447,6 +509,7 @@ impl Normalizer {
             agent_tool_spawns: std::collections::HashMap::new(),
             skill_calls: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
+            command_calls: std::collections::HashMap::new(),
             typed_fork: None,
             fork_transcripts: true,
             assistant_message_id: new_message_id(),
@@ -653,6 +716,7 @@ impl Normalizer {
                 is_error: status == DoneStatus::Errored,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
         ]
     }
@@ -699,9 +763,10 @@ impl Normalizer {
             return Vec::new();
         };
         let events = if assistant {
+            note_commands(&f, &mut self.command_calls);
             subagent_message(&fork.chip, &f)
         } else {
-            subagent_results(&fork.chip, &f)
+            subagent_results(&fork.chip, &f, &mut self.command_calls)
         };
         if !events.is_empty()
             && let Some(uuid) = f.uuid
@@ -987,6 +1052,7 @@ impl Normalizer {
             }
 
             Frame::Assistant(f) => {
+                note_commands(&f, &mut self.command_calls);
                 if let Some(parent) = &f.parent_tool_use_id {
                     let parent = &self.route(parent).to_owned();
                     if self.fork_repeat(parent, f.uuid.as_deref()) {
@@ -1112,7 +1178,7 @@ impl Normalizer {
                     }
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
-                    let mut out = subagent_results(parent, &f);
+                    let mut out = subagent_results(parent, &f, &mut self.command_calls);
                     // A tagged user frame's TEXT blocks are the parent
                     // steering its subagent (SendMessage-style follow-ups —
                     // tool results ride their own blocks, filtered above).
@@ -1150,12 +1216,7 @@ impl Normalizer {
                         // A skill whose result came back without a task
                         // start ran inline: it never forks now.
                         self.skill_calls.remove(&b.tool_use_id);
-                        AgentEvent::ToolResult {
-                            id: b.tool_use_id.clone(),
-                            is_error: b.is_error.unwrap_or(false),
-                            output: None,
-                            diff: None,
-                        }
+                        tool_result(&b, &mut self.command_calls)
                     })
                     .collect()
             }
@@ -1395,6 +1456,149 @@ mod tests {
         ));
     }
 
+    /// Folds a Bash call and its result through a fresh normalizer and the
+    /// doc fold, returning the tool part.
+    fn folded_tool(
+        name: &str,
+        input: Value,
+        content: Value,
+        is_error: bool,
+    ) -> zeron_doc::MessagePart {
+        let mut n = Normalizer::new();
+        let mut parts = Vec::new();
+        for raw in [
+            json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_1", "name": name, "input": input}
+            ]}}),
+            json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": content, "is_error": is_error}
+            ]}}),
+        ] {
+            let frame = crate::claude::wire::parse_frame(&raw.to_string()).expect("frame parses");
+            for event in n.normalize(frame, false) {
+                zeron_doc::fold_event_into_parts(&mut parts, &event);
+            }
+        }
+        parts
+            .into_iter()
+            .find(|p| p.id() == "toolu_1")
+            .expect("tool part")
+    }
+
+    /// A failed Bash's long output: its `Exit code N` lead becomes the exit
+    /// code, and the doc keeps the last 10 lines / 1 KB, flagged, redacted.
+    #[test]
+    fn bash_output_folds_to_a_short_tail_with_its_exit_code() {
+        let body: String = (1..=300)
+            .map(|i| format!("test case_{i} ... FAILED\n"))
+            .collect::<String>()
+            + "curl -H 'Authorization: Bearer sk-ant-api03-abcdefghijklmnop' failed";
+        let text = format!("Exit code 2\n{body}");
+        let part = folded_tool("Bash", json!({"command": "cargo test"}), json!(text), true);
+        let zeron_doc::MessagePart::Tool {
+            is_error,
+            output: Some(tail),
+            output_bytes,
+            output_truncated,
+            exit_code,
+            ..
+        } = &part
+        else {
+            panic!("no tail: {part:?}");
+        };
+        assert!(*is_error);
+        assert_eq!(*exit_code, Some(2));
+        assert!(*output_truncated);
+        assert_eq!(*output_bytes, Some(body.len() as u64));
+        assert!(tail.lines().count() <= 10, "{} lines", tail.lines().count());
+        assert!(tail.len() <= 1024, "{} bytes", tail.len());
+        assert!(tail.contains("test case_300 ... FAILED"));
+        assert!(!tail.contains("test case_250 "));
+        assert!(!tail.starts_with("Exit code"));
+        assert!(!tail.contains("sk-ant-api03"), "key survived: {tail}");
+    }
+
+    /// A short successful command keeps all its output, exit 0, unflagged;
+    /// array-shaped content reads like a string; a background command has no
+    /// exit code yet; a stopped one's `Exit code 137 [killed]` still parses.
+    #[test]
+    fn bash_results_read_their_exit_status() {
+        let ok = folded_tool(
+            "Bash",
+            json!({"command": "ls"}),
+            json!([{"type": "text", "text": "a.rs\nb.rs\n"}]),
+            false,
+        );
+        assert!(matches!(
+            &ok,
+            zeron_doc::MessagePart::Tool { output: Some(o), exit_code: Some(0), output_truncated: false, .. }
+                if o == "a.rs\nb.rs"
+        ));
+        let bg = folded_tool(
+            "Bash",
+            json!({"command": "npm run dev", "run_in_background": true}),
+            json!("Command running in background with ID: b1"),
+            false,
+        );
+        assert!(matches!(
+            &bg,
+            zeron_doc::MessagePart::Tool {
+                exit_code: None,
+                output: Some(_),
+                ..
+            }
+        ));
+        let killed = folded_tool(
+            "Bash",
+            json!({"command": "sleep 99"}),
+            json!("Exit code 137 [killed]"),
+            true,
+        );
+        assert!(matches!(
+            &killed,
+            zeron_doc::MessagePart::Tool {
+                exit_code: Some(137),
+                output: None,
+                ..
+            }
+        ));
+    }
+
+    /// A file read's result never reaches the event, let alone the doc.
+    #[test]
+    fn a_read_result_keeps_no_output() {
+        let mut n = Normalizer::new();
+        let mut events = Vec::new();
+        for raw in [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_r","name":"Read","input":{"file_path":"/w/.env"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_r","content":"API_KEY=hunter2"}]}}"#,
+        ] {
+            events.extend(n.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false));
+        }
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolResult {
+                output: None,
+                exit_code: None,
+                ..
+            }
+        )));
+        let part = folded_tool(
+            "Read",
+            json!({"file_path": "/w/.env"}),
+            json!("API_KEY=hunter2"),
+            false,
+        );
+        assert!(matches!(
+            &part,
+            zeron_doc::MessagePart::Tool {
+                output: None,
+                exit_code: None,
+                ..
+            }
+        ));
+    }
+
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
         Normalizer::new().normalize(frame, false)
@@ -1522,6 +1726,8 @@ mod tests {
                     is_error: false,
                     output: None,
                     diff: None,
+                    // (A subagent's Bash too: no `Exit code` lead, it exited 0.)
+                    exit_code: Some(0),
                 }),
             }]
         );
@@ -2026,6 +2232,7 @@ mod tests {
                 is_error: status == DoneStatus::Errored,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
         ]
     }

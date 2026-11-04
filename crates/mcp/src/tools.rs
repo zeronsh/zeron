@@ -126,11 +126,11 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a standalone session with kind chat, or a child with kind side. Omitted kind defaults to side with an origin/parent, standalone otherwise. Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["chat", "side"], "description": "chat: standalone, no parent allowed. side: requires parent or origin. Omit for legacy defaults." },
+                    "kind": { "type": "string", "enum": ["subagent", "side", "chat"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. Omitted: subagent with a parent/origin, chat otherwise." },
                     "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
                     "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
@@ -212,7 +212,7 @@ fn catalog() -> Vec<ToolDef> {
         (
             "create_chats",
             "create_chat",
-            "Create multiple standalone or side chats concurrently (kind per request). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
+            "Create multiple chats concurrently: subagents of your chat by default, or side/standalone chats (kind per request, as create_chat). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
         ),
         (
             "send_messages",
@@ -558,6 +558,7 @@ struct ListChatsArgs {
 enum ChatKind {
     Chat,
     Side,
+    Subagent,
 }
 
 #[derive(Deserialize, Default)]
@@ -715,6 +716,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
         "archived": chat.archived,
         "parentChatId": chat.parent_chat_id,
+        "childKind": chat.child_kind,
         "status": status,
         "sessionStatus": session.as_ref().map(|s| s.status),
         "statusStale": session.as_ref().is_some_and(|s| zeron_proto::view::session_stale(s, now)),
@@ -1027,13 +1029,16 @@ impl Tools {
             .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent))
         };
         anyhow::ensure!(
-            args.kind != Some(ChatKind::Side) || parent_chat_id.is_some(),
-            "kind side requires a parent or origin chat"
+            !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent)) || parent_chat_id.is_some(),
+            "kind {} requires a parent or origin chat",
+            if args.kind == Some(ChatKind::Side) { "side" } else { "subagent" }
         );
-        let kind = if parent_chat_id.is_some() {
-            ChatKind::Side
-        } else {
-            ChatKind::Chat
+        // A child is a subagent unless asked for as a side chat: delegated
+        // work lists under its parent's Subagents, not its side chats.
+        let kind = match (args.kind, parent_chat_id.is_some()) {
+            (_, false) => ChatKind::Chat,
+            (Some(ChatKind::Side), true) => ChatKind::Side,
+            (_, true) => ChatKind::Subagent,
         };
 
         // Delegation is one level deep: a chat that has a parent never
@@ -1166,6 +1171,10 @@ impl Tools {
         }
         if let Some(parent) = &parent_chat_id {
             mutate["parentChatId"] = json!(parent);
+            mutate["childKind"] = json!(match kind {
+                ChatKind::Side => zeron_proto::ChildKind::Side,
+                _ => zeron_proto::ChildKind::Subagent,
+            });
         }
         if let Some(branch) = args
             .branch
@@ -1272,6 +1281,11 @@ impl Tools {
                 harness_session_cwd: None,
                 harness_session_harness: None,
                 parent_chat_id: parent_chat_id.clone(),
+                child_kind: match kind {
+                    ChatKind::Side => Some(zeron_proto::ChildKind::Side),
+                    ChatKind::Subagent => Some(zeron_proto::ChildKind::Subagent),
+                    ChatKind::Chat => None,
+                },
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
@@ -2717,11 +2731,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kinds_preserve_defaults_and_reject_invalid_arguments_before_writing() {
+    async fn kinds_default_children_to_subagents_and_reject_invalid_arguments_before_writing() {
         let world = Arc::new(World::default());
         let root = tools(world.clone(), Origin::default());
         for args in [
             json!({"kind":"side"}),
+            json!({"kind":"subagent"}),
             json!({"kind":"unknown"}),
             json!({"kind":"chat", "parent":"Alpha", "title":"must not write"}),
         ] {
@@ -2740,8 +2755,11 @@ mod tests {
             (json!({"kind":"chat"}), "chat", Value::Null),
             (json!({"kind":"chat", "parent":"  "}), "chat", Value::Null),
             (json!({"kind":"side"}), "side", json!("chat-alpha-1")),
-            (json!({}), "side", json!("chat-alpha-1")),
-            (json!({"parent":"Beta"}), "side", json!("chat-beta-2")),
+            (json!({"kind":"subagent"}), "subagent", json!("chat-alpha-1")),
+            // A child of your own chat, kind omitted: a subagent.
+            (json!({}), "subagent", json!("chat-alpha-1")),
+            (json!({"parent":"Beta"}), "subagent", json!("chat-beta-2")),
+            (json!({"kind":"side", "parent":"Beta"}), "side", json!("chat-beta-2")),
         ] {
             let created = from_chat.call("create_chat", args).await.unwrap();
             assert_eq!(created["kind"], kind);
@@ -2750,8 +2768,11 @@ mod tests {
             let row = &writes.last().unwrap().1;
             if kind == "chat" {
                 assert!(row.get("parentChatId").is_none());
+                assert!(row.get("childKind").is_none());
             } else {
                 assert_eq!(row["parentChatId"], parent);
+                // The row says what the child is to its parent.
+                assert_eq!(row["childKind"], kind);
             }
         }
         assert_eq!(
@@ -2763,6 +2784,11 @@ mod tests {
                 .await
                 .unwrap()["kind"],
             "side"
+        );
+        // An explicit parent from outside any chat: a subagent of it.
+        assert_eq!(
+            root.call("create_chat", json!({"parent":"Alpha"})).await.unwrap()["kind"],
+            "subagent"
         );
     }
 
