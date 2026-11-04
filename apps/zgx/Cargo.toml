@@ -25,6 +25,9 @@ path = "src/main.rs"
 # ~/.zeron, port 27654), managed as Zeron.app manages it. Without it, the app
 # stays on staging (src/auth.rs, src/engine/manager.rs).
 beta = []
+# The layout benchmarks that read a probed zgx (docs/zgx-layout-probe.patch;
+# `live_reflow_traced` in src/split_tests.rs says how). Off in every build.
+layout_probe = []
 
 [dependencies]
 zgx = { git = "https://github.com/zeronsh/zgx", rev = "7cd25fc145e81df496bb00359a579af92102566e" }

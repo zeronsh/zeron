@@ -2807,7 +2807,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- list (whose rows all shrink together) never finds a thousand tiny
 		-- ones in view and builds them all.
 		local t = clock:peek()
-		local view = (list_view.height or 0) + 2 * SLOT
+		-- (As the list stands now, not followed: a ref's field follows its
+		-- whole box, and every frame of the sidebar's edge dragged or the
+		-- window resized would build this again, for every row.)
+		local list_now = list_view:peek()
+		local view = ((list_now and list_now.height) or 0) + 2 * SLOT
 		if view < 600 then
 			view = 600
 		end
