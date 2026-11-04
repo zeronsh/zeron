@@ -433,8 +433,10 @@ local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 -- The title bar's controls' size (the Expand button stands with them).
 local CONTROL = ds.island.metrics().control
 -- Expand's glyph (icons.zeron.sh's arrows), weighing as the panel toggle's.
+-- (Smaller than the toggle's 16: open arrows reaching the full height look
+-- taller than a closed frame of the same height.)
 local function expand_glyph(which: string): Node
-	return Icon { name = if which == "collapse" then "collapse-arrows" else "expand-arrows", size = 16, glyph_stroke = true }
+	return Icon { name = if which == "collapse" then "collapse-arrows" else "expand-arrows", size = 14, glyph_stroke = true }
 end
 
 -- A prop's value now (`control.value`: a function's answer, a state's,

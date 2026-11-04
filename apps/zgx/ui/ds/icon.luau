@@ -159,11 +159,11 @@ local function file(name: string): string
 	return if code then `code:{code}` else `assets/icons/ui/{key}.svg`
 end
 
--- `src`, its stroke the theme's. (The token is in points at 16; the source is
--- 24 units across, so it scales with the icon as the source's line does.)
-local function in_glyph_stroke(src: string): string
+-- `src`, its stroke the theme's, those points at any `size`. (The source is
+-- 24 units across, drawn `size` points across.)
+local function in_glyph_stroke(src: string, size: number): string
 	local points = (ui.theme.get("zeron.glyph.stroke") :: number?) or 1.1667
-	return (string.gsub(src, 'stroke%-width="[%d%.]+"', `stroke-width="{points * 24 / 16}"`))
+	return (string.gsub(src, 'stroke%-width="[%d%.]+"', `stroke-width="{points * 24 / size}"`))
 end
 
 return function(props: Props): Node
@@ -174,7 +174,7 @@ return function(props: Props): Node
 		src = if type(name) == "function" or themed
 			then function()
 				local src = file(if type(name) == "function" then name() else name)
-				return if themed then in_glyph_stroke(src) else src
+				return if themed then in_glyph_stroke(src, size) else src
 			end
 			else file(name),
 		w = size,
