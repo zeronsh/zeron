@@ -3679,6 +3679,7 @@ mod image_tests {
             None,
             Some(checkout.to_string_lossy().into_owned()),
             None,
+            None,
         )
         .unwrap();
         let repos = Repos::new(&dir.path().join("data"), "cloud-session");

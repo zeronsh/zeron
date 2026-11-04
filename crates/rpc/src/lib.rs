@@ -258,6 +258,10 @@ pub mod methods {
     // its host's runtime: `{chatId, taskId}`, relay-forwardable.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
     pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
+    /// `{chatId, toolId, offset}` → `ToolOutputChunk`: one command's whole
+    /// output, from the run journal of the device that ran it, redacted;
+    /// relay-forwardable (target the chat's host).
+    pub const READ_TOOL_OUTPUT: &str = "ReadToolOutput";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
@@ -677,7 +681,8 @@ pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
 /// `Review*`), signing (`SignPlugin`, `PluginSigningKey`), updating
 /// (`UpdatePlugin`, `UpdateTemplate`, the engine's and harnesses'),
 /// credentials (`AccessToken`, sign-in, `StepUp`, `DeleteAccount`),
-/// terminals, files, vault and agent logins.
+/// terminals, files, vault and agent logins, and a command's whole output
+/// (`ReadToolOutput`: an agent reads a chat as its doc keeps it).
 pub fn agent_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -741,6 +746,11 @@ pub mod capability_errors {
     pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
     pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
     pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
+    /// `ReadToolOutput`: the host's journal doesn't hold that command (an
+    /// old chat, or one whose journal is gone).
+    pub const TOOL_OUTPUT_UNAVAILABLE: &str = "tool_output.unavailable";
+    /// `ReadToolOutput`: the command has no result yet.
+    pub const TOOL_OUTPUT_NOT_FINISHED: &str = "tool_output.not_finished";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1319,6 +1329,7 @@ mod tests {
             methods::EXPORT_PLUGIN,
             // The window's own watch of the theme files.
             methods::WATCH_THEMES,
+            methods::READ_TOOL_OUTPUT,
         ] {
             assert!(!agent_allowed(method), "{method}");
             match agent.call(method, serde_json::json!({})).await {

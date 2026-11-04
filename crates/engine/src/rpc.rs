@@ -41,6 +41,12 @@
 //!   `ReadChatImageChunk {chatId, path, offset}` → the same reply, for an image
 //!   a reply names in Markdown (jailed to that one chat's working folder, no
 //!   link followed).
+//! - Tool outputs: `ReadToolOutput {chatId, toolId, offset}` → `ToolOutputChunk`
+//!   (`{text, nextOffset, done, bytes, lines, trimmed, exitCode?}`): one command's
+//!   whole output from this host's run journal, redacted as the doc's tail is
+//!   ([`crate::tool_output`]). Answered only by the chat's host; a command it
+//!   has no record of fails `tool_output.unavailable`, one still running
+//!   `tool_output.not_finished` (capability error codes).
 //!
 //! ## Device-addressed routing (`targetDeviceId`, feature-inventory §2.1)
 //!
@@ -571,6 +577,16 @@ struct ReadAttachmentChunkParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ReadToolOutputParams {
+    /// The doc the tool part is in: a chat, or a subagent's doc in it.
+    chat_id: String,
+    tool_id: String,
+    #[serde(default)]
+    offset: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReadChatImageChunkParams {
     chat_id: String,
     path: String,
@@ -702,6 +718,11 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// What the child is to its parent (`childKind`: `side` | `subagent`,
+        /// the Zeron MCP's `kind`): kept on the row only with a parent. An
+        /// unknown kind reads as none (a side chat).
+        #[serde(default, deserialize_with = "zeron_proto::lenient_child_kind")]
+        child_kind: Option<zeron_proto::ChildKind>,
         /// Run on Cloud (the checkout picker's Cloud): the chat gets its own
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
@@ -1807,6 +1828,7 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                child_kind,
                 cloud: _,
             } => {
                 // A voice orchestrator is hidden, so the chats it creates are
@@ -1814,13 +1836,15 @@ impl EngineRpc {
                 let parent_chat_id = parent_chat_id
                     .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
                 self.workspace
-                    .create_chat_with_parent(
+                    .create_chat_hosted(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
+                        None,
                         config,
                         cwd,
                         parent_chat_id,
+                        child_kind,
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -2322,6 +2346,8 @@ fn forwardable(method: &str) -> bool {
             | methods::UPLOAD_COMMIT
             | methods::READ_ATTACHMENT_CHUNK
             | methods::READ_CHAT_IMAGE_CHUNK
+            // A command's whole output lives in its host's run journal.
+            | methods::READ_TOOL_OUTPUT
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
             | methods::APPLY_UPDATE
@@ -3624,6 +3650,7 @@ impl RpcService for EngineRpc {
                     branch,
                     cwd,
                     parent_chat_id,
+                    child_kind,
                     cloud,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
@@ -3654,6 +3681,7 @@ impl RpcService for EngineRpc {
                             config.clone(),
                             cwd.clone(),
                             parent_chat_id.clone(),
+                            *child_kind,
                         )
                         .map_err(failed)?;
                     if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -5005,6 +5033,38 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 RpcReply::value(&chunk)
             }
+            methods::READ_TOOL_OUTPUT => {
+                let p: ReadToolOutputParams = parse_params(params)?;
+                // Only the host has the journal; the same chat check as a
+                // reply's pictures (`chat_image_root`). A subagent's doc is
+                // its root chat's.
+                let chat_id = crate::tool_output::journal_chat(&p.chat_id);
+                let chat = self
+                    .workspace
+                    .chat(chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::BadParams("chat not found".into()))?;
+                if chat.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::BadParams("chat belongs to another device".into()));
+                }
+                use crate::tool_output::ToolOutputError as E;
+                let chunk = self
+                    .sessions
+                    .read_tool_output(&p.chat_id, &p.tool_id, p.offset)
+                    .await
+                    .map_err(|e| match e {
+                        E::NotACommand | E::BadOffset => RpcError::BadParams(e.to_string()),
+                        // Stable codes: a client words these for its reader.
+                        E::NotAvailable => RpcError::Capability(
+                            capability_errors::TOOL_OUTPUT_UNAVAILABLE.into(),
+                        ),
+                        E::NotFinished => RpcError::Capability(
+                            capability_errors::TOOL_OUTPUT_NOT_FINISHED.into(),
+                        ),
+                        E::Journal(err) => RpcError::Failed(err.to_string()),
+                    })?;
+                RpcReply::value(&chunk)
+            }
             methods::PUBLISH_VISUAL => {
                 let p: PublishVisualParams = parse_params(params)?;
                 let title: String = p
@@ -5185,6 +5245,43 @@ mod tests {
             .unwrap();
             let row = core.workspace.chat(chat).unwrap().unwrap();
             assert_eq!(row.parent_chat_id.as_deref(), expected);
+        }
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_child_s_kind_is_recorded_only_with_a_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        use zeron_proto::ChildKind;
+        for (chat, parent, kind, expected) in [
+            ("sub", Some("main"), Some("subagent"), Some(ChildKind::Subagent)),
+            ("side", Some("main"), Some("side"), Some(ChildKind::Side)),
+            // A person's side chat names none; a newer peer's kind reads as none.
+            ("plain-side", Some("main"), None, None),
+            ("future", Some("main"), Some("orbit"), None),
+            // Without a parent, no kind.
+            ("top", None, Some("subagent"), None),
+        ] {
+            let mut params = serde_json::json!({"op":"createChat", "chatId":chat,
+                "deviceId":core.device_id,
+                "config":{"harness":"codex","sandbox":"workspace-write"}});
+            if let Some(parent) = parent {
+                params["parentChatId"] = parent.into();
+            }
+            if let Some(kind) = kind {
+                params["childKind"] = kind.into();
+            }
+            rpc.handle(methods::MUTATE, params).await.unwrap();
+            let row = core.workspace.chat(chat).unwrap().unwrap();
+            assert_eq!(row.child_kind, expected, "{chat}");
         }
         core.sessions.shutdown().await;
     }

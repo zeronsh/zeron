@@ -37,10 +37,11 @@ For parallel delegation, use `create_chats` with a prompt for each chat or \
 even if your harness executes tool calls sequentially. Alternatively, launch ALL \
 chats/messages with `wait: false` first, then use `wait_for_turn` to collect replies. \
 Do not wait for one worker before launching the next independent worker. \
-Use `kind: chat` in `create_chat` or each `create_chats` request for a standalone \
-session visible in Sessions; it cannot have a parent. Use `kind: side` for a child \
-with an explicit parent or your origin chat. Omitted kind keeps legacy defaults: \
-side with an origin/parent, standalone otherwise. \
+A chat you create from your chat is your subagent by default (`kind: subagent`): \
+it lists under your chat's Subagents and in its transcript's subagent block. Use \
+`kind: side` only for a side conversation the person should treat as their own, \
+and `kind: chat` for a standalone session visible in Sessions (no parent). Omitted \
+kind: subagent with an origin/parent, standalone otherwise. \
 Discover hosts with `list_devices`, then `list_projects {device}`, \
 `list_harnesses {device}` and `list_models {device, harness}`. A project fixes \
 its host; with both project and device it must belong to that device. Use listed \
