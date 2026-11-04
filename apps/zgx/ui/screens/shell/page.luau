@@ -1129,22 +1129,23 @@ return function(props: Props): Node
 	local BAND, LEAST = "25%", 48
 	local ZONES: { [string]: { [string]: any } } = {
 		top = { left = BAND, right = BAND, top = 0, h = BAND, min_h = LEAST },
-		bottom = { left = BAND, right = BAND, h = BAND, min_h = LEAST },
+		-- (From where it starts over a composer at rest: a taller one takes from it,
+		-- rather than pushing it up the pane into the middle.)
+		bottom = { left = BAND, right = BAND, top = "75%", mt = ui.raw(-(Dock.GAP + Dock.REST), "over a composer at rest"), min_h = LEAST },
 		left = { left = 0, top = 0, w = BAND, min_w = LEAST },
 		right = { right = 0, top = 0, w = BAND, min_w = LEAST },
 	}
-	-- The room a pane's composer takes at its foot: the window's own,
-	-- measured, over the focused one; a pane's own at rest over another.
-	local function composer_room(id: string): number
-		local h = if splits.focused:get() == id then chat_shared.dock_h:get() else Dock.REST
-		return Dock.GAP + h
-	end
+	-- The room a pane's composer takes at its foot: the window's own, measured, over
+	-- the focused one; a pane's own over another.
 	local function zone(id: string, side: string): Node
 		local props: { [any]: any } = table.clone(ZONES[side])
 		props.absolute = true
 		if side ~= "top" then
+			-- (A pane's own, as its lane measures it: a draft with a chip stands taller.)
+			local own = LaneTab.dock_height(`split-{id}`)
 			props.bottom = function(): number
-				return ui.raw(composer_room(id), "the pane's composer, which attaches")
+				local h = if splits.focused:get() == id then chat_shared.dock_h:get() else own:get()
+				return ui.raw(Dock.GAP + h, "the pane's composer, which attaches")
 			end
 		end
 		props.pointer_events = "auto"
@@ -1655,8 +1656,7 @@ return function(props: Props): Node
 				return props.width() - (row_ref.width or props.width())
 			end,
 			start = function(): number
-				-- (`controls_end` holds the row's own 10 past its last control.)
-				local past = ds.TitleBar.controls_end() - 10 + 8
+				local past = ds.TitleBar.last_control_end() + 8
 				if sidebar_settled() <= 0 then
 					return past
 				end

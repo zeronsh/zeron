@@ -71,6 +71,7 @@ const BACK: &str = "#titlebar >> role:button \"Back\"";
 const FORWARD: &str = "#titlebar >> role:button \"Forward\"";
 const PANEL: &str = "#titlebar >> role:button \"Panel\"";
 const VIEW: &str = "role:button \"Sidebar view options\"";
+const TAB: &str = "#session-tabs >> role:tab";
 
 /// What a press (and release) at `(x, y)` asks of the window.
 fn press(app: &mut TestApp, x: f32, y: f32) -> Option<WindowGesture> {
@@ -85,10 +86,10 @@ fn press(app: &mut TestApp, x: f32, y: f32) -> Option<WindowGesture> {
     gesture
 }
 
-/// Everything on the bar on one line: the bar's own controls, the session's
-/// title, the panel's toggle and the sidebar's "…", their middles on `line`.
+/// Everything on the bar on one line: the bar's own controls, the panel's
+/// toggle and the sidebar's "…", their middles on `line`.
 fn on_line(app: &mut TestApp, line: f32, when: &str) {
-    for target in [TOGGLE, BACK, FORWARD, PANEL, VIEW, "#page-title"] {
+    for target in [TOGGLE, BACK, FORWARD, PANEL, VIEW] {
         if app.find(target).is_none() {
             continue;
         }
@@ -96,10 +97,7 @@ fn on_line(app: &mut TestApp, line: f32, when: &str) {
         if b.width <= 0. {
             continue;
         }
-        // (v3's title, in its card, stands a point under the bar's line, as
-        // shell_tests allows: the card's hairline.)
-        let slack = if target == "#page-title" { 1. } else { 0.5 };
-        assert!((mid(b) - line).abs() <= slack, "{when}: {target} {b:?} isn't on the line {line}");
+        assert!((mid(b) - line).abs() <= 0.5, "{when}: {target} {b:?} isn't on the line {line}");
     }
 }
 
@@ -114,30 +112,30 @@ fn beside_windows_caption_buttons_zerons_controls_start_at_the_left_on_their_lin
     assert_eq!(toggle.x, 10., "the toggle {toggle:?}");
     on_line(&mut app, 16., "a new chat");
 
-    // A session: its title and the panel's toggle on that line, clear of the
-    // caption buttons (the toggle as far in from them as from an edge).
+    // A session: the panel's toggle on that line, clear of the caption
+    // buttons (the toggle as far in from them as from an edge), and its tab
+    // short of the toggle.
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
     app.frames(30);
     on_line(&mut app, 16., "a session");
     let panel = app.bounds(PANEL);
     assert!((panel.x + panel.width - (caption - DIVIDED)).abs() <= 0.5, "the panel's toggle {panel:?} isn't one rhythm's room before the caption buttons (from {caption})");
-    let title = app.bounds("#page-title");
-    assert!(title.x + title.width <= panel.x, "the title {title:?} runs under the panel's toggle {panel:?}");
+    let tab = app.bounds(TAB);
+    assert!(tab.x + tab.width <= panel.x, "the tab {tab:?} runs under the panel's toggle {panel:?}");
 
-    // Collapsed: the title starts past the controls, as the shipping app's
-    // (10 + its 82 of controls + 8), still on the line.
+    // Collapsed: the tabs start past the controls, as the shipping app's title
+    // did (10 + its 82 of controls + 8), the controls still on the line.
     app.click(TOGGLE);
     app.frames(40);
-    let (title, forward) = (app.bounds("#page-title"), app.bounds(FORWARD));
-    assert!(title.x >= forward.x + forward.width, "the title {title:?} under the controls (Forward {forward:?})");
-    assert!((title.x - 100.).abs() <= 1., "the title {title:?}");
+    let (tab, forward) = (app.bounds(TAB), app.bounds(FORWARD));
+    assert!(tab.x >= forward.x + forward.width, "the tab {tab:?} under the controls (Forward {forward:?})");
     on_line(&mut app, 16., "collapsed");
 
     // The strip still moves the window, under the caption buttons' line,
-    // but for the controls.
+    // but for the controls and the tab.
     for x in [60., 400., 700., caption - 60.] {
         let mut boxes = Vec::new();
-        for t in [TOGGLE, BACK, FORWARD, PANEL] {
+        for t in [TOGGLE, BACK, FORWARD, PANEL, TAB] {
             if app.find(t).is_some() {
                 boxes.push(app.bounds(t));
             }
@@ -147,8 +145,12 @@ fn beside_windows_caption_buttons_zerons_controls_start_at_the_left_on_their_lin
             assert_eq!(press(&mut app, x, 16.), Some(WindowGesture::Drag), "a press at {x} on the caption buttons' line");
         }
     }
+    let tab = app.bounds(TAB);
+    assert!((tab.x - 100.).abs() <= 1., "the tab {tab:?}");
 }
 
+/// The panel's tabs stand in its card, under the caption buttons. What stands on
+/// their line is the top bar's: the chats' tabs and Expand, clear of them.
 #[test]
 fn the_panels_strip_clears_windows_caption_buttons_on_their_line() {
     let mut app = mount(windows(W));
@@ -158,13 +160,13 @@ fn the_panels_strip_clears_windows_caption_buttons_on_their_line() {
     app.frames(40);
     let strip = app.bounds("#panel-strip");
     assert!(strip.width > 0., "the panel's strip {strip:?}");
-    for tab in ["role:tab"] {
-        if app.find(tab).is_some() {
-            let b = app.bounds(tab);
-            assert!((mid(b) - 16.).abs() <= 0.5, "a tab {b:?} off the caption buttons' line");
-            assert!(b.x + b.width <= W - 138., "a tab {b:?} under the caption buttons");
-        }
-    }
+    assert!(strip.y >= 32., "the panel's strip {strip:?} under the caption buttons");
+    let expand = app.bounds("#panel-expand");
+    assert!((mid(expand) - 16.).abs() <= 0.5, "Expand {expand:?} off the caption buttons' line");
+    assert!(expand.x + expand.width <= W - 138., "Expand {expand:?} under the caption buttons");
+    let tab = app.bounds(TAB);
+    assert!(tab.x + tab.width <= W - 138., "a tab {tab:?} under the caption buttons");
+    assert!((mid(tab) - 16.).abs() <= 0.5, "a tab {tab:?} off the caption buttons' line");
 }
 
 #[test]
@@ -181,7 +183,8 @@ fn beside_gnomes_buttons_at_the_right_the_line_stays_and_the_toggle_starts_at_th
 }
 
 /// macOS exactly as before: the toggle 88 in beside the lights, the line 21
-/// down, the collapsed title past the controls' island (180) by 4.
+/// down, and collapsed, the tabs past the controls (Forward's end, 172) by 8, on
+/// that line.
 #[test]
 fn beside_the_traffic_lights_nothing_moves() {
     for (report, when) in [(macos(W), "the lights reported"), (Report { area: None, controls: None }, "nothing reported (full screen)")] {
@@ -193,8 +196,9 @@ fn beside_the_traffic_lights_nothing_moves() {
         on_line(&mut app, MAC_LINE, when);
         app.click(TOGGLE);
         app.frames(40);
-        let title = app.bounds("#page-title");
-        assert!((title.x - 184.).abs() <= 1., "{when}: the title {title:?}");
+        let (tab, forward) = (app.bounds(TAB), app.bounds(FORWARD));
+        assert!((tab.x - (forward.x + forward.width + 8.)).abs() <= 1., "{when}: the tab {tab:?} (Forward {forward:?})");
+        assert!((mid(tab) - MAC_LINE).abs() <= 0.5, "{when}: the tab {tab:?} isn't on the line");
     }
 }
 

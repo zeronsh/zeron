@@ -1339,6 +1339,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		pl = motion.tween(ui.computed(function(): number
 			return if fit.current:get().sidebar then 5 else 0
 		end), motion.sidebar),
+		-- (That gap's top moves the window, as the bar beside it does.)
+		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,
 		rename_dialog(),
 		delete_dialog(),

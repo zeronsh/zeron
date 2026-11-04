@@ -152,10 +152,12 @@ end
 -- row's end: ROW_PAD past its last control; alone at the window's left
 -- (off macOS, the window's buttons at the right), its island holds it
 -- evenly, as far past its end as before its start.
+local function controls_tail(start: number): number
+	return if not on_macos() and start == ROW_PAD then ROW_PAD - island.metrics().inset else ROW_PAD
+end
 local function controls_w(start: number): number
 	local m = island.metrics()
-	local tail = if not on_macos() and start == ROW_PAD then ROW_PAD - m.inset else ROW_PAD
-	return m.control + m.group + m.control + m.gap + m.control + tail
+	return m.control + m.group + m.control + m.gap + m.control + controls_tail(start)
 end
 
 -- Whether the window is in full screen, untracked (a value to start from).
@@ -547,6 +549,11 @@ local function controls_end(full: boolean?, tracked: boolean?): number
 	local start = toggle_in(at, tracked ~= false)
 	return start + controls_w(start)
 end
+-- Where the last of them ends: `controls_end` less the row's own room past it.
+local function last_control_end(): number
+	local start = toggle_in(full_screen(), true)
+	return start + controls_w(start) - controls_tail(start)
+end
 
 -- `window_buttons_right()`, `actions_right()`, `middle()`: where the
 -- window's own buttons and the page's controls stand on the bar, and its
@@ -554,6 +561,7 @@ end
 local M = setmetatable({
 	control = control,
 	controls_end = controls_end,
+	last_control_end = last_control_end,
 	window_buttons_right = window_buttons_right,
 	actions_right = actions_right,
 	middle = middle,

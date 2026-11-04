@@ -619,7 +619,10 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			return -props.window_x()
 		end,
 		right = 0,
-		top = ui.raw(4, "on the top bar"),
+		-- (On the bar's line, wherever the platform has it.)
+		top = function(): number
+			return ui.raw(ds.TitleBar.middle() - 17, "on the top bar's line")
+		end,
 		h = 34,
 		pointer_events = "none",
 		ui.row {
