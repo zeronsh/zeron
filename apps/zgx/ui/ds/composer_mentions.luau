@@ -66,6 +66,8 @@ export type Use = {
 	-- Whether a trigger opens anything (an agent's "Use $ for skills"
 	-- off: `$` is ordinary text); by default, every one.
 	enabled: ((trigger: Trigger) -> boolean)?,
+	-- Whether its composer is in view (by default, it is).
+	in_view: (() -> boolean)?,
 }
 
 -- Wires the mentions to a draft: returns what the composer needs.
@@ -105,6 +107,11 @@ function M.use(opts: Use)
 	end
 	local function open(): boolean
 		local t = token:get()
+		-- (Its composer in view: Settings standing over the page, it has nothing to
+		-- hang from.)
+		if opts.in_view and not opts.in_view() then
+			return false
+		end
 		return t ~= nil and dismissed:get() ~= t.from
 	end
 	-- The window going to the back closes every popover, as AppKit's do: not a

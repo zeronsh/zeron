@@ -380,6 +380,36 @@ fn the_composers_menu_comes_back_with_the_window_and_stays_shut_after_escape() {
     assert!(!open_now(&mut app), "dismissed stays dismissed");
 }
 
+/// Leaving Settings, the composer is where it was, no glide: the page hidden behind
+/// them, with no height, isn't somewhere it moved to.
+#[test]
+fn coming_back_from_settings_the_composer_doesnt_move() {
+    let mut app = mount(&scratch("settings-composer"));
+    app.ui.scene.borrow_mut().resize(1400., H);
+    app.frames(60);
+    let home = app.bounds("#chat-composer").y;
+    assert!(app.host.run_command("shell.settings"));
+    // (In real time: what's hidden settling while Settings show.)
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        app.frame();
+    }
+    assert!(app.host.run_command("shell.new_chat"));
+    let mut seen = Vec::new();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        app.frame();
+        seen.push(app.bounds("#chat-composer").y);
+    }
+    for y in &seen {
+        assert!((y - home).abs() <= 1., "at {home}, then {seen:?}");
+    }
+    // Cmd+R: the panel, here too.
+    assert!(app.host.run_command("shell.toggle_files"));
+    app.frames(60);
+    assert!(app.bounds("#shell-files").width > 300., "the panel opens on a new chat");
+}
+
 /// A templates folder as a launch leaves it (the default's copy, and the
 /// official templates installed beside it), with `.live` composed for
 /// `id` and the shell's fixture (and what it loads, beside app.luau) in it.
