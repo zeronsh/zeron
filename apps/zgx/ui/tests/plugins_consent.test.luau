@@ -226,6 +226,22 @@ test("a shell or an interpreter says it's full control, by name, each program it
 	expect(tree).to_contain("They run as you, with your sign-ins.")
 end)
 
+test("a host named exactly says it can be on this computer or your network", function()
+	local app = open()
+	app:command("hosts")
+	app:frames(20)
+	local tree = app:tree("#consent")
+	expect(tree).to_contain("A named host can be on this computer or your network.")
+	expect(tree).to_contain("box.example.ts.net")
+	expect(tree).to_contain("localhost:8080: this Mac or your network")
+	-- A wildcard never reaches a private address, so it isn't said.
+	app:command("wildcard_hosts")
+	app:frames(20)
+	tree = app:tree("#consent")
+	expect(tree).to_contain("*.example.org")
+	expect(tree).never.to_contain("A named host")
+end)
+
 test("a program nobody knows says what it always did", function()
 	local app = open()
 	app:command("unknown_tool")

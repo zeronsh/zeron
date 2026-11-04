@@ -3049,7 +3049,8 @@
         "network": {
           "title": "连接互联网",
           "title_any": "连接到互联网上的任何网站",
-          "title_hosts": "连接到这些地方"
+          "title_hosts": "连接到这些地方",
+          "detail_named": "指定的主机可能在这台电脑或你的网络上。"
         },
         "clipboard": {
           "title": "读取和更改你的剪贴板"

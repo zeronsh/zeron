@@ -76,7 +76,7 @@ With `network`, `ui.fetch`, remote pictures and the service's `zeron.fetch` all 
 - With a port, only that port. Without one (`"localhost"`, `"nas.local"`), any port on that host, which suits a dev server that changes ports. There's no port wildcard or range.
 - `localhost` and `127.0.0.1` are different hosts: name the one you use.
 - Naming any host narrows the plugin to the hosts you name, public ones included: a plugin that reaches `localhost:8080` and the internet lists its public hosts too (`*.example.org` covers names under it, never a private address).
-- A host that reads as local (`localhost`, an address, `.local`) asks the person again when an update adds it.
+- A host named exactly asks the person again when an update adds it, whatever it reads as, because it reaches where it resolves. The sheet says a named host can be on this computer or their network. A `*.` name never reaches a private address, so it needs no asking. A name like `box.tailnet.ts.net` that resolves to your network works once it's named and allowed.
 
 A refused request fails with an error that names what to add, such as `add "localhost:3000" to "network": { "hosts": [] } in its manifest`. `Host`, `Connection` and the like can't be set, and `Authorization` and `Cookie` go only to hosts named here. A program it runs (`commands`) isn't under this rule: what it can reach is what you can.
 

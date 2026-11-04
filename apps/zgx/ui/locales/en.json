@@ -3049,7 +3049,8 @@
         "network": {
           "title": "Connect to the internet",
           "title_any": "Connect to any site on the internet",
-          "title_hosts": "Connect to these places"
+          "title_hosts": "Connect to these places",
+          "detail_named": "A named host can be on this computer or your network."
         },
         "clipboard": {
           "title": "Read and change your clipboard"
