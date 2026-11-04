@@ -1046,3 +1046,150 @@ fn every_tab_opened_lands_in_the_focused_panel_group() {
     app.frames(10);
     assert_eq!(panel_focus(&app, "a1").1, other);
 }
+
+// ── The panel's toggle over a chat of visuals ──────────────────────────────
+
+/// The shell's fixture with the real host's visuals (src/visuals.rs).
+fn mount_visuals(fixture: &Path, storage: &Path, w: f32) -> TestApp {
+    let (fixture, storage) = (fixture.to_path_buf(), storage.to_path_buf());
+    let app = TestApp::new(move |runtime| {
+        let host = ScriptHost::new(runtime, fixture).storage(storage);
+        crate::visuals::register(&host);
+        host
+    });
+    app.ui.scene.borrow_mut().resize(w, 820.);
+    app.frames(30);
+    app
+}
+
+/// A visual's script from the visuals' fixture, by its name there.
+fn visual_source(name: &str) -> String {
+    let fixture = std::fs::read_to_string(ui().join("visuals_fixture.luau")).unwrap();
+    let at = fixture.find(&format!("name = \"{name}\"")).unwrap();
+    let from = at + fixture[at..].find("source = [[").unwrap() + "source = [[".len();
+    let to = from + fixture[from..].find("]]").unwrap();
+    fixture[from..to].to_string()
+}
+
+/// Chat `id` as the host has it: a reply of `blocks` (text, and visuals
+/// when `visuals`), done.
+fn reply_of_visuals(app: &TestApp, ids: &[(&str, bool)]) {
+    use zgx_script::Value;
+    let s = |v: &str| Value::from(v);
+    let words = "A paragraph of the reply, long enough to wrap over a few lines at the chat's width, so its text lays out as a real reply's does, with more after it.";
+    let chats: Vec<(String, Value)> = ids
+        .iter()
+        .map(|(id, visuals)| {
+            let mut blocks = vec![Value::record([("id", s("b0")), ("kind", s("text")), ("text", s(words))])];
+            for (n, name) in ["dashboard", "charts", "scene", "canvas"].iter().enumerate() {
+                blocks.push(if *visuals {
+                    Value::record([("id", s(&format!("v:{id}-{name}"))), ("kind", s("visual")), ("title", s(name)), ("source", s(&visual_source(name)))])
+                } else {
+                    Value::record([("id", s(&format!("t{n}"))), ("kind", s("text")), ("text", s(words))])
+                });
+                blocks.push(Value::record([("id", s(&format!("w{n}"))), ("kind", s("text")), ("text", s(words))]));
+            }
+            let messages = vec![
+                Value::record([("id", s(&format!("{id}-q"))), ("role", s("user")), ("text", s("Show me the numbers."))]),
+                Value::record([("id", s(&format!("{id}-r"))), ("role", s("assistant")), ("text", s("")), ("blocks", Value::List(std::rc::Rc::from(blocks)))]),
+            ];
+            let session = Value::record([("id", s(id)), ("state", s("ready")), ("running", Value::Bool(false))]);
+            (id.to_string(), Value::record([("messages", Value::List(std::rc::Rc::from(messages))), ("session", session)]))
+        })
+        .collect();
+    app.host.shared("fixture.chats", Value::Nil).set(Value::record(chats));
+}
+
+/// What a panel toggle costs, open and closed again: script calls, and the
+/// frames' time (the most, and their sum), over its glide.
+fn toggle_cost(app: &mut TestApp) -> (u64, f64, f64) {
+    app.wait_until(|app| app.find("~\"Loading \"").is_none());
+    app.frames(40);
+    let calls = app.calls();
+    let mut most: f64 = 0.;
+    let mut all = 0.;
+    let mut each: Vec<f64> = Vec::new();
+    for _ in 0..2 {
+        app.click("#titlebar >> role:button \"Panel\"");
+        for _ in 0..30 {
+            let t = std::time::Instant::now();
+            app.frame();
+            let ms = t.elapsed().as_secs_f64() * 1000.;
+            most = most.max(ms);
+            all += ms;
+            each.push(ms);
+        }
+    }
+    each.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    eprintln!("MEASURE   median frame {:.2} ms, p90 {:.2} ms", each[each.len() / 2], each[each.len() * 9 / 10]);
+    (app.calls() - calls, most, all)
+}
+
+#[test]
+#[ignore = "a measurement: cargo test --bin zeron-zgx panel_toggle_over_visuals -- --ignored --nocapture"]
+fn panel_toggle_over_visuals_measured() {
+    let root = scratch("toggle-v2");
+    let t = root.join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let v2 = compose(&t, "zeron-v2").join("shell_fixture.luau");
+    for (label, fixture) in [("v3", ui().join("shell_fixture.luau")), ("v2", v2)] {
+        for (chat, visuals) in [("a1", false), ("a1", true)] {
+            for w in [1100., 1500.] {
+                let mut app = mount_visuals(&fixture, &scratch(&format!("toggle-{visuals}-{w}")), w);
+                open(&mut app, "Fix the build");
+                reply_of_visuals(&app, &[(chat, visuals)]);
+                let (calls, most, all) = toggle_cost(&mut app);
+                eprintln!("MEASURE {label} w{w} visuals={visuals}: {calls} script calls, frames {all:.1} ms in all, {most:.1} ms the most");
+            }
+        }
+    }
+    // A split of two, each its chat of visuals (v3).
+    for visuals in [false, true] {
+        let mut app = mount_visuals(&ui().join("shell_fixture.luau"), &scratch(&format!("toggle-split-{visuals}")), 1500.);
+        open(&mut app, "Fix the build");
+        split_right(&mut app, "Tidy the tests");
+        reply_of_visuals(&app, &[("a1", visuals), ("a3", visuals)]);
+        let (calls, most, all) = toggle_cost(&mut app);
+        eprintln!("MEASURE v3 split w1500 visuals={visuals}: {calls} script calls, frames {all:.1} ms in all, {most:.1} ms the most");
+    }
+}
+
+
+
+/// A panel toggle over a chat of visuals lays the chat out once a way, not
+/// at every frame of its glide: the transcript and a chart in it take at
+/// most three widths through an open and a close (as they were, beside the
+/// panel, and back), and the toggle runs about the script a plain chat's
+/// does. (Shipping's way: what's beside the moving column keeps its width;
+/// the card, a box, follows the edge.)
+#[test]
+fn a_panel_toggle_lays_a_chat_of_visuals_out_once_a_way() {
+    let toggle = |visuals: bool| -> (u64, std::collections::BTreeSet<i64>, std::collections::BTreeSet<i64>) {
+        let mut app = mount_visuals(&ui().join("shell_fixture.luau"), &scratch(&format!("once-{visuals}")), 1100.);
+        open(&mut app, "Fix the build");
+        reply_of_visuals(&app, &[("a1", visuals)]);
+        app.wait_until(|app| app.find("~\"Loading \"").is_none());
+        app.frames(40);
+        let calls = app.calls();
+        let (mut transcript, mut chart) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+        for _ in 0..2 {
+            app.click("#titlebar >> role:button \"Panel\"");
+            for _ in 0..30 {
+                app.frame();
+                transcript.insert(app.bounds("#chat-session >> #transcript").width.round() as i64);
+                if visuals {
+                    let plot = app.target(".chart-plot").or_else(|_| app.target("#chat-session >> .chart-plot"));
+                    if let Ok(node) = plot {
+                        chart.insert(app.ui.scene.borrow().bounds(node).width.round() as i64);
+                    }
+                }
+            }
+        }
+        (app.calls() - calls, transcript, chart)
+    };
+    let (plain, plain_widths, _) = toggle(false);
+    let (with, widths, chart) = toggle(true);
+    assert!(plain_widths.len() <= 3 && widths.len() <= 3, "the transcript took {widths:?} (plain {plain_widths:?})");
+    assert!(chart.len() <= 3, "a chart took {chart:?}");
+    assert!(with as f64 <= plain as f64 * 1.25, "{with} script calls over visuals, {plain} over a plain chat");
+}

@@ -180,8 +180,10 @@ export type Block = {
 	-- another: each a path on the chat's host and its name (ds/reply_picture).
 	images: { { id: string, path: string, name: string? } }?,
 	-- A visual's (ds/visual): its script on the chat's host, its title, and
-	-- that host's device when it isn't this one.
+	-- that host's device when it isn't this one; or its script itself, when
+	-- the message carries it (a fixture's).
 	path: string?,
+	source: string?,
 	title: string?,
 	device: string?,
 	tools: { Tool }?,
@@ -491,7 +493,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
-			return Visual { id = b.id, path = b.path, title = b.title, device = b.device }
+			return Visual { id = b.id, path = b.path, source = b.source, title = b.title, device = b.device }
 		end
 		-- Pictures an agent showed: one alone, or several on a tray, among
 		-- the reply's pictures in the lightbox. More arriving while it works
