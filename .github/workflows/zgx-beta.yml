@@ -35,8 +35,9 @@ on:
 permissions:
   contents: read
 
+# By version, so a by-hand run of another version doesn't queue behind this one.
 concurrency:
-  group: zgx-beta-${{ github.ref }}
+  group: zgx-beta-${{ github.ref }}-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
