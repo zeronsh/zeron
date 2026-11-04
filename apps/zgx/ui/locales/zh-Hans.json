@@ -2360,7 +2360,10 @@
       "search": "搜索会话、命令和文件…",
       "app": "应用",
       "reload_zeron": "重新启动 Zeron",
-      "reload_interface": "重新加载界面"
+      "reload_interface": "重新加载界面",
+      "commands": "命令",
+      "run": "运行",
+      "default_interface": "使用 Zeron v3"
     },
     "add_project": {
       "something_went_wrong": "出错了",

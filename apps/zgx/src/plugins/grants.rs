@@ -43,6 +43,13 @@ pub const SHARED_READ: &[(&str, Option<&str>)] = &[
     // work no one would see waits for it.
     ("zgx.window.shown", None),
     ("zgx.window.active", None),
+    // Whether the system asks for no transparency (src/transparency.rs):
+    // the design system's glass, lent to plugins, turns solid with it.
+    ("system.reduced_transparency", None),
+    ("system.popups_blur", None),
+    // The window's corner radius where it follows the window's state
+    // (Windows): the design system's inset cards stay concentric with it.
+    ("window.corner_radius", None),
 ];
 
 /// What plugins may change of the app's own shared state, and the grant

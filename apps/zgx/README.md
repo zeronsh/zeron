@@ -337,7 +337,7 @@ it opened on. From a fullscreen app it is covered and waits; zgx's
 - A file that fails (at load, at build or later) falls back to Zeron's own for that module alone, with one notice.
 - If its `app.luau` fails, the whole window goes back to Zeron's own and the template shows as broken.
 - Saving the file again retries it.
-- **The way back from any template:** View → **Use Zeron v3** (the host's own menu item, which no template can remove), `zeron template use zeron`, or launching with `--zeron-template`.
+- **The way back from any template:** View → **Use Zeron v3** (the host's own menu item, which no template can remove; on Windows and Linux, which have no menu bar, it's "Use Zeron v3" in the command palette, and Revert in a preview's toast), `zeron template use zeron`, or launching with `--zeron-template`.
 
 **Plugins layer on whatever template is in use.** One that aims at an element the template dropped (its id or class) says "Not shown in this template" on the Plugins page. That check is static: only literal selectors are seen. A placed node that needs what its place doesn't give draws nothing, and its row says why.
 

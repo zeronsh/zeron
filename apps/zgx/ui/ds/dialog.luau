@@ -132,7 +132,7 @@ end
 local function panel(props: ContainerProps): ContainerProps
 	glass.style(props, "menu")
 	props.bg = function()
-		return if material.frosted:get() then "$zeron.dialog.tint" else "$zeron.dialog.solid"
+		return if material.see_through() then "$zeron.dialog.tint" else "$zeron.dialog.solid"
 	end
 	props.rounded = "$zeron.dialog.radius"
 	props.shadow = "$zeron.dialog.shadow"

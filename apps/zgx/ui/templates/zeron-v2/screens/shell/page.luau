@@ -249,15 +249,23 @@ return function(props: Props): Node
 					end),
 				},
 				absolute = true,
-				top = TITLE_TOP,
+				-- (Centred on the bar's line: 21 down, or the window's own
+				-- buttons' middle where they set it.)
+				top = function(): number
+					return ds.TitleBar.middle() - (TITLE_H - TITLE_TOP) / 2
+				end,
 				h = TITLE_H - TITLE_TOP,
 				ref = header_ref,
 				left = motion.tween(ui.computed(function(): number
 					return title_left(false, true)
 				end), motion.sidebar),
 				x = full_screen_shift(ds.TitleBar.full_screen_now(), false),
-				-- (Clear of the bar's own controls at its right.)
-				right = ui.raw(TITLE_RIGHT, "the title bar's controls at the right, and their room"),
+				-- (Clear of the bar's own controls at its right, and of the
+				-- window's buttons where they stand there; TITLE_RIGHT counts the
+				-- bar's row padding, 10, which `actions_right` gives as it is.)
+				right = function(): number
+					return ui.raw(TITLE_RIGHT - 10 + ds.TitleBar.actions_right(), "the title bar's controls at the right, and their room")
+				end,
 				gap = "$zeron.space.tight",
 				items = "center",
 				pointer_events = "none",

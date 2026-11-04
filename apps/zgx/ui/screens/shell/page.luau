@@ -38,9 +38,12 @@ export type Props = {
 -- The title bar's height (Zeron's): the pages start under it, the
 -- wallpaper runs under it to the window's top.
 local TITLE_H = 38
--- The title line's own room: under the bar's 4 of top padding, its
--- controls centred 21 down; and what its right end keeps for them.
-local TITLE_TOP, TITLE_RIGHT = 4, 64
+-- What the title line's right end keeps for the bar's controls there. (The
+-- line itself is the bar's: `ds.TitleBar.middle`.)
+local TITLE_RIGHT = 64
+-- Of that room, what lies past the controls' row (ds/title_bar's ROW_PAD),
+-- which `TitleBar.actions_right` gives as it is now.
+local TITLE_ROW_PAD = 10
 -- How wide a session's files stand beside it: at least, and by default
 -- (room for the tree beside a file, ds/files_pane's 288 + 360).
 -- The panel's least (Zeron's surface host's: screens/shell/fit) and its
@@ -178,9 +181,11 @@ return function(props: Props): Node
 		return false
 	end
 	-- Where a pane's × stands from its card's right: clear of the title
-	-- bar's panel toggle over the page's top right while the panel is shut.
+	-- bar's panel toggle over the page's top right while the panel is shut
+	-- (10 in and 24 wide; past the window's own buttons and the divider
+	-- where they stand at the right: `TitleBar.actions_right`).
 	local function close_right(id: string?): number
-		return if at_top_right(id) and not panel_open() then 34 else 8
+		return if at_top_right(id) and not panel_open() then 24 + ds.TitleBar.actions_right() else 8
 	end
 
 	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
@@ -201,18 +206,13 @@ return function(props: Props): Node
 	-- of the window's composer, at the focused pane's foot, over that
 	-- pane's card, letting the pointer through to it but for the composer.)
 	-- (Flat, a new chat with the sidebar closed: no card, the window's.)
-	local RADIUS = (function(): number
-		local r: any = ui.theme.get("zeron.inset.radius")
-		if type(r) ~= "number" then
-			r = ui.theme.get("radius.xl")
-		end
-		return if type(r) == "number" then r else 12
-	end)()
 	-- (Its corners whole while there's any gap round it, square as it
 	-- meets the window's edges: never between, where they'd show changing
-	-- and not match the other corners round them.)
-	pane.rounded = function(): number
-		return ui.raw(if edged:get() then RADIUS else 0, "the card's corners, whole while any gap is round it")
+	-- and not match the other corners round them. Whole, the cards' token,
+	-- which follows the window's own corner where the host says it:
+	-- ds/tokens.)
+	pane.rounded = function(): any
+		return if edged:get() then "$zeron.inset.radius" else 0
 	end
 	-- (Its edge's room; the edge itself is drawn with the fill, below.)
 	pane.border = function(): number
@@ -384,7 +384,11 @@ return function(props: Props): Node
 	-- (The title line is the card's own head, level with the title
 	-- bar's controls in the window: centred where they are, less the gap
 	-- the card is set down by.)
-	local title_mid = TITLE_TOP + (TITLE_H - TITLE_TOP) / 2 - INSET
+	-- (`ds.TitleBar.middle`: Zeron's 21 down, or the window's own buttons'
+	-- middle where they set the bar's line.)
+	local function title_mid(): number
+		return ds.TitleBar.middle() - INSET
+	end
 	-- Where a pane's title starts in its card: past the title bar's
 	-- controls when they stand over it (the sidebar collapsed, the pane at
 	-- the inset's top left), else the page's inset.
@@ -430,7 +434,9 @@ return function(props: Props): Node
 				},
 				absolute = true,
 				top = 0,
-				h = 2 * title_mid,
+				h = function(): number
+					return 2 * title_mid()
+				end,
 				-- (Collapsed, the bar's controls stand over the card's start:
 				-- past them, less the gap the card is set in by.)
 				-- (In a split, only the leftmost pane's is under them.)
@@ -442,13 +448,14 @@ return function(props: Props): Node
 					return title_left(splits.focused:get(), false, true)
 				end), motion.sidebar),
 				x = full_screen_shift(splits.focused:peek(), ds.TitleBar.full_screen_now(), false),
-				-- (Clear of the bar's own controls at its right; in a split,
-				-- of its pane's ×.)
+				-- (Clear of the bar's own controls at its right, and of the
+				-- window's buttons where they stand there; in a split, of its
+				-- pane's ×.)
 				right = function(): number
 					if grouped() then
 						return ui.raw(close_right(splits.focused:get()) + CLOSE + 6, "its pane's × at its right")
 					end
-					return ui.raw(TITLE_RIGHT, "the title bar's controls at the right, and their room")
+					return ui.raw(TITLE_RIGHT - TITLE_ROW_PAD + ds.TitleBar.actions_right(), "the title bar's controls at the right, and their room")
 				end,
 				gap = "$zeron.space.tight",
 				items = "center",
@@ -1364,7 +1371,10 @@ return function(props: Props): Node
 			top = 0,
 			left = 0,
 			right = 0,
-			h = TITLE_H - INSET,
+			-- (Its middle on the bar's line, as the session's head.)
+			h = function(): number
+				return 2 * title_mid()
+			end,
 			-- (Kept by `follow` above, from here.)
 			pl = ui.raw(title_left(id, ds.TitleBar.full_screen_now(), false), "where its title starts, as the session's head"),
 			-- (Its × clear of the title bar's panel toggle, easing as the panel

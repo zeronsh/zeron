@@ -135,6 +135,12 @@ foreign-types = "0.5"
 # with Zig 0.16 (cached in ~/Library/Caches/zgx-ghostty).
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "7cd25fc145e81df496bb00359a579af92102566e", features = ["ghostty"] }
 
+# Windows' Transparency effects (src/transparency.rs), read and watched in
+# the registry, until zgx reports them (zgx-asks/windows-transparency); a
+# visual's thread CPU time (src/visuals.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading"] }
+
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
 [patch.crates-io]

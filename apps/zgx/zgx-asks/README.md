@@ -15,6 +15,9 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [host-guard](host-guard/ASK.md) | A template in preview can still use `ui.fetch`/`ui.socket`; every host action is guarded one by one. |
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
+| [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |
+| [windows-popup-backdrop](windows-popup-backdrop/ASK.md) | A popup's glass on Windows blurs nothing: a wallpaper's dither shows sharp through the model picker. Zeron draws the menus' glass solid there meanwhile. |
+| [windows-transparency](windows-transparency/ASK.md) | Windows' Transparency effects aren't reported (`ui.prefers.reduced_transparency` is always false there). Zeron watches the registry meanwhile. |
 
 ## Medium: users meet it now and then, or a feature waits on it
 

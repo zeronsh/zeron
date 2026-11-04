@@ -37,6 +37,7 @@ local Mark = require("@self/mark")
 local status = require("@self/status")
 local FadeText = require("@self/fade_text")
 local island = require("@self/island")
+local TitleBar = require("@self/title_bar")
 local Tile = require("@self/tile")
 local Surface = require("@self/surface")
 local Avatar = require("@self/avatar")
@@ -4839,8 +4840,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 			}
 			else ui.div {},
 		-- Its view options, at its top right: on the title bar's line when one
-		-- lies over it (its controls centred halfway down it, under its top
-		-- inset: Zeron's 38 and 4), else at its own inset. Where it stands
+		-- lies over it (`TitleBar.middle`: halfway down it under its top inset,
+		-- Zeron's 38 and 4, or the window's own buttons' line), else at its
+		-- own inset. Where it stands
 		-- open, whatever its width as it folds or comes back: its edge clips
 		-- it there, as it clips the rest, so it never slides under the title
 		-- bar's controls and the window's buttons on the way.
@@ -4850,7 +4852,11 @@ fn layer(input:LayerInput)->vec4<f32> {
 				local button = (ui.theme.get("zeron.icon_button.md") :: number?) or 24
 				return room() - PAD - button
 			end,
-			top = if props.top then (props.top + 4) / 2 - 12 else PAD,
+			top = if props.top
+				then function(): number
+					return TitleBar.middle() - 12
+				end
+				else PAD,
 			opacity = shown_wide,
 			pointer_events = function()
 				return if collapsed:get() then "none" else "auto"
