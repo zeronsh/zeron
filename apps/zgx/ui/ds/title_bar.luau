@@ -63,24 +63,171 @@ local LIGHT, LIGHT_FIRST, LIGHT_PITCH = 14, 21, 23
 -- the theme's island (`zeron.island`), read as the bar is built; its row
 -- runs 10 past its last control (Zeron's `TITLEBAR_CLUSTER_PAD`).
 local TOGGLE_IN, ROW_PAD = 88, 10
+-- On macOS the toggle stands this far past the traffic lights' right edge
+-- (`ui.window.controls`: 12 in and 60 across in zgx's inset title bar, so
+-- 88 in, as ever). In full screen macOS hides them, and the controls take
+-- the window's edge inset (Zeron's `titlebar_cluster_start(true)`). Off
+-- macOS the bar keeps its 88.
+local LIGHTS_GAP, FULL_SCREEN_IN = 16, 12
+-- How they slide over: as Zeron's do (`titlebar_tween`, 200 ms, ease out),
+-- once the system's animation is over. The window draws no frames while
+-- macOS animates it in or out (it shows a picture of the window meanwhile:
+-- zgx's frames say "the window stopped presenting" for its 0.35 s going in,
+-- and as long coming out), so a slide timed to it is never seen; nothing
+-- moves until it's done, then they slide from where they stood.
+local FULL_SCREEN_SLIDE = { duration = 200, ease = "cubicBezier(0, 0, 0.58, 1)" }
+
+-- A state of the window's (`ui.window.<name>`), or nil where there's none
+-- (a plugin, lent the design system, has no window of its own).
+local function window_state(name: string): State<any>?
+	local window = (ui :: any).window
+	return if window then window[name] else nil
+end
+local function read(state: State<any>?, tracked: boolean): any
+	if state == nil then
+		return nil
+	end
+	return if tracked then state:get() else state:peek()
+end
+
+-- Whether the window is on macOS, as the host says (src/main.rs
+-- `platform`): its buttons the traffic lights at the bar's left. Asked once.
+local macos: boolean? = nil
+local function on_macos(): boolean
+	if macos == nil then
+		local ok, platform = pcall(function(): any
+			return ui.shared("platform", ""):peek()
+		end)
+		macos = ok and platform == "macos"
+	end
+	return macos :: boolean
+end
+
+-- Whether the window is in full screen (tracked).
+local function full_screen(): boolean
+	return read(window_state("full_screen"), true) == true
+end
 
 -- The window's own buttons as the window reports them, and the side they
 -- stand at: the left (macOS's traffic lights; on Linux a `close:…` layout)
 -- or the right (Windows' caption buttons; GNOME's `appmenu:close`). Nil
 -- where none are reported: in full screen, in a plugin (which reads no
--- `ui.window.controls`) and headless.
+-- `ui.window.controls`) and headless. Read tracked unless `tracked` is
+-- false.
 type Side = "left" | "right"
-local function window_buttons(): (Side?, any)
-	local window = ui.window :: any
-	local area_state, controls_state = window.titlebar_area, window.controls
-	if area_state == nil or controls_state == nil then
-		return nil, nil
-	end
-	local area, buttons = area_state:get(), controls_state:get()
+local function window_buttons(tracked: boolean?): (Side?, any)
+	local area = read(window_state("titlebar_area"), tracked ~= false)
+	local buttons = read(window_state("controls"), tracked ~= false)
 	if not area or not buttons then
 		return nil, nil
 	end
 	return if buttons.x >= area.x + area.width then "right" else "left", buttons
+end
+
+-- Where the toggle stands from the window's left, in full screen (`full`)
+-- or out of it. On macOS: past the traffic lights, or at the edge once
+-- they're hidden. (Leaving full screen, the lights aren't reported again
+-- until the system's animation ends: 88 meanwhile, where they put it.)
+-- Elsewhere, by where the window's buttons stand: 10 in with them at the
+-- right (the shipping app's), past them at the left (never nearer than
+-- the lights' 88), 88 with none reported.
+local function toggle_in(full: boolean, tracked: boolean?): number
+	if not on_macos() then
+		local side, buttons = window_buttons(tracked)
+		if side == "right" then
+			return ROW_PAD
+		elseif side == "left" then
+			return math.max(TOGGLE_IN, buttons.x + buttons.width)
+		end
+		return TOGGLE_IN
+	end
+	if full then
+		return FULL_SCREEN_IN
+	end
+	local lights = read(window_state("controls"), tracked ~= false)
+	return if lights then lights.x + lights.width + LIGHTS_GAP else TOGGLE_IN
+end
+
+-- The row's controls' width, past the toggle's start (`start`), to the
+-- row's end: ROW_PAD past its last control; alone at the window's left
+-- (off macOS, the window's buttons at the right), its island holds it
+-- evenly, as far past its end as before its start.
+local function controls_w(start: number): number
+	local m = island.metrics()
+	local tail = if not on_macos() and start == ROW_PAD then ROW_PAD - m.inset else ROW_PAD
+	return m.control + m.group + m.control + m.gap + m.control + tail
+end
+
+-- Whether the window is in full screen, untracked (a value to start from).
+local function full_screen_now(): boolean
+	return read(window_state("full_screen"), false) == true
+end
+
+-- `target`'s props kept where each says (`at[prop](full)`, read tracked: the
+-- window in full screen or not, the lights, whatever else it reads), by the
+-- engine: still while the window goes in or out of full screen, then
+-- sliding over as Zeron's controls do (`FULL_SCREEN_SLIDE`); otherwise eased
+-- by `settle` (a tween's options) or set at once. Nothing runs per frame
+-- and nothing at rest: the node's own style gives them a plain number to
+-- start from (`at` as it stands then), never a function (an animated style
+-- runs its node's functions again each frame). With motion reduced they
+-- land at once.
+local function follow(target: any, at: { [string]: (full: boolean) -> number }, settle: { duration: number, ease: string }?)
+	local moving = window_state("full_screen_transition")
+	-- Where they stand, and whether full screen's move is held for its slide.
+	local last: { [string]: number }? = nil
+	local held = false
+	local function go(to: { [string]: number }, timing: { duration: number, ease: string }?)
+		local from = last :: { [string]: number }
+		last = to
+		if timing == nil or motion.reduced_now() then
+			anime.utils.set(target, to :: any)
+			return
+		end
+		local params: { [string]: any } = { duration = timing.duration, ease = timing.ease }
+		for prop, v in to do
+			params[prop] = { from[prop], v }
+		end
+		anime.animate(target, params :: any)
+	end
+	ui.effect(function()
+		local full = full_screen()
+		local now: { [string]: number } = {}
+		for prop, f in at do
+			now[prop] = f(full)
+		end
+		-- (The first: the node's own style already says it.)
+		if last == nil then
+			last = now
+			return
+		end
+		-- Held while macOS animates (what it reports meanwhile is never
+		-- seen: coming out, the lights stand at 9,9 for a moment).
+		if read(moving, true) ~= nil then
+			held = true
+			return
+		end
+		local changed = false
+		for prop, v in now do
+			if (last :: any)[prop] ~= v then
+				changed = true
+			end
+		end
+		if not changed then
+			return
+		end
+		if held then
+			-- Once what macOS says as it ends has settled (the lights come
+			-- back a moment after the transition ends; a change meanwhile
+			-- runs this again and waits anew).
+			ui.after(0.05, function()
+				held = false
+				go(now, FULL_SCREEN_SLIDE)
+			end)
+			return
+		end
+		go(now, settle)
+	end)
 end
 
 -- How far in from the window's right edge the window's own buttons reach;
@@ -103,19 +250,6 @@ local function actions_right(): number
 	return ROW_PAD
 end
 
--- Where the toggle stands from the window's left: past the window's buttons
--- there (never nearer than beside the traffic lights), 10 in with them at
--- the right. None reported (full screen, a plugin), beside the lights.
-local function toggle_in(): number
-	local side, buttons = window_buttons()
-	if side == "right" then
-		return ROW_PAD
-	elseif side == "left" then
-		return math.max(TOGGLE_IN, buttons.x + buttons.width)
-	end
-	return TOGGLE_IN
-end
-
 -- The title line's middle, from the window's top: where everything on the
 -- bar centres. 21, as beside the traffic lights; where the window's buttons
 -- stand at the right in a strip shorter than the bar (Windows' 32-point
@@ -123,9 +257,9 @@ end
 -- one line; never nearer the window's top than an island's middle, its
 -- controls held their padding in from the edge (zgx reports the buttons
 -- shorter in a zoomed window than it draws them: zgx-asks/
--- windows-caption-buttons).
-local function middle(): number
-	local side, buttons = window_buttons()
+-- windows-caption-buttons). Read tracked unless `tracked` is false.
+local function middle(tracked: boolean?): number
+	local side, buttons = window_buttons(tracked)
 	if side == "right" and buttons.height < H then
 		return math.max(buttons.y + buttons.height / 2, island.thickness() / 2)
 	end
@@ -158,31 +292,17 @@ local function control(label: Label, glyph: Node, enabled: (() -> boolean)?, on_
 	}
 end
 
--- The bar's own controls' row, its width: the toggle, then back and
--- forward.
-local function row_width(m: island.Metrics): number
-	return m.control + m.group + m.control + m.gap + m.control
-end
-
--- Where the bar's controls end, from the window's left (its island's
--- right edge): what lies on the title line beside them starts past it.
--- Beside the window's buttons, the row runs ROW_PAD past its last control;
--- alone at the left, its island holds it evenly, as far past its end as
--- before its start.
-local function controls_end(): number
-	local m = island.metrics()
-	local start = toggle_in()
-	local tail = if start == ROW_PAD then ROW_PAD - m.inset else ROW_PAD
-	return start + row_width(m) + tail
-end
-
 local TitleBar = ui.component(function(props: Props): Node
 	local m = island.metrics()
 	local CONTROL, GROUP_GAP, CONTROL_GAP = m.control, m.group, m.gap
 	-- The island: from the window's inset to the control row's end; as tall
 	-- as an island (a control and its padding), a padding's worth less as it
-	-- comes (Zeron's 28 to 32).
+	-- comes (Zeron's 28 to 32). Its end follows the row (full screen).
 	local ISLAND_LEFT = m.inset
+	local function island_w(full: boolean, tracked: boolean?): number
+		local start = toggle_in(full, tracked)
+		return start + controls_w(start) - ISLAND_LEFT
+	end
 	local ISLAND_TO = island.thickness()
 	local ISLAND_FROM = ISLAND_TO - m.pad
 	local collapsed = props.collapsed
@@ -215,7 +335,13 @@ local TitleBar = ui.component(function(props: Props): Node
 	end
 	local bar: { [any]: any } = {
 		w_full = true,
-		h = H,
+		-- (A strip of no height its controls hang from, each placed on the
+		-- bar's line: a box the bar's size, even one passing the pointer
+		-- through, stands in front of what's under it for the pointer's
+		-- cursor, and the panel's tabs, a split pane's ×, the top of a
+		-- resize edge showed none of theirs. The bar's room is `H`.)
+		h = 0,
+		overflow = "visible",
 		relative = true,
 		-- The bar lets the pointer through to what is under it, but for its
 		-- controls.
@@ -223,12 +349,13 @@ local TitleBar = ui.component(function(props: Props): Node
 		-- The island: glass behind the buttons and controls as the sidebar
 		-- goes, centred on them as it grows; gone as it comes back.
 	}
+	local island_ref = ui.ref()
 	local left_island: ContainerProps = {
+		ref = island_ref,
 		absolute = true,
 		left = ISLAND_LEFT,
-		w = function(): number
-			return controls_end() - ISLAND_LEFT
-		end,
+		-- (Kept by `follow` below, from here.)
+		w = island_w(full_screen_now(), false),
 		top = motion.tween(ui.computed(function(): number
 			return middle() - (if shown() then ISLAND_TO else ISLAND_FROM) / 2
 		end), motion.sidebar),
@@ -243,14 +370,29 @@ local TitleBar = ui.component(function(props: Props): Node
 	end
 	-- (Its own controls first, then the page's: Tab reads the bar left to
 	-- right.)
+	local row_ref = ui.ref()
+	follow(row_ref, {
+		left = function(full: boolean): number
+			return toggle_in(full)
+		end,
+		-- (On the bar's line: the window's buttons' where they set it.)
+		top = function(): number
+			return middle() - CONTROL / 2
+		end,
+	})
+	follow(island_ref, {
+		w = function(full: boolean): number
+			return island_w(full)
+		end,
+	})
 	table.insert(
 		bar,
 		ui.row {
+			ref = row_ref,
 			absolute = true,
-			left = toggle_in,
-			top = function(): number
-				return middle() - CONTROL / 2
-			end,
+			-- (Kept by `follow` above, from here.)
+			left = toggle_in(full_screen_now(), false),
+			top = middle(false) - CONTROL / 2,
 			items = "center",
 			pointer_events = "auto",
 			-- (Between its controls, the bar is still the window's to move:
@@ -400,17 +542,32 @@ local TitleBar = ui.component(function(props: Props): Node
 	return ui.div(bar)
 end)
 
--- `control`: a control for the bar's `actions` (its size, a quiet glyph,
--- its tooltip below; `enabled`, `on_click` as the bar's own).
--- `controls_end()`, `window_buttons_right()`, `actions_right()`, `middle()`: where what lies on
--- the title line beside the bar stands (read in a binding: they follow the
--- window).
+-- A control for the bar's `actions`: its size, a quiet glyph, its tooltip
+-- below (`enabled`, `on_click` as the bar's own).
+-- Where the bar's controls end, from the window's left (its island's
+-- right edge): what lies on the title line beside them starts past it.
+-- Now (in full screen they stand further left), or in full screen or out
+-- of it (`full`); read tracked unless `tracked` is false.
+local function controls_end(full: boolean?, tracked: boolean?): number
+	local at = if full == nil then (if tracked == false then full_screen_now() else full_screen()) else full
+	local start = toggle_in(at, tracked ~= false)
+	return start + controls_w(start)
+end
+
+-- `window_buttons_right()`, `actions_right()`, `middle()`: where the
+-- window's own buttons and the page's controls stand on the bar, and its
+-- line (read in a binding: they follow the window).
 local M = setmetatable({
 	control = control,
 	controls_end = controls_end,
 	window_buttons_right = window_buttons_right,
 	actions_right = actions_right,
 	middle = middle,
+	-- What lies beside the controls follows them: `follow(ref, { prop =
+	-- function(full) … end }, settle?)`, with `controls_end(full)`, its
+	-- prop's own style a plain number to start from (`full_screen_now()`).
+	follow = follow,
+	full_screen_now = full_screen_now,
 }, {
 	__call = function(_, props: Props): Node
 		return TitleBar(props)

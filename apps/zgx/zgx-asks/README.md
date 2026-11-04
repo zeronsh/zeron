@@ -4,7 +4,7 @@ Every open ask from Zeron's zgx app, one folder per topic: an `ASK.md` (who
 needs it, what fails today, the ask) and, where one exists, a minimal repro
 (`zgx run <folder>/repro` or `zgx test <folder>`, with `ZGX_CHECK=0`). Most
 were seen on zgx `b3371f8` on macOS, unless the folder says otherwise; Zeron's
-pin is now zgx main `99a50ad5` (0.1.9, its fixes, and Linux's popups and glass blur). Each open ask is assigned to a zgx lane,
+pin is now zgx main `e46ff6fc` (0.1.9, its fixes, Linux popups and glass blur, full screen to scripts, terminal colours from the theme, lists that scroll with the view around them). Each open ask is assigned to a zgx lane,
 which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 ## High: users see it

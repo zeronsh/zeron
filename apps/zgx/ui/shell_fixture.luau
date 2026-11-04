@@ -18,7 +18,109 @@ local sessions = require("@account/sessions")
 require("@app/screens/shell/route").launched:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
+-- The host's chats, as the engine has them: one record a chat (its session,
+-- its messages, its reply streaming), shown by every view watching it: the
+-- window's open chat (screens/chat/store) and each lane (a split's chats).
+-- A test changes a chat by setting `fixture.chats` (`{ [id]: { session?,
+-- messages?, draft? } }`); what's watched is kept in `split_lanes`. A chat
+-- with no record shows its own words, "This is <id>", in a lane.
+local lanes = require("@app/screens/chat/lanes")
+local split_lanes = ui.state("split_lanes", {} :: { [string]: string })
+local fixture_chats = ui.shared("fixture.chats", {} :: { [string]: any })
+local open_chat = ui.state("fixture_open_chat", "")
+local function project(view: any, id: string, lane: boolean)
+	local c = fixture_chats:peek()[id]
+	if not c then
+		if lane then
+			-- (Asked again for the chat it has, as a reload asks, it keeps
+			-- what it has, as the host does.)
+			local first = view.messages:peek()[1]
+			if not (first and first.id == `{id}-m`) then
+				view.messages:set({ { id = `{id}-m`, role = "assistant", text = `This is {id}` } })
+			end
+		end
+		return
+	end
+	view.messages:set(c.messages or { { id = `{id}-m`, role = "assistant", text = `This is {id}` } })
+	view.draft:set(c.draft or { id = "", text = "" })
+	view.session:set(c.session)
+end
+local stub_lanes = lanes :: any
+stub_lanes.watch = function(slot: string, id: string?)
+	split_lanes:set_key(slot, id)
+	if id then
+		project(lanes.view(slot), id, true)
+	end
+end
+-- (The window's open chat: in place of the store's, below.)
+local function open_store(id: string?)
+	open_chat:set(id or "")
+	if id then
+		project(store, id, false)
+	end
+end
+ui.effect(function()
+	fixture_chats:get()
+	for slot, id in split_lanes:peek() do
+		if id then
+			project(lanes.view(slot), id, true)
+		end
+	end
+	local id = open_chat:peek()
+	if id ~= "" then
+		project(store, id, false)
+	end
+end)
 -- Settings' host calls, answered as the host would (settings_stub.luau).
+-- (Answered at once, as the host's calls do a beat later.)
+local function answered(value: any): any
+	return {
+		after = function(_, ok: (any) -> ())
+			ui.after(0, function()
+				ok(value)
+			end)
+		end,
+	}
+end
+-- (A terminal's host and zgx's terminal, stood in for: an engine terminal
+-- a number, its view a column saying which, as ui/panel_fixture's.)
+local tapi = require("@app/screens/panel/terminal_api") :: any
+local terms = ui.state("fixture_terms", 0)
+local term_sessions: { [string]: any } = {}
+tapi.start = function(_target: any): any
+	terms:add(1)
+	return answered({ command = `bridge term-{terms:peek()}`, claim = `claim-{terms:peek()}` })
+end
+tapi.claimed = function(claim: string): any
+	return answered(`term-{string.match(claim, "%d+")}`)
+end
+tapi.command = function(id: string): any
+	return answered(`bridge {id}`)
+end
+tapi.status = function(): any
+	return answered({ busy = false, exited = false })
+end
+tapi.close = function(): any
+	return answered(nil)
+end
+tapi.write = function(): any
+	return answered(nil)
+end
+tapi.term = function(key: string, options: any?): any
+	local s = term_sessions[key]
+	if not s and options then
+		s = { title = nil, close = function()
+			term_sessions[key] = nil
+		end, focus = function() end }
+		term_sessions[key] = s
+	end
+	return s
+end
+tapi.view = function(props: any): Node
+	return ui.column { grow = 1, label = "Terminal", ui.text { `terminal {props.label}`, literal = true } }
+end
+-- (Before Settings' stand-ins, which put theirs over these: the
+-- registry's sign-in terminal, every other one as here.)
 require("./settings_stub")
 
 -- No window chrome to restyle headless, and no chat to open (the chat
@@ -93,6 +195,8 @@ for name, f in chat_store do
 		chat_store[name] = function() end
 	end
 end
+-- (Its open chat shown as the host's chats have it, above.)
+chat_store.open = open_store
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
@@ -500,6 +604,41 @@ projects_stub.delete = function(id: string): any
 	end
 	publish()
 	return answer(nil)
+end
+
+-- What opens tabs in the panel, as plugins, links and the panel home do:
+-- each its own tab (a PR from the GitHub plugin's board, a file, a page, a
+-- terminal), named by a count.
+local opened_tabs = ui.state("fixture_opened_tabs", 0)
+local function panel_screen(): any
+	return require("@app/screens/panel")
+end
+local function here(): string?
+	local s = require("@app/screens/shell/route").session:peek()
+	return if s then s.id else nil
+end
+for _, source in { "pr", "file", "url", "terminal" } do
+	ui.command {
+		id = `fixture.open_{source}`,
+		title = `Fixture: open a {source} in the panel`,
+		run = function()
+			opened_tabs:add(1)
+			local n, p = opened_tabs:peek(), panel_screen()
+			if source == "pr" then
+				p.open_plugin_tab(here(), { plugin = "github", kind = "pr", title = `PR #{n}`, data = { key = `pr{n}` } })
+			elseif source == "file" then
+				p.open_file(here(), `src/file{n}.rs`)
+			elseif source == "url" then
+				p.open_url(here(), `https://example.com/{n}`)
+			else
+				local state = require("@app/screens/panel/state")
+				local k = state.key(here(), nil)
+				if k then
+					state.open(k, "terminal")
+				end
+			end
+		end,
+	}
 end
 
 -- What changes on the engine's side.

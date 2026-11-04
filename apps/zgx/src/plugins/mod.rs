@@ -45,6 +45,7 @@ pub mod recovery;
 pub mod remote;
 pub mod templates;
 pub mod retired_themes;
+pub mod official;
 pub mod tokens;
 pub mod looks;
 pub mod template_consent;
@@ -680,7 +681,7 @@ pub fn prepare_live() -> PathBuf {
     }
 }
 
-/// The host's own menu item's action ("Use Default Interface").
+/// The host's own menu item's action ("Use Zeron v3").
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
 /// The host's own "Keep <template>…": the keep sheet for the one in preview.
 pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
@@ -730,17 +731,17 @@ pub fn ask_zeron_template() {
 thread_local! {
     /// The main window's bridge, for what the app's host tells it.
     static BRIDGE: RefCell<Weak<Bridge>> = const { RefCell::new(Weak::new()) };
-    /// Plugin commands whose shortcut was already Zeron's (or another's), by
-    /// plugin: the shortcut as written and the command's title.
-    static SHORTCUTS_TAKEN: RefCell<BTreeMap<String, Vec<(String, String)>>> = RefCell::default();
+    /// Plugin commands the menu bar shows without their shortcut, by
+    /// plugin (src/menu_bar.rs).
+    static SHORTCUTS_TAKEN: RefCell<BTreeMap<String, Vec<crate::menu_bar::Dropped>>> = RefCell::default();
 }
 
 /// The menu bar's account of plugin commands shown without their shortcut
-/// (src/main.rs `menus_noting`): each says so on its plugin's row.
-pub fn shortcuts_taken(list: Vec<(String, String, String)>) {
-    let mut by: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-    for (plugin, key, title) in list {
-        by.entry(plugin).or_default().push((key, title));
+/// (src/menu_bar.rs `Bar::of`): each says so on its plugin's row.
+pub fn shortcuts_taken(list: Vec<crate::menu_bar::Dropped>) {
+    let mut by: BTreeMap<String, Vec<crate::menu_bar::Dropped>> = BTreeMap::new();
+    for dropped in list {
+        by.entry(dropped.plugin.clone()).or_default().push(dropped);
     }
     let changed = SHORTCUTS_TAKEN.with(|t| {
         let same = *t.borrow() == by;
@@ -761,6 +762,27 @@ pub fn shortcuts_taken(list: Vec<(String, String, String)>) {
             }
         });
     }
+}
+
+/// What a plugin's row says of its commands shown without their shortcut
+/// (`lost`, at least one), naming another plugin by `name_of` its id: "Its
+/// ⌘J for “Open board” is already Zeron's (Toggle terminal), so it's in the
+/// menu bar without one."
+pub(crate) fn shortcut_notice(lost: &[crate::menu_bar::Dropped], name_of: impl Fn(&str) -> String) -> String {
+    use crate::menu_bar::Why;
+    let first = &lost[0];
+    let key = shortcut_words(&first.key);
+    let mut words = match &first.why {
+        Why::Zerons(title) => format!("Its {key} for “{}” is already Zeron's ({title}), so it's in the menu bar without one.", first.title),
+        Why::Plugins(other) => format!("Its {key} for “{}” is already {}'s, so it's in the menu bar without one.", first.title, name_of(other)),
+        Why::NoKey => format!("Its {key} for “{}” isn't a key a menu can show, so it's in the menu bar without one.", first.title),
+    };
+    match lost.len() {
+        1 => {}
+        2 => words.push_str(" So is one more of its commands."),
+        n => words.push_str(&format!(" So are {} more of its commands.", n - 1)),
+    }
+    words
 }
 
 /// A shortcut as the menu shows it: `cmd+shift+n` is ⇧⌘N.
@@ -958,7 +980,7 @@ pub fn set_view(handle: zgx::compose::ViewHandle) {
     }
 }
 
-/// "Use Default Interface" (the host's own menu item, and Revert in its toast, which no
+/// "Use Zeron v3" (the host's own menu item, and Revert in its toast, which no
 /// template can take away): safe mode (preview.rs), so Zeron's own runs
 /// whatever `.active` says until you pick a template on the Templates page,
 /// and the terminals templates started are closed. The window follows.
@@ -1555,7 +1577,7 @@ impl Bridge {
                 ("author", Value::from(t.author.as_str())),
                 ("version", Value::from(t.version.as_str())),
                 ("zeron_version", Value::from(t.zeron_version.as_str())),
-                ("builtin", Value::from(t.id == live::BUILTIN)),
+                ("builtin", Value::from(t.id == live::BUILTIN || t.official.is_some())),
                 ("active", Value::from(t.id == active)),
                 ("status", Value::from(state)),
             ];
@@ -1620,13 +1642,10 @@ impl Bridge {
                 }
                 // A shortcut it lost to Zeron's (or another plugin's).
                 if let Some(lost) = SHORTCUTS_TAKEN.with(|t| t.borrow().get(i.id()).cloned())
-                    && let Some((key, title)) = lost.first()
+                    && !lost.is_empty()
                 {
-                    i.json["problem"] = Json::String(format!(
-                        "{}'s shortcut {} for “{title}” is already taken: it's in the menu without one",
-                        i.name(),
-                        shortcut_words(key)
-                    ));
+                    let name_of = |id: &str| self.item(id).map_or_else(|| id.to_string(), |p| p.name().to_string());
+                    i.json["problem"] = Json::String(shortcut_notice(&lost, name_of));
                 }
                 if let Some((hash, words)) = self.problems.borrow().get(i.id())
                     && hash == i.hash()
@@ -3214,6 +3233,7 @@ fn reveal(dir: &Path) {
 }
 
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3294,17 +3314,19 @@ mod loading_tests;
 #[cfg(test)]
 mod examples_tests;
 #[cfg(test)]
+mod hotkeys_tests;
+#[cfg(test)]
 mod markdown_tests;
 
 #[cfg(test)]
 mod menu_tests {
-    /// "Use Default Interface" is the host's own, in View, whatever the
+    /// "Use Zeron v3" is the host's own, in View, whatever the
     /// scripts declare (none here, as when a template broke before any).
     #[test]
     fn the_host_s_menu_always_has_a_way_back_to_zeron_s_template() {
-        let menus = format!("{:?}", crate::menus(&[]));
+        let menus = format!("{:?}", crate::menu_bar::Bar::of(&[], &[], &[], None).menus);
         assert!(menus.contains("View"), "{menus}");
-        assert!(menus.contains("Use Default Interface"), "{menus}");
+        assert!(menus.contains("Use Zeron v3"), "{menus}");
         assert!(menus.contains(super::USE_ZERON_TEMPLATE), "{menus}");
     }
 
@@ -3324,11 +3346,11 @@ mod menu_tests {
             command("zeron.anything", "Mine", "File"),
             command("new-chat", "New Chat", "File"),
         ];
-        let bar = crate::menus(&commands);
+        let bar = crate::menu_bar::Bar::of(&commands, &[], &[], None).menus;
         let shown = format!("{bar:?}");
         assert!(zgx_desktop::app_menu_bar(bar, |_| {}).is_ok(), "the platform takes the bar: {shown}");
         assert_eq!(shown.matches(super::USE_ZERON_TEMPLATE).count(), 1, "{shown}");
-        assert!(shown.contains("Use Default Interface") && !shown.contains("Stay Here") && !shown.contains("Keep Me"), "{shown}");
+        assert!(shown.contains("Use Zeron v3") && !shown.contains("Stay Here") && !shown.contains("Keep Me"), "{shown}");
         assert!(!shown.contains("zeron.anything") && shown.contains("New Chat"), "{shown}");
     }
 }

@@ -2363,7 +2363,7 @@
       "reload_interface": "Reload interface",
       "commands": "Commands",
       "run": "Run",
-      "default_interface": "Use the default interface"
+      "default_interface": "Use Zeron v3"
     },
     "add_project": {
       "something_went_wrong": "Something went wrong",

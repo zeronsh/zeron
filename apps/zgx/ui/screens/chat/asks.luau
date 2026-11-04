@@ -1,0 +1,138 @@
+-- What a chat's composer shows of its session beyond its draft, and what's
+-- done with it, for one chat by its id: what the agent asks (a question,
+-- an approval), the queue, the todos and the background tasks (the tray).
+-- The window's composer (the chat shown) and a split pane's (its own chat,
+-- focused or not) are made from the same, so a chat shows the same in
+-- either, and a pane out of focus is as live as the one in it.
+--
+--   local a = Asks.bind { id = fn, session = fn, chosen = state, asked = state }
+--   ds.Composer { question = a.question, approval = a.approval, chosen = a.chosen,
+--     on_pick = a.on_pick, on_answer = a.on_answer, …, queue = a.queue, todos = a.todos,
+--     tasks = a.tasks }
+--
+-- `session` is the chat's record as the host publishes it (the window's
+-- chat's, or a lane's); `chosen` the options picked in its question, which
+-- start afresh as another question is asked (`asked`, the request they're
+-- for, and its chat).
+
+local store = require("@app/screens/chat/store")
+
+local M = {}
+
+export type Bind = {
+	id: () -> string?,
+	session: () -> any,
+	chosen: State<{ [string]: boolean }>,
+	asked: State<any>,
+}
+
+function M.bind(b: Bind): { [string]: any }
+	local ask = ui.computed(function(): store.Ask?
+		local s = b.session()
+		return if s then s.ask else nil
+	end)
+	local question = ui.computed(function(): any
+		local a = ask:get()
+		return if a and a.kind == "question" then a.question else nil
+	end)
+	local approval = ui.computed(function(): any
+		local a = ask:get()
+		return if a and a.kind == "approval" then a.approval else nil
+	end)
+	-- (Fresh for another question of the same chat: moving to another
+	-- chat brings its own picks with its draft, screens/chat/shared.)
+	ui.effect(function()
+		local a = ask:get()
+		local now = { id = b.id(), request = if a then a.request else nil }
+		local was = b.asked:peek()
+		if type(was) ~= "table" or was.id ~= now.id or was.request ~= now.request then
+			b.asked:set(now)
+			if type(was) == "table" and was.id == now.id then
+				b.chosen:set({})
+			end
+		end
+	end)
+	local function list(key: string): any
+		return ui.computed(function(): { any }
+			local s = b.session()
+			return if s and s[key] then s[key] else {}
+		end)
+	end
+	local queue = list("queue")
+	-- Each act is on the chat and the question it was asked about, as they
+	-- are as it's taken.
+	local function on_ask(f: (id: string, request: string) -> ())
+		return function()
+			local id, a = b.id(), ask:peek()
+			if id and a then
+				f(id, a.request)
+			end
+		end
+	end
+	return {
+		ask = ask,
+		question = question,
+		approval = approval,
+		chosen = b.chosen,
+		on_pick = function(value: string)
+			local q = question:peek()
+			local now = table.clone(b.chosen:peek())
+			if q and q.multi then
+				now[value] = not now[value] or nil
+			else
+				now = { [value] = true }
+			end
+			b.chosen:set(now)
+		end,
+		on_answer = function(answer: any)
+			local id, a = b.id(), ask:peek()
+			if id and a then
+				store.answer(id, a.request, answer)
+			end
+		end,
+		on_close_question = on_ask(store.deny),
+		-- Back a page: it shows again with what was picked on it.
+		on_back = on_ask(function(id: string, request: string)
+			store.question_back(id, request):after(function(picked: any)
+				local now: { [string]: boolean } = {}
+				for _, v in picked or {} do
+					now[v] = true
+				end
+				b.chosen:set(now)
+			end, function() end)
+		end),
+		-- (The engine allows once, each time it's asked.)
+		can_always = false,
+		on_approve = function(scope: string)
+			local id, a = b.id(), ask:peek()
+			if id and a then
+				store.approve(id, a.request, scope)
+			end
+		end,
+		on_deny = on_ask(store.deny),
+		queue = queue,
+		on_queue_send = function(item: string)
+			local id = b.id()
+			if id then
+				store.queue(id, { op = "send", item = item })
+			end
+		end,
+		on_queue_remove = function(item: string)
+			local id = b.id()
+			if id then
+				store.queue(id, { op = "remove", item = item })
+			end
+		end,
+		on_queue_reorder = function(from: number, to: number)
+			local id = b.id()
+			local items = queue:peek()
+			if id and items[from] then
+				store.queue(id, { op = "move", item = items[from].id, to = to })
+			end
+		end,
+		todos = list("todos"),
+		tasks = list("tasks"),
+	}
+end
+
+return M

@@ -4,15 +4,17 @@
 -- from its background, menus and the composer from its chrome and card,
 -- every hairline and wash from its text's own ink, its accent and tones,
 -- its code's and Markdown's colours, diffs, git, statuses, and a visual's
--- chart colours from its terminal's ANSI ones. (The terminal's own colours
--- have no token yet: zgx's terminal paints a fixed palette.) Zeron's own
--- (zeron-dark, zeron-light) are the design system's themes (themes/*.json)
--- and change nothing.
+-- chart colours from its terminal's ANSI ones, and the terminal's own
+-- colours (`terminal.*`: its text, cursor, selection and sixteen ANSI
+-- colours, which zgx gives the terminal over the user's Ghostty ones).
+-- Zeron's own (zeron-dark, zeron-light) are the design system's themes
+-- (themes/*.json) and change nothing but the terminal's.
 --
 -- Each palette stays legible: an ink that reads too faint on the palette's
 -- surfaces is moved toward black or white until it reads (body text and
--- code at 4.5:1, faint text, comments and fills at 3:1), and `tokens`
--- says what it moved.
+-- code at 4.5:1, faint text, comments and fills at 3:1; the terminal's ANSI
+-- colours at 4.5:1, 3:1 for the two that are the background's own shade),
+-- and `tokens` says what it moved.
 --
 -- The themes themselves are the host's (src/themes.rs): Zeron's built in,
 -- each template's own and your imported ones, and the one chosen for each
@@ -222,13 +224,34 @@ local STATUS = {
 -- the bright half on dark, the normal on light.
 local SERIES = { teal = 7, amber = 4, rose = 2, violet = 6, lime = 3, sky = 5 }
 
--- The overrides a window wears for `p` (nil for the design system's own),
--- and the inks moved to stay legible.
+-- The terminal's colours (zgx's `terminal.*`), into `out`: its text the
+-- palette's (legible already), the cursor its accent with black or white
+-- under it, the selection its accent over the card (Ghostty's colours are
+-- opaque: a wash is mixed in), its background the card the pane shows
+-- (the app draws the pane; Ghostty's own background is clear), and the
+-- sixteen ANSI colours held legible on the window's surfaces as its inks
+-- are (`ensure`), at 3:1 the two that are the background's own shade
+-- (black and bright black on dark, white and bright white on light: a
+-- light theme's pale white turns grey, never white on white), else 4.5:1.
+-- A palette without ANSI colours leaves those the terminal's own.
+local function terminal(out: { [string]: any }, p: Palette, dark: boolean, surfaces: { string }, card: string, text: string, accent: string, ensure: (string, string, { string }, number) -> string)
+	out["terminal.background"] = card
+	out["terminal.foreground"] = text
+	out["terminal.cursor"] = accent
+	out["terminal.cursor_text"] = M.on(accent)
+	out["terminal.selection_background"] = M.mix(card, accent, if dark then 0.35 else 0.24)
+	out["terminal.selection_foreground"] = text
+	for i, c in p.ansi or {} do
+		local n = i - 1
+		local dim = if dark then n == 0 or n == 8 else n == 7 or n == 15
+		out[`terminal.ansi.{n}`] = ensure(`terminal.ansi.{n}`, c, surfaces, if dim then 3 else 4.5)
+	end
+end
+
+-- The overrides a window wears for `p` (for the design system's own, the
+-- terminal's alone), and the inks moved to stay legible.
 function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 	local fixes: { Fix } = {}
-	if OWN[p.id] then
-		return nil, fixes
-	end
 	local dark = p.kind ~= "light" and p.kind ~= "high-contrast-light"
 	local function pick(on_dark: any, on_light: any): any
 		return if dark then on_dark else on_light
@@ -241,6 +264,14 @@ function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 		return out
 	end
 	local a = M.alpha
+	if OWN[p.id] then
+		-- (Its surfaces and inks are its theme file's, legible as made.)
+		local card = p.card or p.background
+		local menu = M.mix(card, p.raised, pick(0.34, 0.02))
+		local own: { [string]: any } = {}
+		terminal(own, p, dark, { p.background, p.shell or p.background, card, menu }, card, p.text, p.accent, ensure)
+		return own, fixes
+	end
 
 	-- The surfaces: the window, its chrome, a card, and a menu's opaque
 	-- fill (the shipping app's overlay: the card a little toward raised).
@@ -400,6 +431,7 @@ function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 			out[`zeron.visual.series.{name}`] = ensure(`zeron.visual.series.{name}`, color, { bg }, 3)
 		end
 	end
+	terminal(out, p, dark, surfaces, card, text, fill.accent, ensure)
 	return out, fixes
 end
 
@@ -444,10 +476,16 @@ end
 local worn: { [string]: string } = {}
 
 -- `slots` worn (nil: Zeron's in both): each scheme's theme registered again
--- where its palette changed. Their names (`palettes.scheme`).
+-- where its palette changed. Their names (`palettes.scheme`). A scheme
+-- wearing Zeron's own takes its terminal's colours from Zeron's palette
+-- (the host's list) once that's there; with no slots (a plugin, lent the
+-- design system) nothing is looked up.
 function M.wear(slots: Slots?): { dark: string, light: string }
 	for _, kind: any in { "dark", "light" } do
 		local p = if slots then (slots :: any)[kind] :: Palette? else nil
+		if slots and p == nil then
+			p = M.find(`zeron-{kind}`)
+		end
 		local said = signature(p)
 		if worn[kind] ~= said then
 			worn[kind] = said

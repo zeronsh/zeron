@@ -132,7 +132,7 @@ pub fn refuse(action: &str) -> Result<(), String> {
     match current() {
         Some(p) if blocked(action) => {
             eprintln!("zeron-zgx: preview: {action} refused while {} isn't kept", p.id);
-            Err(format!("{} is a preview. Keep it first, or revert to the default interface.", p.name))
+            Err(format!("{} is a preview. Keep it first, or go back to Zeron v3.", p.name))
         }
         _ => Ok(()),
     }
@@ -190,8 +190,10 @@ pub fn approve(id: &str, digest: &str) -> Result<(), String> {
     approve_at(&path, id, digest).map_err(|e| format!("Couldn't keep it: {e}"))
 }
 
-/// Whether template `id` in `templates` runs with the app's powers: Zeron's
-/// own, or one you kept as it is.
+/// Whether template `id` in `templates` runs with the app's powers: the
+/// default, one of Zeron's official templates exactly as this build wrote it
+/// (`official::verified`: Zeron's own code, as the default is), or one you
+/// kept as it is.
 pub fn trusted(templates: &Path, id: &str) -> bool {
     id == live::BUILTIN || approvals_path().is_some_and(|p| trusted_at(templates, id, &p))
 }
@@ -202,7 +204,7 @@ pub fn trusted_at(templates: &Path, id: &str, approvals: &Path) -> bool {
         return true;
     }
     let dir = templates.join(id);
-    approved_at(approvals, id, &digest(&dir))
+    super::official::verified(&dir).is_some() || approved_at(approvals, id, &digest(&dir))
 }
 
 // ── Safe mode ───────────────────────────────────────────────────────────────

@@ -46,6 +46,7 @@ mod images;
 mod links;
 mod pasted;
 mod math;
+mod menu_bar;
 mod plugins;
 mod previews;
 mod projects;
@@ -65,6 +66,8 @@ mod menu_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
+mod split_tests;
+#[cfg(test)]
 mod route_motion_tests;
 #[cfg(test)]
 mod hit_sweep_tests;
@@ -72,6 +75,8 @@ mod hit_sweep_tests;
 mod hit_tests;
 #[cfg(test)]
 mod shortcut_tests;
+#[cfg(test)]
+mod menu_bar_tests;
 #[cfg(test)]
 mod window_buttons_tests;
 #[cfg(test)]
@@ -103,7 +108,7 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
 use zgx::{compose::component, platform::PlatformService, scene::Rect, widgets::Ui};
 use zgx_desktop::{
-    AppMenu, AppMenuEntry, Application, FontData, MenuAccelerator, Glass, GlassMaterial, Titlebar, WindowBounds, WindowContext,
+    Application, FontData, Glass, GlassMaterial, Titlebar, WindowBounds, WindowContext,
     WindowHandle, WindowLevel, WindowOptions,
 };
 use zgx_script::{ScriptHost, Shared, Value};
@@ -437,7 +442,7 @@ fn open(cx: &mut WindowContext, entry: &str, inspect: bool) {
     // fixture, a template in preview and a notice of each kind.)
     let chrome = plugins::host_bar::dev_toasts(cx);
     let floor = chrome.is_some().then(|| host.shared("toast_floor", 16.));
-    serve_with(cx, host, entry, inspect, chrome);
+    serve_with(cx, host, entry, inspect, chrome, menu_bar::Role::Bar);
     if let Some(floor) = floor {
         plugins::host_bar::follow(floor);
     }
@@ -458,7 +463,7 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     let chrome = plugins::host_bar::view(cx);
     // Where the app's toasts stand, over the host's (host_bar.rs `follow`).
     let floor = host.shared("toast_floor", 16.);
-    let view = serve_with(cx, host, "app.luau", inspect, Some(chrome));
+    let view = serve_with(cx, host, "app.luau", inspect, Some(chrome), menu_bar::Role::Bar);
     plugins::host_bar::follow(floor);
     // What zgx reports of the window's elements, for plugins' places.
     plugins::set_view(view);
@@ -510,6 +515,21 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     host.window_zoom(&cx.ui);
     // `ui.window.size` (the lightbox fills the window with it).
     host.window_size(cx.viewport.clone());
+    // `ui.window.full_screen` and its transition (macOS's animation, going
+    // in or out, and how long it takes): the title bar's controls slide
+    // over to where the traffic lights were, in step with it.
+    {
+        let transition = cx.full_screen_transition.clone();
+        host.window_full_screen(cx.window_info.fullscreen.clone(), move || {
+            transition.get().map(|transition| match transition {
+                zgx_desktop::FullScreenTransition::Entering(duration) => (true, duration.as_secs_f64()),
+                zgx_desktop::FullScreenTransition::Leaving(duration) => (false, duration.as_secs_f64()),
+            })
+        });
+    }
+    // The platform the window is on ("macos", "linux", "windows"): what the
+    // window's own buttons are (ds/title_bar: macOS's traffic lights).
+    host.shared("platform", std::env::consts::OS);
     if let Ok(step) = std::env::var("ZERON_ZGX_STEP") {
         host.shared("onboarding.start", step.as_str());
     }
@@ -524,6 +544,12 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     }
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
+    // Full screen, entered or left (`ui.invoke("window.full_screen", on)`),
+    // as the green button does: macOS animates it, and `ui.window`'s
+    // full_screen and its transition say so (a fixture drives the title
+    // bar's slide with it).
+    let window = cx.window.clone();
+    host.action("window.full_screen", move |on| window.set_fullscreen(matches!(on, Value::Bool(true))));
     // Reload Zeron: the app quits and starts again, the same launch
     // (src/relaunch.rs).
     let windows = cx.windows.clone();
@@ -751,13 +777,27 @@ fn selection_platform(cx: &mut WindowContext, host: &ScriptHost) -> Rc<RefCell<O
 /// Loads `host`'s scripts into the window, reloading them as they change,
 /// with devtools when asked.
 fn serve(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool) -> zgx::compose::ViewHandle {
-    serve_with(cx, host, entry, inspect, None)
+    serve_with(cx, host, entry, inspect, None, menu_bar::Role::Bar)
+}
+
+/// `serve`, for a sheet in a window of its own (a plugin's or a template's
+/// consent): its commands, if any, are never the app's menu bar, which
+/// stays the window's that has it (src/menu_bar.rs).
+fn serve_sheet(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool) -> zgx::compose::ViewHandle {
+    serve_with(cx, host, entry, inspect, None, menu_bar::Role::Sheet)
 }
 
 /// `serve`, with what the host draws above the scripts' view (`chrome`: the
 /// main window's own bar, src/plugins/host_bar.rs), outside anything the
 /// scripts build.
-fn serve_with(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool, chrome: Option<zgx::compose::View>) -> zgx::compose::ViewHandle {
+fn serve_with(
+    cx: &mut WindowContext,
+    host: ScriptHost,
+    entry: &str,
+    inspect: bool,
+    chrome: Option<zgx::compose::View>,
+    role: menu_bar::Role,
+) -> zgx::compose::ViewHandle {
     let _ = host.reload();
     // (The scripts' garbage is collected as the window goes idle, by zgx
     // itself: `zgx::idle`. The app once looked for quiet twice a second.)
@@ -810,7 +850,7 @@ fn serve_with(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bo
     } else {
         None
     };
-    let commands = serve_commands(cx, &host);
+    let commands = serve_commands(cx, &host, role);
     // Reload interface: every script evaluated again and the window's
     // interface mounted anew, as a save under ui/ does (state kept), on the
     // next turn rather than inside the command that asks. (The host is held
@@ -853,16 +893,13 @@ fn serve_with(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bo
     handle
 }
 
-/// The scripts' commands (`ui.command`) as the app's menu bar, kept current
-/// as a reload changes them, each item running its command. A shortcut
-/// reaches the app only as a menu's key equivalent: without this, ⌘K, ⌘N
-/// and the rest never fired in a real window (headless tests run commands
-/// by id). Those the scripts reserve (`reserved = true`) come before a
-/// focused terminal or web page. zgx-run's `serve_commands`, which this app
-/// doesn't depend on; keep the effect it returns while the window lives.
-fn serve_commands(cx: &mut WindowContext, host: &ScriptHost) -> zgx::reactive::Effect {
-    let (commands, reserved) = (host.commands(), host.reserved_keys());
-    let windows = cx.windows.clone();
+/// The scripts' commands as the app's menu bar while this window has it
+/// (src/menu_bar.rs: one bar for the whole app, the last opened window's
+/// that has one; a sheet never takes it), and each item it shows chosen
+/// here run in this window's scripts; and the bar's items listed for the
+/// command palette. Keep what it returns while the window lives: dropped,
+/// the bar is the next window's again.
+fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Role) -> (menu_bar::Served, Option<zgx::reactive::Effect>) {
     // The host's own items follow a template going in and out of preview.
     let preview = cx.ui.runtime.signal(plugins::preview::current());
     let heard = preview.clone();
@@ -870,58 +907,47 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost) -> zgx::reactive::E
         heard.set(now.cloned());
     });
     // What the menus hold, for the command palette (`app.menu_commands`):
-    // where the system draws no menu bar (Windows, Linux) and zgx's drawn one
-    // isn't mounted (src/plugins/host_bar.rs), the palette is how a pointer
-    // reaches each item; their shortcuts are zgx's key bindings still.
-    let listed = host.shared("app.menu_commands", Value::List(Rc::from([])));
-    let follow = cx.ui.runtime.effect(move || {
-        preview.with(|_| ());
-        let all = commands.get();
-        let (bar, taken) = menus_noting(&all);
-        // A plugin's whose shortcut was taken says so on its Plugins row.
-        plugins::shortcuts_taken(taken);
-        let mut shown = bar.clone();
-        if let Err(error) = windows.set_menus(bar) {
-            // Never a bar without the app's own shortcuts: the platform
-            // refuses a whole bar for one bad item, and with none before it
-            // no shortcut works at all. The app's alone, then.
-            eprintln!("zeron-zgx: menus: {error}; the app's own, without plugins'");
-            let own: Vec<zgx_script::Command> = all.iter().filter(|c| !is_plugins(c)).cloned().collect();
-            shown = menus(&own);
-            if let Err(error) = windows.set_menus(shown.clone()) {
-                // The scripts' are the template's too: the host's own bar,
-                // which always has the way back to Zeron's template.
-                eprintln!("zeron-zgx: menus: {error}; the host's own alone");
-                shown = menus(&[]);
-                if let Err(error) = windows.set_menus(shown.clone()) {
-                    eprintln!("zeron-zgx: menus: {error}");
-                }
-            }
-        }
-        listed.set(palette_commands(&shown, &all));
-        let keys = reserved.get().iter().filter_map(|key| accelerator(key)).collect();
-        if let Err(error) = windows.set_reserved_shortcuts(keys) {
-            eprintln!("zeron-zgx: reserved shortcuts: {error}");
-        }
+    // where the system draws no menu bar (Windows, Linux: zgx's drawn one
+    // isn't mounted, src/plugins/host_bar.rs) the palette is how a pointer
+    // reaches each item. The bar `menu_bar` makes of this window's commands;
+    // their shortcuts are zgx's key bindings still. (A sheet's bar is the
+    // window's under it: nothing of its own to list.)
+    let listing = (role == menu_bar::Role::Bar).then(|| {
+        let listed = host.shared("app.menu_commands", Value::List(Rc::from([])));
+        let (commands, reserved, from, preview) = (host.commands(), host.reserved_keys(), host.clone(), preview.clone());
+        cx.ui.runtime.effect(move || {
+            let commands = commands.get();
+            let reserved = reserved.get();
+            let bar = preview.with(|preview| menu_bar::Bar::of(&commands, &reserved, &from.dropped_shortcuts(), preview.as_ref()));
+            listed.set(palette_commands(&bar.menus, &commands));
+        })
     });
+    let served = menu_bar::of(&cx.windows).serve(&cx.ui.runtime, host, preview, role);
     let run = host.clone();
     cx.on_menu_action(move |action| {
-        // The host's own items (no script's: `zeron.` is the host's, and
-        // `menus` leaves the scripts' out): a way back from any template,
-        // and keeping the one in preview.
-        if action.0.starts_with(HOST_COMMANDS) {
+        // The host's own items (no script's: `zeron.` is the host's, and the
+        // bar leaves the scripts' out): a way back from any template, and
+        // keeping the one in preview, from any window.
+        if action.0.starts_with(menu_bar::HOST_COMMANDS) {
             plugins::host_command(&action.0);
             return;
         }
-        run.run_command(&action.0);
+        // A sheet's bar is the window's under it: its items aren't the
+        // sheet's to run.
+        if role == menu_bar::Role::Sheet {
+            return;
+        }
+        if !run.run_command(&action.0) {
+            eprintln!("zeron-zgx: menus: {} chosen, but no command of this window runs it", action.0);
+        }
     });
-    follow
+    (served, listing)
 }
 
-/// Every item of the menus as set (`bar`), in their order, for the command
+/// Every item of the menus (`bar`), in their order, for the command
 /// palette: `{ id, title, menu, key }`, `key` as the scripts wrote it where
-/// the item has its shortcut (`all`'s). Not the host's Keep: that's its
-/// toast's, never a script's to run.
+/// the item has its shortcut (`all`'s). Not the host's Keep: that's the
+/// preview toast's, never a script's to run.
 fn palette_commands(bar: &[AppMenu], all: &[zgx_script::Command]) -> Value {
     fn walk(menu: &str, entries: &[AppMenuEntry], all: &[zgx_script::Command], out: &mut Vec<Value>) {
         for entry in entries {
@@ -948,11 +974,10 @@ fn palette_commands(bar: &[AppMenu], all: &[zgx_script::Command]) -> Value {
 
 /// A menu item run from the command palette (`app.run_menu_command`, the
 /// id `palette_commands` gave it), on the next turn, as its menu item would:
-/// the host's way back to the default interface, or a script's command. A
-/// plugin's waits until a template in preview is kept, as the host's
-/// dangerous actions do.
+/// the host's way back to Zeron v3, or a script's command. A plugin's waits
+/// until a template in preview is kept, as the host's dangerous actions do.
 fn run_menu_command(host: &ScriptHost, id: &str) {
-    if id.starts_with(HOST_COMMANDS) {
+    if id.starts_with(menu_bar::HOST_COMMANDS) {
         if id == plugins::USE_ZERON_TEMPLATE {
             plugins::host_command(id);
         }
@@ -963,140 +988,6 @@ fn run_menu_command(host: &ScriptHost, id: &str) {
         return;
     }
     host.run_command(id);
-}
-
-/// Menus in the order the scripts first name them, items in their order.
-/// A plugin's command (zgx names each `<plugin>/<id>`; the app's have no `/`).
-fn is_plugins(command: &zgx_script::Command) -> bool {
-    command.id.contains('/')
-}
-
-/// The menu bar of the scripts' commands. The platform refuses a whole bar
-/// with an action or a shortcut twice (and then no shortcut works), so each
-/// action is shown once and each shortcut once, compared as the keystroke
-/// it is (`meta+n` and `cmd+n` are both ⌘N on a Mac, which zgx's own check,
-/// by name, lets past): the app's own commands keep theirs first, and a
-/// plugin's whose shortcut is taken shows without one.
-fn menus(commands: &[zgx_script::Command]) -> Vec<AppMenu> {
-    menus_noting(commands).0
-}
-
-/// `menus`, and each plugin command whose shortcut was taken: its plugin,
-/// its shortcut as written, its title.
-fn menus_noting(commands: &[zgx_script::Command]) -> (Vec<AppMenu>, Vec<(String, String, String)>) {
-    let mut lost: Vec<(String, String, String)> = Vec::new();
-    let mut keys: std::collections::HashMap<usize, MenuAccelerator> = std::collections::HashMap::new();
-    let mut taken: Vec<zgx::actions::Keystroke> = Vec::new();
-    for plugins in [false, true] {
-        for (i, command) in commands.iter().enumerate() {
-            if command.separator || is_plugins(command) != plugins {
-                continue;
-            }
-            let Some(key) = command.key.as_deref().and_then(accelerator) else { continue };
-            if taken.contains(&key.0) {
-                eprintln!("zeron-zgx: menus: {}'s shortcut `{}` is taken; it shows without one", command.id, command.key.as_deref().unwrap_or(""));
-                if let Some((plugin, _)) = command.id.split_once('/') {
-                    lost.push((plugin.to_string(), command.key.clone().unwrap_or_default(), command.title.clone()));
-                }
-                continue;
-            }
-            taken.push(key.0.clone());
-            keys.insert(i, key);
-        }
-    }
-    let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut menus: Vec<AppMenu> = Vec::new();
-    for (i, command) in commands.iter().enumerate() {
-        // `zeron.` is the host's: a script's (a template's) command by such
-        // an id would be a second item with the host's action, and the
-        // platform refuses the whole bar for it.
-        if !command.separator && command.id.starts_with(HOST_COMMANDS) {
-            eprintln!("zeron-zgx: menus: {} is the host's; the script's is left out", command.id);
-            continue;
-        }
-        if !command.separator && (command.id.is_empty() || command.title.is_empty() || !ids.insert(command.id.as_str())) {
-            continue;
-        }
-        let index = match menus.iter().position(|m| m.label == command.menu) {
-            Some(index) => index,
-            None => {
-                menus.push(AppMenu::new(command.menu.clone(), []));
-                menus.len() - 1
-            }
-        };
-        let entry = if command.separator {
-            AppMenuEntry::Separator
-        } else {
-            let item = AppMenuEntry::item(command.title.clone(), command.id.as_str());
-            match keys.remove(&i) {
-                Some(key) => item.accelerator(key),
-                None => item,
-            }
-        };
-        menus[index].entries.push(entry);
-    }
-    // "Use Default Interface", the host's own, after the scripts' View items:
-    // no template can take it away (src/plugins).
-    let view = match menus.iter().position(|m| m.label == "View") {
-        Some(index) => index,
-        None => {
-            menus.push(AppMenu::new("View", []));
-            menus.len() - 1
-        }
-    };
-    if !menus[view].entries.is_empty() {
-        menus[view].entries.push(AppMenuEntry::Separator);
-    }
-    // A template in preview: keeping it, from here too (the bar's Keep).
-    if let Some(preview) = plugins::preview::current() {
-        menus[view].entries.push(AppMenuEntry::item(format!("Keep {}…", preview.name), plugins::KEEP_TEMPLATE));
-    }
-    menus[view].entries.push(AppMenuEntry::item("Use Default Interface", plugins::USE_ZERON_TEMPLATE));
-    (menus, lost)
-}
-
-/// The host's own command ids: no script's command may have one.
-const HOST_COMMANDS: &str = "zeron.";
-
-/// `cmd+shift+d`, `cmd+alt+arrowleft`, `cmd+[`, `cmd+,` as a menu's
-/// accelerator: `cmd` is Command on macOS, Control elsewhere.
-fn accelerator(text: &str) -> Option<MenuAccelerator> {
-    use zgx::input::{Key, Modifiers};
-    let mut modifiers = Modifiers::default();
-    let mut parts: Vec<&str> = text.split('+').collect();
-    let key = parts.pop()?.to_ascii_lowercase();
-    for part in parts {
-        match part.to_ascii_lowercase().as_str() {
-            "cmd" | "command" if cfg!(target_os = "macos") => modifiers.meta = true,
-            "cmd" | "command" => modifiers.control = true,
-            "super" | "meta" => modifiers.meta = true,
-            "ctrl" | "control" => modifiers.control = true,
-            "alt" | "opt" | "option" => modifiers.alt = true,
-            "shift" => modifiers.shift = true,
-            other => {
-                eprintln!("zeron-zgx: menus: unknown modifier `{other}` in `{text}`");
-                return None;
-            }
-        }
-    }
-    let key = match key.as_str() {
-        "arrowleft" | "left" => Key::ArrowLeft,
-        "arrowright" | "right" => Key::ArrowRight,
-        "arrowup" | "up" => Key::ArrowUp,
-        "arrowdown" | "down" => Key::ArrowDown,
-        "enter" | "return" => Key::Enter,
-        "tab" => Key::Tab,
-        "escape" | "esc" => Key::Escape,
-        "backspace" => Key::Backspace,
-        "delete" => Key::Delete,
-        "space" => Key::Space,
-        single if single.chars().count() == 1 => Key::Character(single.into()),
-        other => {
-            eprintln!("zeron-zgx: menus: unknown key `{other}` in `{text}`");
-            return None;
-        }
-    };
-    Some(MenuAccelerator::new(key, modifiers))
 }
 
 fn intro_window() -> WindowOptions {

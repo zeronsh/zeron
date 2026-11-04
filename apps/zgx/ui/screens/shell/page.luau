@@ -22,6 +22,13 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
+local splits = require("@app/screens/shell/split")
+local lanes = require("@app/screens/chat/lanes")
+local LaneTab = require("@app/screens/chat/lane_tab")
+local chat_shared = require("@app/screens/chat/shared")
+local DropOverlay = require("@ds/drop_overlay")
+local Dock = require("@app/screens/chat/dock")
+local Glass = require("@ds/glass")
 
 export type Props = {
 	files: State<boolean>,
@@ -31,9 +38,9 @@ export type Props = {
 -- The title bar's height (Zeron's): the pages start under it, the
 -- wallpaper runs under it to the window's top.
 local TITLE_H = 38
--- The title line's own room: under the bar's 4 of top padding, its
--- controls centred 21 down; and what its right end keeps for them.
-local TITLE_TOP, TITLE_RIGHT = 4, 64
+-- What the title line's right end keeps for the bar's controls there. (The
+-- line itself is the bar's: `ds.TitleBar.middle`.)
+local TITLE_RIGHT = 64
 -- Of that room, what lies past the controls' row (ds/title_bar's ROW_PAD),
 -- which `TitleBar.actions_right` gives as it is now.
 local TITLE_ROW_PAD = 10
@@ -42,6 +49,16 @@ local TITLE_ROW_PAD = 10
 -- The panel's least (Zeron's surface host's: screens/shell/fit) and its
 -- width until it's first split or dragged.
 local FILES_MIN, FILES_W = fit.RIGHT_PANE_MIN, 660
+-- The page and its panel are cards set into the window under the
+-- title bar, the window showing this much round and between them
+-- (`zeron.inset.gap`, ds/tokens).
+local INSET = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+-- A split pane's ×: its size.
+local CLOSE = 22
+-- Whether the panel's tabs show in groups (screens/panel sets it).
+local panel_groups = ui.shared("panel.groups_shown", false)
+-- How far up from a split pane's foot a click is on its composer.
+local COMPOSER_ROOM = 130
 
 return function(props: Props): Node
 	local box = ui.ref()
@@ -84,15 +101,151 @@ return function(props: Props): Node
 		end)
 	end, { w_full = true, h_full = true })
 
+	-- Split chats (screens/shell/split): the chats of the split showing laid
+	-- out in the page, side by side and above one another, the window's gap
+	-- between them; with none, the one chat (or a new chat, a plugin's page)
+	-- fills it. The page's own card stands where the focused one is. (Each
+	-- placed by edges that are a share of the page plus points: resizing
+	-- the window or sliding the sidebar runs no script.)
+	-- The chats in the page now: the split's, else the one open (so a chat
+	-- dragged over it can split it); none off a session.
+	local members = ui.computed(function(): { string }
+		local list = splits.members:get()
+		if #list > 0 then
+			return list
+		end
+		local f = splits.focused:get()
+		return if f then { f } else {}
+	end)
+	local grouped_now = ui.computed(function(): boolean
+		return #members:get() >= 2
+	end)
+	local function grouped(): boolean
+		return grouped_now:get()
+	end
+	-- A new chat with the sidebar closed: the page the whole window, as
+	-- the single-page layout has it, no gap round it (its wallpaper to the
+	-- window's edges).
+	local is_flat = ui.computed(function(): boolean
+		return home() and not on_plugin() and (shell_view.collapsed:get() or not fit.current:get().sidebar)
+	end)
+	-- The window's gap round the cards: none while the page is flat, eased
+	-- there and back with the sidebar's own motion (at once, the page
+	-- would step by the gap as the sidebar slides, and what's centred on it,
+	-- the composer, would step and drift back). Eased by zgx itself, a tween
+	-- bound to what shows it: no script runs as it moves.
+	local gap_to = ui.computed(function(): number
+		return if is_flat:get() then 0 else INSET
+	end)
+	local gap = motion.tween(gap_to, motion.sidebar)
+	-- (The page under the card's head, where it stood in the window: the
+	-- card is set down by the gap.)
+	local below_head = motion.tween(ui.computed(function(): number
+		return TITLE_H - gap_to:get()
+	end), motion.sidebar)
+	-- Whether the card has its corners (clipping the wallpaper) and its
+	-- edge's room: as soon as it leaves the window's edges, and until the gap
+	-- has closed going flat, so no square card shows in the gap. (Its fill
+	-- and edge fade meanwhile: `card_shown`. Its timer is the effect's: going
+	-- back before it's up keeps them.)
+	local edged = ui.use_state(not is_flat:peek())
+	ui.effect(function()
+		local flat = is_flat:get()
+		if not flat or motion.reduced_now() then
+			edged:set(not flat)
+			return
+		end
+		ui.after(motion.sidebar.duration or 0, function()
+			edged:set(false)
+		end)
+	end)
+	-- Where a chat's card stands in the page (alone, all of it).
+	local function box_of(id: string?): any
+		local b = if id then splits.frames:get()[id] else nil
+		return b or splits.WHOLE
+	end
+	-- Whether a pane's top meets the page's top at its left end or its
+	-- right (where the title bar's controls stand over it).
+	local function at_top_left(id: string?): boolean
+		return splits.top_left(box_of(id))
+	end
+	local function at_top_right(id: string?): boolean
+		return splits.top_right(box_of(id))
+	end
+	-- Whether the session's panel is open (known further down).
+	local panel_open: () -> boolean = function(): boolean
+		return false
+	end
+	-- Where a pane's × stands from its card's right: clear of the title
+	-- bar's panel toggle over the page's top right while the panel is shut
+	-- (10 in and 24 wide; past the window's own buttons and the divider
+	-- where they stand at the right: `TitleBar.actions_right`).
+	local function close_right(id: string?): number
+		return if at_top_right(id) and not panel_open() then 24 + ds.TitleBar.actions_right() else 8
+	end
+
 	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
 	pane.ref = box
 	pane.id = "shell-page"
 	pane.hook = "shell.page"
-	pane.grow = 1
 	pane.min_w = 0
-	pane.h_full = true
-	pane.relative = true
 	pane.overflow = "hidden"
+	-- (Alone, all of the page. In a split, over the focused chat's pane, as
+	-- the panes are placed: a composer docked at its foot is at that pane's
+	-- foot from the first frame, a launch included.)
+	splits.place(pane, function(): any
+		return if grouped() then box_of(splits.focused:get()) else splits.WHOLE
+	end)
+	-- (A card of its own, its corners clipping the wallpaper. In a split,
+	-- every chat's transcript is its pane's own (each kept as the focus
+	-- moves, so none is made again and none moves): this is only the frame
+	-- of the window's composer, at the focused pane's foot, over that
+	-- pane's card, letting the pointer through to it but for the composer.)
+	-- (Flat, a new chat with the sidebar closed: no card, the window's.)
+	local RADIUS = (function(): number
+		local r: any = ui.theme.get("zeron.inset.radius")
+		if type(r) ~= "number" then
+			r = ui.theme.get("radius.xl")
+		end
+		return if type(r) == "number" then r else 12
+	end)()
+	-- (Its corners whole while there's any gap round it, square as it
+	-- meets the window's edges: never between, where they'd show changing
+	-- and not match the other corners round them.)
+	pane.rounded = function(): number
+		return ui.raw(if edged:get() then RADIUS else 0, "the card's corners, whole while any gap is round it")
+	end
+	-- (Its edge's room; the edge itself is drawn with the fill, below.)
+	pane.border = function(): number
+		return if edged:get() then 1 else 0
+	end
+	pane.border_color = "#00000000"
+	-- The card's fill and edge, under all it holds: faded in and out with
+	-- the sidebar's own motion as a new chat's page goes flat and back (the
+	-- fill lighter than the window, lifting it), by a tween zgx runs, so no
+	-- script runs and nothing is laid out as it fades, and nothing changes
+	-- in one frame. None in a split: there the panes are the cards.
+	local card_shown = motion.tween(ui.computed(function(): number
+		return if grouped() or is_flat:get() then 0 else 1
+	end), motion.sidebar)
+	table.insert(pane, ui.div {
+		id = "shell-page-card",
+		absolute = true,
+		-- (Over the card's edge's room too: the whole card.)
+		left = ui.raw(-1, "over the card's 1-point edge"),
+		right = ui.raw(-1, "over the card's 1-point edge"),
+		top = ui.raw(-1, "over the card's 1-point edge"),
+		bottom = ui.raw(-1, "over the card's 1-point edge"),
+		pointer_events = "none",
+		bg = "$zeron.inset.bg",
+		border = 1,
+		border_color = "$zeron.inset.edge",
+		rounded = "$zeron.inset.radius",
+		opacity = card_shown,
+	})
+	pane.pointer_events = function(): any
+		return if grouped() then "none" else "auto"
+	end
 	-- A trackpad's swipe between pages (the mouse's back and forward too):
 	-- the history, as the router's own view takes it.
 	pane.on_navigate = function(e)
@@ -151,14 +304,31 @@ return function(props: Props): Node
 		absolute = true,
 		left = 0,
 		right = 0,
-		top = TITLE_H,
+		-- (In a split, empty over the focused pane: the pointer goes to it.)
+		pointer_events = function(): any
+			return if grouped() then "none" else "auto"
+		end,
+		-- (The card is set down by the gap, so the page starts that much
+		-- less far down it, where it did in the window.)
+		top = below_head,
 		bottom = 0,
 		-- (Under a plugin's page, kept and unseen: it comes back as it was.)
 		opacity = function(): number
 			return if on_plugin() then 0 else 1
 		end,
-		view,
+		-- (In a split, the panes show the chats: the chat page isn't made.)
+		ui.show(function(): boolean
+			return not grouped()
+		end, view),
 	})
+	-- (In a split, the chat page isn't made: the window still watches the
+	-- focused chat, for the composer and the focused pane's transcript.)
+	local chat_store = require("@app/screens/chat/store")
+	ui.effect(function()
+		if grouped() then
+			chat_store.open(splits.focused:get())
+		end
+	end)
 	-- The one composer, over whatever shows (it hides itself on settings).
 	local chat_screen = boundary.load("@app/screens/chat")
 	if chat_screen and chat_screen.Composer then
@@ -212,12 +382,46 @@ return function(props: Props): Node
 	-- (Collapsed, past the bar's controls by as much as Zeron's title
 	-- stands past its last control's glyph.)
 	local after_controls = (ui.theme.get("space.1") :: number?) or 4
+	-- (The title line is the card's own head, level with the title
+	-- bar's controls in the window: centred where they are, less the gap
+	-- the card is set down by.)
+	-- (`ds.TitleBar.middle`: Zeron's 21 down, or the window's own buttons'
+	-- middle where they set the bar's line.)
+	local function title_mid(): number
+		return ds.TitleBar.middle() - INSET
+	end
+	-- Where a pane's title starts in its card: past the title bar's
+	-- controls when they stand over it (the sidebar collapsed, the pane at
+	-- the inset's top left), else the page's inset.
+	-- (`full`, `tracked`: as ds.TitleBar's `controls_end`, the bar's
+	-- controls in full screen or out of it.)
+	local function title_left(id: string?, full: boolean?, tracked: boolean?): number
+		if at_top_left(id) and (shell_view.collapsed:get() or not fit.current:get().sidebar) then
+			return ds.TitleBar.controls_end(full, tracked) + after_controls - INSET
+		end
+		return inset
+	end
+	-- How far a title past the bar's controls moves with them as the window
+	-- goes in or out of full screen (macOS hides the traffic lights there).
+	local function full_screen_shift(id: string?, full: boolean?, tracked: boolean?): number
+		return title_left(id, full, tracked) - title_left(id, false, tracked)
+	end
+	-- (Kept by the title bar's `follow`: gliding with its controls as the
+	-- window goes in or out of full screen, eased as the sidebar's moves
+	-- otherwise, as its `left` is.)
+	local header_ref = ui.ref()
+	ds.TitleBar.follow(header_ref, {
+		x = function(full: boolean): number
+			return full_screen_shift(splits.focused:get(), full)
+		end,
+	}, motion.sidebar)
 	table.insert(
 		pane,
 		ui.show(
 			function(): boolean
 				-- (Not over a plugin's page: it's a page of its own, not the chat.)
-				return has_chat:get() and not on_plugin()
+				-- (In a split, each pane's head says its own.)
+				return has_chat:get() and not on_plugin() and not grouped()
 			end,
 			-- (`#session-header`: what plugins place on a session's head by,
 			-- the session under them; `#page-title`, its name.)
@@ -230,18 +434,28 @@ return function(props: Props): Node
 					end),
 				},
 				absolute = true,
-				-- (Centred on the bar's line: 21 down, or the window's own
-				-- buttons' middle where they set it.)
-				top = function(): number
-					return ds.TitleBar.middle() - (TITLE_H - TITLE_TOP) / 2
+				top = 0,
+				h = function(): number
+					return 2 * title_mid()
 				end,
-				h = TITLE_H - TITLE_TOP,
+				-- (Collapsed, the bar's controls stand over the card's start:
+				-- past them, less the gap the card is set in by.)
+				-- (In a split, only the leftmost pane's is under them.)
+				-- (Out of full screen's place, eased as the sidebar comes and
+				-- goes; full screen's shift on top, gliding with the bar's
+				-- controls as the window goes in or out.)
+				ref = header_ref,
 				left = motion.tween(ui.computed(function(): number
-					return if shell_view.collapsed:get() or not fit.current:get().sidebar then ds.TitleBar.controls_end() + after_controls else inset
+					return title_left(splits.focused:get(), false, true)
 				end), motion.sidebar),
+				x = full_screen_shift(splits.focused:peek(), ds.TitleBar.full_screen_now(), false),
 				-- (Clear of the bar's own controls at its right, and of the
-				-- window's buttons where they stand there.)
+				-- window's buttons where they stand there; in a split, of its
+				-- pane's ×.)
 				right = function(): number
+					if grouped() then
+						return ui.raw(close_right(splits.focused:get()) + CLOSE + 6, "its pane's × at its right")
+					end
 					return ui.raw(TITLE_RIGHT - TITLE_ROW_PAD + ds.TitleBar.actions_right(), "the title bar's controls at the right, and their room")
 				end,
 				gap = "$zeron.space.tight",
@@ -324,7 +538,7 @@ return function(props: Props): Node
 				absolute = true,
 				left = 0,
 				right = 0,
-				top = TITLE_H,
+				top = TITLE_H - INSET,
 				bottom = 0,
 				ui.presence(function(): string
 					local c = route.current:get()
@@ -337,7 +551,12 @@ return function(props: Props): Node
 	-- The title bar's strip over the page moves the window (a double click
 	-- zooms it): over all of the page (the composer's room, the wallpaper),
 	-- under the bar's controls, which keep their presses.
-	table.insert(pane, ui.div { id = "page-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true })
+	-- (The card's own head, set down by the gap; the gap over the
+	-- cards moves the window too, below.)
+	-- (In a split, the panes' heads are there instead.)
+	table.insert(pane, ui.show(function(): boolean
+		return not grouped()
+	end, ui.div { id = "page-drag", absolute = true, left = 0, right = 0, top = 0, h = below_head, window_drag = true }))
 
 	-- A session's files, beside it: sliding in from the window's edge as
 	-- the toggle opens them, at their own width (the pane keeps it as it
@@ -490,7 +709,9 @@ return function(props: Props): Node
 		-- (The page's room read only while expanded: otherwise the sidebar
 		-- moving would wake this every frame.)
 		if expanded() then
-			local room: number = row_ref.width or 0
+			-- (The row's room less the window round the cards; the
+			-- page's card gone, there's no gap before the panel's.)
+			local room: number = (row_ref.width or 0) - 2 * INSET
 			if room > 0 then
 				return room
 			end
@@ -659,6 +880,26 @@ return function(props: Props): Node
 			chosen:set(true)
 		end
 	end
+	-- (The page's card goes, not to a sliver of its edge, while the
+	-- panel stands over it.)
+	pane.opacity = function(): number
+		return if expanded() then 0 else 1
+	end
+	-- Whether any of it shows: none at all under 2 points. (Shut is shut:
+	-- what's left of its width as it eases closed, a point or so, would
+	-- stand at the window's right as a sliver.) And the gap before its card,
+	-- closing with it. (Each worked out as its width eases, telling what
+	-- shows them only when they change: its edge's, its fill's and its
+	-- gap's bindings don't run on every frame of its glide.)
+	local panel_seen = ui.computed(function(): boolean
+		return open_w:get() >= 2
+	end)
+	local gap_before = ui.computed(function(): number
+		if expanded() then
+			return 0
+		end
+		return math.min(INSET, if panel_seen:get() then open_w:get() else 0)
+	end)
 	local beside = ui.column {
 		id = "shell-files",
 		hook = "shell.files",
@@ -667,6 +908,40 @@ return function(props: Props): Node
 		shrink = 0,
 		overflow = "hidden",
 		relative = true,
+		-- (A card of its own beside the page's, the window between
+		-- them as it opens; its hairline stronger under the pointer at its
+		-- edge and as it's dragged. Shut, nothing of it shows.)
+		-- (Expanded over the page, the page's card is gone: no gap before
+		-- it, so it stands the window's gap in from the sidebar, as every
+		-- card does.)
+		ml = function(): number
+			return ui.raw(gap_before:get(), "the gap before the panel's card, closing with it")
+		end,
+		-- (Its tabs split into groups, each a card of its own on the window
+		-- as the chat panes are: its own card goes, but for its edge under
+		-- the pointer.)
+		bg = function(): string
+			return if panel_groups:get() then "#00000000" else "$zeron.inset.bg"
+		end,
+		rounded = "$zeron.inset.radius",
+		-- (Its groups' cards each have their edge: its own none, so they
+		-- stand the window's gap from what's round them, as every card does,
+		-- not its edge's width more.)
+		-- (Shut, none either: an edge on a card of no width still stands its
+		-- width at each side, a sliver at the window's right where a flat
+		-- page meets it.)
+		border = function(): number
+			return if panel_groups:get() or not panel_seen:get() then 0 else 1
+		end,
+		border_color = function(): string
+			if edge_over:get() or drag_held:get() ~= nil then
+				return "$zeron.inset.edge_hover"
+			end
+			return "$zeron.inset.edge"
+		end,
+		opacity = function(): number
+			return if panel_seen:get() then 1 else 0
+		end,
 		-- (From the window's top: the panel's own band is the title strip
 		-- over it, its tabs in it, a window-drag region of its own, room
 		-- left at its right for the title bar's Panel toggle.)
@@ -684,9 +959,10 @@ return function(props: Props): Node
 						page = route.page,
 						-- (Where its left edge is in the window: expanded, or with
 						-- the sidebar collapsed, its tabs clear the title bar's
-						-- controls there.)
+						-- controls there. Its card ends the gap short of
+						-- the window's right.)
 						left = function(): number
-							return props.width() - open_w:get()
+							return props.width() - INSET - open_w:get()
 						end,
 						-- (Its strip held where it stands open as the panel slides,
 						-- its right end against the title bar's controls: what shows
@@ -705,17 +981,7 @@ return function(props: Props): Node
 					return files.Pane { project = route.project, session = route.session }
 				end),
 		},
--- A hairline down its left, between it and the session, full height
-		-- (as the sidebar's at its right).
-		-- (Not expanded: its edge is then the sidebar's, which has its own.)
-		-- (Stronger under the pointer at its edge and as it's dragged, as the
-		-- sidebar's.)
-		ui.div { absolute = true, left = 0, top = 0, bottom = 0, w = 1, bg = function(): string
-			if expanded() then
-				return "#00000000"
-			end
-			return if edge_over:get() or drag_held:get() ~= nil then "$border.strong" else "$border.subtle"
-		end, pointer_events = "none" },
+		-- (No hairline down its left; its card's edge is that.)
 		-- Its edge, dragged: wider or narrower (the page keeps its least).
 		-- (Pressed itself, so it keeps the pointer as it's dragged. Not while
 		-- expanded: it's as wide as it goes.)
@@ -781,12 +1047,542 @@ return function(props: Props): Node
 			end,
 		},
 	}
-	return ui.row {
-		ref = row_ref,
+	panel_open = function(): boolean
+		return shown:get()
+	end
+
+	-- Split chats: what stands over the page's panes. A chat dragged over a
+	-- pane (a sidebar row, or another pane's head) lands at the edge it's
+	-- held over: left or right, beside it; top or bottom, above or below it.
+	-- A preview of where shows as it's held there; the pane's middle stays
+	-- the chat page's own (a chat dropped there is mentioned).
+	local over = ui.use_state(nil :: { id: string, side: string }?)
+	-- (A drag that ended anywhere leaves no preview.)
+	ui.effect(function()
+		if not splits.dragging:get() and over:peek() ~= nil then
+			over:set(nil)
+		end
+	end)
+	-- Every chat of the split is watched by the host in a lane of its own,
+	-- focused or not, for as long as it's in the split: each pane shows its
+	-- own chat from its own lane, and the focus moving changes no pane's
+	-- source. (Let go as it leaves. A reload asks for the same chats again,
+	-- which the host already has: nothing more happens.)
+	local watched: { [string]: boolean } = {}
+	ui.effect(function()
+		local want: { [string]: boolean } = {}
+		if grouped() then
+			for _, id in members:get() do
+				want[id] = true
+			end
+		end
+		for id in watched do
+			if not want[id] then
+				lanes.watch(`split-{id}`, nil)
+			end
+		end
+		for id in want do
+			if not watched[id] then
+				lanes.watch(`split-{id}`, id)
+			end
+		end
+		watched = want
+	end)
+	-- Where a chat dragged over a pane lands. Its edges split: a band a
+	-- quarter of the pane deep (48 points at least) along each side, the
+	-- sides running from its top (owning its top corners) down to its
+	-- composer, the top and bottom between them, the bottom ending above the
+	-- composer. Its middle and its composer attach it (the chat page's own
+	-- drop: a chat mentioned). Each point is one's: the bands stand over
+	-- the page, and nothing else does. (Shares and points: nothing here is
+	-- worked out from the pane's size.)
+	local BAND, LEAST = "25%", 48
+	local ZONES: { [string]: { [string]: any } } = {
+		top = { left = BAND, right = BAND, top = 0, h = BAND, min_h = LEAST },
+		bottom = { left = BAND, right = BAND, h = BAND, min_h = LEAST },
+		left = { left = 0, top = 0, w = BAND, min_w = LEAST },
+		right = { right = 0, top = 0, w = BAND, min_w = LEAST },
+	}
+	-- The room a pane's composer takes at its foot: the window's own,
+	-- measured, over the focused one; a pane's own at rest over another.
+	local function composer_room(id: string): number
+		local h = if splits.focused:get() == id then chat_shared.dock_h:get() else Dock.REST
+		return Dock.GAP + h
+	end
+	local function zone(id: string, side: string): Node
+		local props: { [any]: any } = table.clone(ZONES[side])
+		props.absolute = true
+		if side ~= "top" then
+			props.bottom = function(): number
+				return ui.raw(composer_room(id), "the pane's composer, which attaches")
+			end
+		end
+		props.pointer_events = "auto"
+		props.drop_when = function(payload: any): boolean
+			local d = splits.dragged(payload)
+			return d ~= nil and d ~= id and splits.can_take(d)
+		end
+		props.on_drag_over = function(_payload: any)
+			local o = over:peek()
+			if not o or o.id ~= id or o.side ~= side then
+				over:set({ id = id, side = side })
+			end
+		end
+		props.on_drag_leave = function()
+			local o = over:peek()
+			if o and o.id == id and o.side == side then
+				over:set(nil)
+			end
+		end
+		props.on_drop = function(payload: any)
+			local d = splits.dragged(payload)
+			over:set(nil)
+			splits.dragging:set(false)
+			if d then
+				-- (A chat from the sidebar is focused as it lands; a pane
+				-- moved leaves the focus where it was.)
+				splits.drop(d, id, side, payload.split_pane == nil)
+			end
+		end
+		return ui.div(props)
+	end
+	-- A pane's title, as the session's head has it (its agent's mark, its
+	-- title), quieter: it isn't the one focused.
+	local function pane_title(about: any): Node
+		return ui.row {
+			grow = 1,
+			min_w = 0,
+			h_full = true,
+			gap = "$zeron.space.tight",
+			items = "center",
+			pointer_events = "none",
+			ui.presence(function(): string
+				return about:get().agent or ""
+			end, function(mark: string): Node
+				if mark == "" then
+					return ui.div {}
+				end
+				return ui.div { shrink = 0, opacity = 0.7, ds.Mark { name = mark :: any, size = 14, bare = true } }
+			end),
+			ds.FadeText {
+				function(): string
+					return about:get().title
+				end,
+				grow = 1,
+				min_w = 0,
+				text_size = "$font.size.sm",
+				weight = "$font.weight.medium",
+				color = "$text.secondary",
+			},
+		}
+	end
+	-- Where a chat held over a pane's edge would land: that half of it.
+	local HALF: { [string]: { [string]: any } } = {
+		left = { left = 0, top = 0, bottom = 0, right = "50%" },
+		right = { left = "50%", top = 0, bottom = 0, right = 0 },
+		top = { left = 0, right = 0, top = 0, bottom = "50%" },
+		bottom = { left = 0, right = 0, top = "50%", bottom = 0 },
+	}
+	-- One chat's place in the page. The focused one's card is the page's
+	-- (`pane`, under these); each other's is its transcript, watched in a
+	-- lane of its own, dimmed, a click on it focusing it. Every pane of a
+	-- split has a head: dragged, it moves the pane; its × takes the chat
+	-- out of the split.
+	local function pane_item(id: string): Node
+		local lane_slot = `split-{id}`
+		local about = splits.chat(id)
+		local function focused(): boolean
+			return splits.focused:get() == id
+		end
+		local hovered = ui.use_state(false)
+		local card_ref = ui.ref()
+		-- Files (and the files pane's, and a sidebar chat) carried over it,
+		-- dropped anywhere on it, as on the chat page: attached to its draft
+		-- (a chat, mentioned). Focused, the chat page's own drop, its
+		-- overlay over this pane; not, focused first, then dropped, its
+		-- overlay its own meanwhile.
+		local files_zone = chat_shared.drop_zone(`split-{id}`)
+		local carrying = ui.use_state(nil :: string?)
+		local function after_focus(f: () -> ())
+			carrying:set(nil)
+			splits.focus(id)
+			ui.after(0, f)
+		end
+		-- Its card: its own transcript, kept for as long as it's in the
+		-- split, focused or not (so the focus moving makes none again, and
+		-- none moves), and, while it isn't focused, a composer of its own
+		-- showing its draft (screens/chat/lane_tab's `split`); focused, the
+		-- window's composer stands at its foot instead. Every part of it
+		-- takes the pointer as the chat page's does (its transcript
+		-- scrolls); a press anywhere in it (heard as it comes up from what
+		-- took it) focuses it, and a press on its composer gives the
+		-- window's composer, its draft the same, the keys.
+		local card = ui.column {
+			ref = card_ref,
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			overflow = "hidden",
+			-- (The focused pane lifted, the others sunk.)
+			bg = function(): string
+				return if focused() then "$zeron.inset.active" else "$zeron.inset.inactive"
+			end,
+			rounded = "$zeron.inset.radius",
+			border = 1,
+			border_color = function(): string
+				return if focused() then "$zeron.inset.focus_edge" else "$zeron.inset.edge"
+			end,
+			on_hover = function(inside: boolean)
+				hovered:set(inside)
+			end,
+			on_file_hover = function(inside: boolean)
+				if focused() then
+					files_zone.on_file_hover(inside)
+				else
+					carrying:set(if inside then "files" else nil)
+				end
+			end,
+			on_file_drop = function(files: { any })
+				if focused() then
+					files_zone.on_file_drop(files)
+				else
+					after_focus(function()
+						files_zone.on_file_drop(files)
+					end)
+				end
+			end,
+			drop_when = files_zone.drop_when,
+			on_drag_over = function(payload: any, e: any)
+				if focused() then
+					files_zone.on_drag_over(payload, e)
+				else
+					carrying:set(if type(payload) == "table" and type(payload.session) == "string" then "session" else "files")
+				end
+			end,
+			on_drag_leave = function(payload: any)
+				if focused() then
+					files_zone.on_drag_leave(payload)
+				else
+					carrying:set(nil)
+				end
+			end,
+			on_drop = function(payload: any, e: any)
+				if focused() then
+					files_zone.on_drop(payload, e)
+				else
+					after_focus(function()
+						files_zone.on_drop(payload, e)
+					end)
+				end
+			end,
+			on_press = function(e)
+				if focused() then
+					return
+				end
+				local on_composer = (e.local_y or 0) > (card_ref.height or 0) - COMPOSER_ROOM
+				splits.focus(id)
+				if on_composer then
+					ui.after(0, function()
+						chat_shared.focus:add(1)
+					end)
+				end
+			end,
+			-- (The keyboard landing in a pane that isn't focused (Tab into
+			-- its composer): it's focused, and the window's composer, its
+			-- chat's draft in it, takes the keys. Only the window's composer
+			-- types: one writer for each chat's draft.)
+			on_focus = function()
+				if not focused() then
+					splits.focus(id)
+					ui.after(0, function()
+						chat_shared.focus:add(1)
+					end)
+				end
+			end,
+			ui.column {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = TITLE_H - INSET,
+				bottom = 0,
+				LaneTab.Tab {
+					tab = {
+						id = lane_slot,
+						kind = "side_chat",
+						chat = id,
+						title = "",
+						data = { split = true, focused = focused },
+					},
+				},
+			},
+			-- Dimmed while another is focused, lighter under the pointer;
+			-- it takes no pointer of its own.
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				bg = function(): string
+					if focused() then
+						return "#00000000"
+					end
+					return if hovered:get() then "$zeron.inset.dim_hover" else "$zeron.inset.dim"
+				end,
+			},
+			-- What's carried over it, while it isn't focused (focused, the
+			-- chat page's overlay stands over it).
+			DropOverlay {
+				id = `split-drop-{id}`,
+				shown = function(): boolean
+					return carrying:get() == "files"
+				end,
+			},
+			DropOverlay {
+				id = `split-drop-mention-{id}`,
+				shown = function(): boolean
+					return carrying:get() == "session"
+				end,
+				label = ui.t("chat.composer.drop_to_mention") :: any,
+			},
+		}
+		-- (Past the bar's controls, it glides with them as the window goes in
+		-- or out of full screen.)
+		local head_ref = ui.ref()
+		ds.TitleBar.follow(head_ref, {
+			paddingLeft = function(full: boolean): number
+				return title_left(id, full)
+			end,
+		})
+		local head = ui.row {
+			ref = head_ref,
+			absolute = true,
+			top = 0,
+			left = 0,
+			right = 0,
+			-- (Its middle on the bar's line, as the session's head.)
+			h = function(): number
+				return 2 * title_mid()
+			end,
+			-- (Kept by `follow` above, from here.)
+			pl = ui.raw(title_left(id, ds.TitleBar.full_screen_now(), false), "where its title starts, as the session's head"),
+			pr = function(): number
+				return ui.raw(close_right(id), "its × clear of the title bar's panel toggle")
+			end,
+			gap = "$zeron.space.tight",
+			items = "center",
+			on_hover = function(inside: boolean)
+				if not focused() then
+					hovered:set(inside)
+				end
+			end,
+			on_click = function()
+				if not focused() then
+					splits.focus(id)
+				end
+			end,
+			on_drag = function(): any
+				splits.dragging:set(true)
+				-- (Its session too: dropped on another's middle or composer,
+				-- it's mentioned there, as a sidebar row is.)
+				return { split_pane = id, session = id }
+			end,
+			drag_preview = function(): Node
+				local card_props: { [any]: any } = {
+					w = 240,
+					h = 30,
+					px = "$space.3",
+					gap = "$zeron.space.tight",
+					items = "center",
+					rounded = "$radius.md",
+					color = "$text.primary",
+					ds.FadeText {
+						about:peek().title,
+						grow = 1,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+					},
+				}
+				Glass.style(card_props, "menu")
+				return ui.row(card_props)
+			end,
+			drag_preview_anchor = { 0.5, 0 },
+			drag_preview_offset = { 0, 14 },
+			on_drag_end = function()
+				splits.dragging:set(false)
+			end,
+			pane_title(about),
+			ui.div { grow = 1, pointer_events = "none" },
+			ds.IconButton {
+				label = "Close pane",
+				tooltip = "Take this chat out of the split",
+				tooltip_side = "bottom",
+				size = "sm",
+				tone = "quiet",
+				w = CLOSE,
+				h = CLOSE,
+				rounded = "$radius.sm",
+				on_click = function()
+					splits.close(id)
+				end,
+				ds.Icon { name = "close", size = 12 },
+			},
+		}
+		local item: { [any]: any } = {
+			-- (`#split-pane-<session>`, `.split-pane`: a chat's pane, the
+			-- session under it.)
+			id = `split-pane-{id}`,
+			class = "split-pane",
+			provide = { session = id },
+			pointer_events = "none",
+			-- (The panel expanded over the page: none of the split shows.)
+			opacity = function(): number
+				return if expanded() then 0 else 1
+			end,
+			ui.show(grouped, card),
+			ui.show(grouped, head),
+		}
+		splits.place(item, function(): any
+			return box_of(id)
+		end)
+		return ui.column(item)
+	end
+	-- Where a chat dragged over a pane would land, over everything (the
+	-- page's card included: a drop goes to what's on top), while a chat is
+	-- dragged: its edges, each taking the drop, and the half it would
+	-- take, lit as it's held there. Its middle is left to the chat page (a
+	-- chat dropped there is mentioned).
+	local function landing(id: string): Node
+		local function held(): string
+			local o = over:get()
+			return if o and o.id == id then o.side else ""
+		end
+		local preview = ui.show(function(): boolean
+			return held() ~= ""
+		end, ui.div {
+			id = "split-landing",
+			absolute = true,
+			left = function(): any
+				return (HALF[held()] or HALF.left).left
+			end,
+			right = function(): any
+				return (HALF[held()] or HALF.left).right
+			end,
+			top = function(): any
+				return (HALF[held()] or HALF.left).top
+			end,
+			bottom = function(): any
+				return (HALF[held()] or HALF.left).bottom
+			end,
+			pointer_events = "none",
+			bg = "$zeron.inset.drop",
+			border = 2,
+			border_color = "$zeron.inset.drop_edge",
+			rounded = "$zeron.inset.radius",
+		})
+		-- (The sides last: over the top's and bottom's ends, they own the
+		-- corners.)
+		local item: { [any]: any } = {
+			pointer_events = "none",
+			preview,
+			zone(id, "top"),
+			zone(id, "bottom"),
+			zone(id, "left"),
+			zone(id, "right"),
+		}
+		splits.place(item, function(): any
+			return box_of(id)
+		end)
+		return ui.column(item)
+	end
+	-- The page's room: the page's card at the focused chat's place, the
+	-- split's panes under it.
+	local split_area = ui.row {
 		grow = 1,
 		min_w = 0,
 		h_full = true,
-		ui.column(pane),
-		beside,
+		relative = true,
+		-- (The split's panes, under the page's card: in a split, their cards
+		-- are the chats, and the page's card is the composer's frame over
+		-- the focused one's.)
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			pointer_events = "none",
+			ui.each(members, function(id: string): Node
+				return pane_item(id)
+			end, {
+				key = function(id: string): string
+					return id
+				end,
+				w_full = true,
+				h_full = true,
+				relative = true,
+			}),
+		},
+		-- (What the page's card stands in, placed by its box in a split.)
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			h_full = true,
+			relative = true,
+			-- (In a split, the frame of the window's composer alone, over the
+			-- panes: the pointer goes through to them, but for the composer.)
+			pointer_events = function(): any
+				return if grouped() then "none" else "auto"
+			end,
+			ui.column(pane),
+		},
+		ui.show(function(): boolean
+			return splits.dragging:get() and not expanded()
+		end, ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			pointer_events = "none",
+			ui.each(members, landing, {
+				key = function(id: string): string
+					return id
+				end,
+				w_full = true,
+				h_full = true,
+				relative = true,
+			}),
+		}),
+	}
+
+	-- Two cards, the page and its panel, set in from the window's edges and
+	-- the sidebar by the gap, the title bar's line inside them. The window
+	-- round them, along the title bar's strip (over them, beside them and
+	-- between them), moves the window as the bar does: a strip under the
+	-- cards, which let the pointer through but for what takes it.
+	return ui.column {
+		grow = 1,
+		min_w = 0,
+		h_full = true,
+		relative = true,
+		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
+		ui.row {
+			ref = row_ref,
+			w_full = true,
+			grow = 1,
+			min_h = 0,
+			pt = gap,
+			pb = gap,
+			pl = gap,
+			pr = gap,
+			pointer_events = "none",
+			split_area,
+			beside,
+		},
 	}
 end

@@ -56,6 +56,15 @@ local SessionRow = require("@self/session_row")
 local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
 
+-- The page's split chats (screens/shell/split, which keeps these):
+-- the chats side by side now, each row of theirs selected; and whether a
+-- chat is being dragged, so the split shows where it can land.
+local split_grouped = ui.shared("split.grouped", {} :: { string })
+local split_dragging = ui.shared("split.dragging", false)
+local function in_split(id: string): boolean
+	return table.find(split_grouped:get(), id) ~= nil
+end
+
 export type Session = {
 	id: string,
 	title: string,
@@ -1186,7 +1195,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			return details.branch:get() and cur().branch ~= nil
 		end, second_line, fades)
 		local function strong(): boolean
-			return active(s) or selected:get() == s.id
+			return active(s) or selected:get() == s.id or in_split(s.id)
 		end
 		-- Its project's icon beside its title, where its group isn't its
 		-- project.
@@ -1353,8 +1362,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				-- Pulled up under the title: the line's own inset is the row's.
 				ui.div { mt = ui.raw(-8, "up a row's inset, under the title"), second },
 			},
+			-- (Every chat of the split showing is selected too.)
 			selected = function(): boolean
-				return selected:get() == s.id
+				return selected:get() == s.id or in_split(s.id)
 			end,
 			on_click = function()
 				selected:set(s.id)
@@ -1417,6 +1427,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 				local from = if list_now then list_now() else list :: string
 				start_drag({ id = s.id, list = from, index = if at then at() else 1, h = session_h(cur(), by) + list_gap() })
+				-- (The page's split shows where it can land.)
+				split_dragging:set(true)
 				return { session = s.id }
 			end,
 			drag_preview = function()
@@ -1442,6 +1454,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return ui.row(card)
 			end,
 			on_drag_end = function()
+				split_dragging:set(false)
 				end_drag()
 			end,
 			body,
@@ -4026,8 +4039,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 				return math.max(0, list_total - (list_view.height or 0))
 			end),
 			-- Sessions dropped on it land where it shows; sections, among yours.
+			-- (A split pane's head carried over it isn't a row to place.)
 			drop_when = function(payload: any): boolean
-				return type(payload) == "table" and (payload.session ~= nil or payload.section ~= nil)
+				return type(payload) == "table" and payload.split_pane == nil and (payload.session ~= nil or payload.section ~= nil)
 			end,
 			on_drag_over = function(payload: any, e)
 				drag_y = e.y
@@ -4857,7 +4871,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 			w = 1,
 			pointer_events = "none",
 			bg = function()
-				return if edge_over:get() or dragging:get() then "$border.strong" else "$border.subtle"
+				-- (The cards beside it are its edge at rest; the
+				-- hairline shows only under the pointer and as it's dragged.)
+				return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
 			end,
 			opacity = shown_wide,
 		},
