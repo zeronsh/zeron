@@ -12,7 +12,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | Ask | What users see today |
 |---|---|
 | [host-top-layer](host-top-layer/ASK.md) | Landed (`View::top_layer`, e379b925, in the pin); not adopted, waiting on the user's call. A template in preview (or a plugin) can still paint a popover over Zeron's own Keep / Revert strip and the Linux/Windows menu bar. |
-| [host-guard](host-guard/ASK.md) | Landed (`ScriptHost::guard`, f01b47a0, in the pin); not adopted, waiting on the user's call. A template in preview can still use `ui.fetch`; every host action is guarded one by one. |
+| [host-guard](host-guard/ASK.md) | Landed (`ScriptHost::guard`, 1526e899, in the pin); not adopted, waiting on the user's call. A template in preview can still use `ui.fetch`; every host action is guarded one by one. |
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
 | [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |
