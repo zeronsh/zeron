@@ -1401,6 +1401,58 @@ fn a_dragged_edge_reflows_the_page_live_keeping_the_reading_place() {
     }
 }
 
+/// Dragging far enough for what's being read to rewrap, in panes under the
+/// conversation's width: it stands still at every frame of the drag, not just
+/// once the drag is over. (Its lines going past the reading place's own row
+/// grow it upward, 24 points a rewrap, if the place falls to another row.)
+#[test]
+fn what_is_being_read_stands_still_at_every_frame_of_a_drag() {
+    for (panes, room) in [(1usize, 1000f32), (2, 1400.), (4, 2000.)] {
+        const IDS: [&str; 4] = ["a1", "a2", "a3", "b1"];
+        let mut app = mount(&scratch(&format!("edge-frames-{panes}")));
+        app.ui.scene.borrow_mut().resize(room, H);
+        app.frames(10);
+        long_chats(&app, &IDS, None);
+        if panes > 1 {
+            split_of(&mut app, &IDS[..panes]);
+        }
+        open(&mut app, "Fix the build");
+        app.frames(30);
+        let scope = if panes > 1 { "#split-pane-a1" } else { "#chat-session" };
+        let list = format!("{scope} >> #transcript");
+        app.scroll(&list, -2500.);
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.frame();
+        }
+        let view = app.bounds(&list);
+        let node = app.target(&list).unwrap();
+        let opts = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: false };
+        let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, Some(node), &opts);
+        let reading = zgx_script::driver::tree_lines_text(&lines, hidden)
+            .lines()
+            .filter_map(|l| {
+                let id = l.split_whitespace().next()?.to_owned();
+                let (_, rest) = l.split_once("text \"")?;
+                let (words, at) = rest.split_once("\" ")?;
+                let y: f32 = at.split_whitespace().next()?.split(',').nth(1)?.parse().ok()?;
+                (y >= view.y && words.len() > 12).then_some((y, id))
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+            .map(|(_, id)| id)
+            .expect("text in view");
+        let before = app.bounds(&reading);
+        let seen = drag_sidebar(&mut app, 240., |app| {
+            let b = app.bounds(&reading);
+            (b.y, b.height)
+        });
+        assert!(seen.iter().any(|(_, h)| *h > before.height), "{panes} pane(s): the drag rewrapped what's read: {seen:?}");
+        for (y, h) in &seen {
+            assert!((y - before.y).abs() <= 2., "{panes} pane(s): {reading} stood at {} and went to {y}, {h} tall: {seen:?}", before.y);
+        }
+    }
+}
+
 // ── Live reflow: what a frame of a moving column costs ─────────────────────
 
 /// Script calls a frame as the sidebar's edge is dragged, over 400 sessions
