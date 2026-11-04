@@ -1073,6 +1073,29 @@ fn viewer_with(github: serde_json::Value) -> (TestApp, Heard) {
 }
 
 #[test]
+fn github_s_viewer_and_board_can_have_their_words_selected() {
+    let detail = json!({
+        "title": "Plugins: class targets", "body": "Selectors by class.",
+        "url": "https://github.com/zeronsh/zgx/pull/1264", "number": 1264, "author": { "login": "ada" },
+        "baseRefName": "main", "headRefName": "plugin/targets", "state": "OPEN", "isDraft": false,
+    });
+    let mut app = viewer(json!({ "viewer": "ada", "pr": detail }));
+    app.frames(10);
+    let page = app.target(".github-pr").expect("the viewer");
+    assert!(app.ui.select_all_text(page), "the viewer's text selects");
+    assert!(app.ui.selected_text().contains("Selectors by class."), "{:?}", app.ui.selected_text());
+
+    let (mut app, _) = board();
+    app.click("role:button \"Project\"");
+    app.frames(10);
+    app.click("\"Atlas\"");
+    app.frames(10);
+    let page = app.target(".github-board").expect("the board");
+    assert!(app.ui.select_all_text(page), "the board's text selects");
+    assert!(app.ui.selected_text().contains("zeronsh/zgx"), "{:?}", app.ui.selected_text());
+}
+
+#[test]
 fn github_s_viewer_shows_the_pull_request_s_header_and_description() {
     let detail = json!({
         "title": "Plugins: class targets", "body": "## Why\n\nSelectors by class.\n\n- one\n- two",

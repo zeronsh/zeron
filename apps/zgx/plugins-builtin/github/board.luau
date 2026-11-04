@@ -612,6 +612,8 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				class = "github-board",
 				w_full = true,
 				h_full = true,
+				-- (Its words can be selected and copied, as a chat's can.)
+				selectable = true,
 				on_resize = function(size)
 
 					-- (No width at all is no width: the page's column closing.)
