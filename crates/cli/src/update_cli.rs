@@ -56,7 +56,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             zeron_update::apply_headless(&app_root, &manifest.version)?;
             println!(
                 "installed {} (current → {})",
-                app_root.join(&manifest.version).display(),
+                app_root.join(zeron_update::managed_dir(&manifest.version)).display(),
                 manifest.version
             );
             match zeron_update::restart_service() {

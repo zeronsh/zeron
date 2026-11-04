@@ -175,7 +175,7 @@ pub fn headless_artifact(version: &str) -> String {
 /// reads `current`'s directory name, would take a beta's version for a newer
 /// engine and restart into itself each time it's idle. A name that doesn't
 /// parse tells it nothing was installed ([`installed_version`]).
-fn managed_dir(version: &str) -> String {
+pub fn managed_dir(version: &str) -> String {
     match Channel::of_version(version) {
         Channel::Beta => format!("beta-{version}"),
         Channel::Stable => version.to_owned(),
