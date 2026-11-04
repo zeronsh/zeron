@@ -260,7 +260,8 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
 /// the system's fonts), else common sans faces, in the order they're
 /// looked for.
 fn font_family(theme: &str) -> String {
-    let theme = theme.trim();
+    // (A family the user chose is its token quoted: ds/look's font_theme.)
+    let theme = theme.trim().trim_matches('"');
     let fallbacks = "Helvetica Neue, Helvetica, Arial, Liberation Sans, DejaVu Sans, Noto Sans, sans-serif";
     let installed = !theme.is_empty()
         && fonts().faces().any(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(theme)));
