@@ -160,3 +160,64 @@ test("arriving after the window resized on a chat with no panel, the panel stand
 		end
 	end
 end)
+
+-- The panel's own motion (ds/motion `panel`, `content`):
+-- what's in it is laid out once, at the width it's going to (closing, the
+-- one it rested at), and stands at the window's right as its edge sweeps
+-- over it; under the panel expanding over it, the page keeps its width,
+-- clipped, and takes its own back in one go, rather than squeezing to
+-- nothing and growing from it. (Each drifts and fades as it comes and
+-- goes: src/route_motion_tests.rs reads that.)
+-- (Its width while it's laid out: shut, the panel leaves layout.)
+local function width_of(app: any, id: string): number?
+	for line in app:tree("#shell"):gmatch("[^\n]+") do
+		if line:find(` #{id} `, 1, true) and not line:find(" hidden", 1, true) then
+			return tonumber(line:match(" %-?%d+,%-?%d+ (%d+)x%d+"))
+		end
+	end
+	return nil
+end
+test("the panel's content and the page under it keep one width as the panel opens, expands, collapses and closes", function()
+	local app = open()
+	show_chat(app, "Fix the build")
+	app:frames(20)
+	-- Each width `id` takes over a step's frames, in order, once each.
+	local function widths(click: string, ids: { string }): { [string]: { number } }
+		app:click(click)
+		local seen: { [string]: { number } } = {}
+		for _ = 1, 30 do
+			app:frames(1)
+			for _, id in ids do
+				local w = width_of(app, id)
+				local list = seen[id] or {}
+				seen[id] = list
+				if w and list[#list] ~= w then
+					table.insert(list, w)
+				end
+			end
+		end
+		return seen
+	end
+	local function one(seen: { [string]: { number } }, id: string, step: string): number
+		local list = seen[id] or {}
+		expect(`{step}: {id} at {table.concat(list, ", ")}`).to_be(`{step}: {id} at {list[1]}`)
+		return list[1]
+	end
+	local CONTENT, PAGE = "shell-files-content", "shell-page-room"
+	local opening = widths('#titlebar >> role:button "Panel"', { CONTENT, PAGE })
+	local rest = one(opening, CONTENT, "opening")
+	-- (The page beside it follows its edge, as upstream chose: #1207.)
+	expect(#opening[PAGE] > 4).to_be(true)
+	local beside = opening[PAGE][#opening[PAGE]]
+	local expanding = widths("#panel-expand", { CONTENT, PAGE })
+	local wide = one(expanding, CONTENT, "expanding")
+	expect(wide > rest).to_be(true)
+	expect(one(expanding, PAGE, "expanding")).to_be(beside)
+	local collapsing = widths("#panel-expand", { CONTENT, PAGE })
+	expect(one(collapsing, CONTENT, "collapsing")).to_be(rest)
+	expect(one(collapsing, PAGE, "collapsing")).to_be(beside)
+	local closing = widths('#titlebar >> role:button "Panel"', { CONTENT })
+	expect(one(closing, CONTENT, "closing")).to_be(rest)
+	expect(panel_width(app)).to_be(0)
+	expect(width_of(app, CONTENT)).to_be_nil()
+end)

@@ -7,7 +7,8 @@
 -- root of how far they go, to at most 240 ms, so a wide panel travels at
 -- the sidebar's pace instead of covering twice the distance in the same
 -- time. Each column keeps its content at full width while it moves (its
--- edge clips it), so nothing in it lays out again on the way.
+-- edge clips it), so nothing in it lays out again on the way; what comes or
+-- goes with it drifts a little and fades (`content`).
 --
 --   local motion = require("@ds/motion")
 --   anime.animate(width, motion.column(from, to))     { value, duration, ease }
@@ -130,6 +131,35 @@ end
 -- What moves with the sidebar (its own width is the sidebar's default or
 -- near it): for `ui.tween`.
 M.sidebar = { duration = M.BASE, ease = M.EASE } :: TweenOptions
+
+-- What a column holds as its edge sweeps over it (the panel's tabs, the
+-- page under an expanded panel, a split's new pane): laid out once, at the
+-- width it's going to (or, going, the width it rested at), it never
+-- squeezes. It drifts `NUDGE` points with the edge and fades in
+-- `FADE_IN_OUT` ms as it comes or goes, so it arrives and leaves softly
+-- instead of being cut off by the edge alone. (The sidebar's own drift is
+-- the gap before its card closing, `NUDGE` too.)
+M.NUDGE = 5
+M.FADE_IN_OUT = 160
+-- The fade for `ui.tween`.
+M.fade = { duration = M.FADE_IN_OUT } :: TweenOptions
+-- `anime.animate`'s params for content coming in (`on`) or going: it stands
+-- at rest, or `NUDGE` points along `toward` (the way its column's edge goes
+-- as it closes: -1 left, 1 right) and faded out, drifting on the sidebar's
+-- clock (so the drift reads as the sidebar's does, whatever its column's
+-- curve). `at_once` (the route moving, nobody's toggle) or with motion
+-- reduced, there on the next frame.
+function M.content(on: boolean, toward: number, at_once: boolean?): ElementParams
+	local x = if on then 0 else toward * M.NUDGE
+	local opacity = if on then 1 else 0
+	if at_once or M.reduced_now() then
+		return { x = x, opacity = opacity, duration = 0 } :: any
+	end
+	return ({
+		x = { to = x, duration = M.BASE, ease = M.EASE },
+		opacity = { to = opacity, duration = M.FADE_IN_OUT, ease = M.EASE },
+	} :: any)
+end
 
 -- Snappy: what answers a press at once (the lightbox's picture growing out
 -- of its thumbnail and going back, its zoom). It moves from the press's own
