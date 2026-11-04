@@ -496,6 +496,11 @@ local function forking(chat: string): Node
 	end, { grow = 1, w_full = true })
 end
 
+-- A lane's composer's height as measured, by its slot.
+function M.dock_height(slot: string): State<number>
+	return ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
+end
+
 M.Tab = ui.component(function(props: { tab: any }): Node
 	local tab = props.tab
 	local slot, chat = tab.id, tab.chat
@@ -583,7 +588,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		ever = #messages:get() > 0 or loaded:get()
 		return ever
 	end)
-	local dock_h = ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
+	local dock_h = M.dock_height(slot)
 	-- (A split's pane, focused: the window's composer stands at its foot.)
 	local room = Dock.room(function(): number
 		return if split and focused_now() then Shared.dock_h:get() else dock_h:get()
@@ -647,9 +652,13 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		return T.Transcript {
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
+		-- (A split's pane reads as the chat page: a little wider than its
+		-- composer, running under its head and past its foot, faded.)
 		measure = function(): number
-			return prefs.conversation_width:get()
+			return prefs.conversation_width:get() + (if split then 24 else 0)
 		end,
+		side = if split then 20 else nil,
+		fade_lead = if split then 12 else nil,
 		messages = messages,
 		draft = reply,
 		offset = offset,

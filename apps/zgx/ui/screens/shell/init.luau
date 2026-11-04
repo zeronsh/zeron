@@ -159,6 +159,12 @@ return function(): Node
 				splits.close(focused)
 				return
 			end
+			-- A chat alone: its tab. (The last gone, a new chat; the window closes from
+			-- there.)
+			local tabs: any = boundary.load("@app/screens/shell/session_tabs")
+			if tabs and tabs.close_showing() then
+				return
+			end
 		end
 		ui.invoke("close")
 	end
@@ -480,11 +486,11 @@ return function(): Node
 				min_h = 0,
 				w_full = true,
 				boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
-					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H }
+					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = 42 }
 				end),
 				boundary.screen(boundary.named("shell.boundary.screen.page"), "@app/screens/shell/page", function(Page): Node
 					return Page { files = files, width = window_w }
-				end),
+				end, { pass = true }),
 			},
 			-- The rail, while the sidebar is collapsed: floating over the page at
 			-- the window's bottom left. (Not mounted while `view.rail` is off.)

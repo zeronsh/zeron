@@ -21,6 +21,7 @@ export type Props = {
 	files: State<boolean>,
 	-- Whether the bar stands over a wallpaper (its island shows, collapsed).
 	art: () -> boolean,
+	caption_over_art: boolean?,
 }
 
 -- Production's "corner card" glyph (icons.rs `corner_card_glyph`): the
@@ -167,8 +168,10 @@ return function(props: Props): Node
 		ds.TitleBar {
 			collapsed = props.collapsed,
 			on_toggle = fit.toggle_sidebar,
+			-- (No glass behind the window's buttons and the controls: they stand on
+			-- the top bar, over nothing but the window.)
 			island = function(): boolean
-				return props.collapsed:get() and props.art()
+				return false
 			end,
 			can_back = route.can_back,
 			can_forward = route.can_forward,
@@ -178,6 +181,7 @@ return function(props: Props): Node
 			-- (Over a new chat's wallpaper, what's in it (a plugin's) stands on
 			-- the island's glass, the sidebar open or not.)
 			actions_island = props.art,
+			caption_over_art = props.caption_over_art,
 			actions_width = actions_width,
 		},
 	}

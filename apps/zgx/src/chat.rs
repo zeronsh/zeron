@@ -324,7 +324,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let v = view.clone();
     host.async_action("chat.configure", move |args| {
         let v = v.clone();
-        async move { v.configure(args).await.map(|_| Value::Nil).map_err(String::from) }
+        // (Its model and effort are a preview's to change; what an agent may
+        // do unasked isn't.)
+        let access = args.field("access").is_some();
+        async move { if access { crate::plugins::preview::refuse("chat.configure")?; } v.configure(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.queue", move |args| {
@@ -334,17 +337,17 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let v = view.clone();
     host.async_action("chat.retry", move |args| {
         let v = v.clone();
-        async move { v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.queue_edit", move |args| {
         let v = v.clone();
-        async move { v.begin_edit(args).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.queue_edit")?; v.begin_edit(args).await.map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.queue_finish", move |args| {
         let v = v.clone();
-        async move { v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.queue_finish")?; v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A project's branches, from git where it is (the shipping app's
     // `ensure_refs`): `{ path, device? }`, the device only when it isn't this

@@ -12,7 +12,7 @@
 //! itself once nothing runs.
 //!
 //! **A development build** has no bundle to update: the page shows the
-//! engine's updater (the engine on this Mac, which knows its version and the
+//! engine's updater (the engine on this computer, which knows its version and the
 //! newest release and updates an install it manages), as before.
 //!
 //!   shared `about`   { app_version, app_build, engine_version?, engine_build?,
@@ -125,11 +125,11 @@ impl Desktop {
         let data_dir = engine::data_dir()?;
         zeron_update::set_app_version(APP_VERSION);
         zeron_update::channel::set_data_dir(&data_dir);
-        // A beta's first launch puts this install on the beta channel (once per
+        // A beta's first launch puts this computer on the beta channel (once per
         // build: a later choice of Stable in it sticks).
         if zeron_update::Channel::of_version(APP_VERSION) == Channel::Beta {
             match zeron_update::channel::claim_for_beta_build(&data_dir, APP_VERSION) {
-                Ok(true) => eprintln!("zeron-zgx: updates: this install now gets beta updates"),
+                Ok(true) => eprintln!("zeron-zgx: updates: this computer now gets beta updates"),
                 Ok(false) => {}
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
             }

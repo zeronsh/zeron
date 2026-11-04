@@ -304,12 +304,6 @@ return ui.row {
 	Panel.Panel {
 		session = session,
 		project = { id = "p1", path = "/proj", name = "proj" },
-		left = function(): number
-			return 400
-		end,
-		docked = function(): boolean
-			return true
-		end,
 		grow = 1,
 		h_full = true,
 	},

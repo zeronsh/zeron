@@ -21,9 +21,10 @@
 --
 -- A split's panes want their least (`page_floor`). Opening one side when they
 -- wouldn't have it with both open closes the other, which stays closed until
--- it's asked for. With one side open and still too little, the panes narrow:
--- nothing else gives way for them but the panel's width, down to its least,
--- and its docked tree, floating.
+-- it's asked for. A window too narrow for them: the panel's width gives way
+-- first, to its least (screens/shell/page), then the sidebar hides before the
+-- panes go narrower than the panel, coming back with the room. The panel never grows by
+-- itself beside a split: new room is the panes'.
 --
 --   fit.current:get()     { sidebar, right, files, sidebar_limit }, now
 --   fit.page_floor:get()  what the page wants beside the columns
@@ -51,10 +52,9 @@ M.right_pane_takeover_width = policy.right_pane_takeover_width
 export type Column = policy.Column
 export type Fit = policy.Fit
 
--- Files' least here: the panel's docked tree at its own width (wider than
--- Zeron's Files at its least), so the fit shows Files only where the file
--- beside the tree keeps the panel's least.
-M.TREE = (ui.theme.get("zeron.files.tree") :: number?) or policy.FILES_PANEL_MIN
+-- What a file tab's tree adds to the panel's width: nothing. It stands beside the
+-- file inside the panel, whatever the panel's width.
+M.TREE = 0
 
 -- When each column was last opened (asked for): an order, newest highest.
 local sequence = ui.state("shell_panel_sequence", 1)
@@ -120,6 +120,10 @@ M.page_floor = ui.computed(function(): number
 	registered:get()
 	return if page_floor_of then page_floor_of() else M.CHAT_PANEL_MIN
 end)
+-- The window's width where the sidebar was asked for though a split's panes
+-- then narrow: a toggle always shows it. It gives way again only under this
+-- width; room for it all forgets it.
+local sidebar_kept = ui.state("shell_fit_sidebar_kept", nil :: number?)
 -- The fit now. (Nothing hides before the window's width is known.)
 M.current = ui.computed(function(): Fit
 	local vw = M.viewport:get()
@@ -137,9 +141,24 @@ M.current = ui.computed(function(): Fit
 	if vw <= 0 then
 		return { sidebar = open_sidebar, right = open_panel, files = false, sidebar_limit = width }
 	end
-	-- (A split's panes keep their least before its tree docks: it floats.)
 	local floor = M.page_floor:get()
-	if floor > M.CHAT_PANEL_MIN and not policy.panes_fit(vw, floor, if open_sidebar then width else 0, M.RIGHT_PANE_MIN + M.TREE) then
+	-- Too little room for a split's panes as wide as the panel: the sidebar gives
+	-- way before they narrow past it, and comes back with the room. (Not over an expanded
+	-- panel; nor when it was asked for here: `sidebar_kept`.)
+	if
+		open_sidebar
+		and floor > M.CHAT_PANEL_MIN
+		and not view.expanded:get()
+		and not policy.panes_fit(vw, policy.page_comfort(floor), width, if open_panel then M.RIGHT_PANE_MIN else 0)
+	then
+		local kept = sidebar_kept:get()
+		if kept == nil or vw < kept then
+			open_sidebar = false
+		end
+	end
+	-- (Beside a split its tree floats: docking it as the window widened grew the
+	-- panel by its width, out of the room that's the panes'.)
+	if floor > M.CHAT_PANEL_MIN then
 		open_tree = false
 	end
 	return M.panels(
@@ -186,6 +205,19 @@ M.sidebar_room = ui.computed(function(): number
 	return held_room or (if preferred then preferred() else M.SIDEBAR_DEFAULT)
 end)
 
+-- The sidebar asked for at a width: forgotten once its panes have room, so it
+-- gives way the next time they don't.
+ui.effect(function()
+	local kept = sidebar_kept:get()
+	if kept == nil then
+		return
+	end
+	local width = if preferred then preferred() else M.SIDEBAR_DEFAULT
+	if policy.panes_fit(M.viewport:get(), policy.page_comfort(M.page_floor:get()), width, if view.files:get() then M.RIGHT_PANE_MIN else 0) then
+		sidebar_kept:set(nil)
+	end
+end)
+
 -- Asked for while hidden for room: ranked newest, so it comes back (another
 -- hiding for it); true when it does. Still hidden (no room even so), its
 -- rank stays and the caller closes it as asked.
@@ -222,7 +254,7 @@ local function other_gives_way(opened: "sidebar" | "right")
 		return
 	end
 	local sidebar = if preferred then preferred() else M.SIDEBAR_DEFAULT
-	if policy.panes_fit(M.viewport:peek(), floor, sidebar, M.RIGHT_PANE_MIN) then
+	if policy.panes_fit(M.viewport:peek(), policy.page_comfort(floor), sidebar, M.RIGHT_PANE_MIN) then
 		return
 	end
 	if opened == "right" then
@@ -247,15 +279,26 @@ end
 -- The sidebar's toggle (the title bar's, ⌘B): hidden for room, brought
 -- back; else folded or opened, opening it ranked newest.
 function M.toggle_sidebar()
-	if not view.collapsed:peek() and promote("sidebar") then
-		other_gives_way("sidebar")
-		return
+	if not view.collapsed:peek() then
+		-- Hidden for a split's panes: asked for, it shows, the panel closing if
+		-- it must, and the panes narrow if that's not room enough.
+		if not M.current:peek().sidebar and M.page_floor:peek() > M.CHAT_PANEL_MIN and not view.expanded:peek() then
+			M.record("sidebar")
+			other_gives_way("sidebar")
+			sidebar_kept:set(M.viewport:peek())
+			return
+		end
+		if promote("sidebar") then
+			other_gives_way("sidebar")
+			return
+		end
 	end
 	local open = view.collapsed:peek()
 	view.collapsed:set(not open)
 	if open then
 		M.record("sidebar")
 		other_gives_way("sidebar")
+		sidebar_kept:set(M.viewport:peek())
 	end
 end
 

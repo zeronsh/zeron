@@ -51,7 +51,7 @@ function M.setup()
 				-- (A panel's pane not focused: lighter, its terminal or page
 				-- still worth reading.)
 				pane_dim = "alpha({background}, 0.3)",
-				focus_edge = "alpha({accent}, 0.55)",
+				focus_edge = "{border.subtle}",
 				drop = "alpha({accent}, 0.14)",
 				drop_edge = "alpha({accent}, 0.7)",
 			},
@@ -655,12 +655,13 @@ function M.setup()
 				inset = {
 					-- A card lifted off the window, lighter than it: the
 					-- theme's raised surface.
-					bg = "{surface.raised}",
-					-- In a split (chats, or the panel's tab groups): the
-					-- focused pane lifted as any card is; the others sunk,
-					-- darker than the window.
-					active = "{surface.raised}",
-					inactive = if dark then "#00000059" else "#00000014",
+					bg = if dark then "alpha({text.primary}, 0.035)" else "alpha({background}, 0.55)",
+					-- A pane with focus a touch brighter than the cards round it.
+					active = if dark then "alpha({text.primary}, 0.06)" else "alpha({background}, 0.85)",
+					inactive = if dark then "alpha({text.primary}, 0.035)" else "alpha({background}, 0.55)",
+					dim = "#00000000",
+					dim_hover = "#00000000",
+					pane_dim = "#00000000",
 				},
 			},
 		}
