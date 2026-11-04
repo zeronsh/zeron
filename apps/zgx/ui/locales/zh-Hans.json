@@ -3073,7 +3073,8 @@
           "title": "以你的身份在此 Mac 上运行 {list}",
           "title_on": "以你的身份在 {device} 上运行 {list}",
           "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。",
-          "detail_anything": "这些程序可以使用你的登录做你能做的任何事。"
+          "detail_anything": "这些程序可以使用你的登录做你能做的任何事。",
+          "detail_each": "它们以你的身份运行，使用你的登录。"
         },
         "native": {
           "title": "在此 Mac 上为你的智能体运行它自己的程序",
@@ -3126,6 +3127,7 @@
         "ui_replace": "用自己的界面替换{places}"
       },
       "can_anything": "{name}：可以做你能做的任何事",
+      "full_control": "它可以运行 {name}，这等于完全控制你的电脑。",
       "any_site": "互联网上的任何网站",
       "near_host": "{host}：这台 Mac 或你的网络",
       "details": {
@@ -3348,7 +3350,7 @@
       "install_title": "安装 {name}？",
       "keep_title": "保留 {name}？",
       "keep_trust": "仅在信任其来源时保留",
-      "keep_body": "这个模板由代理创建、修改或切换而来，或在你上次保留后又有改动。保留之前它只是预览：Zeron 不允许它运行程序、使用你的账户、更改插件、模板或文件，也不允许它向代理发送内容。保留后，它将拥有 Zeron 的全部能力。",
+      "keep_body": "这个模板由代理创建、修改或切换而来，或在你上次保留后又有改动。保留之前它只是预览。保留后，它将拥有 Zeron 的全部能力。",
       "keep_files": "{n, plural, other {# 个文件}}，以当前内容为准",
       "keep_files_detail": "如果它们再次改动，Zeron 会再次询问。",
       "keep": "保留",

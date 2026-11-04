@@ -4,15 +4,15 @@ Every open ask from Zeron's zgx app, one folder per topic: an `ASK.md` (who
 needs it, what fails today, the ask) and, where one exists, a minimal repro
 (`zgx run <folder>/repro` or `zgx test <folder>`, with `ZGX_CHECK=0`). Most
 were seen on zgx `b3371f8` on macOS, unless the folder says otherwise; Zeron's
-pin is now zgx main `7cd25fc1` (0.1.9, its fixes, Linux popups and glass blur, full screen to scripts, terminal colours from the theme, lists that scroll with the view around them). Each open ask is assigned to a zgx lane,
+pin is now zgx main `1526e899` (0.1.9, its fixes, Linux popups and glass blur, full screen to scripts, terminal colours from the theme, lists that scroll with the view around them, an app-owned network policy for plugins, the host's top layer, and the module, slot and shortcut rules for plugins). Each open ask is assigned to a zgx lane,
 which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 ## High: users see it
 
 | Ask | What users see today |
 |---|---|
-| [host-top-layer](host-top-layer/ASK.md) | A template in preview (or a plugin) can paint a modal over Zeron's own Keep / Revert strip and the Linux/Windows menu bar. |
-| [host-guard](host-guard/ASK.md) | A template in preview can still use `ui.fetch`/`ui.socket`; every host action is guarded one by one. |
+| [host-top-layer](host-top-layer/ASK.md) | Landed (`View::top_layer`, e379b925, in the pin); not adopted, waiting on the user's call. A template in preview (or a plugin) can still paint a popover over Zeron's own Keep / Revert strip and the Linux/Windows menu bar. |
+| [host-guard](host-guard/ASK.md) | Landed (`ScriptHost::guard`, 1526e899, in the pin); not adopted, waiting on the user's call. A template in preview can still use `ui.fetch`; every host action is guarded one by one. |
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
 | [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |

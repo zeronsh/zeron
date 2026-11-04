@@ -7,7 +7,9 @@
 //! "you", one edited since you kept it) it runs as a **preview**: it draws
 //! as it likes, with a toast the host draws over it ("Previewing <name>",
 //! Keep and Revert, host_bar.rs), and the host refuses its dangerous
-//! actions (`BLOCKED`).
+//! actions (`BLOCKED`). That isn't a sandbox: its code runs as the app's, and
+//! what zgx gives the app's scripts directly (`ui.term`, `ui.web`) isn't an
+//! action, so nothing here refuses it. Don't word a preview as safe.
 //!
 //! What you kept is bound to the template's content: the sha256 of every
 //! file it lays over Zeron's own (`digest`). The record lives in the app's

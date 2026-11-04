@@ -52,6 +52,7 @@ pub mod template_consent;
 pub mod preview;
 pub mod host_bar;
 pub mod locales;
+pub mod network;
 pub mod plugin_menus;
 
 use std::{
@@ -134,6 +135,12 @@ impl Item {
     pub fn permissions(&self) -> Vec<String> {
         self.list(&self.json["permissions"])
     }
+    /// The hosts its requests may reach, as its manifest names them (none:
+    /// any public address). What the window's requests are held to
+    /// (`network`), and the engine's for its service.
+    pub fn network_hosts(&self) -> Vec<String> {
+        self.list(&self.json["network_hosts"])
+    }
     /// Its "ui.change" targets, as its manifest lists them.
     pub fn change(&self) -> Vec<String> {
         self.list(&self.json["ui"]["change"])
@@ -204,6 +211,8 @@ struct PrWatch {
 
 pub struct Bridge {
     host: ScriptHost,
+    /// Where each plugin's requests may go, as its manifest names them.
+    network: network::Network,
     windows: WindowFactory,
     page: Shared,
     menus: Shared,
@@ -300,8 +309,12 @@ pub struct Bridge {
 /// What plugins may read and ask of the app, each behind its permission,
 /// and every declared hook behind "ui.add".
 pub fn expose_surface(host: &ScriptHost) {
+    // Names under `zeron` are the app's alone, whatever a plugin is called
+    // (its slots and commands are its own names anyway).
+    host.reserve_prefix("zeron");
     // Adding before or after any element, by any selector, is "ui.add"'s
-    // (replacing is "ui.change"'s, an Override of the selector as written).
+    // (replacing is "ui.change"'s, an OverrideElement of the selector as
+    // written).
     host.require_contribution_capability(Capability::Named(grants::UI_ADD.into()));
     // What a file or a reply's block is, as an element gives it: a token
     // (`tokens`), never the path or the text.
@@ -453,8 +466,11 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
 /// Plugins for the main window `cx` shows `host` in.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
+    let plugin_network = network::Network::default();
+    host.fetch_policy(plugin_network.clone());
     let bridge = Rc::new(Bridge {
         host: host.clone(),
+        network: plugin_network,
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
@@ -778,6 +794,7 @@ pub(crate) fn shortcut_notice(lost: &[crate::menu_bar::Dropped], name_of: impl F
         Why::Zerons(title) => format!("Its {key} for “{}” is already Zeron's ({title}), so it's in the menu bar without one.", first.title),
         Why::Plugins(other) => format!("Its {key} for “{}” is already {}'s, so it's in the menu bar without one.", first.title, name_of(other)),
         Why::NoKey => format!("Its {key} for “{}” isn't a key a menu can show, so it's in the menu bar without one.", first.title),
+        Why::NoModifier => format!("Its {key} for “{}” has no ⌘, ⌃ or ⌥, so it would take that key from everything you type in. It's in the menu bar without one.", first.title),
     };
     match lost.len() {
         1 => {}
@@ -846,6 +863,9 @@ pub fn builtin_dir() -> PathBuf {
 pub fn dev_plugins(host: &ScriptHost) {
     let Some(dirs) = crate::dev::switch("ZERON_ZGX_DEV_PLUGINS") else { return };
     expose_surface(host);
+    let plugin_network = network::Network::default();
+    host.fetch_policy(plugin_network.clone());
+    let mut hosts = Vec::new();
     let mut plugins = Vec::new();
     for dir in std::env::split_paths(&dirs) {
         let Ok(text) = std::fs::read_to_string(dir.join("zeron-plugin.json")) else {
@@ -859,8 +879,10 @@ pub fn dev_plugins(host: &ScriptHost) {
                 "id": id, "name": manifest["name"], "status": "on", "entry": manifest["entry"],
                 "snapshot": dir, "permissions": manifest["permissions"],
                 "ui": manifest.get("ui").cloned().unwrap_or(json!({})),
+                "network_hosts": manifest["network"]["hosts"],
             }),
         };
+        hosts.push((id.clone(), item.network_hosts()));
         expose_own(host, &id);
         locales::publish(host, &id, &dir);
         // Its settings, at their defaults (a fixture sets them as it likes).
@@ -890,6 +912,7 @@ pub fn dev_plugins(host: &ScriptHost) {
         eprintln!("zeron-zgx: dev plugin {id} from {}", dir.display());
         plugins.extend(item.plugin());
     }
+    plugin_network.set(hosts);
     host.set_plugins(plugins);
 }
 
@@ -1232,6 +1255,8 @@ impl Bridge {
         for plugin in &want {
             self.expose(&plugin.name);
         }
+        // Where each may reach, before anything of it runs.
+        self.network.set(items.iter().filter(|i| want.iter().any(|p| p.name == i.id())).map(|i| (i.id().to_string(), i.network_hosts())));
         // Each one's own words (`locales/`, read again: a new version brings
         // its own), for the SDK's `zeron.t`.
         for item in items.iter().filter(|i| want.iter().any(|p| p.name == i.id())) {
@@ -1347,7 +1372,7 @@ impl Bridge {
     /// new version or an edit of it arrives.
     pub(crate) fn plugin_failed(&self, id: &str, error: &str) {
         let Some(item) = self.item(id) else { return };
-        if !self.failed_plugins.borrow_mut().fail(id, item.hash(), error) {
+        if !self.failed_plugins.borrow_mut().fail(id, item.hash(), &recovery::reason(error)) {
             return;
         }
         eprintln!("zeron-zgx: plugin {id} failed and is withdrawn: {}", recovery::first_line(error));
@@ -3274,7 +3299,7 @@ mod tests {
         let p = on.plugin().unwrap();
         assert_eq!(p.name, "focus");
         assert_eq!(p.entry, PathBuf::from("/d/plugins/.loaded/focus/0123/init.luau"));
-        assert!(p.grants.contains(&Capability::Override("#sidebar-actions".into())));
+        assert!(p.grants.contains(&Capability::OverrideElement("#sidebar-actions".into())));
         for status in ["off", "pending", "tampered", "broken"] {
             let mut json = on.json.clone();
             json["status"] = json!(status);
@@ -3308,6 +3333,8 @@ mod examples_tests;
 mod hotkeys_tests;
 #[cfg(test)]
 mod markdown_tests;
+#[cfg(test)]
+mod network_tests;
 
 #[cfg(test)]
 mod menu_tests {

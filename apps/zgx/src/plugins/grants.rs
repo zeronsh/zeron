@@ -92,7 +92,8 @@ pub fn page_selector(id: &str) -> String {
     format!(".plugin-page.plugin-{id}")
 }
 
-/// May `module` be replaced by a plugin allowed "ui.replace"?
+/// May `module` be replaced by a plugin allowed "ui.replace"? Granted as
+/// that module alone (`OverrideModule`), never `*`.
 pub fn replaceable(module: &str) -> bool {
     module.starts_with("@app/screens/")
         && !NEVER_REPLACED
@@ -101,10 +102,9 @@ pub fn replaceable(module: &str) -> bool {
 }
 
 /// May a plugin allowed "ui.change" be given `target`? Only an element's
-/// selector, as zgx reads one: zgx's `Override` also lets `ui.override`
-/// swap an `@app/…` module (running the plugin as the app), so a target
-/// naming a module, or everything (`*`), is never given; nor Zeron's
-/// plugin placeholders (`.plugin-…`: a plugin's tabs, pages and the
+/// selector, as zgx reads one: a target naming a module or everything (`*`)
+/// is never given (zgx's `OverrideElement` doesn't reach modules anyway); nor
+/// Zeron's plugin placeholders (`.plugin-…`: a plugin's tabs, pages and the
 /// Unverified badge, each plugin's own through "panel.tabs" and
 /// "pages.add" alone). The engine refuses such a manifest too
 /// (`change_target_problem`); this holds whatever it lists.
@@ -211,7 +211,7 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
                         // A raw target may not reach what's private: zgx
                         // keeps `hook = false` out of every target's reach.
                         .filter(|t| change_target(t))
-                        .map(|t| Capability::Override(t.clone())),
+                        .map(|t| Capability::OverrideElement(t.clone())),
                 );
                 if change.iter().any(|t| SIDEBAR.contains(&t.as_str())) {
                     out.push(named("zeron.sidebar.filter"));
@@ -221,7 +221,7 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
                 replace
                     .iter()
                     .filter(|m| replaceable(m))
-                    .map(|m| Capability::Override(m.clone())),
+                    .map(|m| Capability::OverrideModule(m.clone())),
             ),
             // Read through records (`records`), but these two follow what
             // Zeron keeps window-wide too.
@@ -241,8 +241,8 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "notifications" => {}
             // Its own tabs and pages: Zeron draws a placeholder of each,
             // which only this plugin may fill (replace).
-            "panel.tabs" => out.push(Capability::Override(tab_selector(id))),
-            "pages.add" => out.push(Capability::Override(page_selector(id))),
+            "panel.tabs" => out.push(Capability::OverrideElement(tab_selector(id))),
+            "pages.add" => out.push(Capability::OverrideElement(page_selector(id))),
             "navigate" => out.push(named("zeron.navigate")),
             "compose" => out.push(named("zeron.compose")),
             "devices" => out.push(named("zeron.devices")),
@@ -286,7 +286,7 @@ mod tests {
             vec![
                 own("focus"),
                 Capability::Named("zeron.ui.add".into()),
-                Capability::Override(".session-row".into()),
+                Capability::OverrideElement(".session-row".into()),
                 Capability::Named("zeron.sidebar.filter".into()),
                 Capability::Named("zeron.sessions".into()),
                 Capability::Fetch,
@@ -309,7 +309,7 @@ mod tests {
                 "@ds/button",
             ]),
         );
-        assert_eq!(got, vec![own("x"), Capability::Override("@app/screens/shell/sidebar".into())]);
+        assert_eq!(got, vec![own("x"), Capability::OverrideModule("@app/screens/shell/sidebar".into())]);
     }
 
     #[test]
@@ -319,8 +319,8 @@ mod tests {
             got,
             vec![
                 own("prs"),
-                Capability::Override(".plugin-tab.plugin-prs".into()),
-                Capability::Override(".plugin-page.plugin-prs".into()),
+                Capability::OverrideElement(".plugin-tab.plugin-prs".into()),
+                Capability::OverrideElement(".plugin-page.plugin-prs".into()),
             ]
         );
     }
@@ -360,12 +360,31 @@ mod tests {
             got,
             vec![
                 own("x"),
-                Capability::Override("#composer-toolbar".into()),
-                Capability::Override("hook:sidebar.sessions".into()),
-                Capability::Override("\"Send @ once\"".into()),
+                Capability::OverrideElement("#composer-toolbar".into()),
+                Capability::OverrideElement("hook:sidebar.sessions".into()),
+                Capability::OverrideElement("\"Send @ once\"".into()),
                 Capability::Named("zeron.sidebar.filter".into()),
             ]
         );
+    }
+
+    /// R1: "ui.change" names what it changes and reaches no module, and
+    /// "ui.replace" reaches the screens it names and no element: neither
+    /// holds the other's power, nor zgx's older `Override`, which reads by
+    /// what it names.
+    #[test]
+    fn change_and_replace_grant_apart() {
+        let got = capabilities(
+            "x",
+            &s(&["ui.change", "ui.replace", "panel.tabs", "pages.add"]),
+            &s(&["#composer-toolbar", "@app/screens/chat"]),
+            &s(&["@app/screens/chat", "#composer-toolbar"]),
+        );
+        assert!(got.contains(&Capability::OverrideElement("#composer-toolbar".into())));
+        assert!(got.contains(&Capability::OverrideModule("@app/screens/chat".into())));
+        assert!(!got.contains(&Capability::OverrideElement("@app/screens/chat".into())));
+        assert!(!got.contains(&Capability::OverrideModule("#composer-toolbar".into())));
+        assert!(!got.iter().any(|c| matches!(c, Capability::Override(_))));
     }
 
     #[test]
