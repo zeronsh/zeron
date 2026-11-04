@@ -105,6 +105,27 @@ test("the page takes clicks: a new chat, a chat alone, and panes side by side", 
 	expect(app:error()).to_be_nil()
 end)
 
+test("typing a trigger in a split opens one menu, not one for the hidden composer too", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Fix the build")
+	app:set_state("inset_split_trees", { { kind = "row", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "a2" } } } })
+	app:frames(30)
+	app:type('#chat-composer-dock >> role:textbox "Message"', "/")
+	app:frames(30)
+	local open_menus = 0
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find("#mention-popover", 1, true) or line:find("#mention-panel", 1, true) then
+			if not line:find(" hidden", 1, true) and line:find("#mention-panel", 1, true) then
+				open_menus += 1
+			end
+		end
+	end
+	expect(open_menus).to_be(1)
+	expect(app:error()).to_be_nil()
+end)
+
 test("each tab opened is in view, with the panel open and the strip narrow", function()
 	local app = all_open()
 	app:click('#titlebar >> role:button "Panel"')

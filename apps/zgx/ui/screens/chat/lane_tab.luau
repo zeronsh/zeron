@@ -438,6 +438,13 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		on_stop = function()
 			store.interrupt(chat)
 		end,
+		-- (Hidden while focused, its draft shown by the window's composer: only that
+		-- one's menus open, or a trigger typed there opens a second here.)
+		mention_enabled = if split and focused
+			then function(_trigger: string): boolean
+				return not focused()
+			end
+			else nil,
 		-- (A split's pane, its chat's own.)
 		question = if asks then asks.question else nil,
 		chosen = if asks then asks.chosen else nil,

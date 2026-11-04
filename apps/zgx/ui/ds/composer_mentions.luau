@@ -107,6 +107,37 @@ function M.use(opts: Use)
 		local t = token:get()
 		return t ~= nil and dismissed:get() ~= t.from
 	end
+	-- The window going to the back closes every popover, as AppKit's do: not a
+	-- dismissal. Back at the front, the list that was open opens again. (Which comes
+	-- first, the window's state or the popover's closing, isn't for this to rely on.)
+	local closed_from, closed_at = -1, -math.huge
+	local away_from = -1
+	local function closed(from: number)
+		dismissed:set(from)
+		closed_from, closed_at = from, os.clock()
+		if ui.window.active:peek() == false then
+			away_from = from
+		end
+	end
+	local was_active = ui.window.active:peek()
+	ui.effect(function()
+		local now = ui.window.active:get()
+		if now == was_active then
+			return
+		end
+		was_active = now
+		if not now then
+			if os.clock() - closed_at < 0.5 then
+				away_from = closed_from
+			end
+			return
+		end
+		local t = token:peek()
+		if t and away_from == t.from and dismissed:peek() == t.from then
+			dismissed:set(-1)
+		end
+		away_from = -1
+	end)
 	-- A new token (or a new query) lights the first row again.
 	ui.effect(function()
 		token:get()
@@ -287,7 +318,7 @@ function M.use(opts: Use)
 			on_close = function()
 				local t = token:peek()
 				if t then
-					dismissed:set(t.from)
+					closed(t.from)
 				end
 			end,
 			at_caret = true,
