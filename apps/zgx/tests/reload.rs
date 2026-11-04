@@ -1151,3 +1151,25 @@ fn a_reload_keeps_the_history_behind_and_ahead() {
     app.frames(30);
     assert!(arrow(&mut app, "Back").contains("disabled"), "home is the first place: {}", arrow(&mut app, "Back"));
 }
+
+/// The window's width changed in one step mid-conversation (maximized, a
+/// panel's page taking its width at once): the reading place stays where it
+/// stood in the view, the rows above it rewrapped and all.
+#[test]
+fn a_width_changed_in_one_step_keeps_the_reading_place() {
+    let log: Log = Rc::default();
+    let mut app = mid_history(&log);
+    let needle = reading_anchor(&mut app);
+    let (from, _) = place_of(&mut app, &needle).unwrap();
+    let mut trace = Vec::new();
+    for (label, w) in [("narrower", 800.), ("wider", 1400.)] {
+        app.ui.scene.borrow_mut().resize(w, 800.);
+        for f in 1..=20 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.frame();
+            trace.push((format!("{label} {f}"), place_of(&mut app, &needle).map_or(i32::MIN, |p| p.0)));
+        }
+    }
+    let moved = drift(&trace, from);
+    assert!(moved.is_empty(), "the reading place moved as the width changed in one step:\n{}", moved.join("\n"));
+}

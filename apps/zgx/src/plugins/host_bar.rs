@@ -12,7 +12,7 @@
 //!   on another device, this device's revoked), and the default interface
 //!   at launch because the template crashed Zeron (safe mode);
 //! - on Linux and Windows, which have no system menu bar, the app's menu
-//!   bar (zgx's `app_menu_bar`): View → Use Default Interface is always in
+//!   bar (zgx's `app_menu_bar`): View → Use Zeron v3 is always in
 //!   it, the host's own item.
 //!
 //! The toasts look like the app's own (ds/toast.luau: its width, corner,

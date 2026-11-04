@@ -59,7 +59,22 @@ local FileIcon = require("@ds/file_icons")
 local FadeText = require("@ds/fade_text")
 local ContextMenu = require("@ds/context_menu")
 local IconButton = require("@ds/icon_button").IconButton
+
 local state = require("@app/screens/panel/state")
+-- Tab groups. A panel's tabs can be split into groups laid out side
+-- by side and above one another (the tree of screens/shell/split), each
+-- with a strip of its own and the tab it shows; the focused one lifted,
+-- the others dimmed. Kept with the tabs (screens/panel/state's `groups`,
+-- by panel key: `{ tree, groups = { [gid] = { tabs = { id } } }, focus,
+-- actives, next }`), where the focus moves with them: a tab opened,
+-- whatever opens it, lands in the focused group; one turned to focuses
+-- its group. The group "main" is every tab no other group holds. A tab
+-- dragged to a group's edge starts a group there; onto a group's strip or
+-- its middle, it moves into that group. With one group left, the panel is
+-- as it always was.
+local panel_groups = state.groups
+local tab_dragging = ui.state("panel_tab_dragging", false)
+local MAIN = state.MAIN
 -- Lanes seen as their tabs come to the front (the panel home's done checks).
 require("@app/screens/panel/lanes_seen")
 local Files = require("@app/screens/files")
@@ -387,9 +402,24 @@ end
 local CHIP_H = 26
 local LABEL_MAX = 140
 local SLOT = 18
-local BAND_H, BAND_PAD = 38, "$space.1"
-local STRIP_START = "$space.2"
-local TOGGLE_ROOM = 34
+-- (The panel is a card set in from the window's top by the inset's
+-- gap, so its band is that much shorter and its tabs stay level with the
+-- title bar's controls; its end keeps room for the panel toggle, now that
+-- much nearer the card's edge.)
+local INSET_GAP = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+local BAND_H = 38 - INSET_GAP
+-- (Its tabs centred under the pad: Zeron's 4, less what the card is set
+-- down by.)
+local BAND_PAD_PT = math.max(0, 4 - INSET_GAP)
+local BAND_PAD = ui.raw(BAND_PAD_PT, "level with the title bar's controls, the card set in from the top")
+-- (Its tabs as far in from its card's left and right as from its top: the
+-- band's room over a tab, which its tabs centre in.)
+local STRIP_EDGE = BAND_PAD_PT + (BAND_H - BAND_PAD_PT - 26) / 2
+local STRIP_START = ui.raw(STRIP_EDGE, "a strip's tabs as far in from the card's side as from its top")
+-- (At the panel's top right, the title bar's panel toggle stands over the
+-- strip's end (10 in from the window's right, 24 wide): the strip ends
+-- before it, by the title bar's own gap between its controls.)
+local TOGGLE_ROOM = 34 - INSET_GAP + 2
 local STRIP_FADE = 36
 local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 -- The title bar's controls' size (the Expand button stands with them).
@@ -598,7 +628,7 @@ export type Props = { project: any?, session: any?, page: any?, left: (() -> num
 
 -- Where the title bar's controls end, from the window's left (ds/title_bar).
 local CONTROLS_END = ds.TitleBar.controls_end()
-local STRIP_START_PT = (ui.theme.get("space.2") :: number?) or 8
+local STRIP_START_PT = STRIP_EDGE
 
 M.Panel = ui.component(function(props: Props): Node
 	local project, session, page = props.project, props.session, props.page
@@ -856,6 +886,8 @@ M.Panel = ui.component(function(props: Props): Node
 				-- the one left behind faint until it lands.
 				on_drag = function(): any
 					dragging:set(true)
+					-- (The panel's panes show where it can land.)
+					tab_dragging:set(true)
 					return { panel_tab = id }
 				end,
 				drag_preview = function()
@@ -880,6 +912,7 @@ M.Panel = ui.component(function(props: Props): Node
 				end,
 				on_drag_end = function()
 					dragging:set(false)
+					tab_dragging:set(false)
 				end,
 				opacity = function(): number
 					return if dragging:get() then 0.4 else 1
@@ -1370,6 +1403,735 @@ M.Panel = ui.component(function(props: Props): Node
 		}
 	end, { w_full = true, grow = 1, min_h = 0, hidden = closed })
 
+	-- Tab groups (`panel_groups` above).
+	local Split = require("@app/screens/shell/split") :: any
+	local tree = Split.tree
+
+	-- The groups as they stand for the panel's key, its tabs as they are
+	-- now: { tree, lists = { [gid] = { id } }, focus, actives }; nil while
+	-- there's one group (the panel as it always was).
+	local groups_now = ui.computed(function(): any
+		local k = key:get()
+		if not k then
+			return nil
+		end
+		local rec = panel_groups:get()[k]
+		if not rec then
+			return nil
+		end
+		local s = state.of(k)
+		local open: { [string]: boolean } = {}
+		for _, t in s.tabs do
+			open[t.id] = true
+		end
+		local lists: { [string]: { string } } = {}
+		local taken: { [string]: boolean } = {}
+		for gid, g in rec.groups do
+			local l = {}
+			for _, id in g.tabs do
+				if open[id] and not taken[id] then
+					table.insert(l, id)
+					taken[id] = true
+				end
+			end
+			lists[gid] = l
+		end
+		local main = {}
+		for _, t in s.tabs do
+			if not taken[t.id] then
+				table.insert(main, t.id)
+			end
+		end
+		lists[MAIN] = main
+		local t = rec.tree
+		for _, gid in tree.leaves(rec.tree) do
+			if not lists[gid] or #lists[gid] == 0 then
+				t = tree.without(t, gid)
+			end
+		end
+		if not t or #tree.leaves(t) < 2 then
+			return nil
+		end
+		-- (Tabs no group shows, "main" gone from the layout: the focused
+		-- group's, so none is lost.)
+		local shown = tree.leaves(t)
+		if #main > 0 and not table.find(shown, MAIN) then
+			local into = if rec.focus and table.find(shown, rec.focus) then rec.focus else shown[1]
+			local l = table.clone(lists[into])
+			for _, id in main do
+				table.insert(l, id)
+			end
+			lists[into] = l
+			lists[MAIN] = nil
+		end
+		return { tree = t, lists = lists, focus = rec.focus, actives = rec.actives or {} }
+	end)
+	local function multi(): boolean
+		return groups_now:get() ~= nil
+	end
+	-- The focused group: the one kept with the tabs (screens/panel/state
+	-- moves it as tabs open, turn and close), while it's shown.
+	local function focused_group(): string?
+		local g = groups_now:get()
+		if not g then
+			return nil
+		end
+		local leaves = tree.leaves(g.tree)
+		if g.focus and table.find(leaves, g.focus) then
+			return g.focus
+		end
+		return leaves[1]
+	end
+	-- The tab a group shows: the active one if it's the focused group (nil:
+	-- its empty page), else the one it showed last.
+	local function group_shows(gid: string): string?
+		local g = groups_now:get()
+		if not g then
+			return nil
+		end
+		if focused_group() == gid then
+			return active()
+		end
+		local l = g.lists[gid] or {}
+		local last = g.actives[gid]
+		if last and table.find(l, last) then
+			return last
+		end
+		return l[1]
+	end
+	-- The record as it now is, made from the groups as they stand (or, one
+	-- group so far, a new one), changed by `change`, tidied and kept.
+	local function rebuild(change: (rec: any) -> ())
+		local k = key:peek()
+		if not k then
+			return
+		end
+		local g = groups_now:peek()
+		local old = panel_groups:peek()[k]
+		local rec: any
+		if g then
+			rec = { tree = g.tree, groups = {}, focus = g.focus, actives = table.clone(g.actives), next = (old and old.next) or 1 }
+			for gid, l in g.lists do
+				if gid ~= MAIN then
+					rec.groups[gid] = { tabs = table.clone(l) }
+				end
+			end
+		else
+			rec = { tree = tree.leaf(MAIN), groups = {}, focus = MAIN, actives = {}, next = (old and old.next) or 1 }
+		end
+		change(rec)
+		-- Tidied: each group less tabs gone; a group left empty leaves the
+		-- layout ("main" too, when every tab is in another).
+		local s = state.of(k)
+		local open: { [string]: boolean } = {}
+		for _, t in s.tabs do
+			open[t.id] = true
+		end
+		local held = 0
+		for gid, gg in rec.groups do
+			local l = {}
+			for _, id in gg.tabs do
+				if open[id] then
+					table.insert(l, id)
+				end
+			end
+			rec.groups[gid] = if #l > 0 then { tabs = l } else nil
+			held += #l
+		end
+		local t = rec.tree
+		for _, gid in tree.leaves(rec.tree) do
+			local n = if gid == MAIN then #s.tabs - held else (if rec.groups[gid] then #rec.groups[gid].tabs else 0)
+			if n <= 0 then
+				t = tree.without(t, gid)
+			end
+		end
+		rec.tree = t or tree.leaf(MAIN)
+		local all = table.clone(panel_groups:peek())
+		all[k] = if #tree.leaves(rec.tree) >= 2 then rec else nil
+		panel_groups:set(all)
+	end
+	-- `d` out of whichever group held it.
+	local function take_out(rec: any, d: string)
+		for gid, gg in rec.groups do
+			local i = table.find(gg.tabs, d)
+			if i then
+				local l = table.clone(gg.tabs)
+				table.remove(l, i)
+				rec.groups[gid] = { tabs = l }
+			end
+		end
+	end
+	-- `d` in a group of its own at `target`'s side.
+	local function new_group(d: string, target: string, side: string)
+		local k = key:peek()
+		if not k then
+			return
+		end
+		rebuild(function(rec: any)
+			take_out(rec, d)
+			local gid = `g{rec.next}`
+			rec.next += 1
+			rec.groups[gid] = { tabs = { d } }
+			rec.tree = tree.insert(rec.tree, target, gid, side) or rec.tree
+			rec.focus = gid
+			rec.actives[gid] = d
+		end)
+		state.activate(k, d)
+	end
+	-- `d` into the group `gid`: before or after its tab `at` (none: at its
+	-- end). Into "main", it takes its place in the panel's own order.
+	local function into_group(d: string, gid: string, at: string?, after: boolean?)
+		local k = key:peek()
+		if not k then
+			return
+		end
+		rebuild(function(rec: any)
+			take_out(rec, d)
+			if gid ~= MAIN then
+				local l = table.clone(if rec.groups[gid] then rec.groups[gid].tabs else {})
+				local i = if at then table.find(l, at) else nil
+				if i then
+					table.insert(l, if after then i + 1 else i, d)
+				else
+					table.insert(l, d)
+				end
+				rec.groups[gid] = { tabs = l }
+			end
+			rec.focus = gid
+			rec.actives[gid] = d
+		end)
+		if gid == MAIN and at and at ~= d then
+			local list = state.of(k).tabs
+			local i = nil
+			for n, t in list do
+				if t.id == at then
+					i = n
+				end
+			end
+			if i then
+				state.move(k, d, if after then i + 1 else i)
+			end
+		end
+		state.activate(k, d)
+	end
+	-- Where the groups stand in the panel (all of it, from its top: the top
+	-- ones' strips in the panel's own band), as the page's split chats are:
+	-- edges that are a share of the panel plus points, so resizing it or
+	-- dragging its edge runs no script (screens/shell/split).
+	local group_frames = ui.computed(function(): { [string]: any }
+		local g = groups_now:get()
+		return tree.frames(if g then g.tree else nil, INSET_GAP)
+	end)
+	local function gbox(gid: string): any
+		return group_frames:get()[gid] or Split.WHOLE
+	end
+	local group_ids = ui.computed(function(): { string }
+		local g = groups_now:get()
+		return if g then tree.leaves(g.tree) else {}
+	end)
+	local function kind_icon(tab: Tab?): string
+		if not tab then
+			return "widget"
+		end
+		if tab.kind == "terminal" then
+			return "terminal"
+		elseif tab.kind == "browser" then
+			return "global"
+		elseif tab.kind == "plugin" then
+			return (tab.icon or "widget") :: any
+		elseif tab.kind == "side_chat" then
+			return "side-chat"
+		elseif tab.kind == "subagent" then
+			return "bot"
+		end
+		return "document"
+	end
+	local function is_tab(payload: any): boolean
+		local k = key:peek()
+		return k ~= nil and type(payload) == "table" and type(payload.panel_tab) == "string" and state.find(k, payload.panel_tab) ~= nil
+	end
+	-- A group's tab in its strip: as the panel's own (its icon, its title,
+	-- × under the pointer), shown as the group shows it; dragged, it moves
+	-- (onto another tab: beside it; to a group's edge: a group of its own).
+	local function group_chip(gid: string, id: string): Node
+		local k = key:peek()
+		local tab = if k then state.find(k, id) else nil
+		local hovered = ui.use_state(false)
+		local function shown(): boolean
+			return group_shows(gid) == id
+		end
+		local function lit(): boolean
+			return shown() and focused_group() == gid
+		end
+		local function title(): string
+			if not tab then
+				return ""
+			end
+			local t = title_of(tab)
+			return t
+		end
+		return ui.row {
+			id = `panel-tab-{id}`,
+			class = if tab and tab.kind == "files" then "panel-tab file-tab" else "panel-tab",
+			provide = { panel = id },
+			role = "tab",
+			label = title,
+			selected = shown,
+			h = CHIP_H,
+			shrink = 0,
+			pl = "$space.3",
+			pr = "$space.1",
+			gap = "$zeron.space.tight",
+			items = "center",
+			rounded = "$radius.lg",
+			cursor = "pointer",
+			bg = function(): string
+				if lit() then
+					return "$zeron.selected.flat.bg"
+				end
+				if shown() or hovered:get() then
+					return "$hover"
+				end
+				return "#00000000"
+			end,
+			color = function(): string
+				return if shown() or hovered:get() then "$text.primary" else "$text.secondary"
+			end,
+			on_hover = function(inside: boolean)
+				hovered:set(inside)
+			end,
+			on_click = function()
+				if k then
+					state.activate(k, id)
+				end
+			end,
+			on_aux_click = function(e)
+				if e.button == "middle" then
+					close(id)
+				end
+			end,
+			on_drag = function(): any
+				tab_dragging:set(true)
+				return { panel_tab = id }
+			end,
+			drag_preview = function(): Node
+				local card: { [any]: any } = {
+					h = CHIP_H,
+					pl = "$space.3",
+					pr = "$space.3",
+					gap = "$zeron.space.tight",
+					items = "center",
+					rounded = "$radius.lg",
+					color = "$text.primary",
+					Icon { name = kind_icon(tab) :: any, size = 14 },
+					FadeText { title(), max_w = LABEL_MAX, text_size = "$font.size.sm", weight = "$font.weight.medium" },
+				}
+				require("@ds/glass").style(card, "menu")
+				return ui.row(card)
+			end,
+			on_drag_end = function()
+				tab_dragging:set(false)
+			end,
+			drop_when = function(payload: any): boolean
+				return is_tab(payload) and payload.panel_tab ~= id
+			end,
+			on_drop = function(payload: any, e)
+				tab_dragging:set(false)
+				into_group(payload.panel_tab, gid, id, e.local_x > e.w / 2)
+			end,
+			ui.div { y = 0.5, shrink = 0, Icon { name = kind_icon(tab) :: any, size = 14 } },
+			FadeText {
+				title,
+				max_w = LABEL_MAX,
+				text_size = "$font.size.sm",
+				weight = "$font.weight.medium",
+			},
+			ui.row {
+				w = SLOT,
+				h = SLOT,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				ui.show(function(): boolean
+					return hovered:get()
+				end, IconButton {
+					label = ui.t("panel.tab.close"),
+					tooltip_side = "bottom",
+					size = "sm",
+					tone = "quiet",
+					w = SLOT,
+					h = SLOT,
+					rounded = "$radius.sm",
+					on_click = function()
+						close(id)
+					end,
+					Icon { name = "close", size = 12 },
+				}),
+			},
+		}
+	end
+	-- A group's strip: its tabs, "+" (its empty page, the group focused),
+	-- and, for the group at the panel's top right, Expand. The top groups'
+	-- strips stand in the panel's band, level with the title bar's controls
+	-- (clear of them at its ends); what isn't a tab moves the window.
+	local function group_strip(gid: string): Node
+		local list = ui.computed(function(): { string }
+			local g = groups_now:get()
+			return if g then g.lists[gid] or {} else {}
+		end)
+		local function top_left(): boolean
+			return Split.top_left(gbox(gid))
+		end
+		local function top_right(): boolean
+			return Split.top_right(gbox(gid))
+		end
+		return ui.row {
+			w_full = true,
+			h = BAND_H,
+			shrink = 0,
+			pt = BAND_PAD,
+			pl = function(): number
+				if top_left() and left_of then
+					return ui.raw(math.max(STRIP_START_PT, CONTROLS_END - left_of()), "clear of the title bar's controls")
+				end
+				return ui.raw(STRIP_START_PT, "the strip's start")
+			end,
+			pr = function(): number
+				return ui.raw(if top_right() then TOGGLE_ROOM + ds.TitleBar.window_buttons_right() else STRIP_EDGE, "the title bar's panel toggle over the top right group's end, else as far in as from its top")
+			end,
+			items = "center",
+			window_drag = true,
+			-- (Dropped on its strip past its tabs: to its end.)
+			drop_when = is_tab,
+			on_drop = function(payload: any)
+				tab_dragging:set(false)
+				into_group(payload.panel_tab, gid)
+			end,
+			ui.scroll_x {
+				grow = 1,
+				min_w = 0,
+				h = CHIP_H,
+				fade_x = { STRIP_FADE, STRIP_FADE },
+				fade_overflow = true,
+				ui.row {
+					gap = "$zeron.space.hair",
+					items = "center",
+					ui.each(list, function(id: string): Node
+						return group_chip(gid, id)
+					end, {
+						key = function(id: string): string
+							return id
+						end,
+						direction = "row",
+						gap = "$zeron.space.hair",
+						animate = motion.layout(SLIDE),
+					}),
+					IconButton {
+						label = ui.t("panel.strip.new_tab"),
+						tooltip_side = "bottom",
+						size = "sm",
+						tone = "quiet",
+						w = CHIP_H,
+						h = CHIP_H,
+						rounded = "$radius.lg",
+						on_click = function()
+							local k = key:peek()
+							if not k then
+								return
+							end
+							local all = table.clone(panel_groups:peek())
+							local r = all[k]
+							if r then
+								r = table.clone(r)
+								r.focus = gid
+								all[k] = r
+								panel_groups:set(all)
+							end
+							state.activate(k, nil)
+						end,
+						Icon { name = "plus", size = 14 },
+					},
+				},
+			},
+			if shell_view and shell_view.toggle_expanded
+				then ui.show(top_right, ui.div {
+					shrink = 0,
+					ml = "$space.1",
+					ui.presence(function(): string
+						return if shell_view.expanded:get() then "collapse" else "expand"
+					end, function(which: string): Node
+						return IconButton {
+							label = if which == "collapse" then ui.t("panel.strip.collapse") else ui.t("panel.strip.expand"),
+							tooltip_side = "bottom",
+							w = CONTROL,
+							h = CONTROL,
+							on_click = function()
+								shell_view.toggle_expanded()
+							end,
+							Icon { name = if which == "collapse" then "collapse-arrows" else "expand-arrows", size = 16 },
+						}
+					end),
+				})
+				else nil,
+		}
+	end
+	-- Where a dragged tab is held, and where it would land: over a group's
+	-- body (or the one panel's), the edge it's near ("left", "right", "top",
+	-- "bottom": a group of its own there) or its middle (into the group).
+	-- The body itself takes the drop, from where the pointer is in it: no
+	-- layer over the tabs' views, so nothing ever stands between them and
+	-- the pointer.
+	local held = ui.use_state(nil :: { id: string, side: string }?)
+	local EDGE = 0.3
+	local function side_at(e: any, edges_only: boolean): string?
+		local fx = if (e.w or 0) > 0 then e.local_x / e.w else 0.5
+		local fy = if (e.h or 0) > 0 then e.local_y / e.h else 0.5
+		if fx < EDGE then
+			return "left"
+		elseif fx > 1 - EDGE then
+			return "right"
+		elseif fy < EDGE then
+			return "top"
+		elseif fy > 1 - EDGE then
+			return "bottom"
+		end
+		return if edges_only then nil else "middle"
+	end
+	-- The drop props for a body: `gid`'s, `accepts` saying whether the tab
+	-- may land at that side.
+	local function droppable(gid: string, edges_only: boolean, accepts: (d: string, side: string) -> boolean): { [string]: any }
+		local function hold(side: string?)
+			local o = held:peek()
+			if side == nil then
+				if o and o.id == gid then
+					held:set(nil)
+				end
+			elseif not o or o.id ~= gid or o.side ~= side then
+				held:set({ id = gid, side = side })
+			end
+		end
+		return {
+			drop_when = is_tab,
+			on_drag_over = function(payload: any, e)
+				local side = side_at(e, edges_only)
+				hold(if side and accepts(payload.panel_tab, side) then side else nil)
+			end,
+			on_drag_leave = function()
+				hold(nil)
+			end,
+			on_drop = function(payload: any, e)
+				hold(nil)
+				tab_dragging:set(false)
+				local side = side_at(e, edges_only)
+				if not side or not accepts(payload.panel_tab, side) then
+					return
+				end
+				if side == "middle" then
+					into_group(payload.panel_tab, gid)
+				else
+					new_group(payload.panel_tab, gid, side)
+				end
+			end,
+		}
+	end
+	-- Where a tab held over a body would land: that half of it (its middle:
+	-- all of it), drawn over it, taking no pointer. (Shares of the body:
+	-- nothing here is worked out from its size.)
+	local HALF: { [string]: { [string]: any } } = {
+		middle = { left = 0, right = 0, top = 0, bottom = 0 },
+		left = { left = 0, right = "50%", top = 0, bottom = 0 },
+		right = { left = "50%", right = 0, top = 0, bottom = 0 },
+		top = { left = 0, right = 0, top = 0, bottom = "50%" },
+		bottom = { left = 0, right = 0, top = "50%", bottom = 0 },
+	}
+	local function drop_preview(gid: string): Node
+		local function side(): string
+			local o = held:get()
+			return if o and o.id == gid then o.side else ""
+		end
+		local function edge(name: string): () -> any
+			return function(): any
+				return (HALF[side()] or HALF.middle)[name]
+			end
+		end
+		return ui.show(function(): boolean
+			return side() ~= ""
+		end, ui.div {
+			id = `panel-drop-{gid}`,
+			absolute = true,
+			left = edge("left"),
+			right = edge("right"),
+			top = edge("top"),
+			bottom = edge("bottom"),
+			pointer_events = "none",
+			bg = "$zeron.inset.drop",
+			border = 2,
+			border_color = "$zeron.inset.drop_edge",
+			-- (Its corners follow the card's, inside its edge.)
+			rounded = "$zeron.inset.inner_radius",
+		})
+	end
+
+	-- A group: a card as the page's chat panes are (the window's gap round
+	-- it, its corners, its edge; the focused one's edge lit, the others
+	-- dimmed all over, strip and all), its strip over the tab it shows (its
+	-- empty page when it's focused with none). A press anywhere in it
+	-- focuses it.
+	local function group_pane(gid: string): Node
+		local k = key:peek()
+		local function is_focus(): boolean
+			return focused_group() == gid
+		end
+		local function list(): { string }
+			local g = groups_now:peek()
+			return if g then g.lists[gid] or {} else {}
+		end
+		-- (Its own last tab can't leave it for its own edge: nothing would
+		-- be left of it. Its middle takes tabs from other groups.)
+		local function accepts(d: string, side: string): boolean
+			local l = list()
+			if side == "middle" then
+				return not table.find(l, d)
+			end
+			return not (#l == 1 and l[1] == d)
+		end
+		local view = ui.presence(function(): string
+			return group_shows(gid) or ""
+		end, function(id: string): Node
+			if not k then
+				return ui.div {}
+			end
+			if id == "" then
+				return empty_page(k, showing)
+			end
+			local tab = state.find(k, id)
+			if not tab then
+				return ui.div {}
+			end
+			local ok, built = pcall(body, k, tab)
+			if ok then
+				return built
+			end
+			return ds.EmptyState {
+				icon = "danger-triangle",
+				size = "sm",
+				fill = true,
+				title = ui.t("panel.broken.tab.title") :: any,
+				body = ui.t("panel.broken.tab.body") :: any,
+			}
+		end, { w_full = true, grow = 1, min_h = 0 })
+		-- Focused: its tab the active one (a press in it, or the keyboard
+		-- landing in it).
+		local function focus_me()
+			if not k or is_focus() then
+				return
+			end
+			local shows = group_shows(gid)
+			if shows then
+				state.activate(k, shows)
+			end
+		end
+		local body_props: { [any]: any } = droppable(gid, false, accepts)
+		body_props.w_full = true
+		body_props.grow = 1
+		body_props.min_h = 0
+		body_props.relative = true
+		body_props[1] = view
+		body_props[2] = drop_preview(gid)
+		local card: { [any]: any } = {
+			overflow = "hidden",
+			-- (The focused group lifted, the others sunk.)
+			bg = function(): string
+				return if is_focus() then "$zeron.inset.active" else "$zeron.inset.inactive"
+			end,
+			rounded = "$zeron.inset.radius",
+			border = 1,
+			border_color = function(): string
+				return if is_focus() then "$zeron.inset.focus_edge" else "$zeron.inset.edge"
+			end,
+			-- (Pressed anywhere in it, a terminal or an editor included: a
+			-- press bubbles up here past what took it. Not as the keyboard
+			-- lands in it: a terminal taking the keys as it's shown, or as
+			-- the panel comes back, would move the focus nobody chose.)
+			on_press = focus_me,
+			group_strip(gid),
+			ui.column(body_props),
+			-- Dimmed all over while another group is focused (taking no
+			-- pointer: a press goes to what's under it, and focuses it).
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				bg = function(): string
+					return if is_focus() then "#00000000" else "$zeron.inset.pane_dim"
+				end,
+			},
+		}
+		-- (`#panel-group-<gid>`: a group of the panel's tabs.)
+		card.id = `panel-group-{gid}`
+		Split.place(card, function(): any
+			return gbox(gid)
+		end)
+		return ui.column(card)
+	end
+	-- The panel's groups, over all of it while there are two or more, the
+	-- window's gap between them.
+	local groups_layer = ui.column {
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		bottom = 0,
+		pointer_events = "none",
+		hidden = function(): boolean
+			return closed() or not multi()
+		end,
+		ui.show(multi, ui.each(group_ids, function(gid: string): Node
+			return group_pane(gid)
+		end, {
+			key = function(gid: string): string
+				return gid
+			end,
+			w_full = true,
+			h_full = true,
+			relative = true,
+		})),
+	}
+	-- (Its groups' cards stand on the window: the panel's own card goes
+	-- while they show, screens/shell/page.)
+	local groups_shown = ui.shared("panel.groups_shown", false)
+	ui.effect(function()
+		local on = multi()
+		if groups_shown:peek() ~= on then
+			groups_shown:set(on)
+		end
+	end)
+	ui.on_cleanup(function()
+		groups_shown:set(false)
+	end)
+	-- One group: the panel's own body, where a tab dragged to an edge
+	-- starts a second group (a tab alone has nowhere to go).
+	local function splits_off(_d: string, _side: string): boolean
+		local k = key:peek()
+		return k ~= nil and #state.of(k).tabs >= 2
+	end
+	local panes_props: { [any]: any } = droppable(MAIN, true, splits_off)
+	panes_props.w_full = true
+	panes_props.grow = 1
+	panes_props.min_h = 0
+	panes_props.relative = true
+	panes_props.hidden = function(): boolean
+		return closed() or multi()
+	end
+	panes_props[1] = ui.show(function(): boolean
+		return not multi()
+	end, content)
+	panes_props[2] = drop_preview(MAIN)
+	local panes = ui.column(panes_props)
+
 	local question = ui.div {
 		-- (Closing loses work: no plugin reaches it.)
 		hook = false,
@@ -1486,8 +2248,14 @@ M.Panel = ui.component(function(props: Props): Node
 	-- for a moment.)
 	box.ref = box.ref or own
 	measured = box.ref
-	box[#box + 1] = ui.column { w_full = true, shrink = 0, hidden = closed, strip }
-	box[#box + 1] = content
+	-- (With two or more groups, each has its strip; the panel's own
+	-- goes, its groups over all of it.)
+	box.relative = true
+	box[#box + 1] = ui.column { w_full = true, shrink = 0, hidden = function(): boolean
+		return closed() or multi()
+	end, strip }
+	box[#box + 1] = panes
+	box[#box + 1] = groups_layer
 	box[#box + 1] = question
 	return ui.column(box)
 end)

@@ -114,7 +114,7 @@ fn the_title_bar_moves_the_window_across_its_width() {
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     app.frames(40);
     assert_eq!(dead_zones(&mut app, BAR), Vec::<f32>::new(), "the collapsed window's strip");
-    collapsed_alone(&mut app, "collapsed");
+    collapsed_alone(&mut app, "collapsed", true);
     // The session's title in the strip: clear of the bar's controls, on
     // their line.
     let title = app.bounds("#page-title");
@@ -125,10 +125,12 @@ fn the_title_bar_moves_the_window_across_its_width() {
     // Nor after the scripts reload, or the route moves (a new chat).
     app.host.reload().expect("the reload failed");
     app.frames(40);
-    collapsed_alone(&mut app, "reloaded");
-    app.keys("cmd+n");
+    collapsed_alone(&mut app, "reloaded", true);
+    // (A new chat, as ⌘N asks: the shortcut is the menu bar's, which a
+    // headless window hasn't.)
+    assert!(app.host.run_command("shell.new_chat"));
     app.frames(40);
-    collapsed_alone(&mut app, "a new chat");
+    collapsed_alone(&mut app, "a new chat", false);
     app.click("#titlebar >> role:button \"Back\"");
     app.frames(40);
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
@@ -141,13 +143,20 @@ fn the_title_bar_moves_the_window_across_its_width() {
     assert_eq!(dead_zones(&mut app, &[]), Vec::<f32>::new(), "settings' strip");
 }
 
+/// The window's gap round the page's card (`zeron.inset.gap`).
+const GAP: f32 = 4.;
+
 /// Collapsed, the sidebar is gone and nothing stands in for it: no rail
 /// (screens/shell/view `rail`, off), the sidebar no wider than nothing, the
-/// page the window's width.
-fn collapsed_alone(app: &mut TestApp, when: &str) {
+/// page the window's width: a session's a card, the window's gap round it;
+/// a new chat's the whole window, its wallpaper to the edges.
+fn collapsed_alone(app: &mut TestApp, when: &str, card: bool) {
     assert!(app.find("#shell-rail").is_none(), "{when}: a rail shows");
     assert_eq!(app.bounds("#shell-sidebar").width, 0., "{when}: the sidebar still shows");
-    assert_eq!(app.bounds("#shell-page").width, W, "{when}: the page isn't the window's width");
+    let want = if card { W - 2. * GAP } else { W };
+    // (The gap round the card eases with the sidebar's motion: settled.)
+    app.wait_until(|app| app.bounds("#shell-page").width == want);
+    assert_eq!(app.bounds("#shell-page").width, want, "{when}: the page isn't the window's width");
 }
 
 #[test]

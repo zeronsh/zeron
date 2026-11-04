@@ -144,10 +144,21 @@ return function(): Node
 	-- × closes it: a file with changes, a busy terminal, ask first). Else
 	-- the window, as Zeron's closes it, and with it the app: what's kept is
 	-- saved as it closes (src/main.rs), the engine and its terminals go on.
+	-- (In a split, else the pane in front: the focused chat out of it, its
+	-- neighbour focused, the last left alone. A chat alone closes the
+	-- window, as it always has.)
 	runs["shell.close"] = function()
 		local panel: any = boundary.load("@app/screens/panel")
 		if panel and panel.close_focused_tab and (panel.close_focused_tab :: any)() then
 			return
+		end
+		if route.current:peek().name == "session" then
+			local splits: any = boundary.load("@app/screens/shell/split")
+			local focused = if splits then splits.focused:peek() else nil
+			if splits and focused and splits.shown:peek() ~= nil then
+				splits.close(focused)
+				return
+			end
 		end
 		ui.invoke("close")
 	end
