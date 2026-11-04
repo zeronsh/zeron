@@ -329,9 +329,6 @@ return ui.column {
 			return Panel.Panel {
 				session = session,
 				project = { id = "p1", path = "/proj", name = "comet-native" },
-				left = function(): number
-					return 600
-				end,
 				grow = 1,
 				h_full = true,
 			}

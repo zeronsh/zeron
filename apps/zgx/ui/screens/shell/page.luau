@@ -136,7 +136,7 @@ return function(props: Props): Node
 	end
 	-- Where a chat's card stands in the page (alone, all of it).
 	local function box_of(id: string?): any
-		local b = if id then splits.frames:get()[id] else nil
+		local b = if id then splits.shown_frames:get()[id] else nil
 		return b or splits.WHOLE
 	end
 	-- Whether a pane's top meets the page's top at its left end or its
@@ -697,8 +697,11 @@ return function(props: Props): Node
 			-- Split or dragged: what it would take, as far as there's room.
 			r = math.min(pref, allowed)
 		elseif r > allowed then
-			-- No room left for the chat's least: it gives way.
-			r = allowed
+			-- No room left for the chat's least: it gives way. (Beside a split, as
+			-- below: all the window's narrowing, the panes keeping theirs.)
+			r = if floor > fit.CHAT_PANEL_MIN and vw < was.vw
+				then math.max(math.min(allowed, r - (was.vw - vw)), fit.RIGHT_PANE_MIN - tree)
+				else allowed
 		elseif floor > fit.CHAT_PANEL_MIN then
 			-- A split's panes keep their size: the panel never grows by
 			-- itself, all new room is theirs, and it gives up its own first:
@@ -731,6 +734,43 @@ return function(props: Props): Node
 			right_w:set(r)
 		end
 	end)
+	-- Its share, as Zeron's: its tree's allowance and half of what the
+	-- sidebar and the tree leave the chat and it, as it opens. A dragged
+	-- edge holds until then. (Not as the sidebar opens or closes, as Zeron
+	-- does: halving it then squeezed a panel the chat had room beside, its
+	-- tree going to float. It gives way only as it must, above, and comes
+	-- back as the sidebar goes.)
+	local split = { on = shown:peek() }
+	ui.effect(function()
+		local on = shown:get()
+		local changed = on ~= split.on
+		split = { on = on }
+		local vw = fit.viewport:peek()
+		if changed and on and not shell_view.expanded:peek() and vw > 0 then
+			local side = sidebar_settled()
+			if fit.page_floor:peek() > fit.CHAT_PANEL_MIN then
+				-- Beside a split it opens at its least: the room is the panes'.
+				-- (Dragged wider, it stays so until it closes; the width chosen
+				-- is kept for a chat alone.)
+				local r = math.max(fit.RIGHT_PANE_MIN - tree_part(), 0)
+				if r ~= right_w:peek() then
+					right_w:set(r)
+				end
+			elseif not chosen:peek() then
+				local keep = reserve()
+				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0), fit.page_floor:peek()))
+			else
+				-- (The width chosen, as far as there's room: not what it had
+				-- given way to before it closed.)
+				local allowed = fit.panel_room(vw, side, tree_part(), fit.page_floor:peek())
+				local r = math.max(math.min(math.max(right_pref(), fit.RIGHT_PANE_MIN - tree_part()), allowed), 0)
+				if r ~= right_w:peek() then
+					right_w:set(r)
+				end
+			end
+		end
+	end)
+	-- (Before what follows, so a panel arriving with the route lands where this puts it.)
 	-- The width it rests at, open; closing, the last it rested at (its
 	-- content keeps that as its edge clips it).
 	local held_rest: number? = nil
@@ -864,42 +904,6 @@ return function(props: Props): Node
 		local w = base + o
 		if open_w:peek() ~= w then
 			open_w:set(w)
-		end
-	end)
-	-- Its share, as Zeron's: its tree's allowance and half of what the
-	-- sidebar and the tree leave the chat and it, as it opens. A dragged
-	-- edge holds until then. (Not as the sidebar opens or closes, as Zeron
-	-- does: halving it then squeezed a panel the chat had room beside, its
-	-- tree going to float. It gives way only as it must, above, and comes
-	-- back as the sidebar goes.)
-	local split = { on = shown:peek() }
-	ui.effect(function()
-		local on = shown:get()
-		local changed = on ~= split.on
-		split = { on = on }
-		local vw = fit.viewport:peek()
-		if changed and on and not shell_view.expanded:peek() and vw > 0 then
-			local side = sidebar_settled()
-			if fit.page_floor:peek() > fit.CHAT_PANEL_MIN then
-				-- Beside a split it opens at its least: the room is the panes'.
-				-- (Dragged wider, it stays so until it closes; the width chosen
-				-- is kept for a chat alone.)
-				local r = math.max(fit.RIGHT_PANE_MIN - tree_part(), 0)
-				if r ~= right_w:peek() then
-					right_w:set(r)
-				end
-			elseif not chosen:peek() then
-				local keep = reserve()
-				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0), fit.page_floor:peek()))
-			else
-				-- (The width chosen, as far as there's room: not what it had
-				-- given way to before it closed.)
-				local allowed = fit.panel_room(vw, side, tree_part(), fit.page_floor:peek())
-				local r = math.max(math.min(math.max(right_pref(), fit.RIGHT_PANE_MIN - tree_part()), allowed), 0)
-				if r ~= right_w:peek() then
-					right_w:set(r)
-				end
-			end
 		end
 	end)
 	-- The panel's content width: opening or closing, the width it rests at
@@ -1197,7 +1201,6 @@ return function(props: Props): Node
 	end)
 	local function pane_item(id: string): Node
 		local lane_slot = `split-{id}`
-		local item_el: any = nil
 		local function focused(): boolean
 			return splits.focused:get() == id
 		end
@@ -1232,6 +1235,15 @@ return function(props: Props): Node
 			right = 0,
 			top = 0,
 			bottom = 0,
+			-- (Opening, at the size it's opening to: its pane's edge reveals it.)
+			min_w = function(): number
+				local size = splits.opening_size(id)
+				return if size then ui.raw(size.w, "the size it's opening to") else 0
+			end,
+			min_h = function(): number
+				local size = splits.opening_size(id)
+				return if size then ui.raw(size.h, "the size it's opening to") else 0
+			end,
 			overflow = "hidden",
 			-- (The focused pane lifted, the others sunk.)
 			bg = function(): string
@@ -1373,6 +1385,11 @@ return function(props: Props): Node
 			class = "split-pane",
 			provide = { session = id },
 			pointer_events = "none",
+			-- (Opening, its edge clips its card, in the card's corners.)
+			rounded = "$zeron.inset.radius",
+			overflow = function(): string
+				return if splits.opening_size(id) then "hidden" else "visible"
+			end,
 			-- (The panel expanded over the page: none of the split shows.)
 			opacity = function(): number
 				return if expanded() then 0 else 1
@@ -1381,15 +1398,6 @@ return function(props: Props): Node
 		}
 		splits.place(item, function(): any
 			return box_of(id)
-		end)
-		-- (A change of structure eases it to its new place.)
-		item.on_mount = function(el: any)
-			item_el = el
-		end
-		splits.follow(function(): any
-			return item_el
-		end, function(): any
-			return splits.frames:peek()[id]
 		end)
 		return ui.column(item)
 	end

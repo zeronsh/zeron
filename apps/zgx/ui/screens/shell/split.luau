@@ -693,41 +693,114 @@ function M.area(): { w: number, h: number }
 	local el = area_element
 	return { w = if el then el.width or 0 else 0, h = if el then el.height or 0 else 0 }
 end
-local EASED = { "left", "top", "width", "height", "marginLeft", "marginTop" }
-function M.follow(element: () -> any, box: () -> Box?)
-	local seen: string? = nil
-	ui.effect(function()
-		local shape = M.shape:get()
-		local was = seen
-		seen = shape
-		if was == nil or was == shape or string.match(was, "^[^#]*") ~= string.match(shape, "^[^#]*") then
-			return
+-- Where each chat's box shows: `frames`, but as the shape of the tab showing changes,
+-- easing there from where each stood. In shares of the page, as `frames` is, so they
+-- keep to each other and to the page as it moves too (the sidebar stepping aside for
+-- a pane just added). A pane just added opens out of the gap it comes in at, as its
+-- neighbours make room, at its full size all along (`opening_size`).
+local settle = ui.state("split.settle", 1)
+local settle_from: { [string]: Box } = {}
+local settle_new: { [string]: boolean } = {}
+local settling: any = nil
+local function mix(a: Box, b: Box, t: number): Box
+	local function at(x: Edge, y: Edge): Edge
+		return edge(x.p + (y.p - x.p) * t, x.q + (y.q - x.q) * t)
+	end
+	return { left = at(a.left, b.left), right = at(a.right, b.right), top = at(a.top, b.top), bottom = at(a.bottom, b.bottom) }
+end
+-- `node` with the panes in `old` keeping their shares and the others taking none.
+local function with_new_shut(node: Node, old: { [string]: Box }): (Node, boolean)
+	if node.kind == "leaf" then
+		return node, old[node.id :: string] == nil
+	end
+	local kids: { Node } = {}
+	local shut: { boolean } = {}
+	local all_new = true
+	local kept = 0
+	local count = #(node.children or {})
+	for i, c in node.children or {} do
+		local kid, new = with_new_shut(c, old)
+		kids[i], shut[i] = kid, new
+		all_new = all_new and new
+		if not new then
+			kept += if node.shares and #node.shares == count then node.shares[i] else 1 / count
 		end
-		local el, b = element(), box()
-		if not el or not b or not area_element or motion.reduced_now() then
-			return
+	end
+	local shares: { number } = {}
+	for i = 1, count do
+		local share = if node.shares and #node.shares == count then node.shares[i] else 1 / count
+		shares[i] = if shut[i] or kept <= 0 then 0 else share / kept
+	end
+	return { kind = node.kind, children = kids, shares = shares }, all_new
+end
+M.shown_frames = ui.computed(function(): { [string]: Box }
+	local to = M.frames:get()
+	local t = settle:get()
+	if t >= 1 then
+		return to
+	end
+	local out: { [string]: Box } = {}
+	for id, b in to do
+		local from = settle_from[id]
+		out[id] = if from then mix(from, b, t) else b
+	end
+	return out
+end)
+local seen_frames = M.frames:peek()
+local seen_shape = M.shape:peek()
+ui.effect(function()
+	local to, shape = M.frames:get(), M.shape:get()
+	local was, was_shape = seen_frames, seen_shape
+	seen_frames, seen_shape = to, shape
+	if was_shape == shape then
+		return
+	end
+	if settling then
+		settling:cancel()
+		settling = nil
+	end
+	-- (Another tab, or no motion: there at once.)
+	if string.match(was_shape, "^[^#]*") ~= string.match(shape, "^[^#]*") or motion.reduced_now() then
+		settle:set(1)
+		return
+	end
+	-- From where each shows now, a step under way included.
+	local t = settle:peek()
+	local from: { [string]: Box } = {}
+	for id, b in was do
+		local start = settle_from[id]
+		from[id] = if t < 1 and start then mix(start, b, t) else b
+	end
+	-- A pane just added: from the gap it comes in at.
+	local tree = M.shown:peek()
+	local shut = if tree then frames_of((with_new_shut(tree, was)), M.GAP) else {}
+	settle_new = {}
+	for id in to do
+		if not from[id] then
+			from[id] = shut[id]
+			settle_new[id] = true
 		end
-		local fw, fh = el.width or 0, el.height or 0
-		-- (Not laid out yet: it arrives with this change, in its place.)
-		if fw <= 0 and fh <= 0 then
-			return
-		end
-		local ax, ay, aw, ah = area_element.x or 0, area_element.y or 0, area_element.width or 0, area_element.height or 0
-		local x, y = b.left.p * aw + b.left.q, b.top.p * ah + b.top.q
-		anime.animate(el, {
-			left = { (el.x or 0) - ax, x },
-			top = { (el.y or 0) - ay, y },
-			width = { fw, b.right.p * aw + b.right.q - x },
-			height = { fh, b.bottom.p * ah + b.bottom.q - y },
-			marginLeft = 0,
-			marginTop = 0,
-			duration = 280,
-			ease = "outQuint",
-			onComplete = function()
-				anime.utils.cleanInlineStyles(el, EASED)
-			end,
-		})
-	end)
+	end
+	settle_from = from
+	settle:set(0)
+	settling = anime.animate(settle, { value = 1, duration = 280, ease = "outQuint" })
+end)
+
+-- The size a pane just added is opening to, while it opens (what it holds stays at
+-- that size, its edge revealing it); else nil.
+function M.opening_size(id: string): { w: number, h: number }?
+	if settle:get() >= 1 or not settle_new[id] then
+		return nil
+	end
+	local b = M.frames:peek()[id]
+	local area = M.area()
+	if not b then
+		return nil
+	end
+	return {
+		w = (b.right.p - b.left.p) * area.w + b.right.q - b.left.q,
+		h = (b.bottom.p - b.top.p) * area.h + b.bottom.q - b.top.q,
+	}
 end
 
 M.across = ui.computed(function(): number
