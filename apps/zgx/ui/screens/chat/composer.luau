@@ -16,6 +16,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
 local T = require("@ds/transcript")
 local Quote = require("@ds/quote")
@@ -922,6 +923,14 @@ local function Composer(): Node
 		}
 	end
 
+    local dictation_editor = ui.ref()
+    Dictation.bind(dictation_editor, shared.text, function(): string
+        local current = route.current:get()
+        return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{current.name}`
+    end, function(): boolean
+        return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
+    end, send)
+
 	local function composer(): Node
 		return ds.Composer {
 			-- Its measures, fold and open tray kept across a reload, so it
@@ -1006,6 +1015,13 @@ local function Composer(): Node
 				return true
 			end,
 			drop_overlay = false,
+            editor = dictation_editor,
+            dictating = Dictation.active,
+            on_cancel_dictation = Dictation.cancel,
+            on_editor_change = Dictation.changed,
+            on_editor_caret = Dictation.caret,
+            on_editor_blur = Dictation.cancel,
+            before_send = Dictation.before_send,
 			on_send = send,
 			on_stop = function()
 				local id = session_id:peek()
