@@ -237,15 +237,33 @@ local function window_buttons_right(): number
 	return if side == "right" then buttons.width else 0
 end
 
+-- Windows' caption glyph (zgx's: a 10-point square in each button) and how
+-- much of a control's box its glyph inks (the island's 16-point glyphs, the
+-- panel toggle's frame among them, are 12 across): what the page's controls
+-- are spaced from the window's buttons by.
+local CAPTION_GLYPH, CONTROL_INK = 10, 12
+
 -- How far in from the window's right edge the page's controls (the bar's
 -- `actions`) end: their row's padding; beside the window's own buttons at
--- the right, past them and a divider standing a group's gap either side of
--- it (Zeron's controls one group, the window's another).
-local DIVIDER = 1
+-- the right, past them by one rhythm, measured by ink: from the last
+-- control's glyph to Minimize's as far as from one caption glyph to the
+-- next (a button's width less its glyph), so the two read as one group.
 local function actions_right(): number
 	local side, buttons = window_buttons()
+	-- (Linux's buttons, circles in a strip the bar's height or more, keep
+	-- the row's padding before them.)
+	if side == "right" and buttons.height >= H then
+		return buttons.width + ROW_PAD
+	end
 	if side == "right" then
-		return buttons.width + island.metrics().group * 2 + DIVIDER
+		-- (Three buttons: the main window's, which has the page's controls.)
+		local pitch = buttons.width / 3
+		local ink_gap = pitch - CAPTION_GLYPH
+		-- Minimize's glyph starts half its button's spare room in; the
+		-- last control's ink ends half its own spare room in from its box.
+		local into_caption = (pitch - CAPTION_GLYPH) / 2
+		local into_control = (island.metrics().control - CONTROL_INK) / 2
+		return buttons.width + ink_gap - into_caption - into_control
 	end
 	return ROW_PAD
 end
@@ -488,30 +506,6 @@ local TitleBar = ui.component(function(props: Props): Node
 		actions_island.rounded_br = hung
 		actions_island.rounded_bl = "$zeron.island.radius"
 		table.insert(bar, ui.div(actions_island))
-		-- Between the page's controls and the window's buttons at the right, a
-		-- hairline on the line: two groups, as the left cluster's are, read
-		-- apart. There while the row holds anything.
-		table.insert(
-			bar,
-			ui.div {
-				id = "titlebar-divider",
-				absolute = true,
-				right = function(): number
-					local buttons = caption()
-					return if buttons then buttons.width + m.group else 0
-				end,
-				top = function(): number
-					return middle() - CONTROL / 3
-				end,
-				w = ui.raw(DIVIDER, "a hairline"),
-				h = ui.raw(CONTROL * 2 / 3, "two thirds of a control, on its line"),
-				bg = "$border.subtle",
-				pointer_events = "none",
-				opacity = function(): number
-					return if caption() ~= nil and holds() then 1 else 0
-				end,
-			}
-		)
 		-- The page's controls, as far in from the right as the row runs past
 		-- its last control at the left, and clear of the window's own
 		-- buttons where they stand at the right.

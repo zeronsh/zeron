@@ -202,18 +202,13 @@ return function(props: Props): Node
 	-- of the window's composer, at the focused pane's foot, over that
 	-- pane's card, letting the pointer through to it but for the composer.)
 	-- (Flat, a new chat with the sidebar closed: no card, the window's.)
-	local RADIUS = (function(): number
-		local r: any = ui.theme.get("zeron.inset.radius")
-		if type(r) ~= "number" then
-			r = ui.theme.get("radius.xl")
-		end
-		return if type(r) == "number" then r else 12
-	end)()
 	-- (Its corners whole while there's any gap round it, square as it
 	-- meets the window's edges: never between, where they'd show changing
-	-- and not match the other corners round them.)
-	pane.rounded = function(): number
-		return ui.raw(if edged:get() then RADIUS else 0, "the card's corners, whole while any gap is round it")
+	-- and not match the other corners round them. Whole, the cards' token,
+	-- which follows the window's own corner where the host says it:
+	-- ds/tokens.)
+	pane.rounded = function(): any
+		return if edged:get() then "$zeron.inset.radius" else 0
 	end
 	-- (Its edge's room; the edge itself is drawn with the fill, below.)
 	pane.border = function(): number

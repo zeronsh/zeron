@@ -21,9 +21,10 @@ const H: f32 = 800.;
 
 /// Zeron's title line beside the traffic lights: 21 down (38 tall, 4 of pad).
 
-/// The room between the page's controls and the window's buttons at the right:
-/// a group's gap (8), the divider (1), a group's gap.
-const DIVIDED: f32 = 17.;
+/// The room between the page's controls and the window's buttons at the right,
+/// one rhythm by ink: the panel toggle's glyph (12 of ink in its 24) to
+/// Minimize's (10 in its 46) as far as one caption glyph to the next (36).
+const DIVIDED: f32 = 12.;
 const MAC_LINE: f32 = 21.;
 
 /// What a window reports: its title bar's free strip and its buttons.
@@ -119,7 +120,7 @@ fn beside_windows_caption_buttons_zerons_controls_start_at_the_left_on_their_lin
     app.frames(30);
     on_line(&mut app, 16., "a session");
     let panel = app.bounds(PANEL);
-    assert!((panel.x + panel.width - (caption - DIVIDED)).abs() <= 0.5, "the panel's toggle {panel:?} isn't a divider's room before the caption buttons (from {caption})");
+    assert!((panel.x + panel.width - (caption - DIVIDED)).abs() <= 0.5, "the panel's toggle {panel:?} isn't one rhythm's room before the caption buttons (from {caption})");
     let title = app.bounds("#page-title");
     assert!(title.x + title.width <= panel.x, "the title {title:?} runs under the panel's toggle {panel:?}");
 
@@ -176,7 +177,7 @@ fn beside_gnomes_buttons_at_the_right_the_line_stays_and_the_toggle_starts_at_th
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
     app.frames(30);
     let panel = app.bounds(PANEL);
-    assert!((panel.x + panel.width - (W - 104. - DIVIDED)).abs() <= 0.5, "the panel's toggle {panel:?} isn't a divider's room before the window's buttons");
+    assert!((panel.x + panel.width - (W - 104. - 10.)).abs() <= 0.5, "the panel's toggle {panel:?} isn't the row's padding before the window's buttons");
 }
 
 /// macOS exactly as before: the toggle 88 in beside the lights, the line 21
@@ -354,4 +355,30 @@ fn every_menu_item_is_in_the_command_palette() {
     let ids: Vec<String> = items.iter().map(|i| text(i, "id")).collect();
     assert!(ids.iter().any(|i| i == crate::plugins::USE_ZERON_TEMPLATE), "the way back to the default interface: {ids:?}");
     assert!(!ids.iter().any(|i| i == crate::plugins::KEEP_TEMPLATE), "Keep is the preview toast's alone");
+}
+
+/// The page's card stays concentric with the window's corner where the host
+/// says what it is (Windows): its radius less the 4 the card is set in by, 4
+/// on Windows 11's 8; square once the window is (maximized, full screen,
+/// Windows 10). Told nothing (macOS), the theme's own.
+#[test]
+fn the_cards_corner_follows_the_windows() {
+    let mut app = mount(windows(W));
+    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    app.frames(30);
+    let corner = |app: &mut TestApp| {
+        let node = app.find("#shell-page").expect("the page's card");
+        match app.ui.scene.borrow().kind(node) {
+            zgx::scene::NodeKind::Panel { quad, .. } | zgx::scene::NodeKind::Quad(quad) => quad.radius,
+            _ => f32::NAN,
+        }
+    };
+    let theirs = corner(&mut app);
+    assert!(theirs >= 8., "the theme's own corner while told nothing: {theirs}");
+    let told = app.host.shared("window.corner_radius", Value::Nil);
+    for (window, card) in [(8., 4.), (0., 0.), (8., 4.)] {
+        told.set(Value::from(window));
+        app.frames(10);
+        assert_eq!(corner(&mut app), card, "a window's {window} corner");
+    }
 }
