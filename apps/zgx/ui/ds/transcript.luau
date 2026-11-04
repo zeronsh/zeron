@@ -1074,7 +1074,7 @@ local function Transcript(props: Props): Node
 	-- lines above the block rewrap inside it: the view moves by however far
 	-- the block moved in its message, so the block stays put, as Zeron's
 	-- rows (each a block) do.
-	local reading: { row: string, block: Ref, within: number }? = nil
+	local reading: { row: string, block: Ref, within: number, view: number? }? = nil
 	local last_w: number? = nil
 	local last_h: number? = nil
 	-- At the end before the view's size changed: it stays at the end through
@@ -1141,7 +1141,7 @@ local function Transcript(props: Props): Node
 			pick, at = crossing, crossing_at
 		end
 		if pick and at then
-			reading = { row = row_id, block = pick, within = at - row_el.y }
+			reading = { row = row_id, block = pick, within = at - row_el.y, view = at - top }
 		end
 	end
 	local function keep_reading()
@@ -1616,9 +1616,35 @@ local function Transcript(props: Props): Node
 			-- the window resized): the reading place put back, then taken
 			-- again where it now stands.
 			on_resize = function(size: { w: number, h: number })
-				local changed = (last_w ~= nil and math.abs(size.w - last_w) >= 0.5)
-					or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
+				local widened = last_w ~= nil and math.abs(size.w - last_w) >= 0.5
+				local changed = widened or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
 				last_w, last_h = size.w, size.h
+				-- (Its width changed in one step (the window maximized, a
+				-- panel's page taking its width at once): every row above the
+				-- reading place rewraps too, in the same layout, past what the
+				-- reading row's own line puts back. A frame on, and twice more
+				-- as the rows it brought into view measure, the reading place
+				-- goes back where it stood in the view, by where it really is,
+				-- as a place returned to is.)
+				local r = reading
+				if widened and r and not end_held and r.view ~= nil then
+					local function settle()
+						if end_held or reading ~= r then
+							return
+						end
+						local be, list_el = r.block:peek(), list:peek()
+						if not be or not list_el or be.y == nil or list_el.y == nil then
+							return
+						end
+						local off = ((be.y :: number) - (list_el.y :: number)) - r.view
+						if math.abs(off) >= 0.5 then
+							offset:set(math.max(0, offset:peek() + off))
+						end
+					end
+					ui.after(0, settle)
+					ui.after(16, settle)
+					ui.after(48, settle)
+				end
 				if changed then
 					resizing_until = ui.now() + 300
 					-- At the end: on it still, every frame of the change.

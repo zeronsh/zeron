@@ -72,6 +72,55 @@ ui.effect(function()
 	end
 end)
 -- Settings' host calls, answered as the host would (settings_stub.luau).
+-- (Answered at once, as the host's calls do a beat later.)
+local function answered(value: any): any
+	return {
+		after = function(_, ok: (any) -> ())
+			ui.after(0, function()
+				ok(value)
+			end)
+		end,
+	}
+end
+-- (A terminal's host and zgx's terminal, stood in for: an engine terminal
+-- a number, its view a column saying which, as ui/panel_fixture's.)
+local tapi = require("@app/screens/panel/terminal_api") :: any
+local terms = ui.state("fixture_terms", 0)
+local term_sessions: { [string]: any } = {}
+tapi.start = function(_target: any): any
+	terms:add(1)
+	return answered({ command = `bridge term-{terms:peek()}`, claim = `claim-{terms:peek()}` })
+end
+tapi.claimed = function(claim: string): any
+	return answered(`term-{string.match(claim, "%d+")}`)
+end
+tapi.command = function(id: string): any
+	return answered(`bridge {id}`)
+end
+tapi.status = function(): any
+	return answered({ busy = false, exited = false })
+end
+tapi.close = function(): any
+	return answered(nil)
+end
+tapi.write = function(): any
+	return answered(nil)
+end
+tapi.term = function(key: string, options: any?): any
+	local s = term_sessions[key]
+	if not s and options then
+		s = { title = nil, close = function()
+			term_sessions[key] = nil
+		end, focus = function() end }
+		term_sessions[key] = s
+	end
+	return s
+end
+tapi.view = function(props: any): Node
+	return ui.column { grow = 1, label = "Terminal", ui.text { `terminal {props.label}`, literal = true } }
+end
+-- (Before Settings' stand-ins, which put theirs over these: the
+-- registry's sign-in terminal, every other one as here.)
 require("./settings_stub")
 
 -- No window chrome to restyle headless, and no chat to open (the chat
@@ -567,43 +616,6 @@ end
 local function here(): string?
 	local s = require("@app/screens/shell/route").session:peek()
 	return if s then s.id else nil
-end
--- (A terminal's host and zgx's terminal, stood in for: an engine terminal
--- a number, its view a column saying which, as ui/panel_fixture's.)
-local tapi = require("@app/screens/panel/terminal_api") :: any
-local terms = ui.state("fixture_terms", 0)
-local term_sessions: { [string]: any } = {}
-tapi.start = function(_target: any): any
-	terms:add(1)
-	return settle({ command = `bridge term-{terms:peek()}`, claim = `claim-{terms:peek()}` })
-end
-tapi.claimed = function(claim: string): any
-	return settle(`term-{string.match(claim, "%d+")}`)
-end
-tapi.command = function(id: string): any
-	return settle(`bridge {id}`)
-end
-tapi.status = function(): any
-	return settle({ busy = false, exited = false })
-end
-tapi.close = function(): any
-	return settle(nil)
-end
-tapi.write = function(): any
-	return settle(nil)
-end
-tapi.term = function(key: string, options: any?): any
-	local s = term_sessions[key]
-	if not s and options then
-		s = { title = nil, close = function()
-			term_sessions[key] = nil
-		end, focus = function() end }
-		term_sessions[key] = s
-	end
-	return s
-end
-tapi.view = function(props: any): Node
-	return ui.column { grow = 1, label = "Terminal", ui.text { `terminal {props.label}`, literal = true } }
 end
 for _, source in { "pr", "file", "url", "terminal" } do
 	ui.command {
