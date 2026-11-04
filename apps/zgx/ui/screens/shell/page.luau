@@ -156,16 +156,24 @@ return function(props: Props): Node
 			edged:set(false)
 		end)
 	end)
-	-- While the panel opens or closes, what's in the page keeps one width:
-	-- the page's with the panel open at rest. Opening, it takes that width
-	-- at once (the card's edge then meets it as the panel slides in);
-	-- closing, it keeps it until the panel has gone. So the page's content
-	-- (a chat, its visuals, its composer; a split's panes) is laid out
-	-- once a toggle, never at each frame of the glide, and nothing in it
-	-- moves: the card, a box, follows the panel's edge. (`opening`: the
-	-- page narrows by the panel's room at rest, as that settles; closing,
-	-- it's the width it has.)
-	local held = ui.use_state(nil :: { opening: boolean }?)
+	-- While a column beside the page moves, what's in the page keeps one
+	-- width, so the page's content (a chat, its visuals, its composer; a
+	-- split's panes) is laid out once, never at each frame, and nothing in
+	-- it moves: the card, a box, follows the column's edge, clipping it or
+	-- revealing room beside it.
+	-- - The panel opening or closing: the page's width with the panel open
+	--   at rest. Opening, it takes that width at once (the card's edge then
+	--   meets it as the panel slides in); closing, it keeps it until the
+	--   panel has gone. (`opening`: the page narrows by the panel's room at
+	--   rest, as that settles.)
+	-- - The sidebar's edge or the panel's dragged: the width it had as the
+	--   drag began, until it's let go, then its own.
+	-- (A window resized lays out live: its own edge would clip the page's
+	-- text until it settled, and it lays out only what shows.) `since`
+	-- counts the holds, so one taken over by another (a drag begun as the
+	-- panel glides) takes its width afresh.
+	local held = ui.use_state(nil :: { opening: boolean, since: number }?)
+	local edge_dragging = ui.shared("shell.edge_dragging", false)
 	-- The panel's room beside the page at rest: its width and the gap
 	-- before it (known further down).
 	local panel_room: () -> number = function(): number
@@ -173,11 +181,16 @@ return function(props: Props): Node
 	end
 	local function held_width(r: any, share: () -> number): () -> any
 		local base: number? = nil
+		local since: number? = nil
 		return function(): any
 			local h = held:get()
 			if not h then
 				base = nil
 				return "100%"
+			end
+			if since ~= h.since then
+				since = h.since
+				base = nil
 			end
 			if base == nil then
 				local el = r:peek()
@@ -187,7 +200,7 @@ return function(props: Props): Node
 				return "100%"
 			end
 			local delta = if h.opening then -panel_room() else 0
-			return ui.raw(math.max(0, base + share() * delta), "the page's width with the panel at rest, through its glide")
+			return ui.raw(math.max(0, base + share() * delta), "the page's width held while a column beside it moves")
 		end
 	end
 	local function whole(): number
@@ -749,6 +762,8 @@ return function(props: Props): Node
 	-- (The build's own, as the animation is: a reload mid-step starts the
 	-- step again from where it shows, never counting what's left twice.)
 	local revealing = ui.use_state(false)
+	-- (Whether the step under way opens the panel beside the page.)
+	local step_opening = ui.use_state(nil :: boolean?)
 	-- Its width is where it's going (`base`, which a window resize moves at
 	-- once) and, after a step (opened, closed, expanded, a column going or
 	-- coming beside it, a neighbour's share), what's left of that step
@@ -829,7 +844,7 @@ return function(props: Props): Node
 			end
 			if opened then
 				revealing:set(true)
-				held:set({ opening = opening })
+				step_opening:set(opening)
 			end
 			off:set(showing - to)
 			local params = motion.column(off:peek(), 0)
@@ -852,10 +867,30 @@ return function(props: Props): Node
 	panel_room = function(): number
 		return rest_w:get() + INSET
 	end
-	-- (The page's content let go to its own width as the glide is over.)
+	-- Which hold stands: the panel's glide's, else a drag's; none, the page's
+	-- content its own width again (laid out once, its reading place kept:
+	-- ds/transcript).
+	local holds = 0
 	ui.effect(function()
-		if not revealing:get() and held:peek() ~= nil then
-			held:set(nil)
+		local want: { opening: boolean }? = nil
+		if revealing:get() and step_opening:get() ~= nil then
+			want = { opening = step_opening:get() == true }
+		elseif edge_dragging:get() or drag_held:get() ~= nil then
+			want = { opening = false }
+		end
+		local now = held:peek()
+		if want == nil then
+			if now ~= nil then
+				held:set(nil)
+			end
+		elseif now == nil or now.opening ~= want.opening then
+			holds += 1
+			held:set({ opening = want.opening, since = holds })
+		end
+	end)
+	ui.effect(function()
+		if not revealing:get() and step_opening:peek() ~= nil then
+			step_opening:set(nil)
 		end
 	end)
 	-- (Following the step as it eases.)
