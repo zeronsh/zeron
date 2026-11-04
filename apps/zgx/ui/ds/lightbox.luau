@@ -30,8 +30,11 @@
 --     radius = 10, w = 120, h = 84, ui.image { … } }
 --
 -- or `Lightbox.open(items, index, group)` from anywhere. An item is
--- `{ src, name, path?, w?, h? }`: `src` what `ui.image` shows, `path` the
--- file on this Mac (Copy path, Reveal), `w`/`h` its size in pixels if known.
+-- `{ src, name, path?, w?, h?, svg? }`: `src` what `ui.image` shows, `path`
+-- the file on this Mac (Copy path, Reveal), `w`/`h` its size in pixels if
+-- known; `svg`, a vector picture's document (a diagram's), drawn over `src`
+-- (its pixels, which give its size and stand in) at the size it shows, so
+-- it stays sharp as it zooms in.
 
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
@@ -49,6 +52,7 @@ export type Item = {
 	path: string?,
 	w: number?,
 	h: number?,
+	svg: string?,
 	-- Which thumbnail it is in its group (a chip's id), where places move;
 	-- else its place in the set.
 	key: string?,
@@ -81,6 +85,9 @@ local MIN_ZOOM, MAX_ZOOM = 0.02, 32
 local DRAG = 4
 -- A gesture's scale is laid out once it has rested this long.
 local SETTLE = 140
+-- A vector picture's raster at most, in pixels at 2x (zgx draws an SVG
+-- up to 32 MiB: 8.4 million pixels).
+local SVG_PIXELS = 8000000
 -- The controls go this long after the pointer rests.
 local IDLE = 1600
 
@@ -676,6 +683,12 @@ local StageView = ui.component(function(st: Stage): Node
 			k = k,
 			d = { x = mx - dw / 2, y = my - dh / 2, w = dw, h = dh },
 		}
+	end
+	-- How much of its laid-out size a vector picture is drawn at: all of
+	-- it, or less where that would pass SVG_PIXELS at 2x (the rest a scale).
+	local function svg_cap(g: Geo): number
+		local px = g.lw * g.lh * 4
+		return if px > SVG_PIXELS then math.sqrt(SVG_PIXELS / px) else 1
 	end
 	-- Square pixels from its own size up, where they land on whole device
 	-- pixels (2x and on) or are large enough to read as pixels (3x and on).
@@ -1281,6 +1294,41 @@ local StageView = ui.component(function(st: Stage): Node
 				end,
 				scale = function(): number
 					return geo().k
+				end,
+			},
+			-- A vector picture (`svg`): over its pixels, laid out at the
+			-- size it shows once at rest, so zooming in keeps it sharp. Its
+			-- raster is held to SVG_PIXELS (zgx draws no larger an SVG),
+			-- scaled up past that.
+			ui.svg {
+				src = function(): string
+					local it = item()
+					return if it and it.svg then "code:" .. it.svg else ""
+				end,
+				aria_hidden = true,
+				pointer_events = "none",
+				absolute = true,
+				left = 0,
+				top = 0,
+				w = function(): number
+					local g = geo()
+					return math.max(1, g.lw * svg_cap(g))
+				end,
+				h = function(): number
+					local g = geo()
+					return math.max(1, g.lh * svg_cap(g))
+				end,
+				x = function(): number
+					local g = geo()
+					return g.x + g.lw * (1 - svg_cap(g)) / 2
+				end,
+				y = function(): number
+					local g = geo()
+					return g.y + g.lh * (1 - svg_cap(g)) / 2
+				end,
+				scale = function(): number
+					local g = geo()
+					return g.k / svg_cap(g)
 				end,
 			},
 		},
