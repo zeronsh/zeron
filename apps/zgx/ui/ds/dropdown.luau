@@ -89,6 +89,9 @@ export type Props = {
 	-- Bumped, the panel opens, as a press on its trigger opens it (a
 	-- shortcut that opens this menu).
 	open_with: State<number>?,
+	-- Set to whether the panel is open (the caller holding still what it
+	-- hangs from while it is).
+	showing: State<boolean>?,
 	-- Whether `extra` (and its rule) shows; always, by default.
 	extra_when: (() -> boolean)?,
 	-- A row's own control at its end (a star to favourite it), given the
@@ -107,8 +110,8 @@ export type Props = {
 	empty: ((query: string) -> Empty)?,
 	-- A panel that opens folded on its chosen item: while `expanded` is
 	-- false the head and the search fold away and every item but the chosen
-	-- one folds to nothing (clipped, fading out), and they ease open around it
-	-- as it turns true. `on_expand` asks to open out (a click on the chosen
+	-- one folds to nothing (clipped, out of sight), and they open around it
+	-- as it turns true (at once: see `folding`). `on_expand` asks to open out (a click on the chosen
 	-- item, ↑/↓, typing). `keep_open`: a pick leaves the panel open
 	-- (`on_choose` hears it: the caller folds it again); `on_escape` takes
 	-- Escape first (true: handled, the panel stays).
@@ -287,26 +290,29 @@ local TRIGGER = {
 -- it is longer.
 local CHIP_LABEL, CHIP_FADE = 160, 24
 
--- How folding eases (the list's height takes the same, so all of it moves
--- as one).
-local FOLD: TweenOptions = { duration = 240, ease = "out(3)" }
+-- Folding and opening out are one step, no easing and no fading: the panel
+-- is a popup window of its own, so a height easing over frames resized it
+-- on every one (on Wayland each a new configure; before xdg_popup moved in
+-- place, a new surface the compositor faded in, the whole panel flickering
+-- see-through as it opened out), and parts of it fading in read as the
+-- panel going transparent.
 
--- What folds: `height` tall while `open`, clipped to nothing while not, the
--- height a tween (in place as it mounts, easing only as it turns: what
--- shows and what is laid out, and so what a click lands on, agree), its
--- content fading as it folds and opens.
+-- What folds: `height` tall while `open`, clipped to nothing (and out of
+-- sight and reach: the search no field to find) while not.
 local function folding(open: () -> boolean, height: number, ...: Node): Node
 	return ui.column {
+		-- (Named for tests: what opens out with the list.)
+		class = "dropdown-fold",
 		w_full = true,
 		gap = 0,
 		shrink = 0,
 		overflow = "hidden",
-		h = ui.tween(ui.computed(function(): number
+		h = function(): number
 			return if open() then height else 0
-		end), FOLD),
-		opacity = ui.tween(ui.computed(function(): number
+		end,
+		opacity = function(): number
 			return if open() then 1 else 0
-		end), { duration = 180 }),
+		end,
 		...,
 	}
 end
@@ -489,8 +495,8 @@ return ui.component(function(props: Props): Node
 	end
 
 	-- Folding (a panel that opens folded). Its rows never fold: the list is
-	-- a window over them, its height and scroll easing together, folded to
-	-- the one row of the chosen item, opening out from where that row is
+	-- a window over them, its height and scroll set together, folded to the
+	-- one row of the chosen item, opening out from where that row is
 	-- (upward, the rows over it come into view), folding back onto the pick.
 	-- The search clears as it folds; folded, typing opens it out.
 	local view_h = ui.use_state(0)
@@ -501,36 +507,20 @@ return ui.component(function(props: Props): Node
 	local function on_row(i: number): number
 		return (i - 1) * step()
 	end
-	-- Each state's glide in flight: a new one, or a jump, stops it.
-	local gliding: { [any]: any } = {}
-	local function stop(state: State<number>)
-		if gliding[state] then
-			gliding[state]:cancel()
-			gliding[state] = nil
-		end
-	end
-	local function glide(state: State<number>, to: number)
-		stop(state)
-		local anim
-		anim = anime.animate(state, {
-			value = to,
-			duration = FOLD.duration,
-			ease = FOLD.ease,
-			onComplete = function()
-				if gliding[state] == anim then
-					gliding[state] = nil
-				end
-			end,
-		})
-		gliding[state] = anim
-	end
-	-- The list's height, and whether it was folded, as last laid out (nil:
-	-- not yet).
+	-- The list's height: folded, one row; opened out, one height whatever
+	-- the tab or the search shows (as tall as every item, up to the view,
+	-- and room for the empty list's message), a short list leaving room
+	-- under it: switching tabs or searching never moves the panel's edge.
+	-- (It began as a fix: a popup that changed size was shown anew on
+	-- Wayland, a new `xdg_popup` the compositor faded in as the last faded
+	-- out, so a list easing to each tab's height flickered the panel
+	-- see-through. zgx moves and resizes a popup in place since 0e7cd810;
+	-- the one height stays, as the picker's look.)
 	local function height_for(list: { Item }, now: boolean, i: number?): number
 		if now and i then
 			return list_h(1)
 		end
-		return if #list == 0 then EMPTY_H else math.min(VIEW, list_h(#list))
+		return math.min(VIEW, math.max(EMPTY_H, list_h(#items())))
 	end
 	local was_folded: boolean? = nil
 	if props.expanded then
@@ -564,14 +554,16 @@ return ui.component(function(props: Props): Node
 						hi:set(v)
 					end
 				end
-				glide(view_h, h)
-				glide(offset, to)
+				ui.batch(function()
+					view_h:set(h)
+					offset:set(to)
+				end)
 			else
-				-- A tab, a search: the height eases to the new list's.
-				glide(view_h, h)
+				-- A tab, a search (opened out, one height: see height_for).
+				view_h:set(h)
 				if now then
 					if i then
-						glide(offset, on_row(i))
+						offset:set(on_row(i))
 					end
 				else
 					settle(list)
@@ -581,12 +573,12 @@ return ui.component(function(props: Props): Node
 		end)
 		-- Folded, the window stays on the chosen row: whatever else moves it
 		-- (a wheel over it, the list clamping an offset set before it had its
-		-- rows) is put back, all but a glide on its way there. Put back a
+		-- rows) is put back. Put back a
 		-- frame later, once at a time (never in the same update: the list's
 		-- own write back would answer it, and so on without end).
 		local function astray(): boolean
 			local i = index_of(value:peek())
-			return folded() and not gliding[offset] and i ~= nil and math.abs(offset:peek() - on_row(i)) > 0.5
+			return folded() and i ~= nil and math.abs(offset:peek() - on_row(i)) > 0.5
 		end
 		local mending = false
 		ui.effect(function()
@@ -743,8 +735,13 @@ return ui.component(function(props: Props): Node
 	else
 		label_node = FadeText { chosen, roll = true, color = TRIGGER[tone].label }
 	end
-	-- Opening: the search cleared, on the chosen item, in view.
+	-- Opening: the search cleared, on the chosen item, in view. (Open
+	-- already, it stays as it is: asked again, by its shortcut or its
+	-- trigger, it was put back folded, the search and tab lost.)
 	local function show_panel()
+		if open:peek() then
+			return
+		end
 		if props.on_open then
 			props.on_open()
 		end
@@ -756,9 +753,7 @@ return ui.component(function(props: Props): Node
 		open:set(true)
 		local i = index_of(v)
 		if props.expanded then
-			-- Folded on the chosen item from the start: no easing in.
-			stop(view_h)
-			stop(offset)
+			-- Folded on the chosen item from the start.
 			local now = folded()
 			view_h:set(height_for(shown:peek(), now, i))
 			offset:set(if now and i then on_row(i) else 0)
@@ -777,6 +772,20 @@ return ui.component(function(props: Props): Node
 				if not open:peek() then
 					show_panel()
 				end
+			end
+		end)
+	end
+	if props.showing then
+		local showing = props.showing
+		ui.effect(function()
+			local now = open:get()
+			if showing:peek() ~= now then
+				showing:set(now)
+			end
+		end)
+		ui.on_cleanup(function()
+			if showing:peek() then
+				showing:set(false)
 			end
 		end)
 	end
@@ -803,7 +812,8 @@ return ui.component(function(props: Props): Node
 		color = trigger_props.color,
 		hover = trigger_props.hover,
 		active = trigger_props.active,
-		on_click = show_panel,
+		-- (Open, a press on it closes it, as a menu's trigger does.)
+		on_click = toggle,
 		leading,
 		if props.fold
 			then ui.show(function()
@@ -818,6 +828,8 @@ return ui.component(function(props: Props): Node
 	-- popover material; opaque: a solid panel). No padding of its own: its
 	-- rules run edge to edge; each section insets itself.
 	return ui.popover(Menu.panel {
+		-- (Named for tests.)
+		class = "dropdown-panel",
 		open = open,
 		anchor = trigger,
 		placement = props.placement or { side = "bottom", align = "start", offset = 6 },
@@ -1072,14 +1084,15 @@ return ui.component(function(props: Props): Node
 						if not props.expanded then
 							return r
 						end
-						-- Folding, the others fade as the window closes over
-						-- them (never shrinking: the window moves, not they).
+						-- Folded, the others are out of sight (the edges of
+						-- the rows either side would show in the window's
+						-- insets), at once as it folds and opens out.
 						local expanded = props.expanded
 						return ui.div {
 							w_full = true,
-							opacity = ui.tween(ui.computed(function(): number
+							opacity = function(): number
 								return if expanded() or value:get() == item.value then 1 else 0
-							end), FOLD),
+							end,
 							r,
 						}
 					end, {
@@ -1109,7 +1122,13 @@ return ui.component(function(props: Props): Node
 						return #shown:get() == 0
 					end, ui.column {
 						w_full = true,
-						h = EMPTY_H - INSET * 2,
+						-- (Opened out, the list's whole window: its message in
+						-- the middle of it.)
+						h = if props.expanded
+							then function(): number
+								return math.max(EMPTY_H, view_h:get()) - INSET * 2
+							end
+							else EMPTY_H - INSET * 2,
 						relative = true,
 						overflow = "hidden",
 						rounded = Menu.row_radius(),
@@ -1338,7 +1357,21 @@ return ui.component(function(props: Props): Node
 					table.unpack(rows),
 				}
 			end
-			return ui.column { w_full = true, gap = 0, table.unpack(rows) }
+			-- Escape from whatever in it has the keys (the slider, a tab, a
+			-- star, not only the search) is the panel's first: opened out,
+			-- it folds it back, rather than reaching the popover, which
+			-- closes.
+			local on_escape = props.on_escape
+			return ui.column {
+				w_full = true,
+				gap = 0,
+				on_key = if on_escape
+					then function(e): boolean
+						return e.key == "Escape" and on_escape()
+					end
+					else nil,
+				table.unpack(rows),
+			}
 		end,
 	})
 end)

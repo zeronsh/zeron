@@ -5,8 +5,9 @@
 //! (`template_consent`, its keep sheet, or allowing its package there).
 //! Until then (one an agent made or switched to, one imported and signed by
 //! "you", one edited since you kept it) it runs as a **preview**: it draws
-//! as it likes, with a bar the host draws over it, "Agent template · Keep /
-//! Revert", and the host refuses its dangerous actions (`BLOCKED`).
+//! as it likes, with a toast the host draws over it ("Previewing <name>",
+//! Keep and Revert, host_bar.rs), and the host refuses its dangerous
+//! actions (`BLOCKED`).
 //!
 //! What you kept is bound to the template's content: the sha256 of every
 //! file it lays over Zeron's own (`digest`). The record lives in the app's
@@ -17,7 +18,7 @@
 //! what this guards.)
 //!
 //! **Safe mode** (`safe`) is the way back that no template can undo: "Use
-//! Zeron's Template" in the host's menu or bar, holding ⌥ as Zeron opens,
+//! Default Interface" in the host's menu, Revert in its toast, holding ⌥ as Zeron opens,
 //! or a template that crashed the window at launch twice running. It runs
 //! Zeron's own whatever `.active` says (a template re-selecting itself from
 //! a timer, a terminal or an agent changes nothing), closes the terminals
@@ -90,7 +91,7 @@ pub struct Preview {
 
 thread_local! {
     static NOW: RefCell<Option<Preview>> = const { RefCell::new(None) };
-    /// What's told of the change (the host's bar and menu follow it).
+    /// What's told of the change (the host's toast and menu follow it).
     static HEARD: RefCell<Vec<Box<dyn Fn(Option<&Preview>)>>> = RefCell::default();
     /// Terminals started while a template other than Zeron's own ran:
     /// closed when safe mode starts. `(id, device)`.
@@ -117,7 +118,7 @@ pub fn set(preview: Option<Preview>) {
     }
 }
 
-/// `f` hears each change of the preview (the host's bar, the menu bar).
+/// `f` hears each change of the preview (the host's toast, the menu bar).
 pub fn on_change(f: impl Fn(Option<&Preview>) + 'static) {
     HEARD.with(|h| h.borrow_mut().push(Box::new(f)));
 }
@@ -131,7 +132,7 @@ pub fn refuse(action: &str) -> Result<(), String> {
     match current() {
         Some(p) if blocked(action) => {
             eprintln!("zeron-zgx: preview: {action} refused while {} isn't kept", p.id);
-            Err(format!("{} is a preview. Keep it in Zeron's bar first, or revert to Zeron's template.", p.name))
+            Err(format!("{} is a preview. Keep it first, or go back to Zeron v3.", p.name))
         }
         _ => Ok(()),
     }
@@ -189,9 +190,10 @@ pub fn approve(id: &str, digest: &str) -> Result<(), String> {
     approve_at(&path, id, digest).map_err(|e| format!("Couldn't keep it: {e}"))
 }
 
-/// Whether template `id` in `templates` runs with the app's powers: Zeron's
-/// own, one of its built-in themes as this build wrote it, or one you kept
-/// as it is.
+/// Whether template `id` in `templates` runs with the app's powers: the
+/// default, one of Zeron's official templates exactly as this build wrote it
+/// (`official::verified`: Zeron's own code, as the default is), or one you
+/// kept as it is.
 pub fn trusted(templates: &Path, id: &str) -> bool {
     id == live::BUILTIN || approvals_path().is_some_and(|p| trusted_at(templates, id, &p))
 }
@@ -202,7 +204,7 @@ pub fn trusted_at(templates: &Path, id: &str, approvals: &Path) -> bool {
         return true;
     }
     let dir = templates.join(id);
-    super::theme_templates::verified(&dir).is_some() || approved_at(approvals, id, &digest(&dir))
+    super::official::verified(&dir).is_some() || approved_at(approvals, id, &digest(&dir))
 }
 
 // ── Safe mode ───────────────────────────────────────────────────────────────
@@ -242,8 +244,30 @@ pub fn read_at_launch() {
     if held || crashed {
         eprintln!("zeron-zgx: safe mode ({})", if held { "⌥ held at launch" } else { "the template crashed Zeron twice" });
         let _ = write_safe(true);
+        LAUNCH_REASON.store(if held { 1 } else { 2 }, Ordering::Relaxed);
     }
     SAFE.store(on, Ordering::Relaxed);
+}
+
+/// Why safe mode started as Zeron opened (the host's toast says so once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SafeReason {
+    /// ⌥ held as it opened.
+    Held,
+    /// The template crashed the window at launch twice running.
+    Crashed,
+}
+
+/// 0: none; 1: `Held`; 2: `Crashed`.
+static LAUNCH_REASON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Why safe mode started at this launch, told once.
+pub fn take_safe_at_launch() -> Option<SafeReason> {
+    match LAUNCH_REASON.swap(0, Ordering::Relaxed) {
+        1 => Some(SafeReason::Held),
+        2 => Some(SafeReason::Crashed),
+        _ => None,
+    }
 }
 
 fn write_safe(on: bool) -> std::io::Result<()> {

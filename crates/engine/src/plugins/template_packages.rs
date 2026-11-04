@@ -128,7 +128,7 @@ impl Package {
 /// `{id, path, files, key}`.
 pub fn export(dir: &Path, id: &str, out: &Path, key: &SigningKey) -> Result<Value, String> {
     if id == ZERON {
-        return Err("Zeron's own interface is already everyone's. Export one of your templates.".into());
+        return Err("Everyone already has the default interface. Export one of your own templates.".into());
     }
     let folder = templates::template_dir(dir, id)
         .ok_or_else(|| format!("There's no template {id}. list_templates names them."))?;
@@ -213,7 +213,7 @@ pub fn default_export_path(data_dir: &Path, id: &str) -> PathBuf {
 /// over a file that isn't a template package (an earlier export is
 /// replaced; nothing else is).
 pub fn check_export_path(out: &Path, data_dir: &Path, home: Option<&Path>) -> Result<(), String> {
-    let refuse = || Err("Zeron saves a template only in a folder of yours: not a hidden one, not Zeron's own, and never over another kind of file.".to_string());
+    let refuse = || Err("A template can only be saved in a folder of yours: not a hidden folder, not one of Zeron's, and not over a different kind of file.".to_string());
     let parent = out.parent().ok_or("Say where to save it.")?;
     let canonical = std::fs::canonicalize(parent).map_err(|_| "That folder can't be found.".to_string())?;
     let data = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());

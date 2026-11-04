@@ -315,10 +315,17 @@ it opened on. From a fullscreen app it is covered and waits; zgx's
 - Allowing happens in a window of its own with no plugins (`ui/consent.luau`).
 
 **Templates are whole interfaces**, like WordPress themes. Each is a folder, `<data>/templates/<id>/`, holding `zeron-template.json` and any part of Zeron's UI (`app.luau`, `screens/`, `ds/`, `assets/`…). A file it leaves out is Zeron's own.
-- One template is in use at a time. "Zeron", Zeron's own, is always there.
-- Settings → Templates lists them as Plugins lists plugins: Installed (Zeron's own, built in, first) and Yours, a row each with Use and a ⋯ menu (its folder, Duplicate, Delete), and New template (a copy of Zeron's own).
+- One template is in use at a time. The default, "Zeron v3" (id `zeron`), is always there. "Zeron v2" (id `zeron-v2`), the single-page layout from before v3, is Zeron's too: its files are `ui/templates/zeron-v2/`, installed into `<data>/templates/zeron-v2/` and kept current with each version, built in and trusted only while exactly as this build wrote it (`src/plugins/official.rs`). A test fails when a default file v2 replaces changes, until v2's copy is brought in step (`zeron_v2_is_in_step_with_the_default`).
+- Settings → Templates lists them as Plugins lists plugins: Installed (the default and Zeron v2, built in, first) and Yours, a row each with Use and a ⋯ menu (its folder, Duplicate, Delete), and New template (a copy of Zeron's own).
 - One is out of date when it was made for another version of Zeron: its manifest's `zeron_version` against this build's (the root workspace's version, which `build.rs` hands zgx as `ZERON_VERSION`). A save to Zeron's own while developing never makes one out of date; `template_status` still names the files whose Zeron original changed.
 - Agents make and change them through Zeron's MCP server: `list_templates`, `create_template`, `use_template`, `template_status`, `delete_template` and `describe_app`.
+
+**Themes are colours, apart from templates** (`src/themes.rs`, `ui/screens/themes/`, `ui/ds/palettes.luau`).
+- Settings → Themes lists Zeron's built-in themes (crates/theme: each family's light and dark together, any other variant alone), each template's own `theme.luau` (read as data), and VS Code themes you import (a `.json` or an extension's folder, by Import theme or dropped on the page; rename and remove). Settings → Appearance has a quick pick for each scheme.
+- You choose one theme for light and one for dark, kept in `<data>/theme-choice.json`. `ds/palettes` wears them as the window's two themes (`theme-light`, `theme-dark`) over whichever template runs. A scheme with nothing chosen wears the running template's own theme, else Zeron's.
+- A theme is data, so it needs no consent and can't run code.
+- The catalogue (what's listed, the library, the choice, palettes and what the window moves to keep them legible) is `zeron_theme::catalog`, shared with the engine. Agents read, make, change, delete and wear themes with Zeron's MCP tools (`list_themes`, `get_theme`, `create_theme`, `update_theme`, `delete_theme`, `use_theme`; guide: `docs/themes.md`). The engine tells the window after each change (`WatchThemes`), and the window reads the files again: a theme changed while it's worn restyles in place.
+- Built-in themes were templates once (`theme-<key>`). Each launch moves anyone on one to the default template with that theme chosen, and deletes only the folders shaped exactly as Zeron wrote them (`src/plugins/retired_themes.rs`).
 
 **How the window runs one** (`src/plugins/live.rs`):
 - The main window always runs from `<data>/templates/.live/`: Zeron's own (`.zeron/`, copied from `ui/`) with the template in use laid over it.
@@ -330,7 +337,7 @@ it opened on. From a fullscreen app it is covered and waits; zgx's
 - A file that fails (at load, at build or later) falls back to Zeron's own for that module alone, with one notice.
 - If its `app.luau` fails, the whole window goes back to Zeron's own and the template shows as broken.
 - Saving the file again retries it.
-- **The way back from any template:** View → **Use Zeron's Template** (the host's own menu item, which no template can remove), `zeron template use zeron`, or launching with `--zeron-template`.
+- **The way back from any template:** View → **Use Zeron v3** (the host's own menu item, which no template can remove), `zeron template use zeron`, or launching with `--zeron-template`.
 
 **Plugins layer on whatever template is in use.** One that aims at an element the template dropped (its id or class) says "Not shown in this template" on the Plugins page. That check is static: only literal selectors are seen. A placed node that needs what its place doesn't give draws nothing, and its row says why.
 

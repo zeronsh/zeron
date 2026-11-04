@@ -47,7 +47,7 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
 /// Ids the app keeps for itself.
 pub const RESERVED_IDS: &[&str] = &["templates", "zeron", "app"];
 
-pub const RESERVED_ID_ERROR: &str = "That name is Zeron's own";
+pub const RESERVED_ID_ERROR: &str = "Zeron already uses that name";
 
 /// `^[a-z0-9][a-z0-9-]{1,39}$`, and not one of [`RESERVED_IDS`].
 pub fn check_id(id: &str) -> Result<(), String> {

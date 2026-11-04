@@ -14,6 +14,21 @@ local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
 	return ok()
 end
 
+-- Whether the dialog titled `title` has closed: gone, or kept but hidden.
+-- ds.Dialog keeps its modal open through its exit (130 ms), and an open
+-- modal takes every click over the window, so a click straight after Save
+-- waits for it, as a person's would. (Not a zgx bug: a modal closed at once
+-- stops taking clicks at once. `app:wait(t, { gone = true })` can't tell,
+-- as a closed modal's kept content still matches; the tree marks it hidden.)
+local function closed(app: any, title: string): boolean
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(`dialog "{title}"`, 1, true) then
+			return line:find(" hidden", 1, true) ~= nil
+		end
+	end
+	return true
+end
+
 -- The kinds of chat `id`'s panel tabs, in order ("terminal,files").
 local function kinds(app: any, id: string): string
 	local s = ((app:state("panel_sessions") :: any) or {})[`chat:{id}`]
@@ -244,6 +259,9 @@ test("Add action asks for a name and a command, then adds it; an import comes fi
 	end)).to_be(true)
 	expect(calls(app)).to_contain("save:p1:new:Lint:cargo clippy:lint:true")
 	expect(app:has('#panel-home-actions >> "Lint (setup)"')).to_be(true)
+	expect(eventually(app, function(): boolean
+		return closed(app, "Add action")
+	end)).to_be(true)
 	-- An import from zeron.json: the editor, filled in from it.
 	app:click('role:button "Import Tests"')
 	expect(app:wait('role:dialog >> "Add action"', { timeout_ms = 15000 })).to_be(true)
@@ -282,6 +300,9 @@ test("an action's gear edits it; Delete asks first, then it's gone", function()
 		return app:has('role:button "Run Dev server 2"')
 	end)).to_be(true)
 	expect(calls(app)).to_contain("save:p1:a1:Dev server 2:npm run dev:play:false")
+	expect(eventually(app, function(): boolean
+		return closed(app, "Edit action")
+	end)).to_be(true)
 	app:hover('role:button "Run Dev server 2"')
 	app:frames(5)
 	app:click('role:button "Edit Dev server 2"')
@@ -341,7 +362,7 @@ test("the side chats and subagents lists open their lanes' tabs", function()
 	end)).to_be(true)
 end)
 
-test("hundreds of lanes: the first five and those needing you, then Show N more; shown whole, only the rows in view are built", function()
+test("hundreds of lanes: the first five and those needing you, then Show N more; shown whole, the home scrolls to the last", function()
 	local app = home()
 	app:command("many")
 	app:frames(30)
@@ -372,37 +393,33 @@ test("hundreds of lanes: the first five and those needing you, then Show N more;
 	app:frames(30)
 	expect(built(app, 'button "Open subagent ')).to_be(5)
 	expect(app:has('#panel-home-subagent-list-pager >> "Show 197 more"')).to_be(true)
-	-- Shown whole: still only what's in view is built.
+	-- Shown whole: every row of the group, the list as tall as they are,
+	-- and the home is what scrolls to reach the last of them (no list
+	-- scrolls inside the panel). (Only the rows in the home's view will be
+	-- built once zgx's ui.list builds against its scrolling ancestor:
+	-- zgx-asks/list-ancestor-viewport.)
 	app:scroll("#panel-empty", 1200)
 	app:frames(5)
 	app:click("#panel-home-side-list-pager")
 	app:frames(30)
 	expect(app:has('#panel-home-side-list-pager >> "Show less"')).to_be(true)
-	expect(built(app, 'button "Open side chat ') < 24).to_be(true)
-	-- (A new gesture: the page's wheel lets go first, as a hand's does.)
-	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
-	for _ = 1, 60 do
-		app:scroll("#panel-home-side-list", 400)
+	-- (Down the home to its end, where the last rows stand.)
+	for _ = 1, 40 do
+		app:scroll("#panel-empty", 600)
 		app:frames(2)
-		if app:has('role:button "Open side chat Side chat 300"') then
-			break
-		end
 	end
 	expect(app:has('role:button "Open side chat Side chat 300"')).to_be(true)
-	-- (To the list's end: the last rows in view.)
-	for _ = 1, 4 do
-		app:scroll("#panel-home-side-list", 400)
-		app:frames(2)
-	end
-	expect(built(app, 'button "Open side chat ') < 24).to_be(true)
 	app:click('role:button "Open side chat Side chat 300"')
 	expect(eventually(app, function(): boolean
 		return calls(app):find("watch:side-300", 1, true) ~= nil
 	end)).to_be(true)
-	-- Back home, Show less: the first few again.
+	-- Back home, Show less (under the last row, at the home's end): the
+	-- first few again.
 	back_home(app)
-	app:scroll("#panel-empty", 1200)
-	app:frames(5)
+	for _ = 1, 40 do
+		app:scroll("#panel-empty", 600)
+		app:frames(2)
+	end
 	app:click("#panel-home-side-list-pager")
 	app:frames(30)
 	expect(built(app, 'button "Open side chat ')).to_be(6)
@@ -656,7 +673,9 @@ local function ports(app: any, n: number, extra: { [string]: any }?)
 	local services = {}
 	for i = 1, n do
 		local name = if i == 1 then "web" else `port-{i}`
-		table.insert(services, { id = `svc-{i}`, name = name, port = 2999 + i, url = `http://{name}.proj.localhost:7400`, project = "comet-native", device = "work-laptop", cwd = "/proj", remote = false })
+		-- (Their processes long started: open before the home looked, they
+		-- show at once.)
+		table.insert(services, { id = `svc-{i}`, name = name, port = 2999 + i, url = `http://{name}.proj.localhost:7400`, project = "comet-native", device = "work-laptop", cwd = "/proj", remote = false, started = 1 })
 	end
 	local p: { [string]: any } = { chat = "chat-1", ready = true, services = services }
 	for k, v in extra or {} do
@@ -712,6 +731,78 @@ test("a port's menu opens it, opens it in the default browser, or copies its add
 	app:set_state("test_menu_pick", "Open")
 	app:command("port_menu_pick")
 	expect(calls(app)).to_contain("port_open")
+end)
+
+-- chat-1's previews as the host has them now: `services`, each started
+-- just now unless it says.
+local function serving(app: any, services: { any })
+	app:set_state("previews", { chat = "chat-1", ready = true, services = services })
+end
+
+local function test_server(id: string, port: number): any
+	return {
+		id = id,
+		name = "HTTP server",
+		port = port,
+		url = `http://{id}.proj.localhost:7400`,
+		process = "python3 -m http.server",
+		command = `python3 -m http.server {port}`,
+	}
+end
+
+-- (A frame is 1/60 s of the test's clock.)
+local function seconds(app: any, s: number)
+	app:frames(math.ceil(s * 60))
+end
+
+test("a port open under five seconds never shows; one open longer shows, then stays a while once closed", function()
+	local app = home()
+	serving(app, {})
+	seconds(app, 0.5)
+	-- A test's server: open a second, gone.
+	serving(app, { test_server("blip", 41001) })
+	seconds(app, 1)
+	expect(app:has("#panel-home-ports")).to_be(false)
+	serving(app, {})
+	seconds(app, 6)
+	expect(app:has("#panel-home-ports")).to_be(false)
+	-- A dev server: shows once it's stayed open five seconds.
+	serving(app, { test_server("dev", 8000) })
+	seconds(app, 4)
+	expect(app:has("#panel-home-ports")).to_be(false)
+	seconds(app, 1.5)
+	expect(app:has('role:button "Open python3 -m http.server preview"')).to_be(true)
+	-- Closed (restarting): still listed, ten seconds.
+	serving(app, {})
+	seconds(app, 8)
+	expect(app:has('role:button "Open python3 -m http.server preview"')).to_be(true)
+	-- Back in time: listed on, as if it never went.
+	serving(app, { test_server("dev", 8000) })
+	seconds(app, 0.5)
+	serving(app, {})
+	seconds(app, 9)
+	expect(app:has('role:button "Open python3 -m http.server preview"')).to_be(true)
+	seconds(app, 1.5)
+	expect(app:has("#panel-home-ports")).to_be(false)
+end)
+
+test("a port's row names the process serving it, its command line in its tooltip", function()
+	local app = home()
+	local sv = test_server("dev", 8000)
+	sv.started = 1
+	serving(app, { sv })
+	app:frames(20)
+	expect(app:has('role:button "Open python3 -m http.server preview" >> ":8000"')).to_be(true)
+	expect(app:has('"HTTP server"')).to_be(false)
+	app:hover('role:button "Open python3 -m http.server preview"')
+	expect(app:wait('"python3 -m http.server 8000"', { timeout_ms = 5000 })).to_be(true)
+	-- Without one (an engine that names none, a remote device's): what the
+	-- engine calls it.
+	serving(app, { { id = "web", name = "Vite", port = 5173, url = "http://web.proj.localhost:7400", started = 1 } })
+	seconds(app, 0.5)
+	-- (Not the first answer: it settles first.)
+	seconds(app, 5.5)
+	expect(app:has('role:button "Open Vite preview"')).to_be(true)
 end)
 
 test("local previews that can't open say so in one plain line, never the system's words", function()
@@ -780,35 +871,32 @@ test("the wheel over a part's rows scrolls the home while the part has nothing t
 	end
 end)
 
-test("a part shown whole scrolls itself first; past its end, the next gesture scrolls the home", function()
+test("a part never scrolls on its own: the wheel over its rows scrolls the home, shown whole or not", function()
 	local app = home()
 	app:command("many")
 	app:frames(30)
-	app:scroll("#panel-empty", 1200)
-	app:frames(5)
-	app:click("#panel-home-side-list-pager")
+	-- (Down to its pager, under its first rows, and Show all.)
+	for _ = 1, 20 do
+		if pcall(function()
+			app:click("#panel-home-side-list-pager")
+		end) then
+			break
+		end
+		app:scroll("#panel-empty", 120)
+		app:frames(3)
+	end
 	app:frames(30)
+	expect(app:has('#panel-home-side-list-pager >> "Show less"')).to_be(true)
 	app:scroll("#panel-empty", -3000)
 	app:frames(10)
 	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
-	app:scroll("#panel-empty", 250)
-	app:frames(10)
-	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
 	local page = y_of(app, "#panel-home-device") :: number
-	-- Over its rows: the list moves, the home stays.
-	app:scroll("#panel-home-side-list", 400)
-	app:frames(5)
-	expect(y_of(app, '#panel-home-side-list >> role:button "Open side chat Side chat 1"')).to_be_nil()
-	expect(y_of(app, "#panel-home-device")).to_be(page)
-	-- To its end, then a new gesture: the home moves.
-	for _ = 1, 40 do
-		app:scroll("#panel-home-side-list", 400)
-		app:frames(2)
-	end
-	expect(app:has('role:button "Open side chat Side chat 300"')).to_be(true)
-	expect(y_of(app, "#panel-home-device")).to_be(page)
-	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
-	app:scroll("#panel-home-side-list", 300)
+	local first = y_of(app, '#panel-home-side-list >> role:button "Open side chat Side chat 1"') :: number
+	-- The wheel over its rows: the whole home moves, the rows with it, by
+	-- the same (the list never scrolls on its own).
+	app:scroll('#panel-home-side-list >> role:button "Open side chat Side chat 1"', 300)
 	app:frames(10)
-	expect((y_of(app, "#panel-home-device") :: number) < page).to_be(true)
+	local moved = page - (y_of(app, "#panel-home-device") :: number)
+	expect(moved > 0).to_be(true)
+	expect(first - (y_of(app, '#panel-home-side-list >> role:button "Open side chat Side chat 1"') :: number)).to_be(moved)
 end)

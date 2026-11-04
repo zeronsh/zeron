@@ -32,6 +32,14 @@ fn layer(input:LayerInput)->vec4<f32> {
  return vec4(input.color.rgb,input.color.a*smoothstep(-.5,.5,d));
 }
 ]])
+M.CUT = CUT
+
+-- `held`'s props with a circle cut out of its layer, `{ x, r }` in points
+-- of its `size` (what sits over it in a stack, and the gap round that).
+function M.cut_into(held: { [any]: any }, size: number, cut: { x: number, r: number })
+	held.layer_shader = CUT
+	held.layer_params = { { cut.x / size, cut.r / size, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }
+end
 
 -- Someone's face: their picture, or their gradient (ds.Avatar). `cut`: a
 -- circle taken out of it, `{ x, r }` in points (the face over it in a

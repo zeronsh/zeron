@@ -4,7 +4,7 @@ Every open ask from Zeron's zgx app, one folder per topic: an `ASK.md` (who
 needs it, what fails today, the ask) and, where one exists, a minimal repro
 (`zgx run <folder>/repro` or `zgx test <folder>`, with `ZGX_CHECK=0`). Most
 were seen on zgx `b3371f8` on macOS, unless the folder says otherwise; Zeron's
-pin is now zgx main `f81d5e99` (#1420). Each open ask is assigned to a zgx lane,
+pin is now zgx main `99a50ad5` (0.1.9, its fixes, and Linux's popups and glass blur). Each open ask is assigned to a zgx lane,
 which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 ## High: users see it
@@ -30,7 +30,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | Cost today |
 |---|---|
-| [reload-cost](reload-cost/ASK.md) | Mostly fixed (#1284: only changed files compile, same-bytes saves don't reload); the whole-window reload per save remains (speed-of-light lane). Was: | Every save reloads the whole window and recompiles every module (77% of a reload); a same-bytes rewrite reloads too. A 50-70% CPU burst per save. Zeron side (Nov 2): one reload per save, no `zeron-catalog` pseudo-plugin (`ScriptHost::i18n`, `96856669b`), no top-level router; launch scripts compiled ahead (`compile_ahead`, `94baa20f`). |
+| [reload-cost](reload-cost/ASK.md) | Mostly fixed (#1284: only changed files compile, same-bytes saves don't reload); the whole-window reload per save remains (speed-of-light lane). A partial reload (`ZGX_RELOAD=partial`, `b93f745b`) is in the pin `d81d2c33`, opt-in until it's proved on Zeron's app and templates; not adopted yet. Was: | Every save reloads the whole window and recompiles every module (77% of a reload); a same-bytes rewrite reloads too. A 50-70% CPU burst per save. Zeron side (Nov 2): one reload per save, no `zeron-catalog` pseudo-plugin (`ScriptHost::i18n`, `96856669b`), no top-level router; launch scripts compiled ahead (`compile_ahead`, `94baa20f`). |
 
 ## Low
 
@@ -44,6 +44,8 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | |
 |---|---|
+| Inherited token colours | Text taking its colour from a token around it follows every theme switch (#1439, `d81d2c33`): button labels kept the first switch's colour after a second (setup's Continue and Back on Make it yours). In the pin; no Zeron workaround was taken; tests/onboarding_continue_ink.rs guards the setup footer. |
+| Token corners and sides | A token `rounded` or `border` takes its single corners or sides, as a number does (#1415, `b72e15db`). In the pin `d81d2c33`; adopted: the composer's tray is `rounded` with `rounded_tl`/`rounded_tr` = 0 again, not a `corners` function (tests/composer_tray.rs). |
 | [modal-over-popups](modal-over-popups/ASK.md) | A modal opening closes every anchored popup outside it, popup windows included (#1419, `fbc62abe`). In the pin `f81d5e99`; adopted: ds/popups is gone (glass's `Popups.track`, the `Popups.modal` wrapping in the command palette, dialog and lightbox, the `popups.dismiss` host action); src/popups_tests.rs stays as the guard. |
 | [menu-keeps-selection](menu-keeps-selection/ASK.md) | An editor keeps drawing its selection, inactive, while a context menu that took its focus shows (#1418, `00597c48`). In the pin `f81d5e99`; nothing to change in Zeron (src/editor_menu.rs's `ready()` still puts the menu's selection back for its actions). |
 | [look-up-line-editor](look-up-line-editor/ASK.md) | `EditorHandle::look_up` works in an editor shown a line at a time (#1418, `6f8ad524`). In the pin `f81d5e99`; adopted: src/editor_menu.rs's `look_up_by_lines` is gone, Look Up calls zgx's own (editor_menu::tests looks up "world" over the word). |

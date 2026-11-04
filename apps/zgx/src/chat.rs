@@ -156,6 +156,11 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments)),
             ("waiting", Value::from(self.waiting)),
+            // (This device's own copy: its pictures are the files it was
+            // sent from, here, which the chat's device never had. The
+            // chat's copy, once it comes, is marked `waiting` too until
+            // its reply begins, so that can't tell them apart.)
+            ("here", Value::Bool(true)),
             ("at", self.at.as_deref().map_or(Value::Nil, Value::from)),
             ("copy", copy_value(&words)),
         ])
@@ -1179,6 +1184,7 @@ impl View {
             // (Where a reply's visuals are read from: the chat's host, when
             // it isn't this device.)
             let device = chats.target(&chat);
+            let open_id = open.id.clone();
             let Open { entries, built, .. } = open;
             let mut list: Vec<Value> = entries
                 .iter()
@@ -1188,7 +1194,7 @@ impl View {
                     };
                     built
                         .entry(id.to_owned())
-                        .or_insert_with(|| match with_visual_device(e, device.as_deref()) {
+                        .or_insert_with(|| match with_host(e, &open_id, device.as_deref()) {
                             Some(e) => message(&e, model.as_deref()),
                             None => message(e, model.as_deref()),
                         })
@@ -2342,21 +2348,39 @@ fn apply(entries: &mut Vec<Json>, frame: &Json) -> Result<Change, ()> {
     })
 }
 
-/// `entry` with its visual parts naming `device`, their host, when it has
-/// any and that isn't this one (nil otherwise: the entry as it is).
-fn with_visual_device(entry: &Json, device: Option<&str>) -> Option<Json> {
-    let device = device?;
+/// `entry` with what its parts read from the chat's host: each visual names
+/// `device`, its host, when that isn't this one; each command whose output
+/// the doc cut to its last lines names `doc`, the doc it is in, so its row
+/// can ask the host for the rest (`chat.tool_output`). Nil when it has
+/// neither: the entry as it is.
+fn with_host(entry: &Json, doc: &str, device: Option<&str>) -> Option<Json> {
     let parts = entry["parts"].as_array()?;
-    if !parts.iter().any(|p| p["kind"].as_str() == Some("visual")) {
+    let visual = |p: &Json| device.is_some() && p["kind"].as_str() == Some("visual");
+    let cut = |p: &Json| p["kind"].as_str() == Some("tool") && p["outputTruncated"].as_bool() == Some(true);
+    if !parts.iter().any(|p| visual(p) || cut(p)) {
         return None;
     }
     let mut entry = entry.clone();
     for part in entry["parts"].as_array_mut().into_iter().flatten() {
-        if part["kind"].as_str() == Some("visual") {
+        if visual(part)
+            && let Some(device) = device
+        {
             part["device"] = Json::String(device.to_owned());
+        }
+        if cut(part) {
+            part["chat"] = Json::String(doc.to_owned());
         }
     }
     Some(entry)
+}
+
+/// The device a read of `doc`'s host data goes to (`targetDeviceId`), when
+/// that isn't this one: a subagent's doc (`{chat}--sub--{id}`) is its root
+/// chat's.
+pub(crate) fn host_of(doc: &str) -> Option<String> {
+    let chats = CHATS.with(Rc::clone);
+    let source = doc.split_once("--sub--").map_or(doc, |(chat, _)| chat);
+    chats.target(&chats.chat(source)?)
 }
 
 /// An entry's words: its text parts, each a paragraph.
@@ -3276,31 +3300,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let ask = asked(&open.entries).and_then(|p| ask_value(p, answered)).unwrap_or(Value::Nil);
     let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
     let live = chats.running(&open.id);
-    let tasks: Vec<Value> = if live {
-        session["backgroundTasks"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|t| {
-                let command = t["command"].as_str().unwrap_or_default();
-                let name = t["description"].as_str().filter(|d| !d.is_empty()).unwrap_or(command);
-                let mut fields = vec![
-                    ("id", s(&t["id"])),
-                    ("kind", Value::from("process")),
-                    ("name", Value::from(name)),
-                ];
-                if name != command {
-                    fields.push(("detail", Value::from(command)));
-                }
-                if let Some(since) = seconds(&t["startedAt"]) {
-                    fields.push(("since", Value::Num(since as f64)));
-                }
-                Value::record(fields)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let tasks = background_tasks(&session);
     let queue: Vec<Value> = open
         .queue
         .iter()
@@ -3348,6 +3348,40 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         fields.push(("branch", Value::from(branch)));
     }
     Value::record(fields)
+}
+
+/// The processes the chat's agent left running in the background, oldest
+/// first: listed while its session row is fresh, whatever the turn does
+/// (the shipping app's `view::background_tasks`). They outlive the turn
+/// that started them, and the engine's heartbeat keeps the row fresh while
+/// they run; gating them on a live turn emptied the tray each time a turn
+/// ended and filled it again as the next began.
+fn background_tasks(session: &Json) -> Vec<Value> {
+    if stale(&session["updatedAt"]) {
+        return Vec::new();
+    }
+    let s = |j: &Json| j.as_str().map(Value::from).unwrap_or(Value::Nil);
+    session["backgroundTasks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            let command = t["command"].as_str().unwrap_or_default();
+            let name = t["description"].as_str().filter(|d| !d.is_empty()).unwrap_or(command);
+            let mut fields = vec![
+                ("id", s(&t["id"])),
+                ("kind", Value::from("process")),
+                ("name", Value::from(name)),
+            ];
+            if name != command {
+                fields.push(("detail", Value::from(command)));
+            }
+            if let Some(since) = seconds(&t["startedAt"]) {
+                fields.push(("since", Value::Num(since as f64)));
+            }
+            Value::record(fields)
+        })
+        .collect()
 }
 
 /// The plan: the latest todo list the agent wrote.
@@ -4239,10 +4273,37 @@ mod tests {
         assert_eq!(list[1].field("id"), Some(&Value::from("v:1")));
         assert!(list[1].field("device").is_none_or(|d| *d == Value::Nil), "this device's: no device");
         // A chat on another device: its visuals are read from there.
-        assert!(with_visual_device(&entry, None).is_none());
-        let remote = with_visual_device(&entry, Some("dev-2")).expect("it has a visual");
+        assert!(with_host(&entry, "c1", None).is_none());
+        let remote = with_host(&entry, "c1", Some("dev-2")).expect("it has a visual");
         let shown = blocks(&remote);
         assert_eq!(shown.list()[1].field("device"), Some(&Value::from("dev-2")));
+    }
+
+    /// A command whose output the doc cut names the doc it is in (its row
+    /// asks that doc's host for the rest), with its exit code and the whole
+    /// output's lines; one kept whole names nothing.
+    #[test]
+    fn a_cut_command_output_names_its_doc_lines_and_exit_code() {
+        let exec = |id: &str, cut: bool| {
+            let mut part = json!({ "kind": "tool", "id": id, "resolved": true, "isError": true, "exitCode": 2,
+                                   "output": "error: boom", "call": { "kind": "exec", "command": "make" } });
+            if cut {
+                part["outputTruncated"] = json!(true);
+                part["outputLines"] = json!(300);
+            }
+            part
+        };
+        let entry = json!({ "id": "a1", "role": "assistant", "status": "complete",
+                            "parts": [exec("t1", true), exec("t2", false)] });
+        let stamped = with_host(&entry, "c1--sub--x", None).expect("a cut output");
+        let row = tool(&stamped["parts"][0]).unwrap();
+        assert_eq!(row.field("chat"), Some(&Value::from("c1--sub--x")));
+        assert_eq!(row.field("output_truncated"), Some(&Value::Bool(true)));
+        assert!(matches!(row.field("output_lines"), Some(Value::Num(n)) if *n == 300.0));
+        assert!(matches!(row.field("exit_code"), Some(Value::Num(n)) if *n == 2.0));
+        let whole = tool(&stamped["parts"][1]).unwrap();
+        assert!(whole.field("chat").is_none() && whole.field("output_truncated").is_none());
+        assert!(with_host(&json!({ "parts": [exec("t2", false)] }), "c1", None).is_none());
     }
 
     #[test]
@@ -4319,5 +4380,36 @@ mod tests {
         // Failed, then shown on another try: the stumble isn't drawn.
         let retried = blocks(&reply(vec![mcp("s1", true), mcp("s2", false), image("i1", "a.png")]));
         assert_eq!(kinds(&retried), ["images"]);
+    }
+
+    #[test]
+    fn background_tasks_outlive_the_turn_and_go_with_a_stale_row() {
+        use super::{Value, background_tasks, now_seconds};
+        let fresh = (now_seconds() * 1000) as f64;
+        let row = |status: &str, updated: f64| {
+            serde_json::json!({
+                "chatId": "c1", "status": status, "updatedAt": updated,
+                "backgroundTasks": [
+                    { "id": "b1", "command": "cargo test", "startedAt": fresh },
+                    { "id": "b2", "command": "npm run dev", "description": "Dev server" },
+                ],
+            })
+        };
+        let ids = |tasks: &[Value]| -> Vec<String> {
+            tasks.iter().map(|t| crate::auth::text(t.field("id").unwrap())).collect()
+        };
+        // Working, the turn ended (idle, completed) or waiting: the same rows,
+        // each time, so the tray neither empties nor fills again.
+        for status in ["working", "idle", "completed", "awaitingInput", "failed"] {
+            assert_eq!(ids(&background_tasks(&row(status, fresh))), ["b1", "b2"], "{status}");
+        }
+        let tasks = background_tasks(&row("idle", fresh));
+        assert_eq!(tasks[1].field("name"), Some(&Value::from("Dev server")));
+        assert_eq!(tasks[1].field("detail"), Some(&Value::from("npm run dev")));
+        assert_eq!(tasks[0].field("detail"), None);
+        // A row gone quiet (its engine stopped beating): they went with it.
+        let quiet = fresh - 120_000.;
+        assert!(background_tasks(&row("idle", quiet)).is_empty());
+        assert!(background_tasks(&serde_json::Value::Null).is_empty());
     }
 }

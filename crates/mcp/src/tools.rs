@@ -23,6 +23,7 @@ use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
 mod plugins;
+mod themes;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
 
@@ -269,6 +270,7 @@ fn catalog() -> Vec<ToolDef> {
         }),
     });
     tools.extend(plugins::catalog());
+    tools.extend(themes::catalog());
     tools
 }
 
@@ -798,6 +800,9 @@ impl Tools {
             }
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
+            }
+            theme if themes::NAMES.contains(&theme) => {
+                return self.themes(theme, args).await;
             }
             plugin if is_plugin_tool_name(plugin) => {
                 return self.call_plugin_tool(plugin, args).await;

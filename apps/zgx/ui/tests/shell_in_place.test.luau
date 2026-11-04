@@ -385,10 +385,10 @@ test("a palette section's title keeps to its row as a search moves it first", fu
 	-- Settings is a later section (its title taller; maybe below the fold,
 	-- as pages are added); a search for one of its rows makes it the first:
 	-- its title stands as the first's.
-	app:type('role:textbox "Search"', "Them")
+	app:type('role:textbox "Search"', "Mode")
 	app:frames(30)
 	local title_y, title_h = box(app, "#palette-list", 'text "Settings"')
-	local row_y = box(app, "#palette-list", 'option "Theme"')
+	local row_y = box(app, "#palette-list", 'option "Mode"')
 	expect(title_y).never.to_be_nil()
 	expect(`room {(row_y :: number) - (title_y :: number) - (title_h :: number)}`).to_be(`room {room}`)
 end)
@@ -512,13 +512,17 @@ test("the title bar's strip moves the window everywhere but its controls", funct
 		app:click(target)
 		app:frames(2)
 	end
-	-- Over the sidebar's head and the page, edge to edge across the window.
+	-- Over the sidebar's head, then the window round the page's card (over
+	-- it, beside it) and the card's own head, edge to edge across the
+	-- window.
 	bare("#sidebar-drag")
 	bare("#page-drag")
 	local sx, sw = span(app, "#sidebar-drag")
+	local gx, gw = span(app, "#shell-drag")
 	local px, pw = span(app, "#page-drag")
-	expect(`{sx} to {(sx :: number) + (sw :: number)}`).to_be(`0 to {px}`)
-	expect((px :: number) + (pw :: number)).to_be(1200)
+	expect(`{sx} to {(sx :: number) + (sw :: number)}`).to_be(`0 to {gx}`)
+	expect((gx :: number) + (gw :: number)).to_be(1200)
+	expect((px :: number) > (gx :: number) and (px :: number) + (pw :: number) < 1200).to_be(true)
 	-- A new chat's composer, risen over the page, leaves it bare too.
 	expect(app:state("shell_route_path")).to_be("/")
 	-- Over a session's files.
@@ -658,14 +662,17 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 	app:frames(20)
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
-	local function alone(when: string)
+	-- (A session's page is a card, the window's gap round it; a new chat's,
+	-- with the sidebar gone, the whole window, its wallpaper to the edges.)
+	local GAP = 4
+	local function alone(when: string, page_w: number)
 		expect(app:has("#shell-rail")).to_be(false)
 		local _, _, sw = rect(app, SIDE)
 		expect(`{when}: sidebar {sw}`).to_be(`{when}: sidebar 0`)
 		local _, _, pw = rect(app, "#shell-page")
-		expect(`{when}: page {pw}`).to_be(`{when}: page 1200`)
+		expect(`{when}: page {pw}`).to_be(`{when}: page {page_w}`)
 	end
-	alone("a session")
+	alone("a session", 1200 - 2 * GAP)
 	-- Its title in the strip, clear of the bar's controls.
 	local tx = rect(app, "#page-title")
 	local fx, _, fw = rect(app, '#titlebar >> role:button "Forward"')
@@ -673,7 +680,7 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 	-- A new chat, and back: still nothing in the sidebar's place.
 	app:command("shell.new_chat")
 	app:frames(40)
-	alone("a new chat")
+	alone("a new chat", 1200)
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
 	local _, _, open_w = rect(app, SIDE)
@@ -890,14 +897,16 @@ test("the palette finds the session's files once typing pauses, under Files, and
 	expect(app:wait('#palette-list >> role:option "README.md"', { timeout_ms = 300 })).to_be(false)
 	app:type('role:textbox "Search"', "e")
 	expect(app:wait('#palette-list >> role:option "README.md"', { timeout_ms = 3000 })).to_be(true)
-	expect(node(app, "#palette-list", "option", "GUIDE.md")).never.to_be_nil()
 	-- (A folder isn't something it opens.)
 	expect(node(app, "#palette-list", "option", "docs")).to_be_nil()
-	-- Its Files scope (⌘4, as Zeron's): the files alone.
+	-- Its Files scope (⌘4, as Zeron's): the files alone. (All of them
+	-- here: unscoped, commands matching "re", Reload Zeron among them,
+	-- come first and can push a file below the list's fold.)
 	app:key("cmd+4")
 	app:frames(20)
 	expect(node(app, "#palette-list", "option", "Ship the release")).to_be_nil()
 	expect(node(app, "#palette-list", "option", "README.md")).never.to_be_nil()
+	expect(node(app, "#palette-list", "option", "GUIDE.md")).never.to_be_nil()
 	-- Enter: the file, in the session's panel.
 	app:key("Enter")
 	app:frames(40)

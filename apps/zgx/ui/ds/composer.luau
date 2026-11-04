@@ -242,6 +242,8 @@ export type Props = {
 	drop_overlay: boolean?,
 	-- Bumped, the model picker opens (a shortcut to it).
 	open_model: State<number>?,
+	-- Set to whether the model picker is open.
+	model_open: State<boolean>?,
 	-- Which of `@`, `/`, `$` open their list (an agent's completion
 	-- settings), and what an empty list says, by trigger.
 	mention_enabled: ((trigger: string) -> boolean)?,
@@ -1236,6 +1238,7 @@ return ui.component(function(props: Props): Node
 			models = props.models :: any,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
+			showing = props.model_open,
 		}
 	end)
 	-- The footer folds a step at a time as it runs short of room, the
@@ -1854,8 +1857,20 @@ return ui.component(function(props: Props): Node
 							return true
 						end
 					end
-					if e.key == "Escape" and not e.shift and not e.cmd and not e.alt and props.on_escape then
-						return props.on_escape()
+					-- A bare Escape: the caller's first (stopping the agent, where
+					-- settings say Escape does); else the keyboard goes back to
+					-- the window, whose bare letters (the panel's B, F, T…, I
+					-- to come back) work again, as vim's normal mode.
+					if e.key == "Escape" and not e.shift and not e.cmd and not e.alt then
+						if props.on_escape and props.on_escape() then
+							return true
+						end
+						local el = field:peek()
+						if el then
+							el:blur()
+							return true
+						end
+						return false
 					end
 					-- (⌘↩ under "mod_enter"; plain ↩ there breaks the line.)
 					local enter_breaks = props.send_with ~= nil and props.send_with() == "mod_enter" and not e.cmd
@@ -2204,15 +2219,9 @@ return ui.component(function(props: Props): Node
 				-- its own anywhere: it is the pill's glass continued (the pill
 				-- keeps its edge). A rounded top, or a hairline, showed a second
 				-- curve against the pill's own.
-				-- (`corners`, not `rounded` with `rounded_tl`/`rounded_tr`: a
-				-- token `rounded` overrides those in zgx, rounding the top too.
-				-- It takes numbers: the trays' radius, read as the theme
-				-- changes.)
-				corners = function(): any
-					local _ = ui.theme.current:get()
-					local r = (ui.theme.get("zeron.composer.tray.radius") :: number?) or 16
-					return { tl = 0, tr = 0, br = r, bl = r }
-				end,
+				rounded = "$zeron.composer.tray.radius",
+				rounded_tl = 0,
+				rounded_tr = 0,
 				bg = function(): string
 					return if material.frosted:get() then "$zeron.composer.tint" else "$zeron.composer.solid"
 				end,

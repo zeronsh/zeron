@@ -26,6 +26,35 @@ function M.setup()
 			-- 32, 48, 64), for controls: a thumb's inset in its track, a chip's
 			-- padding and gap, a small button's padding.
 			space = { hair = 2, tight = 6, snug = 10 },
+			-- The page's cards: the chat page and the right panel as two
+			-- cards set into the window, the title bar's line inside them.
+			-- `gap` is the window showing round and between them (the title
+			-- bar's controls stay where they were, so a gap past its 4 of top
+			-- padding would crowd them against the cards' top); `radius` their
+			-- corners;
+			-- `bg` their fill over the window's glass or colour; `edge` their
+			-- hairline, `edge_hover` the panel's under the pointer at its edge
+			-- (and as it's dragged).
+			inset = {
+				gap = 4,
+				radius = "{radius.xl}",
+				bg = "{surface.raised}",
+				edge = "{border.subtle}",
+				edge_hover = "{border.strong}",
+				-- Split chats (screens/shell/split): what lies over a pane
+				-- that isn't focused (lighter under the pointer), the focused
+				-- one's edge, and where a chat dragged over the panes lands.
+				-- (Lighter than it was: a pane's own fill says which is
+				-- focused, `active` and `inactive`.)
+				dim = "alpha({background}, 0.4)",
+				dim_hover = "alpha({background}, 0.2)",
+				-- (A panel's pane not focused: lighter, its terminal or page
+				-- still worth reading.)
+				pane_dim = "alpha({background}, 0.3)",
+				focus_edge = "alpha({accent}, 0.55)",
+				drop = "alpha({accent}, 0.14)",
+				drop_edge = "alpha({accent}, 0.7)",
+			},
 			-- Between the items of any list (a menu's rows, a sidebar's pages):
 			-- enough that one row's wash (hover, selected) never touches the
 			-- next's, no more.
@@ -588,13 +617,21 @@ function M.setup()
 	}
 	ui.theme.load("ds/themes/zeron-dark.json")
 	ui.theme.load("ds/themes/zeron-light.json")
-	-- A template's colours (its theme.luau; Zeron's own returns nil), worn
-	-- over those themes through the one mapping (ds/palettes): what each
-	-- scheme wears follows. (Guarded: a plugin, lent the design system,
-	-- has no app of its own to read.)
+	-- The theme chosen for each scheme, else the template's own (its
+	-- theme.luau; the default's returns nil), else Zeron's, worn over those
+	-- themes through the one mapping (ds/palettes), and worn again as the
+	-- choice or the themes change. (Guarded: a plugin, lent the design
+	-- system, has no app of its own to read.)
 	local palettes = require("@self/palettes")
-	local ok, family = pcall(require, "@app/theme")
-	ui.theme.follow_system(palettes.wear(if ok then family else nil))
+	local ok, own = pcall(require, "@app/theme")
+	if ok then
+		ui.effect(function()
+			palettes.wear(palettes.slots(own))
+		end)
+	else
+		palettes.wear(nil)
+	end
+	ui.theme.follow_system(palettes.scheme)
 	-- Corners made from others (a theme's tokens take no arithmetic), made
 	-- again as the theme's change, each its container's corner less its
 	-- edge and how far in it sits (inner = outer − inset, always):
@@ -606,6 +643,28 @@ function M.setup()
 	--   option;
 	-- - a tray's row (and its head), the tray's padding in; a queued
 	--   message's thumbnail, its row's inset in.
+	-- The cards lighter than the window round them, lifted off it;
+	-- in a split, the panes not focused sunk below it, black laid over the
+	-- window's glass or colour, more of it in a dark theme (where a little
+	-- reads as nothing) than a light one.
+	ui.effect(function()
+		local kind = ui.theme.kind()
+		local dark = not (kind == "light" or kind == "high-contrast-light")
+		ui.theme.tokens {
+			zeron = {
+				inset = {
+					-- A card lifted off the window, lighter than it: the
+					-- theme's raised surface.
+					bg = "{surface.raised}",
+					-- In a split (chats, or the panel's tab groups): the
+					-- focused pane lifted as any card is; the others sunk,
+					-- darker than the window.
+					active = "{surface.raised}",
+					inactive = if dark then "#00000059" else "#00000014",
+				},
+			},
+		}
+	end)
 	local control = require("@self/control")
 	ui.effect(function()
 		local chip = control.nest("$zeron.composer.radius", 1, "$zeron.composer.chip.inset")
@@ -614,6 +673,9 @@ function M.setup()
 		ui.theme.tokens {
 			zeron = {
 				menu = { row_radius = control.nest("$radius.lg", 1, "$space.1") },
+				-- What follows a card's corner inside its 1-point edge (where
+				-- a dropped tab would land, over a panel card's body).
+				inset = { inner_radius = control.nest("$zeron.inset.radius", 1) },
 				tag = { remove_radius = control.nest("$radius.md", 3) },
 				composer = {
 					chip = { radius = chip },

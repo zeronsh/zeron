@@ -161,6 +161,7 @@ local TITLE_KEYS: { [string]: { string } } = {
 	about = { "About & updates", "settings.about.title" },
 	archived = { "Archived", "settings.archived.title" },
 	plugins = { "Plugins", "plugins.page.title" },
+	themes = { "Themes", "themes.page.title" },
 	templates = { "Templates", "templates.page.title" },
 }
 local GROUP_KEYS: { [string]: string } = {
@@ -170,6 +171,7 @@ local GROUP_KEYS: { [string]: string } = {
 	Organization = "settings.shell.group.organization",
 	Workspace = "settings.shell.group.workspace",
 	Cloud = "settings.shell.group.cloud",
+	Customize = "settings.shell.group.customize",
 	Plugins = "settings.shell.group.plugins",
 }
 local function title_of(id: string, title: string): string

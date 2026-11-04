@@ -44,6 +44,7 @@ local function Home(): Node
 		drop_when = zone.drop_when,
 		on_drag_over = zone.on_drag_over,
 		on_drag_leave = zone.on_drag_leave,
+		on_hover = zone.on_hover,
 		on_drop = zone.on_drop,
 		-- Over the composer's place: what plugins add to a new chat. (Not
 		-- while there's no project: its empty margin would push the ask down.)

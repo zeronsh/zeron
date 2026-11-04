@@ -1,6 +1,6 @@
 //! The main window's shortcuts reach their commands from wherever focus is,
 //! as a desktop window routes them. A command's shortcut is its menu item's
-//! (src/main.rs `serve_commands`): the window binds the menus' keymap at
+//! (src/menu_bar.rs): the window binds the menus' keymap at
 //! its root, a key goes first to what has focus, and one nothing takes
 //! reaches the root as the menu item's action, which runs the command. This
 //! mounts the shell headless (ui/shell_fixture.luau), binds the commands'
@@ -16,6 +16,8 @@ use zgx::{
 };
 use zgx_desktop::MenuAction;
 use zgx_script::{ScriptHost, Value, testing::TestApp};
+
+// (The menu bar itself, its plugins and its windows: src/menu_bar_tests.rs.)
 
 struct Window {
     app: TestApp,
@@ -59,7 +61,7 @@ fn mount() -> Window {
             continue;
         };
         // (Every shortcut a menu can show: one it can't would never fire.)
-        let accelerator = crate::accelerator(key).unwrap_or_else(|| panic!("{}: `{key}` isn't a shortcut", command.id));
+        let accelerator = crate::menu_bar::accelerator(key).unwrap_or_else(|| panic!("{}: `{key}` isn't a shortcut", command.id));
         let mut stroke = accelerator.0;
         if let zgx::input::Key::Character(s) = &mut stroke.key {
             *s = s.to_ascii_lowercase();
@@ -249,149 +251,6 @@ fn command_w_closes_the_panels_tab_while_it_has_the_keyboard_else_the_window() {
     assert!(w.closed.get(), "⌘W in the composer didn't close the window");
 }
 
-/// What zgx-desktop's `set_menus` refuses a whole bar for (app_menu.rs
-/// `validate`): an empty label or action, an action twice, or a shortcut
-/// twice. Refused, the bar before it stays, and with none before it there
-/// are no shortcuts at all.
-fn refused(menus: &[zgx_desktop::AppMenu]) -> Option<String> {
-    let (mut ids, mut keys): (Vec<String>, Vec<zgx::actions::Keystroke>) = (Vec::new(), Vec::new());
-    for menu in menus {
-        for entry in &menu.entries {
-            if let zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } = entry {
-                if label.is_empty() || action.0.is_empty() {
-                    return Some(format!("an empty label or action in {}", menu.label));
-                }
-                if ids.contains(&action.0) {
-                    return Some(format!("the action `{}` twice", action.0));
-                }
-                ids.push(action.0.clone());
-                if let Some(key) = accelerator {
-                    if keys.contains(&key.0) {
-                        return Some(format!("a shortcut twice ({}'s)", action.0));
-                    }
-                    keys.push(key.0.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// The window as the desktop serves it: the bar src/main.rs makes of the
-/// commands set as the platform would (kept as it was if refused), and its
-/// keymap bound at the root, again after each load.
-struct Served {
-    app: TestApp,
-    bar: Option<Vec<zgx_desktop::AppMenu>>,
-    refusals: Vec<String>,
-    heard: Rc<RefCell<Vec<String>>>,
-    keys: Option<KeymapBinding>,
-}
-
-impl Served {
-    fn new(plugin: Option<&std::path::Path>) -> Self {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
-        let entry = plugin.map(std::path::Path::to_path_buf);
-        let app = TestApp::new(move |runtime| {
-            let host = ScriptHost::new(runtime, path);
-            host.action("close", |_| {});
-            if let Some(entry) = entry {
-                host.set_plugins(vec![zgx_script::Plugin { name: "keys".into(), entry, grants: vec![] }]);
-            }
-            host
-        });
-        app.ui.scene.borrow_mut().resize(1200., 800.);
-        app.frames(30);
-        assert_eq!(app.error(), None, "the shell failed");
-        let heard: Rc<RefCell<Vec<String>>> = Rc::default();
-        let into = heard.clone();
-        let root = app.ui.scene.borrow().root();
-        let listener = app.ui.input.listen(root, move |event| {
-            if event.phase == zgx::input::EventPhase::Capture || event.default_prevented() {
-                return;
-            }
-            if let InputEvent::Action(action) = &event.event
-                && let Some(action) = action.downcast_ref::<MenuAction>()
-            {
-                into.borrow_mut().push(action.0.clone());
-                event.prevent_default();
-            }
-        });
-        std::mem::forget(listener);
-        let mut s = Served { app, bar: None, refusals: Vec::new(), heard, keys: None };
-        s.serve();
-        s
-    }
-
-    /// The commands' bar, set as src/main.rs sets it.
-    fn serve(&mut self) {
-        let bar = crate::menus(&self.app.host.commands().get());
-        match refused(&bar) {
-            Some(why) => self.refusals.push(why),
-            None => self.bar = Some(bar),
-        }
-        let mut map = Keymap::new();
-        for menu in self.bar.iter().flatten() {
-            for entry in &menu.entries {
-                if let zgx_desktop::AppMenuEntry::Item { action, accelerator: Some(key), .. } = entry {
-                    map = map.bind(KeyBinding::new([key.0.clone()], Action::new(MenuAction(action.0.clone()))).expect("a shortcut"));
-                }
-            }
-        }
-        self.keys = None;
-        let root = self.app.ui.scene.borrow().root();
-        self.keys = Some(self.app.ui.input.bind_keys(root, map));
-    }
-
-    /// What `keys` reached, if anything.
-    fn press(&mut self, keys: &str) -> Option<String> {
-        self.heard.borrow_mut().clear();
-        self.app.keys(keys);
-        self.app.frames(5);
-        self.heard.borrow_mut().drain(..).next()
-    }
-}
-
-#[test]
-fn a_plugin_s_commands_never_cost_the_app_its_shortcuts() {
-    let dir = std::env::temp_dir().join(format!("zgx-shortcuts-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let entry = dir.join("init.luau");
-    // ⌘N as the app has it, ⌘N again by another name (`meta` is ⌘ on a
-    // Mac, as `cmd` is), and one key free. (zgx refuses an id declared
-    // twice as an error: the plugin is set aside, src/plugins/recovery.rs.)
-    let alias = if cfg!(target_os = "macos") { "meta+n" } else { "ctrl+n" };
-    std::fs::write(&entry, r#"
-ui.command { id = "mine", title = "Mine", menu = "Keys", key = "cmd+n", run = function() end }
-ui.command { id = "alias", title = "Also new", menu = "Keys", key = "ALIAS", run = function() end }
-ui.command { id = "free", title = "Free", menu = "Keys", key = "cmd+shift+y", run = function() end }
-"#.replace("ALIAS", alias)).unwrap();
-    let mut w = Served::new(Some(&entry));
-    let check = |w: &mut Served, when: &str, free: bool| {
-        assert!(w.refusals.is_empty(), "{when}: the bar was refused: {:?}", w.refusals);
-        assert_eq!(w.press("cmd+n").as_deref(), Some("shell.new_chat"), "{when}: ⌘N");
-        assert_eq!(w.press("cmd+k").as_deref(), Some("shell.palette"), "{when}: ⌘K");
-        w.app.key(zgx::input::Key::Escape);
-        w.app.frames(10);
-        let got = w.press("cmd+shift+y");
-        assert_eq!(got.as_deref(), if free { Some("keys/free") } else { None }, "{when}: the plugin's free key");
-    };
-    check(&mut w, "loaded", true);
-    // Reloaded: the same commands again, not twice over.
-    w.app.host.reload().unwrap();
-    w.app.frames(20);
-    w.serve();
-    check(&mut w, "reloaded", true);
-    // Unloaded: its commands go with it.
-    w.app.host.set_plugins(vec![]);
-    w.app.host.reload().unwrap();
-    w.app.frames(20);
-    w.serve();
-    check(&mut w, "unloaded", false);
-    assert!(!w.app.host.commands().get().iter().any(|c| c.id.starts_with("keys/")), "its commands stayed");
-}
-
 /// ⌘1–9 open the sidebar's sessions as it shows them, top to bottom
 /// (Zeron's jumps); a folded list's sessions are out of reach, and a digit
 /// past the last does nothing.
@@ -544,18 +403,26 @@ fn command_slash_opens_the_model_picker() {
     }
 }
 
-/// Holds `meta` (and `shift`) as the window reports a modifier alone
-/// (zgx's `ui.modifiers`, which `app.keys` never sets: it presses and lets
-/// go at once).
-fn hold(w: &mut Window, meta: bool, shift: bool) {
-    let held = zgx::input::Modifiers { meta, shift, ..Default::default() };
+/// Holds ⌘ (and `shift`) as the window reports a modifier alone (zgx's
+/// `ui.modifiers`, which `app.keys` never sets: it presses and lets go at
+/// once). ⌘ is what `cmd` shortcuts are pressed with: Command on macOS,
+/// Control elsewhere.
+fn hold(w: &mut Window, command: bool, shift: bool) {
+    let mut held = zgx::input::Modifiers { shift, ..Default::default() };
+    if cfg!(target_os = "macos") {
+        held.meta = command;
+    } else {
+        held.control = command;
+    }
     zgx::input::set_held_modifiers(&w.app.ui.runtime, held);
     w.app.frames(2);
 }
 
-/// Whether the first row wears its jump (`find` names one node; nine show).
+/// Whether the first row wears its jump (`find` names one node; nine show),
+/// as the platform writes it: ⌘1, or Ctrl+1.
 fn hints(w: &mut Window) -> bool {
-    w.app.tree().lines().any(|line| line.contains("text \"⌘1\""))
+    let keys = if cfg!(target_os = "macos") { "⌘1" } else { "Ctrl+1" };
+    w.app.tree().lines().any(|line| line.contains(&format!("text \"{keys}\"")))
 }
 
 /// ⌘ held alone shows the sidebar's ⌘1–9 hints at once, kept through the
@@ -596,6 +463,26 @@ fn jump_hints_follow_command_held_alone() {
     w.app.frames(5);
     hold(&mut w, true, false);
     assert!(!hints(&mut w), "none over the palette");
+    hold(&mut w, false, false);
+}
+
+/// The other of Command and Control (Control on macOS; Super, `meta`,
+/// elsewhere) is no ⌘: held alone it shows no hints, and held with ⌘ it
+/// hides them, as ⇧ does.
+#[test]
+fn jump_hints_want_the_platforms_command_not_the_other() {
+    let mut w = mount();
+    let mac = cfg!(target_os = "macos");
+    let other = zgx::input::Modifiers { control: mac, meta: !mac, ..Default::default() };
+    zgx::input::set_held_modifiers(&w.app.ui.runtime, other);
+    w.app.frames(2);
+    assert!(!hints(&mut w), "the other alone: none");
+    let both = zgx::input::Modifiers { control: true, meta: true, ..Default::default() };
+    zgx::input::set_held_modifiers(&w.app.ui.runtime, both);
+    w.app.frames(2);
+    assert!(!hints(&mut w), "with the other: not alone");
+    hold(&mut w, true, false);
+    assert!(hints(&mut w), "⌘ alone: shown");
     hold(&mut w, false, false);
 }
 

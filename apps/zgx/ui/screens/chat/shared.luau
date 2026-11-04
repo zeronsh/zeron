@@ -86,19 +86,20 @@ function M.show(key: string)
 	end
 	ui.batch(function()
 		local all = table.clone(kept:peek())
-		local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
-		if text ~= "" or #cargo > 0 then
-			all[was] = { text = text, cargo = cargo, quotes = quotes }
+		local text, cargo, quotes, chosen = M.text:peek(), M.cargo:peek(), M.quotes:peek(), M.chosen:peek()
+		if text ~= "" or #cargo > 0 or next(chosen) ~= nil then
+			all[was] = { text = text, cargo = cargo, quotes = quotes, chosen = chosen }
 		else
 			all[was] = nil
 		end
-		local next = all[key]
+		local now = all[key]
 		all[key] = nil
 		kept:set(all)
 		here:set(key)
-		M.text:set(if next then next.text else "")
-		M.cargo:set(if next then next.cargo else {})
-		M.quotes:set(if next then next.quotes else {})
+		M.text:set(if now then now.text else "")
+		M.cargo:set(if now then now.cargo else {})
+		M.quotes:set(if now and now.quotes then now.quotes else {})
+		M.chosen:set(if now and now.chosen then now.chosen else {})
 	end)
 end
 
@@ -291,6 +292,61 @@ function M.carrying_session(): boolean
 	return false
 end
 
+-- Files carried from outside end with a drop or with their leave. One lost
+-- on the way (the platform's drag ended elsewhere, or what the files were
+-- over went first) left the chat dimmed under "Drop to attach" for good,
+-- Escape and all. Any sign the drag is over lets go of them: Escape, the
+-- window losing focus, the pointer over the chat (none reaches a window
+-- while another app's drag is over it), or no word of them for a while. A
+-- sidebar session carried is the window's own drag, whose end is always
+-- heard: kept. True if files were let go of.
+function M.let_go(): boolean
+	local now = M.dropping:peek()
+	local next, any = {}, false
+	for zone, what in now do
+		if what == "session" then
+			next[zone] = what
+		else
+			any = true
+		end
+	end
+	if any then
+		M.dropping:set(next)
+	end
+	return any
+end
+
+-- No word of them for this long (each move from one part of the chat to
+-- another is one): let go. The pointer's word counts only once they've
+-- been over the chat a moment: a move it made just before the drag came
+-- can be heard after it.
+local STALE_MS = 8000
+local SETTLE_MS = 300
+local settled = false
+ui.effect(function()
+	settled = false
+	if M.carrying() then
+		ui.after(SETTLE_MS, function()
+			settled = true
+		end)
+		ui.after(STALE_MS, function()
+			M.let_go()
+		end)
+	end
+end)
+ui.effect(function()
+	if ui.window.active:get() == false then
+		M.let_go()
+	end
+end)
+
+-- The pointer over the chat again: no drag from outside is under way.
+function M.pointer_back()
+	if settled then
+		M.let_go()
+	end
+end
+
 -- Another chat mentioned (a sidebar session dropped on the chat): a chip,
 -- sent as Zeron's chat mention (screens/chat/chat_links). Once each.
 function M.mention_chat(id: string)
@@ -345,6 +401,11 @@ function M.drop_zone(zone: string): { [string]: any }
 		end,
 		on_drag_leave = function()
 			M.over(zone, false)
+		end,
+		on_hover = function(inside: boolean)
+			if inside then
+				M.pointer_back()
+			end
 		end,
 		on_drop = function(payload: any)
 			M.dropping:set({})
@@ -480,6 +541,64 @@ function M.remove_cargo(id: string)
 		end
 	end
 	M.cargo:set(M.renumber(left))
+end
+
+-- Chat `key`'s draft, wherever it is: out in the composer while it shows
+-- that chat, else kept for it: its words, its chips and the options picked
+-- in a question it's asked. What shows a chat's draft by its id (a split
+-- pane's composer) reads it here, never the chat shown's; `show` moves a
+-- draft between the two in one batch, so it's never read half moved.
+function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [string]: boolean } }
+	if here:get() == key then
+		return { text = M.text:get(), cargo = M.cargo:get(), chosen = M.chosen:get() }
+	end
+	local d = kept:get()[key]
+	return {
+		text = if d and type(d.text) == "string" then d.text else "",
+		cargo = if d and type(d.cargo) == "table" then d.cargo else {},
+		chosen = if d and type(d.chosen) == "table" then d.chosen else {},
+	}
+end
+
+-- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
+-- or "chosen"): written wherever it is, as `draft_of` reads it.
+function M.set_draft_of(key: string, field: string, value: any)
+	if here:peek() == key then
+		if field == "text" then
+			M.text:set(value)
+		else
+			M.chosen:set(value)
+		end
+		return
+	end
+	local all = table.clone(kept:peek())
+	local d = table.clone(all[key] or { text = "", cargo = {}, quotes = {} })
+	d[field] = value
+	all[key] = d
+	kept:set(all)
+end
+
+-- A chip taken off chat `key`'s draft, wherever the draft is.
+function M.remove_cargo_of(key: string, id: string)
+	if here:peek() == key then
+		M.remove_cargo(id)
+		return
+	end
+	local all = table.clone(kept:peek())
+	local d = all[key]
+	if not d then
+		return
+	end
+	d = table.clone(d)
+	local left = {}
+	for _, item in d.cargo or {} do
+		if item.id ~= id then
+			table.insert(left, item)
+		end
+	end
+	d.cargo = M.renumber(left)
+	all[key] = d
+	kept:set(all)
 end
 
 -- The page's picks numbered 1, 2, 3… in the order made, no gap where one

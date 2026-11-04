@@ -225,7 +225,7 @@
       "zoom_in": "放大",
       "zoom_out": "缩小",
       "fit_or_actual": "适合窗口或实际大小",
-      "fit_or_actual_tip": "适合窗口 ⌘0 · 实际大小 ⌘1",
+      "fit_or_actual_tip": "适合窗口 {fit} · 实际大小 {actual}",
       "preview_or_source": "预览或源代码",
       "show": "显示",
       "preview": "预览",
@@ -453,6 +453,7 @@
       "devices": "设备",
       "sessions": "会话",
       "new_chat_in": "在 {name} 中新建对话",
+      "new_chat_in_on": "在 {device} 上的 {name} 中新建对话",
       "new_chat": "新建对话",
       "search": "搜索",
       "pinned": "已置顶",
@@ -489,11 +490,14 @@
         "create_section": "创建分区",
         "keep_active": "折叠时显示活跃会话",
         "devices_first": "设备优先",
-        "projects_first": "项目优先"
+        "projects_first": "项目优先",
+        "empty_projects": "空项目"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
-      "show_less": "显示更少"
+      "show_less": "显示更少",
+      "empty_projects_word": "空项目",
+      "empty_projects": "{n, plural, other {# 个空项目}}"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -673,7 +677,15 @@
       "show_full": "{what, select, diff {显示完整差异} other {显示完整输出}}",
       "show_full_size": "{what, select, diff {显示完整差异（{size}）} other {显示完整输出（{size}）}}",
       "loading_full": "{what, select, diff {正在加载完整差异…} other {正在加载完整输出…}}",
-      "failed_full": "{what, select, diff {无法加载完整差异——点按以重试} other {无法加载完整输出——点按以重试}}"
+      "failed_full": "{what, select, diff {无法加载完整差异——点按以重试} other {无法加载完整输出——点按以重试}}",
+      "earlier_trimmed": "… 更早的输出已省略",
+      "exit_code": "退出码 {code}",
+      "loading_all_lines": "正在加载全部 {n} 行…",
+      "whole_offline": "运行此命令的设备已离线。等它重新上线后再试。",
+      "whole_update": "请在运行此命令的设备上更新 Zeron，以查看全部输出。",
+      "whole_unavailable": "此输出的其余部分未被保留。",
+      "whole_running": "此命令尚未完成。",
+      "whole_failed": "无法加载此输出的其余部分。请重试。"
     },
     "activity": {
       "phrase": {
@@ -746,7 +758,7 @@
     "comment": {
       "reply_placeholder": "回复…",
       "reply": "回复",
-      "send_hint": "按 ⌘↵ 发送",
+      "send_hint": "按 {key} 发送",
       "comment": "评论",
       "resolved": "已解决",
       "resolve": "标记为已解决",
@@ -791,7 +803,7 @@
       "send_now_hint": "立即发送，打断当前轮次",
       "steer_hint": "引导：在当前轮次中向智能体传话",
       "send_next_hint": "在下一轮发送",
-      "hint_last": "{what} · ⌘↵",
+      "hint_last": "{what} · {key}",
       "save_to_queue": "保存到队列",
       "cancel": "取消",
       "edit": "编辑",
@@ -1111,7 +1123,7 @@
       "default_browser": "默认浏览器",
       "send_with": {
         "enter": "Enter",
-        "mod_enter": "⌘ Enter"
+        "mod_enter": "{key}"
       },
       "pull_requests": {
         "native": "拉取请求视图",
@@ -1134,12 +1146,20 @@
       "pt": "{n} 磅",
       "pt_default": "{n} 磅（默认）",
       "scheme": {
-        "label": "主题",
+        "label": "模式",
         "terms": "配色方案 系统 浅色 深色 模式 color scheme system light dark mode",
         "description": "浅色、深色或跟随系统。",
         "system": "跟随系统",
         "light": "浅色",
         "dark": "深色"
+      },
+      "theme": {
+        "light": "浅色主题",
+        "dark": "深色主题",
+        "one": "主题",
+        "terms": "主题 配色 颜色 调色板 vscode",
+        "more": "全部主题",
+        "more_description": "浏览所有主题，或从 VS Code 导入。"
       },
       "accent": {
         "label": "强调色",
@@ -1303,7 +1323,7 @@
       "word_wrap": {
         "label": "自动换行",
         "terms": "自动换行 长行 编辑器 soft wrap long lines editor",
-        "description": "将长行折行以适应编辑器宽度。⌥Z 仍可切换单个文件的换行设置。"
+        "description": "将长行折行以适应编辑器宽度。{key} 仍可切换单个文件的换行设置。"
       },
       "show_all": {
         "label": "显示隐藏和已忽略的文件",
@@ -1746,33 +1766,10 @@
         "organization": "组织",
         "workspace": "工作区",
         "cloud": "Cloud",
+        "customize": "自定义",
         "plugins": "插件",
         "browser": "浏览器"
       }
-    },
-    "theme_library": {
-      "built_in": "内置",
-      "imported": "已导入",
-      "imported_toast": "{count, plural, =1 {已导入主题} other {已导入 # 个主题}}",
-      "imported_body": "在浅色主题或深色主题下选择。",
-      "skipped": "部分主题未能导入：{names}",
-      "choose_source": "选择主题来源",
-      "vscode_theme": "VS Code 主题",
-      "more_for": "{name}的更多选项",
-      "needs_look": "需要进一步检查。",
-      "dark": "深色",
-      "light": "浅色",
-      "rename": "重命名",
-      "remove": "移除",
-      "section": "已导入的主题",
-      "section_description": "VS Code 配色主题：主题的 .json 文件或扩展的 package.json 文件。",
-      "import": "导入主题",
-      "import_failed": "无法导入此主题",
-      "rename_title": "重命名主题",
-      "couldnt_rename": "无法重命名主题",
-      "name": "名称",
-      "remove_title": "移除此主题？",
-      "remove_body": "它将从你的图库中移除。使用此主题的地方将改用 Zeron 自带的主题。"
     },
     "store": {
       "says": {
@@ -2062,7 +2059,7 @@
       },
       "default_zoom": {
         "label": "页面缩放",
-        "description": "用 ⌘+ 和 ⌘− 缩放某个网站，即可为它保留单独的缩放。",
+        "description": "用 {zoom_in} 和 {zoom_out} 缩放某个网站，即可为它保留单独的缩放。",
         "terms": "缩放 文字大小 放大 zoom"
       },
       "site_zoom": {
@@ -2288,7 +2285,7 @@
       "hide_details": "隐藏会话详情",
       "show_details": "显示会话详情",
       "panel": "面板",
-      "panel_tooltip": "面板  ⌘R"
+      "panel_tooltip": "面板  {key}"
     },
     "page": {
       "plugin": "插件",
@@ -2316,7 +2313,9 @@
         "shell_palette": "搜索",
         "shell_settings": "设置",
         "shell_find": "查找",
-        "shell_close": "关闭"
+        "shell_close": "关闭",
+        "shell_reload": "重新启动 Zeron",
+        "shell_reload_interface": "重新加载界面"
       },
       "group": {
         "sessions": "会话",
@@ -2340,9 +2339,11 @@
         "light": "浅色",
         "dark": "深色"
       },
-      "theme": "主题",
+      "theme": "模式",
       "use_template": "使用模板：{name}",
       "templates": "模板",
+      "use_theme": "使用主题：{name}",
+      "themes": "主题",
       "use": "使用",
       "recent_files": "最近使用的文件",
       "files": "文件",
@@ -2356,7 +2357,10 @@
       "settings_page": "设置：{title}",
       "go_to": "前往",
       "frosted_glass": "磨砂玻璃",
-      "search": "搜索会话、命令和文件…"
+      "search": "搜索会话、命令和文件…",
+      "app": "应用",
+      "reload_zeron": "重新启动 Zeron",
+      "reload_interface": "重新加载界面"
     },
     "add_project": {
       "something_went_wrong": "出错了",
@@ -2863,6 +2867,7 @@
       "port_open_external": "在默认浏览器中打开",
       "port_copy": "复制网址",
       "port_copied": "网址已复制",
+      "port_closed": "已关闭",
       "previews_unavailable": "本地预览暂时不可用"
     }
   },
@@ -2876,8 +2881,7 @@
     "comment": {
       "placeholder": "添加评论",
       "submit": "评论",
-      "you": "你",
-      "pending": "待发送"
+      "you": "你"
     },
     "unreachable": {
       "title": "无法连接到这些文件",
@@ -3026,7 +3030,7 @@
         },
         "notifications": {
           "title": "向你发送通知",
-          "detail": "以 Zeron 的名义发送，可在“设置”→“通知”中管理。"
+          "detail": "与其他通知一样，可在“设置”→“通知”中管理。"
         },
         "links_open": {
           "title": "打开链接",
@@ -3253,18 +3257,18 @@
       "review": "查看",
       "template_waiting_body": "来自其他人的模板。",
       "failed": "{name}已停止运行",
-      "failed_body": "更新或编辑插件前，Zeron 将继续运行但不使用它。",
+      "failed_body": "在插件更新或修复前，Zeron 会在不使用它的情况下继续运行。",
       "show_folder": "显示文件夹",
       "template_failed": "你的模板中的 {name} 有错误",
-      "template_failed_body": "修复并保存模板前，将显示 Zeron 自带界面。",
+      "template_failed_body": "修复并保存前，这部分将显示默认界面。",
       "template_broken": "{name}无法运行",
-      "template_broken_body": "修复并保存模板前，将显示 Zeron 自带界面。"
+      "template_broken_body": "修复并保存模板前，将显示默认界面。"
     }
   },
   "templates": {
     "page": {
       "title": "模板",
-      "description": "Zeron 可以运行的完整界面。模板未包含的部分使用 Zeron 自带界面。",
+      "description": "Zeron 的完整界面。模板未包含的部分使用默认界面。",
       "search": "搜索模板",
       "tabs": "模板",
       "installed": "已安装",
@@ -3277,8 +3281,8 @@
         "named": "由 {name} 制作"
       },
       "about": {
-        "broken": "无法运行，已显示 Zeron 自带界面：{error}",
-        "errors": "部分内容回退到 Zeron 自带界面：{error}",
+        "broken": "无法运行，已显示默认界面：{error}",
+        "errors": "部分内容显示默认界面：{error}",
         "out_of_date": "为 Zeron {version} 制作。此后 Zeron 已更新。",
         "out_of_date_unversioned": "为较早版本的 Zeron 制作。此后 Zeron 已更新。",
         "no_description": "无描述。"
@@ -3303,13 +3307,13 @@
       "couldnt_use": "无法使用 {name}",
       "in_use": "使用中",
       "none_yours": "你还没有模板",
-      "none_body": "请智能体创建一个，或从 Zeron 模板的副本开始。",
+      "none_body": "请智能体创建一个，或从默认界面的副本开始。",
       "show_templates_folder": "显示模板文件夹",
       "delete_title": "删除此模板？",
-      "delete_body": "模板会移到模板文件夹的已移除项目中，以便日后恢复。如果正在使用，Zeron 自带模板会取而代之。",
+      "delete_body": "模板会保留在模板文件夹中，以便日后恢复。如果正在使用，Zeron 会切换到默认界面。",
       "couldnt_delete": "无法删除模板",
       "new_title": "新建模板",
-      "new_body": "这是 Zeron 自带界面的副本，你可以自行更改。请智能体修改，或自行编辑其文件。",
+      "new_body": "默认界面的副本，供你修改。请智能体修改，或自行编辑其文件。",
       "make_it": "创建",
       "couldnt_make": "无法创建模板",
       "name": "名称",
@@ -3346,18 +3350,71 @@
       "keep_files_detail": "如果它们再次改动，Zeron 会再次询问。",
       "keep": "保留",
       "trust": "仅在信任{whom}时安装",
-      "trust_body": "模板是 Zeron 自身的代码：它会替换 Zeron 的界面，并拥有 Zeron 的全部能力，可访问你的对话、文件、账户和智能体。",
+      "trust_body": "模板作为 Zeron 的一部分运行：它会替换 Zeron 的界面，并能做 Zeron 能做的一切，可访问你的对话、文件、账户和智能体。",
       "unknown_body": "Zeron 无法确定签名所用密钥的所有者。仅在信任来源时安装。",
       "signature": "签名有效",
       "signature_detail": "自使用密钥 {key} 签名后，内容未发生更改。",
       "files": "{n, plural, other {# 个文件}}",
       "files_made_for": "{n, plural, other {# 个文件}} · 为 Zeron {version} 制作",
       "left_out": "{n, plural, other {# 个文件未包含}}",
-      "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自带文件：{files}",
+      "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自己的版本：{files}",
       "not_now": "暂不",
       "install": "安装",
       "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",
       "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。"
+    }
+  },
+  "themes": {
+    "page": {
+      "title": "主题",
+      "description": "Zeron 的配色。你的主题可与任何模板搭配使用。",
+      "search": "搜索主题",
+      "tabs": "主题",
+      "all": "全部",
+      "builtin": "内置",
+      "from_templates": "来自模板",
+      "yours": "你的",
+      "import": "导入主题",
+      "hint": "主题只包含配色，因此适用于任何模板，也不能做其他事情。",
+      "about": {
+        "default": "默认主题，浅色和深色",
+        "both": "浅色和深色",
+        "light": "仅浅色",
+        "dark": "仅深色"
+      },
+      "byline": {
+        "builtin": "内置",
+        "template": "来自 {name}",
+        "imported": "已导入"
+      },
+      "needs_fixing": "此主题有需要修复的地方。",
+      "in_use": "使用中",
+      "for_light": "浅色",
+      "for_dark": "深色",
+      "use": "使用",
+      "couldnt_use": "无法使用此主题",
+      "use_light": "仅用于浅色",
+      "use_dark": "仅用于深色",
+      "show_template": "在“模板”中显示",
+      "more_for": "{name} 的更多选项",
+      "rename": "重命名",
+      "remove": "移除",
+      "rename_title": "重命名主题",
+      "couldnt_rename": "无法重命名主题",
+      "name": "名称",
+      "remove_title": "要移除此主题吗？",
+      "remove_body": "它将从“你的”中移除。使用此主题的地方将恢复为默认主题。",
+      "none_yours": "还没有你的主题",
+      "none_yours_body": "导入 VS Code 配色主题：主题的 .json 文件或扩展的文件夹。也可以将其拖放到此页面。",
+      "none_templates": "没有模板带有主题",
+      "none_templates_body": "当模板带有自己的配色时，会显示在这里，可与任何模板搭配使用。",
+      "choose_source": "选择主题",
+      "vscode_theme": "VS Code 主题",
+      "drop": "拖放以导入",
+      "import_failed": "无法导入此主题",
+      "skipped": "部分主题未能导入：{names}",
+      "imported_toast": "{count, plural, one {已导入主题} other {已导入 # 个主题}}",
+      "imported_body": "它在“你的”中。"
     }
   }
 }

@@ -39,6 +39,7 @@ local MenuAt = require("@ds/menu_at")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
 local keys = require("@app/screens/shell/keys")
+local host = require("@app/screens/settings/host")
 -- (The look chosen, applied as it loads.)
 local appearance = require("@app/screens/shell/appearance")
 local motion = require("@ds/motion")
@@ -143,10 +144,21 @@ return function(): Node
 	-- × closes it: a file with changes, a busy terminal, ask first). Else
 	-- the window, as Zeron's closes it, and with it the app: what's kept is
 	-- saved as it closes (src/main.rs), the engine and its terminals go on.
+	-- (In a split, else the pane in front: the focused chat out of it, its
+	-- neighbour focused, the last left alone. A chat alone closes the
+	-- window, as it always has.)
 	runs["shell.close"] = function()
 		local panel: any = boundary.load("@app/screens/panel")
 		if panel and panel.close_focused_tab and (panel.close_focused_tab :: any)() then
 			return
+		end
+		if route.current:peek().name == "session" then
+			local splits: any = boundary.load("@app/screens/shell/split")
+			local focused = if splits then splits.focused:peek() else nil
+			if splits and focused and splits.shown:peek() ~= nil then
+				splits.close(focused)
+				return
+			end
 		end
 		ui.invoke("close")
 	end
@@ -264,6 +276,16 @@ return function(): Node
 				add.open()
 			end
 		end
+	end
+	-- Reload Zeron: the app quits and starts again, the same launch, its
+	-- engine left running (src/relaunch.rs). Reload interface: every script
+	-- evaluated again in place, as a save does (src/main.rs `serve`).
+	-- (Through settings' host calls, which a fixture answers.)
+	runs["shell.reload"] = function()
+		host.invoke("app.relaunch")
+	end
+	runs["shell.reload_interface"] = function()
+		host.invoke("app.reload_interface")
 	end
 	runs["shell.pin"] = function()
 		local s = route.current:peek().session
@@ -402,14 +424,28 @@ return function(): Node
 		-- bubble here from whatever has focus, too.
 		on_key = function(e): boolean
 			-- Any key down while ⌘ is held: the sidebar's hints go (⌘C), but
-			-- for the ⌘1–9 they offer.
+			-- for the ⌘1–9 they offer. (`cmd` is Ctrl or Command, as the
+			-- platform has it: both down, the other is held too.)
 			local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 			if sidebar and sidebar.key_pressed then
-				sidebar.key_pressed(string.match(e.key, "^[1-9]$") ~= nil and not (e.shift or e.alt or e.ctrl))
+				sidebar.key_pressed(string.match(e.key, "^[1-9]$") ~= nil and not (e.shift or e.alt or (e.ctrl and e.meta)))
 			end
 			if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
 				local store: any = boundary.load("@app/screens/chat/store")
 				return store ~= nil and store.escape ~= nil and (store.escape :: any)() == true
+			end
+			-- A bare I nothing took, with no text field holding the keyboard,
+			-- on a chat or a new one: into the composer, as vim's insert
+			-- (Escape there gives the keyboard back: ds/composer).
+			if e.key == "i" and not (e.editing or e.shift or e.cmd or e.alt or e.ctrl or e.meta or e["repeat"]) then
+				local name = route.current:peek().name
+				if name == "session" or name == "home" then
+					local shared: any = boundary.load("@app/screens/chat/shared")
+					if shared and shared.focus then
+						shared.focus:add(1)
+						return true
+					end
+				end
 			end
 			-- A bare letter nothing took, with no text field holding the
 			-- keyboard: the panel home's (B, F, T…), while it shows.
@@ -471,12 +507,17 @@ return function(): Node
 		-- window beside the row, one surface of the menus' glass blurring
 		-- what's under it. (Not zgx's tooltip, whose popup frames it again
 		-- and blurs nothing.)
+		-- (An anchor at the window's corner, no box of its own: a layer the
+		-- window's size, even one passing the pointer through, stands in
+		-- front of everything for the pointer's cursor, and no resize edge
+		-- or button showed its own.)
 		ui.div {
 			absolute = true,
 			left = 0,
 			top = 0,
-			right = 0,
-			bottom = 0,
+			w = 0,
+			h = 0,
+			overflow = "visible",
 			pointer_events = "none",
 			hidden = in_settings,
 			ui.presence(function(): string

@@ -144,7 +144,7 @@ return function(props: Props): Node
 			-- the right), narrowing as the panel closes, as the left one does.
 			ds.IconButton {
 				label = ui.t("shell.title_bar.panel"),
-				tooltip = locale.s("shell.title_bar.panel_tooltip"),
+				tooltip = locale.s("shell.title_bar.panel_tooltip", { key = ui.shortcut_text("cmd+r") }),
 				tooltip_side = "bottom",
 				w = size,
 				h = size,
