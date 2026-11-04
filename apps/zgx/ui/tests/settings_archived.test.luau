@@ -55,8 +55,17 @@ test("sessions group by when they last moved, today first", function()
 	expect(app:has(`{PAGE} >> "Today" >> "Port the sidebar fold"`)).to_be(true)
 	expect(app:has(`{PAGE} >> "Yesterday" >> "Investigate memory spike"`)).to_be(true)
 	expect(app:has(`{PAGE} >> "This week" >> "Cloud machine warmup"`)).to_be(true)
+	-- (It stands far down the page: only what the page shows is built.)
+	local y = 0
+	while y < 3000 and not app:has(`{PAGE} >> "Earlier" >> "Audit the icon set"`) do
+		y += 300
+		app:set_state("shell_settings_scroll", y)
+		app:frames(5)
+	end
 	expect(app:has(`{PAGE} >> "Earlier" >> "Audit the icon set"`)).to_be(true)
 	expect(app:has(`{PAGE} >> "Today" >> "Audit the icon set"`)).to_be(false)
+	app:set_state("shell_settings_scroll", 0)
+	app:frames(10)
 	-- Where each ran: its project and computer; a Cloud machine's unnamed.
 	expect(app:has(`{PAGE} >> "Atlas · MacBook Pro"`)).to_be(true)
 	expect(app:has(`{PAGE} >> "Borealis · devbox"`)).to_be(true)
@@ -206,6 +215,101 @@ test("past fifty, Show more shows the rest", function()
 	app:frames(30)
 	expect(app:has(row("Old 30"))).to_be(true)
 	expect(app:has("#archived-more")).to_be(false)
+end)
+
+-- The rows of `Chat <n>` built now, top to bottom: each's number and box.
+local function chats(app: any): { { n: number, y: number, h: number, w: number, x: number } }
+	local out = {}
+	for l in app:tree(PAGE):gmatch("[^\n]+") do
+		local n, x, y, w, h = l:match('^%s*@%d+ "Chat (%d+)" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)')
+		-- (Not the search field's words, a line tall.)
+		if n and (tonumber(h) :: number) > 40 then
+			table.insert(out, { n = tonumber(n) :: number, x = tonumber(x) :: number, y = tonumber(y) :: number, w = tonumber(w) :: number, h = tonumber(h) :: number })
+		end
+	end
+	return out
+end
+
+-- Rows next to each other stand a row and its hairline apart: the heights
+-- the list was told are what the rows lay out to.
+local function in_step(rows: { any }, what: string)
+	for i = 2, #rows do
+		local a, b = rows[i - 1], rows[i]
+		if b.n == a.n + 1 then
+			expect(`{what}: Chat {b.n} {b.y - a.y}`).to_be(`{what}: Chat {b.n} {a.h + 1}`)
+		end
+	end
+end
+
+local function thousands(): any
+	local app = open()
+	app:command("archive_thousands")
+	app:frames(30)
+	-- (All of them shown, past Show more.)
+	app:set_state("settings_archived_shown", 5000)
+	app:frames(30)
+	return app
+end
+
+test("thousands archived: only the rows the page shows are built, to the very last", function()
+	local app = thousands()
+	expect(app:has(`{PAGE} >> "2037 sessions, hidden from the sidebar until restored."`)).to_be(true)
+	-- Down the page by the state and by the wheel: never more than a window's.
+	local most = 0
+	local y = 2000
+	while y < 130000 do
+		app:set_state("shell_settings_scroll", y)
+		app:frames(3)
+		local rows = chats(app)
+		expect(#rows > 0).to_be(true)
+		most = math.max(most, #rows)
+		in_step(rows, `at {y}`)
+		y += 4001
+	end
+	for _ = 1, 20 do
+		app:scroll(PAGE, 600)
+		app:frames(2)
+		most = math.max(most, #chats(app))
+	end
+	expect(most < 30).to_be(true)
+	-- The very last, and it can be reached and restored.
+	app:set_state("shell_settings_scroll", 200000)
+	app:frames(10)
+	expect(app:has(row("Chat 2000"))).to_be(true)
+	expect(#chats(app) < 30).to_be(true)
+	app:hover(row("Chat 2000"))
+	app:frames(5)
+	app:click(`{row("Chat 2000")} >> role:button "Restore to sidebar"`)
+	app:frames(10)
+	expect(calls(app)).to_contain("unarchive:many2000")
+	expect(app:has(row("Chat 2000"))).to_be(false)
+	expect(app:has(row("Chat 1999"))).to_be(true)
+end)
+
+test("the search finds a row far down the thousands, and only it is built", function()
+	local app = thousands()
+	app:type(`{PAGE} >> role:textbox "Search archived sessions"`, "Chat 1234")
+	app:frames(30)
+	expect(app:has(row("Chat 1234"))).to_be(true)
+	expect(#chats(app)).to_be(1)
+	expect(app:has(row("Chat 1"))).to_be(false)
+end)
+
+test("a row's height is what the list was told, at every text size, with a line under its name or none", function()
+	local app = thousands()
+	-- (Each seventh has nothing under its name.)
+	app:set_state("shell_settings_scroll", 6000)
+	app:frames(10)
+	local at_13 = chats(app)
+	in_step(at_13, "13 pt")
+	expect(#at_13 > 7).to_be(true)
+	for _, size in { 12, 14, 16 } do
+		app:set_state("text_size", size)
+		app:frames(20)
+		in_step(chats(app), `{size} pt`)
+	end
+	-- Larger type, taller rows.
+	expect(chats(app)[1].h > at_13[1].h).to_be(true)
 end)
 
 test("the header's words and the groups' names sit on the cards' text edge", function()

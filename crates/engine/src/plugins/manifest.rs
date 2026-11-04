@@ -47,7 +47,7 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
 /// Ids the app keeps for itself.
 pub const RESERVED_IDS: &[&str] = &["templates", "zeron", "app"];
 
-pub const RESERVED_ID_ERROR: &str = "That name is Zeron's own";
+pub const RESERVED_ID_ERROR: &str = "Zeron already uses that name";
 
 /// `^[a-z0-9][a-z0-9-]{1,39}$`, and not one of [`RESERVED_IDS`].
 pub fn check_id(id: &str) -> Result<(), String> {
@@ -71,10 +71,7 @@ pub fn check_id(id: &str) -> Result<(), String> {
 /// A program a manifest may name to run (`commands`): its name alone, as
 /// it's found on the PATH, never a path (`gh`, `git`, `node`, `python3`).
 pub fn valid_command(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    (1..=64).contains(&bytes.len())
-        && bytes[0].is_ascii_alphanumeric()
-        && bytes.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+    zeron_plugin_guard::commands::valid_name(name)
 }
 
 /// A service's file: a relative `.luau` path inside the plugin, without
@@ -88,7 +85,59 @@ pub fn valid_service_path(path: &str) -> bool {
             .all(|part| !part.is_empty() && !part.starts_with('.'))
 }
 
-/// `^[a-z][a-z0-9_]{0,40}$`.
+/// What's wrong with a `ui.change` entry, if anything. An entry names an
+/// element of Zeron's by selector, as zgx matches plugin targets: `#id`,
+/// `.class`, `hook:name`, `role:name`, `"name"` or a bare id, with `>>`
+/// between ancestors. It never names a module (`@app/…`: zgx would let
+/// the plugin run as the app), everything (`*`), a node's number, row or
+/// nth match, or Zeron's plugin placeholders (`.plugin-…`, each plugin's
+/// own through "panel.tabs" and "pages.add" alone).
+pub fn change_target_problem(target: &str) -> Option<String> {
+    let refuse = |why: &str| Some(format!("It can't change \"{target}\": {why}"));
+    if target.len() > 200 || target.chars().any(char::is_control) {
+        return refuse("a selector is one short line");
+    }
+    if target.trim_start().starts_with('@') {
+        return refuse("\"ui.change\" names parts of the screen, not modules (that's \"ui.replace\")");
+    }
+    for piece in target.split(">>") {
+        let mut rest = piece.trim();
+        if rest.is_empty() {
+            return refuse("it isn't a selector (#id, .class, hook:name, role:name or \"name\")");
+        }
+        while !rest.is_empty() {
+            if let Some(after) = rest.strip_prefix('"') {
+                let Some(end) = after.find('"') else {
+                    return refuse("an unclosed quote");
+                };
+                rest = after[end + 1..].trim_start();
+                continue;
+            }
+            // As zgx reads a part: a class ends at the next `.`, the rest
+            // at whitespace (or a `[`, refused below).
+            let (class, prefix) = match rest {
+                r if r.starts_with('.') => (true, 1),
+                r if r.starts_with('#') => (false, 1),
+                r if r.starts_with("hook:") || r.starts_with("role:") => (false, 5),
+                _ => (false, 0),
+            };
+            let name_end = rest[prefix..]
+                .find(|c: char| c.is_whitespace() || (class && c == '.'))
+                .map_or(rest.len(), |at| at + prefix);
+            let name = &rest[prefix..name_end];
+            rest = rest[name_end..].trim_start();
+            if name.is_empty() || name.contains(['@', '*', '[', ']', '~', '"', '#']) || name == "row" {
+                return refuse("it isn't a selector (#id, .class, hook:name, role:name or \"name\")");
+            }
+            if class && name.starts_with("plugin-") {
+                return refuse("plugins' tabs, pages and badges are their own and Zeron's");
+            }
+        }
+    }
+    None
+}
+
+/// `^[a-z][a-z0-9_]{0,40}$`, without `__`.
 pub fn valid_tool_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     (1..=41).contains(&bytes.len())
@@ -96,6 +145,10 @@ pub fn valid_tool_name(name: &str) -> bool {
         && bytes[1..]
             .iter()
             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+        // (`__` is the plugin's and the tool's divide in `<plugin>__<tool>`:
+        // with none in a tool's name, and a tool's starting with a letter,
+        // each agent-facing name has one plugin and one tool. R29.)
+        && !name.contains("__")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -146,6 +199,10 @@ pub struct Manifest {
     pub commands: Vec<String>,
     /// Its service's file (`"service": "service.luau"`, with the permission).
     pub service: Option<String>,
+    /// The hosts its requests may reach (`"network": { "hosts": […] }`,
+    /// with the permission): none named, any public host; named, those
+    /// alone, a private one (`localhost:8080`) only so (plugin-guard's `net`).
+    pub network_hosts: Vec<String>,
     /// `None` when absent; `Some(Err)` when present but malformed.
     pub signature: Option<Result<SignatureSpec, ()>>,
     /// The first thing wrong with it, in plain words.
@@ -326,6 +383,19 @@ impl Manifest {
                 None
             }
         };
+        let network_hosts = match object.get("network") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::Object(network)) => {
+                string_list(network.get("hosts"), "network.hosts").unwrap_or_else(|e| {
+                    problems.push(e);
+                    Vec::new()
+                })
+            }
+            Some(_) => {
+                problems.push("Its \"network\" must be an object (\"hosts\": [\"api.example.com\"])".into());
+                Vec::new()
+            }
+        };
         let signature = object.get("signature").map(parse_signature);
         let mut manifest = Manifest {
             raw: raw.clone(),
@@ -341,6 +411,7 @@ impl Manifest {
             mcp,
             commands,
             service,
+            network_hosts,
             signature,
             problem: None,
         };
@@ -360,6 +431,12 @@ impl Manifest {
             ));
         }
         let asks = |p: &str| self.permissions.iter().any(|have| have == p);
+        if !self.network_hosts.is_empty() && !asks("network") {
+            return Some("It names hosts to reach but doesn't ask for \"network\"".into());
+        }
+        if let Err(problem) = zeron_plugin_guard::net::Policy::new(&self.network_hosts) {
+            return Some(problem);
+        }
         if !self.tools.is_empty() && !asks("tools") {
             return Some("It lists tools but doesn't ask for the \"tools\" permission".into());
         }
@@ -393,6 +470,9 @@ impl Manifest {
         }
         if !self.ui.change.is_empty() && !asks("ui.change") {
             return Some("It changes parts of Zeron but doesn't ask for \"ui.change\"".into());
+        }
+        if let Some(problem) = self.ui.change.iter().find_map(|t| change_target_problem(t)) {
+            return Some(problem);
         }
         if !self.ui.replace.is_empty() && !asks("ui.replace") {
             return Some("It replaces screens but doesn't ask for \"ui.replace\"".into());
@@ -479,6 +559,44 @@ mod tests {
         manifest
     }
 
+    /// R1: a "ui.change" entry naming a module (`@app/…`) would be a zgx
+    /// module override, the plugin running as the app.
+    #[test]
+    fn plugins_manifest_change_names_elements_never_modules() {
+        let change = |target: &str| {
+            let mut m = with("ui", serde_json::json!({ "change": [target] }));
+            m["permissions"] = serde_json::json!(["ui.change"]);
+            problem(m)
+        };
+        for good in [
+            "#chat-composer",
+            ".session-row",
+            "hook:sidebar.sessions",
+            "role:toolbar",
+            "\"Send\"",
+            "#sidebar >> .session-row",
+            "titlebar-actions",
+        ] {
+            assert_eq!(change(good), None, "{good}");
+        }
+        for bad in [
+            "@app/screens/plugins/state",
+            " @app/screens/shell/settings",
+            "@1",
+            "*",
+            "",
+            "#a >> ",
+            ".row[2]",
+            "~\"Allow\"",
+            "#x >> @app/screens/chat",
+            ".plugin-tab.plugin-github",
+            ".plugin-unverified",
+            "\"open",
+        ] {
+            assert!(change(bad).is_some(), "{bad:?}");
+        }
+    }
+
     #[test]
     fn plugins_manifest_minimal_is_fine() {
         assert_eq!(problem(base()), None);
@@ -541,5 +659,9 @@ mod tests {
         assert!(valid_tool_name("count_words"));
         assert!(!valid_tool_name("_x"));
         assert!(!valid_tool_name(&format!("a{}", "b".repeat(41))));
+        // R29: `<plugin>__<tool>` names one plugin's one tool. Before, plugin
+        // `a--b`'s tool `c` and plugin `a`'s tool `b__c` were both `a__b__c`.
+        assert!(!valid_tool_name("b__c"));
+        assert_ne!(crate::plugins::mcp_name("a--b", "c"), crate::plugins::mcp_name("a", "b_c"));
     }
 }

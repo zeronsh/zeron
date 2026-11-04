@@ -225,7 +225,7 @@
       "zoom_in": "Zoom In",
       "zoom_out": "Zoom Out",
       "fit_or_actual": "Fit or actual size",
-      "fit_or_actual_tip": "Fit ⌘0 · Actual size ⌘1",
+      "fit_or_actual_tip": "Fit {fit} · Actual size {actual}",
       "preview_or_source": "Preview or Source",
       "show": "Show",
       "preview": "Preview",
@@ -453,6 +453,7 @@
       "devices": "Devices",
       "sessions": "Sessions",
       "new_chat_in": "New chat in {name}",
+      "new_chat_in_on": "New chat in {name} on {device}",
       "new_chat": "New chat",
       "search": "Search",
       "pinned": "Pinned",
@@ -489,11 +490,14 @@
         "create_section": "Create section",
         "keep_active": "Active when collapsed",
         "devices_first": "Devices first",
-        "projects_first": "Projects first"
+        "projects_first": "Projects first",
+        "empty_projects": "Empty projects"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
-      "show_less": "Show less"
+      "show_less": "Show less",
+      "empty_projects_word": "Empty",
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
     },
     "git": {
       "pull_request": "Pull request",
@@ -673,7 +677,15 @@
       "show_full": "{what, select, diff {Show full diff} other {Show full output}}",
       "show_full_size": "{what, select, diff {Show full diff ({size})} other {Show full output ({size})}}",
       "loading_full": "{what, select, diff {Loading full diff…} other {Loading full output…}}",
-      "failed_full": "{what, select, diff {Couldn't load full diff — tap to retry} other {Couldn't load full output — tap to retry}}"
+      "failed_full": "{what, select, diff {Couldn't load full diff — tap to retry} other {Couldn't load full output — tap to retry}}",
+      "earlier_trimmed": "… earlier output trimmed",
+      "exit_code": "Exit code {code}",
+      "loading_all_lines": "Loading all {n} lines…",
+      "whole_offline": "The device that ran this command is offline. Try again when it's back.",
+      "whole_update": "Update Zeron on the device that ran this command to see all of its output.",
+      "whole_unavailable": "The rest of this output wasn't kept.",
+      "whole_running": "This command hasn't finished yet.",
+      "whole_failed": "Couldn't load the rest of this output. Try again."
     },
     "activity": {
       "phrase": {
@@ -746,7 +758,7 @@
     "comment": {
       "reply_placeholder": "Reply…",
       "reply": "Reply",
-      "send_hint": "⌘↵ to send",
+      "send_hint": "{key} to send",
       "comment": "Comment",
       "resolved": "Resolved",
       "resolve": "Resolve",
@@ -778,7 +790,8 @@
       "show_fewer": "Show fewer attachments",
       "show_more": "Show {n} more attachments",
       "show_less": "Show less",
-      "more": "+{n} more"
+      "more": "+{n} more",
+      "comment_from": "From {plugin}"
     },
     "composer_dock": {
       "fold": "Fold {title}",
@@ -790,7 +803,7 @@
       "send_now_hint": "Send now, interrupting the turn",
       "steer_hint": "Steer: a word to the agent mid-turn",
       "send_next_hint": "Send at the next turn",
-      "hint_last": "{what} · ⌘↵",
+      "hint_last": "{what} · {key}",
       "save_to_queue": "Save to queue",
       "cancel": "Cancel",
       "edit": "Edit",
@@ -1027,7 +1040,7 @@
       "language": {
         "label": "Language",
         "terms": "language locale translation chinese english 中文 简体 语言",
-        "system": "Follows your Mac's preferred language.",
+        "system": "Follows your computer's preferred language.",
         "chosen": "The menu bar changes the next time Zeron opens."
       },
       "title": "General",
@@ -1081,7 +1094,7 @@
         "model": "A small model keeps titles fast and cheap."
       },
       "git": "Git",
-      "git_description": "On this Mac.",
+      "git_description": "On this computer.",
       "worktrees": {
         "label": "Custom worktree location",
         "terms": "folder directory path checkout branches",
@@ -1100,8 +1113,8 @@
       }
     },
     "engine": {
-      "outdated": "Update Zeron on this Mac to change this.",
-      "offline": "Zeron isn't running on this Mac.",
+      "outdated": "Update Zeron on this computer to change this.",
+      "offline": "Zeron isn't running on this computer.",
       "couldnt_save": "Couldn't save that"
     },
     "prefs": {
@@ -1110,7 +1123,7 @@
       "default_browser": "Default browser",
       "send_with": {
         "enter": "Enter",
-        "mod_enter": "⌘ Enter"
+        "mod_enter": "{key}"
       },
       "pull_requests": {
         "native": "Pull request view",
@@ -1125,7 +1138,7 @@
     "appearance": {
       "title": "Appearance",
       "terms": "theme look colors",
-      "description": "How Zeron looks on this Mac.",
+      "description": "How Zeron looks on this computer.",
       "motion": "Motion",
       "fonts": "Fonts and layout",
       "new_chat": "New chat",
@@ -1133,12 +1146,20 @@
       "pt": "{n} pt",
       "pt_default": "{n} pt (default)",
       "scheme": {
-        "label": "Theme",
+        "label": "Mode",
         "terms": "color scheme system light dark mode",
         "description": "Light, dark, or as the system is.",
         "system": "System",
         "light": "Light",
         "dark": "Dark"
+      },
+      "theme": {
+        "light": "Light theme",
+        "dark": "Dark theme",
+        "one": "Theme",
+        "terms": "theme colors colours palette vscode dracula",
+        "more": "All themes",
+        "more_description": "Browse every theme, or import one from VS Code."
       },
       "accent": {
         "label": "Accent color",
@@ -1147,8 +1168,8 @@
       "reduce_motion": {
         "label": "Reduce motion",
         "terms": "animation accessibility movement fade spring",
-        "system_on": "On while your Mac's Reduce motion is on: moves land at once and fades stay short.",
-        "description": "Moves land at once and fades stay short. On whenever your Mac's Reduce motion is on."
+        "system_on": "On while your computer's Reduce motion is on: moves land at once and fades stay short.",
+        "description": "Moves land at once and fades stay short. On whenever your computer's Reduce motion is on."
       },
       "glass": {
         "label": "Frosted glass",
@@ -1279,7 +1300,7 @@
         "name": "Errors and disconnections sound"
       },
       "unread": {
-        "title": "Couldn't read this Mac's notification settings",
+        "title": "Couldn't read this computer's notification settings",
         "body": "Banners follow what Zeron last saved. Try again in a moment."
       }
     },
@@ -1302,7 +1323,7 @@
       "word_wrap": {
         "label": "Word wrap",
         "terms": "soft wrap long lines editor",
-        "description": "Wrap long lines to the editor's width. ⌥Z still turns it for one file."
+        "description": "Wrap long lines to the editor's width. {key} still turns it for one file."
       },
       "show_all": {
         "label": "Show hidden and ignored files",
@@ -1417,7 +1438,7 @@
         "terms": "install add new",
         "description": "Install one and it appears above, ready to sign in."
       },
-      "this_mac": "this Mac",
+      "this_mac": "this computer",
       "couldnt_update": "Couldn't update {name}",
       "cant_reach": "Zeron can't reach {device}.",
       "try_later": "Try again in a moment.",
@@ -1549,7 +1570,7 @@
       "rename_name": "Rename {name}",
       "dialog": {
         "title": "Rename device",
-        "here": "This Mac, as your other devices list it.",
+        "here": "This computer, as your other devices list it.",
         "other": "As every one of your devices lists it.",
         "field": "Device name"
       }
@@ -1628,7 +1649,7 @@
       "version": {
         "label": "Version",
         "terms": "zeron engine version build about",
-        "description": "The engine on this Mac."
+        "description": "The engine on this computer."
       },
       "updates": {
         "label": "Check for updates",
@@ -1663,10 +1684,10 @@
         "updated_running": "The engine is running the new version.",
         "updated_starting": "The engine is starting again on it.",
         "unmanaged": "Update from the Zeron app",
-        "unmanaged_line": "This Mac's engine came with the Zeron app, which updates it: open Zeron and choose Check for Updates.",
+        "unmanaged_line": "This computer's engine came with the Zeron app, which updates it: open Zeron and choose Check for Updates.",
         "check_again": "Check again",
         "couldnt_check": "Couldn't check for updates",
-        "offline_line": "This Mac seems to be offline.",
+        "offline_line": "This computer seems to be offline.",
         "couldnt_update": "Couldn't update",
         "failed_line": "Something went wrong. Try again in a moment.",
         "not_connected": "Not connected to the engine",
@@ -1708,7 +1729,7 @@
         "description": "For a bug report: the versions and builds above.",
         "copied": "Version info copied"
       },
-      "updates_description": "Updates go to the engine on this Mac, as the Zeron app's do. This app isn't packaged yet, so it isn't updated here."
+      "updates_description": "Updates go to the engine on this computer, as the Zeron app's do. This app isn't packaged yet, so it isn't updated here."
     },
     "archived": {
       "title": "Archived",
@@ -1745,33 +1766,10 @@
         "organization": "Organization",
         "workspace": "Workspace",
         "cloud": "Cloud",
+        "customize": "Customize",
         "plugins": "Plugins",
         "browser": "Browser"
       }
-    },
-    "theme_library": {
-      "built_in": "Built in",
-      "imported": "Imported",
-      "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
-      "imported_body": "Choose it under Light theme or Dark theme.",
-      "skipped": "Some of its themes didn't import: {names}",
-      "choose_source": "Choose Theme Source",
-      "vscode_theme": "VS Code theme",
-      "more_for": "More for {name}",
-      "needs_look": "It needs another look.",
-      "dark": "Dark",
-      "light": "Light",
-      "rename": "Rename",
-      "remove": "Remove",
-      "section": "Imported themes",
-      "section_description": "VS Code colour themes: a theme's .json, or an extension's package.json.",
-      "import": "Import theme",
-      "import_failed": "This theme couldn't be imported",
-      "rename_title": "Rename theme",
-      "couldnt_rename": "Couldn't rename the theme",
-      "name": "Name",
-      "remove_title": "Remove this theme?",
-      "remove_body": "It's gone from your library. Where it's in use, Zeron's own takes its place."
     },
     "store": {
       "says": {
@@ -1780,7 +1778,10 @@
         "not_found": "That's already gone.",
         "invalid": "That doesn't look right.",
         "too_large": "That picture is too large. Try a smaller one.",
-        "last_admin": "You're the only admin of your organization. Make someone else an admin first."
+        "last_admin": "You're the only admin of your organization. Make someone else an admin first.",
+        "busy": "Someone in your organization is changing roles right now. Try again in a moment.",
+        "try_again": "Your account couldn't be deleted just now. Nothing was removed. Try again in a moment.",
+        "timed_out": "Signing in again took too long, so nothing was deleted. Try again."
       },
       "couldnt_save_name": "Couldn't save your name",
       "couldnt_rename_org": "Couldn't rename the organization",
@@ -1960,7 +1961,7 @@
         "label": "Signed in as",
         "terms": "email address mail account organization sync",
         "not_signed_in": "Not signed in",
-        "local": "Sessions stay on this Mac.",
+        "local": "Sessions stay on this computer.",
         "org": "In {org}. Your sessions sync across your devices.",
         "sync": "Your sessions sync across your devices."
       },
@@ -1979,9 +1980,9 @@
         "label": "Sign out",
         "terms": "log out logout leave account session",
         "busy": "Signing out…",
-        "description": "This Mac stops syncing until you sign in again.",
+        "description": "This computer stops syncing until you sign in again.",
         "confirm_title": "Sign out of Zeron?",
-        "confirm_body": "Your sessions stay in your account. On this Mac, setup opens again."
+        "confirm_body": "Your sessions stay in your account. On this computer, setup opens again."
       },
       "delete": {
         "label": "Delete account",
@@ -1990,8 +1991,12 @@
         "description": "Your account, its card and your place in your organization, for good.",
         "failed": "Couldn't delete your account",
         "confirm_title": "Delete your account?",
-        "confirm_body_org": "You'll leave {org} and be signed out everywhere. Your card's address is retired. This can't be undone.",
-        "confirm_body": "You'll be signed out everywhere. Your card's address is retired. This can't be undone."
+        "confirm_body_org": "You'll leave {org} and be signed out everywhere. Your card's address is retired. This can't be undone. You'll sign in again to confirm it's you.",
+        "confirm_body": "You'll be signed out everywhere. Your card's address is retired. This can't be undone. You'll sign in again to confirm it's you.",
+        "step_up": {
+          "title": "To delete your account, sign in again",
+          "body": "Finish signing in in your browser. Your account is deleted as soon as you have."
+        }
       },
       "claim": {
         "open": "Claim a username",
@@ -2012,11 +2017,29 @@
         "sessions": "Your sessions, everywhere",
         "sessions_description": "Pick up any chat on your phone or another computer.",
         "sign_in": "Sign in"
+      },
+      "keys": {
+        "label": "Signing keys",
+        "terms": "keys signing plugins templates security revoke fingerprint devices",
+        "description": "Your devices sign the plugins and templates you make with these. If you don't recognise a key, revoke it.",
+        "this_mac": "This computer",
+        "another_device": "Another device",
+        "new": "New",
+        "added": "Added {date}",
+        "revoked": "Revoked {date}",
+        "revoke": "Revoke",
+        "revoke_title": "Revoke this key?",
+        "revoke_body": "Plugins and templates it signed will stop counting as yours.",
+        "revoke_failed": "Couldn't revoke the key",
+        "none": "No signing keys yet.",
+        "none_how": "One is made when you sign a plugin.",
+        "failed": "Couldn't load your signing keys",
+        "retry": "Try again"
       }
     },
     "browser": {
       "title": "Browser",
-      "description": "Sites you sign into stay signed in on this Mac, separately for each account.",
+      "description": "Sites you sign into stay signed in on this computer, separately for each account.",
       "terms": "browser web page website links search engine home page zoom history cookies sign in inspector",
       "search_engine": {
         "label": "Search engine",
@@ -2036,7 +2059,7 @@
       },
       "default_zoom": {
         "label": "Page zoom",
-        "description": "Zoom a site with ⌘+ and ⌘− to keep its own.",
+        "description": "Zoom a site with {zoom_in} and {zoom_out} to keep its own.",
         "terms": "zoom text size scale magnify"
       },
       "site_zoom": {
@@ -2047,7 +2070,7 @@
       },
       "history": "History",
       "history_terms": "history visited pages recent",
-      "history_description": "Pages you’ve visited, kept on this Mac for your account.",
+      "history_description": "Pages you’ve visited, kept on this computer for your account.",
       "keep_history": {
         "label": "Keep history",
         "description": "So you can find a page again. Off, nothing new is kept.",
@@ -2221,9 +2244,9 @@
             "too_large": "That image is too large.",
             "open": "Couldn't open that image. Choose a PNG or JPEG.",
             "save": "Couldn't save the project. Try again.",
-            "save_outdated": "Zeron on this Mac needs an update to save project icons. Update it, then save again.",
+            "save_outdated": "Zeron on this computer needs an update to save project icons. Update it, then save again.",
             "save_gone": "This project was removed on another device.",
-            "save_offline": "Zeron on this Mac isn't responding. Try again in a moment."
+            "save_offline": "Zeron on this computer isn't responding. Try again in a moment."
           }
         }
       },
@@ -2262,7 +2285,7 @@
       "hide_details": "Hide session details",
       "show_details": "Show session details",
       "panel": "Panel",
-      "panel_tooltip": "Panel  ⌘R"
+      "panel_tooltip": "Panel  {key}"
     },
     "page": {
       "plugin": "Plugin",
@@ -2290,7 +2313,9 @@
         "shell_palette": "Search",
         "shell_settings": "Settings",
         "shell_find": "Find",
-        "shell_close": "Close"
+        "shell_close": "Close",
+        "shell_reload": "Reload Zeron",
+        "shell_reload_interface": "Reload interface"
       },
       "group": {
         "sessions": "Sessions",
@@ -2314,9 +2339,11 @@
         "light": "Light",
         "dark": "Dark"
       },
-      "theme": "Theme",
+      "theme": "Mode",
       "use_template": "Use template: {name}",
       "templates": "Templates",
+      "use_theme": "Use theme: {name}",
+      "themes": "Themes",
       "use": "Use",
       "recent_files": "Recent files",
       "files": "Files",
@@ -2330,7 +2357,13 @@
       "settings_page": "Settings: {title}",
       "go_to": "Go to",
       "frosted_glass": "Frosted glass",
-      "search": "Search sessions, commands and files…"
+      "search": "Search sessions, commands and files…",
+      "app": "App",
+      "reload_zeron": "Reload Zeron",
+      "reload_interface": "Reload interface",
+      "commands": "Commands",
+      "run": "Run",
+      "default_interface": "Use Zeron v3"
     },
     "add_project": {
       "something_went_wrong": "Something went wrong",
@@ -2389,6 +2422,7 @@
   },
   "onboarding": {
     "skip_for_now": "Skip for now",
+    "not_now": "Not now",
     "signin": {
       "title": "Welcome\nto Zeron",
       "lines": {
@@ -2421,7 +2455,7 @@
         "description": "Your chats and agents sync across all your devices."
       },
       "local": {
-        "label": "Chats stay on this Mac",
+        "label": "Chats stay on this computer",
         "description": "Sign in any time to sync them to your other devices."
       },
       "open_org": "Open {org}",
@@ -2488,11 +2522,11 @@
     "providers": {
       "title_install": "Install an agent",
       "title": "Your agents",
-      "looking": "Looking for coding agents on this Mac…",
+      "looking": "Looking for coding agents on this computer…",
       "unavailable": "Zeron runs the coding agents you already use.",
-      "none": "None are on this Mac yet. Install one to continue.",
-      "found": "{n, plural, one {Found # agent on this Mac. Sign in to any you'd like to use.} other {Found # agents on this Mac. Sign in to any you'd like to use.}}",
-      "this_mac": "this Mac"
+      "none": "None are on this computer yet. Install one to continue.",
+      "found": "{n, plural, one {Found # agent on this computer. Sign in to any you'd like to use.} other {Found # agents on this computer. Sign in to any you'd like to use.}}",
+      "this_mac": "this computer"
     },
     "try_again": "Try again"
   },
@@ -2837,6 +2871,7 @@
       "port_open_external": "Open in Default Browser",
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
+      "port_closed": "Closed",
       "previews_unavailable": "Local previews aren't available right now"
     }
   },
@@ -2850,8 +2885,7 @@
     "comment": {
       "placeholder": "Leave a comment",
       "submit": "Comment",
-      "you": "You",
-      "pending": "Pending"
+      "you": "You"
     },
     "unreachable": {
       "title": "Can't reach these files",
@@ -2964,11 +2998,11 @@
         },
         "ui_change": {
           "title": "Change how {places} shows",
-          "detail": "It can hide, reorder or relabel what's there."
+          "detail": "It can hide, reorder, relabel or redraw what's there."
         },
         "ui_replace": {
           "title": "Replace {places} with its own",
-          "detail": "It runs as part of Zeron and can do anything Zeron can."
+          "detail": "Its code runs as part of Zeron: it can do anything you can."
         },
         "profile_read": {
           "title": "See your name, username and picture"
@@ -3000,7 +3034,7 @@
         },
         "notifications": {
           "title": "Send you notifications",
-          "detail": "As Zeron's own, under Settings → Notifications."
+          "detail": "Like any other notification, set in Settings → Notifications."
         },
         "links_open": {
           "title": "Open links",
@@ -3014,7 +3048,9 @@
           "detail": "You still send it."
         },
         "network": {
-          "title": "Connect to the internet"
+          "title": "Connect to the internet",
+          "title_any": "Connect to any site on the internet",
+          "title_hosts": "Connect to these places"
         },
         "clipboard": {
           "title": "Read and change your clipboard"
@@ -3035,12 +3071,14 @@
           "title": "Send data between your own devices"
         },
         "commands": {
-          "title": "Run {list} on this Mac as you",
+          "title": "Run {list} on this computer as you",
           "title_on": "Run {list} on {device} as you",
-          "detail": "It can do whatever {list} can do with your sign-ins."
+          "detail": "It can do whatever {list} can do with your sign-ins.",
+          "detail_anything": "These can do anything you can, with your sign-ins.",
+          "detail_each": "They run as you, with your sign-ins."
         },
         "native": {
-          "title": "Run its own program on this Mac for your agents",
+          "title": "Run its own program on this computer for your agents",
           "title_on": "Run its own program on {device} for your agents",
           "detail": "It can do anything you can."
         },
@@ -3075,7 +3113,29 @@
       },
       "unverified": "Unverified",
       "from": "From {where}",
-      "from_file": "From a file"
+      "from_file": "From a file",
+      "more": "and {n} more",
+      "diff": {
+        "commands": "Run more programs as you",
+        "mcp": "Run a different program beside your agents",
+        "mcp_gone": "Stop running its program beside your agents",
+        "tools_added": "New tools for your agents",
+        "tools_changed": "Tools that now tell your agents something else",
+        "service": "Run a different background service",
+        "entry": "Start from a different file",
+        "network": "Connect to more places",
+        "settings": "Its settings changed",
+        "ui_replace": "Replace {places} with its own"
+      },
+      "can_anything": "{name}: can do anything you can",
+      "full_control": "It can run {name}, which gives it full control of your computer.",
+      "any_site": "Any site on the internet",
+      "near_host": "{host}: this computer or your network",
+      "details": {
+        "changes": "Parts of Zeron it changes",
+        "replaces": "Screens it replaces",
+        "changes_since": "Also changes, since you allowed it"
+      }
     },
     "page": {
       "title": "Plugins",
@@ -3129,7 +3189,9 @@
       "remove_body_device": "It stops everywhere in Zeron on {device} at once. Its folder goes to the removed items in that computer's plugins folder, in case you want it back.",
       "install_dialog_title_device": "Install a plugin on {device}",
       "install_dialog_body_device": "Paste a link to a .zeron-plugin file, a GitHub release or a repository. Zeron checks who signed it, and you allow what it asks before it runs there.",
-      "file_here_only": "A plugin file installs only on the computer it's on. To install one from a file, show this Mac's plugins."
+      "file_here_only": "A plugin file installs only on the computer it's on. To install one from a file, show this computer's plugins.",
+      "setup_title": "Finish setting up your account",
+      "setup_body": "Your plugins load as soon as you've chosen where you work."
     },
     "consent": {
       "made_by_you": "Made by you",
@@ -3143,12 +3205,20 @@
       "tampered": "Changed since you allowed it",
       "asks_again": "It now also asks to:",
       "asks": "It asks to:",
-      "mine": "It's mine",
+      "mine": "It's mine…",
       "not_now": "Not now",
       "allow": "Allow",
       "on_device": "On {device}",
       "unverified_why": "Zeron can't confirm who made this. Allow it only if you trust where it came from.",
-      "unverified_why_from": "Zeron can't confirm who made this. Allow it only if you trust where it came from: {where}."
+      "unverified_why_from": "Zeron can't confirm who made this. Allow it only if you trust where it came from: {where}.",
+      "made_on_your_device": "Made on one of your devices",
+      "grew": "New since you allowed it:",
+      "allow_there": "Allow it on {device}: it asks there, in Zeron on that computer.",
+      "mine_confirm": "Sign {name} as your own? Only if you wrote it yourself: Zeron will treat it as yours from now on, on this computer.",
+      "mine_cancel": "Cancel",
+      "mine_sign": "Sign as mine",
+      "details": "Details",
+      "details_hide": "Hide details"
     },
     "permissions": {
       "screen_recording": {
@@ -3193,18 +3263,18 @@
       "review": "Review",
       "template_waiting_body": "A template from someone else.",
       "failed": "{name} stopped working",
-      "failed_body": "Zeron goes on without it until it's updated or edited.",
+      "failed_body": "Zeron keeps working without it until it's updated or fixed.",
       "show_folder": "Show folder",
       "template_failed": "Your template's {name} has an error",
-      "template_failed_body": "Zeron's own shows in its place until it's fixed and saved.",
+      "template_failed_body": "That part shows the default interface until it's fixed and saved.",
       "template_broken": "{name} can't run",
-      "template_broken_body": "Zeron's own interface is showing until the template is fixed and saved."
+      "template_broken_body": "The default interface shows until the template is fixed and saved."
     }
   },
   "templates": {
     "page": {
       "title": "Templates",
-      "description": "Whole interfaces Zeron can run in. Anything a template leaves out is Zeron's own.",
+      "description": "Whole interfaces for Zeron. Anything a template leaves out comes from the default interface.",
       "search": "Search templates",
       "tabs": "Templates",
       "installed": "Installed",
@@ -3217,8 +3287,8 @@
         "named": "by {name}"
       },
       "about": {
-        "broken": "Can't run, so Zeron's own shows: {error}",
-        "errors": "Some of it falls back to Zeron's own: {error}",
+        "broken": "Can't run, so the default interface shows: {error}",
+        "errors": "Some parts show the default interface: {error}",
         "out_of_date": "Made for Zeron {version}. Zeron has updated since.",
         "out_of_date_unversioned": "Made for an earlier Zeron. Zeron has updated since.",
         "no_description": "No description."
@@ -3243,13 +3313,13 @@
       "couldnt_use": "Couldn't use {name}",
       "in_use": "In use",
       "none_yours": "None of yours yet",
-      "none_body": "Ask an agent to make one, or start from a copy of Zeron's.",
+      "none_body": "Ask an agent to make one, or start from a copy of the default.",
       "show_templates_folder": "Show templates folder",
       "delete_title": "Delete this template?",
-      "delete_body": "It goes to the templates folder's removed items, in case you want it back. If it's in use, Zeron's own takes its place.",
+      "delete_body": "It's set aside in the templates folder, so you can get it back. If it's in use, Zeron switches to the default interface.",
       "couldnt_delete": "Couldn't delete the template",
       "new_title": "New template",
-      "new_body": "A copy of Zeron's own interface, yours to change. Ask an agent to change it, or edit its files yourself.",
+      "new_body": "A copy of the default interface for you to change. Ask an agent to change it, or edit its files yourself.",
       "make_it": "Make it",
       "couldnt_make": "Couldn't make the template",
       "name": "Name",
@@ -3279,19 +3349,78 @@
       "nothing": "Nothing waiting",
       "nothing_body": "This template was answered already.",
       "install_title": "Install {name}?",
+      "keep_title": "Keep {name}?",
+      "keep_trust": "Keep it only if you trust what made it",
+      "keep_body": "An agent made, changed or switched to this template, or it hasn't been kept since it changed. Until you keep it, it's a preview. Kept, it runs with everything Zeron can do.",
+      "keep_files": "{n, plural, one {# file} other {# files}} of its own, as they are now",
+      "keep_files_detail": "If they change again, Zeron asks again.",
+      "keep": "Keep",
       "trust": "Install it only if you trust {whom}",
-      "trust_body": "A template is Zeron's own code: it replaces Zeron's interface and runs with everything Zeron can do, with your chats, files, accounts and agents.",
+      "trust_body": "A template runs as part of Zeron: it replaces Zeron's interface and can do anything Zeron can, with your chats, files, accounts and agents.",
       "unknown_body": "Zeron can't tell whose key signed it. Install it only if you trust where it came from.",
       "signature": "Its signature checks out",
       "signature_detail": "Nothing in it changed since it was signed, by key {key}.",
       "files": "{n, plural, one {# file} other {# files}}",
       "files_made_for": "{n, plural, one {# file} other {# files}} · made for Zeron {version}",
       "left_out": "{n, plural, one {# file} other {# files}} left out",
-      "left_out_detail": "No template may replace these, so Zeron keeps its own: {files}",
+      "left_out_detail": "Templates can't replace these, so Zeron keeps its versions: {files}",
       "not_now": "Not now",
       "install": "Install",
       "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
       "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
+    }
+  },
+  "themes": {
+    "page": {
+      "title": "Themes",
+      "description": "Colours for Zeron. Your theme is worn with any template.",
+      "search": "Search themes",
+      "tabs": "Themes",
+      "all": "All",
+      "builtin": "Built in",
+      "from_templates": "From templates",
+      "yours": "Yours",
+      "import": "Import theme",
+      "hint": "A theme is only colours, so it works with any template, and it can't do anything else.",
+      "about": {
+        "default": "The default, light and dark",
+        "both": "Light and dark",
+        "light": "Light only",
+        "dark": "Dark only"
+      },
+      "byline": {
+        "builtin": "Built in",
+        "template": "From {name}",
+        "imported": "Imported"
+      },
+      "needs_fixing": "Something in this theme needs fixing.",
+      "in_use": "In use",
+      "for_light": "Light",
+      "for_dark": "Dark",
+      "use": "Use",
+      "couldnt_use": "Couldn't use the theme",
+      "use_light": "Use only for light",
+      "use_dark": "Use only for dark",
+      "show_template": "Show in Templates",
+      "more_for": "More for {name}",
+      "rename": "Rename",
+      "remove": "Remove",
+      "rename_title": "Rename theme",
+      "couldnt_rename": "Couldn't rename the theme",
+      "name": "Name",
+      "remove_title": "Remove this theme?",
+      "remove_body": "It's removed from Yours. Wherever it's in use, the default comes back.",
+      "none_yours": "None of yours yet",
+      "none_yours_body": "Import a VS Code colour theme: its .json file, or an extension's folder. You can drop one on this page too.",
+      "none_templates": "No template brings a theme",
+      "none_templates_body": "When a template has colours of its own, they show here, to use with any template.",
+      "choose_source": "Choose Theme",
+      "vscode_theme": "VS Code theme",
+      "drop": "Drop to import",
+      "import_failed": "This theme couldn't be imported",
+      "skipped": "Some of its themes didn't import: {names}",
+      "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
+      "imported_body": "It's under Yours."
     }
   }
 }

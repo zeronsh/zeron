@@ -446,6 +446,43 @@ impl AccessMode {
     }
 }
 
+impl SandboxLevel {
+    /// Every level, least to most trusting.
+    pub const ALL: [SandboxLevel; 3] = [
+        SandboxLevel::ReadOnly,
+        SandboxLevel::WorkspaceWrite,
+        SandboxLevel::DangerFullAccess,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SandboxLevel::ReadOnly => "read-only",
+            SandboxLevel::WorkspaceWrite => "workspace-write",
+            SandboxLevel::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+/// What an agent-made chat may run with: `sandbox` and `access` no more
+/// trusting than its creator's (`ceiling`), and whether either was lowered.
+/// A chat created through Zeron's MCP never gets more access than the chat
+/// that created it.
+pub fn cap_access(
+    (sandbox, access): (SandboxLevel, AccessMode),
+    (max_sandbox, max_access): (SandboxLevel, AccessMode),
+) -> (SandboxLevel, AccessMode, bool) {
+    fn rank<T: PartialEq>(all: &[T], x: &T) -> usize {
+        all.iter().position(|y| y == x).unwrap_or(0)
+    }
+    let sandbox_over = rank(&SandboxLevel::ALL, &sandbox) > rank(&SandboxLevel::ALL, &max_sandbox);
+    let access_over = rank(&AccessMode::ALL, &access) > rank(&AccessMode::ALL, &max_access);
+    (
+        if sandbox_over { max_sandbox } else { sandbox },
+        if access_over { max_access } else { access },
+        sandbox_over || access_over,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -655,6 +692,25 @@ pub struct WorktreeSpec {
 /// EXEMPT this id — it legitimately reappears in every segment for the whole
 /// life of a run.
 pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
+
+/// Bytes of a command's output a harness adapter puts on its
+/// [`AgentEvent::ToolResult`]: the END of it, where a build's error or a
+/// test run's summary is. The doc keeps far less (a 10-line / 1 KB tail);
+/// this bounds what the run journal holds per command.
+pub const COMMAND_OUTPUT_CAP: usize = 32 * 1024;
+
+/// The last [`COMMAND_OUTPUT_CAP`] bytes of a command's output, started on a
+/// char boundary; `None` when it printed nothing.
+pub fn command_output_cap(text: &str) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut start = text.len().saturating_sub(COMMAND_OUTPUT_CAP);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(text[start..].to_owned())
+}
 
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -996,13 +1052,20 @@ pub enum AgentEvent {
         id: String,
         is_error: bool,
         /// Tool output text, capped by the emitting harness (ACP tool-call
-        /// content; claude/codex adapters never populate it). The doc-side
-        /// fold applies its own byte cap before anything persists.
+        /// content; the claude/codex adapters send a command's output only,
+        /// its last [`COMMAND_OUTPUT_CAP`] bytes). The doc-side fold keeps a
+        /// short redacted tail of a command's output and drops every other
+        /// tool's before anything persists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         /// Inline file diff for edit-shaped tools (ACP `Diff` content).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
+        /// A command's exit status, when the harness reported one (Claude
+        /// Code's Bash, Codex's command execution). Absent for other tools,
+        /// a command still running in the background, or one that never ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
     },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.

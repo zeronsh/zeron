@@ -51,6 +51,7 @@ local control = require("@self/control")
 local glass = require("@self/glass")
 local Motion = require("@self/motion")
 local locale = require("@self/locale")
+local toast = require("@self/toast")
 -- (By the alias the shell sets its opener on: one instance per path.)
 local Links = require("@ds/links")
 
@@ -266,23 +267,23 @@ local function copy_image(file: string)
 	local ok, promise = pcall(ui.call, "image.copy", { path = file })
 	if ok and promise then
 		promise:after(function()
-			ui.toast { title = locale.s("ds.lightbox.image_copied"), kind = "success" }
+			toast.show { title = locale.s("ds.lightbox.image_copied"), tone = "success" }
 		end, function(err: any)
-			ui.toast { title = locale.s("ds.lightbox.copy_failed"), body = tostring(err), kind = "error" }
+			toast.show { title = locale.s("ds.lightbox.copy_failed"), body = tostring(err), tone = "danger" }
 		end)
 	end
 end
 
 local function copy_path(path: string)
 	ui.clipboard.write(path)
-	ui.toast { title = locale.s("ds.lightbox.path_copied"), kind = "success" }
+	toast.show { title = locale.s("ds.lightbox.path_copied"), tone = "success" }
 end
 
 local function reveal(path: string)
 	local ok, promise = pcall(ui.call, "image.reveal", { path = path })
 	if ok and promise then
 		promise:after(nil, function(err: any)
-			ui.toast { title = locale.s("ds.lightbox.reveal_failed"), body = tostring(err), kind = "error" }
+			toast.show { title = locale.s("ds.lightbox.reveal_failed"), body = tostring(err), tone = "danger" }
 		end)
 	end
 end

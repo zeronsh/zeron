@@ -13,7 +13,7 @@
 --                                         its key's cap at its end
 --   PanelHome.Heading { label, trail? }   a part's title
 --   PanelHome.Lanes { id, list, label, icon, open, on_toggle, items, name,
---                     on_open, expanded, on_expand, harness?, max_rows? }
+--                     on_open, expanded, on_expand, harness? }
 --                                         a part of lanes (side chats,
 --                                         subagents) drawn as the sidebar's
 --                                         groups (ds/session_row): it folds,
@@ -49,10 +49,9 @@ local PAD_PT = 8
 -- A lane's row: a list's, shorter, as the lanes card's.
 M.LANE_H = 32
 -- How many lanes show before "Show N more" (as the sidebar's groups: those
--- at work or waiting on you show past them), and how many rows a list
--- shown whole stands before it scrolls.
+-- at work or waiting on you show past them). A list is always as tall as
+-- its rows: the panel scrolls, never a part inside it.
 M.LANE_FIRST = 5
-M.LANE_ROWS = 12
 -- How a list opens and closes: the sidebar's own move.
 local SLIDE = { duration = 260, ease = "out(3)" }
 
@@ -189,6 +188,8 @@ export type Lane = {
 	branch: string?,
 	-- A second line of its own, whatever the view (a port's address).
 	detail: string?,
+	-- Drawn faded: gone, kept a while (a port closed).
+	faded: boolean?,
 	-- (Its group, as the view makes it: the list's own.)
 	group: LaneGroup?,
 }
@@ -209,7 +210,6 @@ export type LanesProps = {
 	-- What it's read out as ("Open side chat {title}").
 	name: (lane: Lane) -> string,
 	on_open: (lane: Lane) -> (),
-	max_rows: number?,
 	-- Each group's fold and whether it's shown whole ("Show less"), by the
 	-- group's key ("all" with no groups).
 	group_open: (key: string) -> boolean,
@@ -229,6 +229,8 @@ export type LanesProps = {
 	menu: ((lane: Lane) -> { any }?)?,
 	-- A glyph leading each lane instead of its harness's mark (a port's).
 	icon: ((lane: Lane) -> Icon.Name?)?,
+	-- Each lane's tooltip (a port's command line); nil, none.
+	tooltip: ((lane: Lane) -> string)?,
 }
 
 -- Whether a lane shows past the first few, and in a folded group: at
@@ -282,10 +284,9 @@ type Item = {
 -- listing those in a state while the view keeps them. Its rows are the
 -- sidebar's session rows (ds/session_row), off their group's trunk. One
 -- list, rows by what they are (a lane by its id, moving between groups the
--- same node), only those in view built; as tall as its rows up to
--- `max_rows`, then it scrolls.
+-- same node); as tall as all its rows, so the home scrolls and never a
+-- list inside it.
 function M.Lanes(props: LanesProps): Node
-	local max_rows = props.max_rows or M.LANE_ROWS
 	-- The sidebar's view, read as ds/sidebar reads it.
 	local function view(): View
 		return if props.view then props.view() else {}
@@ -550,24 +551,97 @@ function M.Lanes(props: LanesProps): Node
 		end
 		return M.LANE_H
 	end
+	local function total_h(rows: { Item }): number
+		local h = 0
+		for _, it in rows do
+			h += item_h(it)
+		end
+		return h
+	end
+	-- As tall as all its rows ("Show N more" keeps a group short).
+	local height = ui.computed(function(): number
+		return total_h(items:get())
+	end)
+	-- The rows the list draws: the part's and, while "Show less" closes it up,
+	-- those it has just put away, after them, so what it closes over is still
+	-- there. (Only a lone group's, whose pager is under the list: with several,
+	-- the rows put away would stand under the wrong group.)
+	local was = items:peek()
+	local was_whole = solo ~= nil and solo.whole == true
+	local away: { Item }? = nil
+	local settles = ui.use_state(0)
+	local drawn = ui.computed(function(): { Item }
+		settles:get()
+		local now = items:get()
+		local whole = solo ~= nil and solo.whole == true
+		local here = {}
+		for _, it in now do
+			here[it.key] = true
+		end
+		if whole or solo == nil then
+			away = nil
+		elseif was_whole then
+			away = was
+		end
+		was, was_whole = now, whole
+		if not away then
+			return now
+		end
+		local out = table.clone(now)
+		for _, it in away do
+			if not here[it.key] then
+				table.insert(out, it)
+			end
+		end
+		return out
+	end)
 	local heights = ui.computed(function(): { number }
 		local out = {}
-		for i, it in items:get() do
+		for i, it in drawn:get() do
 			out[i] = item_h(it)
 		end
 		return out
 	end)
-	-- As tall as its first `max_rows` rows, then it scrolls.
-	local height = ui.computed(function(): number
-		local h = 0
-		for i, x in heights:get() do
-			if i > max_rows then
-				break
-			end
-			h += x
-		end
-		return h
+	local drawn_h = ui.computed(function(): number
+		return total_h(drawn:get())
 	end)
+	-- How much of the list shows: easing to its height, and never past the
+	-- rows there are. (Ours, not a tween on the box: the fold around it, and
+	-- so what's under it, go with it.)
+	local shown = ui.use_state(height:peek())
+	local target = shown:peek()
+	local going: any = nil
+	ui.effect(function()
+		local to = height:get()
+		if to == target then
+			return
+		end
+		target = to
+		-- (With motion reduced it lands at once: what it puts away is known first.)
+		drawn:peek()
+		if going then
+			going:cancel()
+		end
+		local this: any = nil
+		this = anime.animate(shown, motion.params({
+			value = to,
+			duration = SLIDE.duration,
+			ease = SLIDE.ease,
+			onComplete = function()
+				if going == this then
+					going = nil
+				end
+				if away then
+					away = nil
+					settles:set(settles:peek() + 1)
+				end
+			end,
+		}))
+		going = this
+	end)
+	local function list_h(): number
+		return math.floor(math.min(shown:get(), drawn_h:get()) + 0.5)
+	end
 	-- Under a group's tile: the trunk at the tile's middle, as the
 	-- sidebar's groups draw it (a project's tile hidden by the view, a
 	-- little further in, as the sidebar's); an inner group's past its
@@ -690,11 +764,23 @@ function M.Lanes(props: LanesProps): Node
 		local function lane(): Lane
 			return (now:get() :: Item).lane :: Lane
 		end
+		local tip = props.tooltip
 		return ui.div {
 			w_full = true,
 			h = function(): number
 				return item_h(now:get() :: Item)
 			end,
+			opacity = function(): number
+				return if lane().faded then 0.5 else 1
+			end,
+			tooltip = if tip
+				then Tooltip {
+					function(): string
+						return tip(lane())
+					end,
+				}
+				else nil,
+			tooltip_placement = if tip then require("@self/icon_button").placement("left") else nil,
 			SessionRow.Row {
 				compact = compact,
 				detail = function(): string
@@ -789,31 +875,36 @@ function M.Lanes(props: LanesProps): Node
 		SessionRow.Fold {
 			open = props.open,
 			h = function(): number
-				return height:get() + (if solo_state:get() then M.LANE_H else 0)
+				return list_h() + (if solo_state:get() then M.LANE_H else 0)
 			end,
 			-- (No gap between the list and its pager: each row keeps its
 			-- own under it, the trunk running through it.)
 			body = ui.column {
 				w_full = true,
 				gap = 0,
-				ui.list {
-				id = props.list,
-				data = items,
-				key = function(it: Item): string
-					return it.key
-				end,
-				row = row,
-				height = M.LANE_H,
-				heights = function(): { number }
-					return heights:get()
-				end,
-				w_full = true,
-				h = motion.tween(height, SLIDE),
-				scrollbar = true,
-				-- (The wheel goes on to the home past its ends, or when it fits
-				-- and has nothing to scroll: "contain" kept it, and the home
-				-- didn't scroll under these lists' rows.)
-				overscroll = "auto",
+				ui.div {
+					w_full = true,
+					overflow = "hidden",
+					h = list_h,
+					ui.list {
+						id = props.list,
+						data = drawn,
+						key = function(it: Item): string
+							return it.key
+						end,
+						row = row,
+						height = M.LANE_H,
+						heights = function(): { number }
+							return heights:get()
+						end,
+						w_full = true,
+						-- Never a scroll of its own: the home is the one that
+						-- scrolls (the wheel over these rows is its), and the list,
+						-- as tall as all its rows, builds only those the home and
+						-- the window show, as the home scrolls (hundreds of side
+						-- chats shown whole build a screenful).
+						virtualize = "ancestor",
+					},
 				},
 				ui.show(function(): boolean
 					return solo_state:get() ~= nil

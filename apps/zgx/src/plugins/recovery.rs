@@ -16,21 +16,37 @@ use std::collections::HashMap;
 
 use zgx_script::Plugin;
 
-/// The plugin `error` is on, of those loaded, if any.
+/// The plugin `error` is on, of those loaded, if any: the VM it names
+/// first (a plugin's own), else the file it's at, exactly (a module a
+/// plugin replaced, run as the app's), never words anywhere in it (one
+/// plugin's message naming another's snapshot once had that one withdrawn).
 pub fn blame(error: &str, plugins: &[Plugin]) -> Option<String> {
-    for plugin in plugins {
-        // Its own VM's error: named for it, first thing.
-        if error.starts_with(&format!("{}: ", plugin.name)) {
-            return Some(plugin.name.clone());
-        }
-        // A file of its snapshot, run as the app's (a module it replaced).
-        if let Some(dir) = plugin.entry.parent()
-            && error.contains(dir.to_string_lossy().as_ref())
-        {
-            return Some(plugin.name.clone());
-        }
+    // Its own VM's error: named for it, first thing.
+    if let Some(plugin) = plugins.iter().find(|p| error.starts_with(&format!("{}: ", p.name))) {
+        return Some(plugin.name.clone());
     }
-    None
+    // A file of its snapshot, run as the app's: where the error is.
+    let at = std::path::Path::new(located(error)?);
+    plugins
+        .iter()
+        .find(|p| p.entry.parent().is_some_and(|dir| within(at, dir)))
+        .map(|p| p.name.clone())
+}
+
+/// The file an app's error is at: after its VM's preamble (`app.luau:
+/// runtime error: `), up to `.luau:<line>`.
+fn located(error: &str) -> Option<&str> {
+    let line = error.lines().next()?;
+    let rest = line.split_once(" error: ").map_or(line, |(_, rest)| rest);
+    let end = rest.find(".luau:")? + ".luau".len();
+    rest[end + 1..].starts_with(|c: char| c.is_ascii_digit()).then(|| &rest[..end])
+}
+
+/// Whether `file` is in `dir`, by whole parts (`/var` and `/private/var`
+/// are one folder on macOS).
+fn within(file: &std::path::Path, dir: &std::path::Path) -> bool {
+    let bare = |p: &std::path::Path| p.strip_prefix("/private").map(|rest| std::path::Path::new("/").join(rest)).unwrap_or_else(|_| p.to_path_buf());
+    bare(file).starts_with(bare(dir))
 }
 
 /// What failed, by name, with what it was when it failed (its file's print,
@@ -65,9 +81,60 @@ impl Failures {
         }
     }
 
+    /// `what` is gone (removed): a new one of that name starts afresh.
+    pub fn forget(&mut self, what: &str) {
+        self.by.remove(what);
+    }
+
+    /// Everything named under `prefix` is forgotten, to be tried again:
+    /// whether any was.
+    pub fn forget_under(&mut self, prefix: &str) -> bool {
+        let before = self.by.len();
+        self.by.retain(|what, _| !what.starts_with(prefix));
+        self.by.len() != before
+    }
+
     pub fn why(&self, what: &str) -> Option<&str> {
         self.by.get(what).map(|(_, why)| why.as_str())
     }
+}
+
+/// Why a plugin failed, as its row in Settings → Plugins says it: zgx's rules
+/// for plugins in words its author can act on, any other error as it is.
+pub fn reason(error: &str) -> String {
+    let line = first_line(error);
+    rule_broken(&line).unwrap_or(line)
+}
+
+/// What's between the first pair of backticks after `start`.
+fn quoted<'a>(line: &'a str, start: &str) -> Option<&'a str> {
+    let rest = &line[line.find(start)? + start.len()..];
+    rest.split('`').next()
+}
+
+/// `line` (zgx's words) in plain ones, if it's a rule a plugin broke.
+fn rule_broken(line: &str) -> Option<String> {
+    if line.contains("ui.slot `") {
+        let slot = quoted(line, "ui.slot `")?;
+        if let Some(owner) = quoted(line, "the plugin `").filter(|_| line.contains("offers only slots")) {
+            return Some(format!("It offers a slot named “{slot}”, but a plugin's slots start with its id. Call it “{owner}.{slot}”, or use zeron.slot(\"{slot}\")."));
+        }
+        return Some(format!("It offers a slot named “{slot}”, but names starting with “zeron” are Zeron's own."));
+    }
+    if line.contains("ui.command `") && line.contains("`key = \"") {
+        let command = quoted(line, "ui.command `")?;
+        let key = line[line.find("`key = \"")? + "`key = \"".len()..].split('"').next()?;
+        return Some(format!("Its command “{command}” has the shortcut “{key}” with no ⌘, ⌃ or ⌥, which would take that key from everything you type in. Add a modifier, like “cmd+shift+{key}”."));
+    }
+    if line.contains("ui.command `") && line.contains("names are the app's alone") {
+        let command = quoted(line, "ui.command `")?;
+        return Some(format!("Its command “{command}” starts with “zeron”, and those names are Zeron's own. Rename it."));
+    }
+    if line.contains("ui.override { module = \"") && line.contains("a trust grant") {
+        let module = line[line.find("module = \"")? + "module = \"".len()..].split('"').next()?;
+        return Some(format!("It replaces {module}, which its manifest doesn't list. Add it to \"ui\": {{ \"replace\": [] }} and ask for \"ui.replace\"."));
+    }
+    None
 }
 
 /// An error's first line, without the VM's preamble and the copy's path: what
@@ -104,6 +171,27 @@ mod tests {
         // The app's own, or a plugin whose name only starts another's: nobody's.
         assert_eq!(blame("app.luau: runtime error: screens/card.luau:3: oops", &plugins), None);
         assert_eq!(blame("focused: runtime error: x", &plugins), None);
+        let private = "app.luau: runtime error: /private/d/plugins/.loaded/focus/0123/a.luau:2: x";
+        assert_eq!(blame(private, &plugins).as_deref(), Some("focus"));
+    }
+
+    /// R26: one plugin can't get another withdrawn by naming its snapshot
+    /// in an error of its own (or of a module it replaced).
+    #[test]
+    fn an_error_naming_another_plugin_s_files_is_never_blamed_on_it() {
+        let plugins = vec![
+            plugin("victim", "/d/plugins/.loaded/victim/aa/init.luau"),
+            plugin("evil", "/d/plugins/.loaded/evil/bb/init.luau"),
+        ];
+        let own = "evil: runtime error: /d/plugins/.loaded/victim/aa/init.luau:1: framed";
+        assert_eq!(blame(own, &plugins).as_deref(), Some("evil"));
+        let replaced = "app.luau: runtime error: /d/plugins/.loaded/evil/bb/x.luau:3: /d/plugins/.loaded/victim/aa/init.luau:1: framed";
+        assert_eq!(blame(replaced, &plugins).as_deref(), Some("evil"));
+        let app = "app.luau: runtime error: screens/x.luau:3: see /d/plugins/.loaded/victim/aa/init.luau:1";
+        assert_eq!(blame(app, &plugins), None);
+        // (A folder whose name only starts another's isn't in it.)
+        let near = "app.luau: runtime error: /d/plugins/.loaded/victim/aaa/x.luau:3: x";
+        assert_eq!(blame(near, &plugins), None);
     }
 
     #[test]
@@ -125,5 +213,21 @@ mod tests {
             "sidebar.luau:12: attempt to index nil"
         );
         assert_eq!(first_line("focus: runtime error: focus:3: filter broke"), "focus:3: filter broke");
+    }
+
+    /// zgx's words for its rules, as a plugin's row says them; anything else
+    /// as it is. (`loading_tests` holds these to what zgx really says.)
+    #[test]
+    fn what_a_person_reads_of_a_rule_broken() {
+        let slot = reason("plug: runtime error: init.luau:1: ui.slot `bar`: the plugin `plug` offers only slots of its own, named `plug.…`");
+        assert_eq!(slot, "It offers a slot named “bar”, but a plugin's slots start with its id. Call it “plug.bar”, or use zeron.slot(\"bar\").");
+        let reserved = reason("plug: runtime error: ui.slot `zeron.x`: `zeron.` names are the app's alone, not the plugin `plug`'s");
+        assert_eq!(reserved, "It offers a slot named “zeron.x”, but names starting with “zeron” are Zeron's own.");
+        let key = reason("plug: runtime error: ui.command `go`: `key = \"k\"`: a plugin's shortcut has a modifier, unless the host grants `Capability::Named(\"zgx.command.bare_keys\")`: a key alone would be taken from every field");
+        assert!(key.starts_with("Its command “go” has the shortcut “k” with no ⌘, ⌃ or ⌥"), "{key}");
+        assert!(!key.contains("Capability"), "{key}");
+        let module = reason("plug: runtime error: ui.override { module = \"@app/screens/chat\" }: plug needs OverrideModule(\"@app/screens/chat\"), a trust grant: the replacement runs as the app");
+        assert!(module.contains("@app/screens/chat") && module.contains("ui.replace") && !module.contains("OverrideModule"), "{module}");
+        assert_eq!(reason("plug: runtime error: init.luau:3: boom"), "init.luau:3: boom");
     }
 }

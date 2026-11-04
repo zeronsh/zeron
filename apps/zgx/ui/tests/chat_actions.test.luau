@@ -275,8 +275,12 @@ test("Escape stops the running agent only with the setting on", function()
 	app:key("Escape")
 	settle(app)
 	expect(app:state("calls")).never.to_contain("interrupt:s1")
+	-- With the setting off, Escape gives the keyboard back instead (the
+	-- window's bare letters work again, I to come back).
+	expect(app:tree():find('textbox "[^"\n]*" focused')).to_be(nil)
 	app:set_state("settings_escape_stops", true)
 	settle(app)
+	app:click("role:textbox")
 	app:key("Escape")
 	settle(app)
 	expect(app:state("calls")).to_contain("interrupt:s1")

@@ -60,6 +60,7 @@ impl Rig {
             entry: "service.luau".into(),
             allowed: allowed.iter().map(|s| s.to_string()).collect(),
             commands: vec!["echo".into()],
+            hosts: Vec::new(),
         }
     }
 
@@ -391,4 +392,108 @@ async fn a_watch_needs_files_read_and_a_folder() {
     let missing = folder.path().join("nope").display().to_string();
     let refused = r.ask(&plan, "watch", json!({ "folder": missing })).await.unwrap_err();
     assert!(refused.message.contains("no folder"), "{refused:?}");
+}
+
+/// R5: a plugin file that is Luau bytecode (unvalidated by Luau, so it could
+/// corrupt the engine) is refused, by `require` and as the entry.
+#[tokio::test]
+async fn a_bytecode_file_is_refused() {
+    // A real compiled chunk whose bytes happen to be UTF-8 (as a source's
+    // must): before R5 it ran.
+    let bytecode = ["return 7", "return nil", "return {}", "return 'x'"]
+        .iter()
+        .find_map(|source| {
+            (0..=2).find_map(|level| {
+                let bytes = mlua::chunk::Compiler::new().set_optimization_level(level).compile(source).unwrap();
+                String::from_utf8(bytes).ok()
+            })
+        })
+        .expect("a chunk whose bytecode is UTF-8");
+    let r = rig(Config::default());
+    let plan = r.plan(
+        "1.0.0",
+        r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("evil", function() return require("./evil") end)
+"#,
+        &["service"],
+    );
+    std::fs::write(plan.dir.join("evil.luau"), &bytecode).unwrap();
+    let refused = r.ask(&plan, "evil", json!({})).await.expect_err("bytecode ran in the service VM");
+    assert!(refused.message.contains("binary chunk"), "{refused:?}");
+
+    let r = rig(Config::default());
+    let plan = r.plan("1.0.0", &bytecode, &["service"]);
+    let refused = r.ask(&plan, "anything", json!({})).await.expect_err("a bytecode entry loaded");
+    assert!(refused.message.contains("binary chunk"), "{refused:?}");
+}
+
+const FETCHER: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("get", function(args)
+	local r = zeron.fetch(args.url, { headers = args.headers }):await()
+	return r.status
+end)
+"#;
+
+/// A server on this device answering 200 (or a redirect to `to`) to anyone.
+async fn local_server(to: Option<String>) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let to = to.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let reply = match to {
+                    Some(to) => format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                    None => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string(),
+                };
+                let _ = socket.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+/// R15: "network" is the internet. A plugin's fetch never reaches this
+/// device, your network or instance metadata (by address, by a name that
+/// resolves there, or by a redirect), unless its manifest names the host.
+#[tokio::test]
+async fn fetch_never_reaches_this_device_or_metadata_unless_named() {
+    let port = local_server(None).await;
+    let r = rig(Config::default());
+    let open = r.plan("1.0.0", FETCHER, &["service", "network"]);
+    for url in [
+        format!("http://127.0.0.1:{port}/"),
+        format!("http://localhost:{port}/"),
+        format!("http://[::ffff:127.0.0.1]:{port}/"),
+        format!("http://0x7f.1:{port}/"),
+        "http://169.254.169.254/latest/meta-data/".to_string(),
+        "http://0.0.0.0/".to_string(),
+    ] {
+        let refused = r.ask(&open, "get", json!({ "url": url })).await;
+        assert!(refused.is_err(), "{url} was reached: {refused:?}");
+    }
+
+    // Named: that host and port, and nothing it redirects to.
+    let redirects = local_server(Some(format!("http://127.0.0.1:{port}/"))).await;
+    let r = rig(Config::default());
+    let mut named = r.plan("1.0.0", FETCHER, &["service", "network"]);
+    named.hosts = vec![format!("localhost:{port}"), format!("127.0.0.1:{redirects}")];
+    let ok = r.ask(&named, "get", json!({ "url": format!("http://localhost:{port}/") })).await;
+    assert_eq!(ok.unwrap(), json!(200));
+    let other = r.ask(&named, "get", json!({ "url": format!("http://127.0.0.1:{port}/") })).await;
+    assert!(other.is_err(), "a port it didn't name: {other:?}");
+    let redirected = r.ask(&named, "get", json!({ "url": format!("http://127.0.0.1:{redirects}/") })).await;
+    assert!(redirected.is_err(), "followed a redirect to a host it didn't name: {redirected:?}");
+    // Never Host, and credentials only to a named host.
+    let host = r.ask(&named, "get", json!({ "url": format!("http://localhost:{port}/"), "headers": { "Host": "x" } })).await;
+    assert!(host.is_err(), "{host:?}");
+    let r = rig(Config::default());
+    let open = r.plan("1.0.0", FETCHER, &["service", "network"]);
+    let auth = r.ask(&open, "get", json!({ "url": "https://example.invalid/", "headers": { "Authorization": "Bearer x" } })).await;
+    assert!(auth.unwrap_err().message.contains("Authorization"));
 }

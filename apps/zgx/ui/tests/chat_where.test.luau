@@ -111,7 +111,7 @@ test("another device brings its projects and their branches", function()
 	settle(app)
 	expect(app:has('role:option ~"Borealis"')).to_be(true)
 	expect(app:has('role:option ~"Atlas"')).to_be(false)
-	-- And back: this Mac's, the project last used there.
+	-- And back: this computer's, the project last used there.
 	app:key("Escape")
 	settle(app)
 	pick_in(app, "Device", "MacBook Pro")

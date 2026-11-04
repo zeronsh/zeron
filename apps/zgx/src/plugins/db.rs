@@ -18,7 +18,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use rusqlite::{Connection, limits::Limit, types::Value as Sql};
+use rusqlite::{
+    Connection,
+    hooks::{AuthAction, AuthContext, Authorization},
+    limits::Limit,
+    types::Value as Sql,
+};
 use serde_json::{Map, Value as Json, json};
 
 /// A plugin's database at most.
@@ -51,9 +56,37 @@ fn open(path: &Path) -> Result<Arc<Mutex<Connection>>, String> {
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0);
     conn.execute_batch(&format!("PRAGMA page_size = {PAGE}; PRAGMA journal_mode = WAL; PRAGMA max_page_count = {};", MAX_BYTES / PAGE))
         .map_err(|e| e.to_string())?;
+    // From here, what the plugin's SQL may do: never lift those limits.
+    conn.authorizer(Some(authorize));
     let conn = Arc::new(Mutex::new(conn));
     open.insert(path.to_path_buf(), conn.clone());
     Ok(conn)
+}
+
+/// Pragmas a plugin may set (how its own tables behave); any other pragma
+/// only read. `max_page_count`, `journal_mode`, `page_size`,
+/// `writable_schema`, … stay as Zeron set them (R29).
+const SETTABLE_PRAGMAS: &[&str] =
+    &["user_version", "application_id", "foreign_keys", "defer_foreign_keys", "recursive_triggers", "case_sensitive_like", "busy_timeout", "cache_size"];
+
+/// What a plugin's SQL may do: anything to its own database but set the
+/// pragmas that bound it, or attach another file.
+fn authorize(context: AuthContext<'_>) -> Authorization {
+    match context.action {
+        AuthAction::Pragma { pragma_name, pragma_value: Some(_) }
+            if !SETTABLE_PRAGMAS.contains(&pragma_name.to_ascii_lowercase().as_str()) =>
+        {
+            Authorization::Deny
+        }
+        // (A pragma that changes things without a value.)
+        AuthAction::Pragma { pragma_name, pragma_value: None }
+            if matches!(pragma_name.to_ascii_lowercase().as_str(), "shrink_memory" | "wal_checkpoint" | "incremental_vacuum") =>
+        {
+            Authorization::Allow
+        }
+        AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }
 }
 
 fn bind(params: &Json) -> Result<Vec<Sql>, String> {
@@ -147,5 +180,30 @@ mod tests {
         assert!(attach.is_err(), "{attach:?}");
         assert!(path_in(Path::new("/x"), "../evil").is_none() && path_in(Path::new("/x"), "").is_none());
         assert_eq!(path_in(Path::new("/x"), "github").unwrap(), Path::new("/x/github.sqlite3"));
+    }
+
+    /// R29: the size limit is Zeron's, not the plugin's to lift (it was
+    /// one `PRAGMA max_page_count` away), and VACUUM INTO writes no file.
+    #[test]
+    fn a_plugin_cant_lift_its_limits() {
+        let db = temp("limits");
+        call(&db, &json!({ "op": "exec", "sql": "CREATE TABLE t (x)" })).unwrap();
+        for sql in [
+            "PRAGMA max_page_count = 2147483646",
+            "PRAGMA main.max_page_count = 2147483646",
+            "PRAGMA MAX_PAGE_COUNT=2147483646; INSERT INTO t VALUES (1)",
+            "PRAGMA journal_mode = OFF",
+            "PRAGMA writable_schema = 1",
+            "PRAGMA page_size = 65536",
+        ] {
+            assert!(call(&db, &json!({ "op": "exec", "sql": sql })).is_err(), "{sql}");
+        }
+        let limit = call(&db, &json!({ "op": "query", "sql": "PRAGMA max_page_count" })).unwrap();
+        assert_eq!(limit[0]["max_page_count"], json!(MAX_BYTES / PAGE), "{limit}");
+        // What a plugin may set, it can.
+        call(&db, &json!({ "op": "exec", "sql": "PRAGMA user_version = 3; PRAGMA foreign_keys = ON" })).unwrap();
+        let out = db.with_file_name("copied.sqlite3");
+        assert!(call(&db, &json!({ "op": "exec", "sql": format!("VACUUM INTO '{}'", out.display()) })).is_err());
+        assert!(!out.exists());
     }
 }

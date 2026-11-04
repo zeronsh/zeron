@@ -250,7 +250,7 @@ test("Providers shows another device's agents when it's chosen", function()
 	expect(asked(app, "agents.target:box")).to_be(true)
 	expect(shows(app, PAGE, "Codex")).to_be(true)
 	expect(shows(app, PAGE, "Claude Code")).to_be(false)
-	-- Back to this Mac: no device named, the engine's own.
+	-- Back to this computer: no device named, the engine's own.
 	app:click(`{PAGE} >> role:button "Device"`)
 	app:frames(10)
 	app:click('role:menuitem "MacBook Pro"')
@@ -373,18 +373,18 @@ test("Profile's fields stay the same nodes as the card moves over and beside the
 	expect(node(app, PAGE, "textbox", "Name")).to_be(field)
 end)
 
-test("Notifications says when this Mac's banner settings can't be read, and holds its switches", function()
+test("Notifications says when this computer's banner settings can't be read, and holds its switches", function()
 	local app = open("General")
 	app:command("settings_stub.refuse_next")
 	app:click(`{NAV} >> role:tab "Notifications"`)
 	app:frames(20)
-	expect(shows(app, PAGE, "Couldn't read this Mac's notification settings")).to_be(true)
+	expect(shows(app, PAGE, "Couldn't read this computer's notification settings")).to_be(true)
 	app:click(`{PAGE} >> role:switch "Desktop notifications"`)
 	app:frames(10)
 	expect(asked(app, "notifications.set")).to_be(false)
 	app:click(`{PAGE} >> role:button "Try again"`)
 	app:frames(20)
-	expect(shows(app, PAGE, "Couldn't read this Mac's notification settings")).to_be(false)
+	expect(shows(app, PAGE, "Couldn't read this computer's notification settings")).to_be(false)
 end)
 
 test("Appearance's code font size is kept as chosen, for the editor to read", function()
@@ -492,7 +492,7 @@ test("About says which Zeron this is, and that this app isn't what updates", fun
 	expect(shows(app, PAGE, '"0.2.131"')).to_be(true)
 	expect(shows(app, PAGE, "abcdef1 · ")).to_be(true)
 	expect(shows(app, PAGE, "Not packaged yet")).to_be(true)
-	expect(shows(app, PAGE, "Updates go to the engine on this Mac")).to_be(true)
+	expect(shows(app, PAGE, "Updates go to the engine on this computer")).to_be(true)
 	-- Copied for a bug report.
 	app:click(`{PAGE} >> role:button "Copy"`)
 	app:frames(6)
@@ -521,7 +521,7 @@ test("an engine up to date says so and when it was checked; a check finds a newe
 	app:set_state("settings_stub_about_next", "offline")
 	app:click(`{PAGE} >> role:button "Check for updates"`)
 	app:frames(6)
-	expect(shows(app, PAGE, "This Mac seems to be offline")).to_be(true)
+	expect(shows(app, PAGE, "This computer seems to be offline")).to_be(true)
 	app:set_state("settings_stub_about_next", "ok")
 	app:click(`{PAGE} >> role:button "Try again"`)
 	app:frames(6)
@@ -608,7 +608,7 @@ test("a sign-in that asks for a code takes it pasted back, and the account arriv
 	expect(shows(app, PAGE, "Paste the authorization code")).to_be(false)
 end)
 
-test("an account whose window is used up says when it starts over, in this Mac's time", function()
+test("an account whose window is used up says when it starts over, in this computer's time", function()
 	local app = open("Providers")
 	local now = os.time()
 	local at = now + 2 * 3600
@@ -760,7 +760,7 @@ end
 local function deletes_asked(app: any): number
 	local n = 0
 	for _, c in calls(app) do
-		n += if string.find(c, "account.delete", 1, true) == 1 then 1 else 0
+		n += if c == "account.delete" then 1 else 0
 	end
 	return n
 end
@@ -835,6 +835,153 @@ test("a delete that didn't go through says so plainly and can be tried again", f
 	expect(deletes_asked(app)).to_be(3)
 	expect(asked(app, "account.sign_out")).to_be(true)
 	expect(asked(app, "app.onboard")).to_be(true)
+end)
+
+-- Only just after signing in can the account be deleted (no agent on this
+-- Mac can): the engine asks for it, the browser opens, and it goes once
+-- you're back.
+test("deleting asks you to sign in again first, then deletes once you have", function()
+	local app = open("Account")
+	app:set_state("settings_stub_step_up_word", "wait")
+	try_delete(app, "ada@example.net", "step_up_required")
+	expect(asked(app, "account.delete_signed_in")).to_be(true)
+	-- Waiting: said in the dialog, still open, nothing signed out.
+	expect(app:state("settings_deleting_account")).to_be(true)
+	expect(app:state("settings_delete_signing_in")).to_be(true)
+	expect(app:has(`{DELETE_DIALOG} >> "To delete your account, sign in again"`)).to_be(true)
+	expect(app:state("settings_delete_busy")).to_be(true)
+	expect(asked(app, "account.sign_out")).to_be(false)
+	-- Signed in again: gone, signed out here, setup.
+	app:command("settings_stub.signed_in_again")
+	app:frames(20)
+	expect(app:state("settings_delete_signing_in")).to_be(false)
+	expect(asked(app, "account.sign_out")).to_be(true)
+	expect(asked(app, "app.onboard")).to_be(true)
+end)
+
+test("closing the dialog while you sign in again stops waiting, and deletes nothing", function()
+	local app = open("Account")
+	app:set_state("settings_stub_step_up_word", "wait")
+	try_delete(app, "ada@example.net", "step_up_required")
+	expect(app:state("settings_delete_signing_in")).to_be(true)
+	app:click(`{DELETE_DIALOG} >> role:button "Cancel"`)
+	app:frames(20)
+	expect(asked(app, "account.cancel_step_up")).to_be(true)
+	expect(app:state("settings_delete_signing_in")).to_be(false)
+	expect(app:state("settings_delete_busy")).to_be(false)
+	-- You stopped it: nothing to say, nothing signed out.
+	expect(app:has('"Couldn\'t delete your account"')).to_be(false)
+	expect(asked(app, "account.sign_out")).to_be(false)
+	-- And it can be asked again.
+	app:set_state("settings_stub_step_up_word", "ok")
+	try_delete(app, "ada@example.net", "step_up_required")
+	expect(asked(app, "app.onboard")).to_be(true)
+end)
+
+test("a sign-in again that doesn't land, or a refusal after it, says so plainly", function()
+	local app = open("Account")
+	app:set_state("settings_stub_step_up_word", "timed_out")
+	try_delete(app, "ada@example.net", "step_up_required")
+	expect(app:has('"Signing in again took too long, so nothing was deleted. Try again."')).to_be(true)
+	expect(app:state("settings_delete_signing_in")).to_be(false)
+	expect(app:state("settings_deleting_account")).to_be(false)
+	-- Signed in again, then the only admin: refused, said why.
+	app:set_state("settings_stub_step_up_word", "last_admin")
+	try_delete(app, "ada@example.net", "step_up_required")
+	expect(app:has('"You\'re the only admin of your organization. Make someone else an admin first."')).to_be(true)
+	-- Busy, or the edge couldn't: nothing was deleted, try again.
+	try_delete(app, "ada@example.net", "busy")
+	expect(app:has('"Someone in your organization is changing roles right now. Try again in a moment."')).to_be(true)
+	try_delete(app, "ada@example.net", "try_again")
+	expect(app:has('"Your account couldn\'t be deleted just now. Nothing was removed. Try again in a moment."')).to_be(true)
+	expect(asked(app, "account.sign_out")).to_be(false)
+end)
+
+-- Signing keys: the keys your devices sign what you make with.
+-- How many shown lines under `scope` hold `text` (a closing dialog's
+-- hidden buttons aside).
+local function count(app: any, scope: string, text: string): number
+	local n = 0
+	for line in app:tree(scope):gmatch("[^\n]+") do
+		if line:find(text, 1, true) and not line:find(" hidden", 1, true) then
+			n += 1
+		end
+	end
+	return n
+end
+
+test("signing keys list this computer first, then the others; a revoked one stays quietly", function()
+	local app = open("Account")
+	app:scroll(PAGE, 2000)
+	app:frames(10)
+	expect(app:has(`{PAGE} >> "Signing keys"`)).to_be(true)
+	expect(app:has(`{PAGE} >> #setting-signing_keys >> ~"If you don't recognise a key, revoke it."`)).to_be(true)
+	local _, mac = box(app, `{PAGE} >> "This computer"`)
+	local _, dev = box(app, `{PAGE} >> "dev"`)
+	local _, old = box(app, `{PAGE} >> "old-laptop"`)
+	expect(mac < dev and dev < old).to_be(true)
+	-- Short fingerprints, the day each was added; the revoked one says when
+	-- it went and has nothing to do.
+	expect(shows(app, PAGE, "a1b2 c3d4 e5f6 0718")).to_be(true)
+	expect(shows(app, PAGE, "2930 4a5b")).to_be(false)
+	expect(shows(app, PAGE, "Added ")).to_be(true)
+	expect(shows(app, PAGE, "Revoked ")).to_be(true)
+	expect(count(app, PAGE, 'button "Revoke"')).to_be(2)
+end)
+
+test("revoking a signing key asks first, then the engine revokes it and it shows Revoked", function()
+	local app = open("Account")
+	app:scroll(PAGE, 2000)
+	app:frames(10)
+	-- Asked, then let go: nothing revoked.
+	app:click(`{PAGE} >> role:button "Revoke"[2]`)
+	app:frames(10)
+	local dialog = 'role:dialog "Revoke this key?"'
+	expect(app:has(`{dialog} >> "Plugins and templates it signed will stop counting as yours."`)).to_be(true)
+	app:click(`{dialog} >> role:button "Cancel"`)
+	app:frames(20)
+	expect(asked(app, "account.revoke_key:k_dev")).to_be(false)
+	-- Asked, and confirmed: the engine revokes it; the row says so.
+	app:click(`{PAGE} >> role:button "Revoke"[2]`)
+	app:frames(10)
+	app:click(`{dialog} >> role:button "Revoke"`)
+	app:frames(20)
+	expect(asked(app, "account.revoke_key:k_dev")).to_be(true)
+	expect(count(app, PAGE, 'button "Revoke"')).to_be(1)
+	expect(count(app, PAGE, "Revoked ")).to_be(2)
+end)
+
+test("a signing key added on another device is New for one visit", function()
+	local app = open("Account")
+	app:scroll(PAGE, 2000)
+	app:frames(10)
+	expect(app:has(`{PAGE} >> "New"`)).to_be(true)
+	-- The next visit: seen.
+	app:click(`{NAV} >> role:tab "General"`)
+	app:frames(20)
+	app:click(`{NAV} >> role:tab "Account"`)
+	app:frames(30)
+	app:scroll(PAGE, 2000)
+	app:frames(10)
+	expect(app:has(`{PAGE} >> "dev"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "New"`)).to_be(false)
+end)
+
+test("no signing keys yet: the card says how one is made", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:set_state("settings_stub_keys", "none")
+	app:command("settings_stub.sign_in")
+	app:command("shell.settings")
+	app:frames(20)
+	app:click(`{NAV} >> role:tab "Account"`)
+	app:frames(30)
+	app:scroll(PAGE, 2000)
+	app:frames(10)
+	expect(shows(app, PAGE, "No signing keys yet.")).to_be(true)
+	expect(shows(app, PAGE, "One is made when you sign a plugin.")).to_be(true)
+	expect(count(app, PAGE, 'button "Revoke"')).to_be(0)
 end)
 
 test("your photo shows at both sidebars' feet once chosen, and goes when removed", function()

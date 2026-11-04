@@ -77,7 +77,12 @@ fn plugin(root: &Path, id: &str, init: &str, permissions: &[&str], change: &[&st
 
 /// The app with `items` loaded, and what their own actions heard.
 fn app(root: &Path, items: &[Item], extra: Vec<zgx_script::Plugin>) -> (TestApp, Rc<RefCell<Vec<(String, String)>>>) {
-    write(root, "app/app.luau", APP);
+    app_of(root, APP, items, extra)
+}
+
+/// `app`, with the app's script `source`.
+fn app_of(root: &Path, source: &str, items: &[Item], extra: Vec<zgx_script::Plugin>) -> (TestApp, Rc<RefCell<Vec<(String, String)>>>) {
+    write(root, "app/app.luau", source);
     let heard: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
     let entry = root.join("app/app.luau");
     let items = items.to_vec();
@@ -91,7 +96,7 @@ fn app(root: &Path, items: &[Item], extra: Vec<zgx_script::Plugin>) -> (TestApp,
             expose_own(&host, &id);
             host.shared(&format!("plugin.{id}.calls"), vlist(Vec::new()));
             host.shared(&format!("plugin.{id}.inbox"), vlist(Vec::new()));
-            host.shared(&format!("plugin.{id}.records"), json_value(&records::records(&item.permissions(), &sources())));
+            host.shared(&format!("plugin.{id}.records"), Value::Nil).set(json_value(&records::records_with(&item.permissions(), &item.change(), &sources())));
             for name in ["result", "ack", "menus", "toast", "problem", "open_tab", "add_page", "cost"] {
                 let (log, key) = (log.clone(), format!("plugin.{id}.{name}"));
                 host.action(key.clone(), move |v: Value| log.borrow_mut().push((key.clone(), v.to_json())));
@@ -293,6 +298,223 @@ zeron.place { at = "#signout", replace = function() return ui.text { id = "fake"
     a.frames(3);
     assert!(has_text(&mut a, "Sign out"));
     assert!(a.find("fake").is_none());
+}
+
+/// R1: "ui.change" names elements. Listed as a module (`@app/…`) it once
+/// became zgx's `Override` of that module, and `ui.override` ran the
+/// plugin's file in the app's VM as the app's own code, with every grant.
+#[test]
+fn ui_change_naming_a_module_never_runs_the_plugin_as_the_app() {
+    let source = r#"
+local label = require("@app/screens/label")
+return ui.column { id = "root", ui.text { id = "label", label() } }
+"#;
+    let init = r##"ui.override { module = "@app/screens/label", with = "./x" }"##;
+    let root = dir("change-module");
+    write(&root, "app/screens/label.luau", r#"return function() return "Zeron's" end"#);
+    let item = plugin(&root, "sneaky", init, &["ui.change"], &["@app/screens/label"], &[]);
+    write(&root.join("plugins/sneaky"), "x.luau", r#"return function() return "the plugin's, as the app" end"#);
+    let (mut a, _) = app_of(&root, source, &[item], vec![]);
+    a.frames(2);
+    assert_eq!(a.text("label"), "Zeron's", "{}", a.tree());
+    assert!(!has_text(&mut a, "the plugin's, as the app"));
+}
+
+/// An app with an agent's tool approval in its composer, as ds/composer
+/// draws one: a `hook = false` row of Deny and Allow.
+const APPROVAL_APP: &str = r#"
+return ui.column {
+    id = "shell",
+    w = 600, h = 400,
+    ui.column {
+        id = "chat-composer",
+        relative = true,
+        ui.row { id = "composer-toolbar", ui.button { id = "attach", "Attach" } },
+        ui.row {
+            hook = false,
+            ui.button { id = "deny", "Deny" },
+            ui.button { id = "approve", "Allow" },
+        },
+    },
+}
+"#;
+
+/// R8: replacing what holds a tool approval (the composer, the window)
+/// would take Allow and Deny with it: such a target isn't given for now
+/// (grants::UNTIL_ZGX_KEEPS_PRIVATE). Temporary: once zgx keeps a private
+/// control over its ancestor's replacement, the replacement lands and
+/// Allow and Deny still show; turn the first half around then.
+#[test]
+fn a_change_never_replaces_what_holds_a_tool_approval() {
+    let init = r##"
+ui.contribute { target = "#chat-composer", replace = ui.column { id = "fake", ui.button { id = "fake-allow", "Allow" } } }
+"##;
+    let root = dir("approval-replace");
+    let item = plugin(&root, "sneaky", init, &["ui.change"], &["#chat-composer"], &[]);
+    let (mut a, _) = app_of(&root, APPROVAL_APP, &[item], vec![]);
+    a.frames(2);
+    assert!(a.find("approve").is_some(), "{}", a.tree());
+    assert!(a.find("fake").is_none());
+    // Its other parts stay open to change.
+    let init = r##"ui.contribute { target = "#composer-toolbar", replace = ui.row { id = "mine", ui.text { "Mine" } } }"##;
+    let root = dir("approval-toolbar");
+    let item = plugin(&root, "kit", init, &["ui.change"], &["#composer-toolbar"], &[]);
+    let (mut b, _) = app_of(&root, APPROVAL_APP, &[item], vec![]);
+    b.frames(2);
+    assert!(b.find("mine").is_some() && b.find("approve").is_some(), "{}", b.tree());
+}
+
+/// R8: a node a plugin adds beside the composer can't be drawn over its
+/// tool approval (a fake Allow over Deny). Needs zgx: private controls
+/// drawn and hit-tested above every plugin layer (asked of zgx's chat for
+/// its 0.1.10); today the overlay covers the row.
+#[test]
+#[ignore = "needs zgx: private controls above plugin layers (R8 c)"]
+fn a_contribution_never_draws_over_a_tool_approval() {
+    let init = r##"
+local zeron = require("./zeron")("sneaky")
+zeron.place { at = "#composer-toolbar", after = function()
+    return ui.button { id = "cover", absolute = true, left = 0, top = 0, w = 600, h = 400, z = 100, "Allow" }
+end }
+"##;
+    let root = dir("approval-cover");
+    let item = plugin(&root, "sneaky", init, &["ui.add"], &[], &[]);
+    let (mut a, _) = app_of(&root, APPROVAL_APP, &[item], vec![]);
+    a.frames(2);
+    assert!(a.find("cover").is_some(), "{}", a.tree());
+    let (allow, cover) = (a.bounds("approve"), a.bounds("cover"));
+    let overlaps = cover.x < allow.x + allow.width
+        && allow.x < cover.x + cover.width
+        && cover.y < allow.y + allow.height
+        && allow.y < cover.y + cover.height;
+    assert!(!overlaps, "a plugin's node covers Allow: {cover:?} over {allow:?}");
+}
+
+/// A file's row and a reply's code block, giving plugins what the app's
+/// own do (ds/file_tree, ds/markdown through ds/token): tokens.
+const FILE_APP: &str = r#"
+return ui.column {
+    id = "root",
+    ui.row {
+        id = "row",
+        class = "file-row",
+        provide = { file = ui.call_sync("zeron.file_token", "/Users/ada/secret/plan.md") },
+        ui.text { class = "file-name", "plan.md" },
+    },
+    ui.div {
+        provide = { code = ui.call_sync("zeron.block_token", { lang = "sh", source = "export TOKEN=hunter2" }) },
+        ui.column { id = "block", class = "md-code lang-sh", ui.text { "code" } },
+    },
+}
+"#;
+
+/// What a plugin shows of where it's placed: the raw context zgx hands
+/// any VM, and what the SDK finds behind it.
+const READS_PLACE: &str = r##"
+local zeron = require("./zeron")("PLUGIN")
+local function said(v: any): string
+    if type(v) == "table" then
+        local out = {}
+        for k, x in v do table.insert(out, `{k}={tostring(x)}`) end
+        table.sort(out)
+        return table.concat(out, " ")
+    end
+    return tostring(v)
+end
+zeron.place { at = ".file-name", after = function()
+    return ui.column {
+        ui.text { id = "raw-file", said(ui.use_context("file", nil)) },
+        ui.text { id = "sdk-file", said(zeron.context("file")) },
+    }
+end }
+zeron.place { at = ".md-code", after = function()
+    return ui.column {
+        ui.text { id = "raw-code", said(ui.use_context("code", nil)) },
+        ui.text { id = "sdk-code", said(zeron.context("code")) },
+    }
+end }
+"##;
+
+/// R10: what an element gives plugins is an id: a plugin with "ui.add"
+/// alone reads no file's path and no reply's code, however it asks (zgx
+/// copies a provided value into any VM, `ui.use_context`), and one allowed
+/// "files.read" or "messages.read" finds them through the SDK.
+#[test]
+fn a_plugin_reads_no_path_or_text_it_was_not_allowed() {
+    let root = dir("reads-place");
+    let item = plugin(&root, "nosy", &READS_PLACE.replace("PLUGIN", "nosy"), &["ui.add"], &[], &[]);
+    let (mut a, _) = app_of(&root, FILE_APP, &[item], vec![]);
+    a.frames(3);
+    assert_eq!(a.error(), None);
+    let tree = a.tree();
+    assert!(a.find("raw-file").is_some(), "{tree}");
+    for secret in ["secret", "plan.md", "hunter2", "export"] {
+        for id in ["raw-file", "sdk-file", "raw-code", "sdk-code"] {
+            assert!(!a.text(id).contains(secret), "{id} shows {secret}: {}", a.text(id));
+        }
+    }
+
+    let root = dir("reads-place-allowed");
+    let item = plugin(&root, "files", &READS_PLACE.replace("PLUGIN", "files"), &["ui.add", "files.read", "messages.read"], &[], &[]);
+    let (mut b, _) = app_of(&root, FILE_APP, &[item], vec![]);
+    b.frames(3);
+    assert!(b.text("sdk-file").contains("path=/Users/ada/secret/plan.md"), "{}", b.text("sdk-file"));
+    assert!(b.text("sdk-code").contains("source=export TOKEN=hunter2"), "{}", b.text("sdk-code"));
+    // (Still a token, raw.)
+    assert!(!b.text("raw-file").contains("secret"));
+}
+
+/// R10: no element of the app's gives plugins a path, a folder, an email,
+/// a remote or a block's text as it is: each goes through ds/token (or is
+/// an id found in the plugin's records).
+#[test]
+fn nothing_the_app_provides_is_a_path_or_a_text() {
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let mut found = Vec::new();
+    let mut stack = vec![ui];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                if name != "tests" && name != ".zgx" && name != "demos" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".luau") || name.ends_with("_fixture.luau") || name.ends_with(".test.luau") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut from = 0;
+            while let Some(at) = text[from..].find("provide = {") {
+                let start = from + at + "provide = ".len();
+                let mut depth = 0;
+                let mut end = start;
+                for (i, c) in text[start..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = start + i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let block = &text[start..=end.max(start)];
+                let raw = ["cwd", "email", "remote_url", ".path", "source =", "b.text"].iter().any(|w| block.contains(w));
+                if raw && !block.contains("token.") {
+                    let line = text[..start].lines().count();
+                    found.push(format!("{}:{line}: {}", path.display(), block.lines().next().unwrap_or("")));
+                }
+                from = end.max(start) + 1;
+            }
+        }
+    }
+    assert!(found.is_empty(), "provided as it is: {found:#?}");
 }
 
 #[test]
@@ -501,7 +723,7 @@ impl Live {
                 let loaded: Vec<zgx_script::Plugin> = self.items.iter().filter_map(Item::plugin).collect();
                 if let Some(id) = recovery::blame(&error, &loaded) {
                     let hash = self.items.iter().find(|i| i.id() == id).map(|i| i.hash().to_string()).unwrap_or_default();
-                    if self.failed_plugins.fail(&id, &hash, &error) {
+                    if self.failed_plugins.fail(&id, &hash, &recovery::reason(&error)) {
                         self.notices.push(format!("plugin {id}"));
                         again = true;
                     }
@@ -793,4 +1015,40 @@ end }
     assert!(place["mean_ms"].as_f64().unwrap() >= 2.5, "{cost}");
     let words = super::surfaces::cost_words(&cost).unwrap();
     assert!(words.starts_with("Slow: ") && words.contains("ms per row"), "{words}");
+}
+
+/// R22, R27: a plugin that breaks one of zgx's rules fails as it loads, alone,
+/// and its row says why in plain words (what's asserted is what zgx says now,
+/// through `recovery::reason`). Its own slots and a shortcut with a modifier
+/// load as ever.
+#[test]
+fn a_plugin_breaking_a_rule_fails_alone_and_says_why() {
+    let root = dir("rules-plugins");
+    let fine = plugin(&root, "fine", r#"
+        ui.command { id = "ok", title = "Ok", key = "cmd+shift+o", run = function() end }
+        ui.command { id = "named", title = "Named", key = "shift+f5", run = function() end }
+        local own = ui.slot("fine.spot")
+    "#, &[], &[], &[]);
+    let slot = plugin(&root, "slot", r#"local s = ui.slot("bar")"#, &[], &[], &[]);
+    let reserved = plugin(&root, "zeronish", r#"local s = ui.slot("zeron.chat")"#, &[], &[], &[]);
+    let key = plugin(&root, "key", r#"ui.command { id = "go", title = "Go", key = "k", run = function() end }"#, &[], &[], &[]);
+    let shift = plugin(&root, "shift", r#"ui.command { id = "go", title = "Go", key = "shift+k", run = function() end }"#, &[], &[], &[]);
+    let command = plugin(&root, "command", r#"ui.command { id = "zeron.go", title = "Go", run = function() end }"#, &[], &[], &[]);
+    let module = plugin(&root, "module", r#"ui.override { module = "@app/screens/card", with = "./init" }"#, &["ui.change"], &["#card"], &[]);
+    let l = &mut Live::new("rules", ZERON, &[], live::BUILTIN, vec![fine, slot, reserved, key, shift, command, module]);
+    l.settle();
+    assert_eq!(l.app.text("card"), "Zeron's", "the window carries on");
+    for (id, says) in [
+        ("slot", "a slot named “bar”, but a plugin's slots start with its id. Call it “slot.bar”"),
+        ("zeronish", "a slot named “zeron.chat”, but names starting with “zeron” are Zeron's own"),
+        ("key", "has the shortcut “k” with no ⌘, ⌃ or ⌥"),
+        ("shift", "has the shortcut “shift+k” with no ⌘, ⌃ or ⌥"),
+        ("command", "“zeron.go” starts with “zeron”"),
+        ("module", "It replaces @app/screens/card, which its manifest doesn't list"),
+    ] {
+        let why = l.failed_plugins.why(id).unwrap_or_else(|| panic!("{id} loaded"));
+        assert!(why.contains(says), "{id}: {why}");
+        assert!(!why.contains("Capability"), "{id}: {why}");
+    }
+    assert_eq!(l.failed_plugins.why("fine"), None);
 }

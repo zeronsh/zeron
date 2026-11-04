@@ -39,6 +39,9 @@
 -- goes to the end (a person sending goes there too, whatever they were
 -- reading).
 
+-- When a transcript was last made: a reply already streaming then keeps what it shows,
+-- only what comes after fading in.
+local opened_at = 0
 local Icon = require("@self/icon")
 local Markdown = require("@self/markdown")
 local UserMessage = require("@self/user_message")
@@ -129,6 +132,11 @@ export type Props = {
 	-- The widest the conversation runs (points; a function follows a
 	-- setting as it changes); by default the theme's measure.
 	measure: (number | () -> number)?,
+	-- Its rows' inset each side, in points; by default the theme's.
+	side: number?,
+	-- How far over what floats at its foot its fade starts. (A fade's first fifth
+	-- hardly shows: this has it show from where it should start.)
+	fade_lead: number?,
 	-- What floats over its foot (a composer, docked), in points: the
 	-- conversation runs under it, its end held clear of it, fading out as
 	-- it passes behind (Zeron's band, from the composer's top to the
@@ -180,8 +188,10 @@ export type Block = {
 	-- another: each a path on the chat's host and its name (ds/reply_picture).
 	images: { { id: string, path: string, name: string? } }?,
 	-- A visual's (ds/visual): its script on the chat's host, its title, and
-	-- that host's device when it isn't this one.
+	-- that host's device when it isn't this one; or its script itself, when
+	-- the message carries it (a fixture's).
 	path: string?,
+	source: string?,
 	title: string?,
 	device: string?,
 	tools: { Tool }?,
@@ -449,6 +459,8 @@ type View = {
 	view: Ref,
 	offset: State<number>,
 	at_end: State<boolean>?,
+	-- The list's row holding the reply (Markdown's `window`).
+	row: Ref?,
 	pictures: ReplyPicture.Pictures?,
 	-- Where the pictures an agent showed are read from (Props'
 	-- `sent_pictures`: they're files on the chat's host, as sent ones are).
@@ -491,7 +503,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
-			return Visual { id = b.id, path = b.path, title = b.title, device = b.device }
+			return Visual { id = b.id, path = b.path, source = b.source, title = b.title, device = b.device }
 		end
 		-- Pictures an agent showed: one alone, or several on a tray, among
 		-- the reply's pictures in the lightbox. More arriving while it works
@@ -546,6 +558,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			text = words,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}:{b.id}` else nil,
+			veil = m.streaming == true,
+			veil_seed = ui.now() - opened_at < 300,
 			track = track(m.id),
 			window = if view
 				then {
@@ -556,6 +570,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 						return now().streaming == true
 					end,
 					at_end = view.at_end,
+					row = view.row,
 				}
 				else nil,
 			pictures = if view then view.pictures else nil,
@@ -634,11 +649,14 @@ local function reply(
 			text = text,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}` else nil,
+			veil = m.streaming == true,
+			veil_seed = ui.now() - opened_at < 300,
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
 			link_menu = if view then view.link_menu else nil,
 			find = if view and view.find then view.find(`{m.id}:r`) else nil,
 			group = `reply:{m.id}`,
+			track = track(m.id),
 		},
 		-- Its foot, one lane: while the turn runs, that it's working and how
 		-- long; once it settles, its time and Copy on hover. The lane keeps
@@ -707,6 +725,7 @@ local named_shown: { [string]: () -> () } = {}
 local named_sending: { [string]: (push: () -> ()) -> () } = {}
 
 local function Transcript(props: Props): Node
+	opened_at = ui.now()
 	local messages = props.messages
 	-- (Its own kept states, by its name: a side chat's beside the chat
 	-- page's never shares the chat page's glide, runway or hover.)
@@ -1072,7 +1091,7 @@ local function Transcript(props: Props): Node
 	-- lines above the block rewrap inside it: the view moves by however far
 	-- the block moved in its message, so the block stays put, as Zeron's
 	-- rows (each a block) do.
-	local reading: { row: string, block: Ref, within: number }? = nil
+	local reading: { row: string, block: Ref, within: number, view: number? }? = nil
 	local last_w: number? = nil
 	local last_h: number? = nil
 	-- At the end before the view's size changed: it stays at the end through
@@ -1107,39 +1126,50 @@ local function Transcript(props: Props): Node
 			return
 		end
 		local top = el.y :: number
-		local row_id: string? = nil
-		local row_el: any = nil
+		-- The rows in view, top first.
+		local shown: { { id: string, el: any } } = {}
 		for id, r in rows do
 			local row = r.outer:peek()
-			if row and row.y and row.height and row.y + row.height > top and (not row_el or row.y < row_el.y) then
-				row_id, row_el = id, row
+			if row and row.y and row.height and row.y + row.height > top and row.y < top + el.height then
+				table.insert(shown, { id = id, el = row })
 			end
 		end
-		local set = if row_id then BLOCKS[row_id] else nil
-		if not row_id or not row_el or not set then
-			return
-		end
+		table.sort(shown, function(a, b)
+			return a.el.y < b.el.y
+		end)
 		-- The first block starting in view (what is read, whole lines of it
-		-- in sight); else the one the view's top crosses.
-		local pick: Ref? = nil
-		local at: number? = nil
-		local crossing: Ref? = nil
-		local crossing_at: number? = nil
-		for b in set do
-			local be = b:peek()
-			if be and be.y and be.height and be.y + be.height > top then
-				if be.y >= top and (not at or be.y < at) then
-					pick, at = b, be.y
-				elseif be.y < top then
-					crossing, crossing_at = b, be.y
+		-- in sight), in whichever row: a row of no blocks (a prompt) is
+		-- itself one. Else, nothing starting in view, the block the view's
+		-- top crosses.
+		local crossing: { row: string, block: Ref, at: number, row_y: number }? = nil
+		for _, r in shown do
+			local set = BLOCKS[r.id]
+			if not set then
+				if r.el.y >= top then
+					reading = { row = r.id, block = rows[r.id].outer, within = 0, view = r.el.y - top }
+					return
+				end
+			else
+				local pick: Ref? = nil
+				local at: number? = nil
+				for b in set do
+					local be = b:peek()
+					if be and be.y and be.height and be.y + be.height > top then
+						if be.y >= top and (not at or be.y < at) then
+							pick, at = b, be.y
+						elseif be.y < top and not crossing then
+							crossing = { row = r.id, block = b, at = be.y, row_y = r.el.y }
+						end
+					end
+				end
+				if pick and at then
+					reading = { row = r.id, block = pick, within = at - r.el.y, view = at - top }
+					return
 				end
 			end
 		end
-		if not pick then
-			pick, at = crossing, crossing_at
-		end
-		if pick and at then
-			reading = { row = row_id, block = pick, within = at - row_el.y }
+		if crossing then
+			reading = { row = crossing.row, block = crossing.block, within = crossing.at - crossing.row_y, view = crossing.at - top }
 		end
 	end
 	local function keep_reading()
@@ -1461,7 +1491,7 @@ local function Transcript(props: Props): Node
 			w_full = true,
 			justify = "center",
 			items = "start",
-			px = "$space.5",
+			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
 			pt = function(): number
 				return ui.raw(pt(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
@@ -1510,6 +1540,11 @@ local function Transcript(props: Props): Node
 							id = m.id,
 							text = m.text,
 							attachments = m.attachments,
+							-- (Its pictures follow the message: sent from here,
+							-- this Mac's files, then the chat's copies.)
+							now = function(): any
+								return state:get()
+							end,
 							open = props.open_link,
 							link_menu = props.link_menu,
 							pictures = props.sent_pictures,
@@ -1518,7 +1553,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
 			},
 		}
 	end
@@ -1537,7 +1572,7 @@ local function Transcript(props: Props): Node
 				hover:set("")
 			end
 		end,
-		SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.on_mention or props.on_attach
+		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.on_mention or props.on_attach
 			then function()
 				-- (A turn on: the release ends the gesture first.)
 				ui.after(0, settle)
@@ -1609,9 +1644,35 @@ local function Transcript(props: Props): Node
 			-- the window resized): the reading place put back, then taken
 			-- again where it now stands.
 			on_resize = function(size: { w: number, h: number })
-				local changed = (last_w ~= nil and math.abs(size.w - last_w) >= 0.5)
-					or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
+				local widened = last_w ~= nil and math.abs(size.w - last_w) >= 0.5
+				local changed = widened or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
 				last_w, last_h = size.w, size.h
+				-- (Its width changed in one step (the window maximized, a
+				-- panel's page taking its width at once): every row above the
+				-- reading place rewraps too, in the same layout, past what the
+				-- reading row's own line puts back. A frame on, and twice more
+				-- as the rows it brought into view measure, the reading place
+				-- goes back where it stood in the view, by where it really is,
+				-- as a place returned to is.)
+				local r = reading
+				if widened and r and not end_held and r.view ~= nil then
+					local function settle()
+						if end_held or reading ~= r then
+							return
+						end
+						local be, list_el = r.block:peek(), list:peek()
+						if not be or not list_el or be.y == nil or list_el.y == nil then
+							return
+						end
+						local off = ((be.y :: number) - (list_el.y :: number)) - r.view
+						if math.abs(off) >= 0.5 then
+							offset:set(math.max(0, offset:peek() + off))
+						end
+					end
+					ui.after(0, settle)
+					ui.after(16, settle)
+					ui.after(48, settle)
+				end
 				if changed then
 					resizing_until = ui.now() + 300
 					-- At the end: on it still, every frame of the change.
@@ -1670,7 +1731,7 @@ local function Transcript(props: Props): Node
 			-- (Zeron's 24 under the title bar; at the foot, the band the
 			-- composer covers, or 24.)
 			fade = function(): { number }
-				return { 24, math.max(24, foot()) }
+				return { 24, math.max(24, foot()) + (props.fade_lead or 0) }
 			end,
 			-- A row Tab (or ⇧Tab) focuses scrolls clear of both bands: the
 			-- title bar's fade at the top, the composer at the foot (followed
@@ -1685,9 +1746,10 @@ local function Transcript(props: Props): Node
 			-- On whole points, so a scroll moves its pixels rather than
 			-- painting them again (a view between device pixels can't).
 			snap = true,
-		} },
-		-- The scrollbar, over the list and never faded, running from its top
-		-- to the band the composer covers.
+		} } },
+		-- The scrollbar, over the list and never faded, running its whole
+		-- height: at the window's edge, beside the composer rather than
+		-- under it, so scrolled to the end it reaches the page's end.
 		Rail {
 			id = "transcript-rail",
 			offset = offset,
@@ -1696,7 +1758,7 @@ local function Transcript(props: Props): Node
 				return list.height or 0
 			end,
 			track = function(): number
-				return math.max(0, (list.height or 0) - foot())
+				return list.height or 0
 			end,
 		},
 		-- What a selection offers.

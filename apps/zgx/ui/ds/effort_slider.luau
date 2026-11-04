@@ -1,8 +1,10 @@
 -- A reasoning-effort slider, after Ask's (its model picker's Reasoning bar,
 -- Ask.app's kit/slider.luau): a 24-point inset groove, a fill running from
 -- its start to a pill thumb, a ghost under the pointer showing where a press
--- would land, a notch at each level between the ends. Pressing or dragging
--- sets it; with focus, ←/→ (and Home/End) step it.
+-- would land, a notch at each level between the ends. Pressed, the thumb
+-- is under the pointer and follows it as it drags, the level under it
+-- shown; let go, the value is that level and the thumb settles on it. With
+-- focus, ←/→ (and Home/End) step it.
 --
 -- Its fill is ours: a field of ASCII glyphs in the intro's 5 by 7 font
 -- (decode.GLYPHS, ` .-+xXS80#@`), sparse and dim at the start, denser and
@@ -128,8 +130,18 @@ return ui.component(function(props: Props): Node
 	-- The pointer's place across the track (a level's fraction), -1 outside.
 	local hover = ui.use_state(-1)
 	local pressed = ui.use_state(false)
+	-- The level a drag is over, until it's let go (nil: no drag): the
+	-- header, the colour and the field follow it as the thumb crosses the
+	-- levels, and the value is set once, as it's let go (setting it is the
+	-- composer's pick and the model chip's label: none of that on each
+	-- step of a drag).
+	local live = ui.use_state(nil :: number?)
 
 	local function index(): number
+		local dragged = live:get()
+		if dragged then
+			return dragged
+		end
 		local v = props.value:get()
 		for i, l in levels() do
 			if l.value == v then
@@ -176,7 +188,12 @@ return ui.component(function(props: Props): Node
 		end
 		return frac(nearest(math.clamp(((e.local_x or 0) - 2 - KNOB / 2) / span, 0, 1)))
 	end
-	local function set(i: number)
+	-- Each level it lands on, a tap under the trackpad, as the shipping
+	-- app's detents (src/haptics.rs; nothing where the host has none).
+	local function tap()
+		pcall(ui.invoke, "haptic.step")
+	end
+	local function set(i: number, quiet: boolean?)
 		local l = levels()[i]
 		if not l or l.value == props.value:peek() then
 			return
@@ -186,16 +203,12 @@ return ui.component(function(props: Props): Node
 		else
 			props.value:set(l.value)
 		end
-		-- Each level it lands on, a tap under the trackpad, as the shipping
-		-- app's detents (src/haptics.rs; nothing where the host has none).
-		pcall(ui.invoke, "haptic.step")
+		if not quiet then
+			tap()
+		end
 	end
 	local function grown(): boolean
 		return hover:get() >= 0 or pressed:get()
-	end
-	-- Levels spring from one to the next.
-	local function moving(f: () -> number): any
-		return ui.spring(ui.computed(f), { stiffness = 420, damping = 34 })
 	end
 	local function grow(a: number, b: number): any
 		return ui.tween(ui.computed(function(): number
@@ -203,10 +216,69 @@ return ui.component(function(props: Props): Node
 		end), { duration = 160 })
 	end
 
+	-- Where the thumb centres, as drawn (the fill runs to it): held, under
+	-- the pointer, set the moment the pointer moves (the frame it moves,
+	-- nothing easing after it); let go, it settles on its level, and a
+	-- level changed otherwise (the keys, another model) eases it there.
+	-- (It sprang after the level, which moved only as the pointer crossed
+	-- half way to the next: the thumb trailed the pointer, then caught up.)
+	local pos = ui.use_state(0)
+	local settling: any = nil
+	local function put(x: number, ease: boolean)
+		if settling then
+			settling:cancel()
+			settling = nil
+		end
+		if not ease or motion.reduced_now() or math.abs(pos:peek() - x) < 0.5 then
+			pos:set(x)
+			return
+		end
+		settling = anime.animate(pos, { value = x, duration = 140, ease = "out(3)" })
+	end
+	-- (On its level at once as the track is first measured: the slider
+	-- opens with its thumb in place.)
+	local placed = false
+	ui.effect(function()
+		if pressed:get() or not measured() then
+			return
+		end
+		put(spot(frac(index())), placed)
+		placed = true
+	end)
+	-- The thumb's centre under a pointer event, held to the track's ends,
+	-- and the level nearest it.
+	local function under(e: any): number
+		return math.clamp(e.local_x or 0, spot(0), spot(1))
+	end
+	local function level_at(x: number): number
+		local span = inner() - KNOB
+		return nearest(if span > 0 then (x - spot(0)) / span else 0)
+	end
+	-- Held: the thumb where the pointer is, the level under it live.
+	local function follow(e: any)
+		local x = under(e)
+		put(x, false)
+		local i = level_at(x)
+		if i ~= index() then
+			live:set(i)
+			tap()
+		end
+	end
+	-- Let go: the level it was over taken, as the thumb settles on it.
+	local function let_go()
+		local i = live:peek()
+		ui.batch(function()
+			pressed:set(false)
+			live:set(nil)
+			if i then
+				set(i, true)
+			end
+		end)
+	end
+
 	-- Each look's field, mounted with it and crossfading in, once the track
-	-- has a width. Its ramp ends at the level's thumb: set on it as the
-	-- width or the level moves (a level of the same look, or a new width,
-	-- keeps the field).
+	-- has a width. Its ramp ends at the thumb: set on it as the thumb moves
+	-- (a level of the same look, or a new width, keeps the field).
 	local field = ui.presence(function(): string?
 		if not measured() then
 			return nil
@@ -216,7 +288,7 @@ return ui.component(function(props: Props): Node
 		local l = look(index())
 		local el = ui.ref()
 		ui.effect(function()
-			local at = edge(frac(index()))
+			local at = pos:get() - 2
 			local node = el:peek()
 			if node then
 				anime.utils.set(node, { shaderParam11 = at })
@@ -227,11 +299,11 @@ return ui.component(function(props: Props): Node
 			w = inner,
 			h = H - 4,
 			bg_shader = FIELD,
-			-- 5 by 7 point characters, the ramp ending at the level's thumb.
+			-- 5 by 7 point characters, the ramp ending at the thumb.
 			-- (A token: the shader's colour follows the theme.)
-			shader_params = { ink(l), { 1, 0.04, l.to, 1.4 }, { l.wander, l.drift, 3, edge(frac(index())) }, { 0, 0, 0, 0 } },
+			shader_params = { ink(l), { 1, 0.04, l.to, 1.4 }, { l.wander, l.drift, 3, pos:peek() - 2 }, { 0, 0, 0, 0 } },
 			on_mount = function(node)
-				anime.utils.set(node, { shaderParam11 = edge(frac(index())) })
+				anime.utils.set(node, { shaderParam11 = pos:peek() - 2 })
 				-- Drifting, unless motion is reduced.
 				if not motion.reduced_now() then
 					anime.animate(node, {
@@ -305,18 +377,15 @@ return ui.component(function(props: Props): Node
 		end,
 		on_press = function(e)
 			pressed:set(true)
-			set(nearest(at(e)))
+			follow(e)
 		end,
 		on_pointer_move = function(e)
-			local f = at(e)
-			hover:set(f)
+			hover:set(at(e))
 			if pressed:peek() then
-				set(nearest(f))
+				follow(e)
 			end
 		end,
-		on_release = function()
-			pressed:set(false)
-		end,
+		on_release = let_go,
 		on_key = if keys
 			then function(e)
 				local i = index()
@@ -389,9 +458,9 @@ return ui.component(function(props: Props): Node
 				rounded = "$radius.sm",
 				overflow = "hidden",
 				pointer_events = "none",
-				w = moving(function(): number
-					return edge(frac(index()))
-				end),
+				w = function(): number
+					return pos:get() - 2
+				end,
 				-- The level's tint.
 				ui.div {
 					absolute = true,
@@ -426,12 +495,15 @@ return ui.component(function(props: Props): Node
 			-- level's colour, on the fill's leading edge; a little larger under the
 			-- pointer (sized, not scaled, so its edges stay crisp).
 			ui.div {
+				-- (Named for tests: where it is drawn.)
+				class = "effort-thumb",
 				absolute = true,
-				left = 0,
+				-- (A point wider each side under the pointer, its centre kept.)
+				left = grow(0, -1),
 				pointer_events = "none",
-				x = moving(function(): number
-					return spot(frac(index())) - KNOB / 2 - (if grown() then 1 else 0)
-				end),
+				x = function(): number
+					return pos:get() - KNOB / 2
+				end,
 				top = grow(1, 0),
 				w = grow(KNOB, KNOB + 2),
 				h = grow(H - 2, H),

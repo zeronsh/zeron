@@ -60,8 +60,24 @@ const recorded = async (userId: string, email: string) => {
   await directory().upsert({ ...seeded, email, profile_picture_url: null, created_at: seeded.updated_at } as never);
 };
 
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82]);
-const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70]);
+// Real pictures: uploads are parsed and rebuilt (image-check.ts). A 1×1 PNG,
+// and a JPEG sound in structure (JFIF, tables, a 1×1 frame, one scan).
+const PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+const JPEG = Uint8Array.from([
+  0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0,
+  0xff, 0xdb, 0, 67, 0, ...new Array(64).fill(1),
+  0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0,
+  0xff, 0xc4, 0, 20, 0, 1, ...new Array(15).fill(0), 0,
+  0xff, 0xda, 0, 8, 1, 1, 0, 0, 0x3f, 0, 0x12, 0x34, 0xff, 0xd9
+]);
+
+/** Sign in interactively (a code exchange through the fake) and keep the
+ * step-up ticket it earns: deleting the account needs one (step-up.ts). */
+const signIn = async (userId: string): Promise<string> => {
+  const res = await call("POST", "/auth/exchange", undefined, { code: `code:${userId}` });
+  expect(res.status).toBe(200);
+  return (res.body.stepUp as { token: string }).token;
+};
 
 const keyOf = (avatar: unknown): string => {
   const m = /\/auth\/avatars\/([0-9a-f]{32})$/.exec(String(avatar));
@@ -225,24 +241,24 @@ describe("deleting an account", () => {
     }
     expect((await workos()).users.some((u) => u.id === userId)).toBe(true);
     // (Case and spaces aside.)
-    expect((await call("DELETE", "/auth/me", userId, { confirm: ` ${email.toUpperCase()} ` })).body).toEqual({ ok: true });
+    expect((await call("DELETE", "/auth/me", userId, { confirm: ` ${email.toUpperCase()} `, stepUp: await signIn(userId) })).body).toEqual({ ok: true });
   });
 
   it("is refused for the only admin of an org others are in, until there's another", async () => {
     const orgId = newId("org");
     const admin = await member(orgId, "admin");
     const other = await member(orgId, "member");
-    expect(await call("DELETE", "/auth/me", admin.userId, { confirm: admin.email })).toEqual({
+    expect(await call("DELETE", "/auth/me", admin.userId, { confirm: admin.email, stepUp: await signIn(admin.userId) })).toEqual({
       status: 409,
       body: { error: "last_admin", organization: orgId }
     });
     expect((await workos()).users.some((u) => u.id === admin.userId)).toBe(true);
     // Another admin: fine.
     await call("PATCH", `/auth/orgs/${orgId}/members/${other.membershipId}`, admin.userId, { role: "admin" });
-    expect((await call("DELETE", "/auth/me", admin.userId, { confirm: admin.email })).status).toBe(200);
+    expect((await call("DELETE", "/auth/me", admin.userId, { confirm: admin.email, stepUp: await signIn(admin.userId) })).status).toBe(200);
     // Alone in an org: fine too.
     const solo = await member(newId("org"), "admin");
-    expect((await call("DELETE", "/auth/me", solo.userId, { confirm: solo.email })).status).toBe(200);
+    expect((await call("DELETE", "/auth/me", solo.userId, { confirm: solo.email, stepUp: await signIn(solo.userId) })).status).toBe(200);
   });
 
   it("deletes them in WorkOS and tombstones them here at once: memberships, username and photo go", async () => {
@@ -253,13 +269,14 @@ describe("deleting an account", () => {
     expect((await directory().claimUsername(userId, username, 1)).error).toBeUndefined();
     await call("PATCH", "/auth/me", userId, { title: "Leaving" });
     const key = keyOf(((await (await send("PUT", "/auth/me/photo", userId, { bytes: PNG })).json()) as { avatar: string }).avatar);
+    const ticket = await signIn(userId);
 
     const logged: unknown[] = [];
     const spies = (["log", "warn", "error"] as const).map((level) =>
       vi.spyOn(console, level).mockImplementation((...args: unknown[]) => void logged.push(...args))
     );
     try {
-      expect(await call("DELETE", "/auth/me", userId, { confirm: email })).toEqual({ status: 200, body: { ok: true } });
+      expect(await call("DELETE", "/auth/me", userId, { confirm: email, stepUp: ticket })).toEqual({ status: 200, body: { ok: true } });
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
@@ -280,10 +297,20 @@ describe("deleting an account", () => {
     const orgId = newId("org");
     const { userId, email } = await member(orgId, "member");
     await recorded(userId, email);
+    expect(await call("DELETE", "/auth/me", userId, { confirm: email, stepUp: await signIn(userId) })).toEqual({ status: 200, body: { ok: true } });
+    // (Theirs and their org's only: other test files share the fake.)
+    const mine = async () => {
+      const state = await workos();
+      return {
+        users: state.users.filter((u) => u.id === userId),
+        memberships: state.memberships.filter((m) => m.user_id === userId || m.organization_id === orgId),
+        invitations: state.invitations.filter((i) => i.organization_id === orgId),
+        deletedOrgs: state.deletedOrgs.filter((id) => id === orgId)
+      };
+    };
+    const after = await mine();
     expect(await call("DELETE", "/auth/me", userId, { confirm: email })).toEqual({ status: 200, body: { ok: true } });
-    const after = await workos();
-    expect(await call("DELETE", "/auth/me", userId, { confirm: email })).toEqual({ status: 200, body: { ok: true } });
-    expect(await workos()).toEqual(after);
+    expect(await mine()).toEqual(after);
     // Still never without the address typed.
     expect((await call("DELETE", "/auth/me", userId, {})).status).toBe(400);
   });
@@ -319,10 +346,12 @@ describe("deleting an account", () => {
       method: "POST",
       body: JSON.stringify({ path: `/user_management/users/${userId}`, times: 1, method: "DELETE" })
     });
-    expect(await call("DELETE", "/auth/me", userId, { confirm: email })).toEqual({ status: 502, body: { error: "upstream" } });
+    // One sign-in's ticket: a failed attempt doesn't use it up.
+    const ticket = await signIn(userId);
+    expect(await call("DELETE", "/auth/me", userId, { confirm: email, stepUp: ticket })).toEqual({ status: 502, body: { error: "upstream" } });
     expect((await workos()).users.some((u) => u.id === userId)).toBe(true);
     expect(Object.keys(await directory().profiles([userId]))).toEqual([userId]);
-    expect((await call("DELETE", "/auth/me", userId, { confirm: email })).status).toBe(200);
+    expect((await call("DELETE", "/auth/me", userId, { confirm: email, stepUp: ticket })).status).toBe(200);
     expect((await workos()).users.some((u) => u.id === userId)).toBe(false);
   });
 
@@ -336,7 +365,7 @@ describe("deleting an account", () => {
       method: "POST",
       body: JSON.stringify({ email: "invitee@example.net", organization_id: solo, state: "pending", expires_at: new Date(Date.now() + 86_400_000).toISOString() })
     });
-    expect((await call("DELETE", "/auth/me", userId, { confirm: email })).status).toBe(200);
+    expect((await call("DELETE", "/auth/me", userId, { confirm: email, stepUp: await signIn(userId) })).status).toBe(200);
     const state = await workos();
     expect(state.deletedOrgs).toContain(solo);
     expect(state.deletedOrgs).not.toContain(shared);
@@ -346,10 +375,11 @@ describe("deleting an account", () => {
 });
 
 describe("a user deleted in WorkOS (the webhook)", () => {
-  it("takes their own photo with them", async () => {
+  it("takes their own photo and images with them", async () => {
     const { userId, email } = await member(newId("org"), "member");
     await recorded(userId, email);
     const key = keyOf(((await (await send("PUT", "/auth/me/photo", userId, { bytes: PNG })).json()) as { avatar: string }).avatar);
+    const image = ((await (await send("PUT", "/auth/me/images", userId, { bytes: PNG })).json()) as { key: string }).key;
     const secret = "workos_whsec_test";
     const payload = JSON.stringify({
       id: `event_${crypto.randomUUID()}`,
@@ -375,6 +405,7 @@ describe("a user deleted in WorkOS (the webhook)", () => {
     });
     expect(res.status).toBe(200);
     expect((await send("GET", `/auth/avatars/${key}`)).status).toBe(404);
+    expect((await send("GET", `/auth/avatars/${image}`)).status).toBe(404);
     expect(await directory().profiles([userId])).toEqual({});
   });
 });

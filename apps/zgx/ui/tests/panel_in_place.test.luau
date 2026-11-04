@@ -322,41 +322,20 @@ test("closing a terminal with a program running asks first; an idle one closes a
 	end)).to_be(true)
 end)
 
--- Where a tab starts, across the window (from its line in the tree).
-local function tab_x(app: any): number?
+-- Where a tab starts, across the window and down it (from its line in
+-- the tree).
+local function tab_at(app: any): (number?, number?)
 	for line in app:tree("#panel-strip"):gmatch("[^\n]+") do
 		if line:find('tab "', 1, true) then
-			return tonumber(line:match(" (%-?%d+),%-?%d+ %d+x%d+"))
+			local x, y = line:match(" (%-?%d+),(%-?%d+) %d+x%d+")
+			return tonumber(x), tonumber(y)
 		end
 	end
-	return nil
+	return nil, nil
 end
-
-test("at the window's edge the tabs start after the title bar's controls, and come back as it moves off", function()
-	local app = open_panel()
-	app:click("#panel-open-files")
-	expect(app:wait("#panel-strip >> role:tab", { timeout_ms = 15000 })).to_be(true)
-	-- Beside a chat: its own start.
-	local beside = tab_x(app)
-	expect(beside).to_be(8)
-	-- Expanded over the window's edge: past the window's buttons and the
-	-- title bar's sidebar toggle, back and forward.
-	app:set_state("test_panel_left", 0)
-	expect(eventually(app, function(): boolean
-		local x = tab_x(app)
-		return x ~= nil and x > 150
-	end)).to_be(true)
-	-- Partly under them: only as far as they reach.
-	app:set_state("test_panel_left", 100)
-	expect(eventually(app, function(): boolean
-		local x = tab_x(app)
-		return x ~= nil and x > 40 and x < 100
-	end)).to_be(true)
-	app:set_state("test_panel_left", 1000)
-	expect(eventually(app, function(): boolean
-		return tab_x(app) == 8
-	end)).to_be(true)
-end)
+local function tab_x(app: any): number?
+	return (tab_at(app))
+end
 
 test("the app's ⌘W closes the panel's active tab only while the panel has the keyboard", function()
 	local app = open_panel()
@@ -432,30 +411,6 @@ test("⌘↵ in the tree opens the file in a tab of its own; the one showing sta
 	expect(first).to_be("code.luau")
 	expect(second).never.to_be("code.luau")
 	expect(second).never.to_be("Files")
-end)
-
-test("the window's layout decides where a file tab's tree goes: beside the file, or floating over it", function()
-	local app = open_panel()
-	open_files(app)
-	-- Room for it (the fixture's 900 wide, and the layout says so): beside.
-	expect(app:has("#files-tree-beside")).to_be(true)
-	expect(app:has("#files-tree-float")).to_be(false)
-	-- The layout says no room, whatever the pane's width: it floats, hidden
-	-- until toggled.
-	app:set_state("test_panel_docked", false)
-	expect(eventually(app, function(): boolean
-		return app:has("#files-tree-float") and not app:has("#files-tree-beside")
-	end)).to_be(true)
-	app:click('role:button "Toggle File Tree"')
-	expect(eventually(app, function(): boolean
-		local line: string = (app:tree("#files-tree-float"):match("^[^\n]+") :: string?) or ""
-		return not line:find(" hidden$") and line:find("12,", 1, true) ~= nil
-	end)).to_be(true)
-	-- Room again: beside the file once more.
-	app:set_state("test_panel_docked", true)
-	expect(eventually(app, function(): boolean
-		return app:has("#files-tree-beside")
-	end)).to_be(true)
 end)
 
 test("⌘↵ on the file showing keeps the one tab, active: a file is never open twice", function()

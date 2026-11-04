@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::AgentEvent;
+use zeron_proto::{AgentEvent, ToolCall};
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -249,6 +249,62 @@ impl RunJournal {
         RevEvents::open(&self.path_for(chat_id))
     }
 
+    /// One tool's call and (once it settled) its result, as the chat's
+    /// journal last recorded them — what `ReadToolOutput` serves the whole
+    /// output from. A subagent's tools are journaled under the chat that
+    /// started it, wrapped in [`AgentEvent::Subagent`]; they are found the
+    /// same way. Read newest-first, and only lines naming `tool_id` are
+    /// parsed, so a long journal costs a byte scan, not a parse.
+    /// `None` when the journal has no such call (an old chat whose journal
+    /// is gone, or a chat this device never ran).
+    pub fn tool_exchange(
+        &self,
+        chat_id: &str,
+        tool_id: &str,
+    ) -> Result<Option<ToolExchange>, JournalError> {
+        let path = self.path_for(chat_id);
+        let Some(mut lines) = RevLines::open(&path)? else {
+            return Ok(None);
+        };
+        // The id as it is written in a line: a JSON string.
+        let needle = serde_json::to_string(tool_id)?;
+        let mut result: Option<ToolResultRecord> = None;
+        while let Some(raw) = lines.next_line()? {
+            if !contains(&raw, needle.as_bytes()) {
+                continue;
+            }
+            let Ok(line) = std::str::from_utf8(&raw) else {
+                continue;
+            };
+            let Some((_, mut event)) = parse_line(&path, line) else {
+                continue;
+            };
+            while let AgentEvent::Subagent { event: inner, .. } = event {
+                event = *inner;
+            }
+            match event {
+                AgentEvent::ToolResult {
+                    id,
+                    output,
+                    exit_code,
+                    is_error,
+                    ..
+                } if id == tool_id && result.is_none() => {
+                    result = Some(ToolResultRecord {
+                        output,
+                        exit_code,
+                        is_error,
+                    });
+                }
+                AgentEvent::ToolCall { id, call } if id == tool_id => {
+                    return Ok(Some(ToolExchange { call, result }));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// Crash-recovery scan: chat ids whose journal's last event is NOT a `Done` — their
     /// runs died mid-stream and need recovery (stamp `aborted`, close the journal).
     pub fn stale_sessions(&self) -> Result<Vec<String>, JournalError> {
@@ -281,6 +337,27 @@ impl RunJournal {
         }
         Ok(())
     }
+}
+
+/// A tool's call and its result, from the journal ([`RunJournal::tool_exchange`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolExchange {
+    /// The call as last recorded (a harness may refine it in place).
+    pub call: ToolCall,
+    /// `None` while the tool is still running.
+    pub result: Option<ToolResultRecord>,
+}
+
+/// What a tool's [`AgentEvent::ToolResult`] carried.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolResultRecord {
+    pub output: Option<String>,
+    pub exit_code: Option<i32>,
+    pub is_error: bool,
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Parse every valid line; malformed lines (torn tail writes) are skipped.

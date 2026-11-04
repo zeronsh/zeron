@@ -204,7 +204,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
 }
 
 fn install_restart(host: &ScriptHost) {
-    host.async_action("engine.restart", |_| async move {
+    host.async_action("engine.restart", |_| async move { crate::plugins::preview::refuse("engine.restart")?;
         let engine = engine::get();
         let Some(config) = engine.config() else {
             return Err("Zeron isn't available here".into());

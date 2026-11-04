@@ -266,6 +266,7 @@ mod tests {
                 is_error: false,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
         ];
         for reasoning in [false, true] {

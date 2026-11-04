@@ -95,3 +95,64 @@ test("closed columns take no room, and nothing open hides nothing", function()
 	f = fit.panels(500, 256, col(true, 1), CLOSED, CLOSED, false)
 	expect(f.sidebar).to_be(false)
 end)
+
+-- A split's panes (screens/shell/fit, `other_gives_way`): what they want.
+local GAP = 4
+local function floor(n: number): number
+	return fit.page_floor(n, GAP)
+end
+
+test("the page wants its panes' least and the gaps; one pane is the chat's least", function()
+	expect(floor(1)).to_be(fit.CHAT_PANEL_MIN)
+	expect(floor(2)).to_be(598)
+	expect(floor(3)).to_be(890)
+	expect(floor(4)).to_be(1182)
+	expect(floor(5)).to_be(1474)
+	expect(floor(6)).to_be(1766)
+	-- What each of two or more has at that: what stands round them and the gaps
+	-- between them out of it, shared.
+	for n = 2, 6 do
+		expect((floor(n) - fit.PAGE_EDGES - (n - 1) * GAP) / n).to_be(fit.PANE_MIN)
+	end
+end)
+
+test("both sides open: 1 to 6 panes at every window, they fit or one side must go", function()
+	local PANEL = fit.RIGHT_PANE_MIN
+	for n = 1, 6 do
+		for _, w in { 760, 900, 1100, 1280, 1440, 1728, 2000, 2560 } do
+			local want = floor(n) + fit.SIDEBAR_DEFAULT + PANEL <= w
+			expect(`{n} at {w}: {fit.panes_fit(w, floor(n), fit.SIDEBAR_DEFAULT, PANEL)}`).to_be(`{n} at {w}: {want}`)
+		end
+	end
+	-- The reported windows.
+	expect(fit.panes_fit(1100, floor(2), 256, PANEL)).to_be(false)
+	expect(fit.panes_fit(1440, floor(2), 256, PANEL)).to_be(true)
+	expect(fit.panes_fit(1440, floor(3), 256, PANEL)).to_be(false)
+end)
+
+test("the fit itself takes no account of panes: a window narrowing keeps its old rule", function()
+	-- Everything still fits a chat's least: nothing hides, whatever the split.
+	local f = fit.panels(1000, 256, col(true, 1), col(true, 2), CLOSED, false)
+	expect(f.sidebar and f.right).to_be(true)
+end)
+
+test("the panel's share leaves the panes what they want, and keeps its own least", function()
+	-- 1100, no sidebar: half of 812 would leave them under 598.
+	expect(fit.content_split(812, floor(2))).to_be(360)
+	-- Plenty: half.
+	expect(fit.content_split(2000, floor(2))).to_be(1000)
+	-- Between: what the panes leave it.
+	expect(fit.content_split(1100, floor(2))).to_be(502)
+	-- One pane is the chat's.
+	expect(fit.content_split(700, floor(1))).to_be(fit.content_split(700))
+	-- Too little for the panes: its least, and they narrow.
+	expect(fit.content_split(812, floor(3))).to_be(360)
+end)
+
+test("the most the panel takes leaves the panes what they want, down to its least", function()
+	expect(fit.panel_room(1440, 256, 0, floor(2))).to_be(586)
+	expect(fit.panel_room(1100, 0, 0, floor(2))).to_be(502)
+	-- Too little: its least, whatever the panes want; its tree counted in it.
+	expect(fit.panel_room(1100, 0, 0, floor(3))).to_be(360)
+	expect(fit.panel_room(1100, 0, 288, floor(3))).to_be(72)
+end)
