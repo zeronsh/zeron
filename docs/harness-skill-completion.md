@@ -87,7 +87,10 @@ File discovery covers the standard directories implemented by each adapter;
 custom plugin paths and provider configuration are exposed where the native
 catalog provides them. It is not a complete parser of every provider’s config.
 Unreadable files, directories, and directory entries are skipped with diagnostics
-so an unrelated skill root cannot suppress valid results.
+so an unrelated skill root cannot suppress valid results. Dependency and VCS
+folders inside a skill root (`node_modules`, `site-packages`, `.venv`,
+`__pycache__`, `.git`) are not walked, so a skill that installed its own packages
+cannot use up the entry limit the roots share.
 
 Hosts advertise `composer-references-v1` for canonical reference delivery.
 Selecting a provider command for an older host inserts literal slash text.
