@@ -46,6 +46,22 @@ Stops new whales being born. No protocol changes; additive on the existing s2 ro
   claude harness emits none.
 - Old readers: both fields are already serde-additive; old app versions render the
   summary as if it were the output. Acceptable.
+- **Exception: command output tail (2026-11-03, user decision, #1168).** A command
+  (Exec) tool part keeps the redacted end of its output: its last **10 lines or
+  1 KB**, whichever is less, plus additive `exitCode`, `outputBytes` (the whole
+  output's size) and `outputTruncated` (written only when earlier output was cut).
+  Secrets are redacted before the cut (`zeron_proto::redact::redact_command_output`),
+  and commands that print secrets by nature (`env`, `cat .env`, `gh auth token`, …)
+  keep only a "not kept" note. So a session grows by at most ~1 KB per command, the
+  sync budget above still holds, and every other tool's output stays out of the doc.
+  The full output stays in the host's run journal and is never synced. With a cut
+  tail the part also carries `outputLines` (the whole output's line count), and a
+  reader who expands the command asks the host for the rest: `ReadToolOutput
+  {chatId, toolId, offset}` (relay-forwardable, answered only by the chat's host,
+  not open to agents' scoped token) reads the call and result from the journal and
+  serves the output's last 1 MB in 48 KB chunks, through the same withholding and
+  redaction as the tail (`zeron_doc::command_output_end`). Commands only; a chat
+  whose journal is gone answers that the output isn't kept.
 
 **A2. Output sidecar.** *[PARKED 2026-08-10 (v0.1.30): product call — no R2
 uploads for now. The fold keeps small outputs inline (≤160 chars,

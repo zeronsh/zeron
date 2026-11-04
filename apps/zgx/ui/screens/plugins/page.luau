@@ -127,7 +127,7 @@ local function failed(title: string | Message): (err: any) -> ()
 end
 
 -- An install or update's outcome: someone else's waiting says so with its
--- own notice (the host's "waiting for you to allow it"); otherwise a word.
+-- own notice (screens/plugins/waiting); otherwise a word.
 -- (`plain` its key without a version, `versioned` with one.)
 local function settled(plain: string, versioned: string): (done: any) -> ()
 	return function(done: any)
@@ -707,6 +707,15 @@ function M.View(): Node
 					tone = "warning",
 					title = ui.t("plugins.page.offline_title"),
 					body = ui.t("plugins.page.offline_body"),
+				}
+			end,
+			-- (The account's setup isn't finished: plugins load once it is,
+			-- src/plugins `wait_for_setup`.)
+			setup = function(): Node
+				return ds.Callout {
+					tone = "info",
+					title = ui.t("plugins.page.setup_title"),
+					body = ui.t("plugins.page.setup_body"),
 				}
 			end,
 			away = away_notice,

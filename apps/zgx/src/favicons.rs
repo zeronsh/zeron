@@ -19,6 +19,11 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 pub fn install(host: &ScriptHost) {
     host.async_action("favicon.fetch", |arg| async move {
         let url = arg.field("url").map(crate::auth::text).unwrap_or_default();
+        // A request of the host's own would carry out what a preview put in
+        // its URL. No icon, as for a page without one.
+        if crate::plugins::preview::current().is_some() {
+            return Ok(Value::Nil);
+        }
         if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(char::is_control) {
             return Ok(Value::Nil);
         }

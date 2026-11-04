@@ -10,8 +10,11 @@ test("each shortcut is one command's, on one key, in a known group", function()
 	for _, k in keys.LIST do
 		expect(ids[k.id]).to_be(nil)
 		ids[k.id] = true
-		expect(`{k.key}: {taken[k.key] or "free"}`).to_be(`{k.key}: free`)
-		taken[k.key] = k.id
+		-- (Those with none have none to share.)
+		if k.key ~= "" then
+			expect(`{k.key}: {taken[k.key] or "free"}`).to_be(`{k.key}: free`)
+			taken[k.key] = k.id
+		end
 		expect(GROUPS[k.group]).to_be(true)
 		expect(keys.get(k.id)).to_be(k)
 	end
@@ -46,4 +49,14 @@ test("a shortcut another screen makes is listed as it makes it", function()
 	expect(k.key).to_be("cmd+shift+i")
 	expect(k.group).to_be("Panels")
 	expect(k.elsewhere).to_be(true)
+end)
+
+test("Reload Zeron and Reload interface are the app's, with no key of their own", function()
+	for _, id in { "shell.reload", "shell.reload_interface" } do
+		local k = keys.get(id) :: any
+		expect(k).never.to_be_nil()
+		expect(k.group).to_be("App")
+		expect(k.key).to_be("")
+	end
+	expect((keys.get("shell.reload") :: any).title).to_be("Reload Zeron")
 end)

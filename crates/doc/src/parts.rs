@@ -67,6 +67,107 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
     Some(out)
 }
 
+/// Lines of a command's output the doc keeps ([`command_output_tail`]).
+pub const COMMAND_TAIL_MAX_LINES: usize = 10;
+/// Bytes of a command's output the doc keeps ([`command_output_tail`]).
+pub const COMMAND_TAIL_MAX_BYTES: usize = 1024;
+
+/// What the doc keeps of a command's output (or, through
+/// [`command_output_end`], what its host serves of it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandTail {
+    /// The output's last [`COMMAND_TAIL_MAX_LINES`] lines or
+    /// [`COMMAND_TAIL_MAX_BYTES`], whichever is less, secrets redacted.
+    pub text: String,
+    /// The output's whole size, as the harness gave it.
+    pub bytes: u64,
+    /// Lines in the whole redacted output, so "Show all N lines" can say N
+    /// before the rest is fetched.
+    pub lines: u64,
+    /// Earlier output was let go.
+    pub truncated: bool,
+}
+
+/// The tail of `command`'s output that rides its tool part into the doc —
+/// the one tool output the doc keeps (see the `ToolResult` fold), and the
+/// doc syncs to the person's other devices and the cloud. So:
+/// - a command that prints secrets by nature (`env`, `cat .env`, `gh auth
+///   token`, … — [`zeron_proto::redact::command_prints_secrets`]) keeps
+///   none of it, only a note saying so;
+/// - any other output is redacted
+///   ([`zeron_proto::redact::redact_command_output`]: private key blocks,
+///   env-style assignments, secret-named keys, url credentials and webhook
+///   paths, tokens, terminal escapes) BEFORE it is cut, so a secret the cut
+///   would split can't survive as an unrecognisable half.
+///
+/// The cut starts on a line where it can: a single line longer than the
+/// byte budget keeps its end. `None` when nothing but whitespace is left.
+pub fn command_output_tail(command: &str, text: &str) -> Option<CommandTail> {
+    command_output_end(command, text, COMMAND_TAIL_MAX_LINES, COMMAND_TAIL_MAX_BYTES)
+}
+
+/// The end of `command`'s output, at most `max_lines` lines and `max_bytes`
+/// bytes, made safe to leave its host exactly as [`command_output_tail`]
+/// makes the doc's tail: the withheld note for a command that prints
+/// secrets, else redacted first and cut after. The host's whole-output read
+/// (`ReadToolOutput`) goes through here too, with a wider budget, so what a
+/// person expands is never less redacted than what the chat kept.
+pub fn command_output_end(
+    command: &str,
+    text: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Option<CommandTail> {
+    let bytes = text.len() as u64;
+    if text.trim().is_empty() {
+        return None;
+    }
+    if zeron_proto::redact::command_prints_secrets(command) {
+        return Some(CommandTail {
+            text: zeron_proto::redact::SECRET_OUTPUT_WITHHELD.to_owned(),
+            bytes,
+            lines: 1,
+            truncated: false,
+        });
+    }
+    let redacted = zeron_proto::redact::redact_command_output(text);
+    let body = redacted.trim_end();
+    if body.trim().is_empty() {
+        return None;
+    }
+    let lines = body.bytes().filter(|b| *b == b'\n').count() as u64 + 1;
+    // The last N lines: the start of the line after the Nth newline from
+    // the end.
+    let mut start = 0;
+    let mut newlines = 0;
+    for (i, b) in body.bytes().enumerate().rev() {
+        if b == b'\n' {
+            newlines += 1;
+            if newlines == max_lines {
+                start = i + 1;
+                break;
+            }
+        }
+    }
+    if body.len() - start > max_bytes {
+        let mut cut = body.len() - max_bytes;
+        while !body.is_char_boundary(cut) {
+            cut += 1;
+        }
+        // Begin on a whole line when one starts inside the budget.
+        start = match body[cut..].find('\n') {
+            Some(nl) if cut + nl + 1 < body.len() => cut + nl + 1,
+            _ => cut,
+        };
+    }
+    Some(CommandTail {
+        text: body[start..].to_owned(),
+        bytes,
+        lines,
+        truncated: start > 0,
+    })
+}
+
 /// Per-file diff stats persisted in place of inline diff text (t3's shape).
 /// The inline diff was the bigger bomb than outputs — 32KB/edit, unexercised
 /// only because the claude harness emits none. Full diff text lives in the
@@ -201,6 +302,19 @@ pub enum MessagePart {
         /// its tagged text deltas (capped; display-only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_tail: Option<String>,
+        /// A command's exit status, as its harness reported it (command
+        /// tools only — see [`command_output_tail`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        /// `output` is the end of a longer command output (its whole size in
+        /// `output_bytes`): the UI says earlier output was trimmed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        output_truncated: bool,
+        /// Lines in the whole (redacted) command output, set only with
+        /// `output_truncated`: the UI's "Show all N lines" before the rest
+        /// is read from the host.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_lines: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -413,6 +527,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    exit_code: None,
+                    output_truncated: false,
+                    output_lines: None,
                 });
             }
         }
@@ -421,16 +538,21 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             is_error,
             output,
             diff,
+            exit_code,
         } => {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
                     id: pid,
+                    call,
                     is_error: e,
                     resolved,
                     output: out_slot,
                     diff: diff_slot,
                     output_bytes,
                     diff_stats,
+                    exit_code: exit_slot,
+                    output_truncated,
+                    output_lines,
                     ..
                 } = p
                     && pid == id
@@ -444,9 +566,43 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     // host's run journal. Inline diffs die the same way:
                     // stats only, never text. `is_error` still folds so
                     // failed chips read as failed.
-                    let _ = output; // journal-only
-                    *out_slot = None;
-                    *output_bytes = None;
+                    //
+                    // The one exception (2026-11-03, user decision): a
+                    // COMMAND's output keeps a short, redacted tail — its
+                    // last 10 lines or 1 KB, whichever is less — with its
+                    // exit code, so an opened Run row shows how it ended (a
+                    // build's error, a test run's summary) the way a
+                    // terminal would. Bounded per part, so a long session
+                    // grows by at most ~1 KB per command; file reads,
+                    // searches, fetches and MCP results stay out. The whole
+                    // output stays in the host's run journal, never synced;
+                    // a reader who expands it asks the host for it
+                    // (`ReadToolOutput`, redacted the same way).
+                    let tail = match (&*call, output.as_deref()) {
+                        (ToolCall::Exec { command }, Some(output)) => {
+                            command_output_tail(command, output)
+                        }
+                        _ => None,
+                    };
+                    *exit_slot = if matches!(call, ToolCall::Exec { .. }) {
+                        *exit_code
+                    } else {
+                        None
+                    };
+                    match tail {
+                        Some(tail) => {
+                            *out_slot = Some(tail.text);
+                            *output_bytes = Some(tail.bytes);
+                            *output_truncated = tail.truncated;
+                            *output_lines = tail.truncated.then_some(tail.lines);
+                        }
+                        None => {
+                            *out_slot = None;
+                            *output_bytes = None;
+                            *output_truncated = false;
+                            *output_lines = None;
+                        }
+                    }
                     *diff_slot = None;
                     *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
                 }
@@ -999,6 +1155,7 @@ mod tests {
                 is_error: true,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
         );
         match &parts[0] {
@@ -1117,6 +1274,9 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                exit_code: None,
+                output_truncated: false,
+                output_lines: None,
             },
         ];
         let chunks = split_parts(&parts);
@@ -1202,6 +1362,234 @@ mod tests {
         assert_eq!((stat.additions, stat.deletions), (2, 0));
     }
 
+    fn fold_command(output: &str, exit_code: Option<i32>) -> MessagePart {
+        let mut parts = Vec::new();
+        for event in [
+            AgentEvent::ToolCall {
+                id: "c".into(),
+                call: ToolCall::Exec {
+                    command: "make".into(),
+                },
+            },
+            AgentEvent::ToolResult {
+                id: "c".into(),
+                is_error: exit_code.is_some_and(|c| c != 0),
+                output: Some(output.into()),
+                diff: None,
+                exit_code,
+            },
+        ] {
+            fold_event_into_parts(&mut parts, &event);
+        }
+        parts.remove(0)
+    }
+
+    #[test]
+    fn a_command_keeps_its_last_ten_lines() {
+        let full: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        let MessagePart::Tool {
+            output: Some(tail),
+            output_bytes,
+            output_truncated,
+            output_lines,
+            exit_code,
+            ..
+        } = fold_command(&full, Some(1))
+        else {
+            panic!("no tail");
+        };
+        assert_eq!(output_lines, Some(40), "the whole output's lines");
+        assert_eq!(tail.lines().count(), COMMAND_TAIL_MAX_LINES);
+        assert!(tail.starts_with("line 31\n") && tail.ends_with("line 40"));
+        assert!(output_truncated);
+        assert_eq!(output_bytes, Some(full.len() as u64));
+        assert_eq!(exit_code, Some(1));
+    }
+
+    #[test]
+    fn a_command_keeps_at_most_one_kilobyte() {
+        // 8 lines of 299 bytes: under 10 lines, over 1 KB. (Words: a long
+        // letters-and-digits run would read as a token and be redacted.)
+        let full: String = (1..=8)
+            .map(|i| format!("{i:03} {}\n", "ab ".repeat(98)))
+            .collect();
+        let MessagePart::Tool {
+            output: Some(tail),
+            output_truncated,
+            ..
+        } = fold_command(&full, Some(0))
+        else {
+            panic!("no tail");
+        };
+        assert!(tail.len() <= COMMAND_TAIL_MAX_BYTES, "{}", tail.len());
+        assert!(tail.starts_with("006 ab"), "starts on a whole line");
+        assert!(tail.ends_with("ab ab"));
+        assert!(output_truncated);
+        // One huge line keeps its end, on a char boundary.
+        let line = "é".repeat(5000);
+        let Some(cut) = command_output_tail("make", &line) else {
+            panic!("no tail");
+        };
+        assert!(cut.truncated && cut.text.len() <= COMMAND_TAIL_MAX_BYTES);
+        assert!(cut.text.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_short_command_output_rides_whole_and_unflagged() {
+        let part = fold_command("\x1b[32mok\x1b[0m\n\n", Some(0));
+        assert!(
+            matches!(
+                &part,
+                MessagePart::Tool { output: Some(o), output_truncated: false, output_lines: None, exit_code: Some(0), output_bytes: Some(13), .. }
+                    if o == "ok"
+            ),
+            "{part:?}"
+        );
+        // Blank output: nothing kept but the exit code.
+        assert!(matches!(
+            fold_command("  \n", Some(3)),
+            MessagePart::Tool {
+                output: None,
+                output_bytes: None,
+                exit_code: Some(3),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_command_tail_is_redacted() {
+        let out = "deploying\nexport GITHUB_TOKEN=ghp_0123456789abcdefghijABCDEFGHIJ\n\
+                   Authorization: Bearer abc.def.ghi\n\
+                   cloning https://user:pw@example.com/repo.git?token=zzz\ndone\n";
+        let MessagePart::Tool {
+            output: Some(tail), ..
+        } = fold_command(out, Some(0))
+        else {
+            panic!("no tail");
+        };
+        for secret in ["ghp_0123", "abc.def.ghi", "user:pw", "token=zzz"] {
+            assert!(!tail.contains(secret), "{secret} survived: {tail}");
+        }
+        assert!(tail.starts_with("deploying\n") && tail.ends_with("done"));
+    }
+
+    #[test]
+    fn a_command_that_prints_secrets_keeps_none_of_its_output() {
+        for command in [
+            "env",
+            "printenv",
+            "cat .env.local",
+            "/usr/bin/zsh -lc 'cat ~/.aws/credentials'",
+            "gh auth token",
+            "gcloud auth print-access-token",
+        ] {
+            let mut parts = Vec::new();
+            for event in [
+                AgentEvent::ToolCall {
+                    id: "c".into(),
+                    call: ToolCall::Exec {
+                        command: command.into(),
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "c".into(),
+                    is_error: false,
+                    output: Some("hunter2-but-unlabelled\n".into()),
+                    diff: None,
+                    exit_code: Some(0),
+                },
+            ] {
+                fold_event_into_parts(&mut parts, &event);
+            }
+            let MessagePart::Tool {
+                output: Some(output),
+                exit_code,
+                output_truncated,
+                ..
+            } = &parts[0]
+            else {
+                panic!("{command}: {parts:?}");
+            };
+            assert_eq!(
+                output,
+                zeron_proto::redact::SECRET_OUTPUT_WITHHELD,
+                "{command}"
+            );
+            assert_eq!(*exit_code, Some(0));
+            assert!(!output_truncated);
+        }
+    }
+
+    #[test]
+    fn a_command_tail_drops_keys_and_environment_values() {
+        let out = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI\n\
+                   export DB_PASS=letmein\n\
+                   -----BEGIN OPENSSH PRIVATE KEY-----\n\
+                   b3BlbnNzaC1rZXktdjEAAAAA\n\
+                   -----END OPENSSH PRIVATE KEY-----\n\
+                   posting to https://hooks.slack.com/services/T000/B000/XXXX\n\
+                   test result: ok. 5 passed; 0 failed\n";
+        let MessagePart::Tool {
+            output: Some(tail), ..
+        } = fold_command(out, Some(0))
+        else {
+            panic!("no tail");
+        };
+        for secret in [
+            "wJalrXUtnFEMI",
+            "letmein",
+            "b3BlbnNzaC1rZXkt",
+            "T000",
+            "XXXX",
+        ] {
+            assert!(!tail.contains(secret), "{secret} survived: {tail}");
+        }
+        assert!(tail.contains("AWS_SECRET_ACCESS_KEY=[redacted]"), "{tail}");
+        assert!(tail.contains("[private key redacted]"), "{tail}");
+        assert!(
+            tail.contains("https://hooks.slack.com/[redacted]"),
+            "{tail}"
+        );
+        assert!(
+            tail.ends_with("test result: ok. 5 passed; 0 failed"),
+            "{tail}"
+        );
+    }
+
+    #[test]
+    fn a_non_command_keeps_no_output_or_exit_code() {
+        let mut parts = Vec::new();
+        for event in [
+            AgentEvent::ToolCall {
+                id: "r".into(),
+                call: ToolCall::ReadFile {
+                    path: "/w/.env".into(),
+                },
+            },
+            AgentEvent::ToolResult {
+                id: "r".into(),
+                is_error: false,
+                output: Some("API_KEY=hunter2".into()),
+                diff: None,
+                exit_code: Some(0),
+            },
+        ] {
+            fold_event_into_parts(&mut parts, &event);
+        }
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool {
+                output: None,
+                output_bytes: None,
+                exit_code: None,
+                output_truncated: false,
+                resolved: true,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn fold_strips_output_to_summary_and_diff_to_stats() {
         let mut parts = Vec::new();
@@ -1209,8 +1597,8 @@ mod tests {
             &mut parts,
             &AgentEvent::ToolCall {
                 id: "t".into(),
-                call: ToolCall::Exec {
-                    command: "cargo test".into(),
+                call: ToolCall::ReadFile {
+                    path: "/w/test.log".into(),
                 },
             },
         );
@@ -1226,6 +1614,7 @@ mod tests {
                     old_text: Some("a\n".into()),
                     new_text: "b\n".into(),
                 }),
+                exit_code: None,
             },
         );
         match &parts[0] {
@@ -1236,8 +1625,8 @@ mod tests {
                 diff_stats,
                 ..
             } => {
-                // One-liner chips: outputs never enter the doc at all
-                // (journal-only); diff text neither — stats survive.
+                // One-liner chips: a non-command's output never enters the
+                // doc (journal-only); diff text neither — stats survive.
                 assert_eq!(output.as_deref(), None);
                 assert_eq!(*output_bytes, None);
                 assert!(diff.is_none(), "inline diff text must not enter the doc");
@@ -1256,8 +1645,9 @@ mod tests {
             &mut parts,
             &AgentEvent::ToolCall {
                 id: "t1".into(),
-                call: ToolCall::Exec {
-                    command: "ls".into(),
+                call: ToolCall::WriteFile {
+                    path: "/w/a".into(),
+                    content: None,
                 },
             },
         );
@@ -1282,6 +1672,7 @@ mod tests {
                     old_text: None,
                     new_text: "x\n".into(),
                 }),
+                exit_code: None,
             },
         );
         apply_sidecar_refs("chat-9", &mut parts);
@@ -1436,6 +1827,7 @@ mod tests {
                 is_error: false,
                 output: Some("   \n".into()),
                 diff: None,
+                exit_code: None,
             }),
             None,
             "blank output uploads nothing"
@@ -1445,6 +1837,7 @@ mod tests {
             is_error: true,
             output: Some("full output".into()),
             diff: None,
+            exit_code: None,
         })
         .unwrap();
         assert_eq!(payload.part_id, "t");

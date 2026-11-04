@@ -29,6 +29,8 @@ fn fixture() -> Fixture {
 }
 
 async fn call(plugins: &Plugins, method: &str, params: serde_json::Value) -> serde_json::Value {
+    // Allowing and signing as Zeron's consent window does: with a review.
+    let params = super::authority_tests::as_consent_window(plugins, method, params).await;
     match plugins.dispatch(method, params).await {
         Ok(RpcReply::Value(value)) => value,
         Ok(RpcReply::Stream(_)) => panic!("{method} streamed"),
@@ -74,11 +76,17 @@ async fn ask(plugins: &Plugins, method: &str, args: serde_json::Value) -> serde_
     call(plugins, methods::CALL_PLUGIN_SERVICE, json!({ "plugin": "svc", "method": method, "args": args })).await
 }
 
+fn own_key(plugins: &Plugins) -> Option<String> {
+    signing::load_key(&plugins.inner.data_dir).map(|k| k.public())
+}
+
 async fn serve(plugins: &Plugins, version: &str, method: &str) -> serde_json::Value {
     call(
         plugins,
         methods::SERVE_PLUGIN_CALL,
-        json!({ "plugin": "svc", "version": version, "from": "dev-2", "method": method, "args": { "name": "Ada" } }),
+        // Signed by this device's key, as another device of yours would
+        // carry it (an unsigned caller for a signed plugin is refused).
+        json!({ "plugin": "svc", "version": version, "from": "dev-2", "method": method, "args": { "name": "Ada" }, "authorKey": own_key(plugins) }),
     )
     .await
 }
@@ -222,7 +230,7 @@ async fn a_service_event_reaches_this_devices_windows() {
     let delivered = call(
         &f.plugins,
         methods::PLUGIN_DELIVER,
-        json!({ "plugin": "svc", "from": "dev-2", "event": "shouted", "data": { "word": "there" } }),
+        json!({ "plugin": "svc", "from": "dev-2", "event": "shouted", "data": { "word": "there" }, "author_key": own_key(&f.plugins) }),
     )
     .await;
     assert_eq!(delivered["outcome"], outcome::DELIVERED, "{delivered}");

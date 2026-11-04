@@ -255,6 +255,12 @@ local function service(id: string): any
 		host.emit(event, data)
 	end
 
+	-- This device's chats' and projects' folders, whole paths ("sessions.read"):
+	-- a promise of a list. Where a service's work on them belongs.
+	function M.folders(): any
+		return op("folders", {})
+	end
+
 	-- A program its manifest names ("commands"), as you, on this device:
 	-- a promise of { status, stdout, stderr }.
 	function M.run(program: string, args: { string }?, opts: { cwd: string?, stdin: string?, timeout: number?, env: { [string]: string }? }?): any

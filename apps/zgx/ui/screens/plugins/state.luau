@@ -3,7 +3,7 @@
 -- (src/plugins), and what the Plugins page asks of it. Every list's items
 -- carry an `id`, so rows key by it and change in place.
 --
---   state.now:get()   { state = "loading" | "ready" | "offline",
+--   state.now:get()   { state = "loading" | "ready" | "offline" | "setup",
 --                       dirs = { plugins, templates },
 --                       list = { PluginItem }      (see the contract: id, name,
 --                         version, description, author { kind, username? },

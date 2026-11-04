@@ -279,9 +279,24 @@ fn zerons(from: f32, to: f32, ms: f32) -> f32 {
     from + (to - from) * at(y1, y2, (lo + hi) / 2.)
 }
 
-/// The sidebar folding and coming back, and a session's panel opening and
-/// closing, move as Zeron's columns do: frame by frame on its curve and
-/// duration (from the frame after the toggle, as the move starts).
+/// The panel's motion (ds/motion `panel`, 280 ms, cubicBezier(.22, 1, .36, 1)):
+/// where it is `ms` into a move from `from` to `to`.
+fn panels(from: f32, to: f32, ms: f32) -> f32 {
+    let t = (ms / 280.).clamp(0., 1.);
+    let (x1, y1, x2, y2) = (0.22_f32, 1.0_f32, 0.36_f32, 1.0_f32);
+    let at = |a: f32, b: f32, s: f32| 3. * (1. - s) * (1. - s) * s * a + 3. * (1. - s) * s * s * b + s * s * s;
+    let (mut lo, mut hi) = (0_f32, 1_f32);
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.;
+        if at(x1, x2, mid) < t { lo = mid } else { hi = mid }
+    }
+    from + (to - from) * at(y1, y2, (lo + hi) / 2.)
+}
+
+/// The sidebar folding and coming back moves as Zeron's columns do, and a
+/// session's panel opening and closing on its own motion: frame by frame on
+/// each curve and duration (from the frame after the toggle, as the move
+/// starts).
 #[test]
 fn the_columns_move_as_zerons_do() {
     let mut app = mount();
@@ -294,11 +309,11 @@ fn the_columns_move_as_zerons_do() {
     // and whether it was awake follows the executor's real time. So the
     // curve is checked from its first moving frame, which must come within
     // two frames of the toggle.)
-    let mut check = |app: &mut TestApp, what: &str, cmd: &str, id: &str| {
+    let mut check = |app: &mut TestApp, what: &str, cmd: &str, id: &str, curve: fn(f32, f32, f32) -> f32| {
         let from = app.bounds(id).width;
         assert!(app.host.run_command(cmd));
         let mut ws = Vec::new();
-        for _ in 0..22 {
+        for _ in 0..24 {
             app.frame();
             ws.push(app.bounds(id).width);
         }
@@ -311,17 +326,17 @@ fn the_columns_move_as_zerons_do() {
             faults.push(format!("{what}: moved only {} frames after the toggle", first + 1));
         }
         for (i, w) in ws.iter().enumerate().skip(first) {
-            let want = zerons(from, to, (i - first + 1) as f32 * 1000. / 60.);
+            let want = curve(from, to, (i - first + 1) as f32 * 1000. / 60.);
             if (w - want).abs() > 1. {
-                faults.push(format!("{what}: frame {} of its move: {w:.1}, Zeron's {want:.1} ({from} → {to})", i - first + 1));
+                faults.push(format!("{what}: frame {} of its move: {w:.1}, its curve's {want:.1} ({from} → {to})", i - first + 1));
             }
         }
         app.frames(30);
     };
-    check(&mut app, "the sidebar folding", "shell.toggle_sidebar", "#shell-sidebar");
-    check(&mut app, "the sidebar coming back", "shell.toggle_sidebar", "#shell-sidebar");
-    check(&mut app, "the panel opening", "shell.toggle_files", "#shell-files");
-    check(&mut app, "the panel closing", "shell.toggle_files", "#shell-files");
+    check(&mut app, "the sidebar folding", "shell.toggle_sidebar", "#shell-sidebar", zerons);
+    check(&mut app, "the sidebar coming back", "shell.toggle_sidebar", "#shell-sidebar", zerons);
+    check(&mut app, "the panel opening", "shell.toggle_files", "#shell-files", panels);
+    check(&mut app, "the panel closing", "shell.toggle_files", "#shell-files", panels);
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
@@ -350,7 +365,9 @@ fn the_sidebars_view_options_never_pass_under_the_title_bars_controls() {
             }
             let x = scene.transformed_bounds(id).x;
             let x0 = *open_x.get_or_insert(x);
-            if (x - x0).abs() > 0.5 {
+            // (It goes with the window's 5-point gap before the sidebar's card as that
+            // closes, no further.)
+            if (x - x0).abs() > 5.5 {
                 faults.push(format!("{what}, frame {f}: the ⋯ moved, {x0} → {x}"));
             }
             if let Some(shows) = scene.visible_bounds(id)
@@ -365,10 +382,10 @@ fn the_sidebars_view_options_never_pass_under_the_title_bars_controls() {
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
-/// The panel's strip (its tabs, its +, Expand) stands clear of the title
-/// bar's Panel toggle on every frame as the panel opens, closes, and closes
-/// from expanded: the strip held where it stands open, the panel's edge
-/// clipping it, so nothing of it slides under the toggle.
+/// Nothing slides under the title bar's Panel toggle on any frame as the panel
+/// opens, closes, and closes from expanded: the chats' tabs on the top bar and
+/// Expand stop short of it, and the panel's strip (its tabs, its +) stands in the
+/// panel's card, under the bar, the panel's edge clipping it.
 #[test]
 fn the_panels_strip_never_passes_under_the_title_bars_toggle() {
     let mut app = mount();
@@ -378,13 +395,16 @@ fn the_panels_strip_never_passes_under_the_title_bars_toggle() {
     app.frames(40);
     app.click("#panel-open-files");
     app.frames(40);
-    let toggle = app.bounds("#titlebar >> role:button \"Panel\"").x;
-    let parts = ["#panel-strip >> role:tab", "#panel-strip >> role:button \"New Tab\"", "#panel-expand"];
+    let bar = app.bounds("#titlebar >> role:button \"Panel\"");
+    let (toggle, foot) = (bar.x, bar.y + bar.height);
+    // (On the bar's line, short of the toggle; in the card, under it.)
+    let beside = ["#session-tabs >> role:tab", "#panel-expand"];
+    let under = ["#panel-strip >> role:tab", "#panel-strip >> role:button \"New Tab\""];
     let mut faults = Vec::new();
     let mut watch = |app: &mut TestApp, what: &str| {
         for f in 1..=20 {
             app.frame();
-            for part in parts {
+            for part in beside.iter().chain(&under) {
                 let target = zgx_script::driver::parse(part).unwrap();
                 app.ui.prepare_frame();
                 let found = zgx_script::driver::find_all(&app.ui, &app.handle, &target).unwrap_or_default();
@@ -393,8 +413,9 @@ fn the_panels_strip_never_passes_under_the_title_bars_toggle() {
                     if let Some(r) = scene.visible_bounds(id)
                         && r.width > 0.
                         && r.x + r.width > toggle + 0.5
+                        && r.y < foot - 0.5
                     {
-                        faults.push(format!("{what}, frame {f}: {part} shows at {:.0}..{:.0}, under the toggle (from {toggle})", r.x, r.x + r.width));
+                        faults.push(format!("{what}, frame {f}: {part} shows at {:.0}..{:.0}, {:.0} down, under the toggle (from {toggle}, to {foot} down)", r.x, r.x + r.width, r.y));
                     }
                 }
             }

@@ -103,7 +103,7 @@ test("arriving at a chat whose panel is open at a chosen width, it's that width 
 	app:click('#titlebar >> role:button "Panel"')
 	settled(app)
 	-- Keyed narrower: a width chosen.
-	app:click('#shell-files >> role:slider')
+	app:click('#shell-chats >> role:slider "Resize files"')
 	for _ = 1, 12 do
 		app:key("ArrowRight")
 	end
@@ -136,7 +136,7 @@ test("arriving after the window resized on a chat with no panel, the panel stand
 	app:frames(20)
 	app:click('#titlebar >> role:button "Panel"')
 	settled(app)
-	app:click('#shell-files >> role:slider')
+	app:click('#shell-chats >> role:slider "Resize files"')
 	for _ = 1, 4 do
 		app:key("ArrowLeft")
 	end

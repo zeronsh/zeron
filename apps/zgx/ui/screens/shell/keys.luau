@@ -59,6 +59,9 @@ for _, k in
 		{ id = "shell.settings", title = "Settings", key = "cmd+,", group = "App", menu = "File", reserved = true },
 		{ id = "shell.find", title = "Find", key = "cmd+f", group = "App", menu = "Edit" },
 		{ id = "shell.close", title = "Close", key = "cmd+w", group = "App", menu = "File", reserved = true },
+		-- (No key of their own: Settings → Shortcuts can give them one.)
+		{ id = "shell.reload", title = "Reload Zeron", key = "", group = "App", menu = "View" },
+		{ id = "shell.reload_interface", title = "Reload interface", key = "", group = "App", menu = "View" },
 	} :: { Key }
 do
 	table.insert(M.LIST, k)

@@ -11,6 +11,8 @@
 //!   `zeron-template.json`, `.hashes.json` (`{rel: hash}` for each of its
 //!   files) and `.catalog.json` (`{screens: [..]}`);
 //! - `.active`: the active template's id (`zeron` when absent or empty);
+//! - `.active.by.json`: who switched to it, when an agent or another device
+//!   did (`{id, by, at}`; a record for the app's preview bar, nothing more);
 //! - `.status.json`: written by the app, `{id: {root?, files: {rel: error}}}`;
 //! - `<id>/`: a template: `zeron-template.json`, any subset of Zeron's files
 //!   (it inherits the rest), `.base.json` (`{rel: Zeron's hash as copied}`)
@@ -35,6 +37,9 @@ pub const MANIFEST: &str = "zeron-template.json";
 pub const HASHES: &str = ".hashes.json";
 pub const CATALOG: &str = ".catalog.json";
 pub const ACTIVE: &str = ".active";
+/// Who switched to the active template when it wasn't this device's own app:
+/// `{id, by, at}` (`UseTemplate`). A record for the app's preview bar.
+pub const ACTIVE_BY: &str = ".active.by.json";
 pub const STATUS: &str = ".status.json";
 pub const BASE: &str = ".base.json";
 pub const PREVIEW: &str = "preview.png";
@@ -69,6 +74,10 @@ struct Manifest {
     version: Option<String>,
     #[serde(default)]
     zeron_version: Option<String>,
+    /// One of Zeron's official templates (Zeron v2), as the app installs
+    /// it: its id.
+    #[serde(default)]
+    builtin_template: Option<String>,
 }
 
 /// `.status.json[id]`.
@@ -93,7 +102,8 @@ pub fn valid_id(id: &str) -> bool {
 /// `rel` as a path inside `dir`, if it is one: normal components only (no
 /// `..`, no absolute part) and no dotfile, but `.luaurc` at the root.
 pub fn inside(dir: &Path, rel: &str) -> Option<PathBuf> {
-    if rel.is_empty() || rel.contains('\\') {
+    // (And one that stays inside on every system: crates/plugin-guard.)
+    if !zeron_plugin_guard::path::is_safe(rel) {
         return None;
     }
     let path = Path::new(rel);
@@ -285,6 +295,24 @@ fn set_active(dir: &Path, id: &str) -> Result<(), String> {
     write_atomic(dir, ACTIVE, id.as_bytes())
 }
 
+/// Whether `folder` (template `id`) is one of Zeron's official templates as
+/// the app installs it (apps/zgx `plugins::official`): marked with its id,
+/// at that id (or `<id>-N`, where someone's has it), and no one's package.
+/// Built in, as the default is: it comes and updates with Zeron, and it
+/// isn't deleted. (Whether it's this build's, byte for byte, is the app's to
+/// say before it runs it with Zeron's powers; this only keeps it listed.)
+fn official(id: &str, folder: &Path, manifest: &Manifest) -> bool {
+    let Some(mark) = manifest.builtin_template.as_deref().filter(|m| !m.is_empty()) else {
+        return false;
+    };
+    let at_its_id = id == mark
+        || id
+            .strip_prefix(mark)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    at_its_id && super::template_packages::imported(folder).is_none()
+}
+
 /// One template, as `ListTemplates` lists it.
 fn entry(
     dir: &Path,
@@ -293,8 +321,8 @@ fn entry(
     active: &str,
     zeron_version: &str,
 ) -> Value {
-    let builtin = id == ZERON;
     let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    let builtin = id == ZERON || official(id, folder, &manifest);
     let made_for = manifest.zeron_version.clone().unwrap_or_default();
     let health = health(dir, id);
     let (status, error) = if let Some(root) = health.root {
@@ -426,7 +454,7 @@ pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path
         ));
     }
     if id == ZERON {
-        return Err("zeron is Zeron's own template. Pick another id.".into());
+        return Err("zeron is the default template's id. Pick another one.".into());
     }
     let target = dir.join(id);
     if std::fs::symlink_metadata(&target).is_ok() {
@@ -472,16 +500,40 @@ pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path
     }))
 }
 
-/// `UseTemplate`: `{active}`. `zeron` works with nothing else in place.
-pub fn use_template(dir: &Path, id: &str) -> Result<Value, String> {
+/// `UseTemplate`: `{active, preview, by?}`. `zeron` works with nothing else
+/// in place.
+///
+/// A plain switch, never an approval: the app runs any template the person
+/// hasn't kept in its own consent window as a preview (a host bar to Keep
+/// or Revert, and only what's safe until they keep it), so `preview` says
+/// a switch to anything but Zeron's own may land as one; the app's bar is
+/// the truth. `by` is who asked when it wasn't this device's own app (an
+/// agent's chat, another device), kept beside `.active` in [`ACTIVE_BY`]
+/// for the app to name in its bar: a record, never an authority.
+pub fn use_template(dir: &Path, id: &str, by: Option<&Value>) -> Result<Value, String> {
     let id = id.trim();
     if id != ZERON && template_dir(dir, id).is_none() {
         return Err(format!(
             "There's no template {id}. list_templates names them."
         ));
     }
+    match by {
+        Some(by) => write_atomic(
+            dir,
+            ACTIVE_BY,
+            &serde_json::to_vec(&json!({ "id": id, "by": by, "at": chrono::Utc::now().timestamp() }))
+                .unwrap_or_default(),
+        )?,
+        None => {
+            let _ = std::fs::remove_file(dir.join(ACTIVE_BY));
+        }
+    }
     set_active(dir, id)?;
-    Ok(json!({ "active": id }))
+    let mut reply = json!({ "active": id, "preview": id != ZERON });
+    if let Some(by) = by {
+        reply["by"] = by.clone();
+    }
+    Ok(reply)
 }
 
 /// `TemplateStatus`: `{id, active, root_error?, file_errors, out_of_date,
@@ -524,10 +576,15 @@ pub fn status(dir: &Path, id: &str) -> Result<Value, String> {
 /// `DeleteTemplate`: moves it to `.removed/<id>-<unix>`. `{deleted, active}`.
 pub fn delete(dir: &Path, id: &str) -> Result<Value, String> {
     if id == ZERON {
-        return Err("Zeron's own template can't be deleted.".into());
+        return Err("The default template can't be deleted.".into());
     }
     let folder = template_dir(dir, id)
         .ok_or_else(|| format!("There's no template {id}. list_templates names them."))?;
+    let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    if official(id, &folder, &manifest) {
+        let name = manifest.name.unwrap_or_else(|| id.to_owned());
+        return Err(format!("{name} comes with Zeron and can't be deleted."));
+    }
     let was_active = active(dir) == id;
     let removed = dir.join(REMOVED);
     std::fs::create_dir_all(&removed).map_err(|e| format!("Couldn't set it aside: {e}"))?;
@@ -780,24 +837,24 @@ mod tests {
         let d = with_zeron("use");
         create(&d, "mine", "Mine", None, Path::new("docs/templates.md")).unwrap();
         assert_eq!(
-            use_template(&d, "mine").unwrap(),
-            json!({ "active": "mine" })
+            use_template(&d, "mine", None).unwrap(),
+            json!({ "active": "mine", "preview": true })
         );
         assert_eq!(std::fs::read_to_string(d.join(ACTIVE)).unwrap(), "mine");
         assert_eq!(list(&d).unwrap()["active"], "mine");
         assert!(
-            use_template(&d, "nope")
+            use_template(&d, "nope", None)
                 .unwrap_err()
                 .contains("no template nope")
         );
-        assert!(use_template(&d, "../..").is_err());
+        assert!(use_template(&d, "../..", None).is_err());
         assert_eq!(std::fs::read_to_string(d.join(ACTIVE)).unwrap(), "mine");
 
         // The escape hatch works with nothing set up at all.
         let bare = dir("use-bare");
         assert_eq!(
-            use_template(&bare, "zeron").unwrap(),
-            json!({ "active": "zeron" })
+            use_template(&bare, "zeron", None).unwrap(),
+            json!({ "active": "zeron", "preview": false })
         );
         assert_eq!(std::fs::read_to_string(bare.join(ACTIVE)).unwrap(), "zeron");
         // An absent or empty .active is Zeron.
@@ -812,7 +869,7 @@ mod tests {
         create(&d, "slim", "Slim", None, Path::new("docs/templates.md")).unwrap();
         create(&d, "dead", "Dead", None, Path::new("docs/templates.md")).unwrap();
         create(&d, "fresh", "Fresh", None, Path::new("docs/templates.md")).unwrap();
-        use_template(&d, "mine").unwrap();
+        use_template(&d, "mine", None).unwrap();
         // slim was made for an earlier Zeron; fresh for this one.
         write(
             &d.join("slim").join(MANIFEST),
@@ -903,7 +960,7 @@ mod tests {
         let d = with_zeron("delete");
         create(&d, "mine", "Mine", None, Path::new("docs/templates.md")).unwrap();
         create(&d, "other", "Other", None, Path::new("docs/templates.md")).unwrap();
-        use_template(&d, "mine").unwrap();
+        use_template(&d, "mine", None).unwrap();
         assert!(
             delete(&d, "zeron")
                 .unwrap_err()
@@ -937,6 +994,38 @@ mod tests {
         );
         assert_eq!(ids(&list(&d).unwrap()), ["zeron"]);
         assert!(d.join(ZERON_DIR).join("app.luau").is_file());
+    }
+
+    /// Zeron v2, as the app installs it, is built in: listed so, and never
+    /// deleted. One that only says so (someone's package, another id) is
+    /// an ordinary template.
+    #[test]
+    fn plugins_templates_an_official_template_is_built_in() {
+        let d = with_zeron("official");
+        let marked = |id: &str| {
+            write(
+                &d.join(id).join(MANIFEST),
+                &format!(r#"{{"id":"{id}","name":"Zeron v2","author":"Zeron","builtin_template":"zeron-v2"}}"#),
+            );
+            write(&d.join(id).join("screens/shell/page.luau"), "-- v2");
+        };
+        marked("zeron-v2");
+        marked("zeron-v2-2");
+        marked("my-v2");
+        marked("posing");
+        write(&d.join("posing").join(".imported.json"), r#"{"key":"k","author":{"kind":"unknown"}}"#);
+        let list = list(&d).unwrap();
+        let builtin = |id: &str| {
+            list["templates"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()["builtin"].clone()
+        };
+        assert_eq!(builtin("zeron-v2"), true);
+        assert_eq!(builtin("zeron-v2-2"), true);
+        assert_eq!(builtin("my-v2"), false);
+        assert_eq!(builtin("posing"), false);
+        assert!(delete(&d, "zeron-v2").unwrap_err().contains("Zeron v2 comes with Zeron and can't be deleted"));
+        assert!(d.join("zeron-v2").is_dir());
+        assert!(delete(&d, "my-v2").is_ok());
+        assert!(delete(&d, "posing").is_ok());
     }
 
     #[test]
@@ -1013,7 +1102,7 @@ mod tests {
         let elsewhere = with_zeron("links-elsewhere");
         create(&elsewhere, "real", "Real", None, Path::new("docs/templates.md")).unwrap();
         symlink(elsewhere.join("real"), d.join("linked")).unwrap();
-        assert!(use_template(&d, "linked").is_err());
+        assert!(use_template(&d, "linked", None).is_err());
         assert!(create(&d, "copy", "Copy", Some("linked"), Path::new("docs/templates.md")).is_err());
         assert!(delete(&d, "linked").is_err());
         assert!(elsewhere.join("real/app.luau").is_file());

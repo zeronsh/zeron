@@ -320,3 +320,20 @@ test("one Zeron can't vouch for says Unverified by its version, and where it cam
 	expect(badges()).to_be(1)
 end)
 
+
+-- While the account's setup isn't finished the engine answers no plugin
+-- call: the page says to finish it, and the list arrives once it is (the
+-- host watches again, src/engine/rpc.rs `watch_set_up`), no relaunch.
+test("with the account's setup unfinished it says so, and the plugins load once it's done", function()
+	local app = open()
+	app:command("setup_incomplete")
+	app:frames(20)
+	local tree = app:tree()
+	expect(tree).to_contain("Finish setting up your account")
+	expect(tree).never.to_contain("Compact sidebar")
+	app:command("set_up")
+	app:frames(20)
+	tree = app:tree()
+	expect(tree).never.to_contain("Finish setting up your account")
+	expect(tree).to_contain("Compact sidebar")
+end)

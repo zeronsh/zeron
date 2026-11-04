@@ -23,6 +23,30 @@ local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+-- (The chat page's places in its chats, which a split's panes share.)
+local Shared = require("@app/screens/chat/shared")
+local Asks = require("@app/screens/chat/asks")
+
+-- Two places in a transcript (ds/transcript's `keep`), the same.
+local function same(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, v in a do
+		if not same(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
 
 -- What its tab says, and its icon, as the shipping app's.
 local M = {}
@@ -52,11 +76,77 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string): Node
+local function composer(chat: string, view: any, name: string, split: boolean?, focused: (() -> boolean)?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
-	local draft = ui.state(`chat_lane_draft_{chat}`, "")
+	-- (A pane of the page's split that isn't focused shows the chat
+	-- page's own draft for its chat, as that keeps it while another chat
+	-- is shown (screens/chat/shared's drafts), so focused, the chat page's
+	-- composer goes on with the same words.)
+	local draft = ui.state(if split then `chat_split_draft_{chat}` else `chat_lane_draft_{chat}`, "")
+	-- (A split's pane: its draft's chips, as the chat page keeps them.)
+	local carried = ui.use_state({} :: { any })
+	-- (A split's pane: as the focus comes or goes, its size there at once,
+	-- never growing into it (ds.Composer's `snap`).)
+	local snap = ui.use_state(0)
+	if split and focused then
+		local was = focused()
+		ui.effect(function()
+			local now = focused()
+			if now ~= was then
+				was = now
+				snap:set(snap:peek() + 1)
+			end
+		end)
+	end
+	-- A chip taken off a split pane's draft, wherever the draft is now.
+	local function remove_carried(cid: string)
+		Shared.remove_cargo_of(chat, cid)
+	end
+	-- (A split's pane: the options picked in a question its chat asks.)
+	local chosen = ui.use_state({} :: { [string]: boolean })
+	if split then
+		-- (Its chat's draft, by its id: its words, chips and a question's
+		-- picks, one draft per chat (screens/chat/shared), shown here and
+		-- written back as they change, wherever it's kept. Never the focused
+		-- chat's: the focus moving changes nothing this shows.)
+		ui.effect(function()
+			local d = Shared.draft_of(chat)
+			if draft:peek() ~= d.text then
+				draft:set(d.text)
+			end
+			carried:set(d.cargo)
+			chosen:set(d.chosen)
+		end)
+		ui.effect(function()
+			local text = draft:get()
+			if Shared.draft_of(chat).text ~= text then
+				Shared.set_draft_of(chat, "text", text)
+			end
+		end)
+		ui.effect(function()
+			local picked = chosen:get()
+			if Shared.draft_of(chat).chosen ~= picked then
+				Shared.set_draft_of(chat, "chosen", picked)
+			end
+		end)
+	end
+	-- (A split's pane: what its chat asks, and its queue, todos and tasks,
+	-- from its own session, as the window's composer shows them.)
+	local asks = if split
+		then Asks.bind {
+			id = function(): string?
+				return chat
+			end,
+			session = function(): any
+				return view.session:get()
+			end,
+			chosen = chosen,
+			asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		}
+		else nil
+	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
 	local running = ui.computed(function(): boolean
@@ -256,8 +346,13 @@ local function composer(chat: string, view: any, name: string): Node
 	end
 	return ds.Composer {
 		value = draft,
+		snap = if split then snap else nil,
+		cargo = if split then carried else nil,
+		-- (Its chips' × under the pointer, as the chat page's.)
+		on_remove_cargo = if split then remove_carried else nil,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
-		placeholder = locale.s("chat.lane_tab.placeholder"),
+		-- (A split's pane is a chat of its own: the chat page's words.)
+		placeholder = locale.s(if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
 		model = model,
@@ -343,6 +438,39 @@ local function composer(chat: string, view: any, name: string): Node
 		on_stop = function()
 			store.interrupt(chat)
 		end,
+		-- (Hidden while focused, its draft shown by the window's composer: only that
+		-- one's menus open, or a trigger typed there opens a second here.)
+		mention_enabled = if split and focused
+			then function(_trigger: string): boolean
+				return not focused()
+			end
+			else nil,
+		-- (A split's pane, its chat's own.)
+		question = if asks then asks.question else nil,
+		chosen = if asks then asks.chosen else nil,
+		on_pick = if asks then asks.on_pick else nil,
+		on_answer = if asks then asks.on_answer else nil,
+		on_close_question = if asks then asks.on_close_question else nil,
+		on_back = if asks then asks.on_back else nil,
+		approval = if asks then asks.approval else nil,
+		can_always = if asks then asks.can_always else nil,
+		on_approve = if asks then asks.on_approve else nil,
+		on_deny = if asks then asks.on_deny else nil,
+		queue = if asks then asks.queue else nil,
+		can_steer = if asks then function(): boolean
+			return running:get()
+		end else nil,
+		on_queue_send = if asks then asks.on_queue_send else nil,
+		on_queue_remove = if asks then asks.on_queue_remove else nil,
+		on_queue_reorder = if asks then asks.on_queue_reorder else nil,
+		todos = if asks then asks.todos else nil,
+		tasks = if asks then asks.tasks else nil,
+		on_stop_task = if asks then function(task: string)
+			store.stop_task(chat, task):after(function() end, function()
+				notice:set({ tone = "danger", text = locale.s("chat.composer.couldnt_stop_task"), dismissable = true })
+			end)
+		end else nil,
+		tray = if split then tray else nil,
 	}
 end
 
@@ -375,6 +503,11 @@ local function forking(chat: string): Node
 	end, { grow = 1, w_full = true })
 end
 
+-- A lane's composer's height as measured, by its slot.
+function M.dock_height(slot: string): State<number>
+	return ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
+end
+
 M.Tab = ui.component(function(props: { tab: any }): Node
 	local tab = props.tab
 	local slot, chat = tab.id, tab.chat
@@ -392,8 +525,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- Watched once there's a chat to watch, while its tab is open: the
 	-- panel lets it go as the tab closes. (A reload asks for the same chat
 	-- again, which the host already has: nothing more happens.)
+	-- (A split's pane is watched by the page, for as long as it's in the
+	-- split, focused or not.)
+	local split = data.split == true
 	ui.effect(function()
-		if kind:get() == "chat" then
+		if kind:get() == "chat" and not split then
 			lanes.watch(slot, chat, data.frozen == true, data.parent)
 		end
 	end)
@@ -403,11 +539,66 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- held clear of the composer, its place kept across a switch of tabs
 	-- and a reload (its anchor and offset kept by the tab), pictures read
 	-- from its own folder, links, quotes into its own draft.
-	local offset = ui.state(`chat_lane_offset_{slot}`, T.PAST_END)
-	local anchor = ui.state(`chat_lane_anchor_{slot}`, nil :: any)
-	local dock_h = ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
+	local offset = ui.state(if split then `chat_split_offset_{chat}` else `chat_lane_offset_{slot}`, T.PAST_END)
+	local anchor = ui.state(if split then `chat_split_anchor_{chat}` else `chat_lane_anchor_{slot}`, nil :: any)
+	-- (A split's pane. Its transcript is its own chat's, from its own
+	-- lane, focused or not, and made once for as long as it's in the
+	-- split: the focus moving changes nothing it shows. Only what stands
+	-- at its foot follows the focus: the window's composer over the
+	-- focused one, its own composer over another. It's made once there's
+	-- something to show, opening where the chat was last read
+	-- (`shared.places`).)
+	local function focused_now(): boolean
+		local f = data.focused
+		return f ~= nil and f() == true
+	end
+	local loaded = ui.computed(function(): boolean
+		local s = view.session:get()
+		return s ~= nil and s.id == chat and s.state ~= "loading"
+	end)
+	local messages: any = view.messages
+	local reply: any = view.draft
+	-- Where the chat was left: as the chat page last showed it (its place
+	-- now, if that's this chat), else its place kept for it.
+	local function place_of(): any
+		if Shared.shown:peek() == chat then
+			return Shared.anchor:peek()
+		end
+		return Shared.places:peek()[chat]
+	end
+	-- Where it's read here, kept the same way, once it has settled: the
+	-- chat page, a pane made again (the split shown again, the chat opened
+	-- alone) open there.
+	local settled = false
+	if split then
+		ui.effect(function()
+			local a = anchor:get()
+			if not settled then
+				return
+			end
+			local now = Shared.places:peek()
+			if not same(now[chat], a) then
+				local c = table.clone(now)
+				c[chat] = a
+				Shared.places:set(c)
+			end
+			if Shared.shown:peek() == chat and not same(Shared.anchor:peek(), a) then
+				Shared.anchor:set(a)
+			end
+		end)
+	end
+	local ever = false
+	local showable = ui.computed(function(): boolean
+		if ever then
+			return true
+		end
+		ever = #messages:get() > 0 or loaded:get()
+		return ever
+	end)
+	local dock_h = M.dock_height(slot)
+	-- (A split's pane, focused: the window's composer stands at its foot.)
 	local room = Dock.room(function(): number
-		return dock_h:get()
+		return if split and focused_now() then Shared.dock_h:get() else dock_h:get()
 	end)
 	local function lane_session(): any
 		local s = view.session:get()
@@ -424,6 +615,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.
 	local function home_session(): string?
+		-- (A split's pane: its own chat's panel, which shows as it's
+		-- focused.)
+		if split then
+			return chat
+		end
 		local s = route.session:peek()
 		return if s then s.id else nil
 	end
@@ -437,6 +633,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		local r = FileLinks.resolve(target, if s then s.cwd else nil)
 		local panel: any = boundary.load("@app/screens/panel")
 		local home = home_session()
+		-- (A split's pane: focused, so its panel, where the file opens, shows.)
+		if split and r and not r.outside then
+			route.open_session(chat)
+		end
 		if r and not r.outside and panel and panel.open_file and home then
 			(panel.open_file :: any)(home, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
@@ -444,16 +644,30 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- A passage quoted (its menu's Mention, or Attach): into its own draft.
 	local draft = ui.state(`chat_lane_draft_{chat}`, "")
 	local function quote(q: any)
+		-- (A split's pane: into its chat's own draft, which the window's
+		-- composer types into once it's focused.)
+		if split then
+			route.open_session(chat)
+			ui.after(0, function()
+				Shared.mention(q)
+			end)
+			return
+		end
 		draft:set(Quote.add(draft:peek(), Quote.line(q)))
 	end
-	local transcript = T.Transcript {
+	local function make_transcript(): Node
+		return T.Transcript {
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
+		-- (A split's pane reads as the chat page: a little wider than its
+		-- composer, running under its head and past its foot, faded.)
 		measure = function(): number
-			return prefs.conversation_width:get()
+			return prefs.conversation_width:get() + (if split then 24 else 0)
 		end,
-		messages = view.messages,
-		draft = view.draft,
+		side = if split then 20 else nil,
+		fade_lead = if split then 12 else nil,
+		messages = messages,
+		draft = reply,
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
@@ -477,7 +691,31 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
+		-- (A split's pane, made again at the place taken up: whether
+		-- that was its end.)
+		was_at_end = if split then anchor:peek() == nil else nil,
 	}
+	end
+	local transcript = if split
+		then ui.presence(function(): string
+			return if showable:get() then "shown" else "waiting"
+		end, function(k: string): Node
+			if k == "waiting" then
+				return ui.div {}
+			end
+			ui.batch(function()
+				offset:set(T.PAST_END)
+				anchor:set(place_of())
+			end)
+			settled = false
+			-- (Its place put back over its first frames: not said again
+			-- until it has settled there.)
+			ui.after(400, function()
+				settled = true
+			end)
+			return make_transcript()
+		end, { w_full = true, grow = 1, min_h = 0 })
+		else make_transcript()
 	if tab.kind == "subagent" then
 		return ui.column { id = `lane-{slot}`, class = "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, transcript }
 	end
@@ -509,7 +747,25 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					pb = Dock.page_pad(),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
-				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`), id = `lane-composer-{slot}` },
+				-- (A split's pane, focused: the window's composer stands over
+				-- this one, which is kept, unseen and out of Tab's way, rather
+				-- than made again as the focus leaves, which would grow it
+				-- from nothing each time.)
+				ui.div {
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					pointer_events = "none",
+					opacity = function(): number
+						return if split and focused_now() then 0 else 1
+					end,
+					hidden = function(): boolean
+						return split and focused_now()
+					end,
+					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, data.split == true, if split then focused_now else nil), id = `lane-composer-{slot}` },
+				},
 			}
 		end, { grow = 1, w_full = true, min_h = 0 }),
 	}

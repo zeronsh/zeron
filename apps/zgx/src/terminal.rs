@@ -52,11 +52,24 @@ use zgx_script::{ScriptHost, Value};
 
 use crate::engine::{self, rpc};
 
+/// The bridge commands the host itself made (`terminal.start`,
+/// `terminal.command`): a terminal Zeron started shows while a template is a
+/// preview, which can't start one (preview.rs `guard`).
+static ISSUED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+pub(crate) fn note_issued(line: &str) {
+    ISSUED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(line.to_string());
+}
+
+pub(crate) fn issued(line: &str) -> bool {
+    ISSUED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(line)
+}
+
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     engine::install(cx);
-    host.async_action("terminal.start", |arg| async move { start(arg).await });
+    host.async_action("terminal.start", |arg| async move { crate::plugins::preview::refuse("terminal.start")?; start(arg).await });
     host.async_action("terminal.claimed", |arg| async move { claimed(arg).await });
-    host.async_action("terminal.command", |arg| async move {
+    host.async_action("terminal.command", |arg| async move { crate::plugins::preview::refuse("terminal.command")?;
         let device = crate::files::route_to(opt_text(arg.field("device"))).await;
         command(arg, device)
     });
@@ -71,7 +84,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         call_for("CloseTerminal", &arg, Map::new()).await?;
         Ok(Value::Nil)
     });
-    host.async_action("terminal.write", |arg| async move {
+    host.async_action("terminal.write", |arg| async move { crate::plugins::preview::refuse("terminal.write")?;
         use base64::Engine as _;
         let data = base64::engine::general_purpose::STANDARD.encode(text(arg.field("text")));
         let mut params = Map::new();
@@ -155,6 +168,7 @@ async fn start(arg: Value) -> Result<Value, String> {
         quote(&Json::Object(params).to_string()),
         quote(&claim.to_string_lossy()),
     );
+    note_issued(&line);
     Ok(Value::record([("command", Value::from(line.as_str())), ("claim", Value::from(claim.to_string_lossy().as_ref()))]))
 }
 
@@ -179,6 +193,8 @@ async fn claimed(arg: Value) -> Result<Value, String> {
         tx.send(await_claim(&claim, CLAIM_WAIT));
     });
     let id = rx.recv().await.unwrap_or_else(|| Err("The terminal didn't open.".into()))?;
+    // Opened while a template ran: closed if safe mode starts (preview.rs).
+    crate::plugins::preview::terminal_opened(&id, None);
     Ok(Value::from(id.as_str()))
 }
 
@@ -246,6 +262,7 @@ fn command(arg: Value, device: Option<String>) -> Result<Value, String> {
     if let Some(device) = device {
         line.push_str(&format!(" --device {}", quote(&device)));
     }
+    note_issued(&line);
     Ok(Value::from(line.as_str()))
 }
 

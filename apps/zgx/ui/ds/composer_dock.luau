@@ -10,8 +10,8 @@
 -- that still says what matters: "Todo 3/7 · Porting the queue's reorder",
 -- "Running 2 · cargo test · 2m 14s", "Queued 2 · Then run the tests…".
 -- Opening one folds the rest; a tray whose work is done folds itself (the
--- plan once every step is done and the turn is idle). A tray that arrives
--- while nothing is open, opens.
+-- plan once every step is done and the turn is idle). A queue or plan that
+-- arrives while nothing is open, opens; what is running stays folded.
 --
 --   Dock { queue = queued, todos = plan, tasks = running, open = tray, … }
 --
@@ -306,10 +306,10 @@ local function tray(level: () -> number, head_node: Node, body: Node, open: () -
 		border_sides = { 1, 1, 0, 1 },
 		border_color = "$zeron.composer.tray.edge",
 		bg = function()
-			return if material.frosted:get() then "$zeron.composer.tray.tint" else "$zeron.composer.tray.solid"
+			return if material.see_through() then "$zeron.composer.tray.tint" else "$zeron.composer.tray.solid"
 		end,
 		backdrop_blur = function()
-			return if material.frosted:get() then "$zeron.composer.tray.blur" else 0
+			return if material.see_through() then "$zeron.composer.tray.blur" else 0
 		end,
 		px = "$space.1",
 		pt = "$space.1",
@@ -404,7 +404,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 	end
 	local function hint(): string
 		local what = locale.s(`ds.composer_dock.{action()}_hint`)
-		return if last() then locale.s("ds.composer_dock.hint_last", { what = what }) else what
+		return if last() then locale.s("ds.composer_dock.hint_last", { what = what, key = ui.shortcut_text("cmd+enter") }) else what
 	end
 	local function locked(): boolean
 		return now().locked ~= nil
@@ -694,8 +694,11 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 				return if ended() then "$text.tertiary" else "$text.primary"
 			end,
 		},
+		-- The word on it takes what the name leaves (from nothing, not from
+		-- its own width): a long command beside it would otherwise take the
+		-- larger share of the shrinking and cut the name to a few letters.
 		if t.detail
-			then FadeText { t.detail, literal = true, grow = 1, text_size = "$font.size.sm", color = "$text.tertiary" }
+			then FadeText { t.detail, literal = true, grow = 1, basis = 0, text_size = "$font.size.sm", color = "$text.tertiary" }
 			else ui.div { grow = 1 },
 		ui.text {
 			function(): string
@@ -797,15 +800,17 @@ M.Dock = ui.component(function(props: Props): Node
 			open:set(nil)
 		end
 	end)
-	local seen = { queue = false, todos = false, tasks = false }
+	-- What is running doesn't: it stays folded to its header ("Running 3 ·
+	-- cargo test · 2m") until opened, as a session can hold a score of
+	-- processes for hours. Opened, it stays open while any run.
+	local seen = { queue = false, todos = false }
 	ui.effect(function()
-		local q, t, k = has_queue(), has_todos(), has_tasks()
+		local q, t = has_queue(), has_todos()
 		local arrived: Tray? = if q and not seen.queue
 			then "queue"
 			elseif t and not seen.todos and not (all_done() and not live()) then "todos"
-			elseif k and not seen.tasks then "tasks"
 			else nil
-		seen.queue, seen.todos, seen.tasks = q, t, k
+		seen.queue, seen.todos = q, t
 		if arrived and open:peek() == nil then
 			open:set(arrived)
 		end

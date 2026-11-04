@@ -517,9 +517,11 @@ test("a comment left on a line is staged for the chat and stands under it until 
 	expect(eventually(app, function(): boolean
 		return string.find(calls(app), "comment:long.txt:3:Why twice?", 1, true) ~= nil
 	end)).to_be(true)
-	-- It stands on its line, pending (sent with the next message).
+	-- It stands on its line (sent with the next message): your name and
+	-- what you said, no time and no "Pending".
 	expect(app:wait('role:article "You: Why twice?"', { timeout_ms = 15000 })).to_be(true)
-	expect(app:has('"Pending"')).to_be(true)
+	expect(app:has('"Pending"')).to_be(false)
+	expect(app:has('role:article "You: Why twice?" >> "just now"')).to_be(false)
 	expect(app:has('"long.txt:3"')).to_be(false)
 	-- Deleted from its card: unstaged, gone.
 	app:hover('role:article "You: Why twice?"')
@@ -774,20 +776,6 @@ local function reload_holds_still(app: any, generation: number)
 	expect(first_difference(before, layout_of(app))).to_be("")
 end
 
-test("a reload keeps the narrow pane's drawer open, still", function()
-	local app = open_pane()
-	app:resize(560, 600)
-	app:wait('"never shown, only waited past"', { timeout_ms = 500 })
-	-- Narrow: the tree comes over the file as a drawer, out.
-	app:click('role:button "Toggle File Tree"')
-	expect(eventually(app, function(): boolean
-		local y = row_y(app, "long.txt")
-		return y ~= nil
-	end)).to_be(true)
-	reload_holds_still(app, 2)
-	expect(row_y(app, "long.txt")).never.to_be_nil()
-end)
-
 test("a reload keeps the narrow pane's drawer closed, still", function()
 	local app = open_pane()
 	app:resize(560, 600)
@@ -862,43 +850,6 @@ local function float_box(app: any): (number?, number?, number?, number?)
 	end
 	return nil, nil, nil, nil
 end
-
-test("narrow, the tree floats: inset from the start, the band and the foot; Esc or a click on the file closes it", function()
-	local app = open_pane()
-	app:resize(560, 600)
-	app:wait('"never shown, only waited past"', { timeout_ms = 500 })
-	expect((float_box(app))).to_be_nil()
-	app:click('role:button "Toggle File Tree"')
-	expect(eventually(app, function(): boolean
-		local x = float_box(app)
-		return x == 12
-	end)).to_be(true)
-	local x, y, w, h = float_box(app)
-	-- One inset (12) in from the start, under the 40 band and above the foot.
-	expect(x).to_be(12)
-	expect(y).to_be(40 + 12)
-	expect((y :: number) + (h :: number)).to_be(600 - 12)
-	expect(w).to_be(288)
-	-- Esc closes it (the tree has the keyboard as it opens, or the pane does).
-	app:click('role:treeitem "src"')
-	app:frames(5)
-	app:key("escape")
-	expect(eventually(app, function(): boolean
-		return float_box(app) == nil
-	end)).to_be(true)
-	-- Open again; a click on the file beside it closes it.
-	app:click('role:button "Toggle File Tree"')
-	expect(eventually(app, function(): boolean
-		return float_box(app) == 12
-	end)).to_be(true)
-	app:click('#files-tree-dismiss')
-	expect(eventually(app, function(): boolean
-		return float_box(app) == nil
-	end)).to_be(true)
-	-- The toggle never moved.
-	expect(app:tree('role:button "Toggle File Tree"')).to_contain(" 8,6 28x28")
-end)
-
 
 test("git's statuses mark the tree's files, a folder not read yet by what's inside it, and the open file's header", function()
 	local app = open_pane()

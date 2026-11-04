@@ -43,10 +43,45 @@ local artworks = ui.state("project_look_artwork", {} :: { [string]: string | fal
 -- (On their way: asked once.)
 local asking: { [string]: boolean } = {}
 
-local function with(map: State<{ [string]: string | false }>, key: string, value: string | false)
-	local next = table.clone(map:peek())
-	next[key] = value
-	map:set(next)
+-- Answers, written together: hundreds of projects' answer in the same moment, and
+-- what follows these maps needn't work everything out again for each. (Still
+-- `asking` until written, so nothing asks again meanwhile.)
+local answers: { { map: State<{ [string]: string | false }>, key: string, value: string | false, asked: string } } = {}
+local function write_answers()
+	if #answers == 0 then
+		return
+	end
+	local got = answers
+	answers = {}
+	local maps: { [any]: { [string]: string | false } } = {}
+	for _, a in got do
+		local next = maps[a.map]
+		if not next then
+			next = table.clone(a.map:peek())
+			maps[a.map] = next
+		end
+		next[a.key] = a.value
+		asking[a.asked] = nil
+	end
+	for map, next in maps do
+		(map :: any):set(next)
+	end
+end
+-- (`soon`: at once, a picture someone just chose. Else a repository's artwork, which
+-- may come in over seconds: at most every 100 ms, so hundreds spread out don't work
+-- it all out again hundreds of times.)
+local writing = false
+local function with(map: State<{ [string]: string | false }>, key: string, value: string | false, asked: string, soon: boolean?)
+	table.insert(answers, { map = map, key = key, value = value, asked = asked })
+	if soon then
+		ui.after(0, write_answers)
+	elseif not writing then
+		writing = true
+		ui.after(100, function()
+			writing = false
+			write_answers()
+		end)
+	end
 end
 
 local function want_file(url: string)
@@ -56,11 +91,9 @@ local function want_file(url: string)
 	asking[url] = true
 	local ok = pcall(function()
 		projects.icon_file(url):after(function(path: any)
-			asking[url] = nil
-			with(files, url, if type(path) == "string" and path ~= "" then path else false)
+			with(files, url, if type(path) == "string" and path ~= "" then path else false, url, true)
 		end, function()
-			asking[url] = nil
-			with(files, url, false)
+			with(files, url, false, url, true)
 		end)
 	end)
 	if not ok then
@@ -76,8 +109,7 @@ local function want_artwork(p: sessions.Project)
 	asking[key] = true
 	local ok = pcall(function()
 		projects.artwork(p, function(src: string?)
-			asking[key] = nil
-			with(artworks, p.id, src or false)
+			with(artworks, p.id, src or false, key)
 		end)
 	end)
 	if not ok then
@@ -133,16 +165,20 @@ function M.of(p: sessions.Project): Look
 	return { hue = hue, src = M.artwork(p) }
 end
 
+-- (Looked up by id, not searched: a list of projects each asks for its own.)
+local by_id = ui.computed(function(): { [string]: sessions.Project }
+	local out: { [string]: sessions.Project } = {}
+	for _, p in sessions.now:get().projects do
+		out[p.id] = p
+	end
+	return out
+end)
 function M.by_id(id: string?): Look?
 	if not id then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
-		if p.id == id then
-			return M.of(p)
-		end
-	end
-	return nil
+	local p = by_id:get()[id]
+	return if p then M.of(p) else nil
 end
 
 return M

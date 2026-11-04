@@ -1034,6 +1034,7 @@ impl WorkspaceHost {
             config,
             cwd,
             parent_chat_id,
+            None,
         )
     }
 
@@ -1052,6 +1053,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
         parent_chat_id: Option<String>,
+        child_kind: Option<zeron_proto::ChildKind>,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
@@ -1087,6 +1089,7 @@ impl WorkspaceHost {
             }
             None => cwd.unwrap_or_default(),
         };
+        let parent = parent_chat_id.filter(|p| !p.trim().is_empty());
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
@@ -1110,7 +1113,9 @@ impl WorkspaceHost {
                 harness_session_harness: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
-                parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                // (What a child is to its parent: only a child has a kind.)
+                child_kind: child_kind.filter(|_| parent.is_some()),
+                parent_chat_id: parent,
             })
         })?;
         Ok(())

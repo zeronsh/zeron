@@ -25,7 +25,7 @@ test("Language follows the Mac's until one is chosen, and lists each language in
 	local app = open()
 	expect(app:state("settings_language")).to_be("system")
 	expect(shows(app, PAGE, "Language")).to_be(true)
-	expect(shows(app, PAGE, "Follows your Mac's preferred language.")).to_be(true)
+	expect(shows(app, PAGE, "Follows your computer's preferred language.")).to_be(true)
 	app:click(`{PAGE} >> role:button "Language"`)
 	app:frames(10)
 	expect(app:has('role:menuitem "English"')).to_be(true)
