@@ -3129,7 +3129,7 @@
       "can_anything": "{name}：可以做你能做的任何事",
       "full_control": "它可以运行 {name}，这等于完全控制你的电脑。",
       "any_site": "互联网上的任何网站",
-      "near_host": "{host}：这台 Mac 或你的网络",
+      "near_host": "{host}：这台电脑或你的网络",
       "details": {
         "changes": "它更改的 Zeron 部分",
         "replaces": "它替换的界面",
