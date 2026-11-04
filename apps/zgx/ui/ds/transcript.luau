@@ -451,6 +451,8 @@ type View = {
 	view: Ref,
 	offset: State<number>,
 	at_end: State<boolean>?,
+	-- The list's row holding the reply (Markdown's `window`).
+	row: Ref?,
 	pictures: ReplyPicture.Pictures?,
 	-- Where the pictures an agent showed are read from (Props'
 	-- `sent_pictures`: they're files on the chat's host, as sent ones are).
@@ -558,6 +560,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 						return now().streaming == true
 					end,
 					at_end = view.at_end,
+					row = view.row,
 				}
 				else nil,
 			pictures = if view then view.pictures else nil,
@@ -1536,7 +1539,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
 			},
 		}
 	end

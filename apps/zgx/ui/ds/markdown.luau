@@ -86,8 +86,10 @@ export type Props = {
 	-- the scroll by the difference, so what shows stays put.
 	-- (`live`: whether the text is being written, its last run then always
 	-- built; `at_end`: whether the view rests at its end, which it then
-	-- holds rather than a returning run's place.)
-	window: { key: string, view: Ref, offset: State<number>, live: (() -> boolean)?, at_end: State<boolean>? }?,
+	-- holds rather than a returning run's place; `row`: the list's row holding
+	-- the text, if the view is a list, which keeps what shows itself as a row
+	-- wholly above it changes.)
+	window: { key: string, view: Ref, offset: State<number>, live: (() -> boolean)?, at_end: State<boolean>?, row: Ref? }?,
 	-- A reply's own pictures (screens/chat/reply_images): each drawn as
 	-- Zeron's reply image row (ds/reply_picture), read as it is asked for;
 	-- `group` names the reply, whose pictures open together in the
@@ -1270,6 +1272,7 @@ return function(props: Props): Node
 			offset: State<number>,
 			live: (() -> boolean)?,
 			at_end: State<boolean>?,
+			row: Ref?,
 		}
 		local k = `{w.key}:{at}`
 		-- Built as it was last judged. One never judged is built if it's
@@ -1332,9 +1335,9 @@ return function(props: Props): Node
 			on_mount = look,
 			on_resize = function(size: { w: number, h: number })
 				look()
-				if not near:peek() then
-					return
-				end
+				-- (Heard even when it was just judged away: it was laid out
+				-- built, and this is the height to hold it at. Held, it's the
+				-- height it already has.)
 				local was = held:peek()
 				local back = returning
 				returning = false
@@ -1350,9 +1353,18 @@ return function(props: Props): Node
 					return
 				end
 				-- Above the view's top (it came in from there): the view moves
-				-- with it, so what shows doesn't.
+				-- with it, so what shows doesn't. (Its row wholly above the top,
+				-- the list has already kept what shows, as it does for any row
+				-- there: moved again, the view would slip by the difference.)
 				local el, view = r:peek(), w.view:peek()
-				if el and view and el.y and view.y and (el.y :: number) < (view.y :: number) then
+				local row = if w.row then w.row:peek() else nil
+				local row_above = row ~= nil
+					and view ~= nil
+					and row.y ~= nil
+					and row.height ~= nil
+					and view.y ~= nil
+					and (row.y :: number) + (row.height :: number) <= (view.y :: number)
+				if el and view and el.y and view.y and (el.y :: number) < (view.y :: number) and not row_above then
 					w.offset:set(math.max(0, w.offset:peek() + size.h - was))
 				end
 			end,
