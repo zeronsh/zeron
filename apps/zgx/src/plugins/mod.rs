@@ -52,6 +52,7 @@ pub mod template_consent;
 pub mod preview;
 pub mod host_bar;
 pub mod locales;
+pub mod network;
 pub mod plugin_menus;
 
 use std::{
@@ -134,6 +135,12 @@ impl Item {
     pub fn permissions(&self) -> Vec<String> {
         self.list(&self.json["permissions"])
     }
+    /// The hosts its requests may reach, as its manifest names them (none:
+    /// any public address). What the window's requests are held to
+    /// (`network`), and the engine's for its service.
+    pub fn network_hosts(&self) -> Vec<String> {
+        self.list(&self.json["network_hosts"])
+    }
     /// Its "ui.change" targets, as its manifest lists them.
     pub fn change(&self) -> Vec<String> {
         self.list(&self.json["ui"]["change"])
@@ -204,6 +211,8 @@ struct PrWatch {
 
 pub struct Bridge {
     host: ScriptHost,
+    /// Where each plugin's requests may go, as its manifest names them.
+    network: network::Network,
     windows: WindowFactory,
     page: Shared,
     menus: Shared,
@@ -453,8 +462,11 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
 /// Plugins for the main window `cx` shows `host` in.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
+    let plugin_network = network::Network::default();
+    host.fetch_policy(plugin_network.clone());
     let bridge = Rc::new(Bridge {
         host: host.clone(),
+        network: plugin_network,
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
@@ -846,6 +858,9 @@ pub fn builtin_dir() -> PathBuf {
 pub fn dev_plugins(host: &ScriptHost) {
     let Some(dirs) = crate::dev::switch("ZERON_ZGX_DEV_PLUGINS") else { return };
     expose_surface(host);
+    let plugin_network = network::Network::default();
+    host.fetch_policy(plugin_network.clone());
+    let mut hosts = Vec::new();
     let mut plugins = Vec::new();
     for dir in std::env::split_paths(&dirs) {
         let Ok(text) = std::fs::read_to_string(dir.join("zeron-plugin.json")) else {
@@ -859,8 +874,10 @@ pub fn dev_plugins(host: &ScriptHost) {
                 "id": id, "name": manifest["name"], "status": "on", "entry": manifest["entry"],
                 "snapshot": dir, "permissions": manifest["permissions"],
                 "ui": manifest.get("ui").cloned().unwrap_or(json!({})),
+                "network_hosts": manifest["network"]["hosts"],
             }),
         };
+        hosts.push((id.clone(), item.network_hosts()));
         expose_own(host, &id);
         locales::publish(host, &id, &dir);
         // Its settings, at their defaults (a fixture sets them as it likes).
@@ -890,6 +907,7 @@ pub fn dev_plugins(host: &ScriptHost) {
         eprintln!("zeron-zgx: dev plugin {id} from {}", dir.display());
         plugins.extend(item.plugin());
     }
+    plugin_network.set(hosts);
     host.set_plugins(plugins);
 }
 
@@ -1232,6 +1250,8 @@ impl Bridge {
         for plugin in &want {
             self.expose(&plugin.name);
         }
+        // Where each may reach, before anything of it runs.
+        self.network.set(items.iter().filter(|i| want.iter().any(|p| p.name == i.id())).map(|i| (i.id().to_string(), i.network_hosts())));
         // Each one's own words (`locales/`, read again: a new version brings
         // its own), for the SDK's `zeron.t`.
         for item in items.iter().filter(|i| want.iter().any(|p| p.name == i.id())) {
@@ -3308,6 +3328,8 @@ mod examples_tests;
 mod hotkeys_tests;
 #[cfg(test)]
 mod markdown_tests;
+#[cfg(test)]
+mod network_tests;
 
 #[cfg(test)]
 mod menu_tests {

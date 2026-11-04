@@ -155,13 +155,16 @@ impl HostRule {
     }
 
     fn matches(&self, host: &str, port: u16) -> bool {
+        self.matches_host(host) && self.port.is_none_or(|p| p == port)
+    }
+
+    fn matches_host(&self, host: &str) -> bool {
         let host = host.trim_end_matches('.');
-        let named = if self.wildcard {
+        if self.wildcard {
             host.len() > self.host.len() && host.ends_with(&self.host) && host[..host.len() - self.host.len()].ends_with('.')
         } else {
             host == self.host
-        };
-        named && self.port.is_none_or(|p| p == port)
+        }
     }
 }
 
@@ -242,6 +245,17 @@ impl Policy {
     /// shapes the connection; credentials (`Authorization`, `Cookie`) only
     /// to a host the manifest names.
     pub fn header(&self, host: &str, port: u16, name: &str) -> Result<(), String> {
+        self.header_if(host, name, |rule, host| rule.matches(host, port))
+    }
+
+    /// [`Policy::header`] where the port isn't known (what a transport asks
+    /// as it sends to a host): credentials go to a host named on any port,
+    /// [`Policy::host`] having already held the request to the port named.
+    pub fn header_to(&self, host: &str, name: &str) -> Result<(), String> {
+        self.header_if(host, name, |rule, host| rule.matches_host(host))
+    }
+
+    fn header_if(&self, host: &str, name: &str, named: impl Fn(&HostRule, &str) -> bool) -> Result<(), String> {
         let lower = name.to_ascii_lowercase();
         if matches!(
             lower.as_str(),
@@ -253,7 +267,7 @@ impl Policy {
         }
         if matches!(lower.as_str(), "authorization" | "cookie") {
             let host = unbracket(host);
-            if !self.hosts.iter().any(|r| r.matches(&host, port)) {
+            if !self.hosts.iter().any(|r| named(r, &host)) {
                 return Err(format!(
                     "A plugin sends {name} only to a host its manifest names (\"network\": {{ \"hosts\": [\"{host}\"] }})"
                 ));
@@ -363,6 +377,19 @@ mod tests {
         assert!(open.header("example.com", 443, "Accept").is_ok());
         let named = Policy::new(&["api.example.com".into()]).unwrap();
         assert!(named.header("api.example.com", 443, "Authorization").is_ok());
+        // The same, for a transport that knows the host and not the port.
+        let ported = Policy::new(&["localhost:8080".into()]).unwrap();
+        for (policy, host, name, allowed) in [
+            (&open, "example.com", "Accept", true),
+            (&open, "example.com", "Authorization", false),
+            (&open, "example.com", "Host", false),
+            (&named, "api.example.com", "Cookie", true),
+            (&named, "evil.example.com", "Cookie", false),
+            (&ported, "localhost", "Authorization", true),
+            (&ported, "localhost", "Proxy-Authorization", false),
+        ] {
+            assert_eq!(policy.header_to(host, name).is_ok(), allowed, "{host} {name}");
+        }
     }
 
     #[test]
