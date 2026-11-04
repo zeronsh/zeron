@@ -12,6 +12,7 @@ use std::{
     },
 };
 
+pub mod backend;
 mod resample;
 
 pub const MAX_SECONDS: usize = 60;
