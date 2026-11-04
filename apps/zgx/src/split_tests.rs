@@ -1156,14 +1156,11 @@ fn panel_toggle_over_visuals_measured() {
 
 
 
-/// A panel toggle over a chat of visuals lays the chat out once a way, not
-/// at every frame of its glide: the transcript and a chart in it take at
-/// most three widths through an open and a close (as they were, beside the
-/// panel, and back), and the toggle runs about the script a plain chat's
-/// does. (Shipping's way: what's beside the moving column keeps its width;
-/// the card, a box, follows the edge.)
+/// A panel toggle over a chat of visuals reflows the chat live, at every
+/// frame of its glide, as v2 did: the transcript and a chart in it follow
+/// the page's edge through an open and a close, never held at one width.
 #[test]
-fn a_panel_toggle_lays_a_chat_of_visuals_out_once_a_way() {
+fn a_panel_toggle_reflows_a_chat_of_visuals_live() {
     let toggle = |visuals: bool| -> (u64, std::collections::BTreeSet<i64>, std::collections::BTreeSet<i64>) {
         let mut app = mount_visuals(&ui().join("shell_fixture.luau"), &scratch(&format!("once-{visuals}")), 1100.);
         open(&mut app, "Fix the build");
@@ -1178,7 +1175,7 @@ fn a_panel_toggle_lays_a_chat_of_visuals_out_once_a_way() {
                 app.frame();
                 transcript.insert(app.bounds("#chat-session >> #transcript").width.round() as i64);
                 if visuals {
-                    let plot = app.target(".chart-plot").or_else(|_| app.target("#chat-session >> .chart-plot"));
+                    let plot = app.target("#chat-session >> .chart-plot[1]");
                     if let Ok(node) = plot {
                         chart.insert(app.ui.scene.borrow().bounds(node).width.round() as i64);
                     }
@@ -1187,11 +1184,10 @@ fn a_panel_toggle_lays_a_chat_of_visuals_out_once_a_way() {
         }
         (app.calls() - calls, transcript, chart)
     };
-    let (plain, plain_widths, _) = toggle(false);
-    let (with, widths, chart) = toggle(true);
-    assert!(plain_widths.len() <= 3 && widths.len() <= 3, "the transcript took {widths:?} (plain {plain_widths:?})");
-    assert!(chart.len() <= 3, "a chart took {chart:?}");
-    assert!(with as f64 <= plain as f64 * 1.25, "{with} script calls over visuals, {plain} over a plain chat");
+    let (_, plain_widths, _) = toggle(false);
+    let (_, widths, chart) = toggle(true);
+    assert!(plain_widths.len() >= 8 && widths.len() >= 8, "the transcript took {widths:?} (plain {plain_widths:?})");
+    assert!(chart.len() >= 8, "a chart took {chart:?}");
 }
 
 
@@ -1389,15 +1385,11 @@ fn drag_sidebar<T>(app: &mut TestApp, by: f32, mut watch: impl FnMut(&mut TestAp
     seen
 }
 
-/// Dragging the sidebar's edge, what's in the page keeps one width: no
-/// transcript, composer or pane is laid out again at each move (each holds
-/// the width it had as the drag began, its card following the edge), and
-/// a frame's script (the sidebar's own, following its width) is the same
-/// whatever the panes; let go, each takes its own width once, the reading
-/// place where it stood.
+/// Dragging the sidebar's edge, what's in the page reflows live: each
+/// pane's transcript follows the edge at every move, never held at one
+/// width; let go, the reading place is where it stood.
 #[test]
-fn a_dragged_edge_lays_the_page_out_once_on_release_keeping_the_reading_place() {
-    let mut script = Vec::new();
+fn a_dragged_edge_reflows_the_page_live_keeping_the_reading_place() {
     for panes in [1usize, 4] {
         const IDS: [&str; 4] = ["a1", "a2", "a3", "b1"];
         let mut app = mount(&scratch(&format!("edge-{panes}")));
@@ -1437,24 +1429,14 @@ fn a_dragged_edge_lays_the_page_out_once_on_release_keeping_the_reading_place() 
             .map(|(_, id)| id)
             .expect("text in view");
         let before = app.bounds(&reading);
-        let calls = app.calls();
         let widths = drag_sidebar(&mut app, 120., |app| app.bounds(&list).width.round() as i64);
-        let per_frame = (app.calls() - calls) / 20;
         let distinct: std::collections::BTreeSet<i64> = widths.iter().copied().collect();
-        assert_eq!(distinct.len(), 1, "{panes} pane(s): the transcript held one width through the drag: {widths:?}");
-        script.push(per_frame);
-        // Let go: its own width, once.
-        let mut after = Vec::new();
+        assert!(distinct.len() >= 15, "{panes} pane(s): the transcript followed the edge: {widths:?}");
         for _ in 0..20 {
             std::thread::sleep(std::time::Duration::from_millis(16));
             app.frame();
-            after.push(app.bounds(&list).width.round() as i64);
         }
-        let settled: std::collections::BTreeSet<i64> = after.iter().copied().collect();
-        assert_eq!(settled.len(), 1, "{panes} pane(s): laid out once on release: {after:?}");
-        assert_ne!(after[0], widths[0], "{panes} pane(s): and to its own width");
         let now = app.bounds(&reading);
         assert!((now.y - before.y).abs() <= 2., "{panes} pane(s): the reading place kept: {reading} from {} to {}", before.y, now.y);
     }
-    assert!(script[1] as f64 <= script[0] as f64 * 1.1 + 4., "a frame of the drag's script, 1 pane then 4: {script:?}");
 }

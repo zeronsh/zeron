@@ -156,56 +156,6 @@ return function(props: Props): Node
 			edged:set(false)
 		end)
 	end)
-	-- While a column beside the page moves, what's in the page keeps one
-	-- width, so the page's content (a chat, its visuals, its composer; a
-	-- split's panes) is laid out once, never at each frame, and nothing in
-	-- it moves: the card, a box, follows the column's edge, clipping it or
-	-- revealing room beside it.
-	-- - The panel opening or closing: the page's width with the panel open
-	--   at rest. Opening, it takes that width at once (the card's edge then
-	--   meets it as the panel slides in); closing, it keeps it until the
-	--   panel has gone. (`opening`: the page narrows by the panel's room at
-	--   rest, as that settles.)
-	-- - The sidebar's edge or the panel's dragged: the width it had as the
-	--   drag began, until it's let go, then its own.
-	-- (A window resized lays out live: its own edge would clip the page's
-	-- text until it settled, and it lays out only what shows.) `since`
-	-- counts the holds, so one taken over by another (a drag begun as the
-	-- panel glides) takes its width afresh.
-	local held = ui.use_state(nil :: { opening: boolean, since: number }?)
-	local edge_dragging = ui.shared("shell.edge_dragging", false)
-	-- The panel's room beside the page at rest: its width and the gap
-	-- before it (known further down).
-	local panel_room: () -> number = function(): number
-		return 0
-	end
-	local function held_width(r: any, share: () -> number): () -> any
-		local base: number? = nil
-		local since: number? = nil
-		return function(): any
-			local h = held:get()
-			if not h then
-				base = nil
-				return "100%"
-			end
-			if since ~= h.since then
-				since = h.since
-				base = nil
-			end
-			if base == nil then
-				local el = r:peek()
-				base = if el then el.width else nil
-			end
-			if base == nil then
-				return "100%"
-			end
-			local delta = if h.opening then -panel_room() else 0
-			return ui.raw(math.max(0, base + share() * delta), "the page's width held while a column beside it moves")
-		end
-	end
-	local function whole(): number
-		return 1
-	end
 	-- Where a chat's card stands in the page (alone, all of it).
 	local function box_of(id: string?): any
 		local b = if id then splits.frames:get()[id] else nil
@@ -345,12 +295,10 @@ return function(props: Props): Node
 			},
 		}
 	)
-	local view_ref = ui.ref()
 	table.insert(pane, ui.column {
-		ref = view_ref,
 		absolute = true,
 		left = 0,
-		w = held_width(view_ref, whole),
+		right = 0,
 		-- (In a split, empty over the focused pane: the pointer goes to it.)
 		pointer_events = function(): any
 			return if grouped() then "none" else "auto"
@@ -383,28 +331,9 @@ return function(props: Props): Node
 		-- project instead, as Zeron's. The composer hides itself then: a
 		-- `ui.show` round it would be a box over the whole pane, taking the
 		-- pointer and the wheel from the page, as boundary's pass explains.)
-		-- (At the page's width, held through the panel's glide: in a split,
-		-- the focused pane's, by its share.)
-		local composer_ref = ui.ref()
-		local function page_share(): number
-			if grouped() then
-				local b = box_of(splits.focused:peek())
-				return b.right.p - b.left.p
-			end
-			return 1
-		end
-		table.insert(pane, ui.div {
-			ref = composer_ref,
-			absolute = true,
-			left = 0,
-			top = 0,
-			bottom = 0,
-			w = held_width(composer_ref, page_share),
-			pointer_events = "none",
-			boundary.screen(boundary.named("shell.boundary.screen.composer"), "@app/screens/chat", function(c): Node
-				return c.Composer()
-			end, { pass = true }),
-		})
+		table.insert(pane, boundary.screen(boundary.named("shell.boundary.screen.composer"), "@app/screens/chat", function(c): Node
+			return c.Composer()
+		end, { pass = true }))
 	end
 	-- Where plugins put something over the page (a banner, a tour).
 	table.insert(pane, ui.div {}) --PERFOFF
@@ -783,8 +712,6 @@ return function(props: Props): Node
 	-- (The build's own, as the animation is: a reload mid-step starts the
 	-- step again from where it shows, never counting what's left twice.)
 	local revealing = ui.use_state(false)
-	-- (Whether the step under way opens the panel beside the page.)
-	local step_opening = ui.use_state(nil :: boolean?)
 	-- Its width is where it's going (`base`, which a window resize moves at
 	-- once) and, after a step (opened, closed, expanded, a column going or
 	-- coming beside it, a neighbour's share), what's left of that step
@@ -828,8 +755,6 @@ return function(props: Props): Node
 		}
 		local to = target()
 		local opened = now.shown ~= seen.shown or now.expanded ~= seen.expanded
-		-- (Opening beside the page, not over it: the page narrows by it.)
-		local opening = now.shown and not seen.shown and not now.expanded
 		local flipped = opened or now.sidebar ~= seen.sidebar or now.files ~= seen.files
 		local resized = now.vw ~= seen.vw
 		local moved = now.owner ~= seen.owner
@@ -865,7 +790,6 @@ return function(props: Props): Node
 			end
 			if opened then
 				revealing:set(true)
-				step_opening:set(opening)
 			end
 			off:set(showing - to)
 			local params = motion.column(off:peek(), 0)
@@ -884,35 +808,6 @@ return function(props: Props): Node
 			base = to
 		end
 		open_w:set(base + off:peek())
-	end)
-	panel_room = function(): number
-		return rest_w:get() + INSET
-	end
-	-- Which hold stands: the panel's glide's, else a drag's; none, the page's
-	-- content its own width again (laid out once, its reading place kept:
-	-- ds/transcript).
-	local holds = 0
-	ui.effect(function()
-		local want: { opening: boolean }? = nil
-		if revealing:get() and step_opening:get() ~= nil then
-			want = { opening = step_opening:get() == true }
-		elseif edge_dragging:get() or drag_held:get() ~= nil then
-			want = { opening = false }
-		end
-		local now = held:peek()
-		if want == nil then
-			if now ~= nil then
-				held:set(nil)
-			end
-		elseif now == nil or now.opening ~= want.opening then
-			holds += 1
-			held:set({ opening = want.opening, since = holds })
-		end
-	end)
-	ui.effect(function()
-		if not revealing:get() and step_opening:peek() ~= nil then
-			step_opening:set(nil)
-		end
 	end)
 	-- (Following the step as it eases.)
 	ui.effect(function()
@@ -1289,7 +1184,6 @@ return function(props: Props): Node
 		end
 		local hovered = ui.use_state(false)
 		local card_ref = ui.ref()
-		local lane_ref = ui.ref()
 		-- Files (and the files pane's, and a sidebar chat) carried over it,
 		-- dropped anywhere on it, as on the chat page: attached to its draft
 		-- (a chat, mentioned). Focused, the chat page's own drop, its
@@ -1396,15 +1290,9 @@ return function(props: Props): Node
 				end
 			end,
 			ui.column {
-				ref = lane_ref,
 				absolute = true,
 				left = 0,
-				-- (Its width held through the panel's glide, by its share of
-				-- the page.)
-				w = held_width(lane_ref, function(): number
-					local b = box_of(id)
-					return b.right.p - b.left.p
-				end),
+				right = 0,
 				top = TITLE_H - INSET,
 				bottom = 0,
 				LaneTab.Tab {
