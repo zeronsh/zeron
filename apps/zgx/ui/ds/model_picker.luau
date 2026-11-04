@@ -558,8 +558,9 @@ return ui.component(function(props: Props): Node
 			tab:set(nil)
 			expanded:set(false)
 		end,
+		-- (Nothing chosen, nothing to fold onto: opened out.)
 		expanded = function(): boolean
-			return expanded:get()
+			return expanded:get() or current() == nil
 		end,
 		on_expand = function()
 			expanded:set(true)
