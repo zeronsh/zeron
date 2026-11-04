@@ -133,6 +133,23 @@ thread_local! {
     static SESSIONS: Rc<Sessions> = Rc::new(Sessions::default());
 }
 
+#[cfg(test)]
+pub(crate) fn delete_action_for_tests(host: &ScriptHost) {
+    delete_action(host, SESSIONS.with(Rc::clone));
+}
+
+/// `sessions.delete`: a chat gone for good, so never an unkept preview's.
+fn delete_action(host: &ScriptHost, a: Rc<Sessions>) {
+    host.async_action("sessions.delete", move |id| {
+        let a = a.clone();
+        let params = json!({ "op": "deleteChat", "chatId": text(&id) });
+        async move {
+            crate::plugins::preview::refuse("sessions.delete")?;
+            a.mutate(params).await.map_err(String::from)
+        }
+    });
+}
+
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let s = SESSIONS.with(Rc::clone);
     let window = s.next_window.get();
@@ -264,11 +281,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         });
     });
     let a = s.clone();
-    host.async_action("sessions.delete", move |id| {
-        let a = a.clone();
-        let params = json!({ "op": "deleteChat", "chatId": text(&id) });
-        async move { a.mutate(params).await.map_err(String::from) }
-    });
+    delete_action(host, a);
     let a = s.clone();
     host.action("sessions.collapse", move |args| {
         let id = args.field("id").map(text).unwrap_or_default();

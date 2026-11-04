@@ -102,9 +102,17 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     });
     let g = github;
     host.action("github.disconnect", move |_| {
-        let g = g.clone();
-        engine::get().spawn(async move { g.disconnect().await });
+        start_disconnect(g.clone());
     });
+}
+
+/// GitHub disconnected, unless an unkept preview asks: whether it started.
+fn start_disconnect(g: Rc<GitHub>) -> bool {
+    if crate::plugins::preview::refuse_aloud("github.disconnect") {
+        return false;
+    }
+    engine::get().spawn(async move { g.disconnect().await });
+    true
 }
 
 pub(crate) fn open_page(url: &str) {
@@ -419,5 +427,21 @@ impl GitHub {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    use crate::plugins::preview;
+
+    /// An unkept preview can't disconnect GitHub; otherwise it goes ahead.
+    #[test]
+    fn a_preview_can_t_disconnect_github() {
+        let g = GITHUB.with(Rc::clone);
+        preview::set(Some(preview::Preview { id: "t".into(), name: "T".into() }));
+        assert!(!start_disconnect(g.clone()));
+        preview::set(None);
+        assert!(start_disconnect(g));
     }
 }
