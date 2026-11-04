@@ -59,6 +59,7 @@ mod settings;
 mod terminal;
 mod tool_details;
 mod themes;
+mod transparency;
 mod visuals;
 #[cfg(test)]
 mod audit_shots;
@@ -66,6 +67,8 @@ mod audit_shots;
 mod menu_tests;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod waiting_toast_tests;
 #[cfg(test)]
 mod split_tests;
 #[cfg(test)]
@@ -78,6 +81,8 @@ mod hit_tests;
 mod shortcut_tests;
 #[cfg(test)]
 mod menu_bar_tests;
+#[cfg(test)]
+mod window_buttons_tests;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]
@@ -464,9 +469,8 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
     // The host's own toasts over it (a template in preview, a switch you
-    // didn't make, signing keys, safe mode at launch) and the menu bar
-    // where the system has none.
-    let chrome = plugins::host_bar::view(cx);
+    // didn't make, signing keys, safe mode at launch).
+    let chrome = plugins::host_bar::view(cx, host.shared("zeron.locale", "en").signal());
     // Where the app's toasts stand, over the host's (host_bar.rs `follow`).
     let floor = host.shared("toast_floor", 16.);
     let view = serve_with(cx, host, "app.luau", inspect, Some(chrome), menu_bar::Role::Bar);
@@ -607,14 +611,22 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         }
     });
     // `appearance(dark)`: the windows' own chrome (the traffic lights, the
-    // title bar's material) in the theme's appearance, `true` dark, `false`
-    // light, nil the system's. zgx themes the content only.
-    host.action("appearance", |value| {
-        set_appearance(match value {
-            Value::Bool(dark) => Some(dark),
-            _ => None,
-        })
+    // title bar's material; Windows' caption buttons and Mica) in the
+    // theme's appearance, `true` dark, `false` light, nil the system's. zgx
+    // themes the content only.
+    let window = cx.window.clone();
+    host.action("appearance", move |value| {
+        set_appearance(
+            &window,
+            match value {
+                Value::Bool(dark) => Some(dark),
+                _ => None,
+            },
+        )
     });
+    // Whether the system asks for no transparency (Windows' Transparency
+    // effects off): every glass solid (src/transparency.rs).
+    transparency::install(cx, &host);
     // LaTeX math laid out for `ds/math` (src/math.rs): every window.
     math::install(&host);
     // A slider's detents tapped under the trackpad (src/haptics.rs).
@@ -709,7 +721,7 @@ fn selected(ui: &Ui) -> Value {
 
 /// Every window's native appearance: dark, light, or (`None`) the system's.
 #[cfg(target_os = "macos")]
-fn set_appearance(dark: Option<bool>) {
+fn set_appearance(_window: &zgx_desktop::WindowHandle, dark: Option<bool>) {
     use objc2::{class, msg_send, runtime::AnyObject};
     use objc2_foundation::NSString;
     // SAFETY: `+[NSApplication sharedApplication]` and `+[NSAppearance
@@ -733,8 +745,15 @@ fn set_appearance(dark: Option<bool>) {
     }
 }
 
+/// The window's own chrome in the theme's appearance, or (`None`) the
+/// system's: Windows' caption buttons (zgx's, which follow the window's
+/// theme, not zgx's) and its Mica, and Linux's dark or light variant. Per
+/// window: there's no app-wide one.
 #[cfg(not(target_os = "macos"))]
-fn set_appearance(_dark: Option<bool>) {}
+fn set_appearance(window: &zgx_desktop::WindowHandle, dark: Option<bool>) {
+    use zgx::theme::Appearance;
+    window.set_theme(dark.map(|dark| if dark { Appearance::Dark } else { Appearance::Light }));
+}
 
 /// What a menu over selected text does (zgx keeps its own menu's actions from
 /// scripts): `copy_selection`, as rich text and plain; `look_up_selection`;
@@ -859,29 +878,97 @@ fn serve_with(
             }
         });
     });
-    let keep = RefCell::new(Some((host, devtools, commands)));
+    // A menu item from the command palette (`run_menu_command`), on the next
+    // turn rather than inside the script that asks.
+    let (slot, tasks) = (reloading.clone(), cx.tasks.clone());
+    host.action("app.run_menu_command", move |id| {
+        let Value::Str(id) = id else { return };
+        let slot = slot.clone();
+        tasks.spawn(async move {
+            let host = slot.borrow().clone();
+            if let Some(host) = host {
+                run_menu_command(&host, &id);
+            }
+        });
+    });
+    // The window's corner radius as it is now, for the scripts' cards to stay
+    // concentric with it (`window.corner_radius`, ui/ds/tokens.luau): on
+    // Windows 11 8, square while maximized or in full screen (Windows rounds
+    // neither), and on Windows 10 (0 from zgx). Windows' alone: macOS's cards
+    // keep their own corner, and zgx knows no other platform's (it says 0).
+    let corner = cfg!(windows).then(|| {
+        let info = &cx.window_info;
+        let (radius, fullscreen, bounds) = (info.corner_radius.clone(), info.fullscreen.clone(), info.bounds.clone());
+        let told = host.shared("window.corner_radius", Value::Nil);
+        cx.ui.runtime.effect(move || {
+            let square = fullscreen.get() || bounds.with(fills_work_area);
+            told.set(Value::from(if square { 0. } else { radius.get() }));
+        })
+    });
+    let keep = RefCell::new(Some((host, devtools, commands, corner)));
     cx.on_closed(move || {
         reloading.borrow_mut().take();
-        if let Some((host, devtools, commands)) = keep.borrow_mut().take() {
+        if let Some((host, devtools, commands, corner)) = keep.borrow_mut().take() {
             host.save();
             drop(devtools);
             drop(commands);
+            drop(corner);
         }
     });
     handle
 }
 
+/// Whether a window at `bounds` fills its monitor's work area (the screen less
+/// the taskbar): maximized, as a frameless window's client is then (winit
+/// fits it to the work area), within a pixel.
+#[cfg(windows)]
+fn fills_work_area(bounds: &zgx_desktop::WindowBounds) -> bool {
+    use windows_sys::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
+    };
+    let Some((x, y)) = bounds.position else { return false };
+    let (w, h) = (bounds.size.0 as i32, bounds.size.1 as i32);
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: the monitor nearest the window's middle (always one, by the
+    // flag), and a MONITORINFO sized as the call asks.
+    let found = unsafe { GetMonitorInfoW(MonitorFromPoint(POINT { x: x + w / 2, y: y + h / 2 }, MONITOR_DEFAULTTONEAREST), &mut info) } != 0;
+    let work = info.rcWork;
+    found && ((work.right - work.left) - w).abs() <= 1 && ((work.bottom - work.top) - h).abs() <= 1
+}
+#[cfg(not(windows))]
+fn fills_work_area(_bounds: &zgx_desktop::WindowBounds) -> bool {
+    false
+}
+
 /// The scripts' commands as the app's menu bar while this window has it
 /// (src/menu_bar.rs: one bar for the whole app, the last opened window's
 /// that has one; a sheet never takes it), and each item it shows chosen
-/// here run in this window's scripts. Keep what it returns while the window
-/// lives: dropped, the bar is the next window's again.
-fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Role) -> menu_bar::Served {
+/// here run in this window's scripts; and the bar's items listed for the
+/// command palette. Keep what it returns while the window lives: dropped,
+/// the bar is the next window's again.
+fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Role) -> (menu_bar::Served, Option<zgx::reactive::Effect>) {
     // The host's own items follow a template going in and out of preview.
     let preview = cx.ui.runtime.signal(plugins::preview::current());
     let heard = preview.clone();
     plugins::preview::on_change(move |now| {
         heard.set(now.cloned());
+    });
+    // What the menus hold, for the command palette (`app.menu_commands`):
+    // where the system draws no menu bar (Windows, Linux: zgx's drawn one
+    // isn't mounted, src/plugins/host_bar.rs) the palette is how a pointer
+    // reaches each item. The bar `menu_bar` makes of this window's commands;
+    // their shortcuts are zgx's key bindings still. (A sheet's bar is the
+    // window's under it: nothing of its own to list.)
+    let listing = (role == menu_bar::Role::Bar).then(|| {
+        let listed = host.shared("app.menu_commands", Value::List(Rc::from([])));
+        let (commands, reserved, from, preview) = (host.commands(), host.reserved_keys(), host.clone(), preview.clone());
+        cx.ui.runtime.effect(move || {
+            let commands = commands.get();
+            let reserved = reserved.get();
+            let bar = preview.with(|preview| menu_bar::Bar::of(&commands, &reserved, &from.dropped_shortcuts(), preview.as_ref()));
+            listed.set(palette_commands(&bar.menus, &commands));
+        })
     });
     let served = menu_bar::of(&cx.windows).serve(&cx.ui.runtime, host, preview, role);
     let run = host.clone();
@@ -902,7 +989,53 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Rol
             eprintln!("zeron-zgx: menus: {} chosen, but no command of this window runs it", action.0);
         }
     });
-    served
+    (served, listing)
+}
+
+/// Every item of the menus (`bar`), in their order, for the command
+/// palette: `{ id, title, menu, key }`, `key` as the scripts wrote it where
+/// the item has its shortcut (`all`'s). Not the host's Keep: that's the
+/// preview toast's, never a script's to run.
+fn palette_commands(bar: &[zgx_desktop::AppMenu], all: &[zgx_script::Command]) -> Value {
+    fn walk(menu: &str, entries: &[zgx_desktop::AppMenuEntry], all: &[zgx_script::Command], out: &mut Vec<Value>) {
+        for entry in entries {
+            match entry {
+                zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } if action.0 != plugins::KEEP_TEMPLATE => {
+                    let key = accelerator.as_ref().and_then(|_| all.iter().find(|c| c.id == action.0)).and_then(|c| c.key.clone());
+                    let mut fields = vec![("id", Value::from(action.0.as_str())), ("title", Value::from(label.as_str())), ("menu", Value::from(menu))];
+                    if let Some(key) = key {
+                        fields.push(("key", Value::from(key.as_str())));
+                    }
+                    out.push(Value::record(fields));
+                }
+                zgx_desktop::AppMenuEntry::Submenu(sub) => walk(&sub.label, &sub.entries, all, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for menu in bar {
+        walk(&menu.label, &menu.entries, all, &mut out);
+    }
+    Value::List(out.into())
+}
+
+/// A menu item run from the command palette (`app.run_menu_command`, the
+/// id `palette_commands` gave it), on the next turn, as its menu item would:
+/// the host's way back to Zeron v3, or a script's command. A plugin's waits
+/// until a template in preview is kept, as the host's dangerous actions do.
+fn run_menu_command(host: &ScriptHost, id: &str) {
+    if id.starts_with(menu_bar::HOST_COMMANDS) {
+        if id == plugins::USE_ZERON_TEMPLATE {
+            plugins::host_command(id);
+        }
+        return;
+    }
+    if id.contains('/') && plugins::preview::current().is_some() {
+        eprintln!("zeron-zgx: {id} waits until the template in preview is kept");
+        return;
+    }
+    host.run_command(id);
 }
 
 fn intro_window() -> WindowOptions {

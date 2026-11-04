@@ -306,10 +306,10 @@ local function tray(level: () -> number, head_node: Node, body: Node, open: () -
 		border_sides = { 1, 1, 0, 1 },
 		border_color = "$zeron.composer.tray.edge",
 		bg = function()
-			return if material.frosted:get() then "$zeron.composer.tray.tint" else "$zeron.composer.tray.solid"
+			return if material.see_through() then "$zeron.composer.tray.tint" else "$zeron.composer.tray.solid"
 		end,
 		backdrop_blur = function()
-			return if material.frosted:get() then "$zeron.composer.tray.blur" else 0
+			return if material.see_through() then "$zeron.composer.tray.blur" else 0
 		end,
 		px = "$space.1",
 		pt = "$space.1",

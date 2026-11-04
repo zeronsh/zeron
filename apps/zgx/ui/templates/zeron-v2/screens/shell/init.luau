@@ -376,7 +376,7 @@ return function(): Node
 		return route.current:get().name == "home" and appearance.showing:get() ~= "none"
 	end
 	local frosted = ui.computed(function(): number
-		return if material.frosted:get() then 1 else 0
+		return if material.see_through() then 1 else 0
 	end)
 	return ui.column {
 		ref = root,

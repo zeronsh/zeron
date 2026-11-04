@@ -127,7 +127,7 @@ local function failed(title: string | Message): (err: any) -> ()
 end
 
 -- An install or update's outcome: someone else's waiting says so with its
--- own notice (the host's "waiting for you to allow it"); otherwise a word.
+-- own notice (screens/plugins/waiting); otherwise a word.
 -- (`plain` its key without a version, `versioned` with one.)
 local function settled(plain: string, versioned: string): (done: any) -> ()
 	return function(done: any)

@@ -27,7 +27,7 @@ A plugin is a folder: `zeron-plugin.json` (its manifest), `init.luau` (its code)
 - `settings`: what the person can set for your plugin (see [Settings](#settings)). Needs no permission.
 - `commands`: the programs it runs as you (`["gh", "git"]`), each by its name as it's found on the PATH, never a path. Needs `"commands"`, and the person sees each name when allowing it (see [Programs and a database](#programs-and-a-database)).
 - `service`: its headless half (`"service.luau"`), which Zeron's engine runs on each device that allowed the plugin. Needs `"service"` (see [Services](#services)).
-- `network`: `{ "hosts": ["api.example.com", "*.example.org", "localhost:8080"] }`, the hosts its requests may reach. Without it, `network` reaches any public address and never this device, your network or a cloud's metadata address. With it, only those hosts; a private one (`localhost`, `10.…`, `nas.local`) is reachable only when it's named exactly, with its port if you give one, and the consent sheet says so. `Authorization` and `Cookie` headers go only to hosts named here. Needs `"network"`.
+- `network`: `{ "hosts": ["api.example.com", "*.example.org", "localhost:8080"] }`, the hosts its requests may reach, from its window and its service alike (see [Reaching the network](#reaching-the-network)). Without it, `network` reaches any public address and never this device, your network or a cloud's metadata address. With it, only those hosts; a private one (`localhost`, `10.…`, `nas.local`) is reachable only when it's named exactly, and the consent sheet says so. `Authorization` and `Cookie` headers go only to hosts named here. Needs `"network"`.
 
 Your own plugins are signed as yours, and re-signed and reloaded each time you save.
 
@@ -48,13 +48,37 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `navigate` | open chats and pages (`zeron.open`) |
 | `compose` | put text in the message box (`zeron.compose`), or a review comment on it (`zeron.compose_comment`); you still send it |
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
-| `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`) |
+| `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`). See [Reaching the network](#reaching-the-network) |
 | `clipboard`, `files`, `web`, `windows` | zgx's clipboard, file dialogs, web views, windows |
 | `tools` | tools for agents (the manifest's `tools`) |
 | `devices` | send data to itself on your other devices |
 | `native` | run a program of its own (the manifest's `mcp`) |
 | `commands` | run the programs its manifest's `commands` names, as you, on this Mac (`zeron.run`) |
 | `service` | run its service (the manifest's `service`) on this device, with no window open, for its windows and agents here and on your other devices |
+
+## Reaching the network
+
+With `network`, `ui.fetch`, remote pictures and the service's `zeron.fetch` all keep to one rule. It's checked for the address you ask, each redirect, and every address a name resolves to, before anything connects.
+
+| Where | Reached |
+|---|---|
+| A public address | Yes, unless the manifest names hosts, and then only those |
+| This device, your network (`localhost`, `127.…`, `::1`, `10.…`, `192.168.…`, `172.16–31.…`, `100.64–127.…`, `fc00::/7`) | Only if the manifest names it exactly (no `*.`) |
+| A cloud's metadata address and link-local space (`169.254.…`, `fe80::`), `0.0.0.0`, `::`, multicast | Never, even named |
+
+**Naming a local host.** Write what the URL says, in `network.hosts`:
+
+```json
+"permissions": ["network"],
+"network": { "hosts": ["localhost:8080", "127.0.0.1:8080", "[::1]:8080", "nas.local"] }
+```
+
+- With a port, only that port. Without one (`"localhost"`, `"nas.local"`), any port on that host, which suits a dev server that changes ports. There's no port wildcard or range.
+- `localhost` and `127.0.0.1` are different hosts: name the one you use.
+- Naming any host narrows the plugin to the hosts you name, public ones included: a plugin that reaches `localhost:8080` and the internet lists its public hosts too (`*.example.org` covers names under it, never a private address).
+- A host that reads as local (`localhost`, an address, `.local`) asks the person again when an update adds it.
+
+A refused request fails with an error that names what to add, such as `add "localhost:3000" to "network": { "hosts": [] } in its manifest`. `Host`, `Connection` and the like can't be set, and `Authorization` and `Cookie` go only to hosts named here. A program it runs (`commands`) isn't under this rule: what it can reach is what you can.
 
 ## Placing by selector
 
@@ -94,7 +118,7 @@ Everything in the window also has `profile`, `appearance` and `route`. A chat's 
 
 ### Slots: places a plugin offers other plugins
 
-A selector reaches Zeron's elements, never another plugin's. A plugin that wants others to add to what it draws offers a **slot**: `zeron.slot(name, props?)` is a column (styled by `props`) holding what each plugin adds there, named under the offering plugin's id. Put a `provide` above it for what they read there: plain data, or a state of it (never a function).
+A selector reaches Zeron's elements, never another plugin's. A plugin that wants others to add to what it draws offers a **slot**: `zeron.slot(name, props?)` is a column (styled by `props`) holding what each plugin adds there, named under the offering plugin's id. A raw `ui.slot(name)` must be `<your id>.…` too: any other name, or one starting with `zeron`, fails the plugin as it loads, and its row says why. Put a `provide` above it for what they read there: plain data, or a state of it (never a function).
 
 ```lua
 -- Git's Changes head: its branch, for whoever adds a button beside it.
@@ -201,6 +225,8 @@ Zeron draws that row on your settings page: "Use as wallpaper", and while it's o
 
 **Commands and shortcuts.** zgx's own `ui.command { id, title, menu, key, run }` works in a plugin. It shows in Zeron's menu bar as `<plugin>/<id>`, with `key` as its shortcut (`"cmd+shift+t"`). A shortcut Zeron (or an earlier plugin) already has stays theirs: yours shows without it, and your row in Settings → Plugins says so.
 
+A shortcut needs a modifier: `"k"`, `"enter"`, `"f5"` or Shift alone on a character (`"shift+k"`) would take that key from every field, page and terminal. Written so, the plugin fails as it loads, and its row says why. A key alone that a state or function gives is dropped: the command stays in the menu bar without it, and the row says so. For letters while your own view has focus, use `on_key` on your element, or `panel_key` in the panel. A command's `id` can't start with `zeron`, those names being Zeron's own.
+
 **Tools for agents.** List each in the manifest's `tools` (and ask `"tools"`), then:
 
 ```lua
@@ -237,7 +263,7 @@ Give each a `key` of your own: `zeron.composed()` lists yours still on a draft b
 
 A plugin can do real work of its own: run the command-line tools you already use, and keep what it learns.
 
-**Programs** (`commands`). Name the programs in the manifest and ask for the permission:
+**Programs** (`commands`). Name the programs in the manifest and ask for the permission. The person sees each one, and a shell or an interpreter (`sh`, `python3`, `node`) says plainly that it gives you full control of their computer, so name one only if you must:
 
 ```json
 "permissions": ["commands"],

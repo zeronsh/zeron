@@ -93,6 +93,31 @@ pub fn any_can_do_anything(commands: &[String]) -> bool {
     commands.iter().any(|c| risk(c) == Risk::Anything)
 }
 
+/// Shells and interpreters, by [`normalized`] name without a version: naming
+/// one lets a plugin run anything at all, so the rules below hold nothing back
+/// and the words for it are plain.
+const FULL_CONTROL: &[&str] = &[
+    "ash", "bash", "bun", "cmd", "csh", "dash", "deno", "elixir", "erl", "fish", "ksh", "lua", "luajit", "node", "nodejs",
+    "osascript", "perl", "php", "powershell", "pwsh", "python", "pypy", "ruby", "sh", "swift", "tclsh",
+    "tcsh", "wscript", "cscript", "zsh",
+];
+
+/// Whether naming `program` gives a plugin full control of your computer: a
+/// shell or an interpreter (`python3`, `python3.12`, `node`, `sh`), which run
+/// whatever they're given. Every one is [`Risk::Anything`], as anything unknown
+/// is; this says which of those to say it of plainly.
+pub fn full_control(program: &str) -> bool {
+    let name = normalized(program);
+    FULL_CONTROL.contains(&name.as_str()) || FULL_CONTROL.contains(&name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
+/// Whether `program` is one this runner holds to rules of its own (`git`,
+/// `gh`: [`git_args`], [`gh_args`]), so it's said as what it does rather than
+/// as anything you can do. It's still [`Risk::Anything`], and always asked.
+pub fn held_to_its_own_rules(program: &str) -> bool {
+    matches!(family(program), Family::Git | Family::Gh)
+}
+
 /// A program's name as the system finds it: lowercase (macOS and Windows
 /// find `Git` as `git`), without a Windows extension.
 pub fn normalized(program: &str) -> String {

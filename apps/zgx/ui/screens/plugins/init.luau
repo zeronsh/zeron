@@ -87,6 +87,9 @@ require("@app/screens/templates")
 -- it's on (screens/plugins/settings).
 require("@app/screens/plugins/settings")
 
+-- What's waiting for you to allow it: a notice each, until it's dealt with.
+require("@app/screens/plugins/waiting")
+
 -- What plugins see, written as it changes (each a steady table, so a
 -- plugin reading one hears only real changes).
 local out = {
@@ -164,6 +167,11 @@ ui.effect(function()
 	put(out.appearance, if kind == "light" or kind == "high-contrast-light" then "light" else "dark")
 end)
 
+-- What a failed plugin's notice offers (a toast's action: `ds/toast`).
+ds.toast.action("plugins.open_folder", function(id: string)
+	state.open_folder(id)
+end)
+
 -- What plugins asked for, done here in order. The host numbers each;
 -- those already done are skipped (a reload of the scripts keeps `done`).
 local requests = ui.shared("plugins.request", {} :: { any })
@@ -212,31 +220,6 @@ local function run(r: any)
 		require("@ds/links").open(r.value)
 	elseif r.kind == "toast" then
 		ds.toast.show { title = r.title, body = r.value }
-	elseif r.kind == "waiting" then
-		ds.toast.show {
-			title = ui.t("plugins.init.waiting", { name = r.title }),
-			tone = "info",
-			action = {
-				label = ui.t("plugins.init.review"),
-				run = function()
-					state.review(r.value)
-				end,
-			},
-		}
-	elseif r.kind == "template_waiting" then
-		-- Someone else's template, brought in (an agent's import_template):
-		-- its consent window, the host's, installs it.
-		ds.toast.show {
-			title = ui.t("plugins.init.waiting", { name = r.title }),
-			body = ui.t("plugins.init.template_waiting_body"),
-			tone = "info",
-			action = {
-				label = ui.t("plugins.init.review"),
-				run = function()
-					ui.invoke("templates.review", r.value)
-				end,
-			},
-		}
 	elseif r.kind == "plugin_failed" then
 		ds.toast.show {
 			title = ui.t("plugins.init.failed", { name = r.title }),
@@ -244,9 +227,8 @@ local function run(r: any)
 			tone = "warning",
 			action = {
 				label = ui.t("plugins.init.show_folder"),
-				run = function()
-					state.open_folder(r.value.id)
-				end,
+				run = "plugins.open_folder",
+				value = r.value.id,
 			},
 		}
 	elseif r.kind == "template_failed" then

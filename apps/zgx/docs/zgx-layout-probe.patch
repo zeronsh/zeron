@@ -1,0 +1,77 @@
+--- a/crates/zgx/src/scene.rs
++++ b/crates/zgx/src/scene.rs
+@@ -9541,6 +9541,9 @@
+     fn measure_uncached(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
+         // Timed for devtools' layout attribution while they trace.
+         let _traced = crate::profile::layout_span(id);
++        if crate::trace::enabled() {
++            crate::trace::probe_log(id.number(), self.layout_pass as u64, format!("{constraints:?}"));
++        }
+         // Checked by `measured`, its one caller.
+         let node = self.tree_node(id);
+         // Not `laid_out` here: joined to this test it's a mask on every
+@@ -10937,6 +10940,11 @@
+         self.settle_children();
+         let _span = crate::profile::span(crate::profile::Phase::Layout);
+         self.layout_pass = self.layout_pass.wrapping_add(1);
++        if crate::trace::enabled() {
++            let bt = std::backtrace::Backtrace::force_capture().to_string();
++            let frames: Vec<String> = bt.lines().filter(|l| l.contains("zgx") && !l.contains("/") && !l.contains("backtrace") && !l.contains("prepare_layout")).take(5).map(|l| l.trim().to_string()).collect();
++            crate::trace::probe_log(u32::MAX, self.layout_pass as u64, format!("full={full} roots={} alone={} caller {frames:?}", self.layout_roots.len(), self.alone_pending));
++        }
+         let mut report = FrameReport::default();
+         // First: one that falls back marks its ancestors for the layouts
+         // below, before any answers for them as it did.
+--- a/crates/zgx/src/trace.rs
++++ b/crates/zgx/src/trace.rs
+@@ -269,6 +269,11 @@
+             Some(parent) => parent.children += micros,
+             None => log.current.layout.micros += micros,
+         }
++        PROBE.with_borrow_mut(|m| {
++            let e = m.entry(node).or_insert((0, 0.));
++            e.0 += 1;
++            e.1 += self_micros;
++        });
+         let layout = &mut log.current.layout;
+         layout.measured += 1;
+         let at = layout
+@@ -382,4 +387,21 @@
+             "names and causes stay as many as the mounted effects: {once:?} then {after:?}"
+         );
+     }
++}
++
++thread_local! {
++    static PROBE: std::cell::RefCell<std::collections::HashMap<u32, (u32, f32)>> = Default::default();
++}
++pub fn take_probe() -> std::collections::HashMap<u32, (u32, f32)> {
++    PROBE.with_borrow_mut(std::mem::take)
++}
++
++thread_local! {
++    static PROBE_LOG: std::cell::RefCell<Vec<(u32, u64, String)>> = Default::default();
++}
++pub fn probe_log(node: u32, pass: u64, c: String) {
++    PROBE_LOG.with_borrow_mut(|l| l.push((node, pass, c)));
++}
++pub fn take_probe_log() -> Vec<(u32, u64, String)> {
++    PROBE_LOG.with_borrow_mut(std::mem::take)
+ }
+--- a/crates/zgx-script/src/lib.rs
++++ b/crates/zgx-script/src/lib.rs
+@@ -461,7 +461,13 @@
+         f: &mlua::Function,
+         args: impl mlua::IntoLuaMulti,
+     ) -> mlua::Result<R> {
+-        self.guard(self.budget, || f.call(args))
++        let began = std::time::Instant::now();
++        let out = self.guard(self.budget, || f.call(args));
++        if zgx::trace::enabled() {
++            let i = f.info();
++            zgx::trace::probe_log(u32::MAX - 1, began.elapsed().as_micros() as u64, format!("{}:{}", i.short_src.as_deref().unwrap_or("?"), i.line_defined.unwrap_or(0)));
++        }
++        out
+     }
+     pub(crate) fn report(&self, error: mlua::Error) {
+         let message = describe(&self.name, &error);

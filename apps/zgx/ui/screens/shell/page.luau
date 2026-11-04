@@ -38,9 +38,12 @@ export type Props = {
 -- The title bar's height (Zeron's): the pages start under it, the
 -- wallpaper runs under it to the window's top.
 local TITLE_H = 38
--- The title line's own room: under the bar's 4 of top padding, its
--- controls centred 21 down; and what its right end keeps for them.
-local TITLE_TOP, TITLE_RIGHT = 4, 64
+-- What the title line's right end keeps for the bar's controls there. (The
+-- line itself is the bar's: `ds.TitleBar.middle`.)
+local TITLE_RIGHT = 64
+-- Of that room, what lies past the controls' row (ds/title_bar's ROW_PAD),
+-- which `TitleBar.actions_right` gives as it is now.
+local TITLE_ROW_PAD = 10
 -- How wide a session's files stand beside it: at least, and by default
 -- (room for the tree beside a file, ds/files_pane's 288 + 360).
 -- The panel's least (Zeron's surface host's: screens/shell/fit) and its
@@ -56,6 +59,10 @@ local CLOSE = 22
 local panel_groups = ui.shared("panel.groups_shown", false)
 -- How far up from a split pane's foot a click is on its composer.
 local COMPOSER_ROOM = 130
+-- What the page wants beside the columns: its panes, each at its least.
+fit.page_holds(function(): number
+	return fit.floor_of(splits.across:get(), splits.GAP)
+end)
 
 return function(props: Props): Node
 	local box = ui.ref()
@@ -174,9 +181,11 @@ return function(props: Props): Node
 		return false
 	end
 	-- Where a pane's × stands from its card's right: clear of the title
-	-- bar's panel toggle over the page's top right while the panel is shut.
+	-- bar's panel toggle over the page's top right while the panel is shut
+	-- (10 in and 24 wide; past the window's own buttons and the divider
+	-- where they stand at the right: `TitleBar.actions_right`).
 	local function close_right(id: string?): number
-		return if at_top_right(id) and not panel_open() then 34 else 8
+		return if at_top_right(id) and not panel_open() then 24 + ds.TitleBar.actions_right() else 8
 	end
 
 	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
@@ -197,18 +206,13 @@ return function(props: Props): Node
 	-- of the window's composer, at the focused pane's foot, over that
 	-- pane's card, letting the pointer through to it but for the composer.)
 	-- (Flat, a new chat with the sidebar closed: no card, the window's.)
-	local RADIUS = (function(): number
-		local r: any = ui.theme.get("zeron.inset.radius")
-		if type(r) ~= "number" then
-			r = ui.theme.get("radius.xl")
-		end
-		return if type(r) == "number" then r else 12
-	end)()
 	-- (Its corners whole while there's any gap round it, square as it
 	-- meets the window's edges: never between, where they'd show changing
-	-- and not match the other corners round them.)
-	pane.rounded = function(): number
-		return ui.raw(if edged:get() then RADIUS else 0, "the card's corners, whole while any gap is round it")
+	-- and not match the other corners round them. Whole, the cards' token,
+	-- which follows the window's own corner where the host says it:
+	-- ds/tokens.)
+	pane.rounded = function(): any
+		return if edged:get() then "$zeron.inset.radius" else 0
 	end
 	-- (Its edge's room; the edge itself is drawn with the fill, below.)
 	pane.border = function(): number
@@ -380,7 +384,11 @@ return function(props: Props): Node
 	-- (The title line is the card's own head, level with the title
 	-- bar's controls in the window: centred where they are, less the gap
 	-- the card is set down by.)
-	local title_mid = TITLE_TOP + (TITLE_H - TITLE_TOP) / 2 - INSET
+	-- (`ds.TitleBar.middle`: Zeron's 21 down, or the window's own buttons'
+	-- middle where they set the bar's line.)
+	local function title_mid(): number
+		return ds.TitleBar.middle() - INSET
+	end
 	-- Where a pane's title starts in its card: past the title bar's
 	-- controls when they stand over it (the sidebar collapsed, the pane at
 	-- the inset's top left), else the page's inset.
@@ -426,7 +434,9 @@ return function(props: Props): Node
 				},
 				absolute = true,
 				top = 0,
-				h = 2 * title_mid,
+				h = function(): number
+					return 2 * title_mid()
+				end,
 				-- (Collapsed, the bar's controls stand over the card's start:
 				-- past them, less the gap the card is set in by.)
 				-- (In a split, only the leftmost pane's is under them.)
@@ -438,13 +448,14 @@ return function(props: Props): Node
 					return title_left(splits.focused:get(), false, true)
 				end), motion.sidebar),
 				x = full_screen_shift(splits.focused:peek(), ds.TitleBar.full_screen_now(), false),
-				-- (Clear of the bar's own controls at its right; in a split,
-				-- of its pane's ×.)
+				-- (Clear of the bar's own controls at its right, and of the
+				-- window's buttons where they stand there; in a split, of its
+				-- pane's ×.)
 				right = function(): number
 					if grouped() then
 						return ui.raw(close_right(splits.focused:get()) + CLOSE + 6, "its pane's × at its right")
 					end
-					return ui.raw(TITLE_RIGHT, "the title bar's controls at the right, and their room")
+					return ui.raw(TITLE_RIGHT - TITLE_ROW_PAD + ds.TitleBar.actions_right(), "the title bar's controls at the right, and their room")
 				end,
 				gap = "$zeron.space.tight",
 				items = "center",
@@ -617,11 +628,11 @@ return function(props: Props): Node
 	local function right_pref(): number
 		return math.max(files_w:get() - reserve(), 0)
 	end
-	local alloc = { vw = fit.viewport:peek(), side = sidebar_settled(), tree = tree_part(), pref = right_pref() }
+	local alloc = { vw = fit.viewport:peek(), side = sidebar_settled(), tree = tree_part(), pref = right_pref(), floor = fit.page_floor:peek() }
 	ui.effect(function()
-		local vw, side, tree, pref = fit.viewport:get(), sidebar_settled(), tree_part(), right_pref()
+		local vw, side, tree, pref, floor = fit.viewport:get(), sidebar_settled(), tree_part(), right_pref(), fit.page_floor:get()
 		local was = alloc
-		alloc = { vw = vw, side = side, tree = tree, pref = pref }
+		alloc = { vw = vw, side = side, tree = tree, pref = pref, floor = floor }
 		-- (Hidden (another chat with none, a new chat), its width holds as
 		-- it was: what it shows at again is worked out as it opens (`split`).
 		-- Followed while hidden, the fit took its tree away there, and the
@@ -631,7 +642,7 @@ return function(props: Props): Node
 		if vw <= 0 or not shown:get() then
 			return
 		end
-		local allowed = vw - side - tree - fit.CHAT_PANEL_MIN
+		local allowed = fit.panel_room(vw, side, tree, floor)
 		local r = right_w:peek()
 		if pref ~= was.pref then
 			-- Split or dragged: what it would take, as far as there's room.
@@ -641,13 +652,14 @@ return function(props: Props): Node
 			r = allowed
 		elseif vw > was.vw and r < pref then
 			-- Widening while it gave way: back first, the chat at its least.
-			local was_allowed = was.vw - was.side - was.tree - fit.CHAT_PANEL_MIN
+			local was_allowed = fit.panel_room(was.vw, was.side, was.tree, was.floor)
 			if r >= was_allowed - 0.5 then
 				r = math.min(pref, allowed)
 			end
-		elseif side < was.side and r < pref then
-			-- The sidebar gone that it gave way to: back to its own width, as
-			-- far as there's room. (Not its tree floating: the file holds.)
+		elseif (side < was.side or floor < was.floor) and r < pref then
+			-- The sidebar gone that it gave way to, or a pane: back to its own
+			-- width, as far as there's room. (Not its tree floating: the file
+			-- holds.)
 			r = math.min(pref, allowed)
 		end
 		-- Never under the panel's least as it shows: a width dragged narrow
@@ -833,11 +845,11 @@ return function(props: Props): Node
 			local side = sidebar_settled()
 			if not chosen:peek() then
 				local keep = reserve()
-				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0)))
+				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0), fit.page_floor:peek()))
 			else
 				-- (The width chosen, as far as there's room: not what it had
 				-- given way to before it closed.)
-				local allowed = vw - side - tree_part() - fit.CHAT_PANEL_MIN
+				local allowed = fit.panel_room(vw, side, tree_part(), fit.page_floor:peek())
 				local r = math.max(math.min(math.max(right_pref(), fit.RIGHT_PANE_MIN - tree_part()), allowed), 0)
 				if r ~= right_w:peek() then
 					right_w:set(r)
@@ -857,11 +869,11 @@ return function(props: Props): Node
 		return open_w:get()
 	end
 	-- Its width asked for (its edge dragged, or keyed): never past what
-	-- leaves the chat its least; kept as the width it takes with its tree
+	-- leaves the page what it wants; kept as the width it takes with its tree
 	-- docked.
 	local function set_width(want: number)
 		local tree = if fit.current:peek().files then TREE else 0
-		local most = math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.CHAT_PANEL_MIN)
+		local most = math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
 		local w = math.clamp(want, FILES_MIN, most)
 		files_w:set(reserve() + w - tree)
 		if not chosen:peek() then
@@ -1183,6 +1195,13 @@ return function(props: Props): Node
 			return splits.focused:get() == id
 		end
 		local hovered = ui.use_state(false)
+		-- Its ×: there while the pointer is over its head or the keyboard is on
+		-- it. (Its room stays, so nothing in the head moves as it comes.)
+		local head_over = ui.use_state(false)
+		local close_focused = ui.use_state(false)
+		local close_shown = ui.computed(function(): number
+			return if head_over:get() or close_focused:get() then 1 else 0
+		end)
 		local card_ref = ui.ref()
 		-- Files (and the files pane's, and a sidebar chat) carried over it,
 		-- dropped anywhere on it, as on the chat page: attached to its draft
@@ -1338,28 +1357,35 @@ return function(props: Props): Node
 			},
 		}
 		-- (Past the bar's controls, it glides with them as the window goes in
-		-- or out of full screen.)
+		-- or out of full screen, and eases there as the sidebar comes and goes,
+		-- as the session's head does.)
 		local head_ref = ui.ref()
 		ds.TitleBar.follow(head_ref, {
 			paddingLeft = function(full: boolean): number
 				return title_left(id, full)
 			end,
-		})
+		}, motion.sidebar)
 		local head = ui.row {
 			ref = head_ref,
 			absolute = true,
 			top = 0,
 			left = 0,
 			right = 0,
-			h = TITLE_H - INSET,
+			-- (Its middle on the bar's line, as the session's head.)
+			h = function(): number
+				return 2 * title_mid()
+			end,
 			-- (Kept by `follow` above, from here.)
 			pl = ui.raw(title_left(id, ds.TitleBar.full_screen_now(), false), "where its title starts, as the session's head"),
-			pr = function(): number
-				return ui.raw(close_right(id), "its × clear of the title bar's panel toggle")
-			end,
+			-- (Its × clear of the title bar's panel toggle, easing as the panel
+			-- comes and goes.)
+			pr = motion.tween(ui.computed(function(): number
+				return close_right(id)
+			end), motion.sidebar),
 			gap = "$zeron.space.tight",
 			items = "center",
 			on_hover = function(inside: boolean)
+				head_over:set(inside)
 				if not focused() then
 					hovered:set(inside)
 				end
@@ -1411,10 +1437,26 @@ return function(props: Props): Node
 				w = CLOSE,
 				h = CLOSE,
 				rounded = "$radius.sm",
+				-- (Unseen, a press there is the head's: focus or drag.)
+				pointer_events = function(): string
+					return if close_shown:get() == 1 then "auto" else "none"
+				end,
+				on_focus = function()
+					close_focused:set(true)
+				end,
+				on_blur = function()
+					close_focused:set(false)
+				end,
 				on_click = function()
 					splits.close(id)
 				end,
-				ds.Icon { name = "close", size = 12 },
+				-- (The glyph fades, not the button: a node of no opacity
+				-- leaves the Tab order, and with no wash at rest the button
+				-- alone shows nothing.)
+				ui.div {
+					opacity = motion.tween(close_shown, { duration = 120 }),
+					ds.Icon { name = "close", size = 12 },
+				},
 			},
 		}
 		local item: { [any]: any } = {
@@ -1491,6 +1533,11 @@ return function(props: Props): Node
 		min_w = 0,
 		h_full = true,
 		relative = true,
+		-- (In a split, the frame of the window's composer alone, over the
+		-- panes: the pointer goes through to them, but for the composer.)
+		pointer_events = function(): any
+			return if grouped() then "none" else "auto"
+		end,
 		-- (The split's panes, under the page's card: in a split, their cards
 		-- are the chats, and the page's card is the composer's frame over
 		-- the focused one's.)
@@ -1512,19 +1559,9 @@ return function(props: Props): Node
 				relative = true,
 			}),
 		},
-		-- (What the page's card stands in, placed by its box in a split.)
-		ui.column {
-			grow = 1,
-			min_w = 0,
-			h_full = true,
-			relative = true,
-			-- (In a split, the frame of the window's composer alone, over the
-			-- panes: the pointer goes through to them, but for the composer.)
-			pointer_events = function(): any
-				return if grouped() then "none" else "auto"
-			end,
-			ui.column(pane),
-		},
+		-- (The page's card, placed by its box in a split: there the frame of
+		-- the window's composer alone, over the panes.)
+		ui.column(pane),
 		ui.show(function(): boolean
 			return splits.dragging:get() and not expanded()
 		end, ui.div {
@@ -1550,24 +1587,19 @@ return function(props: Props): Node
 	-- round them, along the title bar's strip (over them, beside them and
 	-- between them), moves the window as the bar does: a strip under the
 	-- cards, which let the pointer through but for what takes it.
-	return ui.column {
+	return ui.row {
+		ref = row_ref,
 		grow = 1,
 		min_w = 0,
 		h_full = true,
 		relative = true,
+		pt = gap,
+		pb = gap,
+		pl = gap,
+		pr = gap,
+		pointer_events = "none",
 		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
-		ui.row {
-			ref = row_ref,
-			w_full = true,
-			grow = 1,
-			min_h = 0,
-			pt = gap,
-			pb = gap,
-			pl = gap,
-			pr = gap,
-			pointer_events = "none",
-			split_area,
-			beside,
-		},
+		split_area,
+		beside,
 	}
 end

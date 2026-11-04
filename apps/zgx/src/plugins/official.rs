@@ -460,7 +460,8 @@ mod tests {
             std::fs::write(path, bytes).unwrap();
         }
         assert!(verified_at(&ui(), &elsewhere).is_none());
-        // A link in it. (Unix: making one on Windows takes a privilege.)
+        // A link in it. (Unix's alone: a symlink on Windows needs Developer
+        // Mode or an administrator, and the test builds there too.)
         #[cfg(unix)]
         {
             let linked = dir("linked");

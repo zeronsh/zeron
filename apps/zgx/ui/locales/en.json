@@ -2361,7 +2361,10 @@
       "search": "Search sessions, commands and files…",
       "app": "App",
       "reload_zeron": "Reload Zeron",
-      "reload_interface": "Reload interface"
+      "reload_interface": "Reload interface",
+      "commands": "Commands",
+      "run": "Run",
+      "default_interface": "Use Zeron v3"
     },
     "add_project": {
       "something_went_wrong": "Something went wrong",
@@ -3071,7 +3074,8 @@
           "title": "Run {list} on this Mac as you",
           "title_on": "Run {list} on {device} as you",
           "detail": "It can do whatever {list} can do with your sign-ins.",
-          "detail_anything": "These can do anything you can, with your sign-ins."
+          "detail_anything": "These can do anything you can, with your sign-ins.",
+          "detail_each": "They run as you, with your sign-ins."
         },
         "native": {
           "title": "Run its own program on this Mac for your agents",
@@ -3124,6 +3128,7 @@
         "ui_replace": "Replace {places} with its own"
       },
       "can_anything": "{name}: can do anything you can",
+      "full_control": "It can run {name}, which gives it full control of your computer.",
       "any_site": "Any site on the internet",
       "near_host": "{host}: this Mac or your network",
       "details": {
@@ -3346,7 +3351,7 @@
       "install_title": "Install {name}?",
       "keep_title": "Keep {name}?",
       "keep_trust": "Keep it only if you trust what made it",
-      "keep_body": "An agent made, changed or switched to this template, or it hasn't been kept since it changed. Until you keep it, it's a preview: Zeron won't let it run programs, use your account, change plugins, templates or files, or send to agents. Kept, it runs with everything Zeron can do.",
+      "keep_body": "An agent made, changed or switched to this template, or it hasn't been kept since it changed. Until you keep it, it's a preview. Kept, it runs with everything Zeron can do.",
       "keep_files": "{n, plural, one {# file} other {# files}} of its own, as they are now",
       "keep_files_detail": "If they change again, Zeron asks again.",
       "keep": "Keep",
