@@ -82,6 +82,8 @@ The engine never re-resolves an open store because `AuthState` changed. This pre
 
 `zeron login` and `zeron logout` operate on `session.json` while the engine is stopped. Login selects `Synced` for the next start; logout selects `Local` for the next start. The UI may update live authentication status, but the active `WorkspaceScope` still changes only after restart.
 
+Managed Scaffold profiles are isolated per authority under `{data_dir}/profiles/scaffold/{key}/`, so moving to another deployment never reopens the old store. `comet import-native-profile --source-copy DIR --writers-stopped` (RPC `ImportNativeProfile`, owner controller only) carries a stopped-writer copy of another authority's native profile into the running one: documents keep their bytes plus unacknowledged outbox rows with cursor 0 / epoch 2, are seeded into this Edge as seq-0 checkpoints before their rebuilt registry rows land, take this identity's `crew` metadata, and move to this device when the source device hosted them (other hosts stay inert until they import). Pending source commands get outcome-less ledger claims so hosts reject rather than replay them; the source uploads root is granted read-only via `native-profile-imports.json`. `scripts/migrate-canary-to-staging.sh` is the operator wrapper.
+
 The resolved profile selects the session snapshots, registry snapshot, run journals, and attachment cache that may contain workspace data:
 
 | Scope | Store and journals | Uploads |

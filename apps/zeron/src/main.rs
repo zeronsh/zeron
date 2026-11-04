@@ -80,6 +80,9 @@ enum Command {
         #[arg(long, requires = "identity_session")]
         device_id: Option<String>,
     },
+    /// Import another authority's native profile (a stopped-writer copy) into the
+    /// running signed-in engine, e.g. Crew Canary history into Crew Staging.
+    ImportNativeProfile(session_cli::ImportNativeProfileArgs),
     /// Build an importer manifest from a consistent stopped-writer profile copy.
     ExportBackup(session_cli::ExportBackupArgs),
     /// Inspect immutable copied bootstrap evidence without starting a runtime.
@@ -318,6 +321,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::ExportBackup(args)) => {
             tokio::runtime::Runtime::new()?.block_on(session_cli::export(args, config.ipc_port, Some(&config.data_dir)))
+        }
+        Some(Command::ImportNativeProfile(args)) => {
+            tokio::runtime::Runtime::new()?.block_on(session_cli::import_native_profile(args, config.ipc_port, &config.data_dir))
         }
         Some(Command::ExportRemoteBackup(_) | Command::ImportRemoteBackup(_) | Command::VerifyRemoteBackup(_) | Command::InspectBackup(_)) => unreachable!("offline migration dispatched before runtime configuration"),
         Some(Command::Engine) => unreachable!("background engine dispatched before runtime configuration"),

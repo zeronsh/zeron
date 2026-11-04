@@ -40,7 +40,20 @@ pub(super) fn handles(method: &str) -> bool {
     matches!(method, "ForkSession" | "HandoffSessionToScaffold" | "RecoverSessionHandoffToScaffold"
         | "HandoffSessionOnlyToScaffold" | "RecoverSessionOnlyHandoffToScaffold"
         | "SendPeerMessage" | "ReplyPeerMessage" | "WaitPeerReply" | "DeliverPeerMessage" | "ImportCrewBackup" | "ExportCrewBackup"
-        | "VerifyImportedCrewSession" | "PublishImportedCrewSession")
+        | "VerifyImportedCrewSession" | "PublishImportedCrewSession" | "ImportNativeProfile")
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportNativeProfileInput {
+    source_copy: std::path::PathBuf,
+    #[serde(default)]
+    source_uploads: Option<std::path::PathBuf>,
+    #[serde(default)]
+    chat_ids: Option<std::collections::HashSet<String>>,
+    #[serde(default)]
+    validate_only: bool,
+    writers_stopped: bool,
 }
 fn failed(error: impl std::fmt::Display) -> RpcError { RpcError::Failed(error.to_string()) }
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, RpcError> {
@@ -337,6 +350,39 @@ impl EngineRpc {
 
     pub(super) async fn native_rpc(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
         match method {
+            "ImportNativeProfile" => {
+                self.native_controller()?;
+                let (subject, scope) = self.crew_services()?.controller()?;
+                if scope.session_id.is_some() {
+                    return Err(failed("Native profile import requires owner controller authority"));
+                }
+                let input: ImportNativeProfileInput = serde_json::from_value(params)
+                    .map_err(|error| RpcError::BadParams(error.to_string()))?;
+                if !input.writers_stopped {
+                    return Err(RpcError::BadParams("explicit stopped-writer confirmation required".into()));
+                }
+                let importer = crate::native_profile_import::NativeProfileImporter {
+                    doc_host: self.doc_host.clone(),
+                    workspace: self.workspace.clone(),
+                    uploads: self.uploads.clone(),
+                    target: crate::native_profile_import::NativeImportTarget {
+                        owner_subject: subject.clone(),
+                        project_id: scope.project_id.clone(),
+                        deployment_id: scope.deployment_id.clone(),
+                    },
+                };
+                let report = importer.run(crate::native_profile_import::NativeImportOptions {
+                    source_copy: input.source_copy,
+                    source_uploads: input.source_uploads,
+                    chat_ids: input.chat_ids,
+                    validate_only: input.validate_only,
+                }).await.map_err(failed)?;
+                let (current_subject, current_scope) = self.crew_services()?.controller()?;
+                if current_subject != subject || current_scope != scope {
+                    return Err(failed("Crew controller scope changed during native profile import"));
+                }
+                RpcReply::value(&report)
+            }
             "VerifyImportedCrewSession" | "PublishImportedCrewSession" => {
                 let (subject, scope) = self.crew_services()?.controller()?;
                 if scope.session_id.is_some() {

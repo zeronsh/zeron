@@ -2972,6 +2972,37 @@ impl DocHost {
         self.spawn_chat2_checkpoint(handle, "threshold");
     }
 
+    /// Native profile migration: seed a never-opened stored document's chat2 room
+    /// with its exact stored snapshot (seq 0), then record the outbox as
+    /// initialized so the first open does not replay the full history as rows.
+    /// An advanced room floor or another owner rejects the POST; nothing local
+    /// is marked in that case, so a later open still self-heals by replay.
+    pub(crate) async fn publish_stored_snapshot(&self, doc_id: &str) -> Result<(), String> {
+        if !chat_allows_sync(doc_id) || self.inner.edge_disconnected.load(Ordering::Acquire) {
+            return Err("Imported history publication requires a connected Edge".into());
+        }
+        if lock(&self.inner.handles).contains_key(doc_id) {
+            return Err("Imported document is already open".into());
+        }
+        let edge = self.inner.config.edge.as_ref().ok_or("Native Edge is not configured")?;
+        let store = self.inner.store.clone();
+        let id = doc_id.to_owned();
+        let snapshot = tokio::task::spawn_blocking(move || store.load_snapshot(&id))
+            .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?
+            .ok_or("Imported snapshot is absent")?;
+        let frontier = loro::LoroDoc::decode_import_blob_meta(&snapshot, true)
+            .map_err(|e| e.to_string())?.partial_end_vv.encode();
+        crate::chat2_host::post_checkpoint(&self.inner.http, edge, doc_id, 0, &frontier, snapshot).await?;
+        let store = self.inner.store.clone();
+        let id = doc_id.to_owned();
+        tokio::task::spawn_blocking(move || store.initialize_chat_outbox(&id, &[]))
+            .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn has_open_document(&self, doc_id: &str) -> bool {
+        lock(&self.inner.handles).contains_key(doc_id)
+    }
+
     /// Owner-controller migration only. Never open/adopt the old guest's document:
     /// doing so would join/drain it or re-export bytes different from the proof.
     pub(crate) async fn publish_imported_terminal_history(

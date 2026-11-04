@@ -52,6 +52,7 @@ mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 mod model_catalogs;
+pub mod native_profile_import;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -344,6 +345,11 @@ impl EngineCore {
             && let Some(root) =
                 local_import::marker_grants_read_root(data_dir, profile.org_id(), profile.user_id())
         {
+            uploads.add_read_only_root(&root);
+        }
+        // A cross-authority native import grants its source uploads root the
+        // same way; the marker lives in the importing profile itself.
+        for root in native_profile_import::marker_read_roots(profile.store_root()) {
             uploads.add_read_only_root(&root);
         }
         // Queued-attachment support: the doc host resolves `pending://` refs

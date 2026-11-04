@@ -627,6 +627,22 @@ impl DocsStore {
         Ok(hit.is_some())
     }
 
+    /// Native subagent document ids (`{chat_id}--sub--…`) stored for one chat.
+    /// Profile import carries them with their parent; they have no registry row.
+    pub fn subagent_snapshot_ids(&self, chat_id: &str) -> Result<Vec<String>, StoreError> {
+        store_blocking(|| {
+            let prefix = format!("{chat_id}--sub--");
+            let conn = self.conn();
+            let mut stmt = conn.prepare(
+                "SELECT doc_id FROM snapshots WHERE substr(doc_id, 1, length(?1)) = ?1 ORDER BY doc_id",
+            )?;
+            let ids = stmt
+                .query_map(params![prefix], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok(ids)
+        })
+    }
+
     /// The full command ledger — profile-import preserves both at-most-once
     /// claims and known outcomes for pending command rows that arrive later.
     pub fn processed_commands(&self) -> Result<Vec<(String, i64, Option<Vec<u8>>)>, StoreError> {

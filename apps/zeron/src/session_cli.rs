@@ -352,6 +352,41 @@ pub async fn import_offline(
     print_json(&serde_json::to_value(operation(&backup, &destination, &principal, &device_id)?)?)
 }
 
+#[derive(clap::Args)]
+pub struct ImportNativeProfileArgs {
+    /// Consistent copy of the source profile directory (holding docs.sqlite3 and
+    /// journals/), taken after its writer stopped; never the live profile.
+    #[arg(long)]
+    source_copy: PathBuf,
+    /// The source profile's original uploads directory, granted read-only.
+    #[arg(long)]
+    source_uploads: Option<PathBuf>,
+    /// Import only these chat ids (repeatable).
+    #[arg(long = "chat")]
+    chats: Vec<String>,
+    /// Plan and validate only; write nothing.
+    #[arg(long)]
+    validate_only: bool,
+    /// Confirm the source writer was stopped before the copy was taken.
+    #[arg(long, required = true)]
+    writers_stopped: bool,
+}
+
+pub async fn import_native_profile(args: ImportNativeProfileArgs, port: u16, data_dir: &Path) -> anyhow::Result<()> {
+    let source_copy = std::path::absolute(&args.source_copy)?;
+    let source_uploads = args.source_uploads.map(std::path::absolute).transpose()?;
+    let chats = (!args.chats.is_empty()).then_some(args.chats);
+    let report = connect(port, data_dir).await?.call("ImportNativeProfile", json!({
+        "sourceCopy": source_copy, "sourceUploads": source_uploads, "chatIds": chats,
+        "validateOnly": args.validate_only, "writersStopped": args.writers_stopped,
+    })).await?;
+    print_json(&report)?;
+    if report.get("errors").and_then(Value::as_array).is_some_and(|errors| !errors.is_empty()) {
+        bail!("native profile import reported errors; re-run after fixing them (completed chats are skipped)");
+    }
+    Ok(())
+}
+
 pub async fn import(backup: PathBuf, destination: PathBuf, validate_only: bool, verify_only: bool, port: u16, data_dir: &Path) -> anyhow::Result<()> {
     let backup = backup.canonicalize()?;
     let destination = std::path::absolute(destination)?;
