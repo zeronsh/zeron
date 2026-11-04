@@ -1094,6 +1094,8 @@ async fn capture_git_in<S: AsRef<OsStr>>(
     let mut child = cmd
         .spawn()
         .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
+    // Dropping this (cancelled capture, early return) kills the real git too.
+    let _tree = crate::git_tree::GitTree::adopt(&child);
     let mut stdout = child
         .stdout
         .take()
@@ -1778,8 +1780,15 @@ async fn run_git_for_path_batch(
         command.arg(path_argument(path));
     }
     command.stdin(std::process::Stdio::null());
-    let output = command
-        .output()
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(true);
+    let child = command
+        .spawn()
+        .map_err(|error| EngineError::Other(format!("git spawn failed: {error}")))?;
+    let _tree = crate::git_tree::GitTree::adopt(&child);
+    let output = child
+        .wait_with_output()
         .await
         .map_err(|error| EngineError::Other(format!("git spawn failed: {error}")))?;
     if output.status.success() {
