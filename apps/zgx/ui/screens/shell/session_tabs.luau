@@ -3,8 +3,8 @@
 -- shows its panes' tiles stacked (three at most) with the pane focused last in front,
 -- and its title. A pane dragged here is a new
 -- tab (near a tab's edge, or past the last), or joins a tab (on its middle). A click
--- goes there, a drag reorders them, its × closes the tab (the sessions go on, in the sidebar; a split stays a
--- split).
+-- goes there, a drag reorders them, its × closes the tab, and a split with it (the sessions go on, in the
+-- sidebar; one opened again gets a tab of its own).
 --
 --   session_tabs.Strip { left = fn, right = fn }
 

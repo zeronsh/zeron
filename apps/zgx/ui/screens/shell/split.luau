@@ -48,18 +48,29 @@ M.GAP = (ui.theme.get("zeron.inset.gap") :: number?) or 4
 
 -- (`shares`: how a row or a column divides among its parts, a share each, summing
 -- to 1; none: equally. A divider dragged sets them.)
-export type Node = { kind: string, id: string?, children: { Node }?, shares: { number }?, key: string?, closed: boolean? }
+export type Node = { kind: string, id: string?, children: { Node }?, shares: { number }?, key: string? }
 -- An edge: `p` of the page's length, plus `q` points.
 export type Edge = { p: number, q: number }
 export type Box = { left: Edge, right: Edge, top: Edge, bottom: Edge }
 
 -- Every tab of chats, in the top bar's order, kept across launches: each a tree
 -- of its panes (a chat alone, a leaf), and a chat is in one tab at a time. `key`,
--- a tab's own: without one, its first chat's. `closed`, a split whose tab was
--- closed, kept so opening its chats again brings the split back. (Its key is the
--- one the Inset template kept splits under before this was Zeron's, so the splits
--- of anyone who used it are still theirs, with it or without.)
+-- a tab's own: without one, its first chat's. (Its key is the one the Inset template
+-- kept splits under before this was Zeron's, so the splits of anyone who used it are
+-- still theirs, with it or without.)
 local trees = ui.persist("inset_split_trees", {} :: { Node })
+-- (A tab closed used to be kept, to come back with its chats: those are gone.)
+do
+	local open_tabs: { Node } = {}
+	for _, t in trees:peek() do
+		if not (t :: any).closed then
+			table.insert(open_tabs, t)
+		end
+	end
+	if #open_tabs ~= #trees:peek() then
+		trees:set(open_tabs)
+	end
+end
 -- (The tabs' order before a tab was a thing of its own: `trees` held only splits.)
 local old_order = ui.persist("shell_session_tabs", {} :: { string })
 
@@ -381,7 +392,6 @@ end
 local function keyed(tree: Node, key: string): Node
 	local out = table.clone(tree)
 	out.key = key
-	out.closed = nil
 	return out
 end
 
@@ -390,27 +400,23 @@ M.focused = ui.computed(function(): string?
 	return if c.name == "session" then c.session else nil
 end)
 
--- The tab showing: the one with the chat focused, a closed split's if that's the
--- only one. (Nil until a chat with no tab has one: below.)
+-- The tab showing: the one with the chat focused. (Nil until a chat with no tab has
+-- one: below.)
 M.current = steady(function(): Node?
 	local id = M.focused:get()
 	if not id then
 		return nil
 	end
-	local closed: Node? = nil
 	for _, t in trees:get() do
 		if holds(t, id) then
-			if not t.closed then
-				return t
-			end
-			closed = closed or t
+			return t
 		end
 	end
-	return closed
+	return nil
 end)
 
 -- The tabs with `id` taken out of all but the tab `except`: one left with no
--- chats goes, as does a closed split left with one.
+-- chats goes.
 local function taken_out(list: { Node }, id: string, except: string?): { Node }
 	local out: { Node } = {}
 	for _, t in list do
@@ -419,10 +425,8 @@ local function taken_out(list: { Node }, id: string, except: string?): { Node }
 			table.insert(out, t)
 		else
 			local rest = without(t, id)
-			if rest and (not t.closed or #leaves(rest) >= 2) then
-				local kept = keyed(rest, key)
-				kept.closed = t.closed
-				table.insert(out, kept)
+			if rest then
+				table.insert(out, keyed(rest, key))
 			end
 		end
 	end
@@ -466,13 +470,9 @@ end)
 ui.effect(function()
 	local list = trees:get()
 	local owner: { [string]: string } = {}
-	for _, closed in { false, true } do
-		for _, t in list do
-			if (t.closed == true) == closed then
-				for _, id in leaves(t) do
-					owner[id] = owner[id] or key_of(t)
-				end
-			end
+	for _, t in list do
+		for _, id in leaves(t) do
+			owner[id] = owner[id] or key_of(t)
 		end
 	end
 	local out = list
@@ -509,18 +509,6 @@ ui.effect(function()
 		local more = table.clone(list)
 		table.insert(more, tab)
 		trees:set(more)
-		return
-	end
-	if t.closed then
-		local key = key_of(t)
-		local more: { Node } = {}
-		for _, other in list do
-			if key_of(other) ~= key then
-				table.insert(more, other)
-			end
-		end
-		table.insert(more, keyed(t, key))
-		trees:set(more)
 	end
 end)
 
@@ -528,9 +516,7 @@ end)
 M.tabs = steady(function(): { string }
 	local out: { string } = {}
 	for _, t in trees:get() do
-		if not t.closed then
-			table.insert(out, key_of(t))
-		end
+		table.insert(out, key_of(t))
 	end
 	return out
 end)
@@ -547,17 +533,13 @@ function M.current_key(): string?
 	return if t then key_of(t) else nil
 end
 
--- Those tabs closed: a chat alone's forgotten, a split's kept for its chats
--- opening again.
+-- Those tabs closed, and forgotten: a chat of theirs opened again gets a tab of its
+-- own.
 function M.close_tabs(keys: { string })
 	local list: { Node } = {}
 	for _, t in trees:peek() do
 		if not table.find(keys, key_of(t)) then
 			table.insert(list, t)
-		elseif #leaves(t) >= 2 then
-			local kept = keyed(t, key_of(t))
-			kept.closed = true
-			table.insert(list, kept)
 		end
 	end
 	trees:set(list)

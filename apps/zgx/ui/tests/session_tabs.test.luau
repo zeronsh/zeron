@@ -340,7 +340,7 @@ test("a chat kept in two tabs stays in the first", function()
 	expect(app:error()).to_be_nil()
 end)
 
-test("a closed split's tab comes back as its chats open again", function()
+test("a closed split's tab stays closed: a chat of its opened again gets a tab of its own", function()
 	local app = all_open()
 	app:set_state("inset_split_trees", {
 		{ kind = "row", key = "both", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "b1" } } },
@@ -352,8 +352,13 @@ test("a closed split's tab comes back as its chats open again", function()
 	expect(tabs_shown(app).both).to_be_nil()
 	open(app, "Fix the build")
 	app:frames(30)
-	expect(tabs_shown(app).both).to_be(true)
-	expect(app:wait("#split-pane-b1", { timeout_ms = 2000 })).to_be(true)
+	expect(tabs_shown(app).both).to_be_nil()
+	local kept = app:state("inset_split_trees") :: any
+	expect(#kept).to_be(2)
+	expect(kept[2].kind).to_be("leaf")
+	expect(kept[2].id).to_be("a1")
+	-- Nor is the other chat kept anywhere.
+	expect(app:has("#split-pane-b1")).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
