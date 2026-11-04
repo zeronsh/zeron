@@ -1040,7 +1040,7 @@
       "language": {
         "label": "语言",
         "terms": "语言 区域 翻译 中文 简体 英文 language locale translation chinese english",
-        "system": "跟随 Mac 的首选语言。",
+        "system": "跟随 电脑的首选语言。",
         "chosen": "菜单栏将在下次打开 Zeron 时更改。"
       },
       "title": "通用",
@@ -1094,7 +1094,7 @@
         "model": "使用小型模型快速、低成本地生成标题。"
       },
       "git": "Git",
-      "git_description": "在此 Mac 上。",
+      "git_description": "在此电脑上。",
       "worktrees": {
         "label": "自定工作树位置",
         "terms": "文件夹 目录 路径 检出 分支 folder directory path checkout branches",
@@ -1113,8 +1113,8 @@
       }
     },
     "engine": {
-      "outdated": "更新此 Mac 上的 Zeron 以更改此设置。",
-      "offline": "Zeron 未在此 Mac 上运行。",
+      "outdated": "更新此电脑上的 Zeron 以更改此设置。",
+      "offline": "Zeron 未在此电脑上运行。",
       "couldnt_save": "无法保存"
     },
     "prefs": {
@@ -1138,7 +1138,7 @@
     "appearance": {
       "title": "外观",
       "terms": "主题 外观 颜色 theme look colors",
-      "description": "此 Mac 上 Zeron 的外观。",
+      "description": "此电脑上 Zeron 的外观。",
       "motion": "动态效果",
       "fonts": "字体与布局",
       "new_chat": "新建对话",
@@ -1168,8 +1168,8 @@
       "reduce_motion": {
         "label": "减弱动态效果",
         "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring",
-        "system_on": "Mac 的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
-        "description": "移动立即完成，淡入淡出时间缩短。Mac 的“减弱动态效果”开启时始终启用。"
+        "system_on": "电脑的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
+        "description": "移动立即完成，淡入淡出时间缩短。电脑的“减弱动态效果”开启时始终启用。"
       },
       "glass": {
         "label": "毛玻璃",
@@ -1300,7 +1300,7 @@
         "name": "错误和断开连接提示音"
       },
       "unread": {
-        "title": "无法读取此 Mac 的通知设置",
+        "title": "无法读取此电脑的通知设置",
         "body": "横幅使用 Zeron 上次保存的设置。请稍后重试。"
       }
     },
@@ -1438,7 +1438,7 @@
         "terms": "安装 添加 新建 install add new",
         "description": "安装后会显示在上方，可随时登录。"
       },
-      "this_mac": "此 Mac",
+      "this_mac": "此电脑",
       "couldnt_update": "无法更新 {name}",
       "cant_reach": "Zeron 无法连接到 {device}。",
       "try_later": "请稍后重试。",
@@ -1548,7 +1548,7 @@
     },
     "devices": {
       "title": "设备",
-      "terms": "设备 电脑 远程 此设备 其他设备 重命名 machines computers remote this device other devices rename",
+      "terms": "设备 电脑远程 此设备 其他设备 重命名 machines computers remote this device other devices rename",
       "yours": {
         "label": "你的设备",
         "terms": "在线 上次在线 版本 系统 online last seen version system"
@@ -1570,7 +1570,7 @@
       "rename_name": "重命名 {name}",
       "dialog": {
         "title": "重命名设备",
-        "here": "此 Mac 在其他设备上显示的名称。",
+        "here": "此电脑在其他设备上显示的名称。",
         "other": "此设备在所有设备上显示的名称。",
         "field": "设备名称"
       }
@@ -1649,7 +1649,7 @@
       "version": {
         "label": "版本",
         "terms": "引擎 版本 构建 关于 zeron engine version build about",
-        "description": "此 Mac 上的引擎。"
+        "description": "此电脑上的引擎。"
       },
       "updates": {
         "label": "检查更新",
@@ -1684,10 +1684,10 @@
         "updated_running": "引擎正在运行新版本。",
         "updated_starting": "引擎正在以新版本重新启动。",
         "unmanaged": "从 Zeron App 更新",
-        "unmanaged_line": "此 Mac 的引擎随 Zeron App 安装，由该 App 更新：打开 Zeron 并选择“检查更新”。",
+        "unmanaged_line": "此电脑的引擎随 Zeron App 安装，由该 App 更新：打开 Zeron 并选择“检查更新”。",
         "check_again": "再次检查",
         "couldnt_check": "无法检查更新",
-        "offline_line": "此 Mac 似乎处于离线状态。",
+        "offline_line": "此电脑似乎处于离线状态。",
         "couldnt_update": "无法更新",
         "failed_line": "出错了。请稍后重试。",
         "not_connected": "未连接到引擎",
@@ -1729,7 +1729,7 @@
         "description": "用于问题报告的上述版本和构建信息。",
         "copied": "已拷贝版本信息"
       },
-      "updates_description": "更新会应用到此 Mac 上的引擎，与 Zeron App 的更新一样。此 App 尚未打包，因此不会在此更新。"
+      "updates_description": "更新会应用到此电脑上的引擎，与 Zeron App 的更新一样。此 App 尚未打包，因此不会在此更新。"
     },
     "archived": {
       "title": "已归档",
@@ -1961,7 +1961,7 @@
         "label": "登录身份",
         "terms": "电子邮件 地址 邮件 账户 组织 同步 email address mail account organization sync",
         "not_signed_in": "未登录",
-        "local": "会话保留在此 Mac 上。",
+        "local": "会话保留在此电脑上。",
         "org": "属于 {org}。你的会话会在所有设备间同步。",
         "sync": "你的会话会在所有设备间同步。"
       },
@@ -1980,9 +1980,9 @@
         "label": "退出登录",
         "terms": "退出登录 离开 账户 会话 log out logout leave account session",
         "busy": "正在退出登录…",
-        "description": "此 Mac 将停止同步，直到你重新登录。",
+        "description": "此电脑将停止同步，直到你重新登录。",
         "confirm_title": "退出登录 Zeron？",
-        "confirm_body": "你的会话会保留在账户中。此 Mac 上将重新打开设置流程。"
+        "confirm_body": "你的会话会保留在账户中。此电脑上将重新打开设置流程。"
       },
       "delete": {
         "label": "删除账户",
@@ -2022,7 +2022,7 @@
         "label": "签名密钥",
         "terms": "密钥 签名 插件 模板 安全 撤销 指纹 设备 keys signing plugins templates revoke fingerprint",
         "description": "你的设备使用这些密钥为你制作的插件和模板签名。如果有你不认识的密钥，请撤销它。",
-        "this_mac": "这台 Mac",
+        "this_mac": "这台电脑",
         "another_device": "其他设备",
         "new": "新",
         "added": "添加于 {date}",
@@ -2039,7 +2039,7 @@
     },
     "browser": {
       "title": "浏览器",
-      "description": "你登录的网站会在这台 Mac 上保持登录，每个账户分开保存。",
+      "description": "你登录的网站会在这台电脑上保持登录，每个账户分开保存。",
       "terms": "浏览器 网页 网站 链接 搜索引擎 主页 缩放 历史记录 Cookie 登录 检查器 browser",
       "search_engine": {
         "label": "搜索引擎",
@@ -2070,7 +2070,7 @@
       },
       "history": "历史记录",
       "history_terms": "历史记录 访问过的页面 最近 history",
-      "history_description": "你访问过的页面，按账户保存在这台 Mac 上。",
+      "history_description": "你访问过的页面，按账户保存在这台电脑上。",
       "keep_history": {
         "label": "保留历史记录",
         "description": "方便你再次找到某个页面。关闭后，不再保留新的页面。",
@@ -2244,9 +2244,9 @@
             "too_large": "图片太大。",
             "open": "无法打开该图片，请选择 PNG 或 JPEG。",
             "save": "无法保存项目，请重试。",
-            "save_outdated": "这台 Mac 上的 Zeron 需要更新才能保存项目图标。更新后再保存。",
+            "save_outdated": "这台电脑上的 Zeron 需要更新才能保存项目图标。更新后再保存。",
             "save_gone": "此项目已在另一台设备上被移除。",
-            "save_offline": "这台 Mac 上的 Zeron 没有响应，请稍后再试。"
+            "save_offline": "这台电脑上的 Zeron 没有响应，请稍后再试。"
           }
         }
       },
@@ -2454,7 +2454,7 @@
         "description": "你的对话和智能体会在所有设备间同步。"
       },
       "local": {
-        "label": "对话保留在此 Mac 上",
+        "label": "对话保留在此电脑上",
         "description": "随时登录，将对话同步到其他设备。"
       },
       "open_org": "打开{org}",
@@ -2521,11 +2521,11 @@
     "providers": {
       "title_install": "安装智能体",
       "title": "你的智能体",
-      "looking": "正在此 Mac 上查找编码智能体…",
+      "looking": "正在此电脑上查找编码智能体…",
       "unavailable": "Zeron 运行你已经使用的编码智能体。",
-      "none": "此 Mac 上还没有智能体。请安装一个以继续。",
-      "found": "{n, plural, other {在此 Mac 上找到 # 个智能体。请登录你想使用的智能体。}}",
-      "this_mac": "此 Mac"
+      "none": "此电脑上还没有智能体。请安装一个以继续。",
+      "found": "{n, plural, other {在此电脑上找到 # 个智能体。请登录你想使用的智能体。}}",
+      "this_mac": "此电脑"
     },
     "try_again": "重试"
   },
@@ -3070,14 +3070,14 @@
           "title": "在你的设备之间发送数据"
         },
         "commands": {
-          "title": "以你的身份在此 Mac 上运行 {list}",
+          "title": "以你的身份在此电脑上运行 {list}",
           "title_on": "以你的身份在 {device} 上运行 {list}",
           "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。",
           "detail_anything": "这些程序可以使用你的登录做你能做的任何事。",
           "detail_each": "它们以你的身份运行，使用你的登录。"
         },
         "native": {
-          "title": "在此 Mac 上为你的智能体运行它自己的程序",
+          "title": "在此电脑上为你的智能体运行它自己的程序",
           "title_on": "在 {device} 上为你的智能体运行它自己的程序",
           "detail": "它可以执行你能做的任何操作。"
         },
@@ -3188,7 +3188,7 @@
       "remove_body_device": "它会立即在 {device} 上的 Zeron 各处停止。它的文件夹会移到那台电脑插件文件夹的已移除项目中，以便你想找回。",
       "install_dialog_title_device": "在 {device} 上安装插件",
       "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
-      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台 Mac 的插件。",
+      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台电脑的插件。",
       "setup_title": "完成账户设置",
       "setup_body": "选择工作空间后，你的插件会立即加载。"
     },
@@ -3213,7 +3213,7 @@
       "made_on_your_device": "由你的另一台设备制作",
       "grew": "自你允许以来新增：",
       "allow_there": "请在{device}上允许：它会在那台电脑的 Zeron 中询问。",
-      "mine_confirm": "将{name}签名为你自己的插件？仅当它是你亲自编写的：从现在起，Zeron 会在这台 Mac 上把它当作你的插件。",
+      "mine_confirm": "将{name}签名为你自己的插件？仅当它是你亲自编写的：从现在起，Zeron 会在这台电脑上把它当作你的插件。",
       "mine_cancel": "取消",
       "mine_sign": "签名为我的",
       "details": "详细信息",

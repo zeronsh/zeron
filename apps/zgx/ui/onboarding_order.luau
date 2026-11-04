@@ -157,7 +157,7 @@ test("a returning account opens on its first page left, and Continue goes throug
 	expect(forward("appearance")).to_equal({ "appearance", "card", "invite", "github", "providers", "done" })
 end)
 
-test("a page finished on this Mac counts at the start too", function()
+test("a page finished on this computer counts at the start too", function()
 	state.path:set("signed_in")
 	state.name_done:set(true)
 	state.org_done:set(true)

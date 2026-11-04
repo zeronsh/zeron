@@ -45,6 +45,10 @@ export type Props = {
 	-- they hold anything, an island of glass gathers behind them, as behind
 	-- the controls at its left, so they read on any picture.
 	read actions_island: (() -> boolean)?,
+	-- Whether the page's art reaches under the window's own buttons (v2's, to the
+	-- window's edges), so the island takes them in too. In a card under the bar, it
+	-- doesn't.
+	read caption_over_art: boolean?,
 	-- Where the actions' width is kept (a named state of the caller's, so it
 	-- outlives a reload of the scripts); its own otherwise.
 	read actions_width: State<number>?,
@@ -468,7 +472,7 @@ local TitleBar = ui.component(function(props: Props): Node
 			return if at == "right" then buttons else nil
 		end
 		local on_art = ui.computed(function(): number
-			return if props.actions_island and props.actions_island() and (holds() or caption() ~= nil) then 1 else 0
+			return if props.actions_island and props.actions_island() and (holds() or (props.caption_over_art == true and caption() ~= nil)) then 1 else 0
 		end)
 		local side = ROW_PAD - m.inset
 		local function hung(): any

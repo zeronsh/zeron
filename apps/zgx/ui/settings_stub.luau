@@ -1,6 +1,6 @@
 -- Settings' host calls, answered here as the host would (no engine or edge
 -- in a test host): your profile and card, your organization, its members
--- and invitations, this Mac's engine settings and banners. The shell's
+-- and invitations, this computer's engine settings and banners. The shell's
 -- fixture requires it, so Settings' pages build headless; the tests drive
 -- it (tests/settings_in_place.test.luau).
 --
@@ -28,7 +28,7 @@ local delete_word = ui.state("settings_stub_delete_word", "ok")
 -- What a delete after signing in again answers: "ok", "wait" (until
 -- `settings_stub.signed_in_again`, or cancelled), or a refusal.
 local step_up_word = ui.state("settings_stub_step_up_word", "ok")
--- The account's signing keys: "some" (this Mac's, one new on another
+-- The account's signing keys: "some" (this computer's, one new on another
 -- device, one revoked; listed out of order) or "none".
 local keys_mode = ui.state("settings_stub_keys", "some")
 local signing_keys = {
@@ -414,7 +414,7 @@ apis.invite = function(_org: string, emails: { string }): any
 	end
 	return settled({ sent = sent, failed = failed })
 end
--- This Mac's agents and another device's (account/agents): one each, so
+-- This computer's agents and another device's (account/agents): one each, so
 -- a switch of device shows whose.
 local agents = require("@account/agents")
 local function agents_of(target: string?): any

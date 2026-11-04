@@ -20,7 +20,7 @@ local ReplyImages = require("@app/screens/chat/reply_images")
 local reads = ui.state("fixture_reads", "")
 local delay = ui.state("fixture_delay", 0)
 local width = ui.state("fixture_width", 820)
--- Whether the chat is on this Mac (a picture's file is here: Show in Finder).
+-- Whether the chat is on this computer (a picture's file is here: Show in Finder).
 local here = ui.state("fixture_here", true)
 
 -- A read: `assets/…` lands (at once, or after the delay), `slow/…` never

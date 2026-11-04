@@ -489,7 +489,7 @@ return function(): Node
 				}
 				else nil,
 			boundary.screen(boundary.named("shell.boundary.screen.title_bar"), "@app/screens/shell/title_bar", function(TitleBar): Node
-				return TitleBar { collapsed = collapsed :: any, files = files, art = art }
+				return TitleBar { collapsed = collapsed :: any, files = files, art = art, caption_over_art = true }
 			end, { pass = true }),
 		},
 		-- A session's card, its row rested on (Zeron's hover card): over the

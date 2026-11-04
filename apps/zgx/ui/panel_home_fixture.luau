@@ -1,6 +1,6 @@
 -- The right panel's home (screens/panel/home) for a session, with no
 -- engine: for tests/panel_home.test.luau and captures. The session
--- (chat-1, on this Mac "work-laptop", project comet-native, a branch with
+-- (chat-1, on this computer "work-laptop", project comet-native, a branch with
 -- changes), its side chats and the open chat's subagents are made up here;
 -- the home's host calls (screens/panel/home_api), the terminal's, and
 -- what's asked of sessions (create, fork) and lanes (watch) are stood in

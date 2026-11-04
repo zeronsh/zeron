@@ -306,18 +306,18 @@ test("settings pages list under their groups' headings, a search over them", fun
 	expect(app:has("#settings-nav >> #settings-search")).to_be(true)
 	-- In order: a group's heading over its pages.
 	local personal, profile = top_of(app, "#settings-nav", "Personal"), top_of(app, "#settings-nav", "Profile")
-	local devices, mac = top_of(app, "#settings-nav", "Devices"), top_of(app, "#settings-nav", "This Mac")
+	local devices, mac = top_of(app, "#settings-nav", "Devices"), top_of(app, "#settings-nav", "This computer")
 	expect(personal < profile and profile < devices and devices < mac).to_be(true)
 	-- The field under Back, over the pages.
 	expect(top_of(app, "#settings-nav", "Back to chats") < top_of(app, "#settings-nav", "Search settings")).to_be(true)
 	expect(top_of(app, "#settings-nav", "Search settings") < personal).to_be(true)
-	app:click('#settings-nav >> "This Mac"')
+	app:click('#settings-nav >> "This computer"')
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/settings/devices")
 	-- Something typed: the pages are put away, Back and the field stay.
 	app:command("settings_typed")
 	app:frames(20)
-	expect(app:has('#settings-nav >> "This Mac"')).to_be(false)
+	expect(app:has('#settings-nav >> "This computer"')).to_be(false)
 	expect(app:has('#settings-nav >> "Back to chats"')).to_be(true)
 	expect(app:has("#settings-nav >> #settings-search")).to_be(true)
 end)

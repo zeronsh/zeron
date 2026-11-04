@@ -21,6 +21,7 @@ export type Props = {
 	files: State<boolean>,
 	-- Whether the bar stands over a wallpaper (its island shows, collapsed).
 	art: () -> boolean,
+	caption_over_art: boolean?,
 }
 
 -- Production's "corner card" glyph (icons.rs `corner_card_glyph`): the
@@ -180,6 +181,7 @@ return function(props: Props): Node
 			-- (Over a new chat's wallpaper, what's in it (a plugin's) stands on
 			-- the island's glass, the sidebar open or not.)
 			actions_island = props.art,
+			caption_over_art = props.caption_over_art,
 			actions_width = actions_width,
 		},
 	}
