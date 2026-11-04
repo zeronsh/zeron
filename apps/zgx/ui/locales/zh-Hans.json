@@ -1176,6 +1176,19 @@
         "terms": "玻璃 半透明 不透明 透明 模糊 材质 glass translucent opaque transparency blur vibrancy material",
         "description": "透过窗口显示桌面。关闭时窗口不透明。"
       },
+      "font_default": "默认（{name}）",
+      "font_search": "搜索字体",
+      "font_none": "没有匹配的字体。",
+      "interface_font": {
+        "label": "界面字体",
+        "terms": "字体 字型 菜单 对话 系统 已安装 typeface family font menus conversations geist system installed",
+        "description": "适用于菜单和对话。"
+      },
+      "code_font": {
+        "label": "代码字体",
+        "terms": "等宽 字体 编辑器 终端 差异 工具输出 monospace typeface family font editor terminal diffs tool output geist mono installed",
+        "description": "适用于代码、差异和终端 · 仅限等宽字体。"
+      },
       "text_size": {
         "label": "界面文字大小",
         "terms": "界面 字体 文字 大小 菜单 对话 放大 缩小 interface font typeface text size menus conversations bigger smaller",
