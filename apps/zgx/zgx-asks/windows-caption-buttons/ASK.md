@@ -6,7 +6,7 @@ the minimise, maximise and close buttons itself (`window_chrome.rs`,
 gives Windows 11's snap layouts. An app can't replace them (they're mounted
 over its content, and `Titlebar::Hidden` drops the hit-testing with them),
 so each of these is the app's to live with until zgx changes it. Seen on
-Zeron's pin `99a50ad5`, Windows 11 26200, at 100%.
+Zeron's pin `99a50ad5` (the caption code is the same at `e46ff6fc`), Windows 11 26200, at 100%.
 
 ## 1. The glyphs follow the system's light or dark, not the window's
 

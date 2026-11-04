@@ -37,4 +37,4 @@ it with `ui.prefers.reduced_transparency` and Zeron's own Frosted/Opaque
 setting. Once zgx reports it, the host's watcher and the shared value go,
 and `see_through()` reads `ui.prefers` alone.
 
-**Seen on:** zgx `99a50ad5` (Zeron's pin), Windows 11 26200.
+**Seen on:** zgx `99a50ad5`, unchanged at `e46ff6fc` (Zeron's pin); Windows 11 26200.

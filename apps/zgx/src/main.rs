@@ -948,11 +948,11 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Rol
 /// palette: `{ id, title, menu, key }`, `key` as the scripts wrote it where
 /// the item has its shortcut (`all`'s). Not the host's Keep: that's the
 /// preview toast's, never a script's to run.
-fn palette_commands(bar: &[AppMenu], all: &[zgx_script::Command]) -> Value {
-    fn walk(menu: &str, entries: &[AppMenuEntry], all: &[zgx_script::Command], out: &mut Vec<Value>) {
+fn palette_commands(bar: &[zgx_desktop::AppMenu], all: &[zgx_script::Command]) -> Value {
+    fn walk(menu: &str, entries: &[zgx_desktop::AppMenuEntry], all: &[zgx_script::Command], out: &mut Vec<Value>) {
         for entry in entries {
             match entry {
-                AppMenuEntry::Item { label, action, accelerator, .. } if action.0 != plugins::KEEP_TEMPLATE => {
+                zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } if action.0 != plugins::KEEP_TEMPLATE => {
                     let key = accelerator.as_ref().and_then(|_| all.iter().find(|c| c.id == action.0)).and_then(|c| c.key.clone());
                     let mut fields = vec![("id", Value::from(action.0.as_str())), ("title", Value::from(label.as_str())), ("menu", Value::from(menu))];
                     if let Some(key) = key {
@@ -960,7 +960,7 @@ fn palette_commands(bar: &[AppMenu], all: &[zgx_script::Command]) -> Value {
                     }
                     out.push(Value::record(fields));
                 }
-                AppMenuEntry::Submenu(sub) => walk(&sub.label, &sub.entries, all, out),
+                zgx_desktop::AppMenuEntry::Submenu(sub) => walk(&sub.label, &sub.entries, all, out),
                 _ => {}
             }
         }

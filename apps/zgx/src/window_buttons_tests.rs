@@ -23,7 +23,7 @@ const H: f32 = 800.;
 
 /// The room between the page's controls and the window's buttons at the right:
 /// a group's gap (8), the divider (1), a group's gap.
-const DIVIDED: f32 = 17.
+const DIVIDED: f32 = 17.;
 const MAC_LINE: f32 = 21.;
 
 /// What a window reports: its title bar's free strip and its buttons.
@@ -44,9 +44,10 @@ fn gnome(w: f32) -> Report {
     Report { area: Some(Rect::new(0., 0., w - 104., 40.)), controls: Some(Rect::new(w - 104., 0., 104., 40.)) }
 }
 
-/// macOS: the traffic lights' frames, centred 21, 44 and 67 in, 14 across.
+/// macOS: the traffic lights' frames as zgx's inset title bar reports them,
+/// 12 in and 60 across.
 fn macos(w: f32) -> Report {
-    Report { area: Some(Rect::new(74., 0., w - 74., 40.)), controls: Some(Rect::new(14., 14., 60., 14.)) }
+    Report { area: Some(Rect::new(72., 0., w - 72., 40.)), controls: Some(Rect::new(12., 13., 60., 16.)) }
 }
 
 fn mount(report: Report) -> TestApp {
@@ -131,7 +132,13 @@ fn beside_windows_caption_buttons_zerons_controls_start_at_the_left_on_their_lin
     // The strip still moves the window, under the caption buttons' line,
     // but for the controls.
     for x in [60., 400., 700., caption - 60.] {
-        let b = [TOGGLE, BACK, FORWARD, PANEL].iter().filter(|t| app.find(t).is_some()).map(|t| app.bounds(t)).any(|b| x >= b.x - 2. && x <= b.x + b.width + 2.);
+        let mut boxes = Vec::new();
+        for t in [TOGGLE, BACK, FORWARD, PANEL] {
+            if app.find(t).is_some() {
+                boxes.push(app.bounds(t));
+            }
+        }
+        let b = boxes.iter().any(|b| x >= b.x - 2. && x <= b.x + b.width + 2.);
         if !b {
             assert_eq!(press(&mut app, x, 16.), Some(WindowGesture::Drag), "a press at {x} on the caption buttons' line");
         }

@@ -32,4 +32,4 @@ over an image, on Windows.
 menus' glass solid there (`$zeron.menu.solid`, as Windows draws its own
 non-activated menus). In-window glass keeps its blur.
 
-**Seen on:** zgx `99a50ad5`, Windows 11 26200.
+**Seen on:** zgx `99a50ad5`, unchanged at `e46ff6fc`; Windows 11 26200.
