@@ -332,9 +332,6 @@ return ui.column {
 				left = function(): number
 					return 600
 				end,
-				docked = function(): boolean
-					return true
-				end,
 				grow = 1,
 				h_full = true,
 			}

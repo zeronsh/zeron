@@ -647,9 +647,13 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		return T.Transcript {
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
+		-- (A split's pane reads as the chat page: a little wider than its
+		-- composer, running under its head and past its foot, faded.)
 		measure = function(): number
-			return prefs.conversation_width:get()
+			return prefs.conversation_width:get() + (if split then 24 else 0)
 		end,
+		side = if split then 20 else nil,
+		fade_lead = if split then 12 else nil,
 		messages = messages,
 		draft = reply,
 		offset = offset,

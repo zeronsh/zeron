@@ -52,10 +52,9 @@ M.right_pane_takeover_width = policy.right_pane_takeover_width
 export type Column = policy.Column
 export type Fit = policy.Fit
 
--- Files' least here: the panel's docked tree at its own width (wider than
--- Zeron's Files at its least), so the fit shows Files only where the file
--- beside the tree keeps the panel's least.
-M.TREE = (ui.theme.get("zeron.files.tree") :: number?) or policy.FILES_PANEL_MIN
+-- What a file tab's tree adds to the panel's width: nothing. It stands beside the
+-- file inside the panel, whatever the panel's width.
+M.TREE = 0
 
 -- When each column was last opened (asked for): an order, newest highest.
 local sequence = ui.state("shell_panel_sequence", 1)

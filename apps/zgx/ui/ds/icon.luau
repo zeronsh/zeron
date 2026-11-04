@@ -9,6 +9,7 @@ export type Name =
 	| "check"
 	| "clipboard"
 	| "close"
+	| "close-thin"
 	| "copy"
 	| "more-horizontal"
 	| "pen"

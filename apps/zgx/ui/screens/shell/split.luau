@@ -38,21 +38,32 @@
 local route = require("@app/screens/shell/route")
 local sessions = require("@account/sessions")
 
+local motion = require("@ds/motion")
+
 local M = {}
 
 M.MAX = 6
 -- The window's gap between the chats (`zeron.inset.gap`, ds/tokens).
 M.GAP = (ui.theme.get("zeron.inset.gap") :: number?) or 4
 
-export type Node = { kind: string, id: string?, children: { Node }? }
+-- (`shares`: how a row or a column divides among its parts, a share each, summing
+-- to 1; none: equally. A divider dragged sets them.)
+export type Node = { kind: string, id: string?, children: { Node }?, shares: { number }?, key: string?, closed: boolean? }
 -- An edge: `p` of the page's length, plus `q` points.
 export type Edge = { p: number, q: number }
 export type Box = { left: Edge, right: Edge, top: Edge, bottom: Edge }
 
--- Every split, kept across launches. (Its key is the one the Inset
--- template kept them under before this was Zeron's, so the splits of
--- anyone who used it are still theirs, with it or without.)
+-- Every tab of chats, in the top bar's order, kept across launches: each a tree
+-- of its panes (a chat alone, a leaf), and a chat is in one tab at a time. `key`,
+-- a tab's own: without one, its first chat's. `closed`, a split whose tab was
+-- closed, kept so opening its chats again brings the split back. (Its key is the
+-- one the Inset template kept splits under before this was Zeron's, so the splits
+-- of anyone who used it are still theirs, with it or without.)
 local trees = ui.persist("inset_split_trees", {} :: { Node })
+-- (The tabs' order before a tab was a thing of its own: `trees` held only splits.)
+local old_order = ui.persist("shell_session_tabs", {} :: { string })
+-- The pane focused last, and its tab: a chat opened that has no tab takes its place.
+local last_pane = ui.persist("shell_tab_pane", nil :: { key: string, chat: string }?)
 
 -- A chat being dragged (shared with the sidebar's rows, which set it).
 M.dragging = ui.shared("split.dragging", false)
@@ -108,7 +119,8 @@ local function normalize(node: Node?): Node?
 	elseif #kids == 1 then
 		return kids[1]
 	end
-	return { kind = node.kind, children = kids }
+	local shares = node.shares
+	return { kind = node.kind, children = kids, shares = if shares and #shares == #kids then shares else nil }
 end
 
 -- The tree less the chat `id`, tidied.
@@ -126,7 +138,7 @@ local function without(node: Node?, id: string): Node?
 			table.insert(kids, n)
 		end
 	end
-	return normalize({ kind = node.kind, children = kids })
+	return normalize({ kind = node.kind, children = kids, shares = node.shares })
 end
 
 -- The tree with `id` put at `target`'s side: beside it in its row (above
@@ -155,7 +167,7 @@ local function insert(node: Node, target: string, id: string, side: string): Nod
 		for _, c in n.children or {} do
 			table.insert(kids, walk(c))
 		end
-		return { kind = n.kind, children = kids }
+		return { kind = n.kind, children = kids, shares = n.shares }
 	end
 	return normalize(walk(node))
 end
@@ -198,12 +210,18 @@ local function edge(p: number, q: number): Edge
 end
 M.WHOLE = { left = edge(0, 0), right = edge(1, 0), top = edge(0, 0), bottom = edge(1, 0) } :: Box
 
--- Each chat's box in the page, `gap` points apart: a node's parts share
--- its span less the gaps between them equally. Independent of the page's
--- size (see `Edge`).
-local function frames_of(tree: Node?, gap: number): { [string]: Box }
+-- A divider: the gap between two parts of a row or a column, which dragged moves
+-- their shares. `length`: what its row or column shares out. `path`: its row or
+-- column, by the child at each level; `at`: the part before it.
+export type Divider = Box & { id: string, axis: string, length: Edge, path: { number }, at: number }
+
+-- Each chat's box in the page, `gap` points apart, and the dividers: a node's
+-- parts share its span less the gaps between them. Independent of the page's size
+-- (see `Edge`).
+local function arrange(tree: Node?, gap: number): ({ [string]: Box }, { Divider })
 	local out: { [string]: Box } = {}
-	local function place(n: Node, box: Box)
+	local dividers: { Divider } = {}
+	local function place(n: Node, box: Box, path: { number })
 		if n.kind == "leaf" then
 			out[n.id :: string] = box
 			return
@@ -213,24 +231,44 @@ local function frames_of(tree: Node?, gap: number): { [string]: Box }
 		local row = n.kind == "row"
 		local first = if row then box.left else box.top
 		local last = if row then box.right else box.bottom
-		-- Each part's length: the span less the gaps, shared.
-		local p = (last.p - first.p) / count
-		local q = (last.q - first.q - (count - 1) * gap) / count
+		-- What the parts share: the span less the gaps.
+		local p = last.p - first.p
+		local q = last.q - first.q - (count - 1) * gap
+		local function along(from: Edge, to: Edge): Box
+			return if row
+				then { left = from, right = to, top = box.top, bottom = box.bottom }
+				else { left = box.left, right = box.right, top = from, bottom = to }
+		end
+		local shares = n.shares
+		local so_far = 0
 		for i, c in kids do
-			local k = i - 1
-			local from = edge(first.p + p * k, first.q + (q + gap) * k)
-			local to = edge(from.p + p, from.q + q)
-			place(
-				c,
-				if row
-					then { left = from, right = to, top = box.top, bottom = box.bottom }
-					else { left = box.left, right = box.right, top = from, bottom = to }
-			)
+			local share = if shares and #shares == count then shares[i] else 1 / count
+			local from = edge(first.p + p * so_far, first.q + q * so_far + gap * (i - 1))
+			so_far += share
+			local to = edge(first.p + p * so_far, first.q + q * so_far + gap * (i - 1))
+			local deeper = table.clone(path)
+			table.insert(deeper, i)
+			place(c, along(from, to), deeper)
+			if i < count then
+				local d: any = along(to, edge(to.p, to.q + gap))
+				-- (Its way round in its name: a split turned from a row to a column has
+				-- another divider, not this one going the wrong way.)
+				d.id = `{n.kind}:{table.concat(path, ".")}/{i}`
+				d.axis = if row then "row" else "col"
+				d.length = edge(p, q)
+				d.path = path
+				d.at = i
+				table.insert(dividers, d)
+			end
 		end
 	end
 	if tree then
-		place(tree, M.WHOLE)
+		place(tree, M.WHOLE, {})
 	end
+	return out, dividers
+end
+local function frames_of(tree: Node?, gap: number): { [string]: Box }
+	local out = arrange(tree, gap)
 	return out
 end
 
@@ -297,15 +335,6 @@ end
 -- screens/panel), and its boxes.
 M.tree = { leaf = leaf, leaves = leaves, normalize = normalize, without = without, insert = insert, frames = frames_of, steady = steady }
 
-local function tree_index(id: string, list: { Node }): number?
-	for i, t in list do
-		if table.find(leaves(t), id) then
-			return i
-		end
-	end
-	return nil
-end
-
 -- The chats there are (not deleted): archived ones stay. (Read only for a
 -- split's chats, and only as the sessions list changes.)
 local known = steady(function(): { [string]: boolean }?
@@ -323,23 +352,285 @@ local known = steady(function(): { [string]: boolean }?
 	return out
 end)
 
+local function key_of(t: Node): string
+	return t.key or leaves(t)[1] or ""
+end
+
+local function holds(t: Node, id: string): boolean
+	return table.find(leaves(t), id) ~= nil
+end
+
+local function tab_with_key(list: { Node }, key: string?): Node?
+	for _, t in list do
+		if key_of(t) == key then
+			return t
+		end
+	end
+	return nil
+end
+
+-- A key no other tab has: its first chat's, numbered past any that has it.
+local function fresh_key(first: string, list: { Node }): string
+	local key, n = first, 1
+	while tab_with_key(list, key) do
+		n += 1
+		key = `{first}~{n}`
+	end
+	return key
+end
+
+-- A tree as a tab, keeping that tab's key.
+local function keyed(tree: Node, key: string): Node
+	local out = table.clone(tree)
+	out.key = key
+	out.closed = nil
+	return out
+end
+
 M.focused = ui.computed(function(): string?
 	local c = route.chat:get()
 	return if c.name == "session" then c.session else nil
 end)
 
-M.shown = steady(function(): Node?
+-- The tab showing: the one with the chat focused, a closed split's if that's the
+-- only one. (Nil until a chat with no tab has one: below.)
+M.current = steady(function(): Node?
 	local id = M.focused:get()
 	if not id then
 		return nil
 	end
+	local closed: Node? = nil
+	for _, t in trees:get() do
+		if holds(t, id) then
+			if not t.closed then
+				return t
+			end
+			closed = closed or t
+		end
+	end
+	return closed
+end)
+
+-- The tabs with `id` taken out of all but the tab `except`: one left with no
+-- chats goes, as does a closed split left with one.
+local function taken_out(list: { Node }, id: string, except: string?): { Node }
+	local out: { Node } = {}
+	for _, t in list do
+		local key = key_of(t)
+		if key == except or not holds(t, id) then
+			table.insert(out, t)
+		else
+			local rest = without(t, id)
+			if rest and (not t.closed or #leaves(rest) >= 2) then
+				local kept = keyed(rest, key)
+				kept.closed = t.closed
+				table.insert(out, kept)
+			end
+		end
+	end
+	return out
+end
+
+-- (Tabs kept from when only splits were kept: their order, once.)
+ui.effect(function()
+	local old = old_order:get()
+	if #old == 0 then
+		return
+	end
+	local kept = trees:peek()
+	local list: { Node } = {}
+	local placed: { [string]: boolean } = {}
+	for _, id in old do
+		local inside: Node? = nil
+		for _, t in kept do
+			if holds(t, id) then
+				inside = t
+				break
+			end
+		end
+		if not inside then
+			table.insert(list, leaf(id))
+		elseif not placed[key_of(inside)] then
+			placed[key_of(inside)] = true
+			table.insert(list, inside)
+		end
+	end
+	for _, t in kept do
+		if not placed[key_of(t)] then
+			table.insert(list, t)
+		end
+	end
+	trees:set(list)
+	old_order:set({})
+end)
+-- A chat in more than one tab stays in the first that's open. (A chat may have
+-- been kept in several.)
+ui.effect(function()
 	local list = trees:get()
-	local i = tree_index(id, list)
-	if not i then
+	local owner: { [string]: string } = {}
+	for _, closed in { false, true } do
+		for _, t in list do
+			if (t.closed == true) == closed then
+				for _, id in leaves(t) do
+					owner[id] = owner[id] or key_of(t)
+				end
+			end
+		end
+	end
+	local out = list
+	local changed = false
+	for id, key in owner do
+		local count = 0
+		for _, t in out do
+			if holds(t, id) then
+				count += 1
+			end
+		end
+		if count > 1 then
+			out = taken_out(out, id, key)
+			changed = true
+		end
+	end
+	if changed then
+		trees:set(out)
+	end
+end)
+-- The tree with the chat `from` swapped for `to`.
+local function swapped(node: Node, from: string, to: string): Node
+	if node.kind == "leaf" then
+		return if node.id == from then leaf(to) else node
+	end
+	local kids: { Node } = {}
+	for _, c in node.children or {} do
+		table.insert(kids, swapped(c, from, to))
+	end
+	return { kind = node.kind, children = kids, shares = node.shares }
+end
+
+-- A chat focused with no tab takes the place of the pane focused last, or, with
+-- none to replace (from a new chat's page), gets a tab of its own. (New tabs come of dragging to the top
+-- bar: `new_tab`.) As the focus moves, not as the tabs change: a tab just closed,
+-- the focus on its way to another, doesn't come back.
+ui.effect(function()
+	local id = M.focused:get()
+	if not id then
+		-- (On a new chat: what it becomes is a tab of its own, replacing nothing.)
+		if last_pane:peek() ~= nil then
+			last_pane:set(nil)
+		end
+		return
+	end
+	local list = trees:peek()
+	local t = M.current:peek()
+	if not t then
+		local was = last_pane:peek()
+		local replaced = was and tab_with_key(list, was.key)
+		if was and replaced and not replaced.closed and holds(replaced, was.chat) then
+			local more: { Node } = {}
+			for _, other in list do
+				if key_of(other) == was.key then
+					table.insert(more, keyed(swapped(other, was.chat, id), was.key))
+				else
+					table.insert(more, other)
+				end
+			end
+			trees:set(more)
+			last_pane:set({ key = was.key, chat = id })
+			return
+		end
+		local tab = leaf(id)
+		tab.key = fresh_key(id, list)
+		local more = table.clone(list)
+		table.insert(more, tab)
+		trees:set(more)
+		last_pane:set({ key = tab.key :: string, chat = id })
+		return
+	end
+	local here = key_of(t)
+	local was = last_pane:peek()
+	if not was or was.key ~= here or was.chat ~= id then
+		last_pane:set({ key = here, chat = id })
+	end
+	if t.closed then
+		local key = key_of(t)
+		local more: { Node } = {}
+		for _, other in list do
+			if key_of(other) ~= key then
+				table.insert(more, other)
+			end
+		end
+		table.insert(more, keyed(t, key))
+		trees:set(more)
+	end
+end)
+
+-- The tabs open, in their order, by key.
+M.tabs = steady(function(): { string }
+	local out: { string } = {}
+	for _, t in trees:get() do
+		if not t.closed then
+			table.insert(out, key_of(t))
+		end
+	end
+	return out
+end)
+
+-- A tab's chats (none: no such tab).
+function M.panes(key: string): { string }
+	local t = tab_with_key(trees:get(), key)
+	return if t then leaves(t) else {}
+end
+
+-- The key of the tab showing.
+function M.current_key(): string?
+	local t = M.current:get()
+	return if t then key_of(t) else nil
+end
+
+-- Those tabs closed: a chat alone's forgotten, a split's kept for its chats
+-- opening again.
+function M.close_tabs(keys: { string })
+	local list: { Node } = {}
+	for _, t in trees:peek() do
+		if not table.find(keys, key_of(t)) then
+			table.insert(list, t)
+		elseif #leaves(t) >= 2 then
+			local kept = keyed(t, key_of(t))
+			kept.closed = true
+			table.insert(list, kept)
+		end
+	end
+	trees:set(list)
+end
+
+-- A tab moved to where another stands.
+function M.move_tab(key: string, onto: string)
+	local list = table.clone(trees:peek())
+	local from, to
+	for i, t in list do
+		local k = key_of(t)
+		if k == key then
+			from = i
+		elseif k == onto then
+			to = i
+		end
+	end
+	if not from or not to then
+		return
+	end
+	local moved = table.remove(list, from)
+	table.insert(list, to, moved :: Node)
+	trees:set(list)
+end
+
+M.shown = steady(function(): Node?
+	local id = M.focused:get()
+	local current = M.current:get()
+	if not id or not current then
 		return nil
 	end
 	-- (Its chats deleted since are left out.)
-	local t: Node? = list[i]
+	local t: Node? = current
 	local there = known:get()
 	if there then
 		for _, member in leaves(t) do
@@ -358,6 +649,126 @@ end)
 M.frames = ui.computed(function(): { [string]: Box }
 	return frames_of(M.shown:get(), M.GAP)
 end)
+-- The dividers of the split, as it is.
+M.dividers = ui.computed(function(): { Divider }
+	local _, list = arrange(M.shown:get(), M.GAP)
+	return list
+end)
+
+-- The tree with its node at `path` changed by `change`.
+local function at_path(node: Node, path: { number }, depth: number, change: (n: Node) -> Node): Node
+	if depth > #path then
+		return change(node)
+	end
+	local kids = table.clone(node.children or {})
+	kids[path[depth]] = at_path(kids[path[depth]], path, depth + 1, change)
+	return { kind = node.kind, children = kids, shares = node.shares }
+end
+
+-- A divider dragged: the part before it to `share` of what the row or column
+-- shares out, the part after it taking up the difference, each at least `least`.
+function M.resize(path: { number }, at: number, start: { number }, moved: number, least: number)
+	local current = M.current:peek()
+	if not current then
+		return
+	end
+	local key = key_of(current)
+	local tree = at_path(current, path, 1, function(n: Node): Node
+		local shares = table.clone(start)
+		local both = shares[at] + shares[at + 1]
+		local first = math.clamp(shares[at] + moved, math.min(least, both / 2), math.max(both - least, both / 2))
+		shares[at], shares[at + 1] = first, both - first
+		return { kind = n.kind, children = n.children, shares = shares }
+	end)
+	local list: { Node } = {}
+	for _, t in trees:peek() do
+		table.insert(list, if key_of(t) == key then keyed(tree, key) else t)
+	end
+	trees:set(list)
+end
+-- A divider's row or column's shares now.
+function M.shares_at(path: { number }): { number }
+	local current = M.current:peek()
+	local n = current
+	for _, i in path do
+		n = if n and n.children then n.children[i] else nil
+	end
+	local count = if n and n.children then #n.children else 0
+	if n and n.shares and #n.shares == count then
+		return table.clone(n.shares)
+	end
+	local out: { number } = {}
+	for _ = 1, count do
+		table.insert(out, 1 / count)
+	end
+	return out
+end
+
+-- A change of structure (a pane come, gone or moved) eases each pane to its new
+-- place; a divider dragged moves them at once, and the same
+-- tab's panes only: another tab lands at once.
+local function shape_of(t: Node?): string
+	if not t then
+		return ""
+	end
+	if t.kind == "leaf" then
+		return t.id or ""
+	end
+	local parts: { string } = {}
+	for _, c in t.children or {} do
+		table.insert(parts, shape_of(c))
+	end
+	return `{t.kind}({table.concat(parts, ",")})`
+end
+M.shape = ui.computed(function(): string
+	local current = M.current:get()
+	return `{if current then key_of(current) else ""}#{shape_of(M.shown:get())}`
+end)
+local area_element: any = nil
+function M.set_area(element: any)
+	area_element = element
+end
+-- The page's room now, in points (read when needed, not followed).
+function M.area(): { w: number, h: number }
+	local el = area_element
+	return { w = if el then el.width or 0 else 0, h = if el then el.height or 0 else 0 }
+end
+local EASED = { "left", "top", "width", "height", "marginLeft", "marginTop" }
+function M.follow(element: () -> any, box: () -> Box?)
+	local seen: string? = nil
+	ui.effect(function()
+		local shape = M.shape:get()
+		local was = seen
+		seen = shape
+		if was == nil or was == shape or string.match(was, "^[^#]*") ~= string.match(shape, "^[^#]*") then
+			return
+		end
+		local el, b = element(), box()
+		if not el or not b or not area_element or motion.reduced_now() then
+			return
+		end
+		local fw, fh = el.width or 0, el.height or 0
+		-- (Not laid out yet: it arrives with this change, in its place.)
+		if fw <= 0 and fh <= 0 then
+			return
+		end
+		local ax, ay, aw, ah = area_element.x or 0, area_element.y or 0, area_element.width or 0, area_element.height or 0
+		local x, y = b.left.p * aw + b.left.q, b.top.p * ah + b.top.q
+		anime.animate(el, {
+			left = { (el.x or 0) - ax, x },
+			top = { (el.y or 0) - ay, y },
+			width = { fw, b.right.p * aw + b.right.q - x },
+			height = { fh, b.bottom.p * ah + b.bottom.q - y },
+			marginLeft = 0,
+			marginTop = 0,
+			duration = 280,
+			ease = "outQuint",
+			onComplete = function()
+				anime.utils.cleanInlineStyles(el, EASED)
+			end,
+		})
+	end)
+end
 
 M.across = ui.computed(function(): number
 	return across_of(M.shown:get())
@@ -399,22 +810,72 @@ function M.drop(id: string, target: string, side: string, focus: boolean)
 	if not tree then
 		return
 	end
-	-- The split as it now is, in place of the one it was; the chat taken
-	-- out of any other it was in.
+	-- The tab as it now is, in place of the one it was; the chat taken out of the
+	-- tab it was in, which goes if that was its last.
+	local current = M.current:peek()
+	local key = if current then key_of(current) else focused
 	local list: { Node } = {}
-	for _, t in trees:peek() do
-		if not table.find(leaves(t), focused) then
-			local rest = without(t, id)
-			if rest and #leaves(rest) >= 2 then
-				table.insert(list, rest)
-			end
+	local replaced = false
+	for _, t in taken_out(trees:peek(), id, key) do
+		if key_of(t) == key then
+			table.insert(list, keyed(tree, key))
+			replaced = true
+		else
+			table.insert(list, t)
 		end
 	end
-	table.insert(list, tree)
+	if not replaced then
+		table.insert(list, keyed(tree, key))
+	end
 	trees:set(list)
 	if focus then
 		route.open_session(id)
 	end
+end
+
+-- Whether a chat dragged over a tab can join it: not one already in it, and with
+-- room there.
+function M.can_join(id: string, key: string): boolean
+	local t = tab_with_key(trees:peek(), key)
+	return t ~= nil and not holds(t, id) and #leaves(t) < M.MAX
+end
+
+-- A chat dragged to the top bar: a tab of its own, before the tab `before` (none:
+-- at the end), and out of the tab it was in, which goes if that was its last.
+function M.new_tab(id: string, before: string?)
+	local list = taken_out(trees:peek(), id, nil)
+	local tab = leaf(id)
+	tab.key = fresh_key(id, list)
+	local at = #list + 1
+	for i, t in list do
+		if key_of(t) == before then
+			at = i
+		end
+	end
+	table.insert(list, at, tab)
+	trees:set(list)
+	route.open_session(id)
+end
+
+-- A chat dragged onto a tab: at the end of it, and out of the tab it was in, which
+-- goes if that was its last. That tab shows, the chat focused.
+function M.join_tab(id: string, key: string)
+	if not M.can_join(id, key) then
+		return
+	end
+	local list = taken_out(trees:peek(), id, key)
+	local out: { Node } = {}
+	for _, t in list do
+		if key_of(t) == key then
+			local panes = leaves(t)
+			local tree = insert(t, panes[#panes], id, "right")
+			table.insert(out, keyed(tree or t, key))
+		else
+			table.insert(out, t)
+		end
+	end
+	trees:set(out)
+	route.open_session(id)
 end
 
 function M.close(id: string)
@@ -428,11 +889,16 @@ function M.close(id: string)
 		return
 	end
 	local focused = M.focused:peek()
+	-- This tab less the pane. (Its chat goes on, in the sidebar.)
+	local current = M.current:peek()
+	local key = if current then key_of(current) else ""
+	local rest = without(shown, id)
 	local list: { Node } = {}
 	for _, t in trees:peek() do
-		local rest = if table.find(leaves(t), id) then without(t, id) else t
-		if rest and #leaves(rest) >= 2 then
-			table.insert(list, rest)
+		if key_of(t) ~= key then
+			table.insert(list, t)
+		elseif rest then
+			table.insert(list, keyed(rest, key))
 		end
 	end
 	trees:set(list)
