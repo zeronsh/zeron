@@ -101,10 +101,29 @@ fff on such a folder (fff-search 0.11, reported on Windows with a
   re-reads every file under it while holding the index's write lock, so
   name searches wait behind it.
 
-The names-only index reads directory listings only and has no watcher (stale
-after 60 s, rewalked in the background on next use). Telling a large folder
+The names-only index reads directory listings only. Telling a large folder
 apart costs one walk that stops at the limit, once per index creation.
 `MAX_LIVE` now counts home and names-only indexes too.
+
+On Windows and macOS a large plain folder's index follows changes through
+one recursive watch on the engine's `FsWatchHub` (one ReadDirectoryChangesW
+handle or FSEvents stream for the whole tree). Changed paths wait 200 ms and
+are then applied in one pass:
+
+- Each path is checked against the walk's own rules with `ignore`'s
+  `IncrementalIgnore`, which reads the nested projects' `.gitignore` files.
+  Paths in ignored, hidden or dependency folders cost no disk access.
+- A file is added, updated or removed with one stat.
+- A folder the index already lists is left alone. Windows reports a folder
+  as changed for every write inside it, and fff walks it again for that.
+- A new folder is listed once, with the same rules.
+- A changed `.gitignore` or `.ignore`, or a sign of lost events from the
+  watcher, starts a new walk in the background. Paths reported during a
+  walk are applied to its result.
+
+Linux keeps the 60 s walk: inotify needs one watch per folder, and on trees
+this size that kept a core busy (see `diff_sync::watch_targets`). Home keeps
+it on every platform.
 
 Name search uses fff's fuzzy matcher (frizbee, smart case). A path ranks by
 the better of its path score and its file name score; an empty query lists

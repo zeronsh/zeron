@@ -11,11 +11,12 @@
 //! skips hidden folders, dependency folders and gitignored paths (home also
 //! skips its cloud and machine folders). It holds no file contents: content
 //! search reads the listed files when someone searches, and only then
-//! decides which are binary.
+//! decides which are binary. A watcher can keep the list current through
+//! [`NamesIndex::update`] (see `workspace_search`).
 
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, RwLock};
 use std::time::{Instant, SystemTime};
 
 use crate::workspace_search::{
@@ -33,6 +34,10 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 const MAX_PREVIEW_BYTES: usize = 512;
 /// Name lists longer than this are fuzzy matched on several threads.
 const PARALLEL_MATCH_FROM: usize = 20_000;
+/// Watcher paths queued at most before a new walk replaces them. Most are
+/// in ignored folders (an `npm install` reports thousands), and those cost
+/// [`NamesIndex::update`] no disk access.
+pub const MAX_UPDATE_PATHS: usize = 65_536;
 
 /// Folders directly under home that a cloud client syncs (matched without
 /// case; OneDrive's business folders read "OneDrive - Contoso").
@@ -58,11 +63,24 @@ const MACHINE_ROOTS: &[&str] = &["library", "appdata", "applications"];
 const SKIPPED_DIRS: &[&str] = &["node_modules", "__pycache__", "venv", "site-packages"];
 
 pub struct NamesIndex {
-    /// Sorted by path.
-    entries: Vec<NamePath>,
+    /// Sorted by path. Written only by [`Self::update`].
+    entries: RwLock<Vec<NamePath>>,
     pub built: Instant,
+    /// The walk's ignore rules, for the paths [`Self::update`] gets. They
+    /// read each folder's ignore files once, as of their first use.
+    rules: Mutex<Option<ignore::IncrementalIgnore>>,
+    home: bool,
 }
 
+/// What [`NamesIndex::update`] needs next.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Update {
+    Done,
+    /// An ignore file changed: walk again.
+    Rewalk,
+}
+
+#[derive(Clone)]
 struct NamePath {
     /// Root-relative, `/`-separated.
     path: String,
@@ -102,18 +120,9 @@ impl NamesIndex {
                 let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
                 // Free on Windows (the listing carries it), one stat elsewhere.
                 let metadata = if is_dir { None } else { entry.metadata().ok() };
-                let modified = metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.modified().ok())
-                    .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map_or(0, |since| since.as_secs());
-                batch.items.push(NamePath {
-                    path: relative.to_string_lossy().replace('\\', "/"),
-                    is_dir,
-                    modified,
-                    size: metadata.as_ref().map_or(0, std::fs::Metadata::len),
-                    cloud: metadata.as_ref().is_some_and(is_cloud_placeholder),
-                });
+                batch
+                    .items
+                    .push(NamePath::new(relative, is_dir, metadata.as_ref()));
                 if batch.items.len() >= 512 && batch.flush() >= MAX_ENTRIES {
                     return ignore::WalkState::Quit;
                 }
@@ -126,9 +135,151 @@ impl NamesIndex {
         entries.truncate(MAX_ENTRIES);
         entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         Self {
-            entries,
+            entries: RwLock::new(entries),
             built: Instant::now(),
+            rules: Mutex::new(walk_builder(root, home).build_matchers().pop()),
+            home,
         }
+    }
+
+    /// Bring the `changed` paths (absolute, under `root`) up to date from
+    /// disk, as a watcher reports them. A new folder is walked with the
+    /// walk's rules; a folder already listed is left alone, since Windows
+    /// reports a folder as changed for every write inside it.
+    pub fn update(&self, root: &Path, changed: &[PathBuf]) -> Update {
+        let mut rules = lock(&self.rules);
+        let Some(rules) = rules.as_mut() else {
+            return Update::Rewalk;
+        };
+        for path in changed {
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            if relative.as_os_str().is_empty() {
+                continue;
+            }
+            // Under an ignored folder: nothing to read from disk.
+            if self.skips(relative)
+                || relative.parent().is_some_and(|parent| {
+                    !parent.as_os_str().is_empty() && rules.matched(parent, true).is_ignore()
+                })
+            {
+                continue;
+            }
+            if relative
+                .file_name()
+                .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+            {
+                return Update::Rewalk;
+            }
+            let key = slash_path(relative);
+            let Ok(metadata) = std::fs::symlink_metadata(path) else {
+                self.remove(&key);
+                continue;
+            };
+            let is_dir = metadata.is_dir();
+            if is_dir && self.contains_dir(&key) {
+                continue;
+            }
+            if rules.matched(relative, is_dir).is_ignore() {
+                continue;
+            }
+            if !is_dir {
+                self.insert(NamePath::new(relative, false, Some(&metadata)));
+                continue;
+            }
+            let mut found = vec![NamePath::new(relative, true, None)];
+            self.list_new_folder(root, path, rules, &mut found);
+            for entry in found {
+                self.insert(entry);
+            }
+        }
+        Update::Done
+    }
+
+    /// The paths under the new folder `dir` that the walk would list.
+    fn list_new_folder(
+        &self,
+        root: &Path,
+        dir: &Path,
+        rules: &mut ignore::IncrementalIgnore,
+        found: &mut Vec<NamePath>,
+    ) {
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(listing) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in listing.flatten() {
+                let path = entry.path();
+                let Ok(relative) = path.strip_prefix(root) else {
+                    continue;
+                };
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                let is_dir = kind.is_dir();
+                if self.skips(relative) || rules.matched(relative, is_dir).is_ignore() {
+                    continue;
+                }
+                let metadata = if is_dir { None } else { entry.metadata().ok() };
+                found.push(NamePath::new(relative, is_dir, metadata.as_ref()));
+                if is_dir {
+                    pending.push(path);
+                }
+            }
+        }
+    }
+
+    /// Paths the walk never lists whatever the ignore files say.
+    fn skips(&self, relative: &Path) -> bool {
+        relative.components().enumerate().any(|(depth, part)| {
+            let name = part.as_os_str().to_string_lossy().to_lowercase();
+            name == ".git"
+                || SKIPPED_DIRS.contains(&name.as_str())
+                || (self.home && depth == 0 && home_root_skipped(&name))
+        })
+    }
+
+    fn contains_dir(&self, key: &str) -> bool {
+        let entries = read(&self.entries);
+        entries
+            .binary_search_by(|entry| entry.path.as_str().cmp(key))
+            .is_ok_and(|at| entries[at].is_dir)
+    }
+
+    /// Add or refresh one path, and the folders above it.
+    fn insert(&self, entry: NamePath) {
+        let mut entries = write(&self.entries);
+        let mut parent = entry.path.rsplit_once('/').map(|(parent, _)| parent);
+        while let Some(dir) = parent {
+            if let Err(at) = entries.binary_search_by(|entry| entry.path.as_str().cmp(dir)) {
+                entries.insert(at, NamePath::new(Path::new(dir), true, None));
+            }
+            parent = dir.rsplit_once('/').map(|(parent, _)| parent);
+        }
+        match entries.binary_search_by(|found| found.path.cmp(&entry.path)) {
+            Ok(at) => entries[at] = entry,
+            Err(at) if entries.len() < MAX_ENTRIES => entries.insert(at, entry),
+            Err(_) => {}
+        }
+    }
+
+    /// Drop a path and, if it was a folder, everything under it.
+    fn remove(&self, key: &str) {
+        let mut entries = write(&self.entries);
+        if let Ok(at) = entries.binary_search_by(|entry| entry.path.as_str().cmp(key)) {
+            entries.remove(at);
+        }
+        let under = format!("{key}/");
+        // Paths sharing a prefix sort together.
+        let start = entries.partition_point(|entry| entry.path < under);
+        let end = start
+            + entries[start..]
+                .iter()
+                .take_while(|entry| entry.path.starts_with(&under))
+                .count();
+        entries.drain(start..end);
     }
 
     /// Fuzzy match with fff's matcher (frizbee, smart case): the query's
@@ -145,12 +296,12 @@ impl NamesIndex {
             NameKinds::Files => !is_dir,
             NameKinds::Directories => is_dir,
         };
+        let entries = read(&self.entries);
         if query.is_empty() {
             if kinds == NameKinds::Directories {
                 return Vec::new();
             }
-            let mut files: Vec<&NamePath> =
-                self.entries.iter().filter(|entry| !entry.is_dir).collect();
+            let mut files: Vec<&NamePath> = entries.iter().filter(|entry| !entry.is_dir).collect();
             files.sort_by(|a, b| {
                 b.modified
                     .cmp(&a.modified)
@@ -166,8 +317,7 @@ impl NamesIndex {
                 })
                 .collect();
         }
-        let candidates: Vec<&NamePath> = self
-            .entries
+        let candidates: Vec<&NamePath> = entries
             .iter()
             .filter(|entry| wanted(entry.is_dir))
             .collect();
@@ -234,8 +384,8 @@ impl NamesIndex {
             return ContentSearch::default();
         };
         // Opening a cloud-only file downloads it.
-        let mut files: Vec<&NamePath> = self
-            .entries
+        // A copy, so watcher updates don't wait for the search.
+        let mut files: Vec<NamePath> = read(&self.entries)
             .iter()
             .filter(|entry| {
                 !entry.is_dir
@@ -244,6 +394,7 @@ impl NamesIndex {
                     && entry.size <= MAX_GREP_FILE_SIZE
                     && !fff_search::is_known_binary_extension(Path::new(&entry.path))
             })
+            .cloned()
             .collect();
         files.sort_by(|a, b| {
             b.modified
@@ -308,7 +459,7 @@ impl NamesIndex {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        read(&self.entries).len()
     }
 }
 
@@ -424,9 +575,30 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// A cloud or machine folder directly under home (`name` lowercased).
+fn home_root_skipped(name: &str) -> bool {
+    MACHINE_ROOTS.contains(&name)
+        || CLOUD_ROOT_PREFIXES.iter().any(|prefix| {
+            name == *prefix
+                || name
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with([' ', '-', '(']))
+        })
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
@@ -452,10 +624,15 @@ pub fn holds_more_files_than(root: &Path, limit: usize) -> bool {
 }
 
 fn walker(root: &Path, home: bool) -> ignore::WalkParallel {
+    walk_builder(root, home).build_parallel()
+}
+
+fn walk_builder(root: &Path, home: bool) -> ignore::WalkBuilder {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(4);
-    ignore::WalkBuilder::new(root)
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
         .hidden(true)
         .follow_links(false)
         .git_ignore(true)
@@ -464,8 +641,29 @@ fn walker(root: &Path, home: bool) -> ignore::WalkParallel {
         .ignore(true)
         .parents(false)
         .threads(threads)
-        .filter_entry(move |entry| entry.depth() == 0 || !skipped(entry, home))
-        .build_parallel()
+        .filter_entry(move |entry| entry.depth() == 0 || !skipped(entry, home));
+    builder
+}
+
+impl NamePath {
+    fn new(relative: &Path, is_dir: bool, metadata: Option<&std::fs::Metadata>) -> Self {
+        let modified = metadata
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs());
+        Self {
+            path: slash_path(relative),
+            is_dir,
+            modified,
+            size: metadata.map_or(0, std::fs::Metadata::len),
+            cloud: metadata.is_some_and(is_cloud_placeholder),
+        }
+    }
+}
+
+/// Root-relative, `/`-separated.
+fn slash_path(relative: &Path) -> String {
+    relative.to_string_lossy().replace('\\', "/")
 }
 
 struct Batch<'a> {
@@ -508,16 +706,7 @@ fn skipped(entry: &ignore::DirEntry, home: bool) -> bool {
     if name == ".git" || SKIPPED_DIRS.contains(&name.as_str()) {
         return true;
     }
-    if home
-        && entry.depth() == 1
-        && (MACHINE_ROOTS.contains(&name.as_str())
-            || CLOUD_ROOT_PREFIXES.iter().any(|prefix| {
-                name == *prefix
-                    || name
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| rest.starts_with([' ', '-', '(']))
-            }))
-    {
+    if home && entry.depth() == 1 && home_root_skipped(&name) {
         return true;
     }
     entry
@@ -672,6 +861,55 @@ mod tests {
         assert_eq!(
             paths(&index, "srcmainrs", NameKinds::Files)[0],
             "app/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn update_applies_changes_with_the_walks_rules() {
+        let (_dir, root) = folder(&["p/.git/", "p/src/a.rs", "p/src/keep.rs"]);
+        std::fs::write(root.join("p/.gitignore"), "dist/\n").unwrap();
+        let index = NamesIndex::build(&root, false, &AtomicBool::new(false));
+        for path in [
+            "p/src/b.rs",
+            "p/dist/out.js",
+            "p/lib/deep/c.rs",
+            "p/lib/node_modules/pkg/d.rs",
+            "p/lib/.cache/e.rs",
+        ] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        }
+        std::fs::remove_file(root.join("p/src/a.rs")).unwrap();
+        let changed: Vec<PathBuf> = [
+            "p/src",
+            "p/src/b.rs",
+            "p/dist",
+            "p/dist/out.js",
+            "p/lib",
+            "p/src/a.rs",
+        ]
+        .iter()
+        .map(|path| root.join(path))
+        .collect();
+        assert_eq!(index.update(&root, &changed), Update::Done);
+        let mut found = paths(&index, "", NameKinds::Files);
+        found.sort_unstable();
+        // Gitignored, dependency and hidden paths stay out, as in a walk.
+        assert_eq!(found, ["p/lib/deep/c.rs", "p/src/b.rs", "p/src/keep.rs"]);
+        assert_eq!(
+            paths(&index, "deep", NameKinds::Directories),
+            ["p/lib/deep"]
+        );
+
+        std::fs::remove_dir_all(root.join("p/lib")).unwrap();
+        assert_eq!(index.update(&root, &[root.join("p/lib")]), Update::Done);
+        assert!(paths(&index, "deep", NameKinds::FilesAndDirectories).is_empty());
+
+        std::fs::write(root.join("p/.gitignore"), "dist/\nsrc/\n").unwrap();
+        assert_eq!(
+            index.update(&root, &[root.join("p/.gitignore")]),
+            Update::Rewalk
         );
     }
 

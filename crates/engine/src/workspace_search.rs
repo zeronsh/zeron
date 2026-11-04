@@ -27,7 +27,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,8 @@ use fff_search::{
     SharedFilePicker, SharedFrecency,
 };
 
-use crate::names_index::NamesIndex;
+use crate::fs_watch::{FsWatch, FsWatchHub};
+use crate::names_index::{MAX_UPDATE_PATHS, NamesIndex, Update};
 
 /// An index nobody searched or warmed for this long is dropped.
 pub const IDLE_EVICT: Duration = Duration::from_secs(15 * 60);
@@ -59,9 +60,18 @@ pub const CONTENT_TIME_BUDGET: Duration = Duration::from_secs(2);
 /// A plain folder holding more files than this gets a names-only index.
 pub const MAX_LIVE_FILES: usize = 50_000;
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
-/// A names-only index older than this is rebuilt in the background on next
-/// use (it has no watcher); searches keep answering from the old one meanwhile.
+/// A names-only index with no live watch is rebuilt in the background on
+/// next use once it is this old; searches keep answering from the old one
+/// meanwhile.
 const NAMES_REFRESH: Duration = Duration::from_secs(60);
+/// Whether a large plain folder's names index follows changes live. One OS
+/// watch covers a whole tree on Windows (ReadDirectoryChangesW) and macOS
+/// (FSEvents). inotify needs one per folder, which on trees this size kept a
+/// core busy (see `diff_sync::watch_targets`), so Linux keeps the
+/// [`NAMES_REFRESH`] walk. Home keeps it everywhere.
+const NAMES_WATCH: bool = cfg!(any(windows, target_os = "macos"));
+/// Watcher paths wait this long, so a burst of writes is one update pass.
+const NAMES_UPDATE_DELAY: Duration = Duration::from_millis(200);
 /// Ceiling for logging a finished scan; a scan still running then is not logged.
 const SCAN_LOG_WAIT: Duration = Duration::from_secs(10 * 60);
 
@@ -165,7 +175,8 @@ struct Entry {
 enum Index {
     /// fff: names and contents, kept current by its watcher.
     Live(SharedFilePicker),
-    /// Names only, rewalked when stale: home, and large plain folders.
+    /// Names only: home, and large plain folders. Walked again when stale,
+    /// or kept current by a watch where [`NAMES_WATCH`] allows.
     Names(Arc<NamesEntry>),
 }
 
@@ -174,6 +185,16 @@ struct NamesEntry {
     home: bool,
     state: Mutex<NamesState>,
     built: Condvar,
+    /// Set when the folder is watched ([`NAMES_WATCH`]).
+    watch: Mutex<Option<NamesWatch>>,
+    /// Walks started, for the log.
+    walks: AtomicUsize,
+}
+
+struct NamesWatch {
+    watch: FsWatch,
+    /// The root as the watcher spells event paths (canonical).
+    root: PathBuf,
 }
 
 #[derive(Default)]
@@ -181,6 +202,14 @@ struct NamesState {
     index: Option<Arc<NamesIndex>>,
     /// A walk is running; `cancel` stops it when the index is dropped.
     building: Option<Arc<AtomicBool>>,
+    /// Paths the watcher reported since the last update pass. A walk's end
+    /// applies them to the new index, since the walk may have listed their
+    /// folder before they changed.
+    changed: Vec<PathBuf>,
+    /// The watcher may have lost events, or an ignore file changed.
+    rewalk: bool,
+    /// An update pass is pending.
+    updating: bool,
 }
 
 impl Default for WorkspaceSearch {
@@ -524,6 +553,8 @@ impl WorkspaceSearch {
                 home: self.is_home(root),
                 state: Mutex::default(),
                 built: Condvar::new(),
+                watch: Mutex::new(None),
+                walks: AtomicUsize::new(0),
             }))
         } else {
             Index::Live(create_picker(root, self.inner.watch)?)
@@ -546,6 +577,13 @@ impl WorkspaceSearch {
         if let Some((victim, entry)) = evicted {
             release(&victim, entry, "capacity");
         }
+        if let Index::Names(names) = &index
+            && NAMES_WATCH
+            && self.inner.watch
+            && !names.home
+        {
+            names.start_watch();
+        }
         Ok(index)
     }
 
@@ -566,22 +604,14 @@ impl NamesEntry {
     /// The index, walking the folder in the background when missing or
     /// stale; waits up to `wait` for a first walk.
     fn index(self: &Arc<Self>, wait: Duration) -> Option<Arc<NamesIndex>> {
+        let watched = self.watched();
         let mut state = lock(&self.state);
         let stale = state
             .index
             .as_ref()
-            .is_none_or(|index| index.built.elapsed() >= NAMES_REFRESH);
-        if stale && state.building.is_none() {
-            let cancel = Arc::new(AtomicBool::new(false));
-            state.building = Some(cancel.clone());
-            let names = Arc::downgrade(self);
-            let spawned = std::thread::Builder::new()
-                .name("workspace-search-names".into())
-                .spawn(move || build_names(names, cancel));
-            if let Err(error) = spawned {
-                state.building = None;
-                tracing::warn!(%error, "names search index did not start");
-            }
+            .is_none_or(|index| !watched && index.built.elapsed() >= NAMES_REFRESH);
+        if stale {
+            self.start_walk(&mut state);
         }
         if state.index.is_none() && state.building.is_some() && !wait.is_zero() {
             state = self
@@ -595,11 +625,91 @@ impl NamesEntry {
         state.index.clone()
     }
 
-    /// Stop a running walk; anyone waiting for it stops waiting.
+    /// Walk the folder in the background, unless a walk is running.
+    fn start_walk(self: &Arc<Self>, state: &mut NamesState) {
+        if state.building.is_some() {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        state.building = Some(cancel.clone());
+        let names = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("workspace-search-names".into())
+            .spawn(move || build_names(names, cancel));
+        if let Err(error) = spawned {
+            state.building = None;
+            tracing::warn!(%error, "names search index did not start");
+        }
+    }
+
+    /// Follow the folder's changes with one recursive watch. The watch's
+    /// first event asks for a walk, which covers what changed before it.
+    fn start_watch(self: &Arc<Self>) {
+        let names = Arc::downgrade(self);
+        let watch = FsWatchHub::global().watch(
+            &self.root,
+            notify::RecursiveMode::Recursive,
+            move |event| {
+                if let Some(names) = names.upgrade() {
+                    names.changed(event);
+                }
+            },
+        );
+        let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        *lock(&self.watch) = Some(NamesWatch { watch, root });
+    }
+
+    /// The watch is installed (it isn't, briefly, after it starts, and for
+    /// good if it failed).
+    fn watched(&self) -> bool {
+        lock(&self.watch)
+            .as_ref()
+            .is_some_and(|watch| watch.watch.is_live())
+    }
+
+    /// A watcher event: queue its paths for the next update pass.
+    fn changed(self: &Arc<Self>, event: &notify::Event) {
+        if matches!(event.kind, notify::EventKind::Access(_)) {
+            return;
+        }
+        let mut state = lock(&self.state);
+        if event.need_rescan() || event.paths.is_empty() {
+            state.rewalk = true;
+        } else {
+            state.changed.extend(event.paths.iter().cloned());
+            if state.changed.len() > MAX_UPDATE_PATHS {
+                state.changed = Vec::new();
+                state.rewalk = true;
+            }
+        }
+        self.schedule_update(&mut state);
+    }
+
+    /// Start an update pass, unless one is pending or a walk is running
+    /// (its end starts one).
+    fn schedule_update(self: &Arc<Self>, state: &mut NamesState) {
+        if state.updating || state.building.is_some() || (state.changed.is_empty() && !state.rewalk)
+        {
+            return;
+        }
+        state.updating = true;
+        let names = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("workspace-search-names-update".into())
+            .spawn(move || update_names(names));
+        if let Err(error) = spawned {
+            state.updating = false;
+            tracing::warn!(%error, "names search index update did not start");
+        }
+    }
+
+    /// Stop a running walk and the watch; anyone waiting for the walk stops
+    /// waiting.
     fn cancel(&self) {
         if let Some(cancel) = lock(&self.state).building.take() {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel.store(true, Ordering::Relaxed);
         }
+        lock(&self.watch).take();
         self.built.notify_all();
     }
 }
@@ -609,6 +719,7 @@ fn build_names(names: Weak<NamesEntry>, cancel: Arc<AtomicBool>) {
         return;
     };
     let started = Instant::now();
+    let walk = names.walks.fetch_add(1, Ordering::Relaxed) + 1;
     let index = NamesIndex::build(&names.root, names.home, &cancel);
     let mut state = lock(&names.state);
     // Released (or replaced) while walking: drop this result.
@@ -624,11 +735,58 @@ fn build_names(names: Weak<NamesEntry>, cancel: Arc<AtomicBool>) {
         home = names.home,
         entries = index.len(),
         scan_ms = started.elapsed().as_millis() as u64,
+        walk,
         "workspace search names index scanned"
     );
     state.index = Some(Arc::new(index));
     state.building = None;
     names.built.notify_all();
+    names.schedule_update(&mut state);
+}
+
+/// Apply the queued watcher paths to the index, or walk again when an
+/// update can't.
+fn update_names(names: Weak<NamesEntry>) {
+    std::thread::sleep(NAMES_UPDATE_DELAY);
+    let Some(names) = names.upgrade() else {
+        return;
+    };
+    let root = match lock(&names.watch).as_ref() {
+        Some(watch) => watch.root.clone(),
+        None => names.root.clone(),
+    };
+    let (index, mut changed) = {
+        let mut state = lock(&names.state);
+        state.updating = false;
+        if state.building.is_some() {
+            return; // the walk's end starts another pass
+        }
+        let Some(index) = state.index.clone() else {
+            return; // the first walk lists everything
+        };
+        if std::mem::take(&mut state.rewalk) {
+            state.changed.clear();
+            names.start_walk(&mut state);
+            return;
+        }
+        (index, std::mem::take(&mut state.changed))
+    };
+    changed.sort_unstable();
+    changed.dedup();
+    let started = Instant::now();
+    let update = index.update(&root, &changed);
+    tracing::debug!(
+        root = %names.root.display(),
+        paths = changed.len(),
+        ?update,
+        update_ms = started.elapsed().as_millis() as u64,
+        "workspace search names index updated"
+    );
+    if update == Update::Rewalk {
+        let mut state = lock(&names.state);
+        state.changed.clear();
+        names.start_walk(&mut state);
+    }
 }
 
 /// Mark `root`'s index used and return it, if it has one.
@@ -1123,6 +1281,65 @@ mod tests {
         assert!(!search.release_unless_warmed(&root), "a chat warmed it");
         search.release_all();
         assert_eq!(search.live(), 0);
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_large_plain_folder_follows_changes_without_walking_again() {
+        let (_dir, root) = folder(&[
+            ("api/.git/HEAD", b"ref: refs/heads/main\n"),
+            ("api/.gitignore", b"dist/\n"),
+            ("api/src/plan.rs", b""),
+            ("api/src/main.rs", b""),
+            ("web/src/app.ts", b""),
+        ]);
+        let search = limited(2);
+        let plans = || {
+            let mut found: Vec<String> = search
+                .search_names_within(&root, "plan", 20, NameKinds::Files, NAME_SCAN_WAIT)
+                .unwrap()
+                .matches
+                .into_iter()
+                .map(|found| found.path)
+                .collect();
+            found.sort_unstable();
+            found
+        };
+        assert_eq!(plans(), ["api/src/plan.rs"]);
+        let Index::Names(names) = lock(&search.inner.entries)[&root].index.clone() else {
+            panic!("no names index");
+        };
+        // The watch going live asks for a second walk; wait for it to end.
+        let settled = || {
+            let state = lock(&names.state);
+            names.watched()
+                && names.walks.load(Ordering::Relaxed) == 2
+                && state.building.is_none()
+                && !state.updating
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !settled() {
+            assert!(Instant::now() < deadline, "the watch never settled");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        std::fs::write(root.join("api/src/plan2.rs"), b"").unwrap();
+        std::fs::create_dir_all(root.join("api/dist")).unwrap();
+        std::fs::write(root.join("api/dist/plan.js"), b"").unwrap();
+        std::fs::create_dir_all(root.join("web/lib/plans")).unwrap();
+        std::fs::write(root.join("web/lib/plans/plan3.ts"), b"").unwrap();
+        std::fs::remove_file(root.join("api/src/plan.rs")).unwrap();
+        let expected = ["api/src/plan2.rs", "web/lib/plans/plan3.ts"];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while plans() != expected {
+            assert!(Instant::now() < deadline, "found {:?}", plans());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // A write into a listed folder: Windows also reports the folder.
+        std::fs::write(root.join("api/src/main.rs"), b"fn main() {}").unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(plans(), expected, "the gitignored file stays out");
+        assert_eq!(names.walks.load(Ordering::Relaxed), 2, "no walk since");
     }
 
     #[test]
