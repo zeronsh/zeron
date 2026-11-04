@@ -730,19 +730,34 @@ M.shown_frames = ui.computed(function(): { [string]: Box }
 end)
 local seen_frames = M.frames:peek()
 local seen_shape = M.shape:peek()
+-- The chat the tab showing holds, when it holds one: it has no frame, the page is its.
+local function lone_of(tree: Node?): string?
+	local ids = leaves(tree)
+	return if #ids == 1 then ids[1] else nil
+end
+local seen_lone = lone_of(M.current:peek())
 ui.effect(function()
 	local to, shape = M.frames:get(), M.shape:get()
-	local was, was_shape = seen_frames, seen_shape
-	seen_frames, seen_shape = to, shape
+	local was, was_shape, was_lone = seen_frames, seen_shape, seen_lone
+	seen_frames, seen_shape, seen_lone = to, shape, lone_of(M.current:peek())
 	if was_shape == shape then
 		return
+	end
+	-- (A chat that stood alone stood on the whole page.)
+	if next(was) == nil and was_lone then
+		was = frames_of(leaf(was_lone), M.GAP)
 	end
 	if settling then
 		settling:cancel()
 		settling = nil
 	end
+	-- (None of them there before, so nothing to ease from: as for another tab.)
+	local any_stays = false
+	for id in to do
+		any_stays = any_stays or was[id] ~= nil
+	end
 	-- (Another tab, or no motion: there at once.)
-	if string.match(was_shape, "^[^#]*") ~= string.match(shape, "^[^#]*") or motion.reduced_now() then
+	if string.match(was_shape, "^[^#]*") ~= string.match(shape, "^[^#]*") or motion.reduced_now() or (next(to) ~= nil and not any_stays) then
 		settle:set(1)
 		return
 	end

@@ -382,6 +382,34 @@ test("a pane added as the sidebar steps aside: the panes and the composer keep t
 	expect(app:error()).to_be_nil()
 end)
 
+test("a chat landing on a lone chat: that chat eases down from the whole page, the new one opening beside it", function()
+	local app = split(1440)
+	local page_x, page_w = box(app, "#shell-page")
+	expect(page_w > 600).to_be(true)
+	app:set_state("inset_split_trees", { row(PAIR) })
+	local narrowest = math.huge
+	local last_w: number? = nil
+	for frame = 1, 40 do
+		app:frames(1)
+		local x1, w1 = box(app, "#split-pane-a1")
+		local x2 = box(app, "#split-pane-a2")
+		-- It keeps its place at the page's left: never out of its zero width.
+		expect(`frame {frame}: {math.abs(x1 - page_x) <= 1}`).to_be(`frame {frame}: true`)
+		-- Only ever narrowing, to its half: no collapsing first and growing back.
+		if last_w then
+			expect(`frame {frame}: {w1 <= last_w + 1}`).to_be(`frame {frame}: true`)
+		end
+		last_w = w1
+		narrowest = math.min(narrowest, w1)
+		expect(`frame {frame}: {x1 + w1 <= x2 + 1}`).to_be(`frame {frame}: true`)
+	end
+	local _, w1 = box(app, "#split-pane-a1")
+	local _, w2 = box(app, "#split-pane-a2")
+	expect(math.abs(w1 - w2) <= 1).to_be(true)
+	expect(narrowest >= w1 - 1).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
 test("a split with more panes shown: the sidebar steps aside for room, and isn't closed", function()
 	local app = split(1440, row(PAIR))
 	toggle(app)
