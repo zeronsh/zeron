@@ -67,9 +67,21 @@ local function write_answers()
 		(map :: any):set(next)
 	end
 end
-local function with(map: State<{ [string]: string | false }>, key: string, value: string | false, asked: string)
+-- (`soon`: at once, a picture someone just chose. Else a repository's artwork, which
+-- may come in over seconds: at most every 100 ms, so hundreds spread out don't work
+-- it all out again hundreds of times.)
+local writing = false
+local function with(map: State<{ [string]: string | false }>, key: string, value: string | false, asked: string, soon: boolean?)
 	table.insert(answers, { map = map, key = key, value = value, asked = asked })
-	ui.after(0, write_answers)
+	if soon then
+		ui.after(0, write_answers)
+	elseif not writing then
+		writing = true
+		ui.after(100, function()
+			writing = false
+			write_answers()
+		end)
+	end
 end
 
 local function want_file(url: string)
@@ -79,9 +91,9 @@ local function want_file(url: string)
 	asking[url] = true
 	local ok = pcall(function()
 		projects.icon_file(url):after(function(path: any)
-			with(files, url, if type(path) == "string" and path ~= "" then path else false, url)
+			with(files, url, if type(path) == "string" and path ~= "" then path else false, url, true)
 		end, function()
-			with(files, url, false, url)
+			with(files, url, false, url, true)
 		end)
 	end)
 	if not ok then
