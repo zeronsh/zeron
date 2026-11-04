@@ -371,7 +371,9 @@
     },
     "title_bar": {
       "toggle_sidebar": "切换侧边栏",
-      "forward": "前进"
+      "forward": "前进",
+      "menu": "菜单",
+      "menus": "菜单栏"
     },
     "address_line": {
       "checking_label": "正在检查地址",

@@ -371,7 +371,9 @@
     },
     "title_bar": {
       "toggle_sidebar": "Toggle sidebar",
-      "forward": "Forward"
+      "forward": "Forward",
+      "menu": "Menu",
+      "menus": "Menus"
     },
     "address_line": {
       "checking_label": "Checking the address",

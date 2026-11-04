@@ -452,6 +452,8 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
+    // The menus to its title bar where the system has none (☰, Alt).
+    plugins::host_menu::serve(&host, cx.window.clone(), &cx.windows.menus());
     // The host's own toasts over it (a template in preview, a switch you
     // didn't make, signing keys, safe mode at launch) and the menu bar
     // where the system has none.
@@ -862,6 +864,8 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost) -> zgx::reactive::E
                 }
             }
         }
+        // The bar the host draws where the system has none: the menus taken.
+        plugins::host_menu::set(windows.menus());
         let keys = reserved.get().iter().filter_map(|key| accelerator(key)).collect();
         if let Err(error) = windows.set_reserved_shortcuts(keys) {
             eprintln!("zeron-zgx: reserved shortcuts: {error}");

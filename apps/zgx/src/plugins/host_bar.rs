@@ -12,8 +12,9 @@
 //!   on another device, this device's revoked), and the default interface
 //!   at launch because the template crashed Zeron (safe mode);
 //! - on Linux and Windows, which have no system menu bar, the app's menu
-//!   bar (zgx's `app_menu_bar`): View → Use Zeron v3 is always in
-//!   it, the host's own item.
+//!   bar (host_menu.rs: the title bar's ☰ and Alt, or the host's own on
+//!   Alt under a template): View → Use Zeron v3 is always in it, the
+//!   host's own item.
 //!
 //! The toasts look like the app's own (ds/toast.luau: its width, corner,
 //! padding and type) and share their corner, the window's bottom right,
@@ -176,11 +177,11 @@ fn dismiss(signal: &zgx::reactive::Signal<Vec<Shown>>, id: u64) {
     }
 }
 
-/// The toasts, and the menu bar where there's no system one: above the
-/// scripts' view.
+/// The toasts, and the menu bar where there's no system one: layers over
+/// the window, taking no room above the scripts' view.
 pub fn view(cx: &mut WindowContext) -> View {
     let toasts = toasts(&cx.ui.runtime);
-    column().child(toasts).children((!zgx_desktop::has_native_app_menu()).then(|| cx.app_menu_bar()))
+    column().child(toasts).children(super::host_menu::view(cx))
 }
 
 /// Development (debug builds): `ZERON_ZGX_HOST_TOASTS=1` lays the toasts
@@ -576,13 +577,25 @@ fn measure() {
     });
 }
 
-/// Keeps what holds `handle` (the host's layer) the window root's last
-/// child, drawn over everything and hit first: as it mounts and after every
-/// layout that changes (a script's modal or layer opening raises itself to
-/// the end, which lays the root out again).
-fn keep_on_top(handle: zgx::compose::NodeHandle) {
+thread_local! {
+    /// The host's layers (the toasts, the menu bar): kept over the scripts'.
+    static ON_TOP: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Keeps what holds `handle` (one of the host's layers) among the window
+/// root's last children, drawn over everything and hit first: as it mounts
+/// and after every layout that changes (a script's modal or layer opening
+/// raises itself to the end, which lays the root out again). The host's
+/// layers keep their order among themselves, so two never trade places.
+pub(super) fn keep_on_top(handle: zgx::compose::NodeHandle) {
     let Some(scene) = handle.scene() else { return };
     let node = handle.node();
+    ON_TOP.with(|t| {
+        let mut t = t.borrow_mut();
+        if !t.contains(&node) {
+            t.push(node);
+        }
+    });
     let raise = move || {
         let Ok(mut scene) = scene.try_borrow_mut() else { return };
         let root = scene.root();
@@ -594,12 +607,29 @@ fn keep_on_top(handle: zgx::compose::NodeHandle) {
                 None => return,
             }
         }
+        // Each of the host's layers, as the root's child that holds it.
+        let ours: Vec<NodeId> = ON_TOP.with(|t| {
+            let mut t = t.borrow_mut();
+            t.retain(|n| scene.contains(*n));
+            t.iter()
+                .filter_map(|&n| {
+                    let mut at = n;
+                    loop {
+                        match scene.parent(at) {
+                            Some(parent) if parent == root => return Some(at),
+                            Some(parent) => at = parent,
+                            None => return None,
+                        }
+                    }
+                })
+                .collect()
+        });
         let children = scene.children(root);
-        if children.last() == Some(&top) {
+        let mut order: Vec<_> = children.iter().copied().filter(|c| !ours.contains(c)).collect();
+        order.extend(children.iter().copied().filter(|c| ours.contains(c)));
+        if order.as_slice() == children {
             return;
         }
-        let mut order: Vec<_> = children.iter().copied().filter(|c| *c != top).collect();
-        order.push(top);
         scene.reorder_children(root, &order);
     };
     let first = raise.clone();
