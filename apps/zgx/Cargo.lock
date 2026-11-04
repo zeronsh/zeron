@@ -6211,6 +6211,7 @@ dependencies = [
  "tokio",
  "tungstenite",
  "ureq 2.12.1",
+ "windows-sys 0.61.2",
  "zatex",
  "zeron-cli",
  "zeron-launch",
