@@ -81,6 +81,16 @@ pub fn records(permissions: &[String], sources: &Sources) -> Json {
                 {
                     record["path"] = json!(path);
                 }
+                // Which repository it is, with its folder ("files.read"): which
+                // of its clones is on this device, and the oldest, name it.
+                if may("files.read")
+                    && let Json::Object(fields) = pick(project, &["repository", "created"])
+                {
+                    if let Json::Object(into) = &mut record {
+                        into.extend(fields);
+                    }
+                    record["here"] = json!(project["device"].is_string() && project["device"] == sources.sessions["here"]);
+                }
                 projects.insert(id.to_string(), record);
             }
         }
@@ -148,7 +158,8 @@ mod tests {
         Sources {
             sessions: json!({
                 "chats": [{ "id": "s1", "title": "Fix the build", "status": "working", "project": "p1", "device": "d1", "updated": 5, "cwd": "/secret/path/.worktrees/fix", "branch": "fix/build" }],
-                "projects": [{ "id": "p1", "path": "/secret/path", "name": "Atlas", "device": "d1" }],
+                "here": "d1",
+                "projects": [{ "id": "p1", "path": "/secret/path", "name": "Atlas", "device": "d1", "repository": "commit:abc", "created": 7 }],
             }),
             messages: json!([{ "id": "m1", "role": "user", "text": "hello", "attachments": [] }]),
             profile: json!({ "id": "u1", "name": "Ada", "username": "ada", "email": "ada@example.com" }),
@@ -178,6 +189,8 @@ mod tests {
         // With "files.read", folders: a session's and its project's.
         let r = records(&p(&["sessions.read", "files.read"]), &sources(false));
         assert_eq!((r["sessions"]["s1"]["cwd"].as_str(), r["projects"]["p1"]["path"].as_str()), (Some("/secret/path/.worktrees/fix"), Some("/secret/path")));
+        // And which repository it is, when added, and that it's on this device.
+        assert_eq!((&r["projects"]["p1"]["repository"], &r["projects"]["p1"]["created"], &r["projects"]["p1"]["here"]), (&json!("commit:abc"), &json!(7), &json!(true)));
         let r = records(&p(&["messages.read"]), &sources(false));
         assert_eq!(r["messages"]["m1"], json!({ "role": "user", "text": "hello" }));
         let r = records(&p(&["profile.read"]), &sources(false));
