@@ -532,8 +532,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let weak = Rc::downgrade(&bridge);
     let effect = cx.ui.runtime.effect(move || {
         if let Some(b) = weak.upgrade() {
-            let sources = b.sources(true);
-            b.publish_records(&sources);
+            let (sources, list) = b.sources(true);
+            b.publish_records(&sources, &list);
         }
     });
     *bridge.records_effect.borrow_mut() = Some(effect);
@@ -1296,8 +1296,8 @@ impl Bridge {
             self.publish_pages();
         }
         self.publish_page();
-        let sources = self.sources(false);
-        self.publish_records(&sources);
+        let (sources, list) = self.sources(false);
+        self.publish_records(&sources, &list);
         if *self.loaded.borrow() == want {
             return;
         }
@@ -1750,7 +1750,7 @@ impl Bridge {
     /// What records are made from, as the window has it: followed (`track`,
     /// from the records' effect) or only read. The open chat's messages are
     /// followed only while a plugin may read them.
-    fn sources(&self, track: bool) -> records::Sources {
+    fn sources(&self, track: bool) -> (records::Sources, Value) {
         let read = |key: &str| {
             let signal = self.host.shared(key, Value::Nil).signal();
             let value = if track { signal.get() } else { signal.with_untracked(Value::clone) };
@@ -1759,33 +1759,33 @@ impl Bridge {
         let messages_wanted = self.items.borrow().iter().any(|i| i.status() == "on" && records::reads_messages(&i.permissions()));
         // (No plugin reading them: nothing is made of a whole transcript.)
         let messages = if messages_wanted { read("chat.messages") } else { Json::Null };
-        // Only what records are made of: this runs each time the list moves, on the
-        // main thread, and an account's archive is no small thing.
+        // The session list itself: records are made from it directly (no text of a
+        // whole account, on the main thread, each time the list moves).
         let signal = self.host.shared("sessions", Value::Nil).signal();
         let all = if track { signal.get() } else { signal.with_untracked(Value::clone) };
-        let part = |key: &str| all.field(key).map_or(Json::Null, value_json);
-        records::Sources {
-            sessions: json!({ "here": part("here"), "chats": part("chats"), "projects": part("projects") }),
+        let sources = records::Sources {
+            sessions: Json::Null,
             messages,
             profile: read("plugins.profile"),
             hide_emails: read("plugins.hide_emails").as_bool().unwrap_or(false),
-        }
+        };
+        (sources, all)
     }
 
     /// Each plugin's records, from `sources`, holding what it may read.
-    fn publish_records(&self, sources: &records::Sources) {
+    fn publish_records(&self, sources: &records::Sources, list: &Value) {
         let items = self.items.borrow().clone();
-        let shared: Vec<(Shared, Json)> = items
+        let shared: Vec<(Shared, Value)> = items
             .iter()
             .filter(|i| i.status() == "on")
             .filter_map(|i| {
                 let shared = self.records.borrow().get(i.id()).cloned()?;
-                Some((shared, records::records_with(&i.permissions(), &i.change(), sources)))
+                Some((shared, records::published(&i.permissions(), &i.change(), sources, list)))
             })
             .collect();
         // (Set with no borrow held: a plugin's effects run at once.)
         for (shared, value) in shared {
-            shared.set(json_value(&value));
+            shared.set(value);
         }
     }
 
