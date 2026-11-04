@@ -442,12 +442,28 @@ return function(props: Props): Node
 	-- Where a pane's title starts in its card: past the title bar's
 	-- controls when they stand over it (the sidebar collapsed, the pane at
 	-- the inset's top left), else the page's inset.
-	local function title_left(id: string?): number
+	-- (`full`, `tracked`: as ds.TitleBar's `controls_end`, the bar's
+	-- controls in full screen or out of it.)
+	local function title_left(id: string?, full: boolean?, tracked: boolean?): number
 		if at_top_left(id) and (shell_view.collapsed:get() or not fit.current:get().sidebar) then
-			return ds.TitleBar.controls_end() + after_controls - INSET
+			return ds.TitleBar.controls_end(full, tracked) + after_controls - INSET
 		end
 		return inset
 	end
+	-- How far a title past the bar's controls moves with them as the window
+	-- goes in or out of full screen (macOS hides the traffic lights there).
+	local function full_screen_shift(id: string?, full: boolean?, tracked: boolean?): number
+		return title_left(id, full, tracked) - title_left(id, false, tracked)
+	end
+	-- (Kept by the title bar's `follow`: gliding with its controls as the
+	-- window goes in or out of full screen, eased as the sidebar's moves
+	-- otherwise, as its `left` is.)
+	local header_ref = ui.ref()
+	ds.TitleBar.follow(header_ref, {
+		x = function(full: boolean): number
+			return full_screen_shift(splits.focused:get(), full)
+		end,
+	}, motion.sidebar)
 	table.insert(
 		pane,
 		ui.show(
@@ -472,9 +488,14 @@ return function(props: Props): Node
 				-- (Collapsed, the bar's controls stand over the card's start:
 				-- past them, less the gap the card is set in by.)
 				-- (In a split, only the leftmost pane's is under them.)
+				-- (Out of full screen's place, eased as the sidebar comes and
+				-- goes; full screen's shift on top, gliding with the bar's
+				-- controls as the window goes in or out.)
+				ref = header_ref,
 				left = motion.tween(ui.computed(function(): number
-					return title_left(splits.focused:get())
+					return title_left(splits.focused:get(), false, true)
 				end), motion.sidebar),
+				x = full_screen_shift(splits.focused:peek(), ds.TitleBar.full_screen_now(), false),
 				-- (Clear of the bar's own controls at its right; in a split,
 				-- of its pane's ×.)
 				right = function(): number
@@ -1393,15 +1414,23 @@ return function(props: Props): Node
 				label = ui.t("chat.composer.drop_to_mention") :: any,
 			},
 		}
+		-- (Past the bar's controls, it glides with them as the window goes in
+		-- or out of full screen.)
+		local head_ref = ui.ref()
+		ds.TitleBar.follow(head_ref, {
+			paddingLeft = function(full: boolean): number
+				return title_left(id, full)
+			end,
+		})
 		local head = ui.row {
+			ref = head_ref,
 			absolute = true,
 			top = 0,
 			left = 0,
 			right = 0,
 			h = TITLE_H - INSET,
-			pl = function(): number
-				return ui.raw(title_left(id), "where its title starts, as the session's head")
-			end,
+			-- (Kept by `follow` above, from here.)
+			pl = ui.raw(title_left(id, ds.TitleBar.full_screen_now(), false), "where its title starts, as the session's head"),
 			pr = function(): number
 				return ui.raw(close_right(id), "its × clear of the title bar's panel toggle")
 			end,
