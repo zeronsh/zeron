@@ -2422,6 +2422,7 @@
   },
   "onboarding": {
     "skip_for_now": "Skip for now",
+    "not_now": "Not now",
     "signin": {
       "title": "Welcome\nto Zeron",
       "lines": {

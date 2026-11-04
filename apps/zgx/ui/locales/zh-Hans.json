@@ -2422,6 +2422,7 @@
   },
   "onboarding": {
     "skip_for_now": "暂时跳过",
+    "not_now": "以后再说",
     "signin": {
       "title": "欢迎使用\nZeron",
       "lines": {

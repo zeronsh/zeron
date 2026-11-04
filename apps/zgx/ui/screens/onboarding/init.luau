@@ -83,6 +83,7 @@ local STEPS: { [state.Step]: () -> Node } = {
 			step = n.step,
 			count = n.count,
 			on_back = actions.back,
+			on_not_now = actions.finish,
 			on_claimed = actions.claimed_username,
 			on_has_one = actions.has_username,
 			on_signed_out = actions.signed_out,

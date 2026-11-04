@@ -222,6 +222,28 @@ test("the dots count every step and never move", function()
 	expect(last).to_be(3)
 end)
 
+test("someone who already had Zeron is welcomed with only their username and card", function()
+	state.welcome = true
+	-- No username yet, whatever else their account had finished.
+	expect(run { path = "signed_in", passed = { "appearance", "org", "invite", "github", "providers" } }).to_be("username")
+	expect(forward("username")).to_equal({ "username", "card", "done" })
+	-- (Back doesn't return to claiming a username, as in every run, nor to Sign in.)
+	expect(backward("card")).to_equal({ "card" })
+	local _, count = state.position("username")
+	expect(count).to_be(3)
+	-- Claiming one goes to the card.
+	state.step:set("username")
+	actions.claimed_username({} :: any)
+	expect(state.step:peek()).to_be("card")
+	-- A username had: its card.
+	expect(run { path = "signed_in", name_done = true }).to_be("card")
+	-- Both finished before: straight to the end.
+	expect(run { path = "signed_in", name_done = true, passed = { "card" } }).to_be("done")
+	-- Not signed in after all (a session gone): the usual way, for them.
+	expect(run { path = "skipped" }).to_be("appearance")
+	state.welcome = false
+end)
+
 return ui.text {
 	id = "result",
 	if #failures == 0 then "ok" else table.concat(failures, "\n"),
