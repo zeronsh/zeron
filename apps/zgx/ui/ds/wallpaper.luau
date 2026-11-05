@@ -11,15 +11,18 @@
 --   	key = fn,                    what stands in it now ("" nothing), and
 --   	content = function(key) … end   builds that, filling the art's box
 --   	picture = fn,                the picture standing there (its grid, for the effects)
---   	width = fn,                  how wide the art is laid (below)
+--   	width = state, beside = fn,  where the window is (below)
 --   	provide = { … },             what its content reads (`ui.use_context`)
 --   }
 --
--- The art is laid `width` wide (the window's) from the box's right edge,
--- so it holds still as a sidebar comes and goes, and the box shows what of
--- it falls inside; the effect is drawn over that art's box, so its grid
--- (the picture's own pixels) holds still with it. A window resized lays
--- the art out again, covering it (zgx's `fit`).
+-- The art holds still in the window as its box moves under it: it's laid
+-- `width` wide (the window's) from the box's right edge, moved right by
+-- `beside` (what stands between the box and the window's right, a panel),
+-- and the box shows what of it falls inside. A sidebar or a panel sliding
+-- only moves the box's edges: the art, its effect and the effect's grid
+-- (the picture's own pixels) stay where they are. A window resized lays
+-- the art out again, covering it (zgx's `fit`), with no script when
+-- `width` is a state.
 -- Changing what stands in it, or the effect, crossfades (an effect is its
 -- layer's shader, given as it is made); `intensity`, `density` and `faded`
 -- change in place.
@@ -57,9 +60,12 @@ export type Props = {
 	-- Faded from the top across its height (by default), or full.
 	faded: (State<boolean> | () -> boolean)?,
 	-- How wide the art is laid, from its box's right edge (the window's
-	-- width, so it holds still as a sidebar comes and goes). Its box's, by
-	-- default.
-	width: (number | () -> number)?,
+	-- width, so it holds still as a sidebar comes and goes): a state is
+	-- followed by zgx alone. Its box's, by default.
+	width: (number | State<number> | () -> number)?,
+	-- How far right of its box's right edge the art's right edge stands (a
+	-- panel open beside the box), so it holds still as that comes and goes.
+	beside: (State<number> | () -> number)?,
 }
 
 export type Picture = { src: string, w: number, h: number, x: number?, y: number?, zoom: number? }
@@ -213,9 +219,9 @@ function M.Wallpaper(props: Props): Node
 				anime.utils.set(node, { layerParam0 = p[1][1], layerParam1 = p[1][2], layerParam3 = p[1][4] })
 			end
 		end)
-		-- The art's box: the window's width from the box's right edge; the
-		-- effect drawn over it (on the picture's grid: the box is what the
-		-- picture covers).
+		-- The art's box: the window's width from the box's right edge, moved
+		-- right by what stands beside the box; the effect drawn over it (on
+		-- the picture's grid: the box is what the picture covers).
 		return ui.div {
 			ref = el,
 			-- (Named, for tests.)
@@ -225,6 +231,7 @@ function M.Wallpaper(props: Props): Node
 			top = 0,
 			bottom = 0,
 			w = props.width or "100%",
+			x = props.beside,
 			overflow = "hidden",
 			provide = props.provide,
 			layer_shader = effects.SHADERS[how] or effects.SHADERS.none,
@@ -246,8 +253,11 @@ function M.Wallpaper(props: Props): Node
 		pointer_events = "none",
 		-- The new art fades in as itself (the box the effect already draws
 		-- through, not a box of its own inside it) over the old leaving.
+		-- The old holds on as the new comes (an ease in against the new's
+		-- ease out), so the two together never let the card show between:
+		-- both easing out dimmed the art by a fifth mid-way.
 		enter = { opacity = { 0, 1 }, duration = FADE, ease = "out(3)" },
-		exit = { opacity = 0, duration = FADE, ease = "out(3)" },
+		exit = { opacity = 0, duration = FADE, ease = "in(3)" },
 	})
 end
 
