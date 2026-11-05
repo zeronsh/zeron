@@ -40,7 +40,7 @@ resumed child's output to the original document.
 
 ```sh
 cargo test --locked -p zeron-harness -p zeron-doc -p zeron-proto
-cargo test --locked -p zeron-engine --lib --test e2e --test codex_subagents
+cargo test --locked -p zeron-engine --lib --test e2e --test misc
 ```
 
 ## Live validation

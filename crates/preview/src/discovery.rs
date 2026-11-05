@@ -27,7 +27,16 @@ pub struct Listener {
     /// The chat that owns [`Self::origin`], once resolved against the chats
     /// and terminals this device hosts.
     pub chat_id: Option<String>,
+    /// Part of an agent's sign-in (its process, or an ancestor, carries
+    /// [`SIGN_IN_ENV`]): a browser callback, never probed (Gemini CLI's
+    /// OAuth server ends the sign-in on the first request that isn't the
+    /// callback).
+    pub signing_in: bool,
 }
+
+/// What an engine sets on an agent's sign-in (the file its browser's page
+/// is recorded in): a listener under it is that sign-in's callback.
+pub const SIGN_IN_ENV: &str = "ZERON_LOGIN_URL_FILE";
 
 impl Listener {
     pub fn belongs_to(&self, root: &Path) -> bool {
@@ -162,8 +171,9 @@ struct Process {
 /// attributed.
 #[derive(Default)]
 pub struct Origins {
-    /// `Some(origin)` when the marker is present.
-    markers: HashMap<(u32, u64), Option<String>>,
+    /// `Some(origin)` when the marker is present, and whether the process
+    /// is an agent's sign-in.
+    markers: HashMap<(u32, u64), (Option<String>, bool)>,
 }
 
 impl Origins {
@@ -172,41 +182,46 @@ impl Origins {
     /// counts while that launcher lives. The walk stops at this engine: an
     /// engine itself started by an agent (a nested development build) must
     /// not lend that outer chat to everything it spawns.
+    /// Also whether it, or an ancestor on the way, is an agent's sign-in.
     fn resolve(
         &mut self,
         pid: u32,
         processes: &HashMap<u32, Process>,
         read: &mut impl FnMut(u32) -> Option<Vec<u8>>,
-    ) -> Option<String> {
+    ) -> (Option<String>, bool) {
         let engine = std::process::id();
         let mut pid = pid;
+        let mut signing_in = false;
         for _ in 0..64 {
             if pid <= 1 || pid == engine {
-                return None;
+                return (None, signing_in);
             }
-            let process = processes.get(&pid)?;
+            let Some(process) = processes.get(&pid) else {
+                return (None, signing_in);
+            };
             let key = (pid, process.started_at);
-            let marker = match self.markers.get(&key) {
+            let (marker, sign_in) = match self.markers.get(&key) {
                 Some(marker) => marker.clone(),
                 None => match read(pid) {
                     Some(environment) => {
-                        let marker = origin_marker(&environment);
+                        let marker = (origin_marker(&environment), has_variable(&environment, SIGN_IN_ENV));
                         self.markers.insert(key, marker.clone());
                         marker
                     }
                     // Unreadable now: retried next scan, never cached.
-                    None => None,
+                    None => (None, false),
                 },
             };
+            signing_in |= sign_in;
             if marker.is_some() {
-                return marker;
+                return (marker, signing_in);
             }
             if process.parent == pid {
-                return None;
+                return (None, signing_in);
             }
             pid = process.parent;
         }
-        None
+        (None, signing_in)
     }
 
     /// Attribute `listeners`, then forget processes no longer running.
@@ -217,7 +232,8 @@ impl Origins {
         mut read: impl FnMut(u32) -> Option<Vec<u8>>,
     ) {
         for listener in listeners.iter_mut() {
-            let origin = self.resolve(listener.pid, processes, &mut read);
+            let (origin, signing_in) = self.resolve(listener.pid, processes, &mut read);
+            listener.signing_in = signing_in;
             listener.zeron_owned = origin.is_some();
             listener.origin = origin.filter(|origin| !origin.is_empty());
         }
@@ -227,6 +243,12 @@ impl Origins {
             .collect();
         self.markers.retain(|key, _| alive.contains(key));
     }
+}
+
+/// Whether a NUL-separated environment block sets `name`.
+fn has_variable(environment: &[u8], name: &str) -> bool {
+    let prefix = format!("{name}=");
+    environment.split(|b| *b == 0).any(|entry| entry.starts_with(prefix.as_bytes()))
 }
 
 /// The origin marker's value in a NUL-separated environment block.
@@ -368,6 +390,7 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
                 zeron_owned: false,
                 origin: None,
                 chat_id: None,
+                signing_in: false,
             });
         }
     }
@@ -626,6 +649,7 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
                 zeron_owned: false,
                 origin: None,
                 chat_id: None,
+                signing_in: false,
             });
         }
     }
@@ -659,6 +683,7 @@ mod tests {
             zeron_owned: true,
             origin: Some("chat:chat".into()),
             chat_id: Some("chat".into()),
+            signing_in: false,
         };
         for args in [
             vec!["/usr/bin/infisical", "login"],
@@ -707,6 +732,7 @@ mod tests {
             zeron_owned: false,
             origin: None,
             chat_id: None,
+            signing_in: false,
         }
     }
     fn environment(entries: &[&str]) -> Vec<u8> {
@@ -797,6 +823,32 @@ mod tests {
         let mut listeners = vec![listener_of(102)];
         origins.attribute(&mut listeners, &recycled, &mut read);
         assert!(!listeners[0].zeron_owned);
+    }
+    #[test]
+    fn an_agents_sign_in_is_never_probed() {
+        // A chat's engine (zeron-owned, chat:a) runs an agent's sign-in
+        // (the marker on it); the agent's callback server is its child.
+        let processes: HashMap<u32, Process> = [
+            (100, Process { parent: 1, started_at: 1 }),
+            (101, Process { parent: 100, started_at: 2 }),
+            (102, Process { parent: 101, started_at: 3 }),
+            (103, Process { parent: 100, started_at: 4 }),
+        ]
+        .into();
+        let read = |pid: u32| {
+            Some(match pid {
+                100 => environment(&["ZERON_ORIGIN=chat:a"]),
+                101 => environment(&["ZERON_LOGIN_URL_FILE=/tmp/x/browser-url"]),
+                _ => environment(&["PATH=/bin"]),
+            })
+        };
+        let mut origins = Origins::default();
+        let mut listeners = vec![listener_of(102), listener_of(103)];
+        origins.attribute(&mut listeners, &processes, read);
+        assert!(listeners[0].zeron_owned && listeners[0].signing_in, "the sign-in's callback");
+        assert!(listeners[1].zeron_owned && !listeners[1].signing_in, "a dev server beside it");
+        assert!(has_variable(&environment(&["A=1", "ZERON_LOGIN_URL_FILE="]), SIGN_IN_ENV));
+        assert!(!has_variable(&environment(&["XZERON_LOGIN_URL_FILE=1"]), SIGN_IN_ENV));
     }
     #[test]
     fn an_unreadable_environment_is_retried_not_remembered() {

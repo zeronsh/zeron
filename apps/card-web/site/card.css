@@ -1,0 +1,22 @@
+/* The card's type: the four Geist faces the native card uses, subset to the
+   characters a card can show (tools/fonts.mjs). */
+@font-face { font-family: "Geist"; font-weight: 600; font-style: normal; font-display: block; src: url("fonts/geist-semibold.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-weight: 700; font-style: normal; font-display: block; src: url("fonts/geist-bold.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-weight: 400; font-style: normal; font-display: block; src: url("fonts/geist-mono.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-weight: 500; font-style: normal; font-display: block; src: url("fonts/geist-mono-medium.woff2") format("woff2"); }
+
+/* The window behind the card: the themes' own, by the system's scheme. */
+:root { color-scheme: light dark; --window: #0e0e10; --ink: #ededef; --muted: rgba(237, 237, 239, 0.6); --faint: rgba(237, 237, 239, 0.42); }
+@media (prefers-color-scheme: light) {
+  :root { --window: #f6f6f7; --ink: #1b1b1d; --muted: rgba(27, 27, 29, 0.64); --faint: rgba(27, 27, 29, 0.45); }
+}
+:root[data-theme="dark"] { --window: #0e0e10; --ink: #ededef; --muted: rgba(237, 237, 239, 0.6); --faint: rgba(237, 237, 239, 0.42); }
+:root[data-theme="light"] { --window: #f6f6f7; --ink: #1b1b1d; --muted: rgba(27, 27, 29, 0.64); --faint: rgba(27, 27, 29, 0.45); }
+
+html, body { margin: 0; padding: 0; background: var(--window); color: var(--ink); }
+body { font: 15px/1.5 "Geist", ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+.stage { position: relative; width: 100%; height: 100%; overflow: hidden; }
+.stage canvas { position: absolute; inset: 0; }
+.stage .fallback { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: none; }
+.stage.failed .fallback { display: block; }
+.stage.failed canvas { display: none; }

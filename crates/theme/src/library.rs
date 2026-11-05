@@ -227,6 +227,36 @@ impl CustomThemeLibrary {
         Ok(entry_id)
     }
 
+    /// A family made here (a theme an agent or the person wrote as palettes,
+    /// `catalog::create`) added as an entry of its own: its id, made unique
+    /// as an import's is, checked as one is.
+    pub fn install_made(&mut self, mut family: ThemeFamily) -> Result<String> {
+        if family.variants.is_empty() {
+            bail!("a theme needs at least one variant");
+        }
+        self.ensure_capacity_for(family.variants.len())?;
+        let entry_id = unique_id(&family.id, self.entries.iter().map(|entry| entry.id.as_str()));
+        if entry_id != family.id {
+            rekey_family(&mut family, &entry_id);
+        }
+        let errors = validation_errors(&family);
+        if !errors.is_empty() {
+            bail!("theme validation failed: {}", errors.join("; "));
+        }
+        let selected_variant_ids = family.variants.iter().map(|variant| variant.id.clone()).collect();
+        self.entries.push(CustomThemeEntry {
+            id: entry_id.clone(),
+            name: family.name.clone(),
+            source: CustomThemeSource::ImportedSnapshot { imported_from: None },
+            family,
+            reports: BTreeMap::new(),
+            selected_variant_ids,
+            status: CustomThemeStatus::Ready,
+        });
+        self.validate_capacity()?;
+        Ok(entry_id)
+    }
+
     /// Reload a linked source. The existing compiled family is only replaced
     /// after a complete successful compile, preserving the last known good
     /// version on any source error.

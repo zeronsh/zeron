@@ -42,6 +42,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -78,6 +79,7 @@ fn mock_script() -> Vec<AgentEvent> {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         },
         done(DoneStatus::Completed),
     ]
@@ -1334,6 +1336,9 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         subagent_ref: Some(format!("{CHAT}--sub--{id}")),
         subagent_status: Some(status),
         subagent_tail: None,
+        exit_code: None,
+        output_truncated: false,
+        output_lines: None,
     }
 }
 
@@ -2640,6 +2645,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         resume: None,
         worktree: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     core.doc_host
         .queue_command(
@@ -2873,6 +2879,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         },
         AgentEvent::TextDelta { text: "two".into() },
         done(DoneStatus::Completed),
@@ -3276,6 +3283,7 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         },
         image.clone(),
         image.clone(),
@@ -3912,6 +3920,124 @@ async fn chat_images_come_only_from_their_chats_own_folder() {
     ] {
         let error = read(chat, path).await.expect_err(chat).to_string();
         assert!(error.contains(why), "{chat}: {error}");
+    }
+    core.shutdown().await;
+}
+
+/// A command's whole output comes from the host's run journal on request
+/// (`ReadToolOutput`), redacted as the doc's ten-line tail is; the doc says
+/// how many lines there are. Only the chat's host answers, and only for a
+/// command.
+#[tokio::test]
+async fn a_commands_whole_output_is_read_from_its_hosts_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let output: String = (1..=300)
+        .map(|i| format!("test case_{i} ... ok\n"))
+        .collect::<String>()
+        + "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n";
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                AgentEvent::ToolCall {
+                    id: "t1".into(),
+                    call: ToolCall::Exec {
+                        command: "cargo test".into(),
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "t1".into(),
+                    is_error: false,
+                    output: Some(output.clone()),
+                    diff: None,
+                    exit_code: Some(0),
+                },
+                AgentEvent::ToolCall {
+                    id: "r1".into(),
+                    call: ToolCall::ReadFile {
+                        path: "/w/a.rs".into(),
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "r1".into(),
+                    is_error: false,
+                    output: Some("fn main() {}".into()),
+                    diff: None,
+                    exit_code: None,
+                },
+                done(DoneStatus::Completed),
+            ],
+            step_delay: Duration::from_millis(5),
+            hang_until_interrupt: false,
+        }),
+    );
+    let here = core.device_id.clone();
+    core.workspace
+        .create_chat(CHAT, None, Some(&here), None, None)
+        .unwrap();
+    core.workspace
+        .create_chat("remote", None, Some("another-device"), None, None)
+        .unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-output",
+        SessionCommandPayload::Run {
+            request: run_request("test"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || {
+            entries(&core).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
+        },
+        "complete reply",
+    )
+    .await;
+    let all = entries(&core);
+    let tool = all
+        .iter()
+        .flat_map(|e| &e.parts)
+        .find(|p| p.id() == "t1")
+        .unwrap_or_else(|| panic!("the command's part: {all:#?}"));
+    let MessagePart::Tool {
+        output: Some(tail),
+        output_truncated: true,
+        output_lines: Some(lines),
+        ..
+    } = tool
+    else {
+        panic!("no tail: {tool:?}");
+    };
+    assert_eq!(tail.lines().count(), zeron_doc::COMMAND_TAIL_MAX_LINES);
+    assert_eq!(*lines, 301);
+
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let read = |chat: &str, tool: &str| {
+        client.call(
+            zeron_rpc::methods::READ_TOOL_OUTPUT,
+            serde_json::json!({ "chatId": chat, "toolId": tool, "offset": 0 }),
+        )
+    };
+    let chunk: zeron_proto::ToolOutputChunk =
+        serde_json::from_value(read(CHAT, "t1").await.expect("the whole output")).unwrap();
+    assert!(chunk.done && !chunk.trimmed);
+    assert_eq!((chunk.lines, chunk.exit_code), (301, Some(0)));
+    assert!(chunk.text.starts_with("test case_1 ... ok\n"));
+    assert!(chunk.text.contains("test case_300 ... ok"));
+    assert!(!chunk.text.contains("ghp_abcdef"), "{}", chunk.text);
+    // Its last lines are the doc's tail, word for word.
+    assert!(chunk.text.ends_with(tail.as_str()));
+    for (chat, tool, why) in [
+        (CHAT, "r1", "Only a command's output"),
+        (CHAT, "nope", "tool_output.unavailable"),
+        ("remote", "t1", "another device"),
+        ("missing", "t1", "chat not found"),
+    ] {
+        let error = read(chat, tool).await.expect_err(tool).to_string();
+        assert!(error.contains(why), "{chat}/{tool}: {error}");
     }
     core.shutdown().await;
 }

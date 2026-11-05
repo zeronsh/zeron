@@ -1,0 +1,22 @@
+{
+  "id": "git",
+  "name": "Git",
+  "version": "1.0.0",
+  "description": "A chat's changes and history, on the device its checkout is on: stage, discard, commit, push and switch branches, as git does.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": [
+    "ui.add",
+    "sessions.read",
+    "files.read",
+    "panel.tabs",
+    "service",
+    "commands",
+    "clipboard",
+    "compose"
+  ],
+  "commands": [
+    "git"
+  ]
+}

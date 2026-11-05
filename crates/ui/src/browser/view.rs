@@ -839,8 +839,10 @@ impl Render for BrowserSurface {
                 .as_deref()
                 .and_then(|s| url::Url::parse(s).ok())
                 .is_some_and(|u| {
+                    // (A preview's `*.localhost` name goes through the proxy,
+                    // on whichever port it got.)
                     super::model::loopback(&u)
-                        && !(u.port() == Some(zeron_proto::PREVIEW_PROXY_PORT)
+                        && !(u.port().is_some()
                             && u.host_str()
                                 .is_some_and(|host| host.ends_with(".localhost")))
                 });

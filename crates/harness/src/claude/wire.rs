@@ -216,6 +216,9 @@ pub(crate) struct ContentBlock {
     pub tool_use_id: String,
     #[serde(default)]
     pub is_error: Option<bool>,
+    /// A `tool_result`'s content: a string, or an array of content blocks.
+    #[serde(default)]
+    pub content: Value,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -634,6 +637,17 @@ pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
         "type": "control_request",
         "request_id": request_id,
         "request": { "subtype": "interrupt", "cancel_queued": true },
+    })
+    .to_string()
+}
+
+/// Stop one background task (`stop_task`): the CLI kills it, then reports
+/// it `stopped` and the roster without it.
+pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "stop_task", "task_id": task_id },
     })
     .to_string()
 }

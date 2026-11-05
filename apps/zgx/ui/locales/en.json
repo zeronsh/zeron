@@ -1,0 +1,3420 @@
+{
+  "language": {
+    "system": "System",
+    "en": "English",
+    "zh_hans": "简体中文"
+  },
+  "time": {
+    "now": "now",
+    "just_now": "just now",
+    "yesterday": "yesterday",
+    "short": {
+      "seconds": "{n}s",
+      "minutes": "{n}m",
+      "hours": "{n}h",
+      "days": "{n}d",
+      "weeks": "{n}w",
+      "hours_minutes": "{h}h {m}m"
+    },
+    "ago": {
+      "minutes": "{n, plural, one {# minute ago} other {# minutes ago}}",
+      "hours": "{n, plural, one {# hour ago} other {# hours ago}}",
+      "days": "{n, plural, one {# day ago} other {# days ago}}",
+      "weeks": "{n, plural, one {# week ago} other {# weeks ago}}",
+      "months": "{n, plural, one {# month ago} other {# months ago}}",
+      "years": "{n, plural, one {# year ago} other {# years ago}}"
+    },
+    "month_short": "{m, select, 1 {Jan} 2 {Feb} 3 {Mar} 4 {Apr} 5 {May} 6 {Jun} 7 {Jul} 8 {Aug} 9 {Sep} 10 {Oct} 11 {Nov} 12 {Dec} other {}}",
+    "weekday_short": "{d, select, 1 {Sun} 2 {Mon} 3 {Tue} 4 {Wed} 5 {Thu} 6 {Fri} 7 {Sat} other {}}",
+    "date": "{m, select, 1 {Jan} 2 {Feb} 3 {Mar} 4 {Apr} 5 {May} 6 {Jun} 7 {Jul} 8 {Aug} 9 {Sep} 10 {Oct} 11 {Nov} 12 {Dec} other {}} {day}, {year}",
+    "month_day": "{m, select, 1 {Jan} 2 {Feb} 3 {Mar} 4 {Apr} 5 {May} 6 {Jun} 7 {Jul} 8 {Aug} 9 {Sep} 10 {Oct} 11 {Nov} 12 {Dec} other {}} {day}",
+    "date_time": "{date} at {time}",
+    "clock_12": "{h}:{mm} {half, select, am {AM} other {PM}}"
+  },
+  "ds": {
+    "status": {
+      "working": "Working",
+      "connecting": "Connecting",
+      "waiting": "Waiting",
+      "input": "Input",
+      "input_long": "Awaiting Input",
+      "approval": "Approval",
+      "approval_long": "Pending Approval",
+      "plan": "Plan ready",
+      "plan_long": "Plan Ready",
+      "done": "Done",
+      "done_long": "Completed",
+      "failed": "Failed",
+      "limited": "Limited"
+    },
+    "file_tree": {
+      "status": {
+        "modified": "Modified",
+        "added": "Added",
+        "untracked": "Untracked",
+        "renamed": "Renamed",
+        "deleted": "Deleted",
+        "conflict": "Conflict"
+      },
+      "holds": {
+        "modified": "Holds modified files",
+        "added": "Holds added files",
+        "untracked": "Holds untracked files",
+        "renamed": "Holds renamed files",
+        "deleted": "Holds deleted files",
+        "conflict": "Holds conflict files"
+      },
+      "name_needed": "A name is needed",
+      "name_slash": "A name can't hold a slash",
+      "name_reserved": "\"{name}\" is reserved",
+      "name_taken_folder": "This folder already has a folder named \"{name}\"",
+      "name_taken_file": "This folder already has a file named \"{name}\"",
+      "into_itself": "A folder can't go inside itself",
+      "open_new_tab": "Open in New Tab",
+      "reveal": "Reveal in Finder",
+      "new_file": "New File…",
+      "new_folder": "New Folder…",
+      "add_to_chat": "Add to Chat",
+      "copy_path": "Copy Path",
+      "copy_paths": "Copy Paths",
+      "copy_relative_path": "Copy Relative Path",
+      "copy_relative_paths": "Copy Relative Paths",
+      "copied": "{n, plural, one {Copied path} other {Copied # paths}}",
+      "copied_relative": "{n, plural, one {Copied relative path} other {Copied # paths}}",
+      "expand_all_inside": "Expand All Inside",
+      "collapse_all_inside": "Collapse All Inside",
+      "rename": "Rename…",
+      "trash": "{n, plural, one {Move to Trash} other {Move # Items to Trash}}",
+      "delete": "{n, plural, one {Delete} other {Delete # Items}}",
+      "confirm_trash_one": "Trash \"{name}\"?",
+      "confirm_trash_many": "Trash {n} items?",
+      "confirm_delete_one": "Delete \"{name}\" for good?",
+      "confirm_delete_many": "Delete {n} items for good?",
+      "collapse_all_folders": "Collapse All Folders",
+      "show_ignored_files": "Show Ignored Files",
+      "new_folder_name": "New folder's name",
+      "new_file_name": "New file's name",
+      "rename_named": "Rename {name}",
+      "folder_name": "Folder name",
+      "file_name": "File name",
+      "go_to": "Go to {name}",
+      "filter": "Filter files",
+      "clear_filter": "Clear filter",
+      "no_match": "No files match “{q}”",
+      "empty": "This folder is empty",
+      "actions": "Files actions"
+    },
+    "session_lanes": {
+      "open_side": "Open side chat {title}",
+      "open_subagent": "Open subagent {title}",
+      "show_more": "Show {n} more",
+      "side_chats": "Side chats",
+      "new_side": "New side chat",
+      "fork": "Fork chat",
+      "subagents": "Subagents",
+      "collapse_finished": "Collapse {n} finished subagents",
+      "expand_finished": "Expand {n} finished subagents",
+      "finished": "{n} finished"
+    },
+    "session_card": {
+      "ago": "{when} ago",
+      "no_project": "No project"
+    },
+    "working": {
+      "label": "Working",
+      "sending": "Sending…",
+      "word": "{word}…",
+      "words": {
+        "zeroning": "Zeroning",
+        "thinking": "Thinking",
+        "pondering": "Pondering",
+        "scheming": "Scheming",
+        "brewing": "Brewing",
+        "weaving": "Weaving",
+        "tinkering": "Tinkering",
+        "musing": "Musing",
+        "composing": "Composing",
+        "sifting": "Sifting",
+        "untangling": "Untangling",
+        "distilling": "Distilling",
+        "sketching": "Sketching",
+        "plotting": "Plotting",
+        "riffing": "Riffing",
+        "combobulating": "Combobulating",
+        "percolating": "Percolating",
+        "marinating": "Marinating",
+        "noodling": "Noodling",
+        "puzzling": "Puzzling",
+        "conjuring": "Conjuring"
+      }
+    },
+    "badge": {
+      "remove": "Remove {name}",
+      "pr": {
+        "open": "Open",
+        "merged": "Merged",
+        "closed": "Closed",
+        "draft": "Draft",
+        "tooltip": "{state} · {title}",
+        "label": "Pull request {n}, {state, select, open {open} merged {merged} closed {closed} other {draft}}"
+      },
+      "review": {
+        "approved": "Approved",
+        "changes": "Changes requested",
+        "commented": "Commented",
+        "pending": "Awaiting review"
+      },
+      "checks": {
+        "passing": "Checks passing",
+        "failing": "Checks failing",
+        "running": "Checks running"
+      },
+      "file": {
+        "added": "Added",
+        "modified": "Modified",
+        "deleted": "Deleted",
+        "renamed": "Renamed",
+        "untracked": "Untracked",
+        "conflict": "Conflict"
+      },
+      "diff": "{added} added, {removed} removed"
+    },
+    "kbd": {
+      "space": "Space",
+      "spoken": {
+        "command": "Command",
+        "shift": "Shift",
+        "option": "Option",
+        "control": "Control",
+        "return": "Return",
+        "delete": "Delete",
+        "forward_delete": "Forward Delete",
+        "escape": "Escape",
+        "tab": "Tab",
+        "up": "Up Arrow",
+        "down": "Down Arrow",
+        "left": "Left Arrow",
+        "right": "Right Arrow"
+      }
+    },
+    "account_row": {
+      "settings": "Settings"
+    },
+    "card_actions": {
+      "share_x": "Share on X",
+      "shared": "Shared",
+      "copy_link": "Copy link",
+      "copied": "Copied",
+      "save_image": "Save image",
+      "group": "Share your card"
+    },
+    "file_viewer": {
+      "status": {
+        "modified": "Modified",
+        "added": "Added",
+        "untracked": "Untracked",
+        "renamed": "Renamed",
+        "deleted": "Deleted",
+        "conflict": "Conflict",
+        "ignored": "Ignored"
+      },
+      "bytes": "{n} bytes",
+      "image_named": "Image {name}",
+      "show_in_tree": "Show {name} in the tree",
+      "unsaved": "Unsaved changes",
+      "zoom_in": "Zoom In",
+      "zoom_out": "Zoom Out",
+      "fit_or_actual": "Fit or actual size",
+      "fit_or_actual_tip": "Fit {fit} · Actual size {actual}",
+      "preview_or_source": "Preview or Source",
+      "show": "Show",
+      "preview": "Preview",
+      "source": "Source",
+      "go_to_line": "Go to Line…",
+      "wrap_lines": "Wrap Lines",
+      "fold_all": "Fold All",
+      "unfold_all": "Unfold All",
+      "fit": "Fit",
+      "actual_size": "Actual Size",
+      "copy_path": "Copy Path",
+      "reveal": "Reveal in Finder",
+      "open_in_editor": "Open in Editor",
+      "find": "Find",
+      "deleted_on_disk": "Deleted on disk",
+      "changed_on_disk": "Changed on disk",
+      "keep_mine": "Keep Mine",
+      "choose": "Choose a file to see it here",
+      "hint_filter": "Filter",
+      "hint_move": "Move",
+      "hint_open": "Open",
+      "binary": {
+        "title": "{name} isn't text",
+        "body_size": "It's a {size} binary file, so there's nothing here to read.",
+        "body": "It's a binary file, so there's nothing here to read.",
+        "open_default": "Open in Default App"
+      },
+      "large": {
+        "title": "{name} is too big to show here",
+        "body": "It's {size}. Files up to {limit} open here; open it in an editor instead."
+      },
+      "gone": {
+        "title": "{name} was deleted",
+        "body": "It's no longer on disk. Git still has it: restore it from the last commit to see it again."
+      },
+      "error": {
+        "title": "Couldn't open {name}",
+        "body": "Something went wrong reading it."
+      },
+      "empty": {
+        "title": "{name} is empty",
+        "body": "There's nothing in it yet."
+      },
+      "lines": "{n, plural, one {# line} other {# lines}}",
+      "toggle_fit": "Double-click to toggle fit"
+    },
+    "dropdown": {
+      "placeholder": "Choose…",
+      "search_placeholder": "Search…",
+      "no_matches": "No matches",
+      "nothing_matches": "Nothing matches “{query}”"
+    },
+    "select": {
+      "placeholder": "Choose…"
+    },
+    "context_menu": {
+      "label": "Context menu"
+    },
+    "dialog": {
+      "type_confirm": {
+        "before": "Type ",
+        "after": " to confirm.",
+        "name": "Type {word} to confirm"
+      }
+    },
+    "settings": {
+      "nav": {
+        "pages": "Settings pages",
+        "resize": "Resize sidebar"
+      },
+      "catalog": {
+        "nothing_matches": "Nothing matches “{query}”",
+        "try_another": "Try another word, or look in the other tab.",
+        "clear_search": "Clear search"
+      }
+    },
+    "appearance_picker": {
+      "color_scheme": "Color scheme",
+      "scheme": {
+        "system": "System",
+        "light": "Light",
+        "dark": "Dark"
+      },
+      "window": "Window",
+      "frosted": "Frosted",
+      "opaque": "Opaque",
+      "frosted_hint": "The desktop shows through, softly.",
+      "opaque_hint": "Solid surfaces throughout.",
+      "accent": "Accent"
+    },
+    "look": {
+      "accent": {
+        "default": "Theme default",
+        "orange": "Orange",
+        "amber": "Amber",
+        "green": "Green",
+        "cyan": "Cyan",
+        "blue": "Blue",
+        "pink": "Pink"
+      }
+    },
+    "shortcut_recorder": {
+      "none": "None",
+      "name": "Shortcut",
+      "press": "Press a shortcut",
+      "press_waiting": "Press a shortcut…",
+      "change": "Change {name}, now {keys}"
+    },
+    "stepper": {
+      "decrease": "Decrease",
+      "increase": "Increase"
+    },
+    "split_button": {
+      "more": "More options"
+    },
+    "text_field": {
+      "show_password": "Show password"
+    },
+    "text_area": {
+      "line_over": "Line {line}: {length}/{limit}"
+    },
+    "search_field": {
+      "results": "{n, plural, one {{count} result} other {{count} results}}"
+    },
+    "progress": {
+      "name": "Progress",
+      "value": "{name}, {percent}%",
+      "working": "{name}, working"
+    },
+    "slider": {
+      "name_value": "{name}, {value}"
+    },
+    "private_text": {
+      "show_email": "Show email"
+    },
+    "layout": {
+      "breadcrumbs": "Breadcrumbs"
+    },
+    "org_list": {
+      "invited": "{from} invited you",
+      "decline": "Decline",
+      "accept": "Accept"
+    },
+    "title_bar": {
+      "toggle_sidebar": "Toggle sidebar",
+      "forward": "Forward"
+    },
+    "address_line": {
+      "checking_label": "Checking the address",
+      "checking": "Checking",
+      "available": "Available",
+      "taken": "Taken"
+    },
+    "files_pane": {
+      "toggle_tree": "Toggle File Tree",
+      "toggle_tree_tip": "Toggle File Tree  {keys}",
+      "close_tree": "Close the file tree"
+    },
+    "code_editor": {
+      "pattern": {
+        "ends_in_backslash": "Ends in \\",
+        "bracket_open": "A [ isn't closed",
+        "nothing_to_repeat": "Nothing to repeat before {c}",
+        "group_repeat": "Groups can't repeat here",
+        "no_alternation": "No | (alternation) in patterns"
+      },
+      "code": "Code",
+      "no_results": "No results",
+      "count_of": "{cur} of {total}",
+      "match_case": "Match Case",
+      "whole_word": "Whole Word",
+      "use_pattern": "Use Pattern",
+      "show_options": "Show Options",
+      "toggle_replace": "Toggle Replace",
+      "find": "Find",
+      "previous_match": "Previous Match",
+      "next_match": "Next Match",
+      "close": "Close",
+      "replace": "Replace",
+      "replace_all": "All",
+      "go_to_line_label": "Go to line",
+      "line": "Line",
+      "line_range": "1 to {n}",
+      "caret": "Ln {line}, Col {column}",
+      "caret_selected": "Ln {line}, Col {column} ({n} selected)",
+      "go_to_line": "Go to Line",
+      "edited": "Edited",
+      "tabs": "Tabs",
+      "spaces": "Spaces: {n}",
+      "wrap": "Wrap",
+      "no_wrap": "No Wrap",
+      "toggle_soft_wrap": "Toggle Soft Wrap",
+      "cut": "Cut",
+      "paste": "Paste",
+      "select_all": "Select All",
+      "add_comment": "Add a Comment",
+      "go_to_line_menu": "Go to Line…",
+      "toggle_comment": "Toggle Comment",
+      "move_line_up": "Move Line Up",
+      "move_line_down": "Move Line Down",
+      "duplicate_line": "Duplicate Line",
+      "fold": "Fold",
+      "unfold": "Unfold",
+      "fold_all": "Fold All",
+      "unfold_all": "Unfold All",
+      "soft_wrap": "Soft Wrap"
+    },
+    "sidebar": {
+      "unknown_device": "Unknown device",
+      "pr": {
+        "open": "Open",
+        "merged": "Merged",
+        "closed": "Closed",
+        "draft": "Draft",
+        "tooltip": "{state} · {title}",
+        "tooltip_untitled": "{state} pull request",
+        "label": "Pull request {n}, {state, select, open {open} merged {merged} closed {closed} other {draft}}"
+      },
+      "subagents_running": "{n, plural, one {# subagent running} other {# subagents running}}",
+      "session_name": "Session name",
+      "archive": "Archive",
+      "unarchive": "Unarchive",
+      "session_actions": "Session actions",
+      "projects": "Projects",
+      "devices": "Devices",
+      "sessions": "Sessions",
+      "new_chat_in": "New chat in {name}",
+      "new_chat_in_on": "New chat in {name} on {device}",
+      "new_chat": "New chat",
+      "search": "Search",
+      "pinned": "Pinned",
+      "drop_to_pin": "Drop here to pin",
+      "drop_sessions": "Drop sessions here",
+      "archived": "Archived",
+      "section_options": "Section options",
+      "rename": "Rename",
+      "archive_all": "Archive all",
+      "delete": "Delete",
+      "section_name": "Section name",
+      "project_actions": "Project actions",
+      "show_more": "Show {n} more",
+      "new_section": "New section",
+      "settings": "Settings",
+      "view": {
+        "by_project": "By project",
+        "by_device": "By device",
+        "none": "None",
+        "last_updated": "Last updated",
+        "created": "Created",
+        "branch": "Branch",
+        "pr": "Pull request",
+        "harness": "Harness",
+        "project_icon": "Project icon",
+        "location": "Location",
+        "project_filter": "Project filter",
+        "archived": "Archived",
+        "options": "Sidebar view options",
+        "organize": "Organize",
+        "sort": "Sort",
+        "show": "Show",
+        "compact": "Compact",
+        "create_section": "Create section",
+        "keep_active": "Active when collapsed",
+        "devices_first": "Devices first",
+        "projects_first": "Projects first",
+        "empty_projects": "Empty projects"
+      },
+      "empty": "No sessions yet",
+      "resize": "Resize sidebar",
+      "show_less": "Show less",
+      "empty_projects_word": "Empty",
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
+    },
+    "git": {
+      "pull_request": "Pull request",
+      "file": "File",
+      "comment_on_line": "Comment on line {n}",
+      "comment_on_old_line": "Comment on old line {n}",
+      "running": "Running",
+      "see_what_failed": "See what failed",
+      "log": "Log",
+      "check_failed": "{name} failed",
+      "check_running": "{name} running",
+      "passed_of": "{passed} of {total} passed",
+      "checks": "Checks",
+      "checks_label": "Checks: {summary}",
+      "checks_label_called": "Checks: {summary}, {called}",
+      "someone": "Someone",
+      "pushed": "pushed {n} commits",
+      "pushed_to": "pushed {n} commits to {branch}",
+      "commented_on": "commented on",
+      "commented": "commented",
+      "checks_ran": "Checks ran on {sha}: {summary}",
+      "checks_ran_called": "Checks ran on {sha}: {summary}, {called}",
+      "approved": "approved",
+      "asked_for_changes": "asked for changes",
+      "merged": "merged",
+      "merged_into": "merged into {base}",
+      "split": "Side by side",
+      "wrap": "Wrap long lines",
+      "check_failed_more": "{name} +{n} failed",
+      "check_running_more": "{name} +{n} running"
+    },
+    "git_changes": {
+      "files": "{count} {n, plural, one {file} other {files}}",
+      "files_in_folders": "{count} {n, plural, one {file} other {files}} in {folders} folders",
+      "files_match": "{n} of {total} files match",
+      "filter": "Filter files"
+    },
+    "github_block": {
+      "connecting": "Connecting GitHub",
+      "contacting": "Contacting GitHub…",
+      "waiting": "Waiting for you to approve on GitHub…",
+      "expired": "The code expired before it was approved.",
+      "not_connected": "Not connected",
+      "connect": "Connect",
+      "disconnect": "Disconnect",
+      "copy_code": "Copy GitHub code {code}",
+      "enter_code": "Enter this code on GitHub",
+      "approve": "Approve Zeron there. This page moves on by itself.",
+      "open_github": "Open GitHub",
+      "repositories": "{n, plural, one {1 repository} other {# repositories}}",
+      "no_repositories": "No repositories selected yet",
+      "and_more": "{first} and {n} more",
+      "choose": "Choose on GitHub"
+    },
+    "lightbox": {
+      "image_copied": "Image copied",
+      "copy_failed": "Couldn't copy the image",
+      "path_copied": "Path copied",
+      "reveal_failed": "Couldn't show it in Finder",
+      "image": "Image",
+      "image_named": "Image {name}",
+      "previous": "Previous image",
+      "next": "Next image",
+      "zoom_out": "Zoom out",
+      "zoom_in": "Zoom in",
+      "fit_or_own": "Fit, or its own size",
+      "fit_tip": "Fit  {fit}  ·  Actual size  {actual}",
+      "copy_image": "Copy image",
+      "copy_image_menu": "Copy Image",
+      "copy_path": "Copy Path",
+      "show_in_finder": "Show in Finder",
+      "not_shown_named": "{name} couldn't be shown",
+      "not_shown": "The picture couldn't be shown",
+      "gone": "Its file has gone.",
+      "viewer": "Image viewer",
+      "open_named": "Open {name}",
+      "open": "Open image",
+      "position": "{i} of {n}"
+    },
+    "composer": {
+      "access": {
+        "label": "Access",
+        "supervised": "Supervised",
+        "supervised_hint": "Ask before commands and file changes.",
+        "edits": "Auto-accept edits",
+        "edits_hint": "Apply edits, ask before other actions.",
+        "full": "Full access",
+        "full_hint": "Run commands and edits without asking."
+      },
+      "plan": {
+        "mode": "Plan mode",
+        "hint": "Explore and propose a plan before changing anything.",
+        "short": "Plan"
+      },
+      "checkout": {
+        "label": "Checkout",
+        "local": "Local checkout",
+        "local_hint": "Work in the project's own folder.",
+        "worktree": "Worktree",
+        "worktree_hint": "An isolated copy, on a branch of its own."
+      },
+      "work_in": "Work in",
+      "project": {
+        "label": "Project",
+        "search": "Search projects…",
+        "none_action": "Don't work in a project",
+        "new": "New project",
+        "none": "No project"
+      },
+      "device": {
+        "label": "Device",
+        "search": "Search devices…",
+        "you": "You"
+      },
+      "context_used": "Context used",
+      "dismiss": "Dismiss",
+      "cancel_dictation": "Cancel dictation",
+      "attach": "Attach",
+      "stop_dictating": "Stop dictating",
+      "dictate": "Dictate",
+      "queue_message": "Queue message",
+      "send_message": "Send message",
+      "stop": "Stop",
+      "back": "Back",
+      "next": "Next",
+      "submit": "Submit",
+      "deny": "Deny",
+      "always_allow": "Always allow",
+      "allow": "Allow",
+      "listening": "Listening",
+      "placeholder": {
+        "answer_picked": "Type your own answer, or leave this blank to use the selected option",
+        "answer": "Type your own answer, or pick an option above",
+        "instead": "Or say what to do instead…",
+        "default": "Do anything…"
+      },
+      "message": "Message",
+      "branch": {
+        "label": "Branch",
+        "no_ref": "No ref",
+        "search": "Search branches…",
+        "fixed": "Branch {name}"
+      },
+      "context": {
+        "heading": "Context window",
+        "percent": "{n}%",
+        "of": "{used} / {window} tokens",
+        "left": "{n} tokens remaining",
+        "used_only": "{n} tokens used",
+        "no_limit": "Context limit not reported",
+        "capacity": "{n} token capacity",
+        "waiting": "Waiting for context usage",
+        "unreported": "Context usage not reported by this agent yet"
+      }
+    },
+    "markdown": {
+      "fit_content": "Fit content",
+      "copy_code": "Copy code",
+      "copied": "Copied",
+      "view_named": "View {name}",
+      "done": "Done"
+    },
+    "math": {
+      "style": {
+        "fira": "Sans",
+        "stix": "Times-like",
+        "computer_modern": "LaTeX's own",
+        "libertinus": "Book serif",
+        "pagella": "Palatino-like",
+        "euler": "Upright, calligraphic"
+      }
+    },
+    "tool_detail": {
+      "more_lines": "{n, plural, one {… # more line} other {… # more lines}}",
+      "diff_of": "Diff of {path}",
+      "diff_of_file": "Diff of the file",
+      "show_full": "{what, select, diff {Show full diff} other {Show full output}}",
+      "show_full_size": "{what, select, diff {Show full diff ({size})} other {Show full output ({size})}}",
+      "loading_full": "{what, select, diff {Loading full diff…} other {Loading full output…}}",
+      "failed_full": "{what, select, diff {Couldn't load full diff — tap to retry} other {Couldn't load full output — tap to retry}}",
+      "earlier_trimmed": "… earlier output trimmed",
+      "exit_code": "Exit code {code}",
+      "loading_all_lines": "Loading all {n} lines…",
+      "whole_offline": "The device that ran this command is offline. Try again when it's back.",
+      "whole_update": "Update Zeron on the device that ran this command to see all of its output.",
+      "whole_unavailable": "The rest of this output wasn't kept.",
+      "whole_running": "This command hasn't finished yet.",
+      "whole_failed": "Couldn't load the rest of this output. Try again."
+    },
+    "activity": {
+      "phrase": {
+        "thought": "{n, plural, one {thought} other {thought # times}}",
+        "search": "{n, plural, one {searched once} other {searched # times}}",
+        "glob": "{n, plural, one {listed files} other {listed files # times}}",
+        "read": "{n, plural, one {read 1 file} other {read # files}}",
+        "exec": "{n, plural, one {ran 1 command} other {ran # commands}}",
+        "edit": "{n, plural, one {edited 1 file} other {edited # files}}",
+        "write": "{n, plural, one {wrote 1 file} other {wrote # files}}",
+        "web": "{n, plural, one {searched the web} other {searched the web # times}}",
+        "todo": "{n, plural, one {updated the plan} other {updated the plan # times}}",
+        "agent": "{n, plural, one {ran a subagent} other {ran # subagents}}"
+      },
+      "failed": "{n} failed",
+      "show_fewer_lines": "Show fewer lines",
+      "show_all_lines": "Show all {n} lines",
+      "open_subagent": "Open subagent {title}",
+      "subagent": "Subagent",
+      "worked_for": "Worked for {secs}s · {summary}"
+    },
+    "transcript": {
+      "copy_message": "Copy message",
+      "switched": "Switched from {from} to {to}",
+      "not_delivered": "Not delivered — send again",
+      "reply": "Reply",
+      "you": "You",
+      "agent": "Agent",
+      "several_messages": "Several messages",
+      "two_names": "{first} and {final}",
+      "n_messages": "{n} messages",
+      "mention": "Mention",
+      "attach": "Attach",
+      "mention_hint": "Mention the selection in the draft",
+      "attach_hint": "Attach the selection to the message",
+      "conversation": "Conversation",
+      "jump_to_latest": "Jump to latest",
+      "new_reply": "New reply",
+      "display_failed": "This couldn't be shown",
+      "image_failed": "Couldn't show this image",
+      "visual_failed": "Couldn't show this visual"
+    },
+    "user_message": {
+      "open_named": "Open {name}",
+      "appshot_label": "{app} Appshot: {title}",
+      "appshot": "{app} · Appshot",
+      "you": "You",
+      "collapse": "Collapse message",
+      "expand": "Expand message",
+      "show_less": "Show less",
+      "show_more": "Show more"
+    },
+    "reply_picture": {
+      "not_a_picture": "Not a picture this can show",
+      "gone": "Its file has gone",
+      "not_shown": "{name} couldn't be shown",
+      "open_named": "Open {name}",
+      "loading_named": "{name}, loading",
+      "unavailable": "Image unavailable",
+      "copy_image": "Copy image",
+      "copy_image_menu": "Copy Image",
+      "copy_path": "Copy Path",
+      "show_in_finder": "Show in Finder",
+      "open": "Open",
+      "actions": "Picture actions"
+    },
+    "drop_overlay": {
+      "drop": "Drop to attach"
+    },
+    "comment": {
+      "reply_placeholder": "Reply…",
+      "reply": "Reply",
+      "send_hint": "{key} to send",
+      "comment": "Comment",
+      "resolved": "Resolved",
+      "resolve": "Resolve",
+      "actions": "Comment actions"
+    },
+    "inline_block": {
+      "add_comment": "Add a Comment",
+      "comment": "Comment",
+      "placeholder": "Leave a comment"
+    },
+    "selection_menu": {
+      "look_up": "Look Up “{text}”",
+      "select_all": "Select All",
+      "selection": "Selection"
+    },
+    "composer_ask": {
+      "question": "Question",
+      "approval": "Approval",
+      "close": "Close without answering",
+      "close_esc": "Close without answering · Esc",
+      "multi": "Select one or more options."
+    },
+    "composer_cargo": {
+      "remove": "Remove {name}",
+      "uploading": "Uploading {n}%",
+      "retry_named": "Retry {name}",
+      "retry": "Retry",
+      "annotation": "Annotation {n}: {note}",
+      "show_fewer": "Show fewer attachments",
+      "show_more": "Show {n} more attachments",
+      "show_less": "Show less",
+      "more": "+{n} more",
+      "comment_from": "From {plugin}"
+    },
+    "composer_dock": {
+      "fold": "Fold {title}",
+      "open": "Open {title}",
+      "rest": "{n} more: {names}",
+      "send_now": "Send now",
+      "steer": "Steer",
+      "send_next": "Send next",
+      "send_now_hint": "Send now, interrupting the turn",
+      "steer_hint": "Steer: a word to the agent mid-turn",
+      "send_next_hint": "Send at the next turn",
+      "hint_last": "{what} · {key}",
+      "save_to_queue": "Save to queue",
+      "cancel": "Cancel",
+      "edit": "Edit",
+      "remove": "Remove",
+      "editing": "Editing in composer",
+      "show_steps": "Show {n} {later, select, true {later} other {earlier}} steps",
+      "steps": "{n} {later, select, true {later} other {earlier}}",
+      "stop_named": "Stop {name}",
+      "stop": "Stop",
+      "all_done": "All done",
+      "dismiss_todos": "Dismiss todo list",
+      "dismiss": "Dismiss",
+      "todo": "Todo",
+      "nothing_running": "Nothing running",
+      "more_running": "{n} more",
+      "stop_all": "Stop all",
+      "running": "Running",
+      "queued_messages": "Queued messages",
+      "queued": "Queued"
+    },
+    "composer_mentions": {
+      "files": "Files",
+      "commands": "Commands",
+      "skills": "Skills",
+      "what": {
+        "files": "files",
+        "commands": "commands",
+        "skills": "skills"
+      },
+      "none_available": "No {what} available",
+      "none_matching": "No matching {what}"
+    },
+    "model_picker": {
+      "starred": "Starred",
+      "star": "Star",
+      "unstar": "Unstar",
+      "fast_mode": "Fast mode",
+      "default": "Default",
+      "reasoning": "REASONING",
+      "model": "Model",
+      "search_starred": "Search starred models…",
+      "search_agent": "Search {agent} models…",
+      "search_all": "Search models…",
+      "no_starred": "No starred models",
+      "no_starred_hint": "Star a model to keep it here",
+      "no_models": "No models",
+      "none_to_offer": "{agent} has none to offer",
+      "not_found": "No models found",
+      "not_found_hint": "Nothing in {where} matches “{q}”",
+      "where_starred": "starred models",
+      "where_models": "models"
+    },
+    "effort_slider": {
+      "reasoning": "Reasoning"
+    },
+    "provider_card": {
+      "resets_at": "resets {when}",
+      "usage": "{label} usage",
+      "session": "Session",
+      "week": "Week",
+      "account_actions": "Account actions",
+      "switch": "Switch to this account",
+      "use_banked": "Use a banked reset…",
+      "remove": "Remove account",
+      "reset_just_now": "{plan} · Limits reset just now",
+      "limit_reached_at": "{plan} · Limit reached, resets at {at}",
+      "limit_reached_plan": "{plan} · Limit reached, {words}",
+      "limit_reached": "Limit reached, {words}",
+      "window_resets": "{window}: {words}",
+      "windows": "Session · Week",
+      "account": "Account",
+      "in_use": "In use",
+      "banked": "{n, plural, =0 {No resets banked} one {# reset banked} other {# resets banked}}",
+      "banked_now": "One starts the session and week over now, instead of waiting until {at}.",
+      "banked_kept": "Kept for the next time a limit is hit.",
+      "use_reset": "Use a reset",
+      "connect": "Connect a {name} account",
+      "add_account": "Add account",
+      "signing_in_to": "Signing in to {name}",
+      "signing_in_hint": "Waiting for you to finish in the browser. Nothing changes until you switch.",
+      "signing_in": "Signing in",
+      "cancel": "Cancel",
+      "paste_code": "Paste the authorization code",
+      "paste_code_hint": "Once you've signed in, the page shows a code. Paste it to finish signing in to {name}.",
+      "code_name": "Authorization code",
+      "code": "Code",
+      "finish": "Finish",
+      "failed": "Couldn't sign in to {name}",
+      "failed_hint": "The browser didn't finish. Nothing was changed.",
+      "dismiss": "Dismiss",
+      "try_again": "Try again",
+      "version_available": "v{v} · v{latest} available",
+      "update": "Update",
+      "settings": "{name} settings",
+      "enabled": "{name} on",
+      "installing_named": "Installing {name}",
+      "installing": "Installing",
+      "install": "Install",
+      "manual": "Install {name} yourself to use it.",
+      "unavailable": "Couldn't check {where} for agents",
+      "unavailable_hint": "Agents already set up keep working. Zeron will look again when it can.",
+      "sign_in": "Sign in to {name}",
+      "sign_in_hint": "Opens your browser to sign in.",
+      "banked_now_soon": "One starts the session and week over now.",
+      "reset_using": "Using a reset…",
+      "reset_failed": "Couldn't use the reset",
+      "reset_why": {
+        "mismatch": "Codex answered for another account. Nothing was used.",
+        "signed_out": "Codex couldn't confirm this login. Sign in again first.",
+        "missing": "This account is no longer saved on its device.",
+        "offline": "Zeron can't reach the device this account is on.",
+        "failed": "Codex didn't confirm it. Trying again won't use two."
+      },
+      "reset_nothing": "No window needed it, so the reset is still banked.",
+      "reset_gone": "That reset was no longer available.",
+      "reset_last": "That was the last one banked.",
+      "resets_title": "Use a Codex reset?",
+      "resets_body": "The session and week limits for {email} start over now. A reset is spent only if a window needed it.",
+      "resets_body_hidden": "The session and week limits for this account start over now. A reset is spent only if a window needed it.",
+      "resets_label": "Banked resets",
+      "reset_option": "{title} · expires {expires}",
+      "reset_option_soonest": "{title} · expires {expires} (soonest)",
+      "resets_unlisted": "Zeron couldn't list them just now. Close this and try again in a moment.",
+      "use_reset_confirm": "Use reset",
+      "open_terminal": "Open a terminal",
+      "open_page": "Open the page again",
+      "signed_in": "Signed in to {name}",
+      "signed_in_as": "Signed in as {who}.",
+      "signed_in_hint": "Its chats use this sign-in.",
+      "sign_out": "Sign out",
+      "code_check": "Check this code matches the one on the page that opened, then confirm there.",
+      "use_key": "Use {method}",
+      "use_key_hint": "Paste a key for {name}. It's kept on this device, as {var}.",
+      "paste_key": "Paste your {method}",
+      "paste_key_hint": "{name} reads it as {var}. It's kept on this device and never shown again.",
+      "key_name": "{var}",
+      "get_key": "Get a key",
+      "save_key": "Save"
+    },
+    "command_palette": {
+      "scope": {
+        "all": "All",
+        "sessions": "Sessions",
+        "commands": "Commands",
+        "files": "Files",
+        "settings": "Settings"
+      },
+      "pr": "Pull request {n}, {state, select, open {open} merged {merged} closed {closed} other {draft}}",
+      "pinned": "Pinned",
+      "recent": "Recent",
+      "loading": "Loading…",
+      "back_from": "Back from {title}",
+      "back_tip": "Back  ⌫",
+      "search": "Search",
+      "placeholder": "Search sessions, commands and settings…",
+      "next_scope": "Next scope",
+      "show_all_n": "Show all {n} {what}",
+      "archived": "Archived",
+      "empty": {
+        "nothing_yet": "Nothing here yet",
+        "nothing_in_scope": "Nothing in this scope",
+        "elsewhere": "{n} elsewhere. Backspace to search everything.",
+        "no_matches": "No matches",
+        "nothing_in_page": "Nothing in {title} matches “{q}”. Backspace goes back.",
+        "nothing_matches": "Nothing matches “{q}”. Try a title, a project, a branch or a device."
+      },
+      "verb": {
+        "open": "Open",
+        "show_all": "Show all",
+        "turn_off": "Turn off",
+        "turn_on": "Turn on",
+        "run": "Run"
+      },
+      "clear": "Clear",
+      "back": "Back",
+      "close": "Close",
+      "navigate": "Navigate",
+      "label": "Command palette"
+    },
+    "visual": {
+      "untitled": "Visual",
+      "loading": "Loading {title}…",
+      "unavailable": "{title} couldn't be shown",
+      "stopped": "The visual stopped",
+      "copy_error": "Copy error"
+    },
+    "links": {
+      "open": "Open",
+      "open_in_panel": "Open in browser panel",
+      "open_outside": "Open in default browser",
+      "copy_link": "Copy link",
+      "copy_address": "Copy address",
+      "copy_path": "Copy path",
+      "reveal": "Reveal in Finder",
+      "copied_link": "Link copied",
+      "link_not_ready": "This chat's link isn't ready yet"
+    },
+    "emoji_picker": {
+      "search": "Search emoji",
+      "results": "Results",
+      "none": "No emoji found",
+      "none_hint": "Try another word",
+      "hint": "Pick an emoji",
+      "kind": {
+        "recent": "Recently used",
+        "smileys": "Smileys & Emotion",
+        "people": "People & Body",
+        "nature": "Animals & Nature",
+        "food": "Food & Drink",
+        "travel": "Travel & Places",
+        "activities": "Activities",
+        "objects": "Objects",
+        "symbols": "Symbols",
+        "flags": "Flags"
+      },
+      "tone": {
+        "title": "Skin tone",
+        "default": "Default",
+        "light": "Light",
+        "medium_light": "Medium-light",
+        "medium": "Medium",
+        "medium_dark": "Medium-dark",
+        "dark": "Dark"
+      }
+    },
+    "editor_menu": {
+      "cut": "Cut",
+      "paste": "Paste",
+      "label": "Text"
+    }
+  },
+  "settings": {
+    "general": {
+      "language": {
+        "label": "Language",
+        "terms": "language locale translation chinese english 中文 简体 语言",
+        "system": "Follows your Mac's preferred language.",
+        "chosen": "The menu bar changes the next time Zeron opens."
+      },
+      "title": "General",
+      "terms": "preferences composer conversations behavior",
+      "send_with": {
+        "label": "Send messages with",
+        "terms": "enter return submit modifier keyboard composer",
+        "enter": "Shift Enter starts a new line.",
+        "mod_enter": "Enter starts a new line."
+      },
+      "compact_mode": {
+        "label": "Compact mode",
+        "description": "Collapse thinking and tools.",
+        "terms": "collapse thinking tools transcript dense density"
+      },
+      "escape_stops": {
+        "label": "Stop agent with Escape",
+        "description": "When no dialog or menu is open.",
+        "terms": "esc interrupt cancel halt run keyboard"
+      },
+      "close_panel": {
+        "label": "Close the panel with its last tab",
+        "description": "Otherwise it stays open on its home.",
+        "terms": "right panel tabs close empty side"
+      },
+      "privacy": "Privacy",
+      "hide_emails": {
+        "label": "Hide email addresses",
+        "description": "Blurred everywhere, for screen sharing. Click one to see it.",
+        "terms": "screen sharing recording blur blurred mosaic private censor redact"
+      },
+      "links": "Links",
+      "links_in": {
+        "external": "Your default browser.",
+        "tab": "A browser tab beside the conversation."
+      },
+      "open_links": {
+        "label": "Open links in",
+        "terms": "web link url browser tab panel zeron external"
+      },
+      "pull_requests": {
+        "label": "Open pull requests in",
+        "terms": "pr pull request badges board browser github",
+        "native": "Inspect them in Zeron, beside the conversation or the Pull requests board."
+      },
+      "thread_naming": {
+        "label": "Thread naming",
+        "terms": "titles rename sessions model",
+        "session_agent": "Session agent",
+        "auto": "Each thread is named by its own agent.",
+        "model": "A small model keeps titles fast and cheap."
+      },
+      "git": "Git",
+      "git_description": "On this Mac.",
+      "worktrees": {
+        "label": "Custom worktree location",
+        "terms": "folder directory path checkout branches",
+        "env": "Set by ZERON_WORKTREES_DIR: {path}",
+        "in": "New worktrees go in {path}.",
+        "in_zeron": "New worktrees go in Zeron's folder.",
+        "folder": "Folder",
+        "folder_hint": "Press Enter to use it.",
+        "folder_name": "Worktree folder"
+      },
+      "commit_credit": {
+        "label": "Credit Zeron in commits",
+        "terms": "co-author coauthor attribution bot commit message",
+        "cloud": "Always on for Cloud",
+        "on": "Agents' commits add zeronsh[bot] as a co-author"
+      }
+    },
+    "engine": {
+      "outdated": "Update Zeron on this Mac to change this.",
+      "offline": "Zeron isn't running on this Mac.",
+      "couldnt_save": "Couldn't save that"
+    },
+    "prefs": {
+      "milliseconds": "{n} ms",
+      "seconds": "{n} s",
+      "default_browser": "Default browser",
+      "send_with": {
+        "enter": "Enter",
+        "mod_enter": "{key}"
+      },
+      "pull_requests": {
+        "native": "Pull request view",
+        "browser": "In-app browser"
+      }
+    },
+    "search": {
+      "placeholder": "Search settings",
+      "results": "Settings found",
+      "empty": "No settings match."
+    },
+    "appearance": {
+      "title": "Appearance",
+      "terms": "theme look colors",
+      "description": "How Zeron looks on this Mac.",
+      "motion": "Motion",
+      "fonts": "Fonts and layout",
+      "new_chat": "New chat",
+      "new_chat_description": "What a new chat opens on.",
+      "pt": "{n} pt",
+      "pt_default": "{n} pt (default)",
+      "scheme": {
+        "label": "Mode",
+        "terms": "color scheme system light dark mode",
+        "description": "Light, dark, or as the system is.",
+        "system": "System",
+        "light": "Light",
+        "dark": "Dark"
+      },
+      "theme": {
+        "light": "Light theme",
+        "dark": "Dark theme",
+        "one": "Theme",
+        "terms": "theme colors colours palette vscode dracula",
+        "more": "All themes",
+        "more_description": "Browse every theme, or import one from VS Code."
+      },
+      "accent": {
+        "label": "Accent color",
+        "terms": "tint highlight swatch colour"
+      },
+      "reduce_motion": {
+        "label": "Reduce motion",
+        "terms": "animation accessibility movement fade spring",
+        "system_on": "On while your Mac's Reduce motion is on: moves land at once and fades stay short.",
+        "description": "Moves land at once and fades stay short. On whenever your Mac's Reduce motion is on."
+      },
+      "glass": {
+        "label": "Frosted glass",
+        "terms": "glass translucent opaque transparency blur vibrancy material",
+        "description": "The desktop shows through the window. Off, it's solid."
+      },
+      "text_size": {
+        "label": "Interface text size",
+        "terms": "interface font typeface text size menus conversations bigger smaller",
+        "description": "Menus and conversations. Code has its own, below."
+      },
+      "code_font_size": {
+        "label": "Code & diff font size",
+        "terms": "monospace typeface editor files size points",
+        "description": "Code, diffs, and files."
+      },
+      "conversation_width": {
+        "label": "Conversation width",
+        "terms": "transcript messages composer column maximum wide narrow",
+        "description": "Maximum width for messages and the composer."
+      },
+      "render_math": {
+        "label": "Render math",
+        "terms": "latex tex formula equation markdown katex",
+        "description": "LaTeX in replies as formulas. Off, it shows as code."
+      },
+      "math_font": {
+        "label": "Math font",
+        "terms": "latex tex formula equation typeface stix computer modern"
+      },
+      "math_size": {
+        "label": "Math size",
+        "terms": "latex tex formula equation scale percent",
+        "description": "Against the text around a formula."
+      },
+      "wallpaper": {
+        "label": "Wallpaper",
+        "terms": "background image picture new thread plugin scene",
+        "none": "None",
+        "none_description": "A new chat opens on the window itself.",
+        "image_description": "A picture of your own.",
+        "choose_title": "Choose a Background Image",
+        "images": "Images",
+        "unsupported": "That picture can't be shown. Choose a PNG or JPEG.",
+        "couldnt_keep": "Zeron couldn't keep that picture. Try again.",
+        "image": {
+          "label": "Image",
+          "terms": "background picture photo choose replace remove adjust zoom",
+          "none": "No image chosen",
+          "missing": "Image unavailable. Choose a replacement or remove it.",
+          "adjust": "Adjust",
+          "choose": "Choose Image",
+          "replace": "Replace",
+          "remove": "Remove"
+        },
+        "adjust": {
+          "title": "Adjust background",
+          "body": "Drag the picture to frame it, and zoom in with the slider.",
+          "done": "Done",
+          "preview": "Background preview",
+          "zoom": "Zoom"
+        },
+        "from_plugin": "From {name}. Choose None or Image to use your own instead.",
+        "open_plugin": "Open {name}"
+      },
+      "effect": {
+        "label": "Effect",
+        "terms": "background effect dither ascii halftone scanlines",
+        "none": {
+          "label": "None",
+          "description": "Shows the original artwork."
+        },
+        "dither": {
+          "label": "Dither",
+          "description": "Rebuilds the artwork with a dithered color palette."
+        },
+        "ascii": {
+          "label": "ASCII",
+          "description": "Draws the artwork's light in colored characters."
+        },
+        "halftone": {
+          "label": "Halftone",
+          "description": "Recreates the artwork with colored print dots."
+        },
+        "scanlines": {
+          "label": "Scanlines",
+          "description": "Adds a pronounced horizontal display-line texture."
+        }
+      }
+    },
+    "notifications": {
+      "title": "Notifications",
+      "terms": "alerts sounds banners",
+      "desktop_section": "Desktop",
+      "sounds_section": "Sounds",
+      "desktop": {
+        "label": "Desktop notifications",
+        "terms": "alerts banners system",
+        "description": "When a run finishes, an agent needs you, or a run fails."
+      },
+      "agent_updates": {
+        "label": "Agent updates",
+        "terms": "cli banner new version",
+        "description": "Show a banner when monitored agent CLIs have updates."
+      },
+      "background_only": {
+        "label": "Only when in the background",
+        "terms": "focus unfocused",
+        "description": "None while Zeron is the app you're in."
+      },
+      "sounds": {
+        "label": "Session sounds",
+        "terms": "audio chime mute"
+      },
+      "sound_done": {
+        "label": "Task completed",
+        "terms": "done finished audio sound",
+        "name": "Task completed sound"
+      },
+      "sound_request": {
+        "label": "Input required",
+        "terms": "question waiting approval audio sound",
+        "name": "Input required sound"
+      },
+      "sound_attention": {
+        "label": "Errors and disconnections",
+        "terms": "failure offline audio sound",
+        "name": "Errors and disconnections sound"
+      },
+      "unread": {
+        "title": "Couldn't read this Mac's notification settings",
+        "body": "Banners follow what Zeron last saved. Try again in a moment."
+      }
+    },
+    "files": {
+      "title": "Files",
+      "terms": "editor autosave wrap hidden",
+      "description": "How files are edited and listed in a session's files.",
+      "editor": "Editor",
+      "tree": "Tree",
+      "autosave": {
+        "label": "Autosave",
+        "terms": "save automatically",
+        "description": "Save a file a moment after you stop typing."
+      },
+      "autosave_delay": {
+        "label": "Autosave delay",
+        "terms": "debounce wait",
+        "description": "How long after the last keystroke."
+      },
+      "word_wrap": {
+        "label": "Word wrap",
+        "terms": "soft wrap long lines editor",
+        "description": "Wrap long lines to the editor's width. {key} still turns it for one file."
+      },
+      "show_all": {
+        "label": "Show hidden and ignored files",
+        "terms": "dotfiles gitignore tree",
+        "description": "Dotfiles, and what the project's .gitignore leaves out."
+      }
+    },
+    "shortcuts": {
+      "title": "Shortcuts",
+      "terms": "keyboard keybindings hotkeys keys",
+      "row_terms": "shortcut keybinding hotkey keys",
+      "description": "The keys for what you do most.",
+      "empty_title": "No shortcuts yet",
+      "empty_body": "Zeron's shortcuts show here as they're added.",
+      "reset": "Reset",
+      "reset_label": "Reset {name} to {keys}",
+      "restore": "Restore defaults",
+      "recording": "Press Escape to cancel.",
+      "taken": "{keys} is already assigned to {name}.",
+      "appshot": {
+        "section": "Appshots",
+        "label": "Capture Appshot",
+        "terms": "shortcut hotkey screenshot capture",
+        "description": "Works while another app is in front. Change it in Appshots.",
+        "change": "Change"
+      }
+    },
+    "appshots": {
+      "title": "Appshots",
+      "terms": "capture screenshot window app shortcut",
+      "description": "Set up once, one permission at a time. Screen Recording captures the window; Accessibility optionally adds off-screen application text.",
+      "capture_section": "Capture",
+      "permissions": "Permissions",
+      "permissions_description": "macOS asks for these for the app that opened Zeron: Zeron itself, or, run from a terminal or an editor, that app. Grant them there in System Settings → Privacy & Security, then quit and reopen it once.",
+      "ready": "Ready",
+      "required": "Required",
+      "set_up": "Set up",
+      "press": "Press a shortcut",
+      "press_now": "Press a shortcut…",
+      "change_shortcut": "Change shortcut, now {keys}",
+      "open_system_settings": "Open System Settings",
+      "changed": "Changed a permission? Check again after returning to Zeron.",
+      "check_again": "Check again",
+      "enabled": {
+        "label": "Capture Appshots",
+        "terms": "screenshot window",
+        "description": "Captures are staged for review and never sent automatically."
+      },
+      "sound": {
+        "label": "Capture sound",
+        "terms": "chime",
+        "description": "Play a sound when an Appshot is ready."
+      },
+      "shortcut": {
+        "label": "Global shortcut",
+        "terms": "hotkey keys",
+        "ready": "The shortcut works while another application has focus.",
+        "unavailable": "This shortcut is unavailable. Choose a different key combination."
+      },
+      "destination": {
+        "label": "Destination",
+        "terms": "session composer",
+        "last_description": "Use the open session, or return to the last session used for an Appshot.",
+        "new_description": "Stage captures in a new-session composer, keeping existing drafts intact.",
+        "automatic_description": "Use the open session, or the new-session composer when no session is open.",
+        "automatic": "Automatic",
+        "last": "Last session",
+        "new": "New session"
+      },
+      "capture": {
+        "label": "Window capture",
+        "terms": "screen recording permission",
+        "description": "Screen Recording lets Zeron capture the frontmost window. macOS may request one restart.",
+        "allow": "Allow window capture"
+      },
+      "text": {
+        "label": "Application text",
+        "terms": "accessibility permission",
+        "description": "Accessibility adds visible and off-screen application text. Screenshots work without it.",
+        "allow": "Enable text capture"
+      }
+    },
+    "providers": {
+      "title": "Providers",
+      "terms": "harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse install enable disable accounts sign in login",
+      "agent_settings": "Agent settings",
+      "agents": {
+        "label": "Your agents",
+        "terms": "accounts sign in usage plan switch remove"
+      },
+      "native_subagents": {
+        "label": "Native subagents",
+        "terms": "subagent delegate side chats tasks spawn",
+        "description": "Off, it delegates through side chats."
+      },
+      "update_policy": {
+        "label": "Update policy",
+        "terms": "automatic upgrade version cli"
+      },
+      "skills_dollar": {
+        "label": "Use $ for skills",
+        "terms": "completion composer skill dollar",
+        "description": "Type $ in the composer to pick a skill."
+      },
+      "skills_separate": {
+        "label": "Separate / commands",
+        "terms": "completion composer slash skills menu",
+        "description": "Keep skills out of the / menu."
+      },
+      "more": {
+        "label": "More agents",
+        "terms": "install add new",
+        "description": "Install one and it appears above, ready to sign in."
+      },
+      "this_mac": "this Mac",
+      "couldnt_update": "Couldn't update {name}",
+      "cant_reach": "Zeron can't reach {device}.",
+      "try_later": "Try again in a moment.",
+      "policy": {
+        "notify": "Notify",
+        "auto": "Auto when idle",
+        "off": "Off",
+        "notify_note": "Only when you choose Update.",
+        "auto_note": "On its own, once no chat runs on it.",
+        "off_note": "New versions aren't looked for."
+      },
+      "dialog_body": "On {device}. Changes apply as you make them.",
+      "done": "Done",
+      "updates": "Updates",
+      "description": "The coding agents on a device, and the accounts they sign in with.",
+      "device": "Device",
+      "add": {
+        "row_label": "Add another agent",
+        "row_description": "{n, plural, one {# more agent} other {# more agents}} in the ACP registry.",
+        "row_description_none": "Every agent in the ACP registry.",
+        "back": "Back to {page}",
+        "title": "Add an agent",
+        "description": "Every agent that speaks the Agent Client Protocol: {n, plural, one {# today} other {# today}}.",
+        "description_none": "Every agent that speaks the Agent Client Protocol.",
+        "search": "Search agents",
+        "built_in": "Built in",
+        "added": "Added",
+        "update_badge": "Update",
+        "no_match_title": "Nothing called “{q}”",
+        "no_match_body": "Try its maker's name, or what it does.",
+        "clear": "Clear search",
+        "offline": "Zeron can't reach the registry right now: this is the list from earlier.",
+        "unavailable": "Couldn't list the registry on {device}",
+        "unavailable_hint": "Zeron can't reach it right now. Try again in a moment.",
+        "try_again": "Try again",
+        "gone_title": "This agent isn't in the registry",
+        "gone_body": "It may have left it since. Go back to see what's there.",
+        "fact": {
+          "by": "Made by",
+          "version": "Version",
+          "license": "License",
+          "source": "Source",
+          "runs": "Runs",
+          "checked": "Checked",
+          "models": "Models",
+          "sign_in": "Sign-in"
+        },
+        "runs": {
+          "binary": "Downloads its build for {device} from {host}.",
+          "npx": "With Node.js, which {device} has.",
+          "npx_missing": "Needs Node.js on {device}, which isn't there yet.",
+          "uvx": "With uv, which {device} has.",
+          "uvx_missing": "Needs uv on {device}, which isn't there yet.",
+          "none": "There's no build for {device}."
+        },
+        "checked": {
+          "sha": "Against the checksum the registry publishes.",
+          "none": "The registry publishes no checksum for this build.",
+          "npm": "Version {version} exactly, from npm, without its install scripts.",
+          "pypi": "Version {version} exactly, from PyPI."
+        },
+        "models": "{name}'s own, once it's added.",
+        "sign_in": "In your browser, with your account for it.",
+        "consent": "{name} runs on {device} with your access. Like any agent here, it can read and change files in your projects and run commands.",
+        "add": "Add to {device}",
+        "adding_hint": "This can take a minute.",
+        "added_title": "{name} is ready",
+        "added_body": "It's in your providers on {device}, switched on.",
+        "open_providers": "Open Providers",
+        "failed_title": "Couldn't add {name}",
+        "failed_offline": "Zeron can't reach {device}. Nothing was changed.",
+        "failed_body": "{reason}. Nothing was changed on {device}.",
+        "on_device": "On {device}",
+        "installed": "Version {version}, the registry's latest.",
+        "outdated": "Version {version}; the registry has {latest}.",
+        "update_to": "Update to {version}",
+        "remove": "Remove",
+        "remove_row": "Remove from {device}",
+        "remove_title": "Remove {name} from {device}?",
+        "remove_body": "Its install goes. Chats that used it stay, and carry on once it's added again.",
+        "couldnt_remove": "Couldn't remove {name}",
+        "own_row": "Run your own agent",
+        "own_row_description": "One you built, or one that isn't in the registry yet.",
+        "own": {
+          "title": "Run your own agent",
+          "description": "One you built, or one that isn't in the registry yet. It runs on {device}, speaking the Agent Client Protocol.",
+          "name": "Name",
+          "name_hint": "How it shows in your providers and the composer.",
+          "name_placeholder": "Halcyon agent",
+          "command": "Command",
+          "command_hint": "The program and its arguments, as you'd run them in a terminal.",
+          "env": "Environment",
+          "env_hint": "One a line. Kept on {device}, never synced.",
+          "failed": "Couldn't add your agent"
+        },
+        "env": {
+          "label": "Environment",
+          "description": "Variables it starts with, one a line. Kept on {device}, never synced."
+        },
+        "terminal": {
+          "title": "Sign in to {name}",
+          "body": "Its sign-in runs on {device}. Answer what it asks, then choose Done.",
+          "label": "{name}'s sign-in"
+        },
+        "remove_row_description": "Chats that used it stay."
+      }
+    },
+    "devices": {
+      "title": "Devices",
+      "terms": "machines computers remote this device other devices rename",
+      "yours": {
+        "label": "Your devices",
+        "terms": "online last seen version system"
+      },
+      "rename_one": {
+        "label": "Rename a device",
+        "terms": "name rename call"
+      },
+      "online": "Online",
+      "offline": "Offline",
+      "last_seen": "Last seen {ago}",
+      "couldnt_rename": "Couldn't rename it",
+      "try_later": "Try again in a moment.",
+      "description": "The computers your sessions sync across.",
+      "empty_title": "No devices yet",
+      "empty_body": "Sign in to sync your sessions across your devices.",
+      "this_device": "This device",
+      "rename": "Rename",
+      "rename_name": "Rename {name}",
+      "dialog": {
+        "title": "Rename device",
+        "here": "This Mac, as your other devices list it.",
+        "other": "As every one of your devices lists it.",
+        "field": "Device name"
+      }
+    },
+    "members": {
+      "title": "Members",
+      "terms": "organization team people workspace seats",
+      "org_section": "Organization",
+      "org_name": {
+        "label": "Organization name",
+        "terms": "rename team workspace"
+      },
+      "people": {
+        "label": "Members",
+        "terms": "people team roles admin remove"
+      },
+      "invite": {
+        "label": "Invite",
+        "terms": "invite add teammates email"
+      },
+      "invitations": {
+        "label": "Invitations",
+        "terms": "pending resend revoke invites",
+        "description": "Each holds until it's accepted or it expires."
+      },
+      "admin": "Admin",
+      "member": "Member",
+      "someone": "Someone",
+      "more_for": "More for {name}",
+      "you": "You",
+      "role_of": "{name}'s role",
+      "remove_from_org": "Remove from organization",
+      "invited_on": "Invited {day} · Member",
+      "invited": "Invited · Member",
+      "expired": "Expired",
+      "resend": "Resend",
+      "revoke": "Revoke",
+      "couldnt_load": "Couldn't load members",
+      "couldnt_load_body": "Your team's access hasn't changed.",
+      "nobody": "No one by that name",
+      "nobody_admin": "Check the spelling, or invite them.",
+      "nobody_member": "Check the spelling.",
+      "invite_someone": "Invite someone",
+      "bad_address": "One address doesn't look right.",
+      "sent": "{n, plural, one {# invite sent} other {# invites sent}}",
+      "sent_body": "They'll get an email from Zeron.",
+      "exists_one": "Already a member or invited.",
+      "exists_many": "These are already members or invited.",
+      "some_failed": "Some couldn't be sent. Check them and try again.",
+      "remove_name": "Remove {name}?",
+      "remove_them": "Remove them?",
+      "remove_body": "They lose access to the organization at once. Chats they started stay with the team.",
+      "remove": "Remove",
+      "invite_to": "Invite to {org}",
+      "invite_teammates": "Invite your teammates",
+      "invite_body": "They join as members. Each gets an email from Zeron.",
+      "send_invites": "Send invites",
+      "addresses": "Email addresses",
+      "addresses_hint": "Enter or a comma adds another.",
+      "couldnt_load_org": "Couldn't load your organization",
+      "couldnt_load_org_body": "Check your connection and try again.",
+      "no_org": "No organization yet",
+      "no_org_body": "Sign in again to make one or join one.",
+      "name": "Name",
+      "name_admin": "How it shows to everyone in it.",
+      "name_member": "Only an admin can rename it.",
+      "everyone_in": "Everyone in {org}, and what they can do here.",
+      "everyone": "Everyone in your organization.",
+      "find": "Find someone"
+    },
+    "about": {
+      "title": "About & updates",
+      "terms": "about version build updates upgrade release",
+      "updates_section": "Updates",
+      "links_section": "Links",
+      "version": {
+        "label": "Version",
+        "terms": "zeron engine version build about",
+        "description": "The engine on this Mac."
+      },
+      "updates": {
+        "label": "Check for updates",
+        "terms": "update upgrade newest release download install"
+      },
+      "release_notes": {
+        "label": "Release notes",
+        "terms": "changelog what's new changes",
+        "description": "What changed in each version."
+      },
+      "website": {
+        "label": "Website",
+        "terms": "zeron.sh home page"
+      },
+      "copy_version": {
+        "label": "Copy version info",
+        "terms": "copy clipboard support bug report"
+      },
+      "build": "{commit} · {day}",
+      "ago": {
+        "just_now": "just now",
+        "minutes": "{n} min ago",
+        "hours": "{n, plural, one {an hour ago} other {# hours ago}}",
+        "days": "{n, plural, one {yesterday} other {# days ago}}"
+      },
+      "state": {
+        "checking": "Checking for updates…",
+        "checking_line": "Asking for the newest release.",
+        "updating": "Updating the engine…",
+        "updating_line": "Downloading Zeron {version} and putting it in place.",
+        "updated": "Updated to Zeron {version}",
+        "updated_running": "The engine is running the new version.",
+        "updated_starting": "The engine is starting again on it.",
+        "unmanaged": "Update from the Zeron app",
+        "unmanaged_line": "This Mac's engine came with the Zeron app, which updates it: open Zeron and choose Check for Updates.",
+        "check_again": "Check again",
+        "couldnt_check": "Couldn't check for updates",
+        "offline_line": "This Mac seems to be offline.",
+        "couldnt_update": "Couldn't update",
+        "failed_line": "Something went wrong. Try again in a moment.",
+        "not_connected": "Not connected to the engine",
+        "not_connected_line": "Zeron's version shows once the engine is running.",
+        "check": "Check for updates",
+        "available": "Zeron {version} is available",
+        "you_have": "You have {version}.",
+        "update_engine": "Update engine",
+        "unreachable_line": "The engine couldn't reach the release feed.",
+        "up_to_date": "Zeron is up to date",
+        "newest_checked": "{version} is the newest · checked {ago}",
+        "downloading": "Downloading Zeron {version}…",
+        "downloading_line": "You can keep working.",
+        "ready": "Zeron {version} is ready",
+        "ready_line": "Restart to finish. If you don't, it installs when you quit Zeron.",
+        "restart": "Restart to update",
+        "download_failed": "Couldn't download Zeron {version}",
+        "held": "Zeron {version} can't be installed yet",
+        "available_stable": "Zeron {version} (Stable) is available",
+        "update": "Update",
+        "newest": "{version} is the newest we know of."
+      },
+      "description": "Which Zeron this is, and keeping it up to date.",
+      "app": {
+        "label": "This app",
+        "built": "Not packaged yet · built {built}",
+        "not_packaged": "Not packaged yet.",
+        "packaged": "Built {built}"
+      },
+      "beta": {
+        "label": "Get beta updates",
+        "terms": "beta early test channel stable preview next",
+        "on": "You're getting beta updates. Turn this off to go back to Stable.",
+        "off": "Try the next Zeron early. Needs macOS {version} or later."
+      },
+      "updates_self_description": "Zeron updates itself: a new version downloads in the background and installs when you restart.",
+      "version_info": {
+        "label": "Version info",
+        "description": "For a bug report: the versions and builds above.",
+        "copied": "Version info copied"
+      },
+      "updates_description": "Updates go to the engine on this Mac, as the Zeron app's do. This app isn't packaged yet, so it isn't updated here."
+    },
+    "archived": {
+      "title": "Archived",
+      "description": "{n, plural, one {# session, hidden from the sidebar until restored.} other {# sessions, hidden from the sidebar until restored.}}",
+      "description_none": "Hidden from the sidebar until restored.",
+      "empty_title": "Nothing archived",
+      "empty_body": "Archive a session from its menu in the sidebar.",
+      "search": "Search archived sessions",
+      "none_match": "No archived sessions match “{q}”",
+      "group": {
+        "today": "Today",
+        "yesterday": "Yesterday",
+        "week": "This week",
+        "earlier": "Earlier"
+      },
+      "untitled": "Untitled session",
+      "restore": "Restore to sidebar",
+      "delete_one": "Delete…",
+      "delete_all": "Delete all",
+      "delete_all_title": "Delete all archived sessions?",
+      "sessions": "{n, plural, one {# archived session} other {# archived sessions}}",
+      "its_machine": " and its Cloud machine",
+      "machines": "{n, plural, one {, and # Cloud machine,} other {, and # Cloud machines,}}",
+      "delete_all_body": "{what} will be permanently deleted. This can’t be undone.",
+      "couldnt_delete": "{n, plural, one {Couldn’t delete # archived session. Try again.} other {Couldn’t delete # archived sessions. Try again.}}",
+      "show_more": "Show more"
+    },
+    "shell": {
+      "back": "Back to chats",
+      "heading": "Settings",
+      "group": {
+        "personal": "Personal",
+        "devices": "Devices",
+        "organization": "Organization",
+        "workspace": "Workspace",
+        "cloud": "Cloud",
+        "customize": "Customize",
+        "plugins": "Plugins",
+        "browser": "Browser"
+      }
+    },
+    "store": {
+      "says": {
+        "refused": "Only an admin of the organization can do that.",
+        "self": "You can't change your own membership here.",
+        "not_found": "That's already gone.",
+        "invalid": "That doesn't look right.",
+        "too_large": "That picture is too large. Try a smaller one.",
+        "last_admin": "You're the only admin of your organization. Make someone else an admin first.",
+        "busy": "Someone in your organization is changing roles right now. Try again in a moment.",
+        "try_again": "Your account couldn't be deleted just now. Nothing was removed. Try again in a moment.",
+        "timed_out": "Signing in again took too long, so nothing was deleted. Try again."
+      },
+      "couldnt_save_name": "Couldn't save your name",
+      "couldnt_rename_org": "Couldn't rename the organization",
+      "couldnt_remove": "Couldn't remove {name}",
+      "couldnt_remove_them": "Couldn't remove them",
+      "couldnt_change_role": "Couldn't change their role",
+      "couldnt_revoke": "Couldn't revoke the invitation",
+      "invitation_resent": "Invitation sent again",
+      "couldnt_resend": "Couldn't send it again",
+      "couldnt_save_title": "Couldn't save your title",
+      "couldnt_change_photo": "Couldn't change your photo",
+      "couldnt_remove_photo": "Couldn't remove your photo"
+    },
+    "cloud": {
+      "title": "Cloud",
+      "terms": "cloud sandboxes remote machines run agents github repositories usage credits",
+      "description": "Run agents on machines of their own, in your GitHub repositories.",
+      "credit": "{number} credit",
+      "credits": "{number} credits",
+      "range": {
+        "7d": "Last 7 days",
+        "30d": "Last 30 days",
+        "month": "This month",
+        "last_month": "Last month",
+        "90d": "Last 90 days"
+      },
+      "bar": {
+        "label": "{day}, {credits}",
+        "tooltip": "{day} · {credits}"
+      },
+      "usage": {
+        "title": "Usage",
+        "terms": "credits used spent minutes chart days range",
+        "description": "Credits Cloud chats used. A credit is a minute of a standard machine.",
+        "used": "{credits} used",
+        "reading": "Reading usage…",
+        "failed": "Couldn't read usage. It shows once Zeron can reach Cloud.",
+        "out": "Out of credits. Add some in Billing.",
+        "left": "{credits} left",
+        "range_name": "Usage range"
+      },
+      "github": {
+        "terms": "connect disconnect account clone push",
+        "description": "Cloud chats clone your repositories and push their branches through GitHub."
+      },
+      "repos": {
+        "title": "Repositories",
+        "terms": "repos choose github app install private",
+        "description": "Projects on these repositories can run on Cloud. Choose which on GitHub.",
+        "refresh": "Check repositories again",
+        "checking": "Checking repositories…",
+        "none": "None yet",
+        "none_description": "Choose the repositories Cloud chats can open.",
+        "choose": "Choose on GitHub",
+        "private": "Private",
+        "more": "and {n} more"
+      },
+      "unreachable": {
+        "title": "Couldn't check Cloud",
+        "outdated": "This version of Zeron can't manage Cloud yet. Update it in About.",
+        "failed": "Zeron couldn't reach Cloud. Try again in a moment."
+      },
+      "attention": {
+        "title": "Cloud needs attention",
+        "failed": "Something went wrong with Cloud."
+      }
+    },
+    "billing": {
+      "title": "Billing",
+      "terms": "billing payment stripe credits plan subscription purchase invoice",
+      "description": "Credits run your Cloud chats.",
+      "hours": "about {n} hours",
+      "try_later": "Try again in a moment.",
+      "changed": {
+        "plan": "You're on {plan}: {credits} a month",
+        "ended": "Your plan has ended",
+        "wont_renew": "Your plan won't renew",
+        "will_renew": "Your plan will renew",
+        "added": "Added {credits}"
+      },
+      "plan_line": {
+        "past_due": "Your last payment didn't go through. Update your card to keep your plan.",
+        "ends": "Ends {date}. You keep its credits until then.",
+        "renews": "Renews {date}."
+      },
+      "stripe_failed": "Stripe's page didn't open",
+      "credits": {
+        "title": "Credits",
+        "terms": "balance left remaining monthly extra hours",
+        "description": "What Cloud chats can spend. A credit is a minute of a standard machine.",
+        "none": "Choose a plan or buy credits to run Cloud chats.",
+        "unit": "{n, plural, one {credit} other {credits}}",
+        "split": "{plan} plan credits, {extra} extra",
+        "plan_label": "Plan credits",
+        "no_plan": "No plan yet. Choose one below.",
+        "of_resets": "Of {total} · resets {date}",
+        "of": "Of {total}",
+        "extra_label": "Extra credits",
+        "extra_description": "Never expire. Used once plan credits run out."
+      },
+      "plan": {
+        "title": "Plan",
+        "terms": "subscription subscribe base pro max monthly price manage cancel renew",
+        "description": "A plan's credits come each month and run out at its end.",
+        "current_plan": "Current plan",
+        "switch": "Switch",
+        "choose": "Choose {plan}",
+        "card_name": "{plan} plan",
+        "current": "Current",
+        "per_month": "/ month",
+        "a_month": "{credits} a month",
+        "current_row": "{plan} · {price} a month",
+        "manage": "Manage subscription"
+      },
+      "extra": {
+        "title": "Extra credits",
+        "terms": "buy purchase packs top up never expire",
+        "description": "Bought once, never expire, and used once a plan's credits run out.",
+        "packs": "{n, plural, one {# pack} other {# packs}} · {hours}",
+        "packs_name": "Packs",
+        "buy": "Buy for {price}"
+      },
+      "load_failed": "Couldn't load billing",
+      "unavailable": {
+        "title": "Plans and credits can't be bought here yet",
+        "body": "Your credits still show here."
+      },
+      "pending": {
+        "title": "Finish in your browser",
+        "body": "This page updates when it's done."
+      }
+    },
+    "profile": {
+      "title": "Account",
+      "terms": "account profile you me card member sign in",
+      "description_org": "How you appear to everyone in {org}.",
+      "description_team": "How you appear to your team.",
+      "photo": {
+        "label": "Photo",
+        "terms": "avatar picture image",
+        "own": "Shows beside your name across Zeron.",
+        "from_sign_in": "From the account you signed in with.",
+        "avatar": "Your photo",
+        "change": "Change",
+        "choose": "Choose a photo",
+        "images": "Images",
+        "open_failed": "Couldn't open that picture",
+        "open_failed_body": "Zeron couldn't read it as a PNG or JPEG.",
+        "preview": "Your photo, as it will show",
+        "zoom": "Zoom"
+      },
+      "crop": {
+        "title": "Your photo",
+        "body": "Drag to place it; zoom to fill the circle.",
+        "confirm": "Use photo"
+      },
+      "name": {
+        "label": "Name",
+        "terms": "display name first last rename",
+        "description": "What your teammates call you. It's on your card.",
+        "empty": "Your teammates need something to call you.",
+        "too_long": "That's longer than a name needs to be."
+      },
+      "job_title": {
+        "label": "Title",
+        "terms": "job role position what you do",
+        "description": "Under your name, wherever it shows.",
+        "placeholder": "What you do",
+        "too_long": "That's longer than a title needs to be."
+      },
+      "username": {
+        "label": "Username",
+        "terms": "handle card address claim",
+        "not_chosen": "Not chosen yet. Your card needs one."
+      },
+      "email": {
+        "label": "Signed in as",
+        "terms": "email address mail account organization sync",
+        "not_signed_in": "Not signed in",
+        "local": "Sessions stay on this Mac.",
+        "org": "In {org}. Your sessions sync across your devices.",
+        "sync": "Your sessions sync across your devices."
+      },
+      "card": {
+        "label": "Member card",
+        "terms": "share copy link x twitter",
+        "share_text": "Just claimed my Zeron card",
+        "none": "No card yet"
+      },
+      "devices": {
+        "label": "Signed in on",
+        "terms": "devices machines computers",
+        "this": "This device"
+      },
+      "sign_out": {
+        "label": "Sign out",
+        "terms": "log out logout leave account session",
+        "busy": "Signing out…",
+        "description": "This Mac stops syncing until you sign in again.",
+        "confirm_title": "Sign out of Zeron?",
+        "confirm_body": "Your sessions stay in your account. On this Mac, setup opens again."
+      },
+      "delete": {
+        "label": "Delete account",
+        "terms": "remove close account erase forever",
+        "busy": "Deleting your account…",
+        "description": "Your account, its card and your place in your organization, for good.",
+        "failed": "Couldn't delete your account",
+        "confirm_title": "Delete your account?",
+        "confirm_body_org": "You'll leave {org} and be signed out everywhere. Your card's address is retired. This can't be undone. You'll sign in again to confirm it's you.",
+        "confirm_body": "You'll be signed out everywhere. Your card's address is retired. This can't be undone. You'll sign in again to confirm it's you.",
+        "step_up": {
+          "title": "To delete your account, sign in again",
+          "body": "Finish signing in in your browser. Your account is deleted as soon as you have."
+        }
+      },
+      "claim": {
+        "open": "Claim a username",
+        "title": "Claim a username",
+        "body": "Your card's address. It's chosen once, and yours for good.",
+        "confirm": "Claim",
+        "placeholder": "yourname",
+        "invalid": "3 to 20 letters, digits, _ or -."
+      },
+      "save": "Save changes",
+      "signed_out": {
+        "description": "Sign in to show up as yourself across Zeron.",
+        "yours": "Yours when you sign in",
+        "name": "Your name and photo",
+        "name_description": "How your team sees you, beside every chat you share.",
+        "card": "Your member card",
+        "card_description": "Numbered by when you joined, with an address of your own.",
+        "sessions": "Your sessions, everywhere",
+        "sessions_description": "Pick up any chat on your phone or another computer.",
+        "sign_in": "Sign in"
+      },
+      "keys": {
+        "label": "Signing keys",
+        "terms": "keys signing plugins templates security revoke fingerprint devices",
+        "description": "Your devices sign the plugins and templates you make with these. If you don't recognise a key, revoke it.",
+        "this_mac": "This Mac",
+        "another_device": "Another device",
+        "new": "New",
+        "added": "Added {date}",
+        "revoked": "Revoked {date}",
+        "revoke": "Revoke",
+        "revoke_title": "Revoke this key?",
+        "revoke_body": "Plugins and templates it signed will stop counting as yours.",
+        "revoke_failed": "Couldn't revoke the key",
+        "none": "No signing keys yet.",
+        "none_how": "One is made when you sign a plugin.",
+        "failed": "Couldn't load your signing keys",
+        "retry": "Try again"
+      }
+    },
+    "browser": {
+      "title": "Browser",
+      "description": "Sites you sign into stay signed in on this Mac, separately for each account.",
+      "terms": "browser web page website links search engine home page zoom history cookies sign in inspector",
+      "search_engine": {
+        "label": "Search engine",
+        "description": "Words typed in the address bar search here.",
+        "terms": "search google duckduckgo bing brave kagi ecosia address bar omnibox",
+        "custom": "Custom",
+        "custom_label": "Search address",
+        "custom_hint": "Put %s where the words go.",
+        "custom_invalid": "Use a web address with %s after the site, such as https://example.com/search?q=%s. Until then, Google searches."
+      },
+      "home_page": {
+        "label": "New tab opens",
+        "terms": "home page start page new tab",
+        "start": "The start page: your project’s previews.",
+        "custom": "This page, each time.",
+        "placeholder": "Start page"
+      },
+      "default_zoom": {
+        "label": "Page zoom",
+        "description": "Zoom a site with {zoom_in} and {zoom_out} to keep its own.",
+        "terms": "zoom text size scale magnify"
+      },
+      "site_zoom": {
+        "label": "{n, plural, one {# site with its own zoom} other {# sites with their own zoom}}",
+        "description": "{n, plural, one {# site keeps} other {# sites keep}} the zoom you gave it.",
+        "reset": "Reset all",
+        "reset_one": "Reset zoom for {site}"
+      },
+      "history": "History",
+      "history_terms": "history visited pages recent",
+      "history_description": "Pages you’ve visited, kept on this Mac for your account.",
+      "keep_history": {
+        "label": "Keep history",
+        "description": "So you can find a page again. Off, nothing new is kept.",
+        "terms": "history private record remember"
+      },
+      "clear_history": {
+        "label": "Clear history",
+        "description": "{n, plural, =0 {Nothing kept yet.} one {# page kept.} other {# pages kept.}}",
+        "terms": "clear delete remove history browsing data",
+        "span": "Time range",
+        "button": "Clear"
+      },
+      "span": {
+        "hour": "Last hour",
+        "day": "Last 24 hours",
+        "week": "Last 7 days",
+        "month": "Last 4 weeks",
+        "all": "All time"
+      },
+      "cleared": "History cleared",
+      "history_search": "Search history",
+      "history_none_match": "No pages match.",
+      "history_more": "Show more",
+      "forget": "Remove {page} from history",
+      "developer": "Developer",
+      "inspectable": {
+        "label": "Allow inspecting pages",
+        "description": "Adds Inspect Page to the browser’s ⋯ menu, for pages opened from now on.",
+        "terms": "devtools developer tools web inspector inspect element console"
+      },
+      "page_title": "Browsing",
+      "links_and_search": "Links and search",
+      "zoom": "Zoom"
+    },
+    "browser_history": {
+      "title": "History",
+      "visited": "Pages visited",
+      "empty": "Pages you visit in the browser show here.",
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "empty_title": "No history yet",
+      "off": "Keep history is off, so pages you visit aren’t kept."
+    }
+  },
+  "common": {
+    "loading": "Loading…",
+    "something_went_wrong": "Something went wrong.",
+    "open": "Open",
+    "close": "Close",
+    "clear": "Clear",
+    "rename": "Rename",
+    "delete": "Delete",
+    "remove": "Remove",
+    "copy": "Copy",
+    "archive": "Archive",
+    "dismiss": "Dismiss",
+    "save": "Save",
+    "discard": "Discard",
+    "reload": "Reload",
+    "more": "More",
+    "try_again": "Try again",
+    "continue": "Continue",
+    "cancel": "Cancel",
+    "search": "Search",
+    "back": "Back",
+    "retry": "Try again",
+    "edit": "Edit"
+  },
+  "shell": {
+    "sidebar": {
+      "unknown_device": "Unknown device",
+      "chats": "Chats",
+      "local": "Local",
+      "you": "You",
+      "filter": {
+        "a_plugin": "A plugin",
+        "state": {
+          "working": "working",
+          "input": "waiting",
+          "approval": "approval",
+          "failed": "failed",
+          "done": "finished",
+          "idle": "idle"
+        },
+        "list_sep": ", ",
+        "list_last": "{rest} and {last}",
+        "notice": "{by} is showing {list} sessions only",
+        "show_all": "Show all"
+      },
+      "project_filter": {
+        "search": "Search projects…",
+        "new_project": "New project",
+        "all_projects": "All projects"
+      },
+      "connection": {
+        "unsaved": "Changes could not be saved",
+        "offline": "Offline — sends are saved",
+        "reconnecting": "Reconnecting…"
+      },
+      "update_notice": "The update notice",
+      "star": "Star on GitHub",
+      "copied": "{what} copied",
+      "menu": {
+        "sections": "Sections",
+        "new_section": "New section",
+        "path": "Path",
+        "no_folder": "It has no folder yet",
+        "zeron_link": "Zeron conversation link",
+        "link_not_ready": "Conversation link is not ready yet",
+        "codex_link": "Codex conversation link",
+        "harness_session_id": "Harness session ID",
+        "session_id": "Session ID",
+        "pin": "Pin",
+        "unpin": "Unpin",
+        "move_to": "Move to",
+        "archive_working": "Stop it first: its agent is still working",
+        "delete": "Delete…",
+        "rename": "Rename…",
+        "remove": "Remove…",
+        "edit_project": "Edit project…"
+      },
+      "project": {
+        "rename_title": "Rename project",
+        "name": "Project name",
+        "remove_title": "Remove project?",
+        "this_project": "this project",
+        "its_device": "its device",
+        "removing": "Removing “{name}” permanently deletes {n, plural, one {its # session} other {its # sessions}} on {device}. This can’t be undone.",
+        "couldnt_remove": "Couldn't remove the project",
+        "edit": {
+          "title": "Edit project",
+          "name": "Name",
+          "name_empty": "Give it a name",
+          "icon": "Icon",
+          "preview": "The project's icon",
+          "kind": {
+            "default": "Default",
+            "emoji": "Emoji",
+            "image": "Image"
+          },
+          "color": "Color",
+          "hue": {
+            "violet": "Violet",
+            "indigo": "Indigo",
+            "blue": "Blue",
+            "sky": "Sky",
+            "cyan": "Cyan",
+            "teal": "Teal",
+            "emerald": "Emerald",
+            "lime": "Lime",
+            "amber": "Amber",
+            "orange": "Orange",
+            "rose": "Rose",
+            "pink": "Pink"
+          },
+          "default_artwork": "Its repository's own logo, found in the project.",
+          "default_initial": "Its initial, on the color you choose.",
+          "drop": "Drop an image here",
+          "drop_release": "Drop to use this image",
+          "choose": "Choose an image",
+          "formats": "PNG or JPEG, cropped to a square",
+          "replace": "Replace",
+          "zoom": "Zoom",
+          "crop": "The picture, placed in its tile. Drag to move it.",
+          "save": "Save",
+          "saving": "Saving…",
+          "error": {
+            "upload": "Couldn't upload the image. Try again.",
+            "offline": "You're offline, so the image can't be uploaded.",
+            "signed_out": "Sign in to upload an image.",
+            "too_large": "That image is too large.",
+            "open": "Couldn't open that image. Choose a PNG or JPEG.",
+            "save": "Couldn't save the project. Try again.",
+            "save_outdated": "Zeron on this Mac needs an update to save project icons. Update it, then save again.",
+            "save_gone": "This project was removed on another device.",
+            "save_offline": "Zeron on this Mac isn't responding. Try again in a moment."
+          }
+        }
+      },
+      "session": {
+        "new_session": "New session",
+        "will_delete": "“{title}” will be permanently deleted. This can’t be undone.",
+        "delete_title": "Delete session?",
+        "rename_title": "Rename session",
+        "name": "Name",
+        "name_placeholder": "Session name"
+      }
+    },
+    "boundary": {
+      "failed": {
+        "title": "{name} didn't load",
+        "body": "Save the file again once it's fixed, and it comes back here."
+      },
+      "screen": {
+        "update_notice": "The update notice",
+        "session_page": "The session page",
+        "new_chat_page": "The new chat page",
+        "composer": "The composer",
+        "panel": "The panel",
+        "files": "Files",
+        "sidebar": "The sidebar",
+        "page": "The page",
+        "rail": "The rail",
+        "title_bar": "The title bar",
+        "settings": "Settings",
+        "update_watch": "The update watch",
+        "search": "Search",
+        "new_project": "New project"
+      }
+    },
+    "title_bar": {
+      "hide_details": "Hide session details",
+      "show_details": "Show session details",
+      "panel": "Panel",
+      "panel_tooltip": "Panel  {key}"
+    },
+    "page": {
+      "plugin": "Plugin",
+      "plugin_off": "Its plugin isn't on right now.",
+      "resize_files": "Resize files"
+    },
+    "keys": {
+      "title": {
+        "shell_new_chat": "New chat",
+        "shell_new_project": "New project",
+        "shell_archive": "Archive session",
+        "shell_pin": "Pin or unpin this session",
+        "shell_model_picker": "Choose model",
+        "shell_toggle_sidebar": "Toggle sidebar",
+        "shell_toggle_files": "Toggle panel",
+        "shell_toggle_files_tab": "Toggle files",
+        "shell_toggle_terminal": "Toggle terminal",
+        "panel_annotate": "Annotate Element",
+        "panel_new_browser_tab": "New Browser Tab",
+        "panel_focus_address": "Open Location",
+        "panel_reload_page": "Reload Page",
+        "shell_next_session": "Next session",
+        "shell_previous_session": "Previous session",
+        "session_n": "Session {i}",
+        "shell_palette": "Search",
+        "shell_settings": "Settings",
+        "shell_find": "Find",
+        "shell_close": "Close",
+        "shell_reload": "Reload Zeron",
+        "shell_reload_interface": "Reload interface"
+      },
+      "group": {
+        "sessions": "Sessions",
+        "panels": "Panels",
+        "go": "Go",
+        "app": "App"
+      }
+    },
+    "palette": {
+      "sessions": "Sessions",
+      "open": "Open",
+      "unarchive": "Unarchive",
+      "new_chat_in": "New chat in…",
+      "search_projects": "Search projects…",
+      "projects": "Projects",
+      "start": "Start",
+      "no_project": "No project",
+      "no_projects": "No projects yet",
+      "scheme": {
+        "system": "System",
+        "light": "Light",
+        "dark": "Dark"
+      },
+      "theme": "Mode",
+      "use_template": "Use template: {name}",
+      "templates": "Templates",
+      "use_theme": "Use theme: {name}",
+      "themes": "Themes",
+      "use": "Use",
+      "recent_files": "Recent files",
+      "files": "Files",
+      "in_files": "In Files",
+      "new_chat": "New chat",
+      "actions": "Actions",
+      "new_project": "New project",
+      "toggle_sidebar": "Toggle sidebar",
+      "archive_session": "Archive session",
+      "settings": "Settings",
+      "settings_page": "Settings: {title}",
+      "go_to": "Go to",
+      "frosted_glass": "Frosted glass",
+      "search": "Search sessions, commands and files…",
+      "app": "App",
+      "reload_zeron": "Reload Zeron",
+      "reload_interface": "Reload interface"
+    },
+    "add_project": {
+      "something_went_wrong": "Something went wrong",
+      "not_connected": "Device is not connected",
+      "no_folder_at": "No folder at {path}",
+      "not_a_folder": "{path} isn't a folder",
+      "couldnt_add": "Couldn't add the project",
+      "go_to": "Go to",
+      "open": "Open",
+      "add_project": "Add project",
+      "search_folders": "Search folders…",
+      "loading_folders": "Loading folders…",
+      "add_this_folder": "Add this folder",
+      "add": "Add",
+      "folders": "Folders",
+      "folder_failed_hint": "Go back with ←, or try another folder.",
+      "no_folders_match": "No folders match",
+      "no_folders_hint": "Type a path like ~/code or /mnt to jump there.",
+      "in_home": "In Home",
+      "clone_here": "Clone {repo} here",
+      "clone_section": "Clone",
+      "clone": "Clone",
+      "cloning": "Cloning {repo}…",
+      "couldnt_clone": "Couldn't clone {repo}",
+      "search_locations": "Search locations…",
+      "loading_locations": "Loading locations…",
+      "no_locations": "No locations found",
+      "no_locations_hint": "Try Home or a drive name.",
+      "home": "Home",
+      "locations": "Locations",
+      "devices": "Devices",
+      "offline": "Offline",
+      "title": "New project",
+      "search_devices": "Search devices…",
+      "no_devices": "No devices found",
+      "no_devices_hint": "Try another device name.",
+      "cloud": "Cloud",
+      "cloud_hint": "Your GitHub repositories",
+      "cloud_title": "Cloud",
+      "search_repos": "Search repositories…",
+      "loading_repos": "Loading your repositories…",
+      "no_repos": "No repositories found",
+      "no_repos_hint": "Cloud lists the repositories the Zeron GitHub App can reach. Add more in Settings → Cloud.",
+      "no_repos_yet": "No repositories yet",
+      "choose_repos": "Choose repositories in Settings → Cloud",
+      "github_not_connected": "GitHub isn't connected",
+      "connect_github": "Connect GitHub in Settings → Cloud",
+      "repos_failed": "Couldn't load your repositories",
+      "repos_failed_hint": "Go back and pick Cloud to try again.",
+      "repos_offline": "Zeron can't be reached right now",
+      "private": "Private",
+      "on_device": "On {device}",
+      "from_github": "From GitHub",
+      "add_cloud_project": "Add project"
+    }
+  },
+  "onboarding": {
+    "skip_for_now": "Skip for now",
+    "signin": {
+      "title": "Welcome\nto Zeron",
+      "lines": {
+        "phone": "Pick up any chat on your phone.",
+        "machines": "Run agents on any of your machines.",
+        "cloud": "Hand a chat to Zeron Cloud and walk away."
+      },
+      "waiting": "Finish signing in in your browser.",
+      "failed": "Couldn't sign in. Nothing was changed.",
+      "have_account": "I already have an account",
+      "waiting_browser": "Waiting for the browser",
+      "create": "Create an account"
+    },
+    "appearance": {
+      "sign_out": "Sign out",
+      "title": "Make it yours",
+      "body": "Pick a look. You can change it any time in Settings."
+    },
+    "done": {
+      "owner": "Owner",
+      "member": "Member",
+      "who": {
+        "two": "{a} and {b}",
+        "more": "{a}, {b} and {n} more"
+      },
+      "invites_sent": "{n, plural, one {# invite sent} other {# invites sent}}",
+      "invites_join": "{n, plural, one {{who} joins as a member once they accept.} other {{who} join as members once they accept.}}",
+      "synced": {
+        "label": "Chats stay in step",
+        "description": "Your chats and agents sync across all your devices."
+      },
+      "local": {
+        "label": "Chats stay on this Mac",
+        "description": "Sign in any time to sync them to your other devices."
+      },
+      "open_org": "Open {org}",
+      "open_zeron": "Open Zeron",
+      "title_org": "{org} is ready",
+      "title": "You're all set",
+      "body": "Here's what was set up.",
+      "body_owner": "You're its owner. Here's what was set up.",
+      "body_member": "You're a member. Here's what was set up."
+    },
+    "github": {
+      "title": "Connect GitHub",
+      "body": "Cloud agents work in your repositories on machines of their own. Connect GitHub so they can clone and push."
+    },
+    "org": {
+      "creating": "Creating",
+      "title": "Name your organization",
+      "failed": "Couldn't create {name}. Nothing was saved.",
+      "body": "It's what your teammates see when they join.",
+      "field": "Organization name",
+      "placeholder": "Your company or team"
+    },
+    "invite": {
+      "one_address": "One address",
+      "failed_one": "{why, select, invalid {{who} isn't an address Zeron can send to.} exists {{who} is already in or invited.} other {{who} couldn't be sent.}}",
+      "failed_many": "{why, select, invalid {{who} isn't an address Zeron can send to, and {n} more weren't sent.} exists {{who} is already in or invited, and {n} more weren't sent.} other {{who} couldn't be sent, and {n} more weren't sent.}}",
+      "nothing_sent": "Nothing was sent. {says}",
+      "bad_addresses": "{n, plural, one {One address doesn't look right.} other {# addresses don't look right.}}",
+      "too_many": "Up to {max} at a time.",
+      "invited_teammate": "Invited teammate",
+      "invited": "Invited",
+      "sending": "Sending",
+      "send_invites": "Send invites",
+      "send_n": "{n, plural, one {Send # invite} other {Send # invites}}",
+      "title": "Invite your teammates",
+      "sent": "{n, plural, one {# invite sent. They'll get an email from Zeron.} other {# invites sent. They'll get an email from Zeron.}}",
+      "body": "Chats and agents you share stay in step for everyone.",
+      "field": "Email addresses",
+      "hint": "Enter or a comma adds another. They join as members."
+    },
+    "username": {
+      "checking_label": "Checking the username",
+      "checking": "Checking",
+      "available": "Available",
+      "taken": "Taken",
+      "reserved": "Reserved",
+      "invalid": "Letters, digits, _ and - only",
+      "start": "Start with a letter or digit",
+      "short": "At least {n} characters",
+      "long": "At most {n} characters",
+      "unknown": "Couldn't check",
+      "saving": "Saving",
+      "title": "Claim your username",
+      "failed": "Couldn't save @{name}. {says} Nothing was changed.",
+      "body": "It's your card's address, and it's yours for good.",
+      "field": "Username",
+      "placeholder": "username"
+    },
+    "card": {
+      "draft": "Just claimed my Zeron card",
+      "failed_title": "Your card didn't load",
+      "failed_body": "{says} Try again in a moment."
+    },
+    "providers": {
+      "title_install": "Install an agent",
+      "title": "Your agents",
+      "looking": "Looking for coding agents on this Mac…",
+      "unavailable": "Zeron runs the coding agents you already use.",
+      "none": "None are on this Mac yet. Install one to continue.",
+      "found": "{n, plural, one {Found # agent on this Mac. Sign in to any you'd like to use.} other {Found # agents on this Mac. Sign in to any you'd like to use.}}",
+      "this_mac": "this Mac"
+    },
+    "try_again": "Try again"
+  },
+  "intro": {
+    "headline": {
+      "your": "Your",
+      "agents": "agents,",
+      "anywhere": "anywhere."
+    },
+    "get_started": "Get started"
+  },
+  "chat": {
+    "init": {
+      "couldnt_show": "{what} couldn't be shown",
+      "home": "The new chat page",
+      "session": "This chat",
+      "composer": "The composer"
+    },
+    "session": {
+      "missing_title": "This chat isn't here",
+      "missing_body": "It may have been archived, or it's on a device that hasn't synced yet.",
+      "new_chat": "New chat",
+      "offline_title": "Can't load this chat right now",
+      "offline_body": "Zeron will show it as soon as it can reach your agents again."
+    },
+    "home": {
+      "title": "Add a project to get started",
+      "body": "A project is a folder on one of your devices.",
+      "action": "Add a project"
+    },
+    "link_notice": {
+      "offline_intent": "Offline — messages will send when you're back online.",
+      "offline": "Offline",
+      "reconnecting_intent": "Reconnecting — messages will send once the connection recovers.",
+      "reconnecting": "Reconnecting…",
+      "the_host": "the host",
+      "unreachable": "Can't reach {host} — messages will send when it's reachable."
+    },
+    "lane_tab": {
+      "subagent": "Subagent",
+      "side_chat": "Side chat",
+      "placeholder": "Ask the side chat…",
+      "didnt_send": "Your message didn't send",
+      "couldnt_fork": "Couldn't fork this chat",
+      "forking": "Forking…",
+      "retry": "Retry"
+    },
+    "lanes": {
+      "subagent": "Subagent",
+      "need_conversation": "Start a conversation before creating a side chat.",
+      "new_side_chat": "New side chat",
+      "side_chat": "Side chat",
+      "couldnt_create": "Couldn't create the side chat."
+    },
+    "zeron_commands": {
+      "model": "Zeron: choose agent, model, and reasoning",
+      "new": "Zeron: start a new conversation",
+      "resume": "Zeron: search and open conversations",
+      "settings": "Zeron: open settings",
+      "files": "Zeron: open project files",
+      "terminal": "Zeron: open a terminal",
+      "rename": "Zeron: rename this conversation",
+      "stop": "Zeron: stop the active run"
+    },
+    "find": {
+      "no_results": "No results",
+      "tally": "{at} of {n}",
+      "toolbar": "Find in chat",
+      "find": "Find",
+      "previous": "Previous Match",
+      "next": "Next Match"
+    },
+    "appshots": {
+      "limit": "Remove an Appshot before adding another (96 MB staged Appshot limit).",
+      "couldnt_capture": "Couldn't capture an Appshot"
+    },
+    "chat_links": {
+      "untitled": "Untitled chat"
+    },
+    "invocations": {
+      "couldnt_list": "Commands couldn't be listed"
+    },
+    "reply_images": {
+      "couldnt_read": "Couldn't be read"
+    },
+    "where": {
+      "ago": {
+        "just_now": "just now",
+        "minutes": "{n} min ago",
+        "hours": "{n} h ago",
+        "days": "{n} d ago"
+      },
+      "device": {
+        "offline": "Offline",
+        "offline_seen": "Offline · last seen {ago}",
+        "cloud_from": "A machine of its own, from {repo}",
+        "cloud": "A machine of its own"
+      },
+      "project": {
+        "missing": "Missing project",
+        "elsewhere": "On another device",
+        "gone": "No longer on this device"
+      },
+      "branch": {
+        "default": "Default",
+        "current": "Current",
+        "worktree": "Worktree"
+      },
+      "branches_empty": {
+        "no_matches": "No matches",
+        "no_matches_hint": "No branch matches “{query}”",
+        "loading": "Loading branches…",
+        "offline": "Device offline",
+        "offline_hint": "Its branches show once it's back.",
+        "error": "Couldn't read the branches",
+        "error_cloud_hint": "GitHub didn't answer. The repository's default branch is used.",
+        "error_hint": "Git didn't answer for this project.",
+        "none": "No branches",
+        "none_hint": "This project's folder has none yet."
+      },
+      "blocked": {
+        "project_gone": "That project is no longer there. Pick another, or none.",
+        "cloud_needs_project": "Cloud chats work in a project. Pick one Cloud can open."
+      }
+    },
+    "composer": {
+      "placeholder": "Ask anything, @ to mention…",
+      "comments": "{n, plural, one {# comment} other {# comments}}",
+      "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",
+      "edit_not_saved": "Your edit wasn't saved",
+      "didnt_send": "Your message didn't send",
+      "starting_cloud": "Starting a Cloud machine…",
+      "starting": "Starting the chat…",
+      "didnt_start": "The chat didn't start",
+      "attach_files": "Attach files",
+      "edit_locked": "That message is being edited on another device",
+      "edit_unavailable": "That message can't be edited now",
+      "couldnt_stop_task": "Couldn't stop that process",
+      "commands_or_skills": "commands or skills",
+      "drop_to_mention": "Drop to mention"
+    }
+  },
+  "panel": {
+    "tab": {
+      "plugin": "Plugin",
+      "browser": "Browser",
+      "files": "Files",
+      "terminal": "Terminal {n}",
+      "actions": "Tab actions",
+      "close": "Close Tab",
+      "close_tooltip": "Close Tab  {key}",
+      "close_others": "Close Other Tabs",
+      "close_left": "Close Tabs to the Left",
+      "close_right": "Close Tabs to the Right",
+      "unsaved": "Unsaved changes"
+    },
+    "strip": {
+      "label": "Panel tabs",
+      "new_tab": "New Tab",
+      "expand": "Expand panel",
+      "collapse": "Collapse panel"
+    },
+    "empty": {
+      "browser": "Browser",
+      "files": "File viewer",
+      "terminal": "Terminal",
+      "title": "Open a tab",
+      "side_chat": "Side chat",
+      "fork": "Fork chat"
+    },
+    "plugin_off": "Its plugin isn't on right now.",
+    "broken": {
+      "browser": {
+        "title": "The browser didn't load",
+        "body": "Save the file again once it's fixed, and it comes back here."
+      },
+      "terminals": {
+        "title": "Terminals didn't load",
+        "body": "Save the file again once it's fixed, and they come back here."
+      },
+      "tab": {
+        "title": "This tab didn't load",
+        "body": "Save the file again once it's fixed, and it comes back here as it was."
+      }
+    },
+    "escape_hint": "Escape moves to the file's tab",
+    "nothing": {
+      "title": "Nothing open",
+      "body": "Open a session to use its panel."
+    },
+    "close_question": {
+      "title": "Close this tab?",
+      "running": "Something is still running in “{title}”. Closing the tab ends it.",
+      "unsaved": "“{title}” has unsaved changes. Closing the tab lets them go."
+    },
+    "terminal": {
+      "no_session": "This tab has no session to run in.",
+      "offline": "Zeron can't reach this session's device right now.",
+      "update": "Update Zeron to use terminals here.",
+      "failed": "The terminal didn't open",
+      "label": "Terminal"
+    },
+    "browser": {
+      "command": {
+        "annotate": "Annotate Element",
+        "new_tab": "New Browser Tab",
+        "open_location": "Open Location",
+        "reload": "Reload Page",
+        "zoom_in": "Zoom In",
+        "zoom_out": "Zoom Out",
+        "zoom_reset": "Actual Size"
+      },
+      "bar": "Browser",
+      "history": "History",
+      "forward": "Forward",
+      "address": "Address",
+      "address_placeholder": "Website or localhost:3000",
+      "page_controls": "Page",
+      "stop": "Stop",
+      "annotate": "Annotate",
+      "annotate_tooltip": "Annotate an element  {key}",
+      "open_in_browser": "Open in Browser",
+      "find": {
+        "no_results": "No results",
+        "tally": "{current} of {count}",
+        "label": "Find in page",
+        "placeholder": "Find",
+        "previous": "Previous Match",
+        "next": "Next Match"
+      },
+      "start": {
+        "open_preview": "Open {name} preview",
+        "preview_title": "Preview your work",
+        "browse_title": "Browse beside the chat",
+        "preview_body": "A dev server running in this project, or any website or localhost address above.",
+        "looking": "Looking for dev servers in this project…",
+        "body": "Enter a website or a localhost address. Point at parts of a page to attach them to your message."
+      },
+      "web_page": "Web page",
+      "offline_title": "You're offline",
+      "offline_body": "Check the connection, then try again.",
+      "failed_title": "Couldn't load this page",
+      "note": {
+        "label": "Annotation note",
+        "field": "Note",
+        "placeholder": "Add a note…"
+      },
+      "zoom": {
+        "reset": "Reset zoom",
+        "reset_to": "Zoom {level}, reset to default"
+      },
+      "more": "More",
+      "menu": {
+        "zoom": "Zoom {level}",
+        "copy_link": "Copy Link",
+        "inspect": "Inspect Page",
+        "history": "History…",
+        "settings": "Browser Settings…"
+      },
+      "file_title": "This file can’t be shown here",
+      "file_body": "Open it in your default browser to download it.",
+      "suggest": {
+        "label": "Suggestions",
+        "go": "Open address",
+        "search": "Search {engine}",
+        "dev_server": "Dev server",
+        "remove": "Remove {page} from history"
+      },
+      "navigation": "Navigation",
+      "annotate_page": {
+        "hint": "Point at an element, or drag a region",
+        "keys": "Shift-click to add · Esc to finish",
+        "selected": "{n} selected",
+        "region": "region"
+      },
+      "download": {
+        "label": "Downloads",
+        "untitled": "Download",
+        "asking": "Choose where to save it…",
+        "percent": "{n}%",
+        "saved": "Saved",
+        "failed": "Couldn’t download",
+        "failed_why": "Couldn’t download: {why}",
+        "show": "Show in Finder",
+        "dismiss": "Dismiss {name}",
+        "saving": "Saving…"
+      }
+    },
+    "browser_api": {
+      "empty": "Enter a website or localhost address.",
+      "invalid_characters": "This address contains invalid characters.",
+      "local_file": "Local files can't be opened in the Browser. Open them from Files or from a file link in the chat.",
+      "invalid": "Enter a valid website or localhost address.",
+      "scheme": "Only http and https addresses are supported.",
+      "credentials": "Use an address without an embedded username or password."
+    },
+    "home": {
+      "label": "Session home",
+      "open": "Open",
+      "unknown_device": "Unknown device",
+      "away": "Away: it can't be reached now",
+      "no_project": "No project",
+      "actions": "Actions",
+      "actions_loading": "Loading actions…",
+      "retry": "Retry",
+      "add_action": "Add action",
+      "setup_suffix": "{name} (setup)",
+      "edit_action": "Edit action",
+      "edit_named": "Edit {name}",
+      "run_named": "Run {name}",
+      "import": "Import",
+      "import_named": "Import {name}",
+      "side_chats": "Side chats",
+      "subagents": "Subagents",
+      "open_side": "Open side chat {title}",
+      "open_subagent": "Open subagent {title}",
+      "editor": {
+        "add_title": "Add action",
+        "edit_title": "Edit action",
+        "name": "Name",
+        "command": "Command",
+        "icon": "Icon",
+        "setup": "Run automatically on worktree creation",
+        "save": "Save action",
+        "saving": "Saving…",
+        "delete": "Delete action",
+        "delete_title": "Delete action?",
+        "delete_body": "“{name}” will be permanently deleted.",
+        "delete_confirm": "Delete",
+        "err_name": "Action name is required",
+        "err_name_long": "Action name must not exceed 80 characters",
+        "err_command": "Action command is required",
+        "err_command_long": "Action command must not exceed 16384 bytes",
+        "icon_play": "Play",
+        "icon_test": "Test",
+        "icon_lint": "Lint",
+        "icon_configure": "Configure",
+        "icon_build": "Build",
+        "icon_debug": "Debug"
+      },
+      "ports": "Ports",
+      "port_open_external": "Open in Default Browser",
+      "port_copy": "Copy URL",
+      "port_copied": "URL copied",
+      "port_closed": "Closed",
+      "previews_unavailable": "Local previews aren't available right now"
+    }
+  },
+  "files": {
+    "name_fallback": "Files",
+    "delete": {
+      "title": "Delete for good?",
+      "one": "“{name}” will be deleted from disk, not moved to the Trash. This can't be undone.",
+      "many": "{n} items will be deleted from disk, not moved to the Trash. This can't be undone."
+    },
+    "comment": {
+      "placeholder": "Leave a comment",
+      "submit": "Comment",
+      "you": "You"
+    },
+    "unreachable": {
+      "title": "Can't reach these files",
+      "body": "The device this session runs on isn't answering."
+    },
+    "unreadable": {
+      "title": "These files couldn't be read",
+      "body": "Zeron couldn't list this folder."
+    },
+    "none": {
+      "title": "No files here",
+      "body": "Open a session in a project to see its files."
+    },
+    "broken": {
+      "title": "Files didn't load",
+      "body": "Save the file again once it's fixed, and they come back here as they were."
+    },
+    "workspace": {
+      "offline": "Zeron can't reach this session's device right now.",
+      "unreadable_text": "It isn't text Zeron can read.",
+      "not_remade": "{name} couldn't be made again",
+      "not_saved": "{name} couldn't be saved",
+      "not_read_yet": "It hasn't been read from disk yet.",
+      "cant_save_here": "{name} can't be saved here",
+      "read_only": "Zeron can show this file but not write it.",
+      "not_moved": "{name} couldn't be moved",
+      "changed": "It changed before it could be. Try again.",
+      "cant_rename": "Files can't be renamed here",
+      "cant_move": "Files can't be moved here",
+      "not_made": "{name} couldn't be made",
+      "cant_delete": "Files can't be deleted here",
+      "not_deleted": "{name} couldn't be deleted",
+      "not_revealed": "{name} couldn't be shown in Finder",
+      "not_opened": "{name} couldn't be opened"
+    }
+  },
+  "engine": {
+    "update": {
+      "restart": "Restart to update",
+      "out_of_date": "Zeron's engine is out of date",
+      "restart_tip": "Zeron updated in the background. Restarting its engine ends what's running in it.",
+      "theirs_tip": "It was started outside this app: restart it there to update it.",
+      "short": "Engine out of date",
+      "old": "This Zeron needs a newer engine",
+      "old_tip": "Its engine is older than this version needs. Open About & updates to go back to Stable.",
+      "short_old": "Needs a newer engine"
+    }
+  },
+  "account": {
+    "api": {
+      "says": {
+        "offline": "Zeron can't be reached right now.",
+        "signed_out": "You've been signed out.",
+        "taken": "That username is taken.",
+        "reserved": "That username is reserved.",
+        "invalid": "That isn't a username yet.",
+        "already_claimed": "You already have a username.",
+        "not_ready": "Your account is still being set up. Try again in a moment.",
+        "rate_limited": "Too many tries. Wait a minute, then try again.",
+        "refused": "That organization isn't open to you.",
+        "failed": "Something went wrong."
+      }
+    },
+    "auth": {
+      "says": {
+        "cancelled": "Sign-in was cancelled.",
+        "denied": "Sign-in was turned down in the browser. Try again when you're ready.",
+        "timed_out": "The browser didn't finish signing you in. Try again.",
+        "offline": "Zeron can't be reached. Check your connection and try again.",
+        "expired": "You were signed out. Sign in again to carry on.",
+        "failed": "Sign-in didn't finish. Try again."
+      }
+    }
+  },
+  "plugins": {
+    "words": {
+      "place": {
+        "window": "the window",
+        "sidebar": "the sidebar",
+        "sidebar_row": "a sidebar row",
+        "title_bar": "the title bar",
+        "rail": "the sidebar's rail",
+        "settings": "Settings",
+        "new_chat": "a new chat",
+        "new_chat_background": "a new chat's background",
+        "chat": "a chat",
+        "chat_header": "a chat's header",
+        "message": "a message",
+        "message_box": "the message box",
+        "files_pane": "the files pane",
+        "file_row": "a file's row",
+        "file_tab": "a file's tab",
+        "open_file": "the open file",
+        "side_panel": "the side panel",
+        "chats": "chats",
+        "main_window": "the main window",
+        "page_area": "the page area",
+        "chat_page": "the chat page",
+        "new_chat_page": "the new chat page",
+        "zeron": "part of Zeron",
+        "zeron_parts": "parts of Zeron"
+      },
+      "list": "{rest} and {last}",
+      "list_sep": ", ",
+      "none_listed": "none listed",
+      "programs": "programs",
+      "permission": {
+        "ui_add": {
+          "title": "Add things to Zeron's interface"
+        },
+        "ui_change": {
+          "title": "Change how {places} shows",
+          "detail": "It can hide, reorder, relabel or redraw what's there."
+        },
+        "ui_replace": {
+          "title": "Replace {places} with its own",
+          "detail": "Its code runs as part of Zeron: it can do anything you can."
+        },
+        "profile_read": {
+          "title": "See your name, username and picture"
+        },
+        "sessions_read": {
+          "title": "See your sessions' titles and status"
+        },
+        "messages_read": {
+          "title": "Read messages in the open chat"
+        },
+        "account_email": {
+          "title": "See your email address"
+        },
+        "files_read": {
+          "title": "See file names and paths in your projects"
+        },
+        "panel_tabs": {
+          "title": "Open tabs in your chats' panels"
+        },
+        "pages_add": {
+          "title": "Add pages to the sidebar"
+        },
+        "github": {
+          "title": "See your pull requests on GitHub",
+          "detail": "Through the GitHub CLI you're signed in to (gh). The plugin never sees your login."
+        },
+        "github_write": {
+          "title": "Comment on pull requests as you"
+        },
+        "notifications": {
+          "title": "Send you notifications",
+          "detail": "Like any other notification, set in Settings → Notifications."
+        },
+        "links_open": {
+          "title": "Open links",
+          "detail": "Where you open links: Settings → Links."
+        },
+        "navigate": {
+          "title": "Open chats and pages"
+        },
+        "compose": {
+          "title": "Put text in the message box",
+          "detail": "You still send it."
+        },
+        "network": {
+          "title": "Connect to the internet",
+          "title_any": "Connect to any site on the internet",
+          "title_hosts": "Connect to these places"
+        },
+        "clipboard": {
+          "title": "Read and change your clipboard"
+        },
+        "files": {
+          "title": "Open and save files you choose"
+        },
+        "web": {
+          "title": "Show web pages"
+        },
+        "windows": {
+          "title": "Open windows of its own"
+        },
+        "tools": {
+          "title": "Give your agents tools"
+        },
+        "devices": {
+          "title": "Send data between your own devices"
+        },
+        "commands": {
+          "title": "Run {list} on this Mac as you",
+          "title_on": "Run {list} on {device} as you",
+          "detail": "It can do whatever {list} can do with your sign-ins.",
+          "detail_anything": "These can do anything you can, with your sign-ins."
+        },
+        "native": {
+          "title": "Run its own program on this Mac for your agents",
+          "title_on": "Run its own program on {device} for your agents",
+          "detail": "It can do anything you can."
+        },
+        "service": {
+          "title": "Run in the background on this device",
+          "title_on": "Run in the background on {device}",
+          "detail": "So its windows and your agents can use it from any of your devices. It does only what else you allow it."
+        }
+      },
+      "author": {
+        "zeron": "by Zeron",
+        "you": "by you",
+        "verified": "by @{username}",
+        "unknown": "Unknown author"
+      },
+      "about": {
+        "failed": "Stopped working: {reason}",
+        "broken": "It can't load.",
+        "tampered": "Changed since you allowed it.",
+        "asks_more": "Asks for more than you allowed.",
+        "waiting": "Waiting for you to allow it.",
+        "no_description": "No description."
+      },
+      "grants": "It can {list}.",
+      "update": {
+        "refused": "Version {version} wasn't installed: {reason}.",
+        "refused_unversioned": "Version wasn't installed: {reason}.",
+        "available": "Update available: {version}.",
+        "available_unversioned": "Update available:.",
+        "added": "It also asks to {list}; you'll be asked first.",
+        "removed": "It no longer asks to {list}."
+      },
+      "unverified": "Unverified",
+      "from": "From {where}",
+      "from_file": "From a file",
+      "more": "and {n} more",
+      "diff": {
+        "commands": "Run more programs as you",
+        "mcp": "Run a different program beside your agents",
+        "mcp_gone": "Stop running its program beside your agents",
+        "tools_added": "New tools for your agents",
+        "tools_changed": "Tools that now tell your agents something else",
+        "service": "Run a different background service",
+        "entry": "Start from a different file",
+        "network": "Connect to more places",
+        "settings": "Its settings changed",
+        "ui_replace": "Replace {places} with its own"
+      },
+      "can_anything": "{name}: can do anything you can",
+      "any_site": "Any site on the internet",
+      "near_host": "{host}: this Mac or your network",
+      "details": {
+        "changes": "Parts of Zeron it changes",
+        "replaces": "Screens it replaces",
+        "changes_since": "Also changes, since you allowed it"
+      }
+    },
+    "page": {
+      "title": "Plugins",
+      "description": "What plugins add to Zeron on each of your computers, and the tools they give your agents.",
+      "search": "Search plugins",
+      "tabs": "Plugins",
+      "installed": "Installed",
+      "yours": "Yours",
+      "package_filter": "Zeron plugin",
+      "install_title": "Install Plugin",
+      "installed_toast": "Installed {name}",
+      "installed_toast_version": "Installed {name} {version}",
+      "updated_toast": "Updated {name}",
+      "updated_toast_version": "Updated {name} {version}",
+      "couldnt_install": "Couldn't install the plugin",
+      "couldnt_update": "Couldn't update {name}",
+      "settings_of": "{name} settings",
+      "review": "Review",
+      "show_folder": "Show folder",
+      "builtin": "{name} is part of Zeron",
+      "remove_named": "Remove {name}",
+      "update": "Update",
+      "updating": "Updating…",
+      "none_yours": "None of yours yet",
+      "none": "No plugins yet",
+      "none_body": "Ask an agent to make one.",
+      "show_plugins_folder": "Show plugins folder",
+      "remove_title": "Remove this plugin?",
+      "remove_body": "It stops everywhere in Zeron at once. Its folder goes to the plugins folder's removed items, in case you want it back.",
+      "new_title": "New plugin",
+      "new_body": "A folder of your own, signed as yours. Ask an agent to fill it in, or edit init.luau yourself.",
+      "make_it": "Make it",
+      "name": "Name",
+      "name_placeholder": "My plugin",
+      "install_dialog_title": "Install a plugin",
+      "install_dialog_body": "Paste a link to a .zeron-plugin file, a GitHub release or a repository, or choose a file. Zeron checks who signed it, and you allow what it asks before it runs.",
+      "install": "Install",
+      "link": "Link",
+      "choose_file": "Choose File",
+      "offline_title": "Plugins aren't available right now",
+      "offline_body": "The ones you've allowed come back when Zeron is running again.",
+      "cant_reach": "Can't reach {device} right now. Try again once it's online.",
+      "couldnt_switch": "Couldn't turn {name} on or off",
+      "couldnt_remove": "Couldn't remove the plugin",
+      "none_body_device": "Install one from a link, or add it on that computer.",
+      "install_link": "Install from a link",
+      "install_more": "Install",
+      "device_offline_title": "{device} is offline",
+      "device_offline_body": "Its plugins show here once it's online again, with Zeron running.",
+      "try_again": "Try again",
+      "remove_body_device": "It stops everywhere in Zeron on {device} at once. Its folder goes to the removed items in that computer's plugins folder, in case you want it back.",
+      "install_dialog_title_device": "Install a plugin on {device}",
+      "install_dialog_body_device": "Paste a link to a .zeron-plugin file, a GitHub release or a repository. Zeron checks who signed it, and you allow what it asks before it runs there.",
+      "file_here_only": "A plugin file installs only on the computer it's on. To install one from a file, show this Mac's plugins.",
+      "setup_title": "Finish setting up your account",
+      "setup_body": "Your plugins load as soon as you've chosen where you work."
+    },
+    "consent": {
+      "made_by_you": "Made by you",
+      "made_by": "Made by @{username}",
+      "unknown_author": "Unknown author",
+      "tampered_why": "It changed after you allowed it. Look again before it runs.",
+      "unknown_why": "Zeron can't tell who made it. Allow it only if you trust where it came from.",
+      "nothing": "Nothing to allow",
+      "asks_nothing": "It asks for nothing beyond running in its own space.",
+      "allow_title": "Allow {name}?",
+      "tampered": "Changed since you allowed it",
+      "asks_again": "It now also asks to:",
+      "asks": "It asks to:",
+      "mine": "It's mine…",
+      "not_now": "Not now",
+      "allow": "Allow",
+      "on_device": "On {device}",
+      "unverified_why": "Zeron can't confirm who made this. Allow it only if you trust where it came from.",
+      "unverified_why_from": "Zeron can't confirm who made this. Allow it only if you trust where it came from: {where}.",
+      "made_on_your_device": "Made on one of your devices",
+      "grew": "New since you allowed it:",
+      "allow_there": "Allow it on {device}: it asks there, in Zeron on that computer.",
+      "mine_confirm": "Sign {name} as your own? Only if you wrote it yourself: Zeron will treat it as yours from now on, on this Mac.",
+      "mine_cancel": "Cancel",
+      "mine_sign": "Sign as mine",
+      "details": "Details",
+      "details_hide": "Hide details"
+    },
+    "permissions": {
+      "screen_recording": {
+        "title": "Screen Recording",
+        "description": "Lets {name} capture the window in front. macOS may ask you to reopen Zeron once.",
+        "grant": "Allow Screen Recording"
+      },
+      "accessibility": {
+        "title": "Accessibility",
+        "description": "Lets {name} read the text in other applications' windows.",
+        "grant": "Allow Accessibility"
+      },
+      "note": "macOS asks for these for the app that opened Zeron: Zeron itself, or, run from a terminal or an editor, that app. Grant them in System Settings → Privacy & Security, then quit and reopen it once."
+    },
+    "settings": {
+      "granted": "Granted",
+      "required": "Required",
+      "open_system_settings": "Open System Settings",
+      "check_named": "Check {name} again",
+      "check_again": "Check again",
+      "a_number": "A number",
+      "at_least": "At least {n}",
+      "at_most": "At most {n}",
+      "none": "None",
+      "choose_named": "Choose {name}",
+      "folder_title": "{plugin}: {setting}",
+      "couldnt_choose_folder": "Couldn't choose that folder",
+      "choose": "Choose",
+      "description": "Settings for the {name} plugin. It reads them as you change them.",
+      "terms": "plugin",
+      "permission_terms": "permission privacy macos allow",
+      "wallpaper": {
+        "label": "Use as wallpaper",
+        "on": "A new chat opens on what {name} draws, in place of Appearance's wallpaper.",
+        "off": "Open new chats on what {name} draws. Appearance's wallpaper comes back when this is off.",
+        "instead_of": "{other} is the wallpaper now. Turning this on uses {name} instead.",
+        "terms": "wallpaper background new chat effect"
+      }
+    },
+    "init": {
+      "waiting": "{name} is waiting for you to allow it",
+      "review": "Review",
+      "template_waiting_body": "A template from someone else.",
+      "failed": "{name} stopped working",
+      "failed_body": "Zeron keeps working without it until it's updated or fixed.",
+      "show_folder": "Show folder",
+      "template_failed": "Your template's {name} has an error",
+      "template_failed_body": "That part shows the default interface until it's fixed and saved.",
+      "template_broken": "{name} can't run",
+      "template_broken_body": "The default interface shows until the template is fixed and saved."
+    }
+  },
+  "templates": {
+    "page": {
+      "title": "Templates",
+      "description": "Whole interfaces for Zeron. Anything a template leaves out comes from the default interface.",
+      "search": "Search templates",
+      "tabs": "Templates",
+      "installed": "Installed",
+      "yours": "Yours",
+      "author": {
+        "zeron": "by Zeron",
+        "you": "by you",
+        "verified": "by @{username}",
+        "unknown": "by an unknown author",
+        "named": "by {name}"
+      },
+      "about": {
+        "broken": "Can't run, so the default interface shows: {error}",
+        "errors": "Some parts show the default interface: {error}",
+        "out_of_date": "Made for Zeron {version}. Zeron has updated since.",
+        "out_of_date_unversioned": "Made for an earlier Zeron. Zeron has updated since.",
+        "no_description": "No description."
+      },
+      "package_filter": "Zeron template",
+      "export_title": "Export Template",
+      "couldnt_export": "Couldn't export {name}",
+      "exported": "Exported {name}",
+      "exported_body": "Signed as yours: whoever installs it sees it's from you.",
+      "import_title": "Import Template",
+      "couldnt_import": "Couldn't import the template",
+      "installed_toast": "Installed {name}",
+      "waiting": "{name} is waiting for you",
+      "waiting_body": "A template from someone else. See who signed it before it's installed.",
+      "review": "Review",
+      "more_for": "More for {name}",
+      "show_folder": "Show folder",
+      "duplicate": "Duplicate",
+      "couldnt_duplicate": "Couldn't duplicate {name}",
+      "export": "Export…",
+      "use": "Use",
+      "couldnt_use": "Couldn't use {name}",
+      "in_use": "In use",
+      "none_yours": "None of yours yet",
+      "none_body": "Ask an agent to make one, or start from a copy of the default.",
+      "show_templates_folder": "Show templates folder",
+      "delete_title": "Delete this template?",
+      "delete_body": "It's set aside in the templates folder, so you can get it back. If it's in use, Zeron switches to the default interface.",
+      "couldnt_delete": "Couldn't delete the template",
+      "new_title": "New template",
+      "new_body": "A copy of the default interface for you to change. Ask an agent to change it, or edit its files yourself.",
+      "make_it": "Make it",
+      "couldnt_make": "Couldn't make the template",
+      "name": "Name",
+      "name_placeholder": "My template",
+      "install_more": "Install",
+      "install_title": "Install Template",
+      "install_dialog_title": "Install a template",
+      "install_dialog_body": "Paste a link to a .zeron-template file, a GitHub release or a repository, or choose a file. Zeron checks who signed it, and you allow it before it's used.",
+      "link": "Link",
+      "install": "Install",
+      "choose_file": "Choose File",
+      "couldnt_install": "Couldn't install the template",
+      "update": "Update",
+      "updating": "Updating",
+      "updated_toast": "Updated {name}",
+      "updated_toast_version": "Updated {name} {version}",
+      "couldnt_update": "Couldn't update {name}"
+    },
+    "consent": {
+      "made_by_you": "Made by you",
+      "made_by": "Made by @{username}",
+      "unknown_author": "Unknown author",
+      "whom_verified": "@{username}",
+      "whom_you": "yourself",
+      "whom_unknown": "whoever sent it",
+      "checking": "Checking the template…",
+      "nothing": "Nothing waiting",
+      "nothing_body": "This template was answered already.",
+      "install_title": "Install {name}?",
+      "keep_title": "Keep {name}?",
+      "keep_trust": "Keep it only if you trust what made it",
+      "keep_body": "An agent made, changed or switched to this template, or it hasn't been kept since it changed. Until you keep it, it's a preview: Zeron won't let it run programs, use your account, change plugins, templates or files, or send to agents. Kept, it runs with everything Zeron can do.",
+      "keep_files": "{n, plural, one {# file} other {# files}} of its own, as they are now",
+      "keep_files_detail": "If they change again, Zeron asks again.",
+      "keep": "Keep",
+      "trust": "Install it only if you trust {whom}",
+      "trust_body": "A template runs as part of Zeron: it replaces Zeron's interface and can do anything Zeron can, with your chats, files, accounts and agents.",
+      "unknown_body": "Zeron can't tell whose key signed it. Install it only if you trust where it came from.",
+      "signature": "Its signature checks out",
+      "signature_detail": "Nothing in it changed since it was signed, by key {key}.",
+      "files": "{n, plural, one {# file} other {# files}}",
+      "files_made_for": "{n, plural, one {# file} other {# files}} · made for Zeron {version}",
+      "left_out": "{n, plural, one {# file} other {# files}} left out",
+      "left_out_detail": "Templates can't replace these, so Zeron keeps its versions: {files}",
+      "not_now": "Not now",
+      "install": "Install",
+      "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
+      "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
+    }
+  },
+  "themes": {
+    "page": {
+      "title": "Themes",
+      "description": "Colours for Zeron. Your theme is worn with any template.",
+      "search": "Search themes",
+      "tabs": "Themes",
+      "all": "All",
+      "builtin": "Built in",
+      "from_templates": "From templates",
+      "yours": "Yours",
+      "import": "Import theme",
+      "hint": "A theme is only colours, so it works with any template, and it can't do anything else.",
+      "about": {
+        "default": "The default, light and dark",
+        "both": "Light and dark",
+        "light": "Light only",
+        "dark": "Dark only"
+      },
+      "byline": {
+        "builtin": "Built in",
+        "template": "From {name}",
+        "imported": "Imported"
+      },
+      "needs_fixing": "Something in this theme needs fixing.",
+      "in_use": "In use",
+      "for_light": "Light",
+      "for_dark": "Dark",
+      "use": "Use",
+      "couldnt_use": "Couldn't use the theme",
+      "use_light": "Use only for light",
+      "use_dark": "Use only for dark",
+      "show_template": "Show in Templates",
+      "more_for": "More for {name}",
+      "rename": "Rename",
+      "remove": "Remove",
+      "rename_title": "Rename theme",
+      "couldnt_rename": "Couldn't rename the theme",
+      "name": "Name",
+      "remove_title": "Remove this theme?",
+      "remove_body": "It's removed from Yours. Wherever it's in use, the default comes back.",
+      "none_yours": "None of yours yet",
+      "none_yours_body": "Import a VS Code colour theme: its .json file, or an extension's folder. You can drop one on this page too.",
+      "none_templates": "No template brings a theme",
+      "none_templates_body": "When a template has colours of its own, they show here, to use with any template.",
+      "choose_source": "Choose Theme",
+      "vscode_theme": "VS Code theme",
+      "drop": "Drop to import",
+      "import_failed": "This theme couldn't be imported",
+      "skipped": "Some of its themes didn't import: {names}",
+      "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
+      "imported_body": "It's under Yours."
+    }
+  }
+}

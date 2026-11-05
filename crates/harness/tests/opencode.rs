@@ -281,6 +281,7 @@ fn request(prompt: &str) -> RunRequest {
         resume: None,
         worktree: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 

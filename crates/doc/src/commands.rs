@@ -364,6 +364,7 @@ mod tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 }

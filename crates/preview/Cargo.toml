@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 zeron-proto.workspace = true
+zeron-preview-label.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
@@ -26,6 +27,9 @@ hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 webrtc = "0.20.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 tempfile.workspace = true

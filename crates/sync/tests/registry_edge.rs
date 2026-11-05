@@ -40,6 +40,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         harness_session_cwd: None,
         harness_session_harness: None,
         parent_chat_id: None,
+        child_kind: None,
         space_id: None,
         last_seen_at: None,
         room_gen: None,
@@ -84,6 +85,7 @@ async fn two_rust_clients_converge_through_a_real_registry_do() {
             last_turn_outcome: None,
             terminal_activity: None,
             running_subagents: 0,
+            background_tasks: Vec::new(),
             chat_id: "chat-live".into(),
             device_id: "dev-live-a".into(),
             status: SessionStatus::Working,
@@ -204,6 +206,7 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
                 last_turn_outcome: None,
                 terminal_activity: None,
                 running_subagents: 0,
+                background_tasks: Vec::new(),
                 chat_id: "chat-churn".into(),
                 device_id: "dev-churn".into(),
                 status: if i % 2 == 0 {

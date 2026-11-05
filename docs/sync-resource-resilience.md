@@ -168,7 +168,7 @@ Relevant checks:
 
 ```
 cargo test --locked -p zeron-engine --test sync_resources -- --nocapture
-cargo test --locked -p zeron-engine --lib --test session_publication --test restart_resume --test local_profiles --test born_chat2_race --test codex_subagents --test message_queue --test transcript_salvage
+cargo test --locked -p zeron-engine --lib --test session_publication --test restart_resume --test misc --test born_chat2_race --test message_queue --test transcript_salvage
 cargo test --locked -p zeron-sync --lib
 cargo test --locked -p zeron-rpc --test device_room
 cargo check --locked -p zeron-ui

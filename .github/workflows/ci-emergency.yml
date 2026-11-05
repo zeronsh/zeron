@@ -1,0 +1,41 @@
+name: CI emergency
+
+# Gives one pull request every CI runner now (scripts/ci/emergency.py): adds
+# `ci:lock` to it, cancels the other pull requests' CI runs, and re-runs its own
+# if needed. Dispatching needs write access. Release the runners by removing the
+# label, or by merging or closing the pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+        type: number
+      cancel-main:
+        description: Also cancel main and merge queue CI runs
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write  # cancel and re-run CI runs
+  issues: write  # the ci:lock label
+  pull-requests: write
+
+concurrency:
+  group: ci-emergency
+  cancel-in-progress: false
+
+jobs:
+  emergency:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          CANCEL_MAIN: ${{ inputs.cancel-main }}
+        run: python3 -I scripts/ci/emergency.py

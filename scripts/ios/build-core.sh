@@ -9,7 +9,10 @@
 #   libzeron_mobile.a            linked via LIBRARY_SEARCH_PATHS
 #   include/module.modulemap     `import zeron_coreFFI` (SWIFT_INCLUDE_PATHS)
 # and refreshes apps/ios/Zeron/Core/Generated/zeron_core.swift — committed so
-# Xcode's synchronized folder always sees it; CI fails if it drifts.
+# Xcode's synchronized folder always sees it — and apps/ios/CoreFFI/ (the C
+# header and module map, committed so CI's simulator tests need no bindings
+# build; outside the synchronized folders, so Xcode compiles nothing from it).
+# CI fails if any of them drifts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -61,7 +64,8 @@ GEN="$OUT/gen"
 "$ROOT/target/mobile/uniffi-bindgen" generate --library "$LIB" --language swift --out-dir "$GEN" >/dev/null
 cp "$GEN/zeron_coreFFI.h" "$OUT/include/zeron_coreFFI.h"
 cp "$GEN/zeron_coreFFI.modulemap" "$OUT/include/module.modulemap"
-# Only touch the Swift file when it changed so Xcode doesn't recompile it.
-SWIFT_OUT="$ROOT/apps/ios/Zeron/Core/Generated/zeron_core.swift"
-mkdir -p "$(dirname "$SWIFT_OUT")"
-cmp -s "$GEN/zeron_core.swift" "$SWIFT_OUT" || cp "$GEN/zeron_core.swift" "$SWIFT_OUT"
+# Only touch the committed files when they changed so Xcode doesn't recompile them.
+refresh() { mkdir -p "$(dirname "$2")"; cmp -s "$1" "$2" || cp "$1" "$2"; }
+refresh "$GEN/zeron_core.swift" "$ROOT/apps/ios/Zeron/Core/Generated/zeron_core.swift"
+refresh "$GEN/zeron_coreFFI.h" "$ROOT/apps/ios/CoreFFI/zeron_coreFFI.h"
+refresh "$GEN/zeron_coreFFI.modulemap" "$ROOT/apps/ios/CoreFFI/module.modulemap"

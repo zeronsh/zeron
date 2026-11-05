@@ -6750,11 +6750,15 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         HarnessId::Grok => (crate::icons::GROK_MARK, None),
         // Nous Research's mark (the Hermes product icon), monochrome.
         HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
+        HarnessId::Fx => (crate::icons::FX_MARK, None),
         HarnessId::Pi => (crate::icons::PI_MARK, None),
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
         HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
         HarnessId::Muse => (crate::icons::MUSE_MARK, Some(crate::icons::muse_brand())),
+        // An agent added from the ACP registry (in another app): no mark of
+        // its own here.
+        HarnessId::Registry(_) => (crate::icons::BOT, None),
     }
 }
 
@@ -7635,6 +7639,7 @@ mod tests {
             started_at: Some(chrono::Utc::now()),
             updated_at: chrono::Utc::now(),
             running_subagents: 0,
+            background_tasks: Vec::new(),
             last_turn_outcome: None,
             terminal_activity: None,
         }
@@ -8303,6 +8308,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: repo.map(str::to_string),
+            icon: None,
             created_at: chrono::Utc::now(),
         };
         let cloud_on = |credits: f64| zeron_proto::CloudStatus {
@@ -8481,6 +8487,7 @@ mod tests {
                 checkout_id: None,
                 repository_id: None,
                 github_repo: None,
+                icon: None,
                 created_at: chrono::Utc::now(),
             }]);
             state
@@ -8525,6 +8532,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -8831,6 +8839,7 @@ mod tests {
             checkout_id: None,
             repository_id: repository.map(str::to_string),
             github_repo: None,
+            icon: None,
             created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
                 + chrono::TimeDelta::minutes(minutes),
         };
@@ -9809,6 +9818,7 @@ mod tests {
 
     fn descriptor(id: HarnessId, name: &str) -> HarnessDescriptor {
         HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             installed: true,
@@ -11155,6 +11165,7 @@ mod tests {
     #[test]
     fn mock_harness_hidden_unless_alone() {
         let descriptor = |id: HarnessId, name: &str| HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             supports_steering: true,
@@ -11184,6 +11195,7 @@ mod tests {
     #[test]
     fn offered_harnesses_follow_the_catalog_enabled_flags() {
         let descriptor = |id: HarnessId, name: &str, enabled: Option<bool>| HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             supports_steering: true,
@@ -11239,6 +11251,7 @@ mod tests {
     fn offered_harnesses_require_an_installed_cli() {
         let descriptor =
             |id: HarnessId, name: &str, enabled: Option<bool>, installed: bool| HarnessDescriptor {
+                icon: None,
                 id,
                 name: name.into(),
                 supports_steering: true,

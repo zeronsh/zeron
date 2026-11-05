@@ -1,0 +1,4 @@
+# Luau checks its asserts unless NDEBUG is defined (about a fifth slower);
+# zgx sets this in its own workspace, and an app built elsewhere repeats it.
+[env]
+LUAU_CXXFLAGS = "-DNDEBUG"
