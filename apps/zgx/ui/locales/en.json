@@ -1392,7 +1392,8 @@
         "label": "Global shortcut",
         "terms": "hotkey keys",
         "ready": "The shortcut works while another application has focus.",
-        "unavailable": "This shortcut is unavailable. Choose a different key combination."
+        "unavailable": "This shortcut is unavailable. Choose a different key combination.",
+        "taken": "Another app uses this shortcut. Choose a different key combination."
       },
       "destination": {
         "label": "Destination",
@@ -1415,7 +1416,9 @@
         "terms": "accessibility permission",
         "description": "Accessibility adds visible and off-screen application text. Screenshots work without it.",
         "allow": "Enable text capture"
-      }
+      },
+      "windows_description": "Press the shortcut while another app is in front: Zeron captures that window. Windows asks no permission. An Appshot carries the window's picture, not its text.",
+      "unsupported_description": "Appshots aren't available on this platform yet."
     },
     "providers": {
       "title": "Providers",

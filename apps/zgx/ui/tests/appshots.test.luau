@@ -153,3 +153,25 @@ test("Settings → Appshots records a new shortcut, and Escape keeps the old one
 	app:frames(10)
 	expect(app:state("appshots_shortcut")).to_be("shift+cmd+k")
 end)
+
+test("Settings → Appshots shows only its platform's rows: none of macOS's permissions on Windows, no capture where there is none", function()
+	local app = settings { platform = "windows", enabled = true, shortcut_ready = true, capture = "ready", text = "required" }
+	local page = app:tree("#settings-page")
+	for _, words in { "Capture Appshots", "Global shortcut", "Destination", "Press the shortcut while another app is in front" } do
+		expect(if page:find(words, 1, true) then words else `missing: {words}`).to_be(words)
+	end
+	for _, words in { "Permissions", "Window capture", "Application text", "Enable text capture", "System Settings", "macOS", "Check again", "unavailable" } do
+		expect(if page:find(words, 1, true) then `shown: {words}` else words).to_be(words)
+	end
+	-- Taken by another app, it says so.
+	app:set_state("appshots.state", { platform = "windows", enabled = true, shortcut_ready = false, capture = "ready", text = "required" })
+	app:frames(20)
+	expect(app:tree("#settings-page"):find("Another app uses this shortcut", 1, true) ~= nil).to_be(true)
+	app:set_state("appshots.state", { platform = "unsupported", enabled = false, shortcut_ready = false, capture = "required", text = "required" })
+	app:frames(20)
+	page = app:tree("#settings-page")
+	expect(page:find("aren't available on this platform", 1, true) ~= nil).to_be(true)
+	for _, words in { "Capture Appshots", "Global shortcut", "Window capture", "Check again" } do
+		expect(if page:find(words, 1, true) then `shown: {words}` else words).to_be(words)
+	end
+end)

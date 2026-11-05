@@ -1392,7 +1392,8 @@
         "label": "全局快捷键",
         "terms": "快捷键 按键 hotkey keys",
         "ready": "其他应用处于前台时也可使用此快捷键。",
-        "unavailable": "此快捷键不可用。请选择其他组合键。"
+        "unavailable": "此快捷键不可用。请选择其他组合键。",
+        "taken": "其他 App 正在使用此快捷键。请选择其他组合键。"
       },
       "destination": {
         "label": "目标位置",
@@ -1415,7 +1416,9 @@
         "terms": "辅助功能 权限 accessibility permission",
         "description": "辅助功能可添加可见及屏幕外的应用文本。不启用也可以截图。",
         "allow": "启用文本截取"
-      }
+      },
+      "windows_description": "在其他 App 位于前台时按下快捷键：Zeron 会截取该窗口。Windows 无需授权。Appshot 只包含窗口的图像，不包含其中的文本。",
+      "unsupported_description": "此平台暂不支持 Appshots。"
     },
     "providers": {
       "title": "提供方",
