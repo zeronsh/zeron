@@ -14,11 +14,14 @@
 //! .luau) or `gallery:<page>`, optionally `@<w>x<h>`, `#<target>` (crop to
 //! a node's box) and `!<command>` / `=<state>:<json>` / `^<target>` (a click) / `+<ms>` (a wait)
 //! steps, joined by `|`:
-//! `gallery:composer|#gallery-demo@1240x820`. `AUDIT_SCALE` (2) is the
-//! pixels a point; `AUDIT_DARK=1` the dark scheme where the screen has one.
-//! What's transparent (the window's glass) is laid on `AUDIT_BACKDROP`
-//! (`#e9e9ee` light, `#1d1d22` dark), the same under both. `AUDIT_WAIT_MS`
-//! lets real time pass before the picture, for what comes over the network.
+//! `gallery:composer|#gallery-demo@1240x820`. For motion, a step `@<w>x<h>`
+//! resizes the window and `%<frames>` takes a picture after that many
+//! frames (`<name>-01.png` on): a strip, each step's frames as written.
+//! `AUDIT_SCALE` (2) is the pixels a point; `AUDIT_DARK=1` the dark scheme
+//! where the screen has one. What's transparent (the window's glass) is
+//! laid on `AUDIT_BACKDROP` (`#e9e9ee` light, `#1d1d22` dark), the same
+//! under both. `AUDIT_WAIT_MS` lets real time pass before the picture, for
+//! what comes over the network.
 //!
 //! Plugins too: `ZERON_ZGX_DEV_PLUGINS` loads plugin folders into each shot
 //! (lent the design system, as the app lends it), and `ZERON_ZGX_DEV_GITHUB`
@@ -49,6 +52,11 @@ enum Step {
     // The pointer resting on a target (`*target`): its hover state.
     Hover(String),
     State(String, serde_json::Value),
+    // The window resized (`@<w>x<h>` after the first part).
+    Resize(f32, f32),
+    // A picture of this frame after these frames (`%<frames>`): a frame
+    // strip, `<name>-01.png` on.
+    Snap(usize),
 }
 
 fn ui_dir() -> PathBuf {
@@ -93,6 +101,11 @@ fn parse(spec: &str, dark: bool) -> Shot {
             steps.push(Step::State(state.to_string(), serde_json::from_str(json).expect("a state's JSON")));
         } else if let Some(ms) = part.strip_prefix('+') {
             steps.push(Step::Wait(ms.parse().expect("+<milliseconds>")));
+        } else if let Some(s) = part.strip_prefix('@') {
+            let (w, hgt) = s.split_once('x').expect("a size is <w>x<h>");
+            steps.push(Step::Resize(w.parse().expect("width"), hgt.parse().expect("height")));
+        } else if let Some(n) = part.strip_prefix('%') {
+            steps.push(Step::Snap(n.parse().expect("%<frames>")));
         } else if let Some(label) = part.strip_prefix('~') {
             name = format!("{name}-{label}");
         }
@@ -152,6 +165,11 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
         }
     };
     wait(&mut app);
+    // A frame strip (`%<frames>` steps): each step's frames exactly as
+    // written, none added between them.
+    let strip = shot.steps.iter().any(|s| matches!(s, Step::Snap(_)));
+    let mut size = (w, h);
+    let mut snaps = 0;
     for step in &shot.steps {
         match step {
             Step::Wait(ms) => {
@@ -182,9 +200,28 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
                     .set_state(name, crate::plugins::json_value(value))
                     .map_err(|e| format!("{}: {name}: {e}", shot.name))?;
             }
+            Step::Resize(rw, rh) => {
+                size = (*rw, *rh);
+                app.ui.scene.borrow_mut().resize(*rw, *rh);
+                app.host
+                    .shared("zgx.window.size", zgx_script::Value::Nil)
+                    .set(zgx_script::window_size_value(*rw, *rh));
+                gpu.resize((rw * scale).round() as u32, (rh * scale).round() as u32);
+            }
+            Step::Snap(frames) => {
+                app.frames(*frames);
+                snaps += 1;
+                let path = out.join(format!("{}-{snaps:02}.png", shot.name));
+                picture(&mut app, &mut gpu, size, scale, dark, None, &path).map_err(|e| format!("{}: {e}", shot.name))?;
+            }
         }
         app.settle();
-        app.frames(10);
+        if !strip {
+            app.frames(10);
+        }
+    }
+    if strip {
+        return Ok(out.join(format!("{}-01.png", shot.name)));
     }
     // Long enough for entrances and springs to finish.
     app.frames(90);
@@ -192,10 +229,24 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
     if let Some(error) = app.error() {
         eprintln!("audit_shots: {}: script error: {error}", shot.name);
     }
+    let path = out.join(format!("{}.png", shot.name));
+    picture(&mut app, &mut gpu, size, scale, dark, shot.crop.as_deref(), &path).map_err(|e| format!("{}: {e}", shot.name))?;
+    Ok(path)
+}
+
+/// The window as it is now, written to `path` (cropped to `crop`'s box).
+fn picture(
+    app: &mut TestApp,
+    gpu: &mut GpuRenderer,
+    (w, h): (f32, f32),
+    scale: f32,
+    dark: bool,
+    crop: Option<&str>,
+    path: &Path,
+) -> Result<(), String> {
     app.ui.prepare_frame();
-    let report = app.ui.scene.borrow_mut().flush();
     // (Everything, not only what changed: the texture starts empty.)
-    let _ = report;
+    let _ = app.ui.scene.borrow_mut().flush();
     let all = [zgx::scene::Rect { x: 0., y: 0., width: w, height: h }];
     gpu.render(&app.ui.scene.borrow(), &all).map_err(|e| format!("render: {e:?}"))?;
     // A picture kept encoded (a JPEG, a PNG) decodes off the thread as it's
@@ -226,8 +277,8 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
 
     // Cropped to a node's box.
     let (mut x0, mut y0, mut cw, mut ch) = (0u32, 0u32, pw, ph);
-    if let Some(target) = &shot.crop {
-        let node = app.target(target).map_err(|e| format!("{}: crop {target}: {e}", shot.name))?;
+    if let Some(target) = crop {
+        let node = app.target(target).map_err(|e| format!("crop {target}: {e}"))?;
         let b = app.ui.scene.borrow().bounds(node);
         x0 = ((b.x * scale).max(0.)) as u32;
         y0 = ((b.y * scale).max(0.)) as u32;
@@ -239,14 +290,13 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
         let start = ((row * pw + x0) * 4) as usize;
         cropped.extend_from_slice(&rgba[start..start + (cw * 4) as usize]);
     }
-    let path = out.join(format!("{}.png", shot.name));
-    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), cw, ch);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     writer.write_image_data(&cropped).map_err(|e| e.to_string())?;
-    Ok(path)
+    Ok(())
 }
 
 #[test]
