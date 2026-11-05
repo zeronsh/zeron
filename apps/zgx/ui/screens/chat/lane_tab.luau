@@ -351,6 +351,11 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		end
 		return where.plan() :: any
 	end
+	local accounts = if split
+		then Shared.model_accounts(function(): string?
+			return device:get()
+		end)
+		else nil
 	return ds.Composer {
 		value = draft,
 		snap = if split then snap else nil,
@@ -374,6 +379,10 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		models = function(): { any }
 			return store.catalog:get().models
 		end,
+		-- (A split's pane is a chat of its own; a side chat has none, as Zeron's.)
+		accounts = if accounts then accounts.accounts else nil,
+		on_account = if accounts then accounts.on_account else nil,
+		on_accounts_open = if accounts then accounts.on_accounts_open else nil,
 		-- What its context holds: the chat page's ring and card, from the
 		-- side chat's own numbers (once it has run and they're reported).
 		usage = function(): any

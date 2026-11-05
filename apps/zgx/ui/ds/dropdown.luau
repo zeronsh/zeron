@@ -16,6 +16,8 @@ local Mark = require("@self/mark")
 local AgentMark = require("@self/agent_mark")
 local RollText = require("@self/roll_text")
 local FadeText = require("@self/fade_text")
+local PrivateText = require("@self/private_text")
+local Avatar = require("@self/avatar")
 local Text = require("@self/text")
 local Tile = require("@self/tile")
 local ascii = require("@self/ascii")
@@ -45,6 +47,9 @@ export type Item = {
 	-- A picture chosen for it (a project's emoji), on its hue's wash.
 	emoji: string?,
 	description: string?,
+	-- Its label is an email address: drawn as ds.PrivateText draws one, its
+	-- tile no letter of it (`seed`'s avatar).
+	private: boolean?,
 	tag: string?,
 	warn: boolean?,
 	-- Shown but not to be picked (a device out of reach): dimmed, passed
@@ -79,6 +84,8 @@ export type Props = {
 	placeholder: (string | Message)?,
 	-- A muted second half to the trigger's label (a model's effort).
 	detail: (string | Message | () -> string)?,
+	-- After the detail, at the trigger's end (the model chip's usage ring).
+	trail: Node?,
 	-- The search field's placeholder (a function follows what it names);
 	-- `false`, no search.
 	search: (string | Message | boolean | () -> string)?,
@@ -194,6 +201,9 @@ end
 
 -- An item's tile: the first letter of its name, or its mark or icon.
 local function tile(item: Item): Node
+	if item.private then
+		return Avatar { seed = item.label, size = 18, label = locale.t("ds.provider_card.account") }
+	end
 	if item.hue or item.src or item.emoji then
 		return Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = 18 }
 	end
@@ -829,6 +839,7 @@ return ui.component(function(props: Props): Node
 			end, label_node)
 			else label_node,
 		detail,
+		props.trail,
 		if tone == "filled" then Icon { name = "alt-arrow-down", size = 12 } else nil,
 	}
 
@@ -1044,13 +1055,23 @@ return ui.component(function(props: Props): Node
 									grow = 1,
 									min_w = 0,
 									gap = "$zeron.space.hair",
-									ui.text {
-										item.label,
-										text_size = "$font.size.md",
-										line_height = "$font.line.md",
-										weight = "$font.weight.medium",
-										color = "$text.primary",
-									},
+									if item.private
+										then PrivateText {
+											item.label,
+											reveal = false,
+											truncate = true,
+											text_size = "$font.size.md",
+											line_height = "$font.line.md",
+											weight = "$font.weight.medium",
+											color = "$text.primary",
+										}
+										else ui.text {
+											item.label,
+											text_size = "$font.size.md",
+											line_height = "$font.line.md",
+											weight = "$font.weight.medium",
+											color = "$text.primary",
+										},
 									ui.text {
 										item.description,
 										text_size = "$font.size.sm",

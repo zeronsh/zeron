@@ -848,6 +848,7 @@
       "fast_mode": "Fast mode",
       "default": "Default",
       "reasoning": "REASONING",
+      "account": "Account",
       "model": "Model",
       "search_starred": "Search starred models…",
       "search_agent": "Search {agent} models…",
@@ -2674,6 +2675,7 @@
       }
     },
     "composer": {
+      "account_not_switched": "Couldn't switch accounts",
       "placeholder": "Ask anything, @ to mention…",
       "comments": "{n, plural, one {# comment} other {# comments}}",
       "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",

@@ -66,6 +66,9 @@ local TEXT = { text_size = true, line_height = true, weight = true, color = true
 export type Props = {
 	[number]: any, -- the text: a string, or a function that returns one
 	truncate: boolean?,
+	-- False: a click doesn't show it (inside a row a press means something
+	-- else to, a menu's). It stays hidden until the setting is off.
+	reveal: boolean?,
 	text_size: any?,
 	line_height: any?,
 	weight: any?,
@@ -101,7 +104,7 @@ end
 local function box_of(props: Props): { [any]: any }
 	local p: { [any]: any } = {}
 	for k, v in props :: any do
-		if type(k) == "string" and not TEXT[k] and k ~= "truncate" and k ~= "name" then
+		if type(k) == "string" and not TEXT[k] and k ~= "truncate" and k ~= "name" and k ~= "reveal" then
 			p[k] = v
 		end
 	end
@@ -118,25 +121,28 @@ local Hidden = ui.component(function(p: { props: Props, value: () -> string }): 
 		shown:set(not shown:peek())
 	end
 	local box = box_of(props)
-	-- A switch: on, the address shows (what it is said through `checked`).
-	box.role = "switch"
-	box.label = props.name or locale.t("ds.private_text.show_email")
-	box.checked = function(): boolean
-		return shown:get()
-	end
-	box.focusable = true
-	box.cursor = "pointer"
 	box.items = "center"
-	-- (No tooltip: the pointer cursor says it can be clicked.)
-	box.on_click = toggle
-	box.on_key = function(e: any): boolean
-		if e.key == "Enter" or e.key == " " then
-			toggle()
-			return true
+	-- (In a row that's pressed as a whole: no reveal, the press is the row's.)
+	if props.reveal ~= false then
+		-- A switch: on, the address shows (what it is said through `checked`).
+		box.role = "switch"
+		box.label = props.name or locale.t("ds.private_text.show_email")
+		box.checked = function(): boolean
+			return shown:get()
 		end
-		return false
+		box.focusable = true
+		box.cursor = "pointer"
+		-- (No tooltip: the pointer cursor says it can be clicked.)
+		box.on_click = toggle
+		box.on_key = function(e: any): boolean
+			if e.key == "Enter" or e.key == " " then
+				toggle()
+				return true
+			end
+			return false
+		end
+		box.focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = ui.raw(2, "the ring clear of the text's own ink") }
 	end
-	box.focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = ui.raw(2, "the ring clear of the text's own ink") }
 	-- Which shows: the stand-in or the address (a real swap; the address
 	-- arrives with a short fade, and goes at once).
 	table.insert(

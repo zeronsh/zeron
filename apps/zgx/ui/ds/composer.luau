@@ -123,6 +123,11 @@ export type Props = {
 	-- functions of them, followed in place as a catalog comes and changes).
 	harnesses: { ModelPicker.Harness } | State<{ ModelPicker.Harness }> | () -> { ModelPicker.Harness },
 	models: { ModelPicker.Model } | State<{ ModelPicker.Model }> | () -> { ModelPicker.Model },
+	-- A model's agent's accounts, putting one in use, and asking after them
+	-- again (ds.ModelPicker's).
+	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
+	on_account: ((harness: string, id: string) -> ())?,
+	on_accounts_open: (() -> ())?,
 	-- How much of the model's context is used (0 to 1): a ring beside its
 	-- chip.
 	context: (number | () -> number)?,
@@ -651,12 +656,6 @@ local function work_in(
 	return ui.column { w_full = true, table.unpack(rows) }
 end
 
--- The context ring: a faint track under an arc from twelve o'clock, alone
--- (no percentage), in a chip-high box of its own. As Zeron's: the text's
--- own ink while there is room, amber from three quarters full, red from
--- nine tenths.
-local fill_color = context_usage.ink
-
 -- The ring, in a chip-high box of its own, washed under the pointer as the
 -- chips beside it are. Given what the context holds, it opens the card
 -- above (below, with the menus below) as the pointer rests on it or the
@@ -681,20 +680,7 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 			tooltip = if usage then context_usage.Card { usage = usage } else nil,
 			tooltip_placement = if at then { side = at, align = "end", offset = 8 } else nil,
 			tooltip_delay = 150,
-			-- (The chips' glyph size, 12 across its ink, so it reads as one of
-			-- them rather than a size up.)
-			ui.canvas {
-				w = 12,
-				h = 12,
-				shrink = 0,
-				draw = function(c, w, h)
-					local f = fraction()
-					c:stroke(ui.path():arc(w / 2, h / 2, 5.25, 0, 360), "$border.strong", 1.5)
-					if f > 0 then
-						c:stroke(ui.path():arc(w / 2, h / 2, 5.25, -90, 360 * f), fill_color(f), 1.5, { cap = "round" })
-					end
-				end,
-			},
+			context_usage.Ring { fraction = fraction },
 		}
 	end
 	if not usage then
@@ -1371,6 +1357,9 @@ return ui.component(function(props: Props): Node
 			options = props.options,
 			harnesses = props.harnesses :: any,
 			models = props.models :: any,
+			accounts = props.accounts,
+			on_account = props.on_account,
+			on_accounts_open = props.on_accounts_open,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			showing = props.model_open,
