@@ -453,6 +453,25 @@ fn rows_round_trip_and_upsert_refreshes() {
 }
 
 #[test]
+fn a_removed_device_is_tombstoned_until_it_writes_again() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_device(&device("dev-a", "laptop")).unwrap();
+    doc.upsert_device(&device("gone", "old devbox")).unwrap();
+
+    assert!(doc.delete_device("gone").unwrap());
+    assert!(!doc.delete_device("never-registered").unwrap());
+    assert!(doc.device_deleted("gone"));
+    let devices = doc.read_devices().unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].id, "dev-a");
+
+    // A device that is in fact alive re-registers with a newer write.
+    doc.upsert_device(&device("gone", "old devbox")).unwrap();
+    assert!(!doc.device_deleted("gone"));
+    assert_eq!(doc.read_devices().unwrap().len(), 2);
+}
+
+#[test]
 fn own_push_ack_never_advances_the_cursor() {
     // Field incident: on the HTTPS transport, push ran before pull in one
     // cycle — the ack jumped the cursor to OUR batch's seq, and the pull

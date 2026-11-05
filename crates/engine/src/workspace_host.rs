@@ -213,6 +213,43 @@ struct WorkspaceHostInner {
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
 pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// [`WorkspaceHost::peer_liveness`] for a connected registry room. `beat` is
+/// the newest heartbeat heard; `joined_at` the room's (re)join time (0 before
+/// any); `row` reads the device's registry row lazily: `None` when the
+/// registry can't be read, `Some(None)` when it has no such row, else the
+/// row's stamped last sighting.
+fn liveness_verdict(
+    now: i64,
+    beat: Option<i64>,
+    joined_at: i64,
+    row: impl FnOnce() -> Option<Option<Option<i64>>>,
+) -> zeron_rpc::PeerLiveness {
+    use zeron_rpc::PeerLiveness::{Dark, Live, Unknown};
+    match beat {
+        Some(ms) if now.saturating_sub(ms) < PRESENCE_FRESH_MS => return Live,
+        Some(ms) if now.saturating_sub(ms) >= DIAL_GATE_DARK_MS => return Dark,
+        Some(_) => return Unknown,
+        None => {}
+    }
+    // Never heard this device beat. Silence is only evidence once OUR room
+    // has been joined long enough to have heard it.
+    if joined_at == 0 || now.saturating_sub(joined_at) < DIAL_GATE_WARMUP_MS {
+        return Unknown;
+    }
+    match row() {
+        None => Unknown,
+        // A joined, warmed-up room has synced every row, so an id with no row
+        // (deleted, or another authority's device that an import carried into
+        // chats and spaces) that never beat is not a device of this
+        // workspace: dialing it only fails.
+        Some(None) => Dark,
+        // The durable row: a device whose last stamped sighting is ancient
+        // AND which isn't beating now is dark.
+        Some(Some(Some(seen))) if now.saturating_sub(seen) >= DIAL_GATE_DARK_MS => Dark,
+        Some(Some(_)) => Unknown,
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -570,14 +607,15 @@ impl WorkspaceHost {
     }
 
     /// Dial-gate verdict for `LinkCache` (park dials to registry-dark peers).
-    /// `Dark` requires positive evidence; every ambiguous state — registry
-    /// room down or still in its warm-up window, unknown device, heartbeat in
-    /// the gray zone — stays `Unknown`, because a dead registry room (rows
+    /// `Dark` requires positive evidence: a stale heartbeat or row, or — once
+    /// the joined room is past warm-up — no row and no heartbeat at all. Every
+    /// ambiguous state — registry room down or still in its warm-up window,
+    /// heartbeat in the gray zone — stays `Unknown`, because a dead registry room (rows
     /// down, relay fine: the 2026-08-18 03:45 incident shape) must never
     /// park the relay. Un-park is presence-driven: heartbeats resume → the
     /// verdict flips and the peer-alive hook clears any dial cooldown.
     pub fn peer_liveness(&self, device_id: &str) -> zeron_rpc::PeerLiveness {
-        use zeron_rpc::PeerLiveness::{Dark, Live, Unknown};
+        use zeron_rpc::PeerLiveness::{Live, Unknown};
         if device_id == self.inner.config.device_id {
             return Live;
         }
@@ -596,36 +634,24 @@ impl WorkspaceHost {
             return Unknown;
         }
         let cached = lock(&self.inner.presence_seen).get(device_id).copied();
-        match live_beat.into_iter().chain(cached).max() {
-            Some(ms) if now.saturating_sub(ms) < PRESENCE_FRESH_MS => Live,
-            Some(ms) if now.saturating_sub(ms) >= DIAL_GATE_DARK_MS => Dark,
-            Some(_) => Unknown,
-            None => {
-                // Never heard this device beat. Silence is only evidence once
-                // OUR room has been joined long enough to have heard it.
-                let joined_at = self
-                    .inner
-                    .room_joined_at
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if joined_at == 0 || now.saturating_sub(joined_at) < DIAL_GATE_WARMUP_MS {
-                    return Unknown;
-                }
-                // Fall back to the durable row: a device whose last stamped
-                // sighting is ancient AND which isn't beating now is dark.
-                let row_seen = self
-                    .read(|doc| doc.read_devices())
-                    .ok()
+        let joined_at = self
+            .inner
+            .room_joined_at
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let row = || {
+            self.read(|doc| doc.read_devices()).ok().map(|devices| {
+                devices
                     .into_iter()
-                    .flatten()
                     .find(|d| d.id == device_id)
-                    .and_then(|d| d.last_seen_at)
-                    .map(|at| at.timestamp_millis());
-                match row_seen {
-                    Some(ms) if now.saturating_sub(ms) >= DIAL_GATE_DARK_MS => Dark,
-                    _ => Unknown,
-                }
-            }
-        }
+                    .map(|d| d.last_seen_at.map(|at| at.timestamp_millis()))
+            })
+        };
+        liveness_verdict(
+            now,
+            live_beat.into_iter().chain(cached).max(),
+            joined_at,
+            row,
+        )
     }
 
     pub fn device_id(&self) -> &str {
@@ -1296,6 +1322,15 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }
 
+    /// Remove another device's registry row. This engine's own row is refused:
+    /// it would only be revived at the next boot.
+    pub fn delete_device(&self, device_id: &str) -> Result<bool, EngineError> {
+        if device_id == self.device_id() {
+            return Err(EngineError::Other("this device can't remove itself".into()));
+        }
+        Ok(self.mutate(|doc| doc.delete_device(device_id))?)
+    }
+
     // ── git metadata (diff-sync host writes) ────────────────────────────────
 
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.
@@ -1894,6 +1929,32 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
 #[cfg(test)]
 mod tests {
     use super::{device_name_on_boot, linked_worktree_root};
+
+    #[test]
+    fn dial_gate_parks_ids_the_warm_registry_does_not_list() {
+        use super::{DIAL_GATE_DARK_MS, DIAL_GATE_WARMUP_MS, liveness_verdict};
+        use zeron_rpc::PeerLiveness::{Dark, Live, Unknown};
+        let now = 10 * DIAL_GATE_DARK_MS;
+        let warm = now - DIAL_GATE_WARMUP_MS;
+        let cold = now - DIAL_GATE_WARMUP_MS + 1;
+        let no_row = || Some(None);
+
+        // Another authority's device: no row, never beat, room warmed up.
+        assert_eq!(liveness_verdict(now, None, warm, no_row), Dark);
+        // Silence isn't evidence before warm-up, nor an unreadable registry.
+        assert_eq!(liveness_verdict(now, None, cold, no_row), Unknown);
+        assert_eq!(liveness_verdict(now, None, 0, no_row), Unknown);
+        assert_eq!(liveness_verdict(now, None, warm, || None), Unknown);
+        // A heartbeat always wins over the row.
+        assert_eq!(liveness_verdict(now, Some(now), warm, no_row), Live);
+        // A listed device needs a stale stamp to park.
+        let unstamped = || Some(Some(None));
+        let fresh = || Some(Some(Some(now)));
+        let stale = || Some(Some(Some(now - DIAL_GATE_DARK_MS)));
+        assert_eq!(liveness_verdict(now, None, warm, unstamped), Unknown);
+        assert_eq!(liveness_verdict(now, None, warm, fresh), Unknown);
+        assert_eq!(liveness_verdict(now, None, warm, stale), Dark);
+    }
 
     #[tokio::test]
     async fn edge_http_rejection_invalidates_only_the_generation_sent() {

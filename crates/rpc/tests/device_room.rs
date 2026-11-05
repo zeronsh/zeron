@@ -881,6 +881,54 @@ async fn presence_reset_clears_cooldown_immediately() {
     );
 }
 
+fn long_cooldown_cache(edge_url: &str) -> Arc<LinkCache> {
+    let mut config = LinkCacheConfig::new(edge_url, Arc::new(StaticToken("test-user".into())));
+    // Long enough that only a reset (never elapsed time) can end it.
+    config.cooldown_base = Duration::from_secs(120);
+    config.cooldown_max = Duration::from_secs(120);
+    config.probe_timeout = Duration::from_millis(1_500);
+    LinkCache::new(config)
+}
+
+/// A dead peer's own dial opens an edge socket, which is itself a
+/// process-wide "online" event. Network recovery must not void that peer's
+/// cooldown, or the dead host is redialed every few seconds forever.
+#[tokio::test]
+async fn network_recovery_keeps_a_dead_peers_cooldown() {
+    let relay = FakeRelay::start().await;
+    let links = long_cooldown_cache(&relay.edge_url());
+
+    // No host: the edge socket opens but the readiness probe fails.
+    assert!(links.client("dev-a").await.is_err(), "no host: dial fails");
+    zeron_sync::wake::notify_online();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let Err(err) = links.client("dev-a").await else {
+        panic!("a dead peer must stay parked")
+    };
+    assert!(err.to_string().contains("backing off"), "got: {err}");
+}
+
+/// The other half: a dial that never reached the edge belonged to the dead
+/// network, so network recovery lets the next call dial at once.
+#[tokio::test]
+async fn network_recovery_clears_a_network_failure_cooldown() {
+    let links = long_cooldown_cache("http://127.0.0.1:1");
+
+    assert!(links.client("dev-a").await.is_err(), "no edge: dial fails");
+    let Err(err) = links.client("dev-a").await else {
+        panic!("must fail fast while cooling")
+    };
+    assert!(err.to_string().contains("backing off"), "got: {err}");
+
+    zeron_sync::wake::notify_online();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let Err(err) = links.client("dev-a").await else {
+        panic!("there is still no edge")
+    };
+    assert!(!err.to_string().contains("backing off"), "redialed: {err}");
+}
+
 #[tokio::test]
 async fn host_supersede_drops_old_links_and_recovers() {
     let relay = FakeRelay::start().await;

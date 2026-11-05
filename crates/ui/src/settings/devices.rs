@@ -286,6 +286,27 @@ impl DevicesPage {
         cx.notify();
     }
 
+    /// Drop an offline device's registry row. A device that is still alive
+    /// re-registers at its next boot, so this only clears out hosts that are
+    /// gone (retired devboxes, finished sandboxes, another profile's Mac).
+    fn remove_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({ "op": "deleteDevice", "deviceId": device_id });
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |page, cx| {
+                if let Err(err) = result {
+                    page.error = Some(format!("Remove failed: {err}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(device_id.clone()));
         self.copied = Some(device_id);
@@ -428,6 +449,8 @@ impl Render for DevicesPage {
             let rename_id = device.id.clone();
             let rename_name = device.name.clone();
             let can_wake = !is_local && !online && device.devbox_binding().is_some();
+            let can_remove = !is_local && !online;
+            let remove_id = device.id.clone();
             let wake_id = device.id.clone();
             let is_waking = waking.as_deref() == Some(device.id.as_str());
             let mut meta: Vec<AnyElement> = vec![
@@ -529,7 +552,20 @@ impl Render for DevicesPage {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.open_rename(rename_id.clone(), rename_name.clone(), cx);
                                 })),
-                        ),
+                        )
+                        .when(can_remove, |el| {
+                            el.child(
+                                widgets::text_action(&theme, widgets::ActionTone::Quiet, "Remove")
+                                    .id(("device-remove", ix))
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .aria_label(format!("Remove {}", device.name))
+                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_device(remove_id.clone(), cx);
+                                    })),
+                            )
+                        }),
                 )
                 .into_any_element()
         };

@@ -3043,10 +3043,7 @@ impl Pickers {
     fn remember_target(&mut self, cx: &App) {
         {
             let state = self.state.read(cx);
-            self.defaults.device = state
-                .selected_device
-                .clone()
-                .or_else(|| state.local_device_id.clone());
+            self.defaults.device = state.picked_or_local_device();
             self.defaults.project = state.selected_space.clone();
             self.defaults.no_project = state.no_project;
         }

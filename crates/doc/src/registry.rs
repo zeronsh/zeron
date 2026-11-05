@@ -1209,6 +1209,17 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// Tombstone another device's row (Settings → Devices "Remove"). `false`
+    /// when no such row. A device that is still alive revives its row with
+    /// the newer write it stamps at its next boot.
+    pub fn delete_device(&mut self, device_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_DEVICES, device_id) {
+            return Ok(false);
+        }
+        self.delete_row_ops(&[(KIND_DEVICES, device_id)]);
+        Ok(true)
+    }
+
     /// Whether `id`'s device row was deleted — a tombstone, not merely an
     /// unknown id (a Cloud session's machine leaves with its sandbox). A
     /// device that comes back revives its row with a newer write.

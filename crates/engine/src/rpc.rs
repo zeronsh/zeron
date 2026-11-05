@@ -732,6 +732,9 @@ enum MutateParams {
     DeleteChat { chat_id: String },
     #[serde(rename_all = "camelCase")]
     RenameDevice { device_id: String, name: String },
+    /// Tombstone another device's registry row (Settings → Devices "Remove").
+    #[serde(rename_all = "camelCase")]
+    DeleteDevice { device_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]
@@ -1527,6 +1530,13 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::DeleteDevice { device_id } => {
+                self.workspace.delete_device(&device_id).map_err(failed)?;
+                if let Some(links) = &self.links {
+                    links.invalidate(&device_id);
+                }
+                Ok(())
+            }
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use zeron_proto::AccessToken;
 
@@ -945,6 +945,16 @@ struct DialState {
     failures: u32,
     last_failure: Option<Instant>,
     cooldown_until: Option<Instant>,
+    /// The last failed sequence reached the edge (its socket opened) and only
+    /// the host failed to answer. The network was fine, so a network-recovery
+    /// signal is no reason to redial — the peer itself is dead or unknown.
+    edge_reached: bool,
+}
+
+/// A failed dial attempt and whether it got as far as an open edge socket.
+struct DialFailure {
+    error: RpcError,
+    edge_reached: bool,
 }
 
 /// Lazily-dialed, cached peer links keyed by device id — the Rust twin of zeron's
@@ -973,8 +983,12 @@ impl LinkCache {
         // (the failures belonged to the pre-suspend network). Drop them so the
         // next call redials immediately with fresh credentials. An online
         // event (network path back / sibling dial success) likewise voids the
-        // cooldowns — those failures belonged to the dead network — but keeps
-        // live links, which a mere network *recovery* has not invalidated.
+        // cooldowns of NETWORK failures — those belonged to the dead network —
+        // but keeps live links, which a mere network *recovery* has not
+        // invalidated, and keeps cooldowns of peers whose edge socket opened
+        // but whose host never answered. Every such dial is itself a "dial
+        // success" online event, so voiding those let a dead peer clear its
+        // own backoff and be redialed every few seconds forever.
         // Skipped outside a runtime (sync unit tests).
         if tokio::runtime::Handle::try_current().is_ok() {
             let weak = Arc::downgrade(&cache);
@@ -986,17 +1000,19 @@ impl LinkCache {
                     .and_then(|cache| cache.config.token.subscribe());
                 loop {
                     tokio::select! {
+                        // Lagged means events were missed, not that the bus
+                        // ended: act on them. Only a closed bus stops this.
                         result = wake.recv() => {
-                            if result.is_err() { return; }
+                            if matches!(result, Err(broadcast::error::RecvError::Closed)) { return; }
                             let Some(cache) = weak.upgrade() else { return };
                             lock(&cache.links).clear();
                             lock(&cache.dial_state).clear();
                             tracing::info!("peer: links + cooldowns cleared after wake");
                         }
                         result = online.recv() => {
-                            if result.is_err() { return; }
+                            if matches!(result, Err(broadcast::error::RecvError::Closed)) { return; }
                             let Some(cache) = weak.upgrade() else { return };
-                            lock(&cache.dial_state).clear();
+                            lock(&cache.dial_state).retain(|_, state| state.edge_reached);
                         }
                         _ = token_changed(&mut token_changes) => {
                             let Some(cache) = weak.upgrade() else { return };
@@ -1147,6 +1163,7 @@ impl LinkCache {
             return Err(unreachable(device_id, reason));
         }
         let mut last_err = None;
+        let mut edge_reached = false;
         for attempt in 0..DIAL_ATTEMPTS {
             if attempt > 0 {
                 tokio::time::sleep(DIAL_RETRY_SPACING * attempt).await;
@@ -1164,15 +1181,16 @@ impl LinkCache {
                     tracing::info!(device = %device_id, "peer: connected via device room");
                     return Ok(link.client());
                 }
-                Err(err) => {
-                    tracing::debug!(device = %device_id, attempt, error = %err, "peer: dial attempt failed");
-                    last_err = Some(err);
+                Err(failure) => {
+                    tracing::debug!(device = %device_id, attempt, error = %failure.error, "peer: dial attempt failed");
+                    edge_reached = failure.edge_reached;
+                    last_err = Some(failure.error);
                 }
             }
         }
         // Only the exhausted sequence counts as ONE failure on the cooldown
         // curve — the in-call retries must not escalate it by themselves.
-        self.note_failure(device_id);
+        self.note_failure(device_id, edge_reached);
         Err(last_err.unwrap_or(RpcError::Closed))
     }
 
@@ -1225,9 +1243,10 @@ impl LinkCache {
         ))
     }
 
-    fn note_failure(&self, device_id: &str) {
+    fn note_failure(&self, device_id: &str, edge_reached: bool) {
         let mut state = lock(&self.dial_state);
         let entry = state.entry(device_id.to_string()).or_default();
+        entry.edge_reached = edge_reached;
         // Stale streaks restart the curve rather than escalating it.
         if entry
             .last_failure
@@ -1245,7 +1264,37 @@ impl LinkCache {
         entry.cooldown_until = Some(Instant::now() + backoff);
     }
 
-    async fn dial(&self, device_id: &str) -> Result<Arc<DeviceLink>, RpcError> {
+    async fn dial(&self, device_id: &str) -> Result<Arc<DeviceLink>, DialFailure> {
+        let link = self
+            .open_link(device_id)
+            .await
+            .map_err(|error| DialFailure {
+                error,
+                edge_reached: false,
+            })?;
+        // Readiness probe: prove the host answers before caching (an offline host bounces
+        // host_offline, which closes the link and fails this call fast).
+        let client = link.client();
+        let probe = client.call(crate::methods::LOCAL_DEVICE, serde_json::json!({}));
+        let ready = tokio::time::timeout(self.config.probe_timeout, probe)
+            .await
+            .map_err(|_| unreachable(device_id, "readiness check timed out"))
+            .and_then(|reply| {
+                reply.map_err(|e| {
+                    unreachable(device_id, format_args!("readiness check failed: {e}"))
+                })
+            });
+        match ready {
+            Ok(_) => Ok(link),
+            Err(error) => Err(DialFailure {
+                error,
+                edge_reached: true,
+            }),
+        }
+    }
+
+    /// Open (but do not probe) an edge socket to `device_id`'s room.
+    async fn open_link(&self, device_id: &str) -> Result<Arc<DeviceLink>, RpcError> {
         // Fresh token on every attempt — an expired one is never reused.
         let token = self
             .config
@@ -1272,16 +1321,7 @@ impl LinkCache {
         )
         .await
         .map_err(|_| unreachable(device_id, "connect timed out"))?;
-        let link = Arc::new(link?);
-        // Readiness probe: prove the host answers before caching (an offline host bounces
-        // host_offline, which closes the link and fails this call fast).
-        let client = link.client();
-        let probe = client.call(crate::methods::LOCAL_DEVICE, serde_json::json!({}));
-        tokio::time::timeout(self.config.probe_timeout, probe)
-            .await
-            .map_err(|_| unreachable(device_id, "readiness check timed out"))?
-            .map_err(|e| unreachable(device_id, format_args!("readiness check failed: {e}")))?;
-        Ok(link)
+        Ok(Arc::new(link?))
     }
 
     fn spawn_evictor(self: &Arc<Self>, device_id: String, link: &Arc<DeviceLink>) {

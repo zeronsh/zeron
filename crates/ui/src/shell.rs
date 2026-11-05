@@ -11653,6 +11653,23 @@ impl Shell {
                 .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
         }
         let outlet: AnyElement = if has_selection || departing_transcript {
+            // A settled transcript reuses its GPUI scene. Any notified view
+            // dirties every ancestor, so without this each ~30Hz pulse tick
+            // anywhere (a Working sidebar row, a running timer) re-rendered
+            // the whole transcript. Its own state/theme/scroll changes still
+            // notify it directly. While the dock fades or slides it renders
+            // fresh, so a replayed scene never carries a stale opacity.
+            let settled = has_selection
+                && transcript_geometry_ready
+                && dock_frame.transcript() >= 1.0;
+            let transcript: AnyElement = if settled {
+                self.transcript
+                    .clone()
+                    .cached(gpui::StyleRefinement::default().size_full())
+                    .into_any_element()
+            } else {
+                self.transcript.clone().into_any_element()
+            };
             div()
                 .relative()
                 .size_full()
@@ -11668,7 +11685,7 @@ impl Shell {
                         } else {
                             0.0
                         })
-                        .child(self.transcript.clone()),
+                        .child(transcript),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.

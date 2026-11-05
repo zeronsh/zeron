@@ -1238,9 +1238,7 @@ impl AppState {
     pub fn terminal_target_device(&self, session_key: &str) -> Option<String> {
         let device = if let Some(space_id) = session_key.strip_prefix(CANVAS_PANEL_PREFIX) {
             if space_id.is_empty() {
-                self.selected_device
-                    .clone()
-                    .or_else(|| self.local_device_id.clone())?
+                self.picked_or_local_device()?
             } else {
                 self.spaces
                     .iter()
@@ -1702,10 +1700,7 @@ impl AppState {
     /// the local device, then any project at all — better a cross-device
     /// project than a surprise project-less canvas). Display order.
     fn first_space_on_picked_device(&self) -> Option<String> {
-        let device = self
-            .selected_device
-            .as_deref()
-            .or(self.local_device_id.as_deref());
+        let device = self.picked_or_local_device();
         let sorted = self.spaces_sorted();
         device
             .and_then(|d| sorted.iter().find(|s| s.device_id == d).copied())
@@ -2284,8 +2279,22 @@ impl AppState {
         if let Some(space) = self.selected_space_row() {
             return Some(space.device_id.clone());
         }
+        self.picked_or_local_device()
+    }
+
+    /// The explicit device pick, else this device. A pick the synced registry
+    /// does not list (another authority's device carried over in composer
+    /// defaults, a retired sandbox) is ignored: routing to it only dials an
+    /// unreachable peer while the chip, finding no name, reads "This device".
+    /// Before the first registry sync the pick stands.
+    pub(crate) fn picked_or_local_device(&self) -> Option<String> {
         self.selected_device
             .clone()
+            .filter(|id| {
+                self.devices.is_empty()
+                    || self.local_device_id.as_deref() == Some(id.as_str())
+                    || self.devices.iter().any(|device| &device.id == id)
+            })
             .or_else(|| self.local_device_id.clone())
     }
 
@@ -5552,6 +5561,32 @@ mod tests {
 
         state.apply_devices(vec![device("local", "José's MacBook Pro")]);
         assert_eq!(state.device_name("local"), Some("José's MacBook Pro"));
+    }
+
+    #[test]
+    fn a_device_pick_the_registry_does_not_list_targets_this_device() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("local".into());
+        // Composer defaults carried over from another authority.
+        state.selected_device = Some("comet-scaffold-gone-e2".into());
+        let canvas = canvas_panel_key(None);
+
+        // Until the registry syncs, the pick stands.
+        assert_eq!(
+            state.effective_device_id().as_deref(),
+            Some("comet-scaffold-gone-e2")
+        );
+
+        state.apply_devices(vec![device("local", "Mac"), device("devbox", "Devbox")]);
+        assert_eq!(state.effective_device_id().as_deref(), Some("local"));
+        assert_eq!(state.terminal_target_device(&canvas), None);
+
+        state.selected_device = Some("devbox".into());
+        assert_eq!(state.effective_device_id().as_deref(), Some("devbox"));
+        assert_eq!(
+            state.terminal_target_device(&canvas).as_deref(),
+            Some("devbox")
+        );
     }
 
     #[test]
