@@ -147,8 +147,7 @@ local function mark_of(r: any, size: number): Node
 			border = 1,
 			border_color = "$zeron.mark.border",
 			shadow = "$shadow.sm",
-			color = "#000000",
-			ds.Icon { name = "zeron-logo", size = size * 0.56 },
+			ui.svg { src = "assets/icons/zeron-mark.svg", w = size * 0.62, h = size * 0.62, shrink = 0 },
 		}
 	end
 	return ds.AgentMark {
