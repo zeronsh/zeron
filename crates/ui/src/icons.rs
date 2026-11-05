@@ -16,7 +16,10 @@
 
 use std::borrow::Cow;
 
-use gpui::{AssetSource, Hsla, Result, SharedString, Styled as _, Svg, svg};
+use gpui::{
+    AssetSource, Div, Hsla, ParentElement as _, Result, SharedString, Styled as _, Svg, div, px,
+    svg,
+};
 
 macro_rules! icon_assets {
     ($(($const_name:ident, $path:literal)),+ $(,)?) => {
@@ -50,14 +53,19 @@ macro_rules! icon_assets {
 icon_assets![
     (PROJECT_DEFAULT, "project-default"),
     (REMOTE_SERVER, "remote-server"),
-    // Service-tier bolt, drawn in the toolbar family's linear weight.
+    // Service-tier bolt, drawn in the toolbar family's linear weight; the
+    // filled twin marks fast mode on.
     (FAST_TIER, "fast-tier"),
+    (FAST_TIER_BOLD, "fast-tier-bold"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (SUN, "sun"),
     (MOON, "moon"),
     // Browser globe, drawn in the same linear weight as the toolbar family.
     (GLOBE, "globe"),
+    (CURSOR_SQUARE, "cursor-square"),
+    // The pointer alone: an annotation chip's glyph inside its well.
+    (CURSOR, "cursor"),
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT, "sort"),
@@ -80,26 +88,31 @@ icon_assets![
     (FOLDER_WITH_FILES, "folder-with-files"),
     // Original tree glyph with compact nodes for the independent Files panel.
     (FILE_TREE, "file-tree"),
-    (FOLDER, "folder"),
+    (FOLDER_TREE, "folder-tree"),
     // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
     (FLOPPY_DISK, "floppy-disk"),
-    // Hand-drawn git-branch glyph in the Solar Linear style (like the
-    // terminal/plus/return ports) — the set has no branch icon.
+    // Zeron Icons (icons.zeron.sh): 24px canvas, 1.75px round strokes. The
+    // git family shares rails at x=6/18 and 2.25-radius nodes; the carets
+    // and arrows are the site's one path pre-rotated per direction.
+    (FOLDER, "folder"),
+    (FORK, "fork"),
     (GIT_BRANCH, "git-branch"),
-    // Provider-neutral pull-request glyph, drawn in the same linear family.
     (PULL_REQUEST, "pull-request"),
+    (WORKTREE, "worktree"),
+    (PLUS, "plus"),
+    (MINUS, "minus"),
+    (ARROW_LEFT, "arrow-left"),
+    (ARROW_RIGHT, "arrow-right"),
+    (ALT_ARROW_DOWN, "alt-arrow-down"),
+    (ALT_ARROW_UP, "alt-arrow-up"),
+    (ALT_ARROW_LEFT, "alt-arrow-left"),
+    (ALT_ARROW_RIGHT, "alt-arrow-right"),
+    (PULL_REQUEST_DRAFT, "pull-request-draft"),
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
     (TAG, "tag"),
-    (SIDEBAR_MINIMALISTIC, "sidebar-minimalistic"),
-    // Mirrored variant (zeron window-controls.tsx `-scale-x-100`): the LEFT
-    // sidebar toggle shows the panel line on the left; gpui divs have no
-    // scale transform at the pinned rev, so the flip is baked into the asset.
-    (SIDEBAR_MINIMALISTIC_LEFT, "sidebar-minimalistic-left"),
     (KEY_MINIMALISTIC, "key-minimalistic"),
     (KEYBOARD, "keyboard"),
-    (ARROW_LEFT, "arrow-left"),
-    (ARROW_RIGHT, "arrow-right"),
     (ARROW_UP, "arrow-up"),
     // arrow-up mirrored (like the sidebar flip) — the Solar Linear set here
     // has no plain arrow-down.
@@ -110,11 +123,6 @@ icon_assets![
     // Hand-drawn return/enter arrow in the Solar Linear style (like the
     // terminal/plus/close ports) — the set has no return glyph.
     (RETURN, "return"),
-    (ALT_ARROW_DOWN, "alt-arrow-down"),
-    // alt-arrow-down mirrored (drawn as its twin: same stroke, caps, joints) —
-    // the embedded Solar Linear set ships no up chevron. The collapse half of
-    // the long-user-message expander.
-    (ALT_ARROW_UP, "alt-arrow-up"),
     // Hand-drawn expand/maximize arrows in the Solar Linear style (like the
     // terminal/plus/return ports) — the set has no expand glyph.
     (EXPAND_ARROWS, "expand-arrows"),
@@ -128,8 +136,6 @@ icon_assets![
     (SPLIT_COLUMNS, "split-columns"),
     // Long-line wrapping toggle shared by changes and agent Markdown fences.
     (WRAP_TEXT, "wrap-text"),
-    (ALT_ARROW_LEFT, "alt-arrow-left"),
-    (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
@@ -160,6 +166,8 @@ icon_assets![
     (FILE_DATA, "file-data"),
     (FILE_MARKDOWN, "file-markdown"),
     (FILE_IMAGE, "file-image"),
+    // A framed picture: the icon of `Image N` chips.
+    (GALLERY, "gallery"),
     (GLOBAL, "global"),
     (CHECKLIST, "checklist"),
     (WIDGET, "widget"),
@@ -178,10 +186,13 @@ icon_assets![
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),
     (VOLUME_LOUD, "volume-loud"),
+    // Hand-drawn microphone pair in the Solar Linear style — voice controls.
+    (MICROPHONE, "microphone"),
+    (MICROPHONE_OFF, "microphone-off"),
+    (PHONE_HANG_UP, "phone-hang-up"),
     // Hand-drawn zeron glyphs (terminal-panel.tsx / composer-actions.tsx /
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),
-    (PLUS, "plus"),
     (CLOSE, "close"),
     // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
     // restore stacked squares) in the same style as `close` — drawn for the
@@ -218,9 +229,17 @@ icon_assets![
     (DEVIN_MARK, "devin-mark"),
     (GROK_MARK, "grok-mark"),
     (HERMES_MARK, "hermes-mark"),
+    (FX_MARK, "fx-mark"),
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
+    // GitHub's mark (Octicons `mark-github`, MIT) for the Cloud page's
+    // GitHub connection.
+    (GITHUB_MARK, "github-mark"),
+    // Settings → Billing (drawn to the Solar linear set's 1.5 stroke).
+    (WALLET, "wallet"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    // Muse Code's mark (Meta's infinity), tinted its brand blue at call sites.
+    (MUSE_MARK, "muse-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
@@ -248,16 +267,141 @@ pub fn claude_brand() -> Hsla {
     gpui::rgb(0xD97757).into()
 }
 
+/// The Muse Code mark's brand blue (`#0081FB`), kept like Claude's orange.
+pub fn muse_brand() -> Hsla {
+    gpui::rgb(0x0081FB).into()
+}
+
 /// An icon element for an embedded asset path. Size and colour are set by the
 /// caller (`.size(..)`, `.text_color(..)`), matching the web app's
 /// `[&_svg]:size-4` idiom.
+/// GPUI's SVG painter reads the SVG's own text color; a color on its parent
+/// does not provide the paint input. Always set `.text_color(..)` on the icon.
 pub fn icon(path: &'static str) -> Svg {
     svg().path(path).flex_none()
+}
+
+/// The Zeron Icons sidebar glyph (icons.zeron.sh "Sidebar" / "Right
+/// sidebar"): a rounded frame holding a panel whose width morphs 5.5 → 1.75
+/// as the sidebar closes. gpui SVGs are static, so it is drawn from quads in
+/// the source's 24-unit space, scaled to `size`. `open` is the morph progress
+/// (1 = open; drive it with [`crate::motion::state_t`]); `right` mirrors it.
+pub fn sidebar_glyph(open: f32, right: bool, size: f32, color: Hsla) -> Div {
+    let s = size / 24.0;
+    // `<rect x=3 y=4 w=18 h=16 rx=4 stroke-width=1.75>`: the centered stroke
+    // grows the box by half the stroke on each side.
+    let stroke = 1.75;
+    let frame = div()
+        .absolute()
+        .left(px((3.0 - stroke / 2.0) * s))
+        .top(px((4.0 - stroke / 2.0) * s))
+        .w(px((18.0 + stroke) * s))
+        .h(px((16.0 + stroke) * s))
+        .rounded(px((4.0 + stroke / 2.0) * s))
+        .border(px(stroke * s))
+        .border_color(color);
+    // `<rect class=zi-panel x=6.5 y=7.5 w=5.5 h=9 rx=.875>`; closed: w=1.75.
+    let inset = px(6.5 * s);
+    let panel = div()
+        .absolute()
+        .top(px(7.5 * s))
+        .w(px(crate::motion::lerp(1.75, 5.5, open.clamp(0.0, 1.0)) * s))
+        .h(px(9.0 * s))
+        .rounded(px(0.875 * s))
+        .bg(color);
+    let panel = if right {
+        panel.right(inset)
+    } else {
+        panel.left(inset)
+    };
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .child(frame)
+        .child(panel)
+}
+
+/// The frame every panel toggle shares (`<rect x=3 y=4 w=18 h=16 rx=4
+/// stroke-width=1.75>`), from quads so the strokes stay crisp at 16px.
+fn panel_frame(s: f32, color: Hsla) -> Div {
+    let stroke = 1.75;
+    div()
+        .absolute()
+        .left(px((3.0 - stroke / 2.0) * s))
+        .top(px((4.0 - stroke / 2.0) * s))
+        .w(px((18.0 + stroke) * s))
+        .h(px((16.0 + stroke) * s))
+        .rounded(px((4.0 + stroke / 2.0) * s))
+        .border(px(stroke * s))
+        .border_color(color)
+}
+
+/// The session card toggle: [`sidebar_glyph`]'s frame with a panel in only
+/// its top-right corner, drawn from the same quads so the strokes match the
+/// sidebar toggles beside it.
+pub fn corner_card_glyph(size: f32, color: Hsla) -> Div {
+    let s = size / 24.0;
+    let frame = panel_frame(s, color);
+    // The open sidebar panel's footprint (x 12..17.5 from the right inset),
+    // cut to its top half.
+    let panel = div()
+        .absolute()
+        .top(px(7.5 * s))
+        .right(px(6.5 * s))
+        .w(px(5.5 * s))
+        .h(px(4.5 * s))
+        .rounded(px(0.875 * s))
+        .bg(color);
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .child(frame)
+        .child(panel)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_icons_produce_visible_pixels() {
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        for path in [
+            PULL_REQUEST,
+            DOCUMENT,
+            FILE_CODE,
+            FOLDER_WITH_FILES,
+            CHECK,
+            CHECKLIST,
+            DANGER_TRIANGLE,
+            CLOCK_CIRCLE,
+            GLOBAL,
+            COPY,
+            REFRESH,
+            ALT_ARROW_LEFT,
+            ALT_ARROW_DOWN,
+            ARROW_UP_RIGHT,
+            EXPAND_ARROWS,
+            COLLAPSE_ARROWS,
+            CHAT_ROUND_LINE,
+            GIT_BRANCH,
+            CLOSE_CIRCLE,
+            FOLDER_TREE,
+        ] {
+            let bytes = Assets.load(path).unwrap().unwrap();
+            let image = renderer.render_single_frame(&bytes, 1.0).unwrap();
+            assert!(
+                image
+                    .as_bytes(0)
+                    .unwrap()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] != 0),
+                "{path} rasterizes to an empty image"
+            );
+        }
+    }
 
     #[test]
     fn every_registered_icon_loads_and_parses() {

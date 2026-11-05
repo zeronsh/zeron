@@ -1,0 +1,10 @@
+[package]
+name = "zeron-veil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The streaming fade veil without a renderer: the desktop transcript recolors
+# GPUI runs with it; voice captions use it on desktop and mobile.
+[dependencies]

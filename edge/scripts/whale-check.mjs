@@ -76,7 +76,8 @@ while (Date.now() - t0 < 20000) {
   if (readerDoc.getList("messages").length >= i) break;
   await sleep(100);
 }
-log(`reader backfill: ${readerDoc.getList("messages").length}/${i} messages (live doc still serves)`);
+const initialReaderMessages = readerDoc.getList("messages").length;
+log(`reader backfill: ${initialReaderMessages}/${i} messages (live doc still serves)`);
 
 const tailRes = await fetch(`${base}/tail/${chatId}?token=${token}`);
 const tailBody = tailRes.status === 200 ? await tailRes.json() : await tailRes.text();
@@ -138,7 +139,7 @@ check(
   durable,
   s2.status === 200 ? `updateRows=${s2.body.updateRows}, snapshotBytes=${s2.body.snapshotBytes}` : ""
 );
-check("reader received the whale live", readerDoc.getList("messages").length === i);
+check("reader received the whale live", initialReaderMessages === i);
 check(
   "/tail materializes",
   tailRes.status === 200 && tailBody.totalMessages === i,

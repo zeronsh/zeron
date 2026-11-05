@@ -15,7 +15,17 @@ struct TurnWire {
     requests: mpsc::UnboundedReceiver<String>,
     events: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
     interrupt: tokio_util::sync::CancellationToken,
+    turn: crate::TurnControl,
+    steering: Option<mpsc::Sender<crate::SteerMessage>>,
     polls: Arc<std::sync::atomic::AtomicUsize>,
+    /// SSE connections accepted (a reconnect adds one).
+    bus_connections: Arc<std::sync::atomic::AtomicUsize>,
+    /// Pending-request list GETs answered.
+    listings: Arc<std::sync::atomic::AtomicUsize>,
+    /// The `pending` lists served to a reconnect sweep.
+    pending: Arc<std::sync::Mutex<Value>>,
+    /// Every question put to the person, in order.
+    asked: Arc<std::sync::Mutex<Vec<UserInputQuestion>>>,
     command_failure_release: Option<tokio::sync::oneshot::Sender<()>>,
     server: tokio::task::JoinHandle<()>,
     run: tokio::task::JoinHandle<()>,
@@ -99,11 +109,23 @@ impl TurnWire {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (bus, bus_rx) = mpsc::unbounded_channel::<Value>();
-        let bus_rx = Arc::new(tokio::sync::Mutex::new(Some(bus_rx)));
+        let bus_rx = Arc::new(tokio::sync::Mutex::new(bus_rx));
+        let bus_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connected = bus_connections.clone();
+        let (superseded, _) = tokio::sync::watch::channel(0_usize);
+        let superseded = Arc::new(superseded);
+        let pending: Arc<std::sync::Mutex<Value>> =
+            Arc::new(std::sync::Mutex::new(overrides["pending"].clone()));
+        let listed = pending.clone();
+        let sweeps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listings = sweeps.clone();
         let (request_tx, requests) = mpsc::unbounded_channel();
         let posts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = posts.clone();
         let hold_prompt = overrides["holdPrompt"].as_bool().unwrap_or(false);
+        let drop_prompt = overrides["dropPrompt"].as_bool().unwrap_or(false);
+        let message_exists = overrides["messageExists"].as_bool().unwrap_or(false);
+        let fail_replies = overrides["failReplies"].as_bool().unwrap_or(false);
         let busy_polls = overrides["busyPolls"].as_u64().unwrap_or(0) as usize;
         let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let server_polls = polls.clone();
@@ -118,6 +140,10 @@ impl TurnWire {
                 let recorded = recorded.clone();
                 let polls = server_polls.clone();
                 let command_failure_wait = command_failure_wait.clone();
+                let connected = connected.clone();
+                let superseded = superseded.clone();
+                let listed = listed.clone();
+                let listed_count = sweeps.clone();
                 connections.spawn(async move {
                     let mut request = Vec::new();
                     let mut buf = [0; 4096];
@@ -143,12 +169,23 @@ impl TurnWire {
                     }
                     if is_post { recorded.lock().unwrap().push((path.clone(), serde_json::from_slice(&request[header_end..header_end+length]).unwrap_or(Value::Null))); }
                     if path == "/global/event" || path == "/api/event" {
+                        // A reconnect supersedes the previous stream before
+                        // it consumes another event; `"close"` ends one.
+                        let generation = connected.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        superseded.send_replace(generation);
+                        let mut superseded = superseded.subscribe();
+                        let mut events = bus_rx.lock().await;
                         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: connected\n\n").await.unwrap();
-                        let mut events = bus_rx.lock().await.take().unwrap();
-                        while let Some(event) = events.recv().await {
-                            if socket.write_all(format!("data: {event}\n\n").as_bytes()).await.is_err() { break; }
+                        loop {
+                            tokio::select! {
+                                event = events.recv() => {
+                                    let Some(event) = event else { return };
+                                    if event == "close" { return; }
+                                    if socket.write_all(format!("data: {event}\n\n").as_bytes()).await.is_err() { return; }
+                                }
+                                _ = superseded.changed() => return,
+                            }
                         }
-                        return;
                     }
                     if command_failure && is_post && path.ends_with("/command") {
                         socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\nConnection: close\r\n\r\nbad command!").await.unwrap();
@@ -157,6 +194,18 @@ impl TurnWire {
                     if hold_prompt && (path.ends_with("/prompt_async") || path.ends_with("/prompt")) {
                         let _ = request_tx.send(path);
                         std::future::pending::<()>().await;
+                        return;
+                    }
+                    // The prompt is read, then the connection drops before
+                    // any answer: the client cannot tell whether it landed.
+                    if drop_prompt && (path.ends_with("/prompt_async") || path.ends_with("/prompt")) {
+                        let _ = request_tx.send(path);
+                        return;
+                    }
+                    // The stored prompt, found under the id it was posted with.
+                    if message_exists && !is_post && let Some(id) = path.strip_prefix("/session/fixture/message/") {
+                        let body = json!({"info": {"id": id, "role": "user"}}).to_string();
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                         return;
                     }
                     if path == "/session/status" || path == "/api/session/active" {
@@ -190,6 +239,27 @@ impl TurnWire {
                             .unwrap();
                         return;
                     }
+                    if fail_replies && is_post && path.contains("/permission") {
+                        let body = r#"{"name":"UnknownError"}"#;
+                        socket.write_all(format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                        return;
+                    }
+                    // Pending-request lists (`pending` override: per kind).
+                    let route = path.split('?').next().unwrap_or_default();
+                    let kind = match route {
+                        "/permission" if !v2 => Some("permission"),
+                        "/question" if !v2 => Some("question"),
+                        _ if v2 && route.ends_with("/permission") => Some("permission"),
+                        _ if v2 && route.ends_with("/form") => Some("form"),
+                        _ => None,
+                    };
+                    if !is_post && let Some(kind) = kind {
+                        let list = listed.lock().unwrap()[kind].as_array().cloned().unwrap_or_default();
+                        let body = if v2 { json!({"data": list}) } else { json!(list) }.to_string();
+                        listed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                        return;
+                    }
                     let missing_resume = path == "/session/missing" || path == "/api/session/missing";
                     let (status, body) = if missing_resume {
                         ("404 Not Found", r#"{"error":"missing"}"#)
@@ -199,7 +269,7 @@ impl TurnWire {
                             "/api/session" => ("200 OK", r#"{"data":{"id":"fixture"}}"#),
                             "/api/command" => ("200 OK", r#"{"data":[]}"#),
                             // Non-empty: the catalog-sync retry loop must not stall tests.
-                            "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true}]}"#),
+                            "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true},{"providerID":"opencode","id":"long-context","name":"Long Context","limit":{"context":2000},"enabled":true}]}"#),
                             _ => ("200 OK", "{}"),
                         }
                     } else {
@@ -236,12 +306,20 @@ impl TurnWire {
                 .send(crate::SteerMessage {
                     prompt: "second".into(),
                     message_id: None,
+                    attachments: Vec::new(),
+                    config: None,
                 })
                 .await
                 .unwrap();
         }
-        drop(steer_tx);
+        let retained_steering = overrides["keepSteering"]
+            .as_bool()
+            .unwrap_or(false)
+            .then_some(steer_tx);
         let interrupt = tokio_util::sync::CancellationToken::new();
+        let turn = crate::TurnControl::default();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let questions_asked = asked.clone();
         let mut request = json!({"prompt": if native_command_reply.is_some() { "/project-review" } else { "first" }, "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"});
         request
             .as_object_mut()
@@ -251,8 +329,11 @@ impl TurnWire {
             server: Server::attached(base),
             event_tx,
             controls: RunControls {
+                realtime: None,
+                execution_lease: None,
                 request_input: Box::new(move |questions| {
                     let answer = answer.expect("fixture must not ask for input");
+                    questions_asked.lock().unwrap().extend(questions.clone());
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(
                         questions
@@ -267,10 +348,24 @@ impl TurnWire {
                 }),
                 steering,
                 interrupt: interrupt.clone(),
+                turn: turn.clone(),
             },
             request: serde_json::from_value(request).unwrap(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_millis(50),
+            // A test stepping a paused clock past the bus's silence bound
+            // would otherwise trip the wedged-server probe, whose answer
+            // (real loopback IO) the stepped clock outruns.
+            bus_timeouts: if overrides["noBusWatchdog"].as_bool() == Some(true) {
+                let never = Duration::from_secs(24 * 3600);
+                BusTimeouts {
+                    silence: never,
+                    probe: never,
+                    wedged: never,
+                }
+            } else {
+                BusTimeouts::default()
+            },
             known_commands: Some(vec![SlashCommand {
                 name: if native_command_reply.is_some() {
                     "project-review"
@@ -289,7 +384,13 @@ impl TurnWire {
             requests,
             events,
             interrupt,
+            turn,
+            steering: retained_steering,
             polls,
+            bus_connections,
+            listings,
+            pending,
+            asked,
             command_failure_release: matches!(
                 native_command_reply,
                 Some(NativeCommandReply::DelayedHttp404)
@@ -297,6 +398,26 @@ impl TurnWire {
             .then_some(command_failure_release),
             server,
             run,
+        }
+    }
+
+    /// Requests whose relative order the fixture's concurrent HTTP handlers
+    /// do not preserve.
+    async fn requests_any_order(&mut self, suffixes: &[&str]) {
+        let mut seen = Vec::new();
+        for _ in suffixes {
+            seen.push(
+                tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        for suffix in suffixes {
+            assert!(
+                seen.iter().any(|path| path.ends_with(suffix)),
+                "missing {suffix}: {seen:?}"
+            );
         }
     }
 
@@ -362,10 +483,53 @@ impl TurnWire {
 }
 
 #[tokio::test]
+async fn completed_turn_keeps_mailbox_alive_for_the_next_queued_request() {
+    let mut wire = TurnWire::start_config(
+        false,
+        false,
+        true,
+        None,
+        "1.18.21",
+        json!({ "keepSteering": true }),
+        false,
+    )
+    .await;
+    wire.request("/prompt_async").await;
+    wire.status("busy");
+    wire.status("idle");
+    wire.idle();
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
+    assert!(!wire.run.is_finished());
+    wire.steering
+        .as_ref()
+        .unwrap()
+        .send(crate::SteerMessage {
+            prompt: "after completion".into(),
+            message_id: Some("second".into()),
+            attachments: Vec::new(),
+            config: None,
+        })
+        .await
+        .unwrap();
+    wire.request("/prompt_async").await;
+    wire.status("busy");
+    wire.status("idle");
+    wire.idle();
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
+    assert!(!wire.run.is_finished());
+    drop(wire.steering.take());
+    tokio::time::timeout(Duration::from_secs(5), &mut wire.run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn queued_turn_ignores_previous_turn_duplicate_idle() {
     for status_first in [true, false] {
         let mut wire = TurnWire::start(true).await;
-        wire.request("/prompt_async").await;
+        // The queued steer preempts the generation at once.
+        wire.requests_any_order(&["/prompt_async", "/abort"]).await;
         wire.status("busy");
         // Both completion encodings belong to the first turn. The first frame
         // submits the queued prompt; the second must not finish that new turn.
@@ -435,7 +599,8 @@ async fn native_command_http_failures_settle_the_current_turn() {
 #[tokio::test]
 async fn late_native_command_failure_does_not_poison_the_queued_turn() {
     let mut wire = TurnWire::start_native_command(true, NativeCommandReply::DelayedHttp404).await;
-    wire.request("/command").await;
+    // The queued steer preempts the generation at once.
+    wire.requests_any_order(&["/command", "/abort"]).await;
     wire.status("busy");
     wire.status("idle");
     wire.request("/prompt_async").await;
@@ -492,6 +657,38 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
             "text": "PONG"
         }),
     );
+    // Each step reports its own tokens; `session.usage.updated` follows with
+    // the cumulative session totals, which must not read as occupancy.
+    let step = |wire: &TurnWire, message: &str, model: &str, tokens: Value, cumulative: Value| {
+        wire.v2(
+            "session.step.started",
+            json!({
+                "sessionID": "fixture",
+                "assistantMessageID": message,
+                "model": {"id": model, "providerID": "opencode"},
+            }),
+        );
+        wire.v2(
+            "session.step.ended",
+            json!({
+                "sessionID": "fixture", "assistantMessageID": message,
+                "finish": "stop", "cost": 0, "tokens": tokens,
+            }),
+        );
+        wire.v2(
+            "session.usage.updated",
+            json!({"sessionID": "fixture", "cost": 0, "tokens": cumulative}),
+        );
+    };
+    wire.v2(
+        "session.step.ended",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "finish": "stop", "cost": 0,
+            "tokens": {"input": 10, "output": 2, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}}
+        }),
+    );
     wire.v2(
         "session.usage.updated",
         json!({
@@ -500,33 +697,72 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
                        "cache": {"read": 0, "write": 0}}
         }),
     );
+    // A model switch resolves the new model's advertised window.
+    step(
+        &wire,
+        "msg_b",
+        "long-context",
+        json!({"input": 20, "output": 3, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
+        json!({"input": 30, "output": 5, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
+    );
+    // A step without reported usage is not an empty context.
+    step(
+        &wire,
+        "msg_c",
+        "long-context",
+        json!({"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}),
+        json!({"input": 30, "output": 5, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
+    );
+    // After compaction the next prompt is smaller; the totals keep climbing.
+    step(
+        &wire,
+        "msg_d",
+        "long-context",
+        json!({"input": 4, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}),
+        json!({"input": 34, "output": 6, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
+    );
     wire.v2(
         "session.execution.succeeded",
         json!({"sessionID": "fixture"}),
     );
 
-    let (status, text, usage) = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut text = String::new();
-        let mut usage = None;
-        loop {
-            match wire.events.recv().await.unwrap().unwrap() {
-                AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
-                AgentEvent::Usage {
-                    input_tokens,
-                    output_tokens,
-                } => {
-                    usage = Some((input_tokens, output_tokens));
+    let (status, text, usage, context_usage) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut text = String::new();
+            let mut usage = None;
+            let mut context_usage = Vec::new();
+            loop {
+                match wire.events.recv().await.unwrap().unwrap() {
+                    AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                    AgentEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        usage = Some((input_tokens, output_tokens));
+                    }
+                    AgentEvent::ContextUsage { tokens, window } => {
+                        context_usage.push((tokens, window));
+                    }
+                    AgentEvent::Done { status, .. } => {
+                        return (status, text, usage, context_usage);
+                    }
+                    _ => {}
                 }
-                AgentEvent::Done { status, .. } => return (status, text, usage),
-                _ => {}
             }
-        }
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "PONG");
-    assert_eq!(usage, Some((10, 2)));
+    assert_eq!(usage, Some((4, 1)));
+    assert_eq!(
+        context_usage,
+        vec![
+            (Some(12), Some(1000)),
+            (Some(28), Some(2000)),
+            (Some(5), Some(2000)),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -919,7 +1155,9 @@ fn prompt_body_carries_model_variant_and_attachments() {
         Some(("anthropic", "claude-opus-5")),
         Some("high"),
         &["/tmp/shot.png".to_owned()],
+        Some("msg_1"),
     );
+    assert_eq!(body["messageID"], "msg_1");
     assert_eq!(body["model"]["providerID"], "anthropic");
     assert_eq!(body["model"]["modelID"], "claude-opus-5");
     assert_eq!(body["variant"], "high");
@@ -981,7 +1219,7 @@ fn reasoning_ahead_of_its_message_role_is_held_and_replayed() {
     assert_eq!(feed.pending_parts.len(), 1);
     // The role lands; replay drains the held part.
     feed.assistant_messages.insert("msg_a".into(), true);
-    let mut turn = TurnState::begin(None);
+    let mut turn = TurnState::begin(None, false);
     let events = replay_pending(&mut feed, "msg_a", true, &mut turn);
     assert!(matches!(
         events.as_slice(),
@@ -1037,6 +1275,29 @@ fn tool_parts_open_and_resolve_once() {
         [AgentEvent::ToolResult { id, is_error: false, output: Some(o), .. }]
             if id == "call-1" && o == "ok\n"
     ));
+}
+
+/// A running tool that takes no arguments is open too: steering preempts
+/// only when no tool is open, so an unseen one would be aborted.
+#[test]
+fn a_running_tool_without_arguments_opens_before_it_completes() {
+    let mut feed = feed_with_assistant("msg_a");
+    let pending = json!({
+        "id": "prt_w", "messageID": "msg_a", "sessionID": "ses_1",
+        "type": "tool", "tool": "slow_slow_wait", "callID": "call-w",
+        "state": {"status": "pending", "input": {}},
+    });
+    assert!(part_snapshot_events(&mut feed, &pending, true, None).is_empty());
+    let running = json!({
+        "id": "prt_w", "messageID": "msg_a", "sessionID": "ses_1",
+        "type": "tool", "tool": "slow_slow_wait", "callID": "call-w",
+        "state": {"status": "running", "input": {}},
+    });
+    let events = part_snapshot_events(&mut feed, &running, true, None);
+    assert!(
+        matches!(events.as_slice(), [AgentEvent::ToolCall { id, .. }] if id == "call-w"),
+        "{events:?}"
+    );
 }
 
 #[test]
@@ -1134,13 +1395,91 @@ fn questions_map_to_input_panel_shape() {
             "multiple": true,
         }],
     });
-    let questions = map_questions(&props);
-    assert_eq!(questions.len(), 1);
-    assert_eq!(questions[0].id, "q0");
-    assert_eq!(questions[0].header, "Color");
-    assert_eq!(questions[0].question, "Which color?");
-    assert_eq!(questions[0].options, vec!["Red", "Blue"]);
-    assert!(questions[0].multi_select);
+    let pairs = map_questions(&props);
+    assert_eq!(pairs.len(), 1);
+    let (key, question) = &pairs[0];
+    // A key-less 1.x question falls back to the positional form key.
+    assert_eq!(key, "q0");
+    // Panel ids are minted per question, never taken from the wire.
+    assert_ne!(question.id, "q0");
+    assert_ne!(question.id, map_questions(&props)[0].1.id);
+    assert_eq!(question.header, "Color");
+    assert_eq!(question.question, "Which color?");
+    assert_eq!(question.options, vec!["Red", "Blue"]);
+    assert!(question.multi_select);
+}
+
+/// A live 2.0.24 `form.created` frame (the `question` tool's transport)
+/// folds into the same bus payload the 1.x question path consumes.
+#[test]
+fn v2_question_forms_fold_into_the_input_panel_shape() {
+    let mut tools = HashMap::new();
+    let out = normalize_v2_frame(
+        json!({"id":"evt_form","type":"form.created","data":{"form":{
+        "id":"frm_116e46801001",
+        "sessionID":"ses_1",
+        "title":"Questions",
+        "metadata":{"kind":"question","tool":{"messageID":"msg_1","id":"call_1"}},
+        "fields":[
+            {"key":"q0","title":"Color","description":"Which color?","type":"string",
+             "options":[{"value":"Red","label":"Red","description":"warm"},
+                        {"value":"Blue","label":"Blue","description":"cool"}],
+             "custom":true},
+            {"key":"q1","title":"Toppings","description":"Pick some","type":"multiselect",
+             "options":[{"value":"A","label":"A"},{"value":"B","label":"B"}],"custom":true}
+        ]}}}),
+        &mut tools,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"question.asked","properties":{
+        "id":"frm_116e46801001","sessionID":"ses_1","form":true,
+        "questions":[
+            {"key":"q0","header":"Color","question":"Which color?","multiple":false,
+             "options":[{"label":"Red"},{"label":"Blue"}]},
+            {"key":"q1","header":"Toppings","question":"Pick some","multiple":true,
+             "options":[{"label":"A"},{"label":"B"}]}
+        ]}})]
+    );
+    // Forms from other features (no question metadata) never reach the panel.
+    assert!(
+        normalize_v2_frame(
+            json!({"id":"evt_other","type":"form.created","data":{"form":{
+                "id":"frm_2","sessionID":"ses_1","title":"MCP",
+                "fields":[{"key":"url","title":"URL","type":"string"}]}}}),
+            &mut tools,
+        )
+        .is_empty()
+    );
+}
+
+/// Form answers key by field: one label for a single-select field, the label
+/// array for a multiselect.
+#[test]
+fn form_answers_key_by_field_with_multiselect_arrays() {
+    let pairs = map_questions(&json!({"questions":[
+        {"key":"q0","question":"Which color?","header":"Color","options":[],"multiple":false},
+        {"key":"q1","question":"Pick some","header":"Toppings","options":[],"multiple":true}
+    ]}));
+    let answers = vec![
+        UserInputAnswer {
+            question_id: pairs[0].1.id.clone(),
+            labels: vec!["Red".into()],
+        },
+        UserInputAnswer {
+            question_id: pairs[1].1.id.clone(),
+            labels: vec!["A".into(), "B".into()],
+        },
+    ];
+    assert_eq!(
+        form_answer_body(&pairs, &answers),
+        json!({"answer":{"q0":"Red","q1":["A","B"]}})
+    );
+    // An unanswered single-select degrades to an empty string, never an array.
+    assert_eq!(
+        form_answer_body(&pairs, &[]),
+        json!({"answer":{"q0":"","q1":[]}})
+    );
 }
 
 #[test]
@@ -1171,13 +1510,22 @@ fn tool_names_type_the_common_calls() {
         "todowrite",
         &json!({"todos": [
             {"content": "step one", "status": "completed"},
-            {"content": "step two", "status": "pending"},
+            {"content": "step two", "status": "in_progress"},
+            {"content": "step three", "status": "pending"},
+            {"content": "step four", "status": "cancelled"},
         ]}),
     );
-    assert!(matches!(
-        &call,
-        ToolCall::Todo { items } if items.len() == 2 && items[0].done && !items[1].done
-    ));
+    assert_eq!(
+        call,
+        ToolCall::Todo {
+            items: vec![
+                TodoItem::new("step one", TodoStatus::Completed),
+                TodoItem::new("step two", TodoStatus::InProgress),
+                TodoItem::new("step three", TodoStatus::Pending),
+                TodoItem::new("step four", TodoStatus::Pending),
+            ]
+        }
+    );
     let call = oc_tool_call("mystery", &json!({"x": 1}));
     assert!(matches!(&call, ToolCall::Unknown { name, input: Some(_) } if name == "mystery"));
     assert!(!call.is_subagent_spawn());
@@ -1339,10 +1687,10 @@ fn v2_frames_normalize_to_v1_payloads() {
             "type":"tool","tool":"read",
             "state":{"status":"running","input":{"path":"/tmp/x"}}}}})]
     );
-    // Usage totals reach the engine as an assistant message.updated.
+    // A step's own usage reaches the engine as an assistant message.updated.
     let out = normalize_v2_frame(
-        json!({"id":"evt_9","type":"session.usage.updated","data":{
-            "sessionID":"ses_1","cost":0,
+        json!({"id":"evt_9","type":"session.step.ended","data":{
+            "sessionID":"ses_1","assistantMessageID":"msg_a","finish":"stop","cost":0,
             "tokens":{"input":10,"output":2,"reasoning":0,"cache":{"read":0,"write":0}}}}),
         &mut tools,
     );
@@ -1352,6 +1700,60 @@ fn v2_frames_normalize_to_v1_payloads() {
             "info":{"sessionID":"ses_1","id":"usage","role":"assistant",
                     "tokens":{"input":10,"output":2,"reasoning":0,
                               "cache":{"read":0,"write":0}}}}})]
+    );
+    // Cumulative session totals are spend, not occupancy; malformed step
+    // usage is dropped.
+    for data in [
+        json!({"id":"evt_10","type":"session.usage.updated","data":{
+            "sessionID":"ses_1","cost":0,"tokens":{"input":10,"output":2}}}),
+        json!({"id":"evt_11","type":"session.step.ended","data":{
+            "sessionID":"ses_1","assistantMessageID":"msg_a","tokens":"12"}}),
+        json!({"id":"evt_11","type":"session.step.ended","data":{
+            "sessionID":"ses_1","assistantMessageID":"msg_a"}}),
+    ] {
+        assert_eq!(normalize_v2_frame(data, &mut tools), Vec::<Value>::new());
+    }
+    // step.ended omits model identity; the session's latest step supplies
+    // it so the context window resolves downstream.
+    let mut session_models = HashMap::new();
+    let step = normalize_v2_frame_with_session_models(
+        json!({"id":"evt_12","type":"session.step.started","data":{
+            "sessionID":"ses_2","assistantMessageID":"msg_b",
+            "model":{"id":"long-context","providerID":"opencode"}}}),
+        &mut tools,
+        &mut session_models,
+    );
+    assert_eq!(step.len(), 1);
+    let out = normalize_v2_frame_with_session_models(
+        json!({"id":"evt_13","type":"session.step.ended","data":{
+            "sessionID":"ses_2","assistantMessageID":"msg_b","finish":"stop","cost":0,
+            "tokens":{"input":1,"output":2}}}),
+        &mut tools,
+        &mut session_models,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"message.updated","properties":{
+            "info":{"sessionID":"ses_2","id":"usage","role":"assistant",
+                    "tokens":{"input":1,"output":2},
+                    "providerID":"opencode","modelID":"long-context"}}})]
+    );
+    // A malformed model leaves the cached one in place.
+    for model in [
+        json!(null),
+        json!("opencode/muse"),
+        json!({"id":"", "providerID":"opencode"}),
+    ] {
+        normalize_v2_frame_with_session_models(
+            json!({"id":"evt_14","type":"session.step.started","data":{
+                "sessionID":"ses_2","assistantMessageID":"msg_c","model":model}}),
+            &mut tools,
+            &mut session_models,
+        );
+    }
+    assert_eq!(
+        session_models.get("ses_2").map(|m| m.model_id.as_str()),
+        Some("long-context")
     );
     // The permission ask keeps its 1.x name on 2.x (observed live when a
     // tool reaches outside the workspace); the auto-approver replies.
@@ -1419,8 +1821,9 @@ fn v2_model_list_folds_into_provider_catalog() {
 
 #[test]
 fn prompt_body_v2_carries_text_and_files_only() {
-    let body = prompt_body_v2("hello", &["/tmp/shot.png".to_owned()]);
+    let body = prompt_body_v2("hello", &["/tmp/shot.png".to_owned()], Some("msg_1"));
     assert_eq!(body["text"], "hello");
+    assert_eq!(body["id"], "msg_1");
     assert_eq!(body["files"][0]["uri"], "file:///tmp/shot.png");
     assert_eq!(body["files"][0]["name"], "shot.png");
     assert!(
@@ -1532,6 +1935,403 @@ async fn permissions_do_not_auto_answer_agent_questions() {
     }})).unwrap();
     let body = wire.posted("/question/question/reply").await;
     assert_eq!(body, json!({"answers": [["No"]]}));
+}
+
+/// Waits for the fixture's first prompt, on either wire.
+async fn first_prompt(wire: &mut TurnWire, v2: bool) {
+    if v2 {
+        wire.request("/api/model").await;
+    }
+    wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+        .await;
+}
+
+/// An edit then a command, as 1.x asks them (`permission`, `patterns`,
+/// `metadata`; observed live, 1.19.4) or 2.x (`action`, `resources`).
+fn ask_edit_and_command(wire: &TurnWire, v2: bool) {
+    for (id, permission, pattern, metadata) in [
+        (
+            "per_edit",
+            "edit",
+            "src/main.rs",
+            json!({"filepath": "/work/src/main.rs"}),
+        ),
+        (
+            "per_bash",
+            "bash",
+            "cargo test",
+            json!({"command": "cargo test"}),
+        ),
+    ] {
+        if v2 {
+            wire.v2(
+                "permission.asked",
+                json!({"id": id, "sessionID": "fixture", "action": permission,
+                       "resources": [pattern], "metadata": metadata}),
+            );
+        } else {
+            wire.bus
+                .send(json!({"type": "permission.asked", "properties": {
+                    "id": id, "sessionID": "fixture", "permission": permission,
+                    "patterns": [pattern], "metadata": metadata, "always": ["*"]
+                }}))
+                .unwrap();
+        }
+    }
+}
+
+fn asked(wire: &TurnWire) -> Vec<String> {
+    wire.asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.question.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn supervised_asks_before_every_permission_and_rejects_on_no() {
+    for v2 in [false, true] {
+        for (answer, reply) in [(true, "once"), (false, "reject")] {
+            let overrides = json!({"access": "supervised"});
+            let mut wire =
+                TurnWire::start_config(false, v2, false, Some(answer), "2.0.3", overrides, false)
+                    .await;
+            first_prompt(&mut wire, v2).await;
+            ask_edit_and_command(&wire, v2);
+            for id in ["per_edit", "per_bash"] {
+                let body = wire.posted(&format!("/permission/{id}/reply")).await;
+                assert_eq!(body, json!({"reply": reply}), "{id} (v2: {v2})");
+            }
+            assert_eq!(
+                asked(&wire),
+                [
+                    "OpenCode wants to modify /work/src/main.rs. Allow it?",
+                    "OpenCode wants to run `cargo test`. Allow it?",
+                ]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn auto_accept_edits_approves_edits_and_asks_before_commands() {
+    for v2 in [false, true] {
+        let overrides = json!({"access": "auto-accept-edits"});
+        let mut wire =
+            TurnWire::start_config(false, v2, false, Some(false), "2.0.3", overrides, false).await;
+        first_prompt(&mut wire, v2).await;
+        ask_edit_and_command(&wire, v2);
+        let edit = wire.posted("/permission/per_edit/reply").await;
+        let bash = wire.posted("/permission/per_bash/reply").await;
+        assert_eq!(edit, json!({"reply": "once"}));
+        assert_eq!(bash, json!({"reply": "reject"}));
+        assert_eq!(
+            asked(&wire),
+            ["OpenCode wants to run `cargo test`. Allow it?"]
+        );
+    }
+}
+
+/// Full access, or `auto_approve` whatever the mode, approves without
+/// asking: the fixture has no answer, so a question would fail it.
+#[tokio::test]
+async fn full_access_approves_every_permission_without_asking() {
+    for (auto_approve, overrides) in [
+        (false, json!({})),
+        (false, json!({"access": "full-access"})),
+        (true, json!({"access": "supervised"})),
+    ] {
+        let mut wire =
+            TurnWire::start_config(false, false, auto_approve, None, "2.0.3", overrides, false)
+                .await;
+        first_prompt(&mut wire, false).await;
+        ask_edit_and_command(&wire, false);
+        for id in ["per_edit", "per_bash"] {
+            let body = wire.posted(&format!("/permission/{id}/reply")).await;
+            assert_eq!(body, json!({"reply": "once"}));
+        }
+        assert!(asked(&wire).is_empty());
+    }
+}
+
+#[test]
+fn permission_questions_name_what_is_asked() {
+    let question = |props: Value, dir: Option<&str>| permission_question(&props, dir).question;
+    assert_eq!(
+        question(
+            json!({"permission": "write", "patterns": ["src/a.rs"],
+                   "metadata": {"filepath": "/work/src/a.rs"}}),
+            Some("/work"),
+        ),
+        "OpenCode wants to modify src/a.rs. Allow it?"
+    );
+    // apply_patch: several files, no single filepath.
+    assert_eq!(
+        question(
+            json!({"permission": "edit", "patterns": ["a.rs", "b.rs"]}),
+            None
+        ),
+        "OpenCode wants to modify a.rs, b.rs. Allow it?"
+    );
+    assert_eq!(
+        question(json!({"action": "bash", "resources": ["git push"]}), None),
+        "OpenCode wants to run `git push`. Allow it?"
+    );
+    assert_eq!(
+        question(
+            json!({"permission": "external_directory", "patterns": ["/etc/*"],
+                   "metadata": {"filepath": "/etc/hosts", "parentDir": "/etc"}}),
+            Some("/work"),
+        ),
+        "OpenCode wants to access /etc outside the project. Allow it?"
+    );
+    assert_eq!(
+        question(
+            json!({"permission": "webfetch", "patterns": ["https://example.test"]}),
+            None,
+        ),
+        "OpenCode wants to use webfetch (https://example.test). Allow it?"
+    );
+}
+
+/// A steer adopting `plan`, as the engine sends a changed configuration.
+fn plan_config(plan: bool) -> crate::SteerMessage {
+    let config: RunRequest = serde_json::from_value(json!({
+        "prompt": "", "cwd": "", "sandbox": "workspace-write", "plan": plan
+    }))
+    .unwrap();
+    crate::SteerMessage {
+        prompt: format!("plan {plan}"),
+        message_id: None,
+        attachments: Vec::new(),
+        config: Some(Box::new(config)),
+    }
+}
+
+/// 1.x names the plan agent on each prompt in plan mode and none outside
+/// it (the server's default agent then runs, verified live on 1.19.4).
+#[tokio::test]
+async fn plan_mode_names_the_plan_agent_on_each_v1_prompt() {
+    let overrides = json!({"plan": true, "keepSteering": true});
+    let mut wire =
+        TurnWire::start_config(false, false, true, None, "2.0.3", overrides, false).await;
+    wire.request("/prompt_async").await;
+    for plan in [false, true] {
+        wire.status("busy");
+        wire.status("idle");
+        wire.idle();
+        assert_eq!(wire.done().await.0, DoneStatus::Completed);
+        let steering = wire.steering.as_ref().unwrap();
+        steering.send(plan_config(plan)).await.unwrap();
+        wire.request("/prompt_async").await;
+    }
+    let agents: Vec<Value> = wire
+        .posts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path.ends_with("/prompt_async"))
+        .map(|(_, body)| body.get("agent").cloned().unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(agents, [json!("plan"), Value::Null, json!("plan")]);
+}
+
+/// 2.x holds the agent on the session: plan mode creates it on the plan
+/// agent, and leaving or re-entering plan mode switches it before the prompt.
+#[tokio::test]
+async fn plan_mode_sets_the_v2_session_agent() {
+    let overrides = json!({"plan": true, "keepSteering": true});
+    let mut wire = TurnWire::start_config(false, true, true, None, "2.0.3", overrides, false).await;
+    first_prompt(&mut wire, true).await;
+    for plan in [false, true] {
+        wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+        wire.v2(
+            "session.execution.succeeded",
+            json!({"sessionID": "fixture"}),
+        );
+        assert_eq!(wire.done().await.0, DoneStatus::Completed);
+        let steering = wire.steering.as_ref().unwrap();
+        steering.send(plan_config(plan)).await.unwrap();
+        // Adopting a configuration re-reads the catalog first.
+        first_prompt(&mut wire, true).await;
+    }
+    let posts = wire.posts.lock().unwrap();
+    let created = posts
+        .iter()
+        .find(|(path, _)| path == "/api/session")
+        .unwrap();
+    assert_eq!(created.1["agent"], "plan");
+    let switched: Vec<&Value> = posts
+        .iter()
+        .filter(|(path, _)| path == "/api/session/fixture/agent")
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(
+        switched,
+        [&json!({"agent": "build"}), &json!({"agent": "plan"})]
+    );
+    assert!(
+        posts
+            .iter()
+            .filter(|(path, _)| path.ends_with("/prompt"))
+            .all(|(_, body)| body.get("agent").is_none())
+    );
+}
+
+#[test]
+fn access_changes_restart_the_server_and_plan_changes_do_not() {
+    let harness = OpencodeHarness::new();
+    assert_eq!(harness.access_modes(), AccessMode::ALL);
+    assert!(harness.supports_plan());
+    let request = |access: &str, auto_approve: bool, plan: bool| -> RunRequest {
+        serde_json::from_value(json!({
+            "prompt": "", "cwd": "/work", "sandbox": "workspace-write",
+            "access": access, "autoApprove": auto_approve, "plan": plan
+        }))
+        .unwrap()
+    };
+    let full = request("full-access", false, false);
+    assert!(!harness.reconfigures_in_place(&full, &request("supervised", false, false)));
+    assert!(harness.reconfigures_in_place(&full, &request("full-access", false, true)));
+    // auto_approve is full access whatever the mode says.
+    assert!(harness.reconfigures_in_place(&full, &request("supervised", true, false)));
+}
+
+#[test]
+fn access_config_asks_through_opencode_permission_rules() {
+    // 1.x: a permission object, merged into the inherited inline layer; a
+    // `deny` set there is kept, the one-word form spelled out.
+    let v1 = |inherited: Option<&str>, access| -> Value {
+        serde_json::from_str(&access_config(inherited, access, Protocol::V1).unwrap()).unwrap()
+    };
+    // Everything is asked but looking around (and, short of supervised,
+    // file changes); the catch-all leads so the named rules win.
+    let expected = |edit: &str, overrides: Value| -> Value {
+        let mut rules = json!({"*": "ask", "edit": edit, "bash": "ask", "webfetch": "ask",
+                               "websearch": "ask"});
+        for tool in UNASKED_PERMISSIONS {
+            rules[tool] = json!("allow");
+        }
+        for (name, rule) in overrides.as_object().unwrap() {
+            rules[name] = rule.clone();
+        }
+        rules
+    };
+    let edits = v1(Some(r#"{"model": "keep"}"#), AccessMode::AutoAcceptEdits);
+    assert_eq!(edits["model"], "keep");
+    assert_eq!(edits["permission"], expected("allow", json!({})));
+    let order: Vec<&String> = edits["permission"].as_object().unwrap().keys().collect();
+    assert_eq!(order[0], "*");
+    assert!(edits.get("agent").is_none());
+    let supervised = v1(
+        Some(r#"{"permission": {"bash": "deny", "read": "allow"}}"#),
+        AccessMode::Supervised,
+    );
+    assert_eq!(
+        supervised["permission"],
+        expected("ask", json!({"bash": "deny"}))
+    );
+    // The plan agent keeps its edit denial and asks before its plan file.
+    assert_eq!(
+        supervised["agent"]["plan"]["permission"]["edit"],
+        json!({"*": "deny", "*opencode/plans/*.md": "ask"})
+    );
+    let rules = supervised["agent"]["plan"]["permission"]["edit"]
+        .as_object()
+        .unwrap();
+    assert_eq!(rules.keys().collect::<Vec<_>>(), ["*", PLAN_FILES]);
+    // An inherited allow-everything is overridden; a deny-everything kept.
+    assert_eq!(
+        v1(
+            Some(r#"{"permission": "allow"}"#),
+            AccessMode::AutoAcceptEdits
+        )["permission"],
+        expected("allow", json!({}))
+    );
+    assert_eq!(
+        v1(Some(r#"{"permission": "deny"}"#), AccessMode::Supervised)["permission"]["*"],
+        "deny"
+    );
+    // 2.x: ordered rules appended after the inherited ones.
+    let v2: Value = serde_json::from_str(
+        &access_config(
+            Some(r#"{"permissions": [{"action": "read", "resource": "*", "effect": "allow"}]}"#),
+            AccessMode::Supervised,
+            Protocol::V2,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rule = |action: &str, resource: &str, effect: &str| -> Value {
+        json!({"action": action, "resource": resource, "effect": effect})
+    };
+    assert_eq!(
+        v2["permissions"],
+        json!([
+            rule("read", "*", "allow"),
+            rule("bash", "*", "ask"),
+            rule("webfetch", "*", "ask"),
+            rule("websearch", "*", "ask"),
+            rule("edit", "*", "ask"),
+        ])
+    );
+    assert_eq!(
+        v2["agents"]["plan"]["permissions"],
+        json!([rule("edit", "*", "deny"), rule("edit", PLAN_FILES, "ask")])
+    );
+    for invalid in [r#"{"permission": 1}"#, r#"{"agent": []}"#] {
+        assert!(access_config(Some(invalid), AccessMode::Supervised, Protocol::V1).is_err());
+    }
+    assert!(
+        access_config(
+            Some(r#"{"permissions": {}}"#),
+            AccessMode::Supervised,
+            Protocol::V2
+        )
+        .is_err()
+    );
+}
+
+/// 2.x (2.0.24+) answers question forms, keyed by field, on the session's
+/// form route — and the harness emits NO `InputRequested`/`InputResolved` of
+/// its own (the engine's input bridge owns that lifecycle; a twin under
+/// opencode's id folded an unanswerable duplicate chip into the doc).
+#[tokio::test]
+async fn v2_question_forms_answer_through_the_form_route() {
+    let mut wire = TurnWire::start_policy(false, true, false, Some(true)).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2(
+        "form.created",
+        json!({"form":{
+        "id":"frm_1","sessionID":"fixture","title":"Questions",
+        "metadata":{"kind":"question","tool":{"messageID":"msg_1","id":"call_1"}},
+        "fields":[
+            {"key":"q0","title":"Color","description":"Which color?","type":"string",
+             "options":[{"value":"Red","label":"Red","description":"warm"}],"custom":true},
+            {"key":"q1","title":"Toppings","description":"Pick some","type":"multiselect",
+             "options":[{"value":"A","label":"A"}],"custom":true}
+        ]}}),
+    );
+    let body = wire.posted("/api/session/fixture/form/frm_1/reply").await;
+    assert_eq!(body, json!({"answer":{"q0":"Yes","q1":["Yes"]}}));
+    // Let the pre-fix twin (if any) land, then prove the stream carries none.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut twins = Vec::new();
+    while let Ok(event) = wire.events.try_recv() {
+        let event = event.unwrap();
+        if matches!(
+            event,
+            AgentEvent::InputRequested { .. } | AgentEvent::InputResolved { .. }
+        ) {
+            twins.push(event);
+        }
+    }
+    assert!(
+        twins.is_empty(),
+        "harness must not emit input lifecycle events itself: {twins:?}"
+    );
 }
 
 #[test]
@@ -1660,14 +2460,17 @@ async fn v2_model_selection_and_prompt_use_the_documented_bodies() {
             .1,
         json!({"model":{"providerID":"opencode","id":"muse","variant":"low"}})
     );
-    assert_eq!(
-        posts
-            .iter()
-            .find(|(p, _)| p == "/api/session/fixture/prompt")
-            .unwrap()
-            .1,
-        json!({"text":"first","files":[]})
-    );
+    let mut prompt = posts
+        .iter()
+        .find(|(p, _)| p == "/api/session/fixture/prompt")
+        .unwrap()
+        .1
+        .clone();
+    // A client-minted id makes a retried POST idempotent.
+    let id = prompt["id"].take();
+    assert!(id.as_str().is_some_and(|id| id.starts_with("msg_")), "{id}");
+    prompt.as_object_mut().unwrap().remove("id");
+    assert_eq!(prompt, json!({"text":"first","files":[]}));
 }
 
 #[tokio::test]
@@ -1679,6 +2482,29 @@ async fn v2_pending_tool_overflow_fails_the_run_instead_of_growing_forever() {
         wire.v2("session.tool.input.started",json!({"sessionID":"other","assistantMessageID":"m","id":format!("c{i}"),"name":"read"}));
     }
     assert_eq!(wire.done().await.0, DoneStatus::Errored);
+}
+
+#[tokio::test]
+async fn v2_session_model_overflow_drops_the_cache_instead_of_failing_the_run() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    for i in 0..=MAX_V2_SESSION_MODELS {
+        wire.v2(
+            "session.step.started",
+            json!({
+                "sessionID": format!("other-{i}"),
+                "assistantMessageID": "m",
+                "model": {"id": "muse", "providerID": "opencode"},
+            }),
+        );
+    }
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
 }
 
 #[tokio::test]
@@ -1825,7 +2651,7 @@ fn v2_command_bodies_follow_server_version() {
         let attachments = vec!["/workspace/image.png".into()];
         assert_eq!(
             command_body_v2(Some(&version), "test", "args", &attachments)["files"],
-            prompt_body_v2("args", &attachments)["files"]
+            prompt_body_v2("args", &attachments, None)["files"]
         );
     }
 }
@@ -2115,22 +2941,158 @@ async fn stalled_prompt_post_does_not_block_bus_completion() {
 
 #[tokio::test]
 async fn stalled_prompt_post_has_a_bounded_timeout() {
+    for v2 in [false, true] {
+        let mut wire = TurnWire::start_config(
+            false,
+            v2,
+            true,
+            None,
+            "2.0.11",
+            json!({"holdPrompt": true, "noBusWatchdog": true}),
+            false,
+        )
+        .await;
+        if v2 {
+            wire.request("/api/model").await;
+        }
+        wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+            .await;
+        tokio::task::yield_now().await;
+        // The server never shows the prompt (not running, no message under
+        // its id): one retry, then the turn fails instead of spinning. The
+        // paused clock is stepped by hand: a timer of the test's own would
+        // fire early while loopback IO is in flight. Each step gives that IO
+        // a moment of real time (a blocking task holds the paused clock
+        // still), or the stepped clock times out a request the fake has not
+        // even read yet.
+        tokio::time::pause();
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(5)))
+                .await
+                .unwrap();
+            while let Ok(event) = wire.events.try_recv() {
+                if let AgentEvent::Done { status: done, .. } = event.unwrap() {
+                    status = Some(done);
+                }
+            }
+            if status.is_some() {
+                break;
+            }
+        }
+        tokio::time::resume();
+        assert_eq!(status, Some(DoneStatus::Errored));
+        let prompts: Vec<Value> = wire
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with("/prompt") || p.ends_with("/prompt_async"))
+            .map(|(_, body)| body[if v2 { "id" } else { "messageID" }].clone())
+            .collect();
+        assert_eq!(prompts.len(), 2, "{prompts:?}");
+        assert_eq!(prompts[0], prompts[1], "a retry reuses the message id");
+    }
+}
+
+/// A prompt POST that dies without an answer, for a turn the bus shows
+/// running, was taken by the server: the turn lives on and completes.
+#[tokio::test]
+async fn unanswered_prompt_post_of_a_running_turn_keeps_the_turn() {
     let mut wire = TurnWire::start_config(
         false,
         false,
         true,
         None,
         "1.18.31",
-        json!({"holdPrompt": true}),
+        json!({"dropPrompt": true}),
         false,
     )
     .await;
     wire.request("/prompt_async").await;
     wire.status("busy");
-    tokio::task::yield_now().await;
-    tokio::time::pause();
-    tokio::time::advance(CALL_TIMEOUT + Duration::from_secs(1)).await;
-    assert_eq!(wire.done().await.0, DoneStatus::Errored);
+    // The retry fails the same way; the bus still shows the turn running.
+    wire.request("/prompt_async").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    wire.bus.send(json!({"type":"message.updated", "properties":{"info":{"id":"answer", "sessionID":"fixture", "role":"assistant"}}})).unwrap();
+    wire.bus.send(json!({"type":"message.part.updated", "properties":{"part":{"id":"text", "messageID":"answer", "sessionID":"fixture", "type":"text", "text":"STILL_HERE"}}})).unwrap();
+    wire.status("idle");
+    wire.idle();
+    assert_eq!(
+        wire.done().await,
+        (DoneStatus::Completed, "STILL_HERE".to_owned())
+    );
+}
+
+/// A prompt POST that dies without an answer is not posted again when the
+/// session already holds a message under the id it was sent with.
+#[tokio::test]
+async fn unanswered_prompt_found_by_its_message_id_is_not_reposted() {
+    let mut wire = TurnWire::start_config(
+        false,
+        false,
+        true,
+        None,
+        "1.18.31",
+        json!({"dropPrompt": true, "messageExists": true}),
+        false,
+    )
+    .await;
+    wire.request("/prompt_async").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wire.status("busy");
+    wire.status("idle");
+    wire.idle();
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
+    let prompts = wire
+        .posts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| p.ends_with("/prompt_async"))
+        .count();
+    assert_eq!(prompts, 1);
+}
+
+/// A prompt whose POST died unanswered is posted again only while its turn
+/// is live: after a stop or an interrupt, the retry never goes out (it
+/// would start the stopped turn over on the server).
+#[tokio::test]
+async fn a_stopped_prompt_is_never_posted_again() {
+    for interrupt in [false, true] {
+        let mut wire = TurnWire::start_config(
+            false,
+            false,
+            true,
+            None,
+            "1.18.31",
+            json!({"dropPrompt": true, "keepSteering": true}),
+            false,
+        )
+        .await;
+        wire.request("/prompt_async").await;
+        if interrupt {
+            wire.interrupt.cancel();
+        } else {
+            wire.turn.stop_turn();
+        }
+        wire.request("/abort").await;
+        wire.status("idle");
+        wire.idle();
+        assert_eq!(wire.done().await.0, DoneStatus::Interrupted);
+        // Past the retry delay and its landed check.
+        tokio::time::sleep(PROMPT_RETRY_DELAY * 3).await;
+        let prompts = wire
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with("/prompt_async"))
+            .count();
+        assert_eq!(prompts, 1, "interrupt: {interrupt}");
+        assert!(wire.events.try_recv().is_err(), "interrupt: {interrupt}");
+    }
 }
 
 #[tokio::test]
@@ -2287,4 +3249,904 @@ fn native_skill_catalog_rejects_unrepresentable_commands() {
         };
         assert_eq!(invocation_links(&invocation.link())[0].1, invocation);
     }
+}
+
+fn sse_feed(chunks: &[&[u8]]) -> (Vec<String>, u64) {
+    let mut decoder = SseDecoder::default();
+    let mut events = Vec::new();
+    for chunk in chunks {
+        events.extend(decoder.feed(chunk));
+    }
+    (events, decoder.frames)
+}
+
+#[test]
+fn sse_decoder_frames_every_line_ending_even_split_across_chunks() {
+    for chunks in [
+        &[b"data: a\n\ndata: b\n\n".as_slice()][..],
+        &[b"data: a\r\n\r\ndata: b\r\n\r\n"],
+        &[b"data: a\r\rdata: b\r\r"],
+        // A CR ends one chunk and its LF opens the next: one line ending.
+        &[b"data: a\r", b"\n\r", b"\ndata: b\r\n", b"\r\n"],
+        // A lone CR at a chunk's end is a complete line ending too.
+        &[b"data: a\r", b"\r", b"data: b\n", b"\n"],
+        &[b"da", b"ta:", b" a\n", b"\n", b"data: b", b"\n\n"],
+    ] {
+        assert_eq!(
+            sse_feed(chunks),
+            (vec!["a".into(), "b".into()], 2),
+            "{chunks:?}"
+        );
+    }
+}
+
+#[test]
+fn sse_decoder_joins_data_lines_and_skips_comments_and_other_fields() {
+    let (events, frames) = sse_feed(&[
+        b"\xEF\xBB\xBF: connected\n\n",
+        b"event: message\nid: 7\nretry: 10\ndata: {\"a\":\ndata:1}\n\n",
+        b": heartbeat\n\n",
+        b"data\n\n",
+    ]);
+    assert_eq!(events, vec!["{\"a\":\n1}".to_owned(), String::new()]);
+    // Comment-only blocks (the 2.x heartbeat) count as frames.
+    assert_eq!(frames, 4);
+    // An unterminated event is not dispatched.
+    assert_eq!(sse_feed(&[b"data: partial\n"]).0, Vec::<String>::new());
+}
+
+#[test]
+fn sse_decoder_replaces_invalid_utf8_instead_of_dropping_the_event() {
+    let (events, _) = sse_feed(&[
+        b"data: {\"text\":\"a\xFFb\"}\n",
+        b"\n",
+        b"data: {\"ok\":\xE2\x9C",
+        b"\x93}\n\n",
+    ]);
+    assert_eq!(events[0], "{\"text\":\"a\u{FFFD}b\"}");
+    // A character split across chunks still decodes whole.
+    assert_eq!(events[1], "{\"ok\":\u{2713}}");
+    assert!(serde_json::from_str::<Value>(&events[0]).is_ok());
+}
+
+#[test]
+fn sse_decoder_scans_a_large_frame_once() {
+    let payload = format!("data: {{\"text\":\"{}\"}}\n\n", "x".repeat(8 << 20));
+    let mut decoder = SseDecoder::default();
+    let start = std::time::Instant::now();
+    let mut events = Vec::new();
+    for chunk in payload.as_bytes().chunks(4096) {
+        events.extend(decoder.feed(chunk));
+    }
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].len(), (8 << 20) + 11);
+    // Rescanning the buffer per chunk took minutes at this size.
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// One SSE response per accepted connection, from `bodies` in turn; each
+/// connection is held open after its body for `hold`.
+async fn sse_server(bodies: Vec<&'static [u8]>, hold: Duration) -> String {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        for body in bodies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = socket.write_all(body).await;
+            tokio::spawn(async move {
+                tokio::time::sleep(hold).await;
+                drop(socket);
+            });
+        }
+    });
+    base
+}
+
+#[tokio::test]
+async fn stream_bus_counts_only_framed_streams_and_abandons_silent_ones() {
+    let base = sse_server(
+        vec![b"", b"data: {\"payload\":{\"type\":\"x\"}}\n\n"],
+        Duration::from_secs(30),
+    )
+    .await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut tools = HashMap::new();
+    let mut models = HashMap::new();
+    // Accepted, then nothing: not a healthy stream (the reconnect budget
+    // must keep counting), and never announced.
+    let resp = reqwest::get(format!("{base}/global/event")).await.unwrap();
+    let silence = Duration::from_millis(300);
+    let before = tokio::time::Instant::now();
+    let mut last_frame = before;
+    let streamed = stream_bus(
+        &tx,
+        resp,
+        Protocol::V1,
+        silence,
+        &mut last_frame,
+        &mut tools,
+        &mut models,
+    );
+    assert!(!streamed.await);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(last_frame, before, "no frame, no stamp");
+    // A frame, then silence past the bound: abandoned for a reconnect.
+    let resp = reqwest::get(format!("{base}/global/event")).await.unwrap();
+    let start = tokio::time::Instant::now();
+    let streamed = stream_bus(
+        &tx,
+        resp,
+        Protocol::V1,
+        silence,
+        &mut last_frame,
+        &mut tools,
+        &mut models,
+    );
+    assert!(streamed.await);
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(last_frame >= start && last_frame + silence <= tokio::time::Instant::now());
+    assert!(matches!(rx.try_recv(), Ok(BusMsg::Connected)));
+    assert!(matches!(rx.try_recv(), Ok(BusMsg::Event(_))));
+}
+
+#[test]
+fn attachment_urls_survive_reserved_characters_and_windows_paths() {
+    for (path, url) in [
+        ("/tmp/shot.png", "file:///tmp/shot.png"),
+        ("/tmp/a b#c?%.png", "file:///tmp/a%20b%23c%3F%25.png"),
+        ("/tmp/Zoë/shot 1.png", "file:///tmp/Zo%C3%AB/shot%201.png"),
+        (
+            r"C:\Users\Zoë\shot 1#.png",
+            "file:///C:/Users/Zo%C3%AB/shot%201%23.png",
+        ),
+        ("c:/x/y.png", "file:///c:/x/y.png"),
+        (
+            r"\\server\share\dir\f g.png",
+            "file://server/share/dir/f%20g.png",
+        ),
+        (r"\\?\C:\a\b.png", "file:///C:/a/b.png"),
+        (r"\\?\UNC\server\share\f.png", "file://server/share/f.png"),
+    ] {
+        assert_eq!(file_url(path), url, "{path}");
+    }
+    let body = prompt_body("x", None, None, &[r"C:\Users\me\a b.png".to_owned()], None);
+    assert_eq!(body["parts"][1]["url"], "file:///C:/Users/me/a%20b.png");
+    let body = prompt_body_v2("x", &["/tmp/a#b.png".to_owned()], None);
+    assert_eq!(body["files"][0]["uri"], "file:///tmp/a%23b.png");
+    assert_eq!(body["files"][0]["name"], "a#b.png");
+}
+
+#[test]
+fn windows_directories_encode_like_encode_uri_component() {
+    // encodeURIComponent output, except `/` (which decodes the same).
+    assert_eq!(
+        encode_directory(r"C:\Users\Zoë\my proj"),
+        "C%3A%5CUsers%5CZo%C3%AB%5Cmy%20proj"
+    );
+    assert_eq!(encode_directory(r"\\srv\share"), "%5C%5Csrv%5Cshare");
+}
+
+#[test]
+fn prompt_message_ids_sort_like_the_servers() {
+    let ids: Vec<String> = (0..64).map(|_| prompt_message_id()).collect();
+    for id in &ids {
+        assert_eq!(id.len(), 30, "{id}");
+        assert!(id.starts_with("msg_"), "{id}");
+        assert!(id[4..16].bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+        assert!(id[16..].bytes().all(|b| b.is_ascii_alphanumeric()), "{id}");
+    }
+    // The time prefix strictly ascends, within a millisecond too.
+    for pair in ids.windows(2) {
+        assert!(pair[0][..16] < pair[1][..16], "{pair:?}");
+    }
+    // 1.x mints the same shape: 12 hex digits of ms*4096+counter.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let stamp = u64::from_str_radix(&ids[63][4..16], 16).unwrap();
+    assert!((stamp >> 12).abs_diff(now & 0xF_FFFF_FFFF) < 10_000);
+}
+
+/// The bus never replays: requests asked while it reconnected are listed
+/// and answered (permissions approved, questions put to the user), and
+/// ones the live bus already delivered are not answered twice.
+#[tokio::test]
+async fn reconnect_sweep_answers_requests_asked_in_the_gap() {
+    for v2 in [false, true] {
+        let pending = if v2 {
+            json!({
+                "permission": [
+                    {"id": "per_live", "sessionID": "fixture"},
+                    {"id": "per_gap", "sessionID": "fixture"},
+                    {"id": "per_foreign", "sessionID": "foreign"},
+                ],
+                "form": [{
+                    "id": "frm_gap", "sessionID": "fixture", "title": "Questions",
+                    "metadata": {"kind": "question"},
+                    "fields": [{"key": "q0", "title": "Color", "description": "Which?",
+                                "type": "string", "options": [{"value": "Yes", "label": "Yes"}]}],
+                }],
+            })
+        } else {
+            json!({
+                "permission": [
+                    {"id": "per_live", "sessionID": "fixture"},
+                    {"id": "per_gap", "sessionID": "fixture"},
+                    {"id": "per_foreign", "sessionID": "foreign"},
+                ],
+                "question": [{
+                    "id": "que_gap", "sessionID": "fixture",
+                    "questions": [{"header": "Choice", "question": "Continue?",
+                                   "options": [{"label": "Yes"}]}],
+                }],
+            })
+        };
+        let mut wire = TurnWire::start_config(
+            false,
+            v2,
+            true,
+            Some(true),
+            "2.0.11",
+            json!({"pending": pending}),
+            false,
+        )
+        .await;
+        if v2 {
+            wire.request("/api/model").await;
+        }
+        wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+            .await;
+        if v2 {
+            wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+            wire.v2(
+                "permission.asked",
+                json!({"id": "per_live", "sessionID": "fixture"}),
+            );
+        } else {
+            wire.status("busy");
+            wire.bus.send(json!({"type": "permission.asked", "properties": {"id": "per_live", "sessionID": "fixture"}})).unwrap();
+        }
+        let live = if v2 {
+            "/api/session/fixture/permission/per_live/reply"
+        } else {
+            "/permission/per_live/reply"
+        };
+        wire.posted(live).await;
+        // The stream drops; the reconnect sweeps what was asked meanwhile.
+        wire.bus.send(json!("close")).unwrap();
+        let gap = if v2 {
+            "/api/session/fixture/permission/per_gap/reply"
+        } else {
+            "/permission/per_gap/reply"
+        };
+        let answer_route = if v2 {
+            "/api/session/fixture/form/frm_gap/reply"
+        } else {
+            "/question/que_gap/reply"
+        };
+        let approval = wire.posted(gap).await;
+        let answer = wire.posted(answer_route).await;
+        assert_eq!(
+            approval,
+            if v2 {
+                json!({"decision": "once"})
+            } else {
+                json!({"reply": "once"})
+            }
+        );
+        assert_eq!(
+            answer,
+            if v2 {
+                json!({"answer": {"q0": "Yes"}})
+            } else {
+                json!({"answers": [["Yes"]]})
+            }
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            wire.bus_connections
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert!(wire.listings.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+        let posts = wire.posts.lock().unwrap();
+        let replies = |suffix: &str| posts.iter().filter(|(p, _)| p.ends_with(suffix)).count();
+        assert_eq!(
+            replies(live),
+            1,
+            "a request the live bus delivered is answered once"
+        );
+        assert_eq!(replies(gap), 1);
+        assert!(!posts.iter().any(|(p, _)| p.contains("per_foreign")));
+        drop(posts);
+        let _ = wire.pending.lock().unwrap().take();
+    }
+}
+
+/// A permission approval that cannot be delivered leaves the agent waiting
+/// forever: after its retries the turn ends, visibly.
+#[tokio::test]
+async fn undeliverable_permission_reply_ends_the_turn_with_an_error() {
+    let mut wire = TurnWire::start_config(
+        false,
+        false,
+        true,
+        None,
+        "1.18.31",
+        json!({"failReplies": true}),
+        false,
+    )
+    .await;
+    wire.request("/prompt_async").await;
+    wire.status("busy");
+    wire.bus
+        .send(json!({"type": "permission.asked", "properties": {"id": "per_1", "sessionID": "fixture"}}))
+        .unwrap();
+    let (status, error, surfaced) = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut surfaced = None;
+        loop {
+            match wire.events.recv().await.unwrap().unwrap() {
+                AgentEvent::Error { message } => surfaced = Some(message),
+                AgentEvent::Done { status, error, .. } => return (status, error, surfaced),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, DoneStatus::Errored);
+    let error = error.unwrap();
+    assert!(error.contains("Could not approve"), "{error}");
+    assert!(error.contains("500"), "{error}");
+    assert_eq!(surfaced.as_deref(), Some(error.as_str()));
+    let posts = wire.posts.lock().unwrap();
+    let attempts = posts
+        .iter()
+        .filter(|(p, _)| p == "/permission/per_1/reply")
+        .count();
+    assert_eq!(attempts, REPLY_ATTEMPTS as usize);
+    assert!(posts.iter().any(|(p, _)| p.ends_with("/abort")));
+}
+
+/// A server that dies mid-turn is noticed within the process poll, with its
+/// own stderr, not after the bus burns its reconnect budget.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_server_crash_mid_turn_settles_promptly_with_its_stderr() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let exe = fixture.path().join("opencode");
+    let script = r#"#!/usr/bin/env node
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('1.18.31'); process.exit(0); }
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  const json = (body, status = 200) => {
+    res.writeHead(status, {'content-type': 'application/json'}); res.end(JSON.stringify(body));
+  };
+  const path = req.url.split('?')[0];
+  if (path === '/global/health') return json({healthy: true, version: '1.18.31'});
+  if (path === '/global/event') {
+    res.writeHead(200, {'content-type': 'text/event-stream'});
+    res.write('data: {"payload":{"type":"server.connected","properties":{}}}\n\n');
+    return;
+  }
+  if (path === '/session' && req.method === 'POST') return json({id: 'ses_crash'});
+  if (path === '/provider') return json({all: [], connected: []});
+  if (path === '/command') return json([]);
+  if (path.endsWith('/prompt_async')) {
+    res.writeHead(204); res.end();
+    setTimeout(() => { console.error('fatal: provider bootstrap exploded'); process.exit(7); }, 100);
+    return;
+  }
+  json({});
+}).listen(port, '127.0.0.1', () => console.log(`opencode server listening on http://127.0.0.1:${port}`));
+"#;
+    std::fs::write(&exe, script).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (steer_tx, steering) = mpsc::channel(1);
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
+        steering,
+        interrupt: tokio_util::sync::CancellationToken::new(),
+        turn: Default::default(),
+    };
+    let request: RunRequest = serde_json::from_value(json!({
+        "prompt": "hi", "cwd": fixture.path().to_str().unwrap(),
+        "sandbox": "workspace-write", "autoApprove": true,
+    }))
+    .unwrap();
+    let harness = OpencodeHarness::new()
+        .with_executable(&exe)
+        .with_graces(Duration::from_millis(100), Duration::from_millis(100));
+    let mut stream = harness.run(request, controls).await.unwrap();
+    let start = tokio::time::Instant::now();
+    let (error, done) = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut error = None;
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::Error { message } => error = Some(message),
+                AgentEvent::Done {
+                    status,
+                    error: done,
+                    ..
+                } => return (error, (status, done)),
+                _ => {}
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .unwrap();
+    // The bus alone would take 40 reconnects (10s+, far longer on Windows).
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(done.0, DoneStatus::Errored);
+    let message = done.1.unwrap();
+    assert!(message.contains("exited unexpectedly"), "{message}");
+    assert!(message.contains("provider bootstrap exploded"), "{message}");
+    assert_eq!(error.as_deref(), Some(message.as_str()));
+    drop(steer_tx);
+}
+
+/// The losers of a first-start migration race, as 1.18.21 prints them: the
+/// statement rides the lines after "Failed query:". Other failed queries,
+/// and DDL outside one, are not transient.
+#[test]
+fn a_lost_migration_race_is_transient() {
+    let raced = "\x1b[91m\x1b[1mError: \x1b[0mUnexpected error\n\nFailed query: \n        CREATE TABLE `workspace` (\n          `id` text PRIMARY KEY\n        );\n      \nparams: ";
+    let mut race = MigrationRace::default();
+    assert!(raced.lines().any(|line| race.feed(line)));
+    let mut race = MigrationRace::default();
+    assert!(
+        race.feed("Failed query: CREATE INDEX `session_project_idx` ON `session` (`project_id`);")
+    );
+    for unrelated in [
+        "Failed query: \n  INSERT INTO `session` VALUES (?)\nparams: 1",
+        "Failed query: \nparams: \nCREATE TABLE `x` (",
+        "CREATE TABLE `x` (",
+        "Error: Unexpected error",
+    ] {
+        let mut race = MigrationRace::default();
+        assert!(
+            !unrelated.lines().any(|line| race.feed(line)),
+            "{unrelated}"
+        );
+    }
+}
+
+/// A server that lost the migration race is relaunched, not reported.
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_retries_a_lost_migration_race() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let exe = fixture.path().join("opencode");
+    let script = r#"#!/usr/bin/env node
+const fs = require('node:fs');
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('1.18.21'); process.exit(0); }
+const raced = require('node:path').join(__dirname, 'raced');
+if (!fs.existsSync(raced)) {
+  fs.writeFileSync(raced, '');
+  console.error('Error: Unexpected error\n\nFailed query: \n        CREATE TABLE `workspace` (\n          `id` text PRIMARY KEY\n        );\n      \nparams: ');
+  process.exit(1);
+}
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({version: '1.18.21'}));
+}).listen(port, '127.0.0.1', () => console.log(`opencode server listening on http://127.0.0.1:${port}`));
+"#;
+    std::fs::write(&exe, script).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut server = Server::spawn(&exe, fixture.path().to_str(), Duration::from_secs(5), None)
+        .await
+        .unwrap();
+    server.shutdown(Duration::from_millis(100)).await;
+    assert!(fixture.path().join("raced").exists());
+}
+
+/// A scripted 1.x `opencode serve` with the routes a run needs. `on_prompt`
+/// and `on_abort` are JavaScript run with the request's `res` and an
+/// `emit(payload)` that writes one bus frame.
+#[cfg(unix)]
+fn scripted_opencode(dir: &std::path::Path, on_prompt: &str, on_abort: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let exe = dir.join("opencode");
+    let script = format!(
+        r#"#!/usr/bin/env node
+const http = require('node:http');
+if (process.argv.includes('--version')) {{ console.log('1.18.31'); process.exit(0); }}
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+let bus = null;
+const emit = (payload) => bus && bus.write(`data: ${{JSON.stringify({{payload}})}}\n\n`);
+http.createServer((req, res) => {{
+  const json = (body, status = 200) => {{
+    res.writeHead(status, {{'content-type': 'application/json'}}); res.end(JSON.stringify(body));
+  }};
+  const path = req.url.split('?')[0];
+  if (path === '/global/health') return json({{healthy: true, version: '1.18.31'}});
+  if (path === '/global/event') {{
+    res.writeHead(200, {{'content-type': 'text/event-stream'}});
+    bus = res;
+    emit({{type: 'server.connected', properties: {{}}}});
+    return;
+  }}
+  if (path === '/session' && req.method === 'POST') return json({{id: 'ses_script'}});
+  if (path === '/provider') return json({{all: [], connected: []}});
+  if (path === '/command') return json([]);
+  if (path === '/session/status') return json({{}});
+  if (path.endsWith('/prompt_async')) {{ {on_prompt} return; }}
+  if (path.endsWith('/abort')) {{ {on_abort} return; }}
+  json({{}});
+}}).listen(port, '127.0.0.1', () => console.log(`opencode server listening on http://127.0.0.1:${{port}}`));
+"#
+    );
+    std::fs::write(&exe, script).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    exe
+}
+
+/// Run `exe` on a one-prompt request; the steering sender keeps the
+/// mailbox open between turns.
+#[cfg(unix)]
+async fn scripted_run(
+    exe: &std::path::Path,
+    cwd: &std::path::Path,
+) -> (
+    BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    crate::TurnControl,
+    mpsc::Sender<crate::SteerMessage>,
+) {
+    let (steer_tx, steering) = mpsc::channel(1);
+    let turn = crate::TurnControl::default();
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
+        steering,
+        interrupt: tokio_util::sync::CancellationToken::new(),
+        turn: turn.clone(),
+    };
+    let request: RunRequest = serde_json::from_value(json!({
+        "prompt": "hi", "cwd": cwd.to_str().unwrap(),
+        "sandbox": "workspace-write", "autoApprove": true,
+    }))
+    .unwrap();
+    let harness = OpencodeHarness::new()
+        .with_executable(exe)
+        .with_graces(Duration::from_secs(5), Duration::from_millis(100));
+    (
+        harness.run(request, controls).await.unwrap(),
+        turn,
+        steer_tx,
+    )
+}
+
+/// Events up to and including the next Done.
+#[cfg(unix)]
+async fn until_done(
+    stream: &mut BoxStream<'static, Result<AgentEvent, HarnessError>>,
+) -> Vec<AgentEvent> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+        panic!("stream ended without Done: {events:?}");
+    })
+    .await
+    .unwrap()
+}
+
+/// A server that dies while a stop is settling ends the turn the user
+/// stopped as stopped, not as a failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_crash_during_a_stop_settles_interrupted() {
+    let fixture = tempfile::tempdir().unwrap();
+    let exe = scripted_opencode(
+        fixture.path(),
+        "res.writeHead(204); res.end(); \
+         emit({type: 'session.status', properties: {sessionID: 'ses_script', status: {type: 'busy'}}});",
+        "json(true); \
+         setTimeout(() => { console.error('fatal: abort exploded'); process.exit(7); }, 50);",
+    );
+    let (mut stream, turn, _steer) = scripted_run(&exe, fixture.path()).await;
+    // The turn is running once the prompt went out.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    turn.stop_turn();
+    let events = until_done(&mut stream).await;
+    let Some(AgentEvent::Done { status, error, .. }) = events.last() else {
+        unreachable!()
+    };
+    assert_eq!(*status, DoneStatus::Interrupted, "{events:?}");
+    assert_eq!(*error, None);
+}
+
+/// A server that dies between turns ends the run with one Errored Done
+/// carrying its crash (the turn already completed; no error chip of its
+/// own), so the next message starts a fresh server.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_crash_between_turns_reports_the_crash_once() {
+    let fixture = tempfile::tempdir().unwrap();
+    let exe = scripted_opencode(
+        fixture.path(),
+        "res.writeHead(204); res.end(); \
+         const status = (type) => ({type: 'session.status', properties: {sessionID: 'ses_script', status: {type}}}); \
+         emit(status('busy')); emit(status('idle')); \
+         emit({type: 'session.idle', properties: {sessionID: 'ses_script'}}); \
+         setTimeout(() => { console.error('fatal: idle exploded'); process.exit(7); }, 300);",
+        "json(true);",
+    );
+    let (mut stream, _turn, _steer) = scripted_run(&exe, fixture.path()).await;
+    let first = until_done(&mut stream).await;
+    assert!(
+        matches!(
+            first.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{first:?}"
+    );
+    let crash = until_done(&mut stream).await;
+    assert_eq!(crash.len(), 1, "{crash:?}");
+    let Some(AgentEvent::Done { status, error, .. }) = crash.last() else {
+        unreachable!()
+    };
+    assert_eq!(*status, DoneStatus::Errored);
+    let error = error.as_deref().unwrap();
+    assert!(error.contains("idle exploded"), "{error}");
+    let rest = tokio::time::timeout(Duration::from_secs(5), stream.next()).await;
+    assert!(matches!(rest, Ok(None)), "{rest:?}");
+}
+
+/// A 1.x server that serves a run until its prompt lands, then wedges: the
+/// open bus goes quiet and every later connection is accepted (as a stopped
+/// process's would be) but never answered — health checks too, unless
+/// `answer_health`. Also returns the count of bus subscriptions.
+async fn wedging_server(answer_health: bool) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let wedged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let subscriptions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let subscribed = subscriptions.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let wedged = wedged.clone();
+            let subscribed = subscribed.clone();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let header = String::from_utf8_lossy(&request);
+                let path = header.split_whitespace().nth(1).unwrap_or_default();
+                let path = path.split('?').next().unwrap_or_default().to_owned();
+                let health = path == "/global/health";
+                if path == "/global/event" {
+                    subscribed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                if wedged.load(std::sync::atomic::Ordering::SeqCst) && !(health && answer_health) {
+                    // Held open, never answered.
+                    let _ = socket.read(&mut buf).await;
+                    std::future::pending::<()>().await;
+                }
+                if path == "/global/event" {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: connected\n\n")
+                        .await;
+                    std::future::pending::<()>().await;
+                }
+                let body = match path.as_str() {
+                    "/global/health" => r#"{"healthy":true,"version":"1.18.31"}"#,
+                    "/session" => r#"{"id":"fixture"}"#,
+                    _ => "{}",
+                };
+                if path.ends_with("/prompt_async") {
+                    wedged.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    (base, subscriptions)
+}
+
+/// Run one prompt against `base` with the given bus bounds; returns the
+/// error chip and the Done once it settles.
+async fn wedged_run(base: String, timeouts: BusTimeouts) -> (Option<String>, DoneStatus, String) {
+    let (event_tx, mut events) = mpsc::channel(64);
+    let (_steer_tx, steering) = mpsc::channel(1);
+    let request =
+        json!({"prompt": "first", "cwd": "", "sandbox": "workspace-write", "autoApprove": true});
+    tokio::spawn(run_session(Session {
+        server: Server::attached(base),
+        event_tx,
+        controls: RunControls {
+            realtime: None,
+            execution_lease: None,
+            request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
+            steering,
+            interrupt: tokio_util::sync::CancellationToken::new(),
+            turn: Default::default(),
+        },
+        request: serde_json::from_value(request).unwrap(),
+        interrupt_grace: Duration::from_secs(2),
+        kill_grace: Duration::from_millis(50),
+        bus_timeouts: timeouts,
+        known_commands: Some(Vec::new()),
+        initial_native_command_selected: false,
+    }));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut chip = None;
+        loop {
+            match events.recv().await.unwrap().unwrap() {
+                AgentEvent::Error { message } => chip = Some(message),
+                AgentEvent::Done { status, error, .. } => {
+                    return (chip, status, error.unwrap_or_default());
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("a wedged server must end the turn")
+}
+
+/// A server that stops serving without exiting (stopped, hung) still
+/// accepts connections, so reconnects alone would keep the turn Working
+/// for half an hour. One silence and an unanswered health check end it.
+#[tokio::test]
+async fn a_wedged_server_fails_the_turn_after_one_silence() {
+    let (base, subscriptions) = wedging_server(false).await;
+    let start = tokio::time::Instant::now();
+    let (chip, status, error) = wedged_run(
+        base,
+        BusTimeouts {
+            silence: Duration::from_millis(300),
+            probe: Duration::from_millis(300),
+            wedged: Duration::from_secs(60),
+        },
+    )
+    .await;
+    assert_eq!(status, DoneStatus::Errored);
+    assert!(error.contains("stopped responding"), "{error}");
+    assert!(error.contains("health check"), "{error}");
+    assert_eq!(chip.as_deref(), Some(error.as_str()));
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    // Checked on the live stream's silence, before any reconnect.
+    assert_eq!(subscriptions.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A server that still answers health checks but whose bus never frames
+/// again is given up on once the wedge budget passes.
+#[tokio::test]
+async fn a_frameless_bus_fails_the_turn_past_the_wedge_budget() {
+    let (base, _) = wedging_server(true).await;
+    let start = tokio::time::Instant::now();
+    let (_, status, error) = wedged_run(
+        base,
+        BusTimeouts {
+            silence: Duration::from_millis(200),
+            probe: Duration::from_secs(1),
+            wedged: Duration::from_millis(1200),
+        },
+    )
+    .await;
+    assert_eq!(status, DoneStatus::Errored);
+    assert!(error.contains("stopped responding"), "{error}");
+    assert!(error.contains("no event for 1s"), "{error}");
+    assert!(start.elapsed() >= Duration::from_millis(1200));
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// The live case: a SIGSTOPped `opencode serve`. The turn fails fast and the
+/// stopped process is torn down with the run.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stopped_server_process_fails_the_turn_and_is_torn_down() {
+    let fixture = tempfile::tempdir().unwrap();
+    let exe = scripted_opencode(
+        fixture.path(),
+        "res.writeHead(204); res.end(); \
+         require('node:fs').writeFileSync(require('node:path').join(__dirname, 'pid'), String(process.pid)); \
+         setTimeout(() => process.kill(process.pid, 'SIGSTOP'), 50);",
+        "json(true);",
+    );
+    let (steer_tx, steering) = mpsc::channel(1);
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
+        steering,
+        interrupt: tokio_util::sync::CancellationToken::new(),
+        turn: Default::default(),
+    };
+    let request: RunRequest = serde_json::from_value(json!({
+        "prompt": "hi", "cwd": fixture.path().to_str().unwrap(),
+        "sandbox": "workspace-write", "autoApprove": true,
+    }))
+    .unwrap();
+    let harness = OpencodeHarness::new()
+        .with_executable(&exe)
+        .with_graces(Duration::from_millis(100), Duration::from_millis(100))
+        .with_bus_timeouts(
+            Duration::from_millis(500),
+            Duration::from_millis(500),
+            Duration::from_secs(60),
+        );
+    let mut stream = harness.run(request, controls).await.unwrap();
+    let start = tokio::time::Instant::now();
+    let events = until_done(&mut stream).await;
+    let Some(AgentEvent::Done { status, error, .. }) = events.last() else {
+        unreachable!()
+    };
+    assert_eq!(*status, DoneStatus::Errored);
+    let error = error.as_deref().unwrap();
+    assert!(error.contains("stopped responding"), "{error}");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    // The run ends only once its server is gone.
+    let rest = tokio::time::timeout(Duration::from_secs(5), stream.next()).await;
+    assert!(matches!(rest, Ok(None)), "{rest:?}");
+    let pid = std::fs::read_to_string(fixture.path().join("pid")).unwrap();
+    let alive = std::process::Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the stopped server {pid} outlived its run");
+    drop(steer_tx);
 }

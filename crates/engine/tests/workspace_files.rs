@@ -327,6 +327,255 @@ async fn workspace_file_rpcs_preserve_plain_folder_search_support() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn projectless_files_use_the_chat_directory_without_a_space() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let folder = temp.path().join("home");
+    std::fs::create_dir_all(folder.join("notes")).expect("chat directory");
+    std::fs::write(folder.join("notes/todo.txt"), "first\n").expect("initial file");
+    let core = assemble(&temp.path().join("data"), "device-projectless");
+    core.workspace
+        .create_chat(
+            "chat-projectless",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(folder.to_string_lossy().into_owned()),
+        )
+        .expect("projectless chat");
+    core.workspace
+        .create_chat(
+            "chat-remote",
+            None,
+            Some("another-device"),
+            None,
+            Some(folder.to_string_lossy().into_owned()),
+        )
+        .expect("foreign chat");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    let root: WorkspaceDirectoryPage = serde_json::from_value(
+        client
+            .call(
+                methods::LIST_WORKSPACE_DIRECTORY,
+                serde_json::json!({ "chatId": "chat-projectless" }),
+            )
+            .await
+            .expect("projectless root"),
+    )
+    .expect("typed root");
+    assert!(root.entries.iter().any(|entry| entry.path == "notes"));
+
+    let matches = client
+        .call(
+            methods::SEARCH_WORKSPACE_FILES,
+            serde_json::json!({ "chatId": "chat-projectless", "query": "todo" }),
+        )
+        .await
+        .expect("projectless search");
+    assert_eq!(matches[0]["path"], "notes/todo.txt");
+
+    let read: WorkspaceFileText = serde_json::from_value(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": "chat-projectless", "path": "notes/todo.txt" }),
+            )
+            .await
+            .expect("projectless read"),
+    )
+    .expect("typed file");
+    assert_eq!(read.text.as_deref(), Some("first\n"));
+    let outcome = client
+        .call(
+            methods::WRITE_WORKSPACE_FILE,
+            serde_json::json!({
+                "chatId": "chat-projectless",
+                "path": "notes/todo.txt",
+                "text": "second\n",
+                "expectedCheckoutId": read.checkout_id,
+                "expectedContentHash": read.content_hash,
+                "encoding": "utf8",
+                "lineEnding": "lf",
+            }),
+        )
+        .await
+        .expect("projectless write");
+    assert_eq!(outcome["status"], "written");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("notes/todo.txt")).unwrap(),
+        "second\n"
+    );
+
+    let mut watch = client
+        .subscribe(
+            methods::WATCH_WORKSPACE_FILES,
+            serde_json::json!({ "chatId": "chat-projectless" }),
+        )
+        .await
+        .expect("projectless watch");
+    let baseline = tokio::time::timeout(Duration::from_secs(3), watch.recv())
+        .await
+        .expect("baseline timeout")
+        .expect("watch alive");
+    let baseline: WorkspaceFileChanges = serde_json::from_value(baseline).unwrap();
+    assert!(baseline.resync_required);
+
+    for params in [
+        serde_json::json!({ "chatId": "chat-remote" }),
+        serde_json::json!({ "chatId": "chat-projectless", "checkoutPath": "/" }),
+    ] {
+        assert!(
+            client
+                .call(methods::LIST_WORKSPACE_DIRECTORY, params)
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": "chat-projectless", "path": "../outside" }),
+            )
+            .await
+            .is_err()
+    );
+    drop(watch);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn projectless_files_stay_inside_a_chat_directory_within_a_git_repo() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let core = assemble(&temp.path().join("data"), "device-projectless-git");
+    core.workspace
+        .create_chat(
+            "chat-projectless",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(repo.join("src").to_string_lossy().into_owned()),
+        )
+        .expect("projectless chat in a repo");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    let root: WorkspaceDirectoryPage = serde_json::from_value(
+        client
+            .call(
+                methods::LIST_WORKSPACE_DIRECTORY,
+                serde_json::json!({ "chatId": "chat-projectless" }),
+            )
+            .await
+            .expect("list chat directory"),
+    )
+    .expect("typed root");
+    assert!(root.entries.iter().any(|entry| entry.path == "lib.rs"));
+    assert!(!root.entries.iter().any(|entry| entry.path == "README.md"));
+    assert!(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": "chat-projectless", "path": "../README.md" }),
+            )
+            .await
+            .is_err()
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn projectless_home_is_required_for_files_catalogs_and_terminal() {
+    const CHILD: &str = "ZERON_MISSING_HOME_FIXTURE";
+    if std::env::var_os(CHILD).is_none() {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "projectless_home_is_required_for_files_catalogs_and_terminal",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .output()
+            .await
+            .expect("isolated missing-home fixture");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let core = assemble(&temp.path().join("data"), "device-missing-home");
+    // A chat from before scratch folders runs in `~`, so it needs a home.
+    core.workspace
+        .create_chat("chat-missing-home", None, Some(&core.device_id), None, None)
+        .unwrap();
+    core.workspace
+        .set_chat_cwd("chat-missing-home", "~")
+        .unwrap();
+    // A new projectless chat's scratch folder lives under the data dir.
+    core.workspace
+        .create_chat("chat-scratch", None, Some(&core.device_id), None, None)
+        .unwrap();
+    let explicit = temp.path().join("explicit-folder");
+    std::fs::create_dir(&explicit).unwrap();
+    core.workspace
+        .create_chat(
+            "chat-explicit-folder",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(explicit.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    for (method, params) in [
+        (
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({ "chatId": "chat-missing-home" }),
+        ),
+        (methods::LIST_FOLDERS, serde_json::json!({})),
+        (
+            methods::LIST_COMMANDS,
+            serde_json::json!({ "chatId": "chat-missing-home", "harness": "mock" }),
+        ),
+        (
+            methods::OPEN_TERMINAL,
+            serde_json::json!({ "chatId": "chat-missing-home", "cols": 80, "rows": 24 }),
+        ),
+    ] {
+        let error = client.call(method, params).await.expect_err(method);
+        assert!(
+            error
+                .to_string()
+                .contains("User home directory unavailable"),
+            "{method}: {error}"
+        );
+    }
+    client
+        .call(
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({ "chatId": "chat-explicit-folder" }),
+        )
+        .await
+        .expect("an explicit folder remains usable without a home variable");
+    client
+        .call(
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({ "chatId": "chat-scratch" }),
+        )
+        .await
+        .expect("a scratch folder needs no home variable");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_rejects_changed_checkout_even_when_contents_match() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -421,4 +670,281 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
         std::fs::read_to_string(worktree.join("README.md")).unwrap(),
         "hello\n"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_mutations_validate_revision_and_publish_semantic_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let core = assemble(&temp.path().join("data"), "device-mutations");
+    core.workspace
+        .create_space(
+            "space",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    core.workspace
+        .create_chat("chat", Some("space"), None, None, None)
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let page: WorkspaceDirectoryPage = serde_json::from_value(
+        client
+            .call(
+                methods::LIST_WORKSPACE_DIRECTORY,
+                serde_json::json!({"chatId":"chat"}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(page.mutation_capabilities.unwrap().delete_entry);
+    let revision = page
+        .entries
+        .iter()
+        .find(|e| e.path == "README.md")
+        .unwrap()
+        .mutation_revision
+        .clone()
+        .unwrap();
+    let checkout = page.checkout_id.unwrap();
+    let mut watch = client
+        .subscribe(
+            methods::WATCH_WORKSPACE_FILES,
+            serde_json::json!({"chatId":"chat"}),
+        )
+        .await
+        .unwrap();
+    watch.recv().await.unwrap();
+    let mut request = serde_json::json!({"chatId":"chat", "operationId":"rename", "expectedCheckoutId":checkout, "sourcePath":"README.md", "destinationPath":"src/read me.md", "expectedSourceRevision":revision, "expectedKind":"file"});
+    request["expectedCheckoutId"] = "wrong".into();
+    let rejected = client
+        .call(methods::MOVE_WORKSPACE_ENTRY, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(rejected["reason"], "workspaceChanged");
+    request["expectedCheckoutId"] = checkout.clone().into();
+    let moved = client
+        .call(methods::MOVE_WORKSPACE_ENTRY, request)
+        .await
+        .unwrap();
+    assert_eq!(moved["status"], "applied");
+    assert!(!repo.join("README.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("src/read me.md")).unwrap(),
+        "hello\n"
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame: WorkspaceFileChanges =
+                serde_json::from_value(watch.recv().await.unwrap()).unwrap();
+            if frame.changes.iter().any(|c| {
+                c.operation_id.as_deref() == Some("rename")
+                    && c.old_path.as_deref() == Some("README.md")
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let deleted = client.call(methods::DELETE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"delete", "expectedCheckoutId":checkout, "path":"src/read me.md", "expectedSourceRevision":moved["entry"]["mutationRevision"], "expectedKind":"file", "recursive":false})).await.unwrap();
+    assert_eq!(deleted["status"], "applied");
+    assert!(!repo.join("src/read me.md").exists());
+
+    // Created: an empty file and a folder, announced on the watch; never
+    // over an entry already there.
+    assert!(page.mutation_capabilities.unwrap().create_entry);
+    let created = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create", "expectedCheckoutId":checkout, "path":"src/new.rs", "kind":"file"})).await.unwrap();
+    assert_eq!(created["status"], "applied");
+    assert_eq!(created["entry"]["path"], "src/new.rs");
+    assert_eq!(std::fs::read(repo.join("src/new.rs")).unwrap(), b"");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame: WorkspaceFileChanges =
+                serde_json::from_value(watch.recv().await.unwrap()).unwrap();
+            if frame.changes.iter().any(|c| {
+                c.operation_id.as_deref() == Some("create") && c.path == "src/new.rs"
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let again = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create-again", "expectedCheckoutId":checkout, "path":"src/new.rs", "kind":"file"})).await.unwrap();
+    assert_eq!(again["status"], "rejected");
+    assert_eq!(again["reason"], "destinationExists");
+    let folder = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create-folder", "expectedCheckoutId":checkout, "path":"docs", "kind":"directory"})).await.unwrap();
+    assert_eq!(folder["status"], "applied");
+    assert!(repo.join("docs").is_dir());
+    let stale = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create-stale", "expectedCheckoutId":"wrong", "path":"x.rs", "kind":"file"})).await.unwrap();
+    assert_eq!(stale["reason"], "workspaceChanged");
+    assert!(!repo.join("x.rs").exists());
+}
+
+// Absolute reads take POSIX paths — the only shape a UI sends.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn absolute_paths_read_inside_normally_and_outside_read_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    std::fs::write(outside.join("report.md"), "outside\n").expect("outside file");
+    std::fs::write(outside.join("pixel.png"), b"\x89PNG\r\n\x1a\nfake").expect("png");
+    let core = assemble(&temp.path().join("data"), "device-absolute");
+    core.workspace
+        .create_space(
+            "space-absolute",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space");
+    core.workspace
+        .create_chat("chat-absolute", Some("space-absolute"), None, None, None)
+        .expect("chat");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    // An absolute path inside the chat root reads like its relative
+    // equivalent — checkout-bound and editable.
+    let inside_abs = std::fs::canonicalize(repo.join("README.md"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let read: WorkspaceFileText = serde_json::from_value(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": "chat-absolute", "path": inside_abs }),
+            )
+            .await
+            .expect("inside absolute read"),
+    )
+    .expect("typed inside read");
+    assert_eq!(read.text.as_deref(), Some("hello\n"));
+    assert_eq!(read.path, "README.md");
+    assert!(read.read_only_reason.is_none());
+    assert!(!read.checkout_id.is_empty());
+    let written = client
+        .call(
+            methods::WRITE_WORKSPACE_FILE,
+            serde_json::json!({
+                "chatId": "chat-absolute",
+                "path": "README.md",
+                "text": "inside write\n",
+                "expectedCheckoutId": read.checkout_id,
+                "expectedContentHash": read.content_hash,
+                "encoding": "utf8",
+                "lineEnding": "lf",
+            }),
+        )
+        .await
+        .expect("inside write");
+    assert_eq!(written["status"], "written");
+
+    // The same file outside every root is a read-only host file with no
+    // checkout identity.
+    let outside_abs = std::fs::canonicalize(outside.join("report.md"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let read: WorkspaceFileText = serde_json::from_value(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": "chat-absolute", "path": outside_abs }),
+            )
+            .await
+            .expect("outside read"),
+    )
+    .expect("typed outside read");
+    assert_eq!(read.text.as_deref(), Some("outside\n"));
+    assert_eq!(
+        read.read_only_reason,
+        Some(zeron_proto::WorkspaceReadOnlyReason::OutsideWorkspace)
+    );
+    assert!(read.checkout_id.is_empty());
+
+    // Missing outside files report NotFound; directories report
+    // not-a-regular-file; images read like workspace images.
+    let missing = outside.join("missing.md").to_string_lossy().into_owned();
+    let error = client
+        .call(
+            methods::READ_WORKSPACE_FILE,
+            serde_json::json!({ "chatId": "chat-absolute", "path": missing }),
+        )
+        .await
+        .expect_err("missing outside read");
+    assert!(error.to_string().contains("not found"), "{error}");
+    let directory: WorkspaceFileText = serde_json::from_value(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({
+                    "chatId": "chat-absolute",
+                    "path": outside.to_string_lossy(),
+                }),
+            )
+            .await
+            .expect("directory read"),
+    )
+    .expect("typed directory read");
+    assert_eq!(
+        directory.read_only_reason,
+        Some(zeron_proto::WorkspaceReadOnlyReason::NotRegularFile)
+    );
+    let png_abs = std::fs::canonicalize(outside.join("pixel.png"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let image = client
+        .call(
+            methods::READ_WORKSPACE_IMAGE,
+            serde_json::json!({
+                "chatId": "chat-absolute",
+                "path": png_abs,
+                "expectedCheckoutId": "",
+                "offset": 0,
+            }),
+        )
+        .await
+        .expect("outside image read");
+    assert_eq!(image["mimeType"], "image/png");
+    assert_eq!(image["done"], true);
+
+    // Writes and space targets keep rejecting absolute paths.
+    assert!(
+        client
+            .call(
+                methods::WRITE_WORKSPACE_FILE,
+                serde_json::json!({
+                    "chatId": "chat-absolute",
+                    "path": outside_abs,
+                    "text": "nope\n",
+                    "expectedCheckoutId": "anything",
+                    "expectedContentHash": "anything",
+                    "encoding": "utf8",
+                    "lineEnding": "lf",
+                }),
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "spaceId": "space-absolute", "path": outside_abs }),
+            )
+            .await
+            .is_err()
+    );
+    core.shutdown().await;
 }

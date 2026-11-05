@@ -1,6 +1,38 @@
 //! Browser state shared by the chrome and platform host. No native handles.
 use std::net::IpAddr;
 
+/// NSEvent supplies characters, while GPUI bindings name non-printing keys.
+/// Shift+Tab can arrive as NSBackTabCharacter rather than a literal tab.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn native_shortcut_key(characters: &str) -> &str {
+    match characters {
+        "\t" | "\u{19}" => "tab",
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod native_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn native_tabs_match_the_configured_navigation_keystrokes() {
+        for (characters, modifiers, binding) in [
+            ("\t", "ctrl-", "ctrl-tab"),
+            ("\t", "ctrl-shift-", "ctrl-shift-tab"),
+            ("\u{19}", "ctrl-shift-", "ctrl-shift-tab"),
+            ("\t", "alt-", "alt-tab"),
+            ("l", "cmd-", "cmd-l"),
+        ] {
+            let native = format!("{modifiers}{}", native_shortcut_key(characters));
+            assert_eq!(
+                gpui::Keystroke::parse(&native).unwrap(),
+                gpui::Keystroke::parse(binding).unwrap(),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct PageState {
     pub url: Option<String>,
@@ -34,6 +66,30 @@ pub fn loopback(url: &url::Url) -> bool {
     }
 }
 
+const LOCAL_FILE_ADDRESS: &str = "Local files can't be opened in the Browser. Open them from Files or from a file link in the chat.";
+
+/// A filesystem path or `file:` URL typed as an address. Left to the web
+/// parser, `/Users/me/page.html` loaded `https://users/me/page.html`,
+/// `\\server\share\page.html` `https://server/share/page.html` and `~`
+/// `https://~/` (#962).
+fn local_file_address(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    (text.starts_with('/') && !text.starts_with("//"))
+        || text.starts_with('\\')
+        || text == "~"
+        || text.starts_with("~/")
+        || text.starts_with("./")
+        || text.starts_with("../")
+        || drive
+        || text
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+}
+
 pub fn normalize_address(input: &str) -> Result<String, &'static str> {
     let text = input.trim();
     if text.is_empty() {
@@ -41,6 +97,9 @@ pub fn normalize_address(input: &str) -> Result<String, &'static str> {
     }
     if text.chars().any(|c| c.is_control()) {
         return Err("This address contains invalid characters.");
+    }
+    if local_file_address(text) {
+        return Err(LOCAL_FILE_ADDRESS);
     }
     // A bare host:port looks like a URI scheme to a URL parser. Only accept
     // that ambiguity when the suffix is an actual numeric port.
@@ -105,6 +164,14 @@ pub fn allowed_navigation(address: &str) -> bool {
     })
 }
 
+/// Subframe navigations: web content, including a frame's own documents
+/// (`about:blank`, `about:srcdoc`, `data:`, `blob:`) — never a scheme that
+/// leaves the page (`file:`, `javascript:`, app links).
+pub fn allowed_frame_navigation(address: &str) -> bool {
+    allowed_navigation(address)
+        || url::Url::parse(address).is_ok_and(|u| matches!(u.scheme(), "about" | "data" | "blob"))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Presentation {
     #[default]
@@ -159,6 +226,46 @@ mod tests {
         }
         assert!(!allowed_navigation("javascript:alert(1)"));
         assert!(!allowed_navigation("https://user@example.com/"));
+    }
+    #[test]
+    fn local_paths_say_where_files_open_instead_of_loading_a_host() {
+        for input in [
+            "/Users/me/Documents/Codex/mockup.html",
+            " /tmp/report.html ",
+            "~",
+            "~/Documents/mockup.html",
+            "./mockup.html",
+            "../mockup.html",
+            "file:///Users/me/mockup.html",
+            "FILE:/Users/me/mockup.html",
+            r"C:\Users\me\mockup.html",
+            "c:/Users/me/mockup.html",
+            r"\\server\share\mockup.html",
+        ] {
+            assert_eq!(normalize_address(input), Err(LOCAL_FILE_ADDRESS), "{input}");
+        }
+    }
+    #[test]
+    fn frames_load_web_content_but_never_leave_the_page() {
+        for ok in [
+            "https://example.com/embed",
+            "about:blank",
+            "about:srcdoc",
+            "data:text/html,hi",
+            "blob:https://example.com/0f3e",
+        ] {
+            assert!(allowed_frame_navigation(ok), "{ok}");
+        }
+        for blocked in [
+            "zeron://open/chat/a",
+            "ms-settings:privacy",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "mailto:a@example.com",
+            "",
+        ] {
+            assert!(!allowed_frame_navigation(blocked), "{blocked}");
+        }
     }
     #[test]
     fn native_visibility_never_outlives_its_surface() {

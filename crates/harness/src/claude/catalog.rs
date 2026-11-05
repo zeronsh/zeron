@@ -254,6 +254,11 @@ pub(super) fn with_discovered_models(
             continue;
         }
         valid = true;
+        // The CLI lists some models by dated snapshot ("claude-haiku-4-5-20251001");
+        // fold those into the curated undated row instead of duplicating it.
+        let id = snapshot_base(id)
+            .filter(|base| models.iter().any(|model| model.id == *base))
+            .unwrap_or(id);
         if text("value") == Some("default") {
             default = Some(id.to_owned());
         }
@@ -312,6 +317,12 @@ pub(super) fn with_discovered_models(
         }
     }
     Ok(models)
+}
+
+/// `claude-haiku-4-5-20251001` -> `claude-haiku-4-5`.
+fn snapshot_base(id: &str) -> Option<&str> {
+    let (base, date) = id.rsplit_once('-')?;
+    (date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())).then_some(base)
 }
 
 pub fn static_models() -> Vec<Model> {
@@ -395,6 +406,19 @@ mod tests {
             Some("max")
         );
         assert_eq!(to_effort(Some(ReasoningLevel::XHigh), None), Some("max"));
+    }
+
+    #[test]
+    fn dated_snapshots_fold_into_curated_rows() {
+        let response = serde_json::json!({"response": {"models": [
+            {"value": "claude-haiku-4-5-20251001", "resolvedModel": "claude-haiku-4-5-20251001",
+             "displayName": "Haiku 4.5", "description": "Fastest for quick answers"},
+            {"value": "claude-haiku-9-9-20990101", "displayName": "Haiku 9.9"},
+        ]}});
+        let models = with_discovered_models(static_models(), &response).unwrap();
+        assert_eq!(models.iter().filter(|m| m.label == "Haiku 4.5").count(), 1);
+        // Snapshots with no curated base still surface as-is.
+        assert!(models.iter().any(|m| m.id == "claude-haiku-9-9-20990101"));
     }
 
     #[test]

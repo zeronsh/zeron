@@ -7,6 +7,7 @@ Exec=zeron %u
 TryExec=zeron
 Icon=zeron
 Terminal=false
+StartupNotify=true
 Categories=Development;Utility;
 Keywords=agent;claude;codex;ai;coding;
 StartupWMClass=zeron

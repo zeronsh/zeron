@@ -14,7 +14,7 @@
  * discarded at the event layer (harness ToolResult carries only `isError`),
  * and ApplyPatch already stores path-only summaries.
  */
-import type { MessagePart, ToolCall, ToolPartDiff } from "./control-types";
+import type { MessagePart, TodoItem, ToolCall, ToolPartDiff } from "./control-types";
 
 /** A tool call reduced to its render surface. Structurally a subset of
  * {@link ToolCall}; every variant here is assignable-from its wire twin after
@@ -37,7 +37,7 @@ export type RenderToolCall =
   | { readonly _tag: "WebSearch"; readonly query: string }
   | {
       readonly _tag: "Todo";
-      readonly items: ReadonlyArray<{ readonly text: string; readonly done: boolean }>;
+      readonly items: ReadonlyArray<TodoItem>;
     }
   | { readonly _tag: "Mcp"; readonly server?: string; readonly tool: string }
   | { readonly _tag: "Unknown"; readonly name: string };
@@ -101,10 +101,13 @@ export const sanitizeToolCall = (call: ToolCall | RenderToolCall): RenderToolCal
     case "Todo":
       return {
         _tag: "Todo",
-        items: (call as Extract<RenderToolCall, { _tag: "Todo" }>).items.map((i) => ({
-          text: i.text,
-          done: i.done
-        }))
+        // `status` rides along when present so an in-progress item survives the
+        // rebuild; dropping it would flatten the checklist to done / not done.
+        items: (call as Extract<RenderToolCall, { _tag: "Todo" }>).items.map((i) =>
+          i.status === undefined
+            ? { text: i.text, done: i.done }
+            : { text: i.text, done: i.done, status: i.status }
+        )
       };
     case "Mcp": {
       const { server, tool } = call as { server?: string; tool: string };

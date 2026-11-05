@@ -41,6 +41,7 @@ fn fixture_path() -> PathBuf {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: Some("grok-4.5".into()),
@@ -49,9 +50,13 @@ fn request(prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -59,6 +64,8 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
     let (steer_tx, steer_rx) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
         request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
             let (tx, rx) = oneshot::channel();
             let answers: Vec<UserInputAnswer> = questions
@@ -73,6 +80,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        turn: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -116,15 +124,48 @@ fn assert_done(events: &[AgentEvent], expected: DoneStatus) {
 
 async fn delayed_turn(scenario: &str) {
     init_env();
-    let harness = AcpHarness::pi().with_executable(fixture_path());
+    let harness = AcpHarness::grok().with_executable(fixture_path());
     assert!(harness.authoritative_prompt_end());
     let (controls, steer, token) = controls();
     let mut stream = harness.run(request(scenario), controls).await.unwrap();
+    let mut early = Vec::new();
+    // Observe the scenario before steering. Grok re-sends a prompt cancelled
+    // before any progress, so queuing immediately after run() races that path
+    // instead of exercising the intended text/tool/usage/reasoning state.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let event = stream
+                .next()
+                .await
+                .expect("scenario event")
+                .expect("stream event");
+            let ready = match scenario {
+                "open-tool" => matches!(&event, AgentEvent::ToolCall { id, .. } if id == "3"),
+                "tools" => matches!(&event, AgentEvent::ToolResult { id, .. } if id == "3"),
+                "usage" => matches!(&event, AgentEvent::ContextUsage { .. }),
+                "reasoning" => matches!(&event, AgentEvent::ReasoningDelta { .. }),
+                "text" => matches!(&event, AgentEvent::TextDelta { text } if text == "working"),
+                _ => panic!("unknown scenario: {scenario}"),
+            };
+            assert!(
+                !matches!(event, AgentEvent::Done { .. }),
+                "premature Done: {event:?}"
+            );
+            early.push(event);
+            if ready {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("scenario must start before steering");
     // Queue multiple follow-ups while the first prompt remains outstanding.
     steer
         .send(SteerMessage {
             message_id: None,
             prompt: "second".into(),
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .unwrap();
@@ -132,32 +173,52 @@ async fn delayed_turn(scenario: &str) {
         .send(SteerMessage {
             message_id: None,
             prompt: "third".into(),
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .unwrap();
-    let first = collect_until_done(&mut stream).await;
+    let mut first = early;
+    first.extend(collect_until_done(&mut stream).await);
     assert_done(&first, DoneStatus::Completed);
-    assert!(
-        first
+    let finished = |events: &[AgentEvent]| {
+        events
             .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "finished")),
-        "premature Done: {first:?}"
-    );
-    for expected in ["second", "third"] {
-        let events = collect_until_done(&mut stream).await;
-        assert_done(&events, DoneStatus::Completed);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == expected)),
-            "{events:?}"
-        );
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "finished"))
+    };
+    let steered = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+            .count()
+    };
+    let together = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second\n\nthird"))
+    };
+    if scenario == "open-tool" {
+        // A running tool is never preempted: the prompt keeps its outcome,
+        // then both steers continue together as the next prompt.
+        assert!(finished(&first), "premature Done: {first:?}");
+        let next = collect_until_done(&mut stream).await;
+        assert_done(&next, DoneStatus::Completed);
+        assert_eq!(steered(&next), 2, "{next:?}");
+        assert!(together(&next), "{next:?}");
+    } else {
+        // Silence is not completion, but steers preempt the generation
+        // immediately and continue the same run together — one Done.
+        assert!(!finished(&first), "steers must preempt: {first:?}");
+        assert_eq!(steered(&first), 2, "{first:?}");
+        assert!(together(&first), "{first:?}");
     }
     // A fresh user message after completion also reuses the same session.
     steer
         .send(SteerMessage {
             message_id: None,
             prompt: "fourth".into(),
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .unwrap();
@@ -202,7 +263,7 @@ async fn open_tools_then_silence_preserves_prompt() {
 async fn cancel_quiet(scenario: &str) {
     init_env();
     let (controls, steer, token) = controls();
-    let mut stream = AcpHarness::pi()
+    let mut stream = AcpHarness::grok()
         .with_executable(fixture_path())
         .run(request(scenario), controls)
         .await
@@ -222,6 +283,8 @@ async fn cancel_quiet(scenario: &str) {
         .send(SteerMessage {
             message_id: None,
             prompt: "must not run".into(),
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .unwrap();
@@ -254,7 +317,7 @@ async fn unresponsive_quiet_turn_is_killed_on_cancel() {
 async fn missing_response_at_eof_is_error_not_success() {
     init_env();
     let (controls, _steer, _token) = controls();
-    let mut stream = AcpHarness::pi()
+    let mut stream = AcpHarness::grok()
         .with_executable(fixture_path())
         .run(request("eof"), controls)
         .await
@@ -265,7 +328,7 @@ async fn missing_response_at_eof_is_error_not_success() {
 #[tokio::test]
 async fn protocol_error_keeps_code_and_agent_detail() {
     let (controls, _steer, _token) = controls();
-    let mut stream = AcpHarness::pi()
+    let mut stream = AcpHarness::grok()
         .with_executable(fixture_path())
         .run(request("error"), controls)
         .await

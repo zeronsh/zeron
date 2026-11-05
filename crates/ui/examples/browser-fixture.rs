@@ -1,3 +1,5 @@
+#[path = "browser-fixture/storage.rs"]
+mod storage;
 #[path = "browser-fixture/transcript_links.rs"]
 mod transcript_links;
 #[cfg(target_os = "linux")]
@@ -35,8 +37,11 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
             .arg(&path)
             .status()?
     };
+    // A nested Wayland compositor whose only output is this window: `grim`.
     #[cfg(not(target_os = "macos"))]
-    let status = {
+    let status = if let Ok(command) = std::env::var("ZERON_BROWSER_CAPTURE_COMMAND") {
+        std::process::Command::new(command).arg(&path).status()?
+    } else {
         let capture_window = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW").ok();
         let windows = std::process::Command::new("xdotool")
             .args([
@@ -62,6 +67,31 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     };
     anyhow::ensure!(status.success(), "screenshot capture failed");
     Ok(())
+}
+
+// The Linux frame loop can be idle while the fixture's async task changes
+// theme/page state. Present the current scene before reading native pixels.
+async fn capture_frame(
+    window: gpui::WindowHandle<shell::Shell>,
+    directory: &std::path::Path,
+    name: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::wait_for_visible_window(cx).await?;
+        gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| {
+            w.refresh();
+            let arena = w.draw(cx);
+            w.present_if_needed();
+            arena.clear();
+        })?;
+        // Let the nested compositor present the submitted native frame.
+        pause(cx, 50).await;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (window, cx);
+    capture(directory, name)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -130,7 +160,11 @@ fn main() -> anyhow::Result<()> {
     );
     std::fs::create_dir_all(&output)?;
     let temp = tempfile::tempdir()?;
-    let data = temp.path().to_path_buf();
+    let data = std::env::var_os("ZERON_BROWSER_STORAGE_ROOT")
+        .map(PathBuf::from).unwrap_or_else(|| temp.path().to_path_buf());
+    let storage_root = data.clone();
+    let storage_profile = std::env::var("ZERON_BROWSER_STORAGE_PROFILE").unwrap_or_else(|_| "local".into());
+    let storage_url = std::env::var("ZERON_BROWSER_STORAGE_URL").ok();
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let _origin = format!("http://{}", listener.local_addr()?);
     std::thread::spawn(move || {
@@ -139,6 +173,18 @@ fn main() -> anyhow::Result<()> {
             let mut request = [0; 4096];
             let n = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..n]);
+            // The bench's video, from `ZERON_BROWSER_BENCH_VIDEO`.
+            if request.starts_with("GET /bench.mp4 ")
+                && let Some(video) = std::env::var_os("ZERON_BROWSER_BENCH_VIDEO").and_then(|path| std::fs::read(path).ok())
+            {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    video.len()
+                );
+                let _ = stream.write_all(&video);
+                continue;
+            }
             let (title, html) = if request.starts_with("GET /two ") {
                 (
                     "Details",
@@ -178,7 +224,7 @@ fn main() -> anyhow::Result<()> {
             let mut s = state::AppState::new();
             s.connection = zeron_proto::view::ConnectionStatus::Ready;
             s.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
-            s.local_device_id = Some("local".into());
+            s.local_device_id = Some(storage_profile.clone());
             s.devices = vec![serde_json::from_value(serde_json::json!({"id":"local","name":"This device","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()];
             s.selected_chat = Some("browser-fixture".into()); s.selected_space = Some("project".into());
             s.auto_selected = true; s.chats_synced = true; s.spaces_synced = true;
@@ -191,6 +237,7 @@ fn main() -> anyhow::Result<()> {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(1000.),px(680.))))),
             titlebar: Some(gpui::TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
             app_owns_titlebar_drag: true,
+            app_id: Some("zeron-browser-fixture".into()),
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
         state.update(cx, |_, cx| cx.notify());
@@ -198,6 +245,13 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                if let Some(url) = &storage_url {
+                    storage::exercise(window, state.clone(), &storage_root, &storage_profile, url, cx).await?;
+                    std::fs::write(output.join("storage-result.json"), serde_json::to_vec(&serde_json::json!({
+                        "profile": storage_profile, "url": url, "status": "pass"
+                    }))?)?;
+                    return Ok(());
+                }
                 if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
                 }
@@ -210,7 +264,7 @@ fn main() -> anyhow::Result<()> {
                 });
                 let (first_id, first) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 500).await;
-                capture(&output, "browser-empty-dark")?;
+                capture_frame(window, &output, "browser-empty-dark", cx).await?;
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
@@ -220,7 +274,11 @@ fn main() -> anyhow::Result<()> {
                         pause(cx, 50).await;
                     }
                     pause(cx, 500).await;
-                    capture(&output, "browser-preview-dark")?;
+                    #[cfg(target_os = "linux")]
+                    if let Some(seconds) = std::env::var("ZERON_BROWSER_BENCH").ok().and_then(|s| s.parse().ok()) {
+                        return linux::bench(window, first.clone(), &_origin, &output, seconds, cx).await;
+                    }
+                    capture_frame(window, &output, "browser-preview-dark", cx).await?;
                     // Real DOM click, native navigation and history.
                     first.read_with(cx, |b, _| b.fixture_eval("document.getElementById('details').click()"));
                     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -252,7 +310,7 @@ fn main() -> anyhow::Result<()> {
                     second.read_with(cx, |b, _| b.fixture_eval("document.title = document.cookie.includes('browserfixture=shared') ? 'Shared login' : 'Missing cookie'"));
                     let deadline = std::time::Instant::now() + Duration::from_secs(5);
                     while !second.read_with(cx, |b, _| b.page.title == "Shared login") {
-                        anyhow::ensure!(std::time::Instant::now() < deadline, "tabs did not share ephemeral website data"); pause(cx, 50).await;
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "tabs did not share website data"); pause(cx, 50).await;
                     }
                     anyhow::ensure!(first.read_with(cx, |b, _| b.page.title == "Updated title"), "second tab replaced first tab state");
                 }
@@ -290,7 +348,7 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_visible()), "toolbar tooltip did not paint on the overlay plane");
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused() && !b.fixture_overlay_at((left+100.) as f64,(top+100.) as f64)), "tooltip stole native focus or page hit testing");
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_visibility_changes() == before), "tooltip hid the page");
-                    capture(&output, "browser-tooltip-dark")?;
+                    capture_frame(window, &output, "browser-tooltip-dark", cx).await?;
                     // Also dwell on the tab itself: its URL tooltip is the
                     // original reported flicker case, distinct from toolbar hover.
                     for _ in 0..2 {
@@ -314,7 +372,7 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_native_visible()), "menu froze or hid the live page");
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_at((left+100.) as f64,(top+150.) as f64)), "menu failed to intercept outside clicks above the browser");
                     std::fs::write(output.join("backdrop-layers.txt"),first.read_with(cx,|b,_|b.fixture_backdrop_layers()))?;
-                    capture(&output, "browser-menu-dark")?;
+                    capture_frame(window, &output, "browser-menu-dark", cx).await?;
                     first.read_with(cx, |b,_| b.fixture_eval("document.addEventListener('click', () => { document.title = 'Unexpected page click'; })"));
                     pause(cx, 100).await;
                     first.read_with(cx, |b,_| b.fixture_click((left+100.) as f64,(top+150.) as f64));
@@ -327,11 +385,20 @@ fn main() -> anyhow::Result<()> {
                     while !first.read_with(cx, |b,_| b.page.title == "Unexpected page click") {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "page mouse input was not restored after menu dismissal"); pause(cx,50).await;
                     }
+                    // That click made the page AppKit's first responder. A click on
+                    // GPUI content must take it back, or keys keep reaching the page
+                    // before the focused GPUI input.
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused()), "page click did not take keyboard focus");
+                    first.read_with(cx, |b,_| b.fixture_click((left*0.5) as f64,(top+150.) as f64));
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while first.read_with(cx, |b,_| b.fixture_focused()) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "page kept keyboard focus after a click on GPUI content"); pause(cx,50).await;
+                    }
                     first.read_with(cx, |b,_| b.fixture_eval("document.title = 'Fieldnotes'"));
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    capture(&output, "browser-menu-dark")?;
+                    capture_frame(window, &output, "browser-menu-dark", cx).await?;
                     window.update(cx, |shell, _, cx| shell.fixture_browser_menu(false, cx))?;
                 }
                 pause(cx, 500).await;
@@ -397,7 +464,7 @@ fn main() -> anyhow::Result<()> {
                         }
                         anyhow::ensure!(std::time::Instant::now()<deadline,"viewport measurement timed out");pause(cx,50).await;
                     }
-                    capture(&output,"browser-resize-dark")?;
+                    capture_frame(window, &output, "browser-resize-dark", cx).await?;
                     eprintln!("Browser fixture: resize drag and CSS viewport passed");
                     // Left sidebar does not occlude the browser at any point.
                     for _ in 0..4 {
@@ -428,24 +495,24 @@ fn main() -> anyhow::Result<()> {
                     pause(cx,350).await;
                     first.read_with(cx,|b,_|b.fixture_eval("document.title='Fieldnotes'"));
                     eprintln!("Browser fixture: right sidebar transitions passed");
-                    capture(&output,"browser-blur-baseline-dark")?;
+                    capture_frame(window, &output, "browser-blur-baseline-dark", cx).await?;
                     window.update(cx,|s,_,cx|s.fixture_browser_menu(true,cx))?;
                     pause(cx,1000).await;
                     let regions=first.read_with(cx,|b,_|b.fixture_backdrops());
                     anyhow::ensure!(!regions.is_empty(),"menu has no native browser backdrop");
                     std::fs::write(output.join("blur-regions.json"),serde_json::to_string(&regions)?)?;
-                    capture(&output,"browser-blur-dark")?;
+                    capture_frame(window, &output, "browser-blur-dark", cx).await?;
                     cx.update(|cx|appearance::set_mode(appearance::AppearanceMode::Light,cx));
                     pause(cx,700).await;
-                    capture(&output,"browser-blur-light")?;
+                    capture_frame(window, &output, "browser-blur-light", cx).await?;
                     first.read_with(cx,|b,_|b.fixture_eval("document.getElementById('browser-blur-grid').style.background='#263d35'"));
                     pause(cx,500).await;
-                    capture(&output,"browser-blur-solid-light")?;
+                    capture_frame(window, &output, "browser-blur-solid-light", cx).await?;
                     let window_width=gpui::AnyWindowHandle::from(window).update(cx,|_,w,_|f32::from(w.viewport_size().width))?;
                     cx.update(|cx|appearance::set_surface(zeron_theme::SurfacePreference::Opaque,cx));
                     pause(cx,500).await;
                     anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_backdrops().is_empty()),"opaque appearance retained native blur");
-                    capture(&output,"browser-menu-opaque")?;
+                    capture_frame(window, &output, "browser-menu-opaque", cx).await?;
                     cx.update(|cx| {appearance::set_mode(appearance::AppearanceMode::Dark,cx);appearance::set_surface(zeron_theme::SurfacePreference::Frosted,cx);});
                     window.update(cx,|s,_,cx|s.fixture_browser_menu(false,cx))?;
                     pause(cx,500).await;
@@ -469,7 +536,7 @@ fn main() -> anyhow::Result<()> {
                 window.update(cx, |shell, _, cx| shell.fixture_expand_browser(cx))?;
                 cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
                 pause(cx, 600).await;
-                capture(&output, "browser-light")?;
+                capture_frame(window, &output, "browser-light", cx).await?;
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     anyhow::ensure!(first.read_with(cx, |b, _| b.fixture_native_visible()), "page not restored after overlays/takeover");
@@ -484,12 +551,18 @@ fn main() -> anyhow::Result<()> {
                     while !first.read_with(cx, |b, _| b.page.error.is_some()) {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "load failure was not reported: {:?}", first.read_with(cx, |b, _| b.page.clone())); pause(cx, 50).await;
                     }
-                    pause(cx, 300).await; capture(&output, "browser-error-light")?;
+                    pause(cx, 300).await; capture_frame(window, &output, "browser-error-light", cx).await?;
                 }
                 // Reject arbitrary schemes while preserving the existing page.
                 let before = first.read_with(cx, |b, _| b.page.url.clone());
                 window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate("javascript:alert(1)", w, cx)))?;
                 anyhow::ensure!(first.read_with(cx, |b, _| b.page.url == before), "unsupported address navigated");
+                // A local path says where files open instead of loading a made-up host.
+                window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate("/Users/me/Documents/mockup.html", w, cx)))?;
+                anyhow::ensure!(first.read_with(cx, |b, _| b.page.url == before), "local path navigated");
+                pause(cx, 300).await; capture_frame(window, &output, "browser-local-file-light", cx).await?;
+                cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Dark, cx));
+                pause(cx, 600).await; capture_frame(window, &output, "browser-local-file-dark", cx).await?;
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(first_id, w, cx))?;
                 pause(cx, 200).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "closed tab retained its native view");
@@ -502,6 +575,11 @@ fn main() -> anyhow::Result<()> {
             drop(state);
             let _ = window.update(cx, |_, window, _| window.remove_window());
             pause(cx, 100).await;
+            // AppKit terminate: exits the process without returning from Application::run.
+            // Report failure before entering that path so native runners cannot see a false pass.
+            if result.lock().unwrap().is_some() {
+                std::process::exit(1);
+            }
             cx.update(|cx| cx.quit());
         }).detach();
     });

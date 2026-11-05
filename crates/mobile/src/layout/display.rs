@@ -1,0 +1,442 @@
+//! Display lists: everything a platform painter needs to draw one row, with
+//! every position already decided. Painters never measure text.
+//!
+//! Text is shipped once per row (`RowDisplay::text`); runs index it in UTF-16
+//! code units so a painter can slice an `NSString`/`java.lang.String` without
+//! re-encoding. Colors are roles, not RGB — theming is paint-only.
+
+/// Paint roles. The painter maps these to its palette (light/dark).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum ColorRole {
+    Text,
+    TextSecondary,
+    TextTertiary,
+    Link,
+    Accent,
+    Danger,
+    Success,
+    Warning,
+    InlineCodeText,
+    InlineCodeBackground,
+    CodeText,
+    CodeBackground,
+    CodeBorder,
+    QuoteBar,
+    Rule,
+    TableBorder,
+    TableHeaderBackground,
+    UserBubble,
+    ChipBackground,
+    SyntaxKeyword,
+    SyntaxString,
+    SyntaxComment,
+    SyntaxNumber,
+    SyntaxFunction,
+    SyntaxType,
+    SyntaxConstant,
+    SyntaxVariable,
+    SyntaxProperty,
+    SyntaxOperator,
+    SyntaxPunctuation,
+    SyntaxTag,
+    SyntaxAttribute,
+    SyntaxEscape,
+    // Tool groups (desktop transcript tokens).
+    /// `text_faint`: detail bodies.
+    TextFaint,
+    /// `text` @ 0.85: file badge names, agent card details.
+    TextSoft,
+    /// `hairline(0.12)`: the activity rail.
+    ToolRail,
+    /// `ink(0.06)`: file badge fill.
+    ToolBadge,
+    /// File-icon well inside a badge.
+    ToolWell,
+    /// `ink(0.03)` / `hairline(0.07)` / `ink(0.08)`: subagent cards and tiles.
+    AgentCard,
+    AgentCardBorder,
+    AgentTile,
+    /// Diff rows: wash (0.055), accent bar (0.55), hunk header.
+    DiffAddWash,
+    DiffDelWash,
+    DiffAddBar,
+    DiffDelBar,
+    DiffHunk,
+    /// An error card's fill: a soft red wash.
+    DangerWash,
+    /// An error card's text and icon: a lighter red that reads on the wash.
+    DangerSoft,
+}
+
+/// Text decorations, painted relative to the run's baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, uniffi::Enum)]
+pub enum Decoration {
+    #[default]
+    None,
+    Underline,
+    Strikethrough,
+}
+
+/// One positioned piece of text: `text[start..start+len]` (UTF-16) drawn with
+/// `style` so its origin sits at (`x`, `baseline`).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TextRun {
+    pub start: u32,
+    pub len: u32,
+    pub x: f32,
+    pub baseline: f32,
+    /// Rust-measured advance — painters may use it for selection/hit rects.
+    pub width: f32,
+    pub style: u16,
+    pub color: ColorRole,
+    pub decoration: Decoration,
+    /// Index into [`RowDisplay::scrollers`] when the run scrolls horizontally.
+    pub scroller: Option<u32>,
+    /// Fade-in start in ms since the row's layout epoch (streaming veil);
+    /// `None` = fully visible.
+    pub reveal_ms: Option<u32>,
+}
+
+/// One glyph of a math formula: glyph id `glyph` of math font `font` (an
+/// index for [`math_font_data`]) drawn at `size` with its origin at
+/// (`x`, `y`). Rules (fraction bars, radicals) are plain [`BoxPrim`] fills.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct GlyphPrim {
+    pub font: u8,
+    pub glyph: u16,
+    pub x: f32,
+    /// Baseline.
+    pub y: f32,
+    pub size: f32,
+    pub color: ColorRole,
+    pub scroller: Option<u32>,
+    /// UTF-16 offset in the row text of the formula's placeholder (U+FFFC),
+    /// so the streaming veil splits glyphs where it splits runs.
+    pub start: u32,
+}
+
+/// The bytes of math font `index` — one per [`MathFace`], in its declaration
+/// order (0 = Fira Math, 1 = STIX Two Math, …), the same table whichever face
+/// lays formulas out; empty past the end. Glyph ids in [`GlyphPrim`] index
+/// these exact files. Hosts load an index when a glyph first names it.
+#[uniffi::export]
+pub fn math_font_data(index: u8) -> Vec<u8> {
+    if index < zatex::bundled::FONTS {
+        zatex::bundled::font_at(index).data().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The face formulas are laid out in (STIX Two for what it lacks). Every
+/// face paints from the [`math_font_data`] table, so switching never
+/// re-registers fonts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, uniffi::Enum)]
+pub enum MathFace {
+    /// Fira Math: a sans that sits beside Geist.
+    #[default]
+    Fira,
+    /// STIX Two Math: the Times-like TeX look.
+    StixTwo,
+    /// New Computer Modern Math (Book): the classic LaTeX look.
+    ComputerModern,
+    /// Libertinus Math: a warm book serif.
+    Libertinus,
+    /// TeX Gyre Pagella Math: Palatino.
+    Pagella,
+    /// Euler Math: Zapf's upright, hand-drawn math.
+    Euler,
+}
+
+impl From<MathFace> for zatex::bundled::Face {
+    fn from(face: MathFace) -> Self {
+        match face {
+            MathFace::Fira => Self::Fira,
+            MathFace::StixTwo => Self::StixTwo,
+            MathFace::ComputerModern => Self::ComputerModern,
+            MathFace::Libertinus => Self::Libertinus,
+            MathFace::Pagella => Self::Pagella,
+            MathFace::Euler => Self::Euler,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BoxStyle {
+    Fill,
+    /// A hairline (1 device pixel) stroke on the rect's inside edge.
+    Hairline,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct BoxPrim {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub radius: f32,
+    pub style: BoxStyle,
+    pub color: ColorRole,
+    pub scroller: Option<u32>,
+    /// For a formula's fills (rules, decoration lines): the UTF-16 offset of
+    /// its placeholder, so the streaming veil fades them with the formula's
+    /// glyphs. `None`: painted with the row's settled boxes.
+    pub start: Option<u32>,
+}
+
+/// A tappable link region (one per fragment; multi-line links repeat).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct LinkHit {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub url: String,
+    pub scroller: Option<u32>,
+}
+
+/// A horizontally scrolling viewport (code blocks, wide tables). Primitives
+/// that reference it are positioned in its content coordinates, whose origin
+/// is the viewport's top-left.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Scroller {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub content_width: f32,
+}
+
+/// Which way overflowing text fades out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FadeEdge {
+    /// Text fades to transparent across the rect, left → right, and is
+    /// clipped at its right edge (single lines wider than their slot).
+    Trailing,
+    /// Text fades to transparent across the rect, top → bottom (folded
+    /// blocks whose last visible line continues).
+    Bottom,
+}
+
+/// An overflow fade: runs whose baseline falls inside the rect's vertical
+/// band are painted through an alpha ramp — the text itself fades, so it
+/// works over any background.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Fade {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub edge: FadeEdge,
+    pub scroller: Option<u32>,
+}
+
+/// Native affordances the painter renders itself (icons, images, spinners).
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum WidgetKind {
+    /// Copy button for a code block; `payload` holds the code.
+    CopyCode,
+    /// Tool group / user message disclosure; toggles via `TranscriptView::toggle`.
+    Disclosure { expanded: bool },
+    /// Status glyph for a tool (running spinner / done check / failed cross).
+    ToolStatus { running: bool, failed: bool },
+    /// A remote image to load into the rect (generated images, attachments).
+    Image { reference: String },
+    /// Working indicator at the tail of a live turn. The painter ticks the
+    /// elapsed label itself so time never forces a relayout.
+    Working { since_ms: Option<i64>, streaming: bool },
+    /// A small activity spinner (running tools).
+    Spinner,
+    /// Tap target revealing the full text in `payload` (truncated tool lines).
+    Detail { title: String },
+    /// A small SF-symbol-like icon by name.
+    Icon { name: String, color: ColorRole },
+    /// A tool group's disclosure chevron (rotates between states).
+    Chevron { expanded: bool },
+    /// The activity rail of an expanded tool group, in the widget's
+    /// coordinates: a 1pt trunk at `trunk_x` from each row's top down to a
+    /// quadratic elbow (radius `bend`) at `row_mid` below the row top, then a
+    /// branch to `branch_end`. The trunk continues through a row's full
+    /// height (open details) into the next row.
+    ToolRail { trunk_x: f32, bend: f32, branch_end: f32, row_mid: f32, tops: Vec<f32>, heights: Vec<f32> },
+    /// Tap target toggling one tool row's inline detail.
+    ToolToggle { detail: u64, open: bool },
+    /// Shimmer sweep over the active group's title (text drawn by the canvas
+    /// underneath; the painter re-draws those runs brighter through a moving
+    /// gradient).
+    Shimmer,
+    /// An agent visual; `TranscriptView::visual(id)` is its live session.
+    Visual { id: String },
+    /// A button the app acts on: `action` names what (`sign-in`), `label`
+    /// is its title (an error card's "Log in").
+    Action { action: String, label: String },
+    /// A subagent spawn's card: opens the child's transcript (`doc_id`;
+    /// `None` while the host hasn't bound one yet).
+    Subagent { doc_id: Option<String>, title: String, running: bool, failed: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Widget {
+    pub id: u32,
+    pub kind: WidgetKind,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub payload: Option<String>,
+    pub scroller: Option<u32>,
+}
+
+/// Everything needed to paint a row at its current width.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct RowDisplay {
+    pub key: u64,
+    pub version: u64,
+    pub width: f32,
+    pub height: f32,
+    pub text: String,
+    pub runs: Vec<TextRun>,
+    pub glyphs: Vec<GlyphPrim>,
+    pub boxes: Vec<BoxPrim>,
+    pub links: Vec<LinkHit>,
+    pub scrollers: Vec<Scroller>,
+    pub widgets: Vec<Widget>,
+    pub fades: Vec<Fade>,
+    /// Plain text for copy / accessibility.
+    pub copy_text: String,
+}
+
+/// Accumulates one row's primitives. `origin` offsets let nested layout code
+/// place children in local coordinates.
+#[derive(Default)]
+pub(crate) struct DisplayBuilder {
+    pub text: String,
+    utf16_len: u32,
+    pub runs: Vec<TextRun>,
+    pub glyphs: Vec<GlyphPrim>,
+    pub boxes: Vec<BoxPrim>,
+    pub links: Vec<LinkHit>,
+    pub scrollers: Vec<Scroller>,
+    pub widgets: Vec<Widget>,
+    pub fades: Vec<Fade>,
+    /// Scroller that newly pushed primitives belong to.
+    pub scroller: Option<u32>,
+    next_widget: u32,
+}
+
+impl DisplayBuilder {
+    /// Append `s` to the row text; returns its UTF-16 start offset.
+    pub fn push_text(&mut self, s: &str) -> u32 {
+        let start = self.utf16_len;
+        self.text.push_str(s);
+        self.utf16_len += s.encode_utf16().count() as u32;
+        start
+    }
+
+    pub fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: ColorRole) {
+        self.boxes.push(BoxPrim {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            style: BoxStyle::Fill,
+            color,
+            scroller: self.scroller,
+            start: None,
+        });
+    }
+
+    pub fn hairline(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: ColorRole) {
+        self.boxes.push(BoxPrim {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            style: BoxStyle::Hairline,
+            color,
+            scroller: self.scroller,
+            start: None,
+        });
+    }
+
+    /// A formula with its baseline origin at (`x`, `y`), drawn at `scale`
+    /// (1 = as laid out; less shrinks glyphs, offsets and rules uniformly
+    /// about the origin); `start` is its placeholder's UTF-16 offset in the
+    /// row text.
+    pub fn formula(&mut self, f: &zatex::Formula, x: f32, y: f32, scale: f32, color: ColorRole, start: u32) {
+        for item in &f.items {
+            match *item {
+                zatex::Item::Glyph { font, glyph, x: gx, y: gy, size } => self.glyphs.push(GlyphPrim {
+                    font,
+                    glyph,
+                    x: x + gx * scale,
+                    y: y + gy * scale,
+                    size: size * scale,
+                    color,
+                    scroller: self.scroller,
+                    start,
+                }),
+                zatex::Item::Rule { x: rx, y: ry, width, height } => {
+                    self.formula_fill(x + rx * scale, y + ry * scale, width * scale, height * scale, color, start)
+                }
+            }
+        }
+    }
+
+    /// A square fill that belongs to the formula at `start` (veils with it).
+    pub fn formula_fill(&mut self, x: f32, y: f32, w: f32, h: f32, color: ColorRole, start: u32) {
+        self.fill(x, y, w, h, 0.0, color);
+        if let Some(b) = self.boxes.last_mut() {
+            b.start = Some(start);
+        }
+    }
+
+    pub fn widget(
+        &mut self,
+        kind: WidgetKind,
+        rect: (f32, f32, f32, f32),
+        payload: Option<String>,
+    ) -> u32 {
+        let id = self.next_widget;
+        self.next_widget += 1;
+        self.widgets.push(Widget {
+            id,
+            kind,
+            x: rect.0,
+            y: rect.1,
+            w: rect.2,
+            h: rect.3,
+            payload,
+            scroller: self.scroller,
+        });
+        id
+    }
+
+    pub fn fade(&mut self, x: f32, y: f32, w: f32, h: f32, edge: FadeEdge) {
+        self.fades.push(Fade {
+            x,
+            y,
+            w,
+            h,
+            edge,
+            scroller: self.scroller,
+        });
+    }
+
+    pub fn begin_scroller(&mut self, x: f32, y: f32, w: f32, h: f32, content_width: f32) {
+        self.scrollers.push(Scroller {
+            x,
+            y,
+            w,
+            h,
+            content_width,
+        });
+        self.scroller = Some(self.scrollers.len() as u32 - 1);
+    }
+
+    pub fn end_scroller(&mut self) {
+        self.scroller = None;
+    }
+}

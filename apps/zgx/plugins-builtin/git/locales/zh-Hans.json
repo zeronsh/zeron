@@ -1,0 +1,312 @@
+{
+  "loading": "正在加载",
+  "try_again": "重试",
+  "device": {
+    "unknown": "这个对话所在的设备"
+  },
+  "tab": {
+    "changes": "更改",
+    "history": "历史",
+    "asking": "正在询问 git…",
+    "no_session_title": "这里没有对话",
+    "no_session_body": "Git 显示一个对话的检出。请从对话的面板中打开。"
+  },
+  "empty_page": {
+    "changes": "更改",
+    "history": "历史"
+  },
+  "scope": {
+    "label": "更改范围",
+    "working": "工作区",
+    "working_about": "自上次提交以来，无论是否已暂存",
+    "branch": "分支",
+    "branch_about": "这个分支离开基准分支以来的全部更改",
+    "turn": "上一轮",
+    "turn_about": "这个对话上一轮所做的更改",
+    "against": "对比",
+    "base_label": "比较对象",
+    "base_choose": "选择一个分支"
+  },
+  "head": {
+    "ahead_of": "领先 {base} {n} 个提交"
+  },
+  "state": {
+    "merge": "正在合并",
+    "rebase": "正在变基",
+    "cherry_pick": "正在拣选",
+    "revert": "正在还原",
+    "commit_to_finish": "所有文件都处理好后，提交即可完成。"
+  },
+  "conflicts": {
+    "title": "{n} 个文件有冲突",
+    "body": "在编辑器中逐个解决，暂存后再提交。"
+  },
+  "stage_all": "全部暂存",
+  "file": {
+    "stage": "暂存",
+    "unstage": "取消暂存",
+    "discard": "放弃更改"
+  },
+  "diff": {
+    "loading": "正在加载差异…",
+    "binary": "二进制文件：没有可显示的行。",
+    "cut": "差异太长：其余部分未显示。",
+    "pick_title": "未选择文件",
+    "pick_body": "选择一个文件，查看其中的更改。"
+  },
+  "empty": {
+    "working_title": "没有要提交的内容",
+    "working_body": "{branch} 上的一切都已提交。",
+    "working_ahead": "{branch} 上的一切都已提交。还有 {n} 个提交尚未推送。",
+    "branch_title": "这个分支没有更改",
+    "branch_body": "它没有 {base} 之外的内容。",
+    "turn_title": "这一轮没有更改",
+    "turn_body": "对话的上一轮没有改动任何文件。"
+  },
+  "pull": {
+    "button": "拉取 {n}"
+  },
+  "push": {
+    "button": "推送 {n}",
+    "publish": "发布分支",
+    "pushing_label": "正在推送",
+    "pushing": "正在将 {n} 个提交推送到 {where}",
+    "pull_then_push": "先拉取，再推送"
+  },
+  "more": {
+    "label": "更多",
+    "fetch": "获取",
+    "pull": "拉取",
+    "discard_all": "放弃所有更改"
+  },
+  "commit": {
+    "button": "提交",
+    "files": "提交 {n} 个文件",
+    "and_push": "提交并推送",
+    "amend": "修改上一次提交",
+    "you": "你",
+    "placeholder": "改了什么，为什么",
+    "message": "提交信息"
+  },
+  "discard": {
+    "title_one": "放弃对 {name} 的更改？",
+    "title_many": "放弃对 {n} 个文件的更改？",
+    "body": "它们会恢复到上一次提交的样子，新文件会被删除。此操作无法撤销。",
+    "confirm": "放弃"
+  },
+  "branches": {
+    "label": "分支",
+    "none": "没有分支",
+    "search": "查找分支…",
+    "new": "新建分支",
+    "new_title": "新建分支",
+    "new_body": "从 {from} 新建，并带上你的更改。",
+    "create": "创建并切换",
+    "name": "分支名称",
+    "name_placeholder": "feature/name",
+    "on_remote": "在 {remote} 上，本地还没有",
+    "ahead_behind": "领先 {ahead}，落后 {behind}",
+    "no_match": "没有匹配“{query}”的分支",
+    "current": "当前"
+  },
+  "history": {
+    "head": "{branch} 上的 {n} 个提交",
+    "head_more": "{branch} 上最近的 {n} 个提交",
+    "older": "显示更早的提交",
+    "fetch": "获取",
+    "back": "返回历史",
+    "empty_title": "还没有提交",
+    "empty_body": "这个分支的第一个提交会显示在这里。",
+    "pick_title": "未选择提交",
+    "pick_body": "选择一个提交，查看它的更改。",
+    "no_files_title": "没有文件更改",
+    "no_files_body": "这个提交没有改动其父提交中的任何内容。",
+    "ref_head": "{name}：当前所在分支",
+    "ref_branch": "分支 {name}",
+    "ref_remote": "远程上的 {name}",
+    "ref_tag": "标签 {name}",
+    "no_subject": "（无标题）",
+    "copy_sha": "复制提交 ID",
+    "copied": "已复制",
+    "open_parent": "打开父提交 {sha}",
+    "body_more": "显示完整信息",
+    "body_less": "收起",
+    "committed_by": "由 {name} 提交",
+    "parents": "父提交",
+    "files": "{n} 个文件",
+    "menu": {
+      "copy_sha": "复制提交 ID",
+      "copy_subject": "复制标题",
+      "branch_here": "从这里新建分支"
+    },
+    "found": "找到 {n} 个提交",
+    "head_all": "所有分支上的 {n} 个提交",
+    "head_all_more": "所有分支上最近的 {n} 个提交",
+    "base_tip": "领先 {base} {ahead}，落后 {behind}",
+    "all_branches": "所有分支",
+    "fetching": "正在获取",
+    "search": "搜索提交",
+    "fetch_failed": "无法获取",
+    "none_found_title": "没有找到提交",
+    "none_found_body": "没有提交信息包含“{query}”。",
+    "branch_from": "从提交 {sha} 新建，并切换过去；你的更改会一起带上。",
+    "parents_n": "{n} 个父提交",
+    "ref_line": {
+      "branch": "分支：{name}",
+      "remote": "远程分支：{name}",
+      "tag": "标签：{name}"
+    },
+    "ref_more": "还有 {n} 个引用"
+  },
+  "reason": {
+    "offline": {
+      "title": "无法连接 {device}",
+      "body": "它已离线或处于睡眠状态。恢复后，这里会显示它的更改。"
+    },
+    "timeout": {
+      "title": "{device} 没有回应",
+      "body": "用时太长。它可能正忙，或者网络较慢。"
+    },
+    "not_installed": {
+      "title": "{device} 上没有 Git",
+      "body": "请在那台设备上更新 Zeron：Git 随之附带。"
+    },
+    "off": {
+      "title": "Git 在 {device} 上已关闭",
+      "body": "请在那台设备的 设置 → 插件 中打开它。"
+    },
+    "not_approved": {
+      "title": "{device} 还没有允许 Git",
+      "body": "请在那台设备的 设置 → 插件 中允许它。"
+    },
+    "version_mismatch": {
+      "title": "{device} 上的 Git 版本不同",
+      "body": "请在两台设备上都更新 Zeron，使版本一致。"
+    },
+    "other_author": {
+      "title": "{device} 上有另一个 Git 插件",
+      "body": "那里有一个同名的他人插件。移除它即可使用 Zeron 的。"
+    },
+    "no_service": {
+      "title": "{device} 上的 Git 无法运行",
+      "body": "它的版本没有服务。请在那里更新 Zeron。"
+    },
+    "not_loaded": {
+      "title": "Git 在 {device} 上没有启动",
+      "body": "它的服务加载失败。那台设备的 设置 → 插件 中有原因。"
+    },
+    "old_engine": {
+      "title": "{device} 需要更新的 Zeron",
+      "body": "请在那里更新 Zeron，才能在这个对话中使用 Git。"
+    },
+    "interrupted": {
+      "title": "Git 在 {device} 上中断了",
+      "body": "调用过程中它停止了。请重试。"
+    },
+    "other": {
+      "title": "出了点问题"
+    }
+  },
+  "code": {
+    "not_a_repo": {
+      "title": "不是 git 仓库",
+      "body": "这个对话的文件夹不在 git 仓库中，没有可比较的内容。"
+    },
+    "no_checkout": {
+      "title": "没有文件夹",
+      "body": "这个对话没有在某个文件夹中工作。"
+    },
+    "rejected": {
+      "title": "{remote} 上的分支已更新",
+      "body": "它有你本地没有的提交。请先拉取，再推送。"
+    },
+    "auth": {
+      "title": "{remote} 拒绝了",
+      "body": "{device} 上的 git 无法登录。请在那里检查凭据。"
+    },
+    "network": {
+      "title": "无法连接 {remote}",
+      "body": "{device} 无法连接到它。请检查网络。"
+    },
+    "nothing_staged": {
+      "title": "没有暂存的内容",
+      "body": "请先勾选要提交的文件。"
+    },
+    "no_identity": {
+      "title": "git 不知道你是谁",
+      "body": "请在 {device} 上为 git 设置姓名和邮箱（git config user.name、user.email）。"
+    },
+    "dirty": {
+      "title": "你的更改挡住了",
+      "body": "切换会覆盖它们。请先提交或放弃。"
+    },
+    "pull_conflicts": {
+      "title": "拉取会产生冲突",
+      "body": "你的提交和对方的提交改动了相同的行。什么都没有改变：请在编辑器或终端中合并。"
+    },
+    "no_base": {
+      "title": "没有基准分支",
+      "body": "没有 main 或 master 可与这个分支比较。"
+    },
+    "no_turn": {
+      "title": "还没有看到一轮",
+      "body": "这个对话开始下一轮后，这里会显示自那时以来的更改。"
+    },
+    "detached": {
+      "title": "没有可推送的分支",
+      "body": "检出位于一个提交上，而不是分支上。请先新建分支。"
+    },
+    "no_remote": {
+      "title": "无处推送",
+      "body": "这个仓库没有远程。"
+    },
+    "no_upstream": {
+      "title": "还不在远程上",
+      "body": "请先推送这个分支。"
+    },
+    "bad_name": {
+      "title": "不是有效的分支名",
+      "body": "分支名不能包含空格或“..”，也不能以“/”或“.lock”结尾。"
+    },
+    "exists": {
+      "title": "该分支已存在",
+      "body": "已经有同名分支：请直接切换到它。"
+    },
+    "timeout": {
+      "title": "git 用时太长",
+      "body": "它可能仍在 {device} 上运行。请稍后重试。"
+    },
+    "no_message": {
+      "title": "没有提交信息",
+      "body": "说明改了什么，以及为什么。"
+    },
+    "git": {
+      "title": "git 无法完成",
+      "body": "Git 在 {device} 上这个对话的文件夹里停了下来。请重试；如果一直这样，在那里的终端里运行同样的命令查看全部信息。"
+    },
+    "no_ref": {
+      "title": "这里没有名为 {words} 的分支",
+      "body": "换一个分支来比较，或从 {remote} 抓取它。"
+    },
+    "unsafe_dir": {
+      "title": "Git 不在这个文件夹工作",
+      "body": "Git 不信任属于其他用户的文件夹。在 {device} 上用 git config --global --add safe.directory 添加它，然后重试。"
+    },
+    "locked": {
+      "title": "这里有另一个 git 命令正在运行",
+      "body": "等它结束后重试。如果没有在运行，在 {device} 上删除 .git/index.lock。"
+    }
+  },
+  "home": {
+    "diff_label": "新增 {adds} 行，删除 {dels} 行：打开分支改动",
+    "branch_changes": "分支改动"
+  },
+  "changes": {
+    "partial": "显示 {total} 个中的 {n} 个"
+  },
+  "comment": {
+    "placeholder": "说说这里要怎么改…",
+    "add": "添加到对话",
+    "where_old": "{where}（旧）"
+  }
+}

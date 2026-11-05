@@ -203,6 +203,7 @@ fn fixture(dir: &Path) -> PathBuf {
 }
 fn request(cwd: &Path, prompt: &str, resume: Option<&str>) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -211,9 +212,13 @@ fn request(cwd: &Path, prompt: &str, resume: Option<&str>) -> RunRequest {
         cwd: cwd.display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: resume.map(str::to_owned),
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -225,6 +230,8 @@ async fn exercise(prompt: &str, resume: Option<&str>) {
     let (steer_tx, steering) = mpsc::channel(4);
     let interrupt = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Vec::new());
@@ -232,6 +239,7 @@ async fn exercise(prompt: &str, resume: Option<&str>) {
         }),
         steering,
         interrupt: interrupt.clone(),
+        turn: Default::default(),
     };
     let operation = async {
         let mut stream = harness
@@ -318,12 +326,15 @@ async fn exercise_tree(prompt: &str, drop_stream: bool) {
     let (_steer, steering) = mpsc::channel(1);
     let interrupt = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
         request_input: Box::new(|_| {
             let (_, rx) = oneshot::channel();
             rx
         }),
         steering,
         interrupt: interrupt.clone(),
+        turn: Default::default(),
     };
     let mut stream = harness
         .run(request(dir.path(), prompt, None), controls)
@@ -476,6 +487,8 @@ async fn batch_overrides_launch_through_cmd() {
         unsafe { std::env::set_var("ZERON_TEST_BATCH_ARGS_FILE", &received) };
         let (_steer, steering) = mpsc::channel(1);
         let controls = RunControls {
+            realtime: None,
+            execution_lease: None,
             request_input: Box::new(|_| {
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(Vec::new());
@@ -483,6 +496,7 @@ async fn batch_overrides_launch_through_cmd() {
             }),
             steering,
             interrupt: CancellationToken::new(),
+            turn: Default::default(),
         };
         // Consume the whole stream: the shim cannot speak any agent protocol,
         // so the run must fail loudly — but only AFTER a safe launch.

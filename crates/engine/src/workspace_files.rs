@@ -1,6 +1,6 @@
 //! Authorized filesystem access for the file tree and editor RPC surface.
 //!
-//! Every operation resolves a synced chat or space to a checkout owned by this
+//! Every operation resolves a synced chat or space to a folder owned by this
 //! device before accepting a workspace-relative path.
 
 use std::collections::{HashMap, HashSet};
@@ -14,24 +14,33 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::{
-    ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceFilesRequest,
-    WatchWorkspaceFilesRequest, WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind,
-    WorkspaceFileChange, WorkspaceFileChangeKind, WorkspaceFileChanges,
-    WorkspaceFileConflictReason, WorkspaceFileSearchMatch, WorkspaceFileText,
-    WorkspaceFileWriteResult, WorkspaceLineEnding, WorkspaceReadOnlyReason, WorkspaceTarget,
-    WorkspaceTextEncoding, WorkspaceWritableEncoding, WorkspaceWritableLineEnding,
-    WriteWorkspaceFileOutcome, WriteWorkspaceFileRequest,
+    ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceContentRequest,
+    SearchWorkspaceFilesRequest, WarmWorkspaceSearchRequest, WarmWorkspaceSearchResult,
+    WatchWorkspaceFilesRequest, WorkspaceContentMatch, WorkspaceContentSearchResult,
+    WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind, WorkspaceFileChange,
+    WorkspaceFileChangeKind, WorkspaceFileChanges, WorkspaceFileConflictReason,
+    WorkspaceFileSearchMatch, WorkspaceFileText, WorkspaceFileWriteResult, WorkspaceLineEnding,
+    WorkspaceReadOnlyReason, WorkspaceSearchIndexState, WorkspaceTarget, WorkspaceTextEncoding,
+    WorkspaceWritableEncoding, WorkspaceWritableLineEnding, WriteWorkspaceFileOutcome,
+    WriteWorkspaceFileRequest,
 };
 use zeron_rpc::RpcError;
 
-use crate::{Repos, WorkspaceHost};
+use crate::workspace_search::{IndexState, NameKinds, normalize_name_query};
+use crate::{Repos, WorkspaceHost, WorkspaceSearch};
+
+mod mutations;
 
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_COMPONENTS: usize = 256;
+const MAX_ABSOLUTE_PATH_BYTES: usize = 16 * 1024;
 pub const DIRECTORY_PAGE_SIZE: usize = 500;
 pub const MAX_DIRECTORY_ENTRIES: usize = 50_000;
 pub const MAX_SEARCH_QUERY_CHARS: usize = 256;
 pub const MAX_SEARCH_RESULTS: usize = 200;
+pub const MAX_CONTENT_RESULTS: usize = 200;
+pub const DEFAULT_CONTENT_RESULTS: usize = 100;
+pub const DEFAULT_CONTENT_RESULTS_PER_FILE: usize = 3;
 pub const WORKSPACE_FILE_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 pub const MAX_EDITABLE_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_PREVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -51,6 +60,10 @@ struct WorkspaceFilesInner {
     repos: Repos,
     workspace: WorkspaceHost,
     device_id: String,
+    /// On a Cloud session machine, its checkout of the session's repository:
+    /// where a chat whose project was made on another device works.
+    cloud_checkout: Option<PathBuf>,
+    mutation_gates: Mutex<HashMap<String, Weak<tokio::sync::RwLock<()>>>>,
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
     cancel: CancellationToken,
@@ -174,6 +187,36 @@ impl WorkspaceRelativePath {
         Ok(Self(parsed.to_path_buf()))
     }
 
+    /// Build a workspace-relative path from an already-resolved filesystem
+    /// path — the strip a canonical absolute path leaves under its base.
+    /// Every component must be a plain name.
+    fn from_resolved(path: &Path) -> Result<Self, WorkspaceFilesError> {
+        let mut parsed = PathBuf::new();
+        let mut count = 0usize;
+        for component in path.components() {
+            count += 1;
+            if count > MAX_RELATIVE_PATH_COMPONENTS {
+                return Err(bad_path("path has too many components"));
+            }
+            match component {
+                Component::Normal(value) => {
+                    let value = value
+                        .to_str()
+                        .ok_or_else(|| bad_path("path must be UTF-8"))?;
+                    if value.eq_ignore_ascii_case(".git") {
+                        return Err(bad_path(".git paths are not accessible"));
+                    }
+                    parsed.push(value);
+                }
+                _ => return Err(bad_path("path must be workspace-relative")),
+            }
+        }
+        if parsed.as_os_str().is_empty() {
+            return Err(bad_path("path must not be empty"));
+        }
+        Ok(Self(parsed))
+    }
+
     pub fn as_path(&self) -> &Path {
         &self.0
     }
@@ -206,11 +249,24 @@ fn plain_folder_identity(device_id: &str, root: &Path) -> String {
 
 impl WorkspaceFiles {
     pub fn new(repos: Repos, workspace: WorkspaceHost, device_id: impl Into<String>) -> Self {
+        Self::with_cloud_checkout(repos, workspace, device_id, None)
+    }
+
+    /// [`Self::new`] on a Cloud session machine: `cloud_checkout` is its
+    /// checkout of the session's repository.
+    pub fn with_cloud_checkout(
+        repos: Repos,
+        workspace: WorkspaceHost,
+        device_id: impl Into<String>,
+        cloud_checkout: Option<PathBuf>,
+    ) -> Self {
         Self {
             inner: Arc::new(WorkspaceFilesInner {
                 repos,
                 workspace,
                 device_id: device_id.into(),
+                cloud_checkout,
+                mutation_gates: Mutex::new(HashMap::new()),
                 write_locks: Mutex::new(HashMap::new()),
                 watches: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
@@ -222,7 +278,7 @@ impl WorkspaceFiles {
         &self,
         target: &WorkspaceTarget,
     ) -> Result<ResolvedWorkspace, WorkspaceFilesError> {
-        let root = match (&target.chat_id, &target.space_id) {
+        let (root, identity) = match (&target.chat_id, &target.space_id) {
             (Some(_), Some(_)) | (None, None) => {
                 return Err(WorkspaceFilesError::BadParams(
                     "workspace target needs exactly one of chatId or spaceId".into(),
@@ -245,11 +301,36 @@ impl WorkspaceFiles {
                         "chat belongs to another device".into(),
                     ));
                 }
+                let Some(space_id) = chat.space_id else {
+                    // The chat's cwd is the browsing boundary, even when it
+                    // happens to be a subdirectory of a Git checkout.
+                    let cwd = PathBuf::from(
+                        crate::repos::resolve_chat_cwd(
+                            chat.cwd.as_deref().unwrap_or("~"),
+                            &self.inner.repos.scratch_root(),
+                        )
+                        .map_err(|error| WorkspaceFilesError::NotFound(error.to_string()))?,
+                    );
+                    if !cwd.is_absolute() {
+                        return Err(WorkspaceFilesError::BadParams(
+                            "chat folder must be absolute".into(),
+                        ));
+                    }
+                    let root = std::fs::canonicalize(&cwd).map_err(|error| {
+                        WorkspaceFilesError::Io(format!("chat folder is unavailable: {error}"))
+                    })?;
+                    if !root.is_dir() {
+                        return Err(WorkspaceFilesError::BadParams(
+                            "chat folder is not a directory".into(),
+                        ));
+                    }
+                    return Ok(ResolvedWorkspace {
+                        checkout_id: plain_folder_identity(&self.inner.device_id, &root),
+                        root,
+                    });
+                };
                 let cwd = chat.cwd.map(PathBuf::from).ok_or_else(|| {
                     WorkspaceFilesError::NotFound("chat has no workspace folder".into())
-                })?;
-                let space_id = chat.space_id.ok_or_else(|| {
-                    WorkspaceFilesError::NotFound("chat has no workspace space".into())
                 })?;
                 let space = self
                     .inner
@@ -259,20 +340,28 @@ impl WorkspaceFiles {
                     .ok_or_else(|| {
                         WorkspaceFilesError::NotFound("chat workspace space not found".into())
                     })?;
-                if space.device_id != self.inner.device_id {
+                // A project made on another device is that device's folder —
+                // except on a Cloud session machine, which works in its own
+                // checkout of the project's repository.
+                let space_path = if space.device_id == self.inner.device_id {
+                    PathBuf::from(&space.path)
+                } else if let Some(checkout) = &self.inner.cloud_checkout {
+                    checkout.clone()
+                } else {
                     return Err(WorkspaceFilesError::Authorization(
                         "chat space belongs to another device".into(),
                     ));
-                }
-                self.inner
-                    .repos
-                    .workspace_checkout(Path::new(&space.path), &cwd)
-                    .await
-                    .ok_or_else(|| {
-                        WorkspaceFilesError::Authorization(
-                            "chat folder is not a workspace checkout".into(),
-                        )
-                    })?
+                };
+                let (checkout, identity) = tokio::join!(
+                    self.inner.repos.workspace_checkout(&space_path, &cwd),
+                    self.inner.repos.checkout_identity(&cwd),
+                );
+                let root = checkout.ok_or_else(|| {
+                    WorkspaceFilesError::Authorization(
+                        "chat folder is not a workspace checkout".into(),
+                    )
+                })?;
+                (root, identity)
             }
             (None, Some(space_id)) => {
                 let space = self
@@ -281,17 +370,23 @@ impl WorkspaceFiles {
                     .space(space_id)
                     .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?
                     .ok_or_else(|| WorkspaceFilesError::NotFound("space not found".into()))?;
-                if space.device_id != self.inner.device_id {
+                // As for a chat target: a Cloud session machine answers for a
+                // project made elsewhere from its own checkout of it.
+                let space_path = if space.device_id == self.inner.device_id {
+                    PathBuf::from(&space.path)
+                } else if let Some(checkout) = &self.inner.cloud_checkout {
+                    checkout.clone()
+                } else {
                     return Err(WorkspaceFilesError::Authorization(
                         "space belongs to another device".into(),
                     ));
-                }
-                let space_path = PathBuf::from(&space.path);
+                };
                 let requested = target
                     .checkout_path
                     .as_deref()
                     .map_or_else(|| space_path.clone(), PathBuf::from);
-                self.inner
+                let root = self
+                    .inner
                     .repos
                     .workspace_checkout(&space_path, &requested)
                     .await
@@ -299,14 +394,16 @@ impl WorkspaceFiles {
                         WorkspaceFilesError::BadParams(
                             "checkoutPath is not a workspace checkout".into(),
                         )
-                    })?
+                    })?;
+                let identity = self.inner.repos.checkout_identity(&root).await;
+                (root, identity)
             }
         };
 
         // Spaces also support plain folders. Git checkouts use their canonical
         // git-dir identity; plain roots get a device-scoped stable key so the
         // existing SearchFiles behavior and shared watcher semantics remain intact.
-        match self.inner.repos.checkout_identity(&root).await {
+        match identity {
             Ok(identity) => Ok(ResolvedWorkspace {
                 checkout_id: identity.id,
                 root: identity.root,
@@ -339,21 +436,31 @@ impl WorkspaceFiles {
         .await
         .map_err(|error| WorkspaceFilesError::Io(format!("directory worker failed: {error}")))?;
         cancel_on_drop.disarm();
-        result
+        result.map(|mut page| {
+            page.checkout_id = Some(workspace.checkout_id);
+            page.mutation_capabilities = Some(zeron_proto::WorkspaceMutationCapabilities {
+                move_entry: cfg!(any(target_os = "linux", target_os = "macos", windows)),
+                delete_entry: true,
+                create_entry: cfg!(any(target_os = "linux", target_os = "macos", windows)),
+            });
+            page
+        })
     }
 
     pub async fn search(
         &self,
         request: SearchWorkspaceFilesRequest,
     ) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
-        validate_workspace_search_query(&request.query)?;
+        validate_name_search_query(&request.query, request.include_ignored)?;
         let workspace = self.resolve_target(&request.target).await?;
         let limit =
             usize::from(request.limit.unwrap_or(MAX_SEARCH_RESULTS as u16)).min(MAX_SEARCH_RESULTS);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
+        let search = self.inner.repos.workspace_search().clone();
         let result = tokio::task::spawn_blocking(move || {
             search_workspace_blocking(
+                &search,
                 &workspace.root,
                 &request.query,
                 request.include_ignored,
@@ -367,15 +474,53 @@ impl WorkspaceFiles {
         result
     }
 
+    pub async fn search_content(
+        &self,
+        request: SearchWorkspaceContentRequest,
+    ) -> Result<WorkspaceContentSearchResult, WorkspaceFilesError> {
+        validate_workspace_search_query(&request.query)?;
+        let workspace = self.resolve_target(&request.target).await?;
+        let search = self.inner.repos.workspace_search().clone();
+        tokio::task::spawn_blocking(move || {
+            search_content_blocking(&search, &workspace.root, &request)
+        })
+        .await
+        .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?
+    }
+
+    pub async fn warm_search(
+        &self,
+        request: WarmWorkspaceSearchRequest,
+    ) -> Result<WarmWorkspaceSearchResult, WorkspaceFilesError> {
+        let workspace = self.resolve_target(&request.target).await?;
+        let search = self.inner.repos.workspace_search().clone();
+        let state = tokio::task::spawn_blocking(move || search.warm(&workspace.root))
+            .await
+            .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?
+            .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        Ok(WarmWorkspaceSearchResult {
+            state: match state {
+                IndexState::Building => WorkspaceSearchIndexState::Building,
+                IndexState::Ready => WorkspaceSearchIndexState::Ready,
+            },
+        })
+    }
+
     pub async fn read_file(
         &self,
         request: ReadWorkspaceFileRequest,
     ) -> Result<WorkspaceFileText, WorkspaceFilesError> {
         let workspace = self.resolve_target(&request.target).await?;
-        let relative = WorkspaceRelativePath::file(&request.path)?;
+        // Only a chat target may read by absolute path; space targets keep
+        // the workspace-relative grammar.
+        let absolute = request.target.chat_id.is_some() && request.path.starts_with('/');
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
         let result = tokio::task::spawn_blocking(move || {
+            if absolute {
+                return read_absolute_file_blocking(&workspace, &request.path, &cancel);
+            }
+            let relative = WorkspaceRelativePath::file(&request.path)?;
             let mut file = read_file_blocking(&workspace.root, &relative, &cancel)?;
             file.checkout_id = workspace.checkout_id;
             Ok(file)
@@ -391,15 +536,34 @@ impl WorkspaceFiles {
         request: zeron_proto::ReadWorkspaceImageRequest,
     ) -> Result<zeron_proto::WorkspaceImageChunk, WorkspaceFilesError> {
         let workspace = self.resolve_target(&request.target).await?;
-        if request.expected_checkout_id.is_empty()
-            || request.expected_checkout_id != workspace.checkout_id
+        let absolute = request.target.chat_id.is_some() && request.path.starts_with('/');
+        if !absolute
+            && (request.expected_checkout_id.is_empty()
+                || request.expected_checkout_id != workspace.checkout_id)
         {
             return Err(WorkspaceFilesError::Authorization(
                 "Workspace changed before image read".into(),
             ));
         }
-        let relative = WorkspaceRelativePath::file(&request.path)?;
         tokio::task::spawn_blocking(move || {
+            if absolute {
+                return match resolve_absolute_read(&workspace, &request.path)? {
+                    AbsoluteRead::Inside(relative) => {
+                        if request.expected_checkout_id.is_empty()
+                            || request.expected_checkout_id != workspace.checkout_id
+                        {
+                            return Err(WorkspaceFilesError::Authorization(
+                                "Workspace changed before image read".into(),
+                            ));
+                        }
+                        read_image_blocking(&workspace.root, &relative, &request)
+                    }
+                    AbsoluteRead::Outside { base, relative } => {
+                        read_image_blocking(&base, &relative, &request)
+                    }
+                };
+            }
+            let relative = WorkspaceRelativePath::file(&request.path)?;
             read_image_blocking(&workspace.root, &relative, &request)
         })
         .await
@@ -418,6 +582,15 @@ impl WorkspaceFiles {
             return Err(WorkspaceFilesError::Authorization(
                 "Workspace changed since this file was opened. Switch back to save your edits."
                     .into(),
+            ));
+        }
+        let mutation_guard = self
+            .mutation_gate(&workspace.checkout_id)
+            .read_owned()
+            .await;
+        if self.resolve_target(&request.target).await? != workspace {
+            return Err(WorkspaceFilesError::Authorization(
+                "Workspace changed while waiting to save".into(),
             ));
         }
         let relative = WorkspaceRelativePath::file(&request.path)?;
@@ -441,6 +614,7 @@ impl WorkspaceFiles {
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
         let expected_hash = request.expected_content_hash;
         let result = tokio::task::spawn_blocking(move || {
+            let _mutation_guard = mutation_guard;
             let _write_guard = write_guard;
             write_file_blocking(&workspace.root, &relative, &expected_hash, &bytes, &cancel)
         })
@@ -805,6 +979,7 @@ fn normalize_watch_events(
                     changes.insert(
                         path.clone(),
                         WorkspaceFileChange {
+                            operation_id: None,
                             kind: WorkspaceFileChangeKind::Modified,
                             path,
                             old_path: None,
@@ -815,6 +990,7 @@ fn normalize_watch_events(
                 changes.insert(
                     path.clone(),
                     WorkspaceFileChange {
+                        operation_id: None,
                         kind: WorkspaceFileChangeKind::Renamed,
                         path,
                         old_path: Some(old_path),
@@ -841,6 +1017,7 @@ fn normalize_watch_events(
                 continue;
             };
             let incoming = WorkspaceFileChange {
+                operation_id: None,
                 kind,
                 path: path.clone(),
                 old_path: None,
@@ -1013,6 +1190,8 @@ fn list_directory_blocking(
             .as_ref()
             .is_some_and(|visible| !visible.contains(&path));
         entries.push(WorkspaceEntry {
+            mutation_revision: (!mutations::is_link(&metadata))
+                .then(|| mutations::revision(&metadata)),
             name: entry.file_name().to_string_lossy().into_owned(),
             path,
             kind,
@@ -1066,6 +1245,8 @@ fn list_directory_blocking(
         })
     });
     Ok(WorkspaceDirectoryPage {
+        checkout_id: None,
+        mutation_capabilities: None,
         directory: directory.wire_path(),
         entries: page_entries,
         next_cursor,
@@ -1090,31 +1271,143 @@ fn filtered_directory_paths(root: &Path, target: &Path) -> HashSet<String> {
         .collect()
 }
 
+/// `SearchWorkspaceFiles` against an already-resolved root, for
+/// `examples/workspace_search_bench.rs`.
+#[doc(hidden)]
+pub fn bench_search_root(
+    search: &WorkspaceSearch,
+    root: &Path,
+    query: &str,
+    include_ignored: bool,
+    limit: usize,
+) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
+    search_workspace_blocking(
+        search,
+        root,
+        query,
+        include_ignored,
+        limit,
+        &AtomicBool::new(false),
+    )
+}
+
+/// Names come from the workspace search index (fff), which skips ignored
+/// files. "Show ignored" has no index, so it walks the folder directly with a
+/// plain substring match — see [`search_including_ignored`].
 fn search_workspace_blocking(
+    search: &WorkspaceSearch,
     root: &Path,
     query: &str,
     include_ignored: bool,
     limit: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
-    validate_workspace_search_query(query)?;
+    validate_name_search_query(query, include_ignored)?;
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut builder = ignore::WalkBuilder::new(root);
-    builder.follow_links(false).hidden(false);
     if include_ignored {
-        builder.standard_filters(false);
+        return search_including_ignored(root, query, limit, cancel);
     }
-    let query_lower = query.to_lowercase();
-    let mut matches = Vec::new();
+    let found = search
+        .search_names_within(
+            root,
+            query,
+            limit,
+            NameKinds::FilesAndDirectories,
+            crate::workspace_search::NAME_SCAN_WAIT,
+        )
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
+    }
+    Ok(found
+        .matches
+        .into_iter()
+        .filter(|found| {
+            !is_internal_temp_wire_path(&found.path)
+                && !contains_git_component(Path::new(&found.path))
+                // A symlink entry itself is listed (the tree shows them);
+                // nothing reached through one is.
+                && !crate::workspace_search::escapes_through_symlink(root, &found.path, true)
+        })
+        .map(|found| {
+            let is_symlink = std::fs::symlink_metadata(root.join(&found.path))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink());
+            let kind = if is_symlink {
+                WorkspaceEntryKind::Symlink
+            } else if found.is_dir {
+                WorkspaceEntryKind::Directory
+            } else {
+                WorkspaceEntryKind::File
+            };
+            WorkspaceFileSearchMatch {
+                name: found
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&found.path)
+                    .to_owned(),
+                path: found.path,
+                kind,
+                score: found.score,
+            }
+        })
+        .collect())
+}
+
+/// Case-insensitive substring match over every entry, ignored ones included.
+/// Names starting with the query rank first, then other name matches, then
+/// path-only matches, shorter paths first; only the best `limit` are kept
+/// while walking.
+fn search_including_ignored(
+    root: &Path,
+    query: &str,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
+    struct Ranked(WorkspaceFileSearchMatch);
+    impl Ranked {
+        fn key(&self) -> (std::cmp::Reverse<i64>, usize, &str) {
+            (
+                std::cmp::Reverse(self.0.score),
+                self.0.path.len(),
+                &self.0.path,
+            )
+        }
+    }
+    impl PartialEq for Ranked {
+        fn eq(&self, other: &Self) -> bool {
+            self.key() == other.key()
+        }
+    }
+    impl Eq for Ranked {}
+    impl PartialOrd for Ranked {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Ranked {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.key().cmp(&other.key())
+        }
+    }
+
+    let query = normalize_name_query(query).trim().to_lowercase();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .standard_filters(false);
+    // Max-heap on rank: the worst kept match sits on top, ready to go.
+    let mut best = std::collections::BinaryHeap::with_capacity(limit + 1);
     for result in builder.build() {
         if cancel.load(Ordering::Relaxed) {
             return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
         }
         let entry = match result {
             Ok(entry) => entry,
-            Err(error) if matches.is_empty() => {
+            Err(error) if best.is_empty() => {
                 return Err(WorkspaceFilesError::Io(error.to_string()));
             }
             Err(_) => continue,
@@ -1126,9 +1419,8 @@ fn search_workspace_blocking(
             Ok(relative) if !contains_git_component(relative) => relative,
             _ => continue,
         };
-        let file_type = match entry.file_type() {
-            Some(file_type) => file_type,
-            None => continue,
+        let Some(file_type) = entry.file_type() else {
+            continue;
         };
         let kind = if file_type.is_symlink() {
             WorkspaceEntryKind::Symlink
@@ -1139,27 +1431,92 @@ fn search_workspace_blocking(
         } else {
             continue;
         };
+        let name = entry.file_name().to_string_lossy();
+        let lower_name = name.to_lowercase();
+        let score = if lower_name.starts_with(&query) {
+            2
+        } else if lower_name.contains(&query) {
+            1
+        } else if normalize_name_query(&relative.to_string_lossy())
+            .to_lowercase()
+            .contains(&query)
+        {
+            0
+        } else {
+            continue;
+        };
         let path = path_to_wire(relative)?;
         if is_internal_temp_wire_path(&path) {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(score) = workspace_search_score(&name, &path, &query_lower) else {
-            continue;
-        };
-        matches.push(WorkspaceFileSearchMatch {
+        best.push(Ranked(WorkspaceFileSearchMatch {
+            name: name.into_owned(),
             path,
-            name,
             kind,
             score,
-        });
-        if matches.len() > limit {
-            matches.sort_by(compare_workspace_search_matches);
-            matches.truncate(limit);
+        }));
+        if best.len() > limit {
+            best.pop();
         }
     }
-    matches.sort_by(compare_workspace_search_matches);
-    Ok(matches)
+    Ok(best
+        .into_sorted_vec()
+        .into_iter()
+        .map(|ranked| ranked.0)
+        .collect())
+}
+
+fn search_content_blocking(
+    search: &WorkspaceSearch,
+    root: &Path,
+    request: &SearchWorkspaceContentRequest,
+) -> Result<WorkspaceContentSearchResult, WorkspaceFilesError> {
+    validate_workspace_search_query(&request.query)?;
+    let limit = request
+        .limit
+        .map_or(DEFAULT_CONTENT_RESULTS, usize::from)
+        .min(MAX_CONTENT_RESULTS);
+    let per_file = request
+        .per_file_limit
+        .map_or(DEFAULT_CONTENT_RESULTS_PER_FILE, usize::from)
+        .min(limit);
+    let found = search
+        .search_content(root, &request.query, limit, per_file)
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    Ok(WorkspaceContentSearchResult {
+        matches: found
+            .matches
+            .into_iter()
+            .filter(|found| {
+                !is_internal_temp_wire_path(&found.path)
+                    && !contains_git_component(Path::new(&found.path))
+                    // Never preview contents reached through a symlink.
+                    && !crate::workspace_search::escapes_through_symlink(root, &found.path, false)
+            })
+            .map(|found| WorkspaceContentMatch {
+                path: found.path,
+                line: found.line,
+                column: found.column,
+                preview: found.preview,
+                ranges: found.ranges,
+            })
+            .collect(),
+        truncated: found.truncated,
+        indexing: found.indexing,
+    })
+}
+
+/// File-name search also takes an empty query, listing the workspace's files
+/// by recency from the index (the palette's default Files list). "Show
+/// ignored" walks the disk with a substring match, so it still needs text.
+fn validate_name_search_query(
+    query: &str,
+    include_ignored: bool,
+) -> Result<(), WorkspaceFilesError> {
+    if query.trim().is_empty() && !include_ignored {
+        return Ok(());
+    }
+    validate_workspace_search_query(query)
 }
 
 fn validate_workspace_search_query(query: &str) -> Result<(), WorkspaceFilesError> {
@@ -1174,17 +1531,6 @@ fn validate_workspace_search_query(query: &str) -> Result<(), WorkspaceFilesErro
         )));
     }
     Ok(())
-}
-
-fn compare_workspace_search_matches(
-    left: &WorkspaceFileSearchMatch,
-    right: &WorkspaceFileSearchMatch,
-) -> std::cmp::Ordering {
-    right
-        .score
-        .cmp(&left.score)
-        .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
-        .then_with(|| left.path.cmp(&right.path))
 }
 
 fn read_image_blocking(
@@ -1280,6 +1626,91 @@ fn read_image_blocking(
     })
 }
 
+/// How an absolute request path resolves against the workspace root: the
+/// canonical path inside it reads like the equivalent relative path
+/// (editable), anything else is a read-only host file.
+enum AbsoluteRead {
+    Inside(WorkspaceRelativePath),
+    Outside {
+        /// The filesystem root the canonical path hangs off — `/` on POSIX —
+        /// so the blocking readers' component walk applies unchanged.
+        base: PathBuf,
+        relative: WorkspaceRelativePath,
+    },
+}
+
+/// Canonicalize an absolute request path and classify it against the
+/// workspace. The wire grammar mirrors the link side's safety envelope: one
+/// leading slash, never `//`, no trailing slash, no `?`, backslashes, NUL or
+/// `.`/`..` segments. A missing path is the same `NotFound` a relative read
+/// reports.
+fn resolve_absolute_read(
+    workspace: &ResolvedWorkspace,
+    path: &str,
+) -> Result<AbsoluteRead, WorkspaceFilesError> {
+    if path.len() > MAX_ABSOLUTE_PATH_BYTES
+        || path.len() == 1
+        || path.starts_with("//")
+        || path.ends_with('/')
+        || path.contains(['\\', '?'])
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(bad_path("path must be workspace-relative"));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            WorkspaceFilesError::NotFound("file not found".into())
+        } else {
+            WorkspaceFilesError::Io(error.to_string())
+        }
+    })?;
+    let root = std::fs::canonicalize(&workspace.root).unwrap_or(workspace.root.clone());
+    if let Ok(relative) = canonical.strip_prefix(&root) {
+        return WorkspaceRelativePath::from_resolved(relative).map(AbsoluteRead::Inside);
+    }
+    let base = canonical
+        .ancestors()
+        .last()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| canonical.clone());
+    let relative = canonical.strip_prefix(&base).map_err(|error| {
+        WorkspaceFilesError::Io(format!("absolute path has no host root: {error}"))
+    })?;
+    WorkspaceRelativePath::from_resolved(relative)
+        .map(|relative| AbsoluteRead::Outside { base, relative })
+}
+
+/// A chat-target read of an absolute path: inside the workspace it reads
+/// exactly like the equivalent relative path (editable, checkout-bound);
+/// outside it is a host file — read-only, no checkout identity — that still
+/// reports Binary, TooLarge, symlink or not-a-regular-file ahead of
+/// `OutsideWorkspace`.
+fn read_absolute_file_blocking(
+    workspace: &ResolvedWorkspace,
+    path: &str,
+    cancel: &AtomicBool,
+) -> Result<WorkspaceFileText, WorkspaceFilesError> {
+    match resolve_absolute_read(workspace, path)? {
+        AbsoluteRead::Inside(relative) => {
+            let mut file = read_file_blocking(&workspace.root, &relative, cancel)?;
+            file.checkout_id = workspace.checkout_id.clone();
+            Ok(file)
+        }
+        AbsoluteRead::Outside { base, relative } => {
+            let mut file = read_file_blocking(&base, &relative, cancel)?;
+            if file.read_only_reason.is_none() {
+                file.read_only_reason = Some(WorkspaceReadOnlyReason::OutsideWorkspace);
+            }
+            file.checkout_id = String::new();
+            file.path = path.to_owned();
+            Ok(file)
+        }
+    }
+}
+
 fn read_file_blocking(
     root: &Path,
     relative: &WorkspaceRelativePath,
@@ -1364,7 +1795,7 @@ fn checked_file_metadata(
                 WorkspaceFilesError::Io(error.to_string())
             }
         })?;
-        if metadata.file_type().is_symlink() {
+        if mutations::is_link(&metadata) {
             let message = if index + 1 == components.len() {
                 "path is a symlink"
             } else {
@@ -1823,6 +2254,8 @@ fn checked_directory(
     root: &Path,
     directory: &WorkspaceRelativePath,
 ) -> Result<PathBuf, WorkspaceFilesError> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     let mut current = root.to_path_buf();
     for component in directory.as_path().components() {
         let Component::Normal(component) = component else {
@@ -1831,7 +2264,7 @@ fn checked_directory(
         current.push(component);
         let metadata = std::fs::symlink_metadata(&current)
             .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
+        if mutations::is_link(&metadata) {
             return Err(WorkspaceFilesError::Unsupported(
                 "symlink directories cannot be traversed".into(),
             ));
@@ -1844,7 +2277,7 @@ fn checked_directory(
     }
     let canonical = std::fs::canonicalize(&current)
         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
-    if !canonical.starts_with(root) {
+    if !canonical.starts_with(&canonical_root) {
         return Err(WorkspaceFilesError::Authorization(
             "directory escaped workspace".into(),
         ));
@@ -1934,40 +2367,6 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn workspace_search_score(name: &str, path: &str, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let name = name.to_lowercase();
-    let path = path.to_lowercase();
-    if name == query {
-        return Some(10_000);
-    }
-    if name.starts_with(query) {
-        return Some(8_000 - name.len() as i64);
-    }
-    if let Some(index) = name.find(query) {
-        return Some(6_000 - index as i64 - name.len() as i64);
-    }
-    if let Some(index) = path.find(query) {
-        return Some(4_000 - index as i64 - path.len() as i64);
-    }
-    let mut query_chars = query.chars();
-    let mut wanted = query_chars.next()?;
-    let mut gaps = 0i64;
-    for character in path.chars() {
-        if character == wanted {
-            match query_chars.next() {
-                Some(next) => wanted = next,
-                None => return Some(2_000 - gaps - path.len() as i64),
-            }
-        } else {
-            gaps += 1;
-        }
-    }
-    None
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -1980,6 +2379,26 @@ mod tests {
 
     fn no_cancel() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    #[test]
+    fn checked_directory_accepts_the_workspace_root_and_its_child_after_canonicalization() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("child")).unwrap();
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+
+        assert_eq!(
+            checked_directory(root.path(), &WorkspaceRelativePath::directory("").unwrap()).unwrap(),
+            canonical_root
+        );
+        assert_eq!(
+            checked_directory(
+                root.path(),
+                &WorkspaceRelativePath::directory("child").unwrap()
+            )
+            .unwrap(),
+            canonical_root.join("child")
+        );
     }
 
     #[test]
@@ -2127,6 +2546,23 @@ mod tests {
         );
     }
 
+    fn search_workspace_blocking(
+        root: &Path,
+        query: &str,
+        include_ignored: bool,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
+        super::search_workspace_blocking(
+            &WorkspaceSearch::new(),
+            root,
+            query,
+            include_ignored,
+            limit,
+            cancel,
+        )
+    }
+
     #[test]
     fn search_ranks_filename_and_nested_path_matches() {
         let root = tempfile::tempdir().unwrap();
@@ -2136,7 +2572,10 @@ mod tests {
         std::fs::write(root.path().join("README.md"), b"").unwrap();
         let root = std::fs::canonicalize(root.path()).unwrap();
 
-        let matches = search_workspace_blocking(&root, "config", false, 200, &no_cancel()).unwrap();
+        // fff ranks the shallower `configuration.rs` first for "config"; an
+        // exact file name still beats depth.
+        let matches =
+            search_workspace_blocking(&root, "config.rs", false, 200, &no_cancel()).unwrap();
         assert_eq!(matches[0].path, "src/deep/config.rs");
         assert!(
             matches
@@ -2147,13 +2586,19 @@ mod tests {
     }
 
     #[test]
-    fn search_rejects_empty_and_whitespace_queries() {
+    fn an_empty_query_lists_recent_names_but_show_ignored_needs_text() {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("notes.txt"), "x").unwrap();
         let root = std::fs::canonicalize(root.path()).unwrap();
 
         for query in ["", "   ", "\n\t"] {
+            // The index lists files by recency (the palette's default list).
+            let listed = search_workspace_blocking(&root, query, false, 200, &no_cancel()).unwrap();
+            assert!(listed.len() <= 200);
+            // "Show ignored" walks the disk with a substring match: no text,
+            // no walk.
             let error =
-                search_workspace_blocking(&root, query, false, 200, &no_cancel()).unwrap_err();
+                search_workspace_blocking(&root, query, true, 200, &no_cancel()).unwrap_err();
             assert!(error.to_string().contains("query must not be empty"));
         }
     }
@@ -2172,11 +2617,250 @@ mod tests {
         }
         let root = std::fs::canonicalize(root.path()).unwrap();
 
-        let matches = search_workspace_blocking(&root, "query", false, 2, &no_cancel()).unwrap();
+        let matches = search_workspace_blocking(&root, "query", true, 2, &no_cancel()).unwrap();
 
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].path, "query");
         assert_eq!(matches[1].path, "query-reference.txt");
+        assert_eq!(
+            search_workspace_blocking(&root, "query", false, 2, &no_cancel())
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn search_including_ignored_matches_nested_paths() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".ignore"), b"aa\n").unwrap();
+        std::fs::create_dir_all(root.path().join("aa/bb/cc/dd")).unwrap();
+        std::fs::write(root.path().join("aa/bb/cc/dd/file.rs"), b"").unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let forward =
+            search_workspace_blocking(&root, "aa/bb/cc/dd", true, 20, &no_cancel()).unwrap();
+        let paths: Vec<_> = forward.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, ["aa/bb/cc/dd", "aa/bb/cc/dd/file.rs"]);
+        #[cfg(windows)]
+        for query in [r"aa\bb\cc\dd", r"aa\bb/cc\dd"] {
+            let found = search_workspace_blocking(&root, query, true, 20, &no_cancel()).unwrap();
+            assert_eq!(found, forward);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn search_including_ignored_preserves_literal_posix_backslashes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(r"aa\bb/cc\dd")).unwrap();
+        std::fs::create_dir_all(root.path().join("aa/bb/cc/dd")).unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let found =
+            search_workspace_blocking(&root, r"aa\bb/cc\dd", true, 20, &no_cancel()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, r"aa\bb/cc\dd");
+        let forward =
+            search_workspace_blocking(&root, "aa/bb/cc/dd", true, 20, &no_cancel()).unwrap();
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].path, "aa/bb/cc/dd");
+    }
+
+    #[test]
+    fn search_finds_ignored_entries_only_when_asked() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".ignore"), b"target\n").unwrap();
+        std::fs::create_dir_all(root.path().join("target/debug")).unwrap();
+        std::fs::write(root.path().join("target/debug/build.log"), b"").unwrap();
+        std::fs::write(root.path().join("lib.rs"), b"").unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let indexed = search_workspace_blocking(&root, "build", false, 200, &no_cancel()).unwrap();
+        assert!(
+            indexed
+                .iter()
+                .all(|entry| !entry.path.starts_with("target"))
+        );
+        let walked = search_workspace_blocking(&root, "build", true, 200, &no_cancel()).unwrap();
+        assert_eq!(walked[0].path, "target/debug/build.log");
+        assert_eq!(walked[0].name, "build.log");
+        assert_eq!(walked[0].kind, WorkspaceEntryKind::File);
+    }
+
+    fn content(
+        root: &Path,
+        query: &str,
+        per_file: Option<u16>,
+    ) -> Result<WorkspaceContentSearchResult, WorkspaceFilesError> {
+        let search = WorkspaceSearch::new();
+        search.warm(root).unwrap();
+        let request = SearchWorkspaceContentRequest {
+            target: WorkspaceTarget {
+                chat_id: Some("chat".into()),
+                space_id: None,
+                checkout_path: None,
+            },
+            query: query.into(),
+            limit: None,
+            per_file_limit: per_file,
+        };
+        // Wait out the initial scan so the result is never `indexing`.
+        for _ in 0..200 {
+            let result = search_content_blocking(&search, root, &request)?;
+            if !result.indexing {
+                return Ok(result);
+            }
+        }
+        panic!("workspace search index never finished scanning");
+    }
+
+    fn content_fixture() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let files: [(&str, &[u8]); 4] = [
+            (
+                "src/lib.rs",
+                b"fn main() {}\n    let needle = 1;\nneedle();\nneedle!();\nneedle?\n",
+            ),
+            ("README.md", b"A Needle in the docs\n"),
+            ("utf8.txt", "café — needle ñ\n".as_bytes()),
+            ("image.bin", b"needle\0\0\0\x01\x02 needle"),
+        ];
+        for (path, bytes) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        (dir, root)
+    }
+
+    #[test]
+    fn content_search_finds_literal_lines_with_their_location() {
+        let (_dir, root) = content_fixture();
+        let result = content(&root, "let needle", None).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        let found = &result.matches[0];
+        assert_eq!(found.path, "src/lib.rs");
+        assert_eq!(found.line, 2);
+        assert_eq!(found.column, 4);
+        assert_eq!(found.preview, "let needle = 1;");
+        assert_eq!(found.ranges, vec![(0, 10)]);
+    }
+
+    #[test]
+    fn content_search_preserves_spaces_and_tabs_in_the_query() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("literal.txt"),
+            "let  needle = 1;\nlet\tneedle = 2;\nlet needle = 3;\n",
+        )
+        .unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        for (query, line) in [("let  needle", 1), ("let\tneedle", 2)] {
+            let result = content(&root, query, None).unwrap();
+            assert_eq!(result.matches.len(), 1, "query: {query:?}");
+            let found = &result.matches[0];
+            assert_eq!(found.path, "literal.txt");
+            assert_eq!(found.line, line, "query: {query:?}");
+            assert_eq!(found.column, 0);
+            assert_eq!(found.ranges, vec![(0, query.len() as u32)]);
+            assert!(found.preview.starts_with(query));
+        }
+    }
+
+    #[test]
+    fn content_search_treats_exclamation_marks_as_literal_text() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("literal.txt"), "if !ready {\nif ready {\n").unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let result = content(&root, "if !ready", None).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        let found = &result.matches[0];
+        assert_eq!(found.path, "literal.txt");
+        assert_eq!(found.line, 1);
+        assert_eq!(found.column, 0);
+        assert_eq!(found.preview, "if !ready {");
+        assert_eq!(found.ranges, vec![(0, 9)]);
+    }
+
+    #[test]
+    fn content_search_preserves_literal_backslashes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("literal.txt"),
+            "\\n\nn\n\\!ready\n!ready\n",
+        )
+        .unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        for (query, line) in [(r"\n", 1), (r"\!ready", 3)] {
+            let result = content(&root, query, None).unwrap();
+            assert_eq!(result.matches.len(), 1, "query: {query:?}");
+            let found = &result.matches[0];
+            assert_eq!(found.path, "literal.txt");
+            assert_eq!(found.line, line);
+            assert_eq!(found.column, 0);
+            assert_eq!(found.preview, query);
+            assert_eq!(found.ranges, vec![(0, query.len() as u32)]);
+        }
+    }
+
+    #[test]
+    fn content_search_uses_smart_case() {
+        let (_dir, root) = content_fixture();
+        let insensitive = content(&root, "needle", Some(10)).unwrap();
+        assert!(insensitive.matches.iter().any(|m| m.path == "README.md"));
+        let sensitive = content(&root, "Needle", Some(10)).unwrap();
+        assert!(sensitive.matches.iter().all(|m| m.path == "README.md"));
+        assert_eq!(sensitive.matches.len(), 1);
+    }
+
+    #[test]
+    fn content_search_skips_binary_files_and_caps_matches_per_file() {
+        let (_dir, root) = content_fixture();
+        let result = content(&root, "needle", None).unwrap();
+        assert!(!result.matches.iter().any(|m| m.path == "image.bin"));
+        assert_eq!(
+            result
+                .matches
+                .iter()
+                .filter(|m| m.path == "src/lib.rs")
+                .count(),
+            DEFAULT_CONTENT_RESULTS_PER_FILE
+        );
+        let one = content(&root, "needle", Some(1)).unwrap();
+        assert_eq!(
+            one.matches
+                .iter()
+                .filter(|m| m.path == "src/lib.rs")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn content_search_ranges_are_utf8_byte_offsets_into_the_preview() {
+        let (_dir, root) = content_fixture();
+        let result = content(&root, "needle ñ", None).unwrap();
+        let found = &result.matches[0];
+        assert_eq!(found.path, "utf8.txt");
+        let (start, end) = found.ranges[0];
+        assert_eq!(&found.preview[start as usize..end as usize], "needle ñ");
+        assert_eq!(start as usize, "café — ".len());
+    }
+
+    #[test]
+    fn content_search_rejects_empty_and_oversized_queries() {
+        let (_dir, root) = content_fixture();
+        for query in ["", "   "] {
+            let error = content(&root, query, None).unwrap_err();
+            assert!(error.to_string().contains("query must not be empty"));
+        }
+        let long = "x".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+        assert!(content(&root, &long, None).is_err());
     }
 
     fn read_fixture(bytes: &[u8]) -> WorkspaceFileText {
@@ -2292,6 +2976,202 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // Absolute reads take POSIX paths — the only shape a UI sends.
+    #[cfg(unix)]
+    fn resolved_workspace(root: &Path) -> ResolvedWorkspace {
+        ResolvedWorkspace {
+            checkout_id: "checkout-test".into(),
+            root: root.to_path_buf(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_inside_the_workspace_is_editable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("dir")).unwrap();
+        std::fs::write(root.path().join("dir/file.txt"), b"inside\n").unwrap();
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        let workspace = resolved_workspace(&canonical);
+        let absolute = canonical
+            .join("dir/file.txt")
+            .to_string_lossy()
+            .into_owned();
+
+        let file = read_absolute_file_blocking(&workspace, &absolute, &no_cancel()).unwrap();
+        assert_eq!(file.text.as_deref(), Some("inside\n"));
+        assert_eq!(file.path, "dir/file.txt");
+        assert_eq!(file.checkout_id, "checkout-test");
+        assert!(file.read_only_reason.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_outside_the_workspace_is_read_only() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("report.md"), b"outside\n").unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+        let absolute = std::fs::canonicalize(outside.path().join("report.md"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let file = read_absolute_file_blocking(&workspace, &absolute, &no_cancel()).unwrap();
+        assert_eq!(file.text.as_deref(), Some("outside\n"));
+        assert_eq!(
+            file.read_only_reason,
+            Some(WorkspaceReadOnlyReason::OutsideWorkspace)
+        );
+        assert_eq!(file.checkout_id, "");
+        assert_eq!(file.path, absolute);
+
+        // A stronger existing reason keeps its own classification.
+        let binary = outside.path().join("raw.bin");
+        std::fs::write(&binary, b"a\0b").unwrap();
+        let file = read_absolute_file_blocking(&workspace, &binary.to_string_lossy(), &no_cancel())
+            .unwrap();
+        assert_eq!(file.read_only_reason, Some(WorkspaceReadOnlyReason::Binary));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_reports_missing_and_non_regular_files() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+
+        let missing = outside
+            .path()
+            .join("missing.md")
+            .to_string_lossy()
+            .into_owned();
+        let error = read_absolute_file_blocking(&workspace, &missing, &no_cancel()).unwrap_err();
+        assert!(matches!(error, WorkspaceFilesError::NotFound(_)), "{error}");
+
+        let directory = outside.path().to_string_lossy().into_owned();
+        let file = read_absolute_file_blocking(&workspace, &directory, &no_cancel()).unwrap();
+        assert_eq!(
+            file.read_only_reason,
+            Some(WorkspaceReadOnlyReason::NotRegularFile)
+        );
+        assert!(file.text.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_rejects_unsafe_wire_shapes() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+        for path in [
+            "//double/slash.md",
+            "/",
+            "/tmp/dir/",
+            "/tmp/a?b.md",
+            "/tmp/a\\b.md",
+            "/tmp/a/../b.md",
+            "/tmp/./b.md",
+        ] {
+            assert!(
+                read_absolute_file_blocking(&workspace, path, &no_cancel()).is_err(),
+                "{path}"
+            );
+        }
+        // Writes still parse through the relative grammar: an absolute path
+        // can never reach `write_file`'s host filesystem.
+        assert!(WorkspaceRelativePath::file("/tmp/file.md").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_follows_symlinks_to_their_canonical_home() {
+        use std::os::unix::fs::symlink;
+
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(workspace_dir.path().join("real.md"), b"real\n").unwrap();
+        std::fs::write(outside.path().join("out.md"), b"out\n").unwrap();
+        // A link inside the workspace pointing out reads as an outside file;
+        // a link outside pointing in reads as the editable workspace file.
+        symlink(
+            outside.path().join("out.md"),
+            workspace_dir.path().join("escape.md"),
+        )
+        .unwrap();
+        symlink(
+            workspace_dir.path().join("real.md"),
+            outside.path().join("enter.md"),
+        )
+        .unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+
+        let escape = canonical_root
+            .join("escape.md")
+            .to_string_lossy()
+            .into_owned();
+        let file = read_absolute_file_blocking(&workspace, &escape, &no_cancel()).unwrap();
+        assert_eq!(
+            file.read_only_reason,
+            Some(WorkspaceReadOnlyReason::OutsideWorkspace)
+        );
+        let enter = std::fs::canonicalize(outside.path().join("enter.md"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let file = read_absolute_file_blocking(&workspace, &enter, &no_cancel()).unwrap();
+        assert!(file.read_only_reason.is_none());
+        assert_eq!(file.path, "real.md");
+        assert_eq!(file.checkout_id, "checkout-test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_image_read_outside_the_workspace_works() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let png = outside.path().join("pixel.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nfake").unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+        let absolute = std::fs::canonicalize(&png)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let AbsoluteRead::Outside { base, relative } =
+            resolve_absolute_read(&workspace, &absolute).unwrap()
+        else {
+            panic!("expected outside resolution");
+        };
+        let request = zeron_proto::ReadWorkspaceImageRequest {
+            target: WorkspaceTarget {
+                chat_id: Some("chat".into()),
+                space_id: None,
+                checkout_path: None,
+            },
+            path: absolute.clone(),
+            expected_checkout_id: String::new(),
+            offset: 0,
+            expected_content_hash: None,
+        };
+        let chunk = read_image_blocking(&base, &relative, &request).unwrap();
+        assert_eq!(chunk.mime_type, "image/png");
+        assert!(chunk.done);
+        assert_eq!(chunk.size, 12);
+        // The same path inside the root still wants a matching checkout id.
+        std::fs::write(workspace_dir.path().join("in.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let inside = canonical_root.join("in.png").to_string_lossy().into_owned();
+        let AbsoluteRead::Inside(relative) = resolve_absolute_read(&workspace, &inside).unwrap()
+        else {
+            panic!("expected inside resolution");
+        };
+        assert_eq!(relative.wire_path(), "in.png");
     }
 
     fn write_request(
@@ -2759,6 +3639,90 @@ mod tests {
 mod image_tests {
     use super::*;
     use zeron_proto::{ReadWorkspaceImageRequest, WORKSPACE_IMAGE_CHUNK_BYTES, WorkspaceTarget};
+
+    /// A Cloud session machine's chat belongs to it, but its project was
+    /// made on the laptop: files resolve to the machine's own checkout, and
+    /// anywhere else such a chat is still refused.
+    #[tokio::test]
+    async fn a_cloud_session_chat_browses_its_own_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("app");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&checkout)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        let host = WorkspaceHost::open(
+            Arc::new(zeron_sync::DocsStore::open(&dir.path().join("docs")).unwrap()),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "cloud-session".into(),
+                device_name: "Cloud session".into(),
+                platform: "cloud".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        host.create_space("space", "laptop", "/Users/me/app", None, true)
+            .unwrap();
+        // Hosted on the session machine, like a chat sent to Cloud.
+        host.create_chat_hosted(
+            "chat",
+            Some("space"),
+            None,
+            Some("cloud-session"),
+            None,
+            Some(checkout.to_string_lossy().into_owned()),
+            None,
+            None,
+        )
+        .unwrap();
+        let repos = Repos::new(&dir.path().join("data"), "cloud-session");
+        let target = WorkspaceTarget {
+            chat_id: Some("chat".into()),
+            space_id: None,
+            checkout_path: None,
+        };
+        let refused = WorkspaceFiles::new(repos.clone(), host.clone(), "cloud-session")
+            .resolve_target(&target)
+            .await
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("chat space belongs to another device"),
+            "{refused}"
+        );
+        let files = WorkspaceFiles::with_cloud_checkout(
+            repos,
+            host,
+            "cloud-session",
+            Some(checkout.clone()),
+        );
+        let resolved = files.resolve_target(&target).await.unwrap();
+        assert_eq!(resolved.root, std::fs::canonicalize(&checkout).unwrap());
+        // The files panel's git status asks by project and checkout path.
+        let by_space = WorkspaceTarget {
+            chat_id: None,
+            space_id: Some("space".into()),
+            checkout_path: Some(checkout.to_string_lossy().into_owned()),
+        };
+        assert_eq!(
+            files.resolve_target(&by_space).await.unwrap().root,
+            resolved.root
+        );
+        // A path outside the machine's checkout is still refused.
+        let outside = WorkspaceTarget {
+            checkout_path: Some(dir.path().to_string_lossy().into_owned()),
+            ..by_space
+        };
+        assert!(files.resolve_target(&outside).await.is_err());
+    }
     fn request() -> ReadWorkspaceImageRequest {
         ReadWorkspaceImageRequest {
             target: WorkspaceTarget {

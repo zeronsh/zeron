@@ -1,0 +1,9 @@
+{
+  "id": "compact-sidebar",
+  "name": "Compact sidebar",
+  "version": "1.0.0",
+  "description": "Your sessions as one short list, newest first.",
+  "entry": "init.luau",
+  "permissions": ["ui.replace"],
+  "ui": { "replace": ["@app/screens/shell/sidebar"] }
+}

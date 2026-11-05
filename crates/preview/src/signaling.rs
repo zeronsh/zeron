@@ -7,7 +7,7 @@ use crate::{
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PreviewService;
@@ -39,37 +39,118 @@ pub async fn run(
     config: Config,
     catalog: Catalog,
     peers: Peers,
-    mut outgoing: mpsc::Receiver<OutgoingSignal>,
+    outgoing: mpsc::Receiver<OutgoingSignal>,
     stop: CancellationToken,
 ) {
+    run_with_wake(
+        config,
+        catalog,
+        peers,
+        outgoing,
+        stop,
+        Arc::new(Notify::new()),
+    )
+    .await
+}
+
+/// [`run`], wakeable: a device whose network changed or that comes back
+/// from suspension (a phone) notifies `wake`. Waiting to reconnect, it
+/// redials at once; connected, it proves the socket with a ping and redials
+/// if nothing answers within [`WAKE_PROBE`] — rather than leaning on the
+/// 40s lease while the socket may be dead.
+pub async fn run_with_wake(
+    config: Config,
+    catalog: Catalog,
+    peers: Peers,
+    outgoing: mpsc::Receiver<OutgoingSignal>,
+    stop: CancellationToken,
+    wake: Arc<Notify>,
+) {
+    run_signing_in(
+        config,
+        catalog,
+        peers,
+        outgoing,
+        stop,
+        wake,
+        Arc::new(|| false),
+    )
+    .await
+}
+
+/// Whether this device is in the middle of a provider sign-in whose
+/// callback rides the direct connection.
+pub type SigningIn = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// [`run_with_wake`] for an engine: while `signing_in` holds, it joins as a
+/// sign-in, which the coordinator admits past its per-user device limit (a
+/// user's idle Cloud machines and phones can fill it). Notify `wake` when a
+/// sign-in starts so a refused device redials at once.
+pub async fn run_signing_in(
+    config: Config,
+    catalog: Catalog,
+    peers: Peers,
+    mut outgoing: mpsc::Receiver<OutgoingSignal>,
+    stop: CancellationToken,
+    wake: Arc<Notify>,
+    signing_in: SigningIn,
+) {
     loop {
-        let connected = connect(&config, &catalog, &peers, &mut outgoing);
+        let connected = connect(
+            &config,
+            &catalog,
+            &peers,
+            &mut outgoing,
+            &wake,
+            signing_in(),
+        );
         tokio::select! { _ = stop.cancelled() => break, result = connected => {
             if let Err(error) = result { tracing::debug!(%error, "preview coordinator disconnected"); }
         } }
         catalog.clear_remote();
         peers.clear().await;
         while outgoing.try_recv().is_ok() {} // signaling from the old lease is stale
-        tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            _ = wake.notified() => {}
+        }
     }
     catalog.clear_remote();
     peers.clear().await;
 }
-async fn connect(
+
+fn coordinator_url(
     config: &Config,
-    catalog: &Catalog,
-    peers: &Peers,
-    outgoing: &mut mpsc::Receiver<OutgoingSignal>,
-) -> anyhow::Result<()> {
-    let token = config.tokens.token().await?;
+    device: &str,
+    signing_in: bool,
+) -> anyhow::Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(&config.edge_url)?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme)
         .map_err(|_| anyhow::anyhow!("invalid preview coordinator URL"))?;
     url.set_path(&format!("/preview/{}/ws", config.org_id));
-    url.query_pairs_mut()
-        .clear()
-        .append_pair("device", catalog.device_id());
+    let mut query = url.query_pairs_mut();
+    query.clear().append_pair("device", device);
+    if signing_in {
+        query.append_pair("signIn", "1");
+    }
+    drop(query);
+    Ok(url)
+}
+
+/// How long a woken connection has to answer its probe.
+const WAKE_PROBE: Duration = Duration::from_millis(2500);
+async fn connect(
+    config: &Config,
+    catalog: &Catalog,
+    peers: &Peers,
+    outgoing: &mut mpsc::Receiver<OutgoingSignal>,
+    wake: &Notify,
+    signing_in: bool,
+) -> anyhow::Result<()> {
+    let token = config.tokens.token().await?;
+    let url = coordinator_url(config, catalog.device_id(), signing_in)?;
     let mut request = url.as_str().into_client_request()?;
     request
         .headers_mut()
@@ -92,6 +173,8 @@ async fn connect(
         .await?;
     let mut ping = tokio::time::interval(Duration::from_secs(10));
     let mut last_message = tokio::time::Instant::now();
+    // A woken socket's probe: it must hear something by this deadline.
+    let mut probe: Option<tokio::time::Instant> = None;
     // SDP gathering must not block the socket heartbeat or other devices.
     let mut negotiations = tokio::task::JoinSet::new();
     loop {
@@ -99,6 +182,13 @@ async fn connect(
             _ = ping.tick() => {
                 anyhow::ensure!(last_message.elapsed() < Duration::from_secs(40), "preview coordinator lease expired");
                 write.send(Message::Text("ping".into())).await?;
+            }
+            _ = wake.notified() => {
+                write.send(Message::Text("ping".into())).await?;
+                probe = Some(tokio::time::Instant::now() + WAKE_PROBE);
+            }
+            _ = async { tokio::time::sleep_until(probe.unwrap_or_else(tokio::time::Instant::now)).await }, if probe.is_some() => {
+                anyhow::bail!("preview coordinator didn't answer after a wake");
             }
             _ = changes.changed() => {
                 let next = catalog.local_services();
@@ -111,6 +201,7 @@ async fn connect(
             message = read.next() => {
                 let message = message.ok_or_else(|| anyhow::anyhow!("preview coordinator closed"))??;
                 last_message = tokio::time::Instant::now();
+                probe = None;
                 match message {
                     Message::Text(text) if text == "pong" => {},
                     Message::Text(text) => {
@@ -132,5 +223,35 @@ async fn connect(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoToken;
+    #[async_trait::async_trait]
+    impl TokenSource for NoToken {
+        async fn token(&self) -> anyhow::Result<String> {
+            anyhow::bail!("unused")
+        }
+    }
+
+    #[test]
+    fn a_sign_in_joins_flagged_so_the_device_limit_lets_it_in() {
+        let config = Config {
+            edge_url: "https://edge.example".into(),
+            org_id: "org".into(),
+            tokens: Arc::new(NoToken),
+        };
+        assert_eq!(
+            coordinator_url(&config, "laptop", false).unwrap().as_str(),
+            "wss://edge.example/preview/org/ws?device=laptop"
+        );
+        assert_eq!(
+            coordinator_url(&config, "laptop", true).unwrap().as_str(),
+            "wss://edge.example/preview/org/ws?device=laptop&signIn=1"
+        );
     }
 }

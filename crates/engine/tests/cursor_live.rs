@@ -73,6 +73,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
             SessionCommandPayload::Run {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 request: RunRequest {
+                    mcp: None,
                     prompt,
                     harness: Some(HarnessId::Cursor),
                     model: Some("muse-spark-1.3".into()),
@@ -81,9 +82,13 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     cwd: cwd.to_str().unwrap().into(),
                     sandbox: SandboxLevel::DangerFullAccess,
                     auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
                     attachments: vec![],
                     worktree: None,
                     resume: None,
+                    env: Default::default(),
+                    extra_mcp: Vec::new(),
                 },
             },
         )

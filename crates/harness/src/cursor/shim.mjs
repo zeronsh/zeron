@@ -11,11 +11,26 @@
 //
 // Protocol: JSONL, one frame per line.
 //   stdin  (engine → shim):
-//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?}   start / first turn
-//     {"op":"user","prompt"}                            next turn (parked)
+//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?,"images"?,
+//      "imageBudget"?,"silenceTimeoutMs"?}
+//                                                       start / first turn;
+//                                                       `imageBudget` = bytes of
+//                                                       images one send inlines,
+//                                                       `silenceTimeoutMs` = how
+//                                                       long a send may go without
+//                                                       any SDK update
+//     {"op":"user","prompt"}                            explicit next turn
+//     {"op":"steer","prompt","model"?,"modelOptions"?,"reconfigure"?,"images"?}
+//                                                       native mid-turn input;
+//                                                       `reconfigure` = runs as
+//                                                       its own turn on `model`
+//                                                       `images` = [{data, mimeType}]
+//                                                       inlined with the text
 //     {"op":"interrupt"}                                cancel the live run
+//     {"op":"stop"}                                     cancel this turn only; the agent stays up
 //   stdout (shim → engine):
 //     {"ev":"ready","agentId","model"?}
+//     {"ev":"steered"}                                   input consumed
 //     {"ev":"text","text","parent"?}        parent = spawning task callId
 //     {"ev":"thinking","text","parent"?}
 //     {"ev":"tool","phase":"start"|"end","id","name","args"?,"error"?,"parent"?}
@@ -67,10 +82,33 @@ const fatal = async (message) => {
 // a multi-megabyte minified source line and obscure the exception.
 for (const event of ["uncaughtException", "unhandledRejection"]) {
   process.on(event, (error) => {
+    if (event === "unhandledRejection" && harmlessSdkRejection(error)) return;
     const deadline = setTimeout(() => process.exit(1), 2000);
     deadline.unref();
     void fatal(error).catch(() => process.exit(1));
   });
+}
+
+// Two rejections the SDK leaves unawaited are not failures of the chat: the
+// tool call they belong to already reports its own error, and treating them
+// as fatal killed the whole conversation over one failed shell command.
+function harmlessSdkRejection(error) {
+  // A shell tool's spawn failed (its interpreter is missing, the cwd is gone):
+  // the SDK's state-capture wrapper rejects a promise nobody awaits.
+  const spawnargs = error?.spawnargs;
+  if (typeof error?.syscall === "string" && error.syscall.startsWith("spawn") &&
+      Array.isArray(spawnargs) && spawnargs.some((arg) => typeof arg === "string" &&
+        ["dump_bash_state", "dump_zsh_state", "__CURSOR_SANDBOX_ENV_RESTORE"].some((m) => arg.includes(m)))) {
+    process.stderr.write(`cursor shell spawn failed (ignored): ${formatError(error)}\n`);
+    return true;
+  }
+  // After a failed exec the SDK writes a last frame to its already-closed
+  // stream. Its class is minified; only the name identifies it.
+  if (error instanceof Error && error.name === "WriteIterableClosedError") {
+    process.stderr.write("cursor SDK wrote to a closed exec stream (ignored)\n");
+    return true;
+  }
+  return false;
 }
 
 // Only copy explicit diagnostic fields, never cause/config/headers or the
@@ -233,6 +271,10 @@ async function preserveInterruptedContext(prompt) {
       throw new Error("Cursor interrupted-message receipt is invalid; refusing to lose conversation context");
     }
     if (!saved.slice(previous.beforeUserCount).includes(previous.wirePrompt)) missing = previous.messages;
+    for (const steer of previous.nativeSteers ?? []) {
+      if (typeof steer.text !== "string" || !Number.isSafeInteger(steer.occurrence)) throw new Error("Invalid native steering receipt");
+      if (saved.filter(text => text === steer.text).length < steer.occurrence) missing.push(steer.text);
+    }
   }
   const wirePrompt = missing.length ?
     "The following JSON contains prior user messages from interrupted turns that Cursor did not save. " +
@@ -244,6 +286,34 @@ async function preserveInterruptedContext(prompt) {
     beforeUserCount: saved.length, wirePrompt, messages: [...missing, prompt]}), {mode: 0o600});
   fs.renameSync(temporary, receiptPath);
   return wirePrompt;
+}
+
+// Native acknowledgments can precede the next saved checkpoint. Retain the
+// acknowledged text across a crash or immediate stop, just like the main input.
+async function recordNativeSteer(text) {
+  if (!receiptPath) return () => {};
+  const saved = await savedUserMessages();
+  const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+  const entries = receipt.nativeSteers ?? [];
+  const occurrence = Math.max(saved.filter(value => value === text).length,
+    ...entries.filter(entry => entry.text === text).map(entry => entry.occurrence), 0) + 1;
+  const entry = {text, occurrence};
+  entries.push(entry);
+  receipt.nativeSteers = entries;
+  const persist = () => {
+    const temporary = `${receiptPath}.tmp-${process.pid}`;
+    fs.writeFileSync(temporary, JSON.stringify(receipt), {mode: 0o600});
+    fs.renameSync(temporary, receiptPath);
+  };
+  persist();
+  return () => {
+    // Other submissions may have persisted since this injection was sent.
+    const latest = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    latest.nativeSteers = (latest.nativeSteers ?? []).filter(value =>
+      value.text !== entry.text || value.occurrence !== entry.occurrence);
+    Object.assign(receipt, latest);
+    persist();
+  };
 }
 
 // ---- models mode ----------------------------------------------------------
@@ -296,6 +366,10 @@ if (process.argv[2] === "login") {
 let agent = null;
 let run = null;
 let interrupted = false;
+// Cuts short the wait between startup retries when a stop or interrupt lands.
+let wakeStartup = null;
+// A turn stop: this turn is cancelled, the agent takes the next prompt.
+let stopping = false;
 let closing = false;
 let cleanupPromise;
 beforeExit = () => cleanupPromise ??= (async () => {
@@ -326,20 +400,61 @@ setInterval(() => {
   catch (error) { if (error.code === "ESRCH") void exitAfterFlush(0); }
 }, 1000).unref();
 
+// A run can "finish" when its whole reply is a transport dump the agent
+// loop printed instead of answering (a ConnectError, the backend's generic
+// failure line). Each top-level assistant message is classified on its own,
+// and only one consisting entirely of such lines (plus a stack trace) counts:
+// prose or code that quotes the same diagnostic is a real answer.
+const TRANSPORT_ERROR =
+  /^Error: (?:RetriableError: (?!\[internal\]).+|ConnectError: \[(?:unavailable|aborted|deadline_exceeded)\].*)$/;
+const SERVER_ERROR = "Something went wrong communicating with the server. Please try again.";
+class ReplyFailure {
+  constructor() { this.text = ""; }
+  push(text) { if (this.text.length < 65536) this.text += text; }
+  get failure() {
+    let failure;
+    for (const raw of this.text.split("\n")) {
+      const line = raw.trimEnd();
+      if (TRANSPORT_ERROR.test(line) || line === SERVER_ERROR) failure = line;
+      else if (line.trim() && !(failure && /^\s+at\s/.test(line))) return undefined;
+    }
+    return failure;
+  }
+}
+const MESSAGE_BOUNDARIES = new Set([
+  "tool-call-started", "tool-call-completed", "thinking-delta", "thinking-completed",
+  "step-started", "step-completed", "user-message-appended",
+]);
+// The current top-level assistant message, and whether this run streamed any.
+let reply = new ReplyFailure();
+let replyOpen = false;
+let streamedText = false;
+
 // One InteractionUpdate → zero or one frame. `parent` attributes nested
 // subagent traffic (tool-call-delta carries the child's updates tagged by
 // the spawning task's callId — the full subagent transcript, live).
+const activeTools = new Set();
 function mapUpdate(u, parent) {
   if (!u || typeof u !== "object") return;
   const tag = parent ? { parent } : {};
+  // Tools, reasoning and step boundaries close the message being written;
+  // token counts and the like stream alongside it.
+  if (!parent && MESSAGE_BOUNDARIES.has(u.type)) replyOpen = false;
   switch (u.type) {
     case "text-delta":
+      if (!parent && u.text) {
+        if (!replyOpen) reply = new ReplyFailure();
+        replyOpen = true;
+        streamedText = true;
+        reply.push(u.text);
+      }
       if (u.text) out({ ev: "text", text: u.text, ...tag });
       break;
     case "thinking-delta":
       if (u.text) out({ ev: "thinking", text: u.text, ...tag });
       break;
     case "tool-call-started":
+      if (!parent) activeTools.add(u.callId);
       out({
         ev: "tool",
         phase: "start",
@@ -350,6 +465,10 @@ function mapUpdate(u, parent) {
       });
       break;
     case "tool-call-completed": {
+      if (!parent) {
+        activeTools.delete(u.callId);
+        queueMicrotask(() => { void pumpSteers().catch(fatal); });
+      }
       const r = u.toolCall?.result;
       const failed =
         r?.status === "error" ||
@@ -402,17 +521,226 @@ function withAuthHint(message) {
   return text;
 }
 
-async function runTurn(prompt, ready) {
+// Keep ownership until Cursor confirms that the active turn appended the text.
+// A boundary race returns revert_to_followup; only those messages start a turn.
+const pendingSteers = [];
+// The model the agent runs: set at start, replaced by a reconfiguring
+// message. Once replaced, every send names it (a send's model is per-run).
+let currentModel = null;
+let modelChanged = false;
+// Messages up to (not including) the first that changes the model or
+// carries images (native steering takes text only): only those may ride the
+// running turn, natively or batched.
+function steerableNow() {
+  const at = pendingSteers.findIndex(message => message.selection || message.images.length);
+  return at < 0 ? pendingSteers : pendingSteers.slice(0, at);
+}
+const steerDeliveries = new Set();
+let steerPump = null;
+let turnActive = false;
+// Immediate steering: Cursor's native steer lands only at a step boundary, so
+// a plain text answer would run to completion first. With no tool running, a
+// steer cancels the streaming run and continues as the follow-up turn (the
+// way Codex turn/steer behaves). A running tool is never cancelled: the
+// native steer injects at its boundary instead.
+let preempting = false;
+// The run a steer cancelled: its late stream updates must not leak into the
+// steer's reply.
+let preemptedRun = null;
+// Tests of the native SDK steering path disable preemption.
+const NATIVE_STEER_ONLY = process.env.ZERON_CURSOR_NATIVE_STEER_ONLY === "1";
+function preemptForSteer() {
+  if (NATIVE_STEER_ONLY) return false;
+  if (!turnActive || !run || activeTools.size || preempting || interrupted || stopping || closing) return false;
+  preempting = true;
+  preemptedRun = run;
+  run.cancel().catch(() => {});
+  return true;
+}
+// The preempted run ended: its steers continue the conversation as one turn.
+async function continueAfterPreempt() {
+  preempting = false;
+  activeTools.clear();
+  await Promise.all(steerDeliveries);
+  run = null;
+  turnActive = false;
+  if (!pendingSteers.length) {
+    out({ ev: "turn", status: "finished" });
+    return;
+  }
+  chain = chain.then(followupSteers).catch(fatal);
+}
+function pumpSteers() {
+  if (steerPump) return steerPump;
+  if (preempting) return Promise.resolve();
+  if (!run || !pendingSteers.length || activeTools.size) return Promise.resolve();
+  const target = run;
+  steerPump = (async () => {
+    while (pendingSteers.length && run === target && !activeTools.size && !interrupted && !closing) {
+      if (typeof target.steer !== "function") {
+        throw new Error("Cursor SDK lacks native steering; update the managed SDK");
+      }
+      const message = steerableNow().find(message => !message.submitted && message.revertedRun !== target);
+      if (!message) return;
+      const reverted = await recordNativeSteer(message.prompt);
+      // History lookup can yield while another tool starts. Never let native
+      // steering cancel its shell/process tree; inject at the tool boundary.
+      if (activeTools.size) { reverted(); return; }
+      message.submitted = true;
+      // Cursor's client submits each injection independently. Awaiting its
+      // terminal delivery acknowledgment here serializes model responses.
+      const delivery = target.steer(message.prompt).then(outcome => {
+        if (outcome === "revert_to_followup") {
+          message.revertedRun = target;
+          reverted();
+        } else if (outcome === "complete_delivered") {
+          message.delivered = true;
+        } else {
+          throw new Error(`Unknown Cursor steering acknowledgment: ${outcome}`);
+        }
+        // The engine owns an ordered mailbox even when SDK acks arrive out of order.
+        while (pendingSteers[0]?.delivered) {
+          pendingSteers.shift();
+          out({ev: "steered"});
+        }
+      });
+      steerDeliveries.add(delivery);
+      void delivery.catch(fatal).finally(() => steerDeliveries.delete(delivery));
+    }
+  })().finally(() => { steerPump = null; });
+  return steerPump;
+}
+async function followupSteers() {
+  while (pendingSteers.length && !interrupted && !closing) {
+    // A model change starts its own turn: it never joins the messages sent
+    // before it, and those after it run on its model.
+    if (pendingSteers[0].selection) {
+      currentModel = pendingSteers[0].selection;
+      modelChanged = true;
+    }
+    const next = pendingSteers.findIndex((message, i) => i > 0 && message.selection);
+    const batch = pendingSteers.splice(0, next < 0 ? pendingSteers.length : next);
+    // A later input can be delivered before an earlier one is rejected.
+    // Never replay the delivered input when draining the rejected prefix.
+    const undelivered = batch.filter(message => !message.delivered);
+    const prompt = undelivered.length === 1 ? undelivered[0].prompt :
+      "These user messages arrived together. Address them together in order:\n" +
+      JSON.stringify(undelivered.map(message => message.prompt));
+    await runTurn(prompt, undefined, () => {
+      for (const message of batch) out({ev: "steered"});
+    }, undelivered.flatMap(message => message.images));
+  }
+}
+// Bytes of images one send may inline, and how long a send may go without
+// a single SDK update: set by the engine's run frame.
+let imageBudget = Infinity;
+let silenceTimeoutMs = 10 * 60 * 1000;
+// Several messages' images can ride one send (a batched follow-up). Past the
+// budget the rest ride as the path refs already in their text.
+function withinBudget(images) {
+  let left = imageBudget;
+  return images.filter(({ data }) => {
+    const bytes = Math.floor(data.length * 3 / 4);
+    if (bytes > left) return false;
+    left -= bytes;
+    return true;
+  });
+}
+// The SDK can go silent for good after a send (a large inlined image did,
+// live: no update for 400s+, never settling). A run streams updates from its
+// first model step, and a running tool has announced itself by then, so a
+// send with no update at all past the bound is wedged, not slow.
+const SILENT = Symbol("silent");
+function silenceWatch() {
+  let timer;
+  let fire;
+  let abandoned = false;
+  const silent = new Promise((resolve) => { fire = resolve; });
+  return {
+    silent,
+    arm() { timer = setTimeout(fire, silenceTimeoutMs, SILENT); },
+    heard() { clearTimeout(timer); },
+    // Once its turn is abandoned, nothing the send reports reaches the
+    // engine: the turn already ended.
+    abandon() { abandoned = true; },
+    get abandoned() { return abandoned; },
+  };
+}
+// `{type, data, mimeType}` blocks from the engine → the SDK's image shape.
+function sdkImages(images) {
+  return (Array.isArray(images) ? images : [])
+    .filter((image) => typeof image?.data === "string" && typeof image?.mimeType === "string")
+    .map(({ data, mimeType }) => ({ data, mimeType }));
+}
+function acceptSteer(message) {
+  message.images = sdkImages(message.images);
+  if (message.reconfigure) message.selection = modelSelection(message);
+  pendingSteers.push(message);
+  if (turnActive) {
+    if (!preemptForSteer()) void pumpSteers().catch(fatal);
+  } else {
+    chain = chain.then(followupSteers).catch(fatal);
+  }
+}
+
+async function runTurn(prompt, ready, accepted, images = []) {
+  const watch = silenceWatch();
+  try {
+    await sendTurn(prompt, ready, accepted, withinBudget(images), watch);
+  } finally {
+    watch.heard();
+  }
+}
+
+// The send outlived the silence bound: abandon the turn with a clear error.
+// The process lives on: whatever the stuck send reports later is dropped
+// (see `silenceWatch`), and the next message starts a run of its own (a run
+// the SDK still holds active is expired then, see `sendTurn`).
+function abandonSilentTurn(watch, pending) {
+  watch.abandon();
+  void pending?.then((late) => late?.cancel().catch(() => {}), () => {});
+  if (run) run.cancel().catch(() => {});
+  activeTools.clear();
+  run = null;
+  turnActive = false;
+  const seconds = Math.max(1, Math.round(silenceTimeoutMs / 1000));
+  const span = seconds >= 120 ? `${Math.round(seconds / 60)} minutes` : `${seconds} seconds`;
+  out({
+    ev: "turn",
+    status: interrupted || stopping ? "cancelled" : "error",
+    ...(interrupted || stopping ? {} : {
+      error: `Cursor sent nothing back for ${span} after the message went out, ` +
+        "so the turn was abandoned. Send it again to retry.",
+    }),
+  });
+  stopping = false;
+}
+
+async function sendTurn(prompt, ready, accepted, images, watch) {
+  turnActive = true;
   if (closing) return;
   try {
     prompt = await preserveInterruptedContext(prompt);
     ready?.();
-    if (interrupted || closing) {
+    if (interrupted || stopping || closing) {
+      stopping = false;
+      turnActive = false;
       out({ev: "turn", status: "cancelled"});
       return;
     }
-    run = await agent.send(prompt, {
+    accepted?.();
+    reply = new ReplyFailure();
+    replyOpen = false;
+    streamedText = false;
+    let thisRun = null;
+    const message = images.length ? { text: prompt, images } : prompt;
+    const send = (local) => agent.send(message, {
+      ...(modelChanged ? { model: currentModel } : {}),
+      ...(local ? { local } : {}),
       onDelta: ({ update }) => {
+        watch.heard();
+        if (watch.abandoned) return;
+        if (thisRun && thisRun === preemptedRun) return;
         try {
           mapUpdate(update);
         } catch {
@@ -420,30 +748,78 @@ async function runTurn(prompt, ready) {
         }
       },
     });
+    watch.arm();
+    const sent = async (local) => {
+      const pending = send(local);
+      const outcome = await Promise.race([pending, watch.silent]);
+      if (outcome === SILENT) throw Object.assign(new Error("silent"), { silent: pending });
+      return outcome;
+    };
+    try {
+      run = thisRun = await sent();
+    } catch (e) {
+      if (e?.silent) throw e;
+      // The agent's persisted run never reached a terminal state (a process
+      // that died mid-run, a cancel that wedged). This send is the only run
+      // this process starts on the agent, so expiring that stale run — the
+      // SDK's own recovery option — is safe. Once.
+      if (!/already has (?:an )?active run/i.test(String(e?.message ?? e))) throw e;
+      run = thisRun = await sent({ force: true });
+    }
   } catch (e) {
+    if (e?.silent) return abandonSilentTurn(watch, e.silent);
     out({ ev: "turn", status: "error", error: withAuthHint(formatError(e, run?.requestId)) });
     run = null;
+    turnActive = false;
     return;
   }
+  // A steer that arrived while send() was creating the run preempts now.
+  if (!pendingSteers.length || !preemptForSteer()) void pumpSteers().catch(fatal);
   // Interrupt may arrive while send() is still creating the run.
-  if (interrupted || closing) await run.cancel().catch(() => {});
+  if (interrupted || stopping || closing) await run.cancel().catch(() => {});
   let result;
   try {
-    result = await run.wait();
+    result = await Promise.race([run.wait(), watch.silent]);
+    if (result === SILENT) return abandonSilentTurn(watch);
   } catch (e) {
+    if (preempting && !interrupted && !stopping && !closing) return continueAfterPreempt();
+    const stopped = stopping;
+    stopping = false;
+    if (stopped) {
+      // The agent lives on; the next prompt starts a fresh run.
+      activeTools.clear();
+      run = null;
+      turnActive = false;
+    }
     out({
       ev: "turn",
-      status: interrupted ? "cancelled" : "error",
-      error: withAuthHint(formatError(e, run?.requestId)),
+      status: interrupted || stopped ? "cancelled" : "error",
+      ...(interrupted || stopped ? {} : { error: withAuthHint(formatError(e, run?.requestId)) }),
     });
     return;
   }
+  if (preempting && !interrupted && !stopping && !closing) return continueAfterPreempt();
+  activeTools.clear();
+  await pumpSteers();
+  await Promise.all(steerDeliveries);
   run = null;
+  turnActive = false;
+  const stopped = stopping;
+  stopping = false;
+  // A reply the SDK settled without streaming it still belongs in the chat.
+  if (!stopped && !streamedText && typeof result?.result === "string" && result.result) {
+    reply = new ReplyFailure();
+    reply.push(result.result);
+    out({ ev: "text", text: result.result });
+  }
+  const transportFailure = !stopped && (result?.status ?? "finished") === "finished" ? reply.failure : undefined;
   out({
     ev: "turn",
-    status: result?.status ?? "finished",
-    ...(result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
+    status: stopped ? "cancelled" : transportFailure ? "error" : result?.status ?? "finished",
+    ...(transportFailure ? { error: transportFailure } : {}),
+    ...(!stopped && !transportFailure && result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
   });
+  if (pendingSteers.length) chain = chain.then(followupSteers).catch(fatal);
 }
 
 // The run's ModelSelection: id + typed parameter values (thinking / context /
@@ -465,8 +841,24 @@ function modelSelection(msg) {
 }
 
 async function start(msg) {
+  if (Number.isFinite(msg.imageBudget) && msg.imageBudget >= 0) imageBudget = msg.imageBudget;
+  // setTimeout fires at once past 2^31-1 ms; clamp to it (about 24 days).
+  if (Number.isFinite(msg.silenceTimeoutMs) && msg.silenceTimeoutMs > 0) {
+    silenceTimeoutMs = Math.min(msg.silenceTimeoutMs, 2 ** 31 - 1);
+  }
   const model = modelSelection(msg);
-  const local = { cwd: msg.cwd || process.cwd(), enableAgentRetries: true };
+  currentModel = model;
+  // The SDK loads NO ambient settings unless asked: without settingSources the
+  // user's ~/.cursor/mcp.json and plugins are invisible and the inline zeron
+  // server is the only MCP the agent sees. "project" (and so "all") is left
+  // out on purpose: the SDK hardcodes ignoreApprovals, so a repo's
+  // .cursor/mcp.json and .cursor/hooks.json would spawn their commands at chat
+  // start with none of the approval gating Cursor itself applies.
+  const local = {
+    cwd: msg.cwd || process.cwd(),
+    enableAgentRetries: true,
+    settingSources: ["user", "team", "mdm", "plugins"],
+  };
   // Isolated per-run store (see the header above). Resume looks the agent's
   // store up by marker; a markerless (pre-isolation) agent resumes from the
   // SDK's default store exactly as before.
@@ -485,8 +877,14 @@ async function start(msg) {
     local.store = fresh.store;
     runDir = fresh.dir;
   }
+  // Zeron's own server plus the plugins' native ones (`extraMcp`); Zeron's
+  // wins a name clash.
+  const servers = [...(msg.extraMcp ?? []), ...(msg.mcp ? [msg.mcp] : [])];
   const options = {
     model,
+    ...(servers.length ? { mcpServers: Object.fromEntries(servers.map(server => [server.name, {
+      type: "stdio", command: server.command, args: server.args, env: server.env,
+    }])) } : {}),
     // askQuestion has no public answer channel in this SDK (SDKRequestMessage
     // carries only a request id) — a question would block the run forever.
     // generateImage has nowhere to land in a zeron session (ACP parity).
@@ -506,7 +904,18 @@ async function start(msg) {
       } catch (error) {
         if (attempt >= 6 || interrupted || closing ||
             !/rate limit.*get_models|get_models.*rate limit/i.test(String(error?.message ?? error))) throw error;
-        await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+        await new Promise(resolve => {
+          wakeStartup = resolve;
+          setTimeout(resolve, 1000 * 2 ** attempt);
+        });
+        wakeStartup = null;
+        if (interrupted || closing) throw error;
+        // Stopped while waiting out the limit: the turn ends before it began.
+        // No agent exists to take a next prompt, so the process ends with it.
+        if (stopping) {
+          out({ ev: "turn", status: "cancelled" });
+          await exitAfterFlush(0);
+        }
       }
     }
   } catch (e) {
@@ -528,7 +937,7 @@ async function start(msg) {
   }
   await runTurn(msg.prompt ?? "", () => {
     out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });
-  });
+  }, undefined, sdkImages(msg.images));
 }
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -546,6 +955,9 @@ rl.on("line", (line) => {
     case "run":
       chain = chain.then(() => start(msg)).catch((e) => fatal(e));
       break;
+    case "steer":
+      acceptSteer(msg);
+      break;
     case "user":
       chain = chain
         .then(() => (agent ? runTurn(msg.prompt ?? "") : undefined))
@@ -553,7 +965,25 @@ rl.on("line", (line) => {
       break;
     case "interrupt":
       interrupted = true;
+      wakeStartup?.();
       if (run) run.cancel().catch(() => {});
+      break;
+    case "stop":
+      // Undelivered steers go with the stopped turn.
+      pendingSteers.splice(0);
+      if (!agent && !closing) {
+        // Still starting (creating or resuming the agent, possibly waiting
+        // out a rate limit): the first turn sees the flag and settles
+        // cancelled exactly once, instead of a cancel now and the prompt
+        // running anyway.
+        stopping = true;
+        wakeStartup?.();
+      } else if (!turnActive) {
+        out({ev: "turn", status: "cancelled"});
+      } else {
+        stopping = true;
+        if (run) run.cancel().catch(() => {});
+      }
       break;
     default:
       break;

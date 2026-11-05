@@ -277,6 +277,27 @@ pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
     GEIST.iter().chain(GEIST_MONO.iter()).copied()
 }
 
+/// The native font backend, not TestAppContext's simulated metrics, with the
+/// bundled faces registered. Platforms can't be created concurrently, so the
+/// guard serializes the tests that use one.
+#[cfg(test)]
+pub(crate) fn native_text_system() -> (std::sync::MutexGuard<'static, ()>, gpui::WindowTextSystem) {
+    static NATIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = NATIVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Windows headless mode uses NoopTextSystem; DirectWrite needs a full
+    // platform, as CoreText/fontconfig do elsewhere.
+    let platform = gpui_platform::current_platform(!cfg!(windows));
+    let text_system = gpui::WindowTextSystem::new(std::sync::Arc::new(gpui::TextSystem::new(
+        platform.text_system(),
+    )));
+    text_system
+        .add_fonts(bundled_font_faces().map(Cow::Borrowed).collect())
+        .unwrap();
+    (guard, text_system)
+}
+
 fn register_family(cx: &App, family: &UiFontFamily, faces: &'static [&'static [u8]]) -> bool {
     let fonts = faces.iter().map(|face| Cow::Borrowed(*face)).collect();
     match cx.text_system().add_fonts(fonts) {

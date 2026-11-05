@@ -30,6 +30,11 @@ startup cursor amnesty repeatedly downloads the uncheckpointed rows.
   one repair; missing causal dependencies and actual server resets still invoke
   recovery. The verification flag is an append-only SQLite migration, defaults
   false for old data, and is invalidated by legacy snapshot/cursor writes.
+  One repair per legacy snapshot, never per rejoin: a document's persister
+  counts as verified from its first verified write, so a chat opened cold
+  (whose born snapshot is unverified) keeps its cursor when it rejoins after
+  idle retirement instead of rewinding to the checkpoint
+  (docs/regressions/remote-chat-opening-outage.md).
 - Checkpoints accept up to 32 MiB. Transfer deadlines allow 300 seconds, with
   connect/read inactivity bounds and existing Range resume retained. This fits
   the reported whale; it does not eliminate document growth indefinitely.
@@ -75,7 +80,7 @@ emits its Vitest shutdown-state diagnostic; the focused checkpoint run is clean.
 
 ```sh
 cargo test -p zeron-sync -p zeron-rpc --features zeron-sync/mock-server
-cargo test -p zeron-engine --lib --test session_publication --test restart_resume --test local_profiles --test codex_subagents
+cargo test -p zeron-engine --lib --test session_publication --test restart_resume --test misc
 cargo test -p zeron-update
 cargo test -p zeron-ui --lib -- --test-threads=1
 npm --prefix edge run typecheck

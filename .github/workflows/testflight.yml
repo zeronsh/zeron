@@ -23,15 +23,21 @@ concurrency:
 jobs:
   upload:
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-latest
-    timeout-minutes: 45
+    # Xcode 27.1 (the iOS 27.1 SDK): built with an older SDK the app runs in
+    # compatibility mode on iPhone Duo, without its vertical bars or layouts.
+    # macos-latest tops out at Xcode 26; the xcode-27 image (preview) has it.
+    runs-on: xcode-27
+    # App Store Connect credentials live in this environment (main only).
+    environment: apple-release
+    # Cold Rust core build (release profile, thin LTO) + archive + processing.
+    timeout-minutes: 90
     env:
       AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
       AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
       AUDIENCE: ${{ inputs.audience || 'internal' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Prepare App Store Connect credentials and build number
         shell: bash
@@ -89,33 +95,83 @@ jobs:
           latest_build="$(jq -r '[.data[].attributes.version | select(test("^[0-9]+$")) | tonumber] | max // 0' "$builds")"
           build_number="$((latest_build + 1))"
 
+          # Session notifications need the Push capability on the App ID (so
+          # the distribution profile the export makes includes it). Best
+          # effort with the reason logged: if it's still missing, the export
+          # fails with a clear provisioning error.
+          asc() { curl --globoff --silent --show-error -o "$1" -w '%{http_code}' -H "Authorization: Bearer $token" -H 'Content-Type: application/json' "${@:2}"; }
+          bundle_ids="$RUNNER_TEMP/bundle-ids.json"
+          status="$(asc "$bundle_ids" 'https://api.appstoreconnect.apple.com/v1/bundleIds?filter[identifier]=sh.zeron.ios')"
+          bundle_id="$(jq -r '[.data[]? | select(.attributes.identifier == "sh.zeron.ios")][0].id // empty' "$bundle_ids" 2>/dev/null || true)"
+          if [ "$status" != 200 ] || [ -z "$bundle_id" ]; then
+            echo "::warning::Couldn't look up the sh.zeron.ios App ID ($status): $(cat "$bundle_ids")"
+          else
+            caps="$RUNNER_TEMP/capabilities.json"
+            status="$(asc "$caps" "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_id/bundleIdCapabilities")"
+            if [ "$status" != 200 ]; then
+              echo "::warning::Couldn't read the App ID's capabilities ($status): $(cat "$caps")"
+            elif jq -e '.data[] | select(.attributes.capabilityType == "PUSH_NOTIFICATIONS")' "$caps" > /dev/null; then
+              echo "Push Notifications already enabled on sh.zeron.ios."
+            else
+              created="$RUNNER_TEMP/capability.json"
+              status="$(asc "$created" -X POST 'https://api.appstoreconnect.apple.com/v1/bundleIdCapabilities' \
+                --data "$(jq -n --arg id "$bundle_id" '{data: {type: "bundleIdCapabilities", attributes: {capabilityType: "PUSH_NOTIFICATIONS"}, relationships: {bundleId: {data: {type: "bundleIds", id: $id}}}}}')")"
+              if [ "$status" = 201 ]; then
+                echo "Enabled Push Notifications on sh.zeron.ios."
+              else
+                echo "::warning::Couldn't enable Push Notifications ($status): $(cat "$created")"
+              fi
+            fi
+          fi
+
           echo "AC_KEY_PATH=$key_path" >> "$GITHUB_ENV"
           echo "AC_TOKEN_PATH=$token_path" >> "$GITHUB_ENV"
           echo "ASC_APP_ID=$app_id" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
           echo "Preparing $AUDIENCE TestFlight build $build_number from $GITHUB_SHA."
 
-      - name: Xcode version
-        run: xcodebuild -version
-
-      - name: Compile iOS app and tests
-        working-directory: apps/ios
+      - name: Rust toolchain + iOS targets
         run: |
-          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO build-for-testing
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ios-core
+          cache-on-failure: true
 
+      # The image defaults to Xcode 27.0. Select 27.1 globally rather than via
+      # DEVELOPER_DIR: build-core.sh runs cargo under `env -i`.
+      - name: Xcode version
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+
+      # No separate simulator build: a generic simulator destination also
+      # builds x86_64, which the Rust core doesn't ship, and PR CI already
+      # builds and tests the app. The archive is the release build.
       - name: Archive build
         working-directory: apps/ios
         run: |
+          # Unsigned: signing here made Xcode mint an Apple Development
+          # certificate on every (fresh) runner until the team hit Apple's
+          # certificate limit. The export below signs for distribution with
+          # the cloud-managed certificate instead; entitlements are put on
+          # the archived app in the next step.
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
             -configuration Release -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Zeron.xcarchive" archive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$AC_KEY_PATH" \
-            -authenticationKeyID "$AC_API_KEY_ID" \
-            -authenticationKeyIssuerID "$AC_API_ISSUER_ID" \
+            CODE_SIGNING_ALLOWED=NO \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+
+      - name: Entitlements for export
+        run: |
+          # An unsigned archive carries no entitlements, and export re-signs
+          # with the ones it finds: ad-hoc sign the app with Zeron.entitlements
+          # (push) so the distribution signature keeps them (aps-environment
+          # becomes production from the App Store profile).
+          app="$RUNNER_TEMP/Zeron.xcarchive/Products/Applications/Zeron.app"
+          codesign --force --sign - --entitlements apps/ios/Zeron.entitlements "$app"
+          codesign -d --entitlements :- "$app" | grep -q aps-environment
 
       - name: Upload to TestFlight
         run: |

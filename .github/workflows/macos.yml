@@ -1,0 +1,289 @@
+name: macOS tests
+
+# Called by ci.yml, which decides which of these run (scripts/ci/plan.py) and
+# holds the runners for them (scripts/ci/admit.py).
+on:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+      native:
+        type: boolean
+        default: true
+      frame-source:
+        type: boolean
+        default: true
+      ios:
+        type: boolean
+        default: true
+      fixtures:
+        description: Also run the WebKit browser and preview fixtures (pull requests that touch them; always otherwise).
+        type: boolean
+        default: true
+      skip:
+        description: JSON list of jobs not to run (ci.yml; `ios-tests` when a pull request leaves the app alone).
+        type: string
+        default: '[]'
+
+permissions:
+  contents: read
+
+env:
+  # Pull requests and main leave out slow and soak tests (scripts/ci/nextest.toml `ci` profile).
+  NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'default' || 'ci' }}
+  # Tests run on the dev profile (workspace crates at opt-level 0, dependencies at 2 as configured in
+  # Cargo.toml) instead of --release: a cold build is several times cheaper. No debug info is needed.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+# Every macOS job starts with `rustup update stable`: runner images are not uniform (one image may ship
+# rustc 1.98.0 and another 1.98.1) and rust-cache keys include the rustc version, so a job that lands
+# on an older image would otherwise miss the cache that `main` seeded.
+jobs:
+  # Updater and preview tests, native UI regressions and the two native WebKit fixtures. Everything is
+  # compiled once (one cargo invocation, so dependencies are built once) and then run.
+  macos-native:
+    if: inputs.native
+    runs-on: macos-latest
+    # A cold cache (first run, eviction, toolchain bump) takes about 32 minutes; warm is about 10.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Install cargo-nextest
+        run: |
+          # Pinned release, verified against a checksum.
+          version=0.9.146
+          sha256=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o "$RUNNER_TEMP/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-universal-apple-darwin.tar.gz"
+          echo "$sha256  $RUNNER_TEMP/nextest.tar.gz" | shasum -a 256 -c -
+          # macOS 26 runners ship rustup from the system package manager, so
+          # ~/.cargo/bin no longer exists. A run-scoped bin dir on PATH also
+          # keeps the verified binary out of the rust-cache'd ~/.cargo.
+          bin="$RUNNER_TEMP/nextest-bin"
+          mkdir -p "$bin"
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
+          echo "$bin" >> "$GITHUB_PATH"
+      # The app (`-p zeron --bins`) is compiled with the tests, sharing their zeron-ui
+      # build: a separate `cargo build -p zeron` rebuilt zeron-ui without the fixture
+      # feature (and a `cargo check` before that recompiled every dependency).
+      - name: Build tests and the application
+        run: |
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --locked \
+            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text -p zeron \
+            --features zeron-ui/browser-fixture --lib --bins --tests
+      - name: Build fixtures
+        if: inputs.fixtures
+        run: |
+          cargo build --locked -p zeron-update -p zeron-preview -p zeron-ui \
+            --features zeron-ui/browser-fixture --example browser-fixture --example preview-fixture
+      - name: Updater, preview, CoreText and native UI regressions
+        run: |
+          # zeron-text's coretext tests are macOS-only (#![cfg(target_os = "macos")]); its other
+          # tests run on Linux in ios-core. The attachment filters cover file staging, chips and
+          # external Finder drops, whose paths and file metadata are platform-specific.
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-fail-fast --locked \
+            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text -p zeron \
+            --features zeron-ui/browser-fixture --lib --bins --tests \
+            -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | binary_id(zeron::cli) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/) | test(/^attachments::tests::/) | test(/composer::attachment_chip_tests::/) | test(/shell::chat_dropzone_tests::/) | test(=queue::tests::queue_rows_label_attachment_chips_and_file_only_sends) | test(=transcript::tests::user_bubbles_project_attachment_chips_in_place_of_the_strip) | test(=transcript::tests::sent_chips_show_upload_progress_until_their_bytes_land)))'
+      - name: Native browser regression and screenshots
+        if: inputs.fixtures
+        timeout-minutes: 7
+        env:
+          RUST_BACKTRACE: 1
+          FIXTURE_ATTEMPT_TIMEOUT: 110
+        run: |
+          scripts/ci/run-macos-fixture.sh target/debug/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
+          test -f "$RUNNER_TEMP/browser-captures/result.txt"
+      - name: Persistent browser profiles across app launches
+        if: inputs.fixtures
+        timeout-minutes: 5
+        run: python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
+      - name: Upload browser screenshots
+        if: ${{ inputs.fixtures && always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-macos-captures
+          path: ${{ runner.temp }}/browser-captures*
+          if-no-files-found: ignore
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: inputs.fixtures
+        with:
+          node-version: 24
+      - name: Install preview fixture server
+        if: inputs.fixtures
+        run: npm ci --prefix edge
+      - name: Project discovery, stable URLs and HMR in native WebKit
+        if: inputs.fixtures
+        timeout-minutes: 5
+        env:
+          ZERON_PREVIEW_AUTO_OPEN: 1
+        run: |
+          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" scripts/ci/run-macos-fixture.sh target/debug/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          test -f "$RUNNER_TEMP/preview-captures/result.txt"
+      - name: Upload preview screenshots
+        if: ${{ inputs.fixtures && always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: preview-macos-captures
+          path: ${{ runner.temp }}/preview-captures*
+          if-no-files-found: ignore
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-macos-native
+
+  # gpui_macos lives in the pinned GPUI checkout, a separate workspace with its own cache.
+  macos-frame-source:
+    if: inputs.frame-source
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup show active-toolchain || rustup toolchain install
+      - name: Check out pinned GPUI for native frame-source tests
+        shell: bash
+        run: |
+          rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
+          git init frame-source-tests
+          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
+          git -C frame-source-tests fetch --depth=1 origin "$rev"
+          git -C frame-source-tests checkout --detach FETCH_HEAD
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+          workspaces: frame-source-tests
+      - name: Native frame-source recovery regression
+        working-directory: frame-source-tests
+        run: cargo test --locked -p gpui_macos --test frame_source_recovery
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-macos-frame-source
+
+  # The iOS checks that do not need Apple tooling run on Linux: Rust mobile core tests, and "the
+  # committed Swift bindings are current" (the UniFFI metadata is identical for any target, so the
+  # bindings are generated from the host build of the library).
+  ios-core:
+    if: inputs.ios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Rust mobile core tests
+        run: cargo test --locked -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
+      # Only for the simulator tests, which link these bindings (they run when the app,
+      # the FFI crate or the client changes, see scripts/ci/plan.py).
+      # The committed bindings: the Swift file the app compiles, and the C header and
+      # module map the simulator job links (apps/ios/CoreFFI). scripts/ios/build-core.sh
+      # refreshes all three. Only crates/mobile defines the FFI, so this runs with the
+      # simulator tests (see scripts/ci/plan.py).
+      - name: Generated bindings are current
+        if: ${{ !contains(fromJSON(inputs.skip), 'ios-tests') }}
+        run: |
+          cargo build --locked -p zeron-mobile --lib
+          cargo build --locked -p zeron-mobile --bin uniffi-bindgen --features bindgen
+          target/debug/uniffi-bindgen generate --library target/debug/libzeron_mobile.so \
+            --language swift --out-dir "$RUNNER_TEMP/gen" >/dev/null
+          diff -u apps/ios/Zeron/Core/Generated/zeron_core.swift "$RUNNER_TEMP/gen/zeron_core.swift"
+          diff -u apps/ios/CoreFFI/zeron_coreFFI.h "$RUNNER_TEMP/gen/zeron_coreFFI.h"
+          diff -u apps/ios/CoreFFI/module.modulemap "$RUNNER_TEMP/gen/zeron_coreFFI.modulemap"
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-ios-core
+
+  # iOS unit tests in the simulator (pull requests: when the app, the FFI crate or the
+  # client changes). Independent of ios-core: the bindings it links are committed
+  # (apps/ios/CoreFFI), and ios-core checks they are current.
+  # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
+  # VM and slow every other step down by minutes. xcodebuild boots it when needed.
+  ios-tests:
+    if: ${{ inputs.ios && !contains(fromJSON(inputs.skip), 'ios-tests') }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Select an available iPhone simulator
+        run: |
+          # The app targets iOS 26: use the newest Xcode 26 and the newest iOS runtime installed.
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$xcode" ]; then echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"; fi
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"]))["devices"]
+          def version(runtime):
+              return [int(part) for part in runtime.split("iOS-")[-1].split("-") if part.isdigit()]
+          iphones = [device for runtime, group in sorted(devices.items(), key=lambda item: version(item[0]), reverse=True)
+                     if "iOS" in runtime for device in group if device["name"].startswith("iPhone")]
+          if not iphones:
+              raise SystemExit("No iPhone simulator is installed")
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
+          PYTHON
+      - name: Rust toolchain + iOS simulator target
+        run: |
+          rustup update stable --no-self-update
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      # The dev profile (workspace crates unoptimized, dependencies at opt-level 2): the
+      # unit tests don't need the optimized core the app ships, and it builds in about half the time.
+      - name: Build the Rust core for the simulator
+        run: |
+          IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build --locked -p zeron-mobile --lib --target aarch64-apple-ios-sim
+          mkdir -p target/ios-core/iphonesimulator/include
+          cp target/aarch64-apple-ios-sim/debug/libzeron_mobile.a target/ios-core/iphonesimulator/
+          cp apps/ios/CoreFFI/zeron_coreFFI.h target/ios-core/iphonesimulator/include/zeron_coreFFI.h
+          cp apps/ios/CoreFFI/module.modulemap target/ios-core/iphonesimulator/include/module.modulemap
+      - name: Run iOS unit tests
+        working-directory: apps/ios
+        env:
+          # Reuse the core built above instead of rebuilding it in the Xcode build phase.
+          ZERON_SKIP_CORE: 1
+        run: |
+          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
+            -only-testing:ZeronTests CODE_SIGNING_ALLOWED=NO test
+      - name: Upload iOS test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-test-results
+          path: ${{ runner.temp }}/ios-tests.xcresult
+          if-no-files-found: ignore
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-ios-tests

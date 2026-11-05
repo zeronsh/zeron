@@ -30,6 +30,9 @@ pub struct Span {
 
 #[derive(Clone, Default)]
 struct MdSelection {
+    /// Painted surface (transcript) the selection lives in. Keys are only
+    /// unique within one: a side chat's forked history repeats its parent's.
+    surface: u64,
     /// Element that owns the drag (where the mouse went down).
     anchor_key: String,
     /// Byte offset of the anchor within its element.
@@ -87,7 +90,13 @@ pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, us
 
 /// Begin a drag anchored at `(key, ix)`; claims the global selection.
 pub fn begin(key: &str, ix: usize) {
+    begin_in(0, key, ix);
+}
+
+/// `begin` on one of several surfaces painted in the same frame.
+pub(crate) fn begin_in(surface: u64, key: &str, ix: usize) {
     *state().lock().unwrap() = Some(MdSelection {
+        surface,
         anchor_key: key.to_string(),
         anchor_ix: ix,
         dragging: true,
@@ -98,7 +107,13 @@ pub fn begin(key: &str, ix: usize) {
 
 /// Begin with an immediate span (double/triple click inside one element).
 pub fn begin_with_span(key: &str, text: &str, range: Range<usize>) {
+    begin_with_span_in(0, key, text, range);
+}
+
+/// `begin_with_span` on one of several surfaces painted in the same frame.
+pub(crate) fn begin_with_span_in(surface: u64, key: &str, text: &str, range: Range<usize>) {
     *state().lock().unwrap() = Some(MdSelection {
+        surface,
         anchor_key: key.to_string(),
         anchor_ix: range.start,
         dragging: true,
@@ -124,6 +139,11 @@ pub(crate) fn anchor_key() -> Option<String> {
         .unwrap()
         .as_ref()
         .map(|s| s.anchor_key.clone())
+}
+
+/// The surface the selection lives in (0 when there is none).
+pub(crate) fn anchor_surface() -> u64 {
+    state().lock().unwrap().as_ref().map_or(0, |s| s.surface)
 }
 
 /// Whether a markdown selection drag is currently in flight.
@@ -268,10 +288,11 @@ pub fn clear_if_owner(key: &str) -> bool {
     false
 }
 
-/// The wash range for `key` this frame (empty ⇒ nothing to paint).
-pub fn wash_range(key: &str) -> Option<Range<usize>> {
+/// The wash range for `key` painted on `surface` this frame (empty ⇒ nothing
+/// to paint). Another surface showing the same key stays unwashed.
+pub fn wash_range(surface: u64, key: &str) -> Option<Range<usize>> {
     let guard = state().lock().unwrap();
-    let sel = guard.as_ref()?;
+    let sel = guard.as_ref().filter(|sel| sel.surface == surface)?;
     sel.spans
         .iter()
         .find(|s| s.key == key && !s.range.is_empty())
@@ -381,9 +402,9 @@ mod tests {
         let spans = resolve_spans(&elems(), (0, 6), (1, 6));
         assert!(update_spans(spans.clone()));
         assert!(!update_spans(spans)); // unchanged ⇒ no repaint
-        assert_eq!(wash_range("p1"), Some(6..15));
-        assert_eq!(wash_range("p2"), Some(0..6));
-        assert_eq!(wash_range("p3"), None);
+        assert_eq!(wash_range(0, "p1"), Some(6..15));
+        assert_eq!(wash_range(0, "p2"), Some(0..6));
+        assert_eq!(wash_range(0, "p3"), None);
         assert_eq!(end_drag("p1").as_deref(), Some("paragraph\nsecond"));
         assert_eq!(selected_text().as_deref(), Some("paragraph\nsecond"));
         // Settled: a down elsewhere clears via the owner's listener.
@@ -434,7 +455,7 @@ mod tests {
     fn double_click_span() {
         let _state = test_state_lock();
         begin_with_span("p1", "hello world", 6..11);
-        assert_eq!(wash_range("p1"), Some(6..11));
+        assert_eq!(wash_range(0, "p1"), Some(6..11));
         assert_eq!(end_drag("p1").as_deref(), Some("world"));
     }
 

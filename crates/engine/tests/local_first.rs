@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
 use zeron_engine::{AuthState, Engine, EngineConfig, EngineInfo, HarnessId, WorkspaceScope};
-use zeron_rpc::{connect_ws, memory_client, methods};
+use zeron_rpc::{connect_ipc, connect_ws, memory_client, methods};
 
 fn config(
     data_dir: &std::path::Path,
@@ -554,7 +554,7 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+            if let Ok(client) = connect_ipc(port, Some(dir.path())).await {
                 break client;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -562,6 +562,28 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
     })
     .await
     .expect("headless IPC did not start");
+
+    // The daemon published an owner-only bearer and refuses dials without it.
+    let token_file = zeron_rpc::ipc_auth::token_path(dir.path());
+    assert!(
+        token_file.is_file(),
+        "headless start must publish its IPC token"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "IPC token must be owner-only");
+    }
+    let url = format!("ws://127.0.0.1:{port}");
+    assert!(
+        connect_ws(&url, None).await.is_err(),
+        "a dial without the token must be refused"
+    );
+    assert!(
+        connect_ws(&url, Some("0000")).await.is_err(),
+        "a dial with a wrong token must be refused"
+    );
 
     assert_eq!(
         client
@@ -600,7 +622,7 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+            if let Ok(client) = connect_ipc(port, Some(dir.path())).await {
                 break client;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

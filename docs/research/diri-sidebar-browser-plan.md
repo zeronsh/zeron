@@ -8,7 +8,17 @@ Diri reference: [`c564784199cfbeabd29f011bac28467a2b12fccf`](https://github.com/
 
 V1 uses the system webview and native compositing; CEF remains a possible later backend.
 
-## Implementation
+## Current behavior update (2026-09-27)
+
+The v1 design below is historical. The embedded browser now supports Linux as
+well as macOS. Website data is persistent per Zeron profile on Linux and macOS
+14+, and remains temporary with a visible notice on macOS 12/13. Changing
+profiles closes the old views without deleting persistent data; returning to a
+profile reopens its store. Windows uses the external browser. Tab restoration
+is still outside this feature. See [browser profiles](../reference/browser-profiles.md)
+and [Linux browser](../reference/linux-browser.md) for the current behavior.
+
+## Original implementation
 
 The implementation uses `browser/{mod,model,view,macos}.rs`, with Wry restricted
 to macOS dependencies. The real shell owns session-specific browser entities;

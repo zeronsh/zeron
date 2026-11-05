@@ -33,14 +33,37 @@
 			</array>
 		</dict>
 	</array>
-	<key>UIAppFonts</key>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Attach photos to messages.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Voice calls you start stream your audio to OpenAI through the ChatGPT account signed in to Codex on your host.</string>
+	<key>UIBackgroundModes</key>
 	<array>
-		<string>Geist.ttf</string>
-		<string>Geist-Medium.ttf</string>
-		<string>Geist-SemiBold.ttf</string>
-		<string>Geist-Bold.ttf</string>
-		<string>GeistMono.ttf</string>
+		<string>audio</string>
 	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Take photos to attach to messages.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Terminals connect straight to your computer on the same network, so typing shows up without a round trip through the cloud.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
@@ -63,8 +86,6 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>UIUserInterfaceStyle</key>
-	<string>Dark</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

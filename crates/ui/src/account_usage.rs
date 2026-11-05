@@ -18,6 +18,7 @@ use crate::settings::accounts::{
     self, AccountsSnapshotCache, UsageLevel, render_usage_meter, reports_usage, signs_in,
     usage_color, usage_level,
 };
+use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -34,6 +35,42 @@ pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
         .iter()
         .map(|window| window.used_fraction.clamp(0.0, 1.0))
         .reduce(f32::max)
+}
+
+/// Whether a Cursor model draws from Cursor's own pool (Composer and the Grok
+/// models, the plan's `autoBucketModels`) rather than the third-party API pool
+/// (Claude, GPT, Gemini, ...). Pure.
+fn cursor_model_is_first_party(model: &str) -> bool {
+    ["default", "auto", "composer", "vega", "grok", "cursor-grok"]
+        .iter()
+        .any(|prefix| {
+            model
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.']))
+        })
+}
+
+/// What the footer ring reads: for Cursor, the window of the pool the selected
+/// model draws from (first-party "Cursor" or third-party "Other"); otherwise,
+/// or while that window is missing, the most-used window. Pure.
+pub fn ring_fraction(
+    account: &AgentAccount,
+    harness: HarnessId,
+    model: Option<&str>,
+) -> Option<f32> {
+    if harness == HarnessId::Cursor
+        && let Some(model) = model
+    {
+        let label = if cursor_model_is_first_party(model) {
+            zeron_proto::CURSOR_USAGE_CURSOR
+        } else {
+            zeron_proto::CURSOR_USAGE_OTHER
+        };
+        if let Some(window) = account.usage_windows.iter().find(|w| w.label == label) {
+            return Some(window.used_fraction.clamp(0.0, 1.0));
+        }
+    }
+    used_fraction(account)
 }
 
 /// The harness's live account, when it reports usage. Pure.
@@ -53,6 +90,8 @@ pub struct AccountUsage {
     /// `None` = this device, as in [`AccountsSnapshotCache`].
     target: Option<String>,
     harness: Option<HarnessId>,
+    /// The composer's selected model: Cursor's ring follows its pool.
+    model: Option<String>,
     /// Once any list has been asked for the current target.
     loaded: bool,
     last_forced: Option<Instant>,
@@ -87,6 +126,7 @@ impl AccountUsage {
             state,
             target: None,
             harness: None,
+            model: None,
             loaded: false,
             last_forced: None,
             error: None,
@@ -104,11 +144,13 @@ impl AccountUsage {
     pub fn track(
         &mut self,
         harness: Option<HarnessId>,
+        model: Option<String>,
         target: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let harness = harness.filter(|h| signs_in(*h) && reports_usage(*h));
         self.harness = harness;
+        self.model = model;
         if self.target != target {
             self.target = target;
             self.loaded = false;
@@ -234,10 +276,16 @@ impl AccountUsage {
         cx.notify();
     }
 
-    /// The ring's reading: the live account's most-used window, when the
+    /// The ring's reading: the live account's window for the selected model
+    /// (the most-used one when the harness doesn't split by model), when the
     /// harness has a live account with usage to show.
     fn fraction(&self, cx: &gpui::App) -> Option<f32> {
-        used_fraction(active_account(self.snapshot(cx)?, self.harness?)?)
+        let harness = self.harness?;
+        ring_fraction(
+            active_account(self.snapshot(cx)?, harness)?,
+            harness,
+            self.model.as_deref(),
+        )
     }
 
     /// A trigger click: open this ring's popover, or close it when the
@@ -300,6 +348,7 @@ impl AccountUsage {
     fn accounts_card(&self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = &Theme::of(cx).for_popup();
         let harness = self.harness;
+        let now = chrono::Utc::now();
         let rows: Vec<AgentAccount> = match (harness, self.snapshot(cx)) {
             (Some(harness), Some(snapshot)) => accounts::provider_accounts(snapshot, harness)
                 .into_iter()
@@ -372,13 +421,24 @@ impl AccountUsage {
                             }),
                     )
                     .child(
-                        div().flex_none().flex().flex_col().gap(px(2.0)).children(
-                            account
-                                .usage_windows
-                                .iter()
-                                .take(2)
-                                .map(|window| render_usage_meter(window, theme)),
-                        ),
+                        div()
+                            .id(("account-usage-meters", ix))
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .when(!account.usage_windows.is_empty(), |meters| {
+                                meters.tooltip(widgets::text_tooltip(accounts::usage_resets(
+                                    &account.usage_windows,
+                                    now,
+                                )))
+                            })
+                            .children(
+                                account
+                                    .usage_windows
+                                    .iter()
+                                    .map(|window| render_usage_meter(window, theme)),
+                            ),
                     )
             }))
             .children(self.error.clone().map(|error| {
@@ -492,6 +552,38 @@ mod tests {
         assert_eq!(
             used_fraction(&account(HarnessId::Codex, true, &[1.4])),
             Some(1.0)
+        );
+    }
+
+    #[test]
+    fn cursor_ring_follows_the_selected_models_pool() {
+        let mut cursor = account(HarnessId::Cursor, true, &[0.5, 0.01, 0.48]);
+        for (window, label) in cursor.usage_windows.iter_mut().zip([
+            zeron_proto::CURSOR_USAGE_CURSOR,
+            zeron_proto::CURSOR_USAGE_GROK,
+            zeron_proto::CURSOR_USAGE_OTHER,
+        ]) {
+            window.label = label.into();
+        }
+        let ring = |model| ring_fraction(&cursor, HarnessId::Cursor, model);
+        assert_eq!(ring(Some("composer-2.5")), Some(0.5));
+        assert_eq!(ring(Some("grok-4.7")), Some(0.5));
+        assert_eq!(ring(Some("default")), Some(0.5));
+        assert_eq!(ring(Some("claude-opus-5-5")), Some(0.48));
+        assert_eq!(ring(Some("gpt-5.5")), Some(0.48));
+        // "grokker" is not a Grok model; no model yet falls back to the most used.
+        assert_eq!(ring(Some("grokker-1")), Some(0.48));
+        assert_eq!(ring(None), Some(0.5));
+        // Other harnesses ignore the model, and a missing pool falls back too.
+        let codex = account(HarnessId::Codex, true, &[0.12, 0.64]);
+        assert_eq!(
+            ring_fraction(&codex, HarnessId::Codex, Some("gpt-5.5")),
+            Some(0.64)
+        );
+        let lone = account(HarnessId::Cursor, true, &[0.3]);
+        assert_eq!(
+            ring_fraction(&lone, HarnessId::Cursor, Some("gpt-5.5")),
+            Some(0.3)
         );
     }
 

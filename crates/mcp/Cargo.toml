@@ -13,8 +13,14 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
 tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+
+[dev-dependencies]
+zeron-theme.workspace = true
+zeron-visual.workspace = true
+tempfile.workspace = true

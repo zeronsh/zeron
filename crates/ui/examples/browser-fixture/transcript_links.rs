@@ -54,11 +54,14 @@ async fn screenshot(
     name: &str,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
-    // Synthetic key/focus dispatch updates hit testing synchronously. Request
-    // a presented frame too, especially when Wayland's frame loop is idle.
-    window.update(cx, |_, w, _| w.on_next_frame(|window, _| window.refresh()))?;
-    pause(cx, 250).await;
-    capture(output, name)
+    #[cfg(target_os = "linux")]
+    return capture_frame(window, output, name, cx).await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        window.update(cx, |_, w, _| w.on_next_frame(|window, _| window.refresh()))?;
+        pause(cx, 250).await;
+        capture(output, name)
+    }
 }
 
 pub(super) async fn exercise(

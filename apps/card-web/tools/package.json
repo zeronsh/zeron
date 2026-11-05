@@ -1,0 +1,11 @@
+{
+  "name": "zeron-card-web-tools",
+  "private": true,
+  "type": "module",
+  "description": "Build and test tooling for apps/card-web: font subsetting, static builds, headless captures and pixel diffs.",
+  "devDependencies": {
+    "pngjs": "7.0.0",
+    "puppeteer-core": "25.16.0",
+    "subset-font": "2.9.0"
+  }
+}

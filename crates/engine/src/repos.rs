@@ -6,13 +6,13 @@
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
 //! created under `~/.zeron/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
-//! matching `zeron/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
+//! matching `zeron/<name>` branch. Device preferences can choose another root;
+//! `ZERON_WORKTREES_DIR` takes precedence over those preferences.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::{StreamExt, stream};
@@ -20,11 +20,13 @@ use sha2::{Digest, Sha256};
 
 use zeron_proto::{
     DriveEntry, FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit,
-    GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, Repo, RepoRef,
-    Worktree,
+    GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, HomeFolderMatch,
+    HomeFolderSearchResult, Repo, RepoRef, Worktree,
 };
 
 use crate::EngineError;
+use crate::WorkspaceSearch;
+use crate::workspace_search::{NameKinds, normalize_name_query};
 
 /// Existence probe timeout for user-chosen / remembered paths, which can point at
 /// dead network mounts where a bare `stat` hangs for minutes.
@@ -41,10 +43,14 @@ const DRIVE_LIST_MAX_ENTRIES: usize = 50;
 const FILE_SEARCH_MAX_RESULTS: usize = 8;
 /// A dead network mount must not leave the composer search spinning forever.
 const FILE_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
+/// Folders `SearchHomeFolders` returns by default, and at most.
+pub const HOME_FOLDER_RESULTS: usize = 20;
+pub const HOME_FOLDER_MAX_RESULTS: usize = 50;
+/// Candidates taken from the index before re-ranking by name; more for a
+/// `/` query, which searches only its last segment.
+const HOME_FOLDER_CANDIDATES: usize = 300;
+const HOME_FOLDER_PATH_CANDIDATES: usize = 2_000;
 const GITHUB_AVATAR_TIMEOUT: Duration = Duration::from_secs(6);
-const FILE_INDEX_TTL: Duration = Duration::from_secs(10);
-const FILE_INDEX_MAX_ENTRIES: usize = 250_000;
-const RANK_BUFFER: usize = 1_024;
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
 
@@ -70,61 +76,91 @@ pub struct CheckoutIdentity {
 
 /// Best-effort home directory (the `ListFolders` default and worktree root base).
 pub(crate) fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .filter(|s| !s.is_empty())
+    let variables = if cfg!(windows) {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
+    };
+    variables
+        .into_iter()
+        .find_map(|name| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
         })
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// `~` / `~/…` → this host's home directory. Anything else passes through.
-pub(crate) fn expand_home(cwd: &str) -> String {
+/// An unavailable home is an error so `~` never silently becomes `/`.
+pub(crate) fn expand_home(cwd: &str) -> Result<String, &'static str> {
     match cwd.strip_prefix('~') {
-        Some("") => home_dir().to_string_lossy().into_owned(),
-        Some(rest) if rest.starts_with('/') => {
-            home_dir().join(&rest[1..]).to_string_lossy().into_owned()
-        }
-        _ => cwd.to_string(),
+        Some("") => Ok(session_home_dir()?.to_string_lossy().into_owned()),
+        Some(rest) if rest.starts_with('/') => Ok(session_home_dir()?
+            .join(&rest[1..])
+            .to_string_lossy()
+            .into_owned()),
+        _ => Ok(cwd.to_string()),
     }
 }
 
-/// Where new worktrees live. Deliberately NOT under the backend data dir —
-/// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR` overrides
-/// (test isolation); empty reads as unset.
-fn default_worktrees_root() -> PathBuf {
-    std::env::var_os("ZERON_WORKTREES_DIR")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".zeron").join("worktrees"))
+/// A chat cwd on this host: [`expand_home`], or a projectless chat's scratch
+/// folder under `scratch_root`, created on first use — createChat only names
+/// it, possibly on another device.
+pub(crate) fn resolve_chat_cwd(cwd: &str, scratch_root: &Path) -> Result<String, String> {
+    if !zeron_proto::projectless::is_scratch_cwd(cwd) {
+        return expand_home(cwd).map_err(str::to_string);
+    }
+    let name = cwd.trim().rsplit('/').next().unwrap_or_default();
+    let folder = scratch_root.join(name);
+    std::fs::create_dir_all(&folder).map_err(|error| {
+        format!(
+            "could not create the chat's folder {}: {error}",
+            folder.display()
+        )
+    })?;
+    Ok(folder.to_string_lossy().into_owned())
+}
+
+/// Resolve the host user's home for a session that explicitly uses `~`.
+/// An absent home must not silently turn a projectless session into `/`.
+pub(crate) fn session_home_dir() -> Result<PathBuf, &'static str> {
+    session_home_dir_with(|name| std::env::var_os(name))
+}
+
+fn session_home_dir_with(
+    mut env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Result<PathBuf, &'static str> {
+    #[cfg(windows)]
+    let names = ["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let names = ["HOME", "USERPROFILE"];
+    for name in names {
+        let Some(value) = env(name).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        if path.is_absolute() && path.is_dir() && path.to_str().is_some() {
+            return Ok(path);
+        }
+    }
+    Err("User home directory unavailable on this device")
 }
 
 struct ReposInner {
     data_dir: PathBuf,
     device_id: String,
-    worktrees_root: PathBuf,
-    file_searches: std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    worktrees: crate::worktree_settings::WorktreePreferences,
     http: reqwest::Client,
     github_avatars: std::sync::Mutex<HashMap<String, String>>,
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
-    file_index: FileIndexCache,
+    /// The engine's one workspace search index set (`@`, file tree, cmd+K).
+    workspace_search: WorkspaceSearch,
+    /// HEAD commit → its trunk's root commit. History behind a commit never
+    /// changes, so the full first-parent walk runs once per HEAD, not on
+    /// every spaces repair pass.
+    trunk_roots: std::sync::Mutex<HashMap<String, String>>,
 }
-
-struct IndexedPath {
-    path: String,
-    haystack: nucleo_matcher::Utf32String,
-    is_dir: bool,
-}
-
-struct FileIndex {
-    entries: Vec<IndexedPath>,
-    built: std::time::Instant,
-}
-
-type FileIndexCache = std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<FileIndex>>>;
 
 #[derive(Clone)]
 pub struct Repos {
@@ -136,30 +172,73 @@ impl Repos {
         &self.inner.data_dir
     }
 
-    /// `data_dir` holds `repos.json` + cloned/created repos; the worktree root
-    /// comes from `$ZERON_WORKTREES_DIR` or `~/.zeron/worktrees`.
-    pub fn new(data_dir: &Path, device_id: &str) -> Self {
-        Self::with_worktrees_root(data_dir, device_id, default_worktrees_root())
+    /// Where projectless chats' folders live on this host: the engine data
+    /// dir's `scratch` (`~/.zeron/scratch` for the default data dir), as
+    /// t3code keeps its under `~/.t3/scratch`.
+    pub(crate) fn scratch_root(&self) -> PathBuf {
+        self.inner.data_dir.join("scratch")
     }
 
-    /// Explicit worktree root (tests).
+    pub fn workspace_search(&self) -> &WorkspaceSearch {
+        &self.inner.workspace_search
+    }
+
+    /// Device preferences live in `data_dir`. New worktrees use the custom
+    /// location or `~/.zeron/worktrees`; a nonempty `$ZERON_WORKTREES_DIR`
+    /// overrides both (including test isolation).
+    pub fn new(data_dir: &Path, device_id: &str) -> Self {
+        Self::with_worktree_preferences(
+            data_dir,
+            device_id,
+            home_dir().join(".zeron").join("worktrees"),
+            std::env::var_os("ZERON_WORKTREES_DIR")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        )
+    }
+
+    /// Explicit default worktree root, without the environment override (tests).
     pub fn with_worktrees_root(data_dir: &Path, device_id: &str, worktrees_root: PathBuf) -> Self {
+        Self::with_worktree_preferences(data_dir, device_id, worktrees_root, None)
+    }
+
+    fn with_worktree_preferences(
+        data_dir: &Path,
+        device_id: &str,
+        worktrees_root: PathBuf,
+        environment_override: Option<PathBuf>,
+    ) -> Self {
         Self {
             inner: std::sync::Arc::new(ReposInner {
                 data_dir: data_dir.to_path_buf(),
                 device_id: device_id.to_string(),
-                worktrees_root,
-                file_searches: std::sync::Mutex::new(HashMap::new()),
+                worktrees: crate::worktree_settings::WorktreePreferences::open(
+                    data_dir,
+                    worktrees_root,
+                    environment_override,
+                ),
                 http: reqwest::Client::builder()
                     .timeout(GITHUB_AVATAR_TIMEOUT)
                     .user_agent("Comet-Git-History")
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new()),
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
+                trunk_roots: std::sync::Mutex::new(HashMap::new()),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
-                file_index: std::sync::Mutex::new(HashMap::new()),
+                workspace_search: WorkspaceSearch::new(),
             }),
         }
+    }
+
+    pub fn worktree_settings(&self) -> zeron_proto::WorktreeSettingsStatus {
+        self.inner.worktrees.status()
+    }
+
+    pub async fn set_worktree_settings(
+        &self,
+        settings: zeron_proto::WorktreeSettings,
+    ) -> Result<zeron_proto::WorktreeSettingsStatus, EngineError> {
+        self.inner.worktrees.set(settings).await
     }
 
     // ── registry (repos.json) ───────────────────────────────────────────────
@@ -200,16 +279,17 @@ impl Repos {
         {
             use std::os::windows::process::CommandExt;
             cmd.as_std_mut().creation_flags(0x08000000);
+            // Let Git handle long native paths without persisting user config.
+            cmd.args(["-c", "core.longpaths=true"]);
         }
-        cmd.args(args);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
+        cmd.args(args);
         cmd.stdin(std::process::Stdio::null());
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
+        let output = cmd.output().await.map_err(|e| {
+            EngineError::Other(format!("git {args:?} in {cwd:?} failed to start: {e}"))
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let message = stderr.trim();
@@ -226,9 +306,49 @@ impl Repos {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Like [`Self::git`], for commands that answer "no" with a silent exit
+    /// status 1 (`rev-parse --verify --quiet`): `Ok(None)` then, `Err` for
+    /// any other failure.
+    async fn git_probe(
+        &self,
+        args: &[&str],
+        cwd: Option<&Path>,
+    ) -> Result<Option<String>, EngineError> {
+        let mut cmd = tokio::process::Command::new("git");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.as_std_mut().creation_flags(0x08000000);
+        }
+        cmd.args(args);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd.stdin(std::process::Stdio::null());
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
+        if output.status.success() {
+            return Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            ));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.code() == Some(1) && stderr.trim().is_empty() {
+            return Ok(None);
+        }
+        Err(EngineError::Other(format!(
+            "git {} failed ({}): {}",
+            args.first().unwrap_or(&"?"),
+            output.status,
+            stderr.trim()
+        )))
+    }
+
     /// Async existence probe with a timeout: a wedged network mount just reads
     /// as "gone" instead of hanging every caller.
-    async fn path_exists(path: &Path) -> bool {
+    pub(crate) async fn path_exists(path: &Path) -> bool {
         let path = path.to_path_buf();
         matches!(
             tokio::time::timeout(PATH_EXISTS_TIMEOUT, tokio::fs::metadata(path)).await,
@@ -237,6 +357,16 @@ impl Repos {
     }
 
     /// Is `path` inside a git work tree? (Also the SpacesSync git-presence probe.)
+    /// The GitHub repository (`owner/name`) of `path`'s `origin` remote.
+    pub async fn github_repo(&self, path: &Path) -> Option<String> {
+        let remote = self
+            .git(&["remote", "get-url", "origin"], Some(path))
+            .await
+            .ok()?;
+        let (owner, name) = parse_github_remote(&remote)?;
+        Some(format!("{owner}/{name}"))
+    }
+
     pub async fn is_repo(&self, path: &Path) -> bool {
         matches!(
             self.git(&["rev-parse", "--is-inside-work-tree"], Some(path)).await,
@@ -287,15 +417,31 @@ impl Repos {
     /// Canonical identity shared by every chat operating in this exact worktree:
     /// `sha256(deviceId ‖ NUL ‖ canonical git dir)`.
     pub async fn checkout_identity(&self, path: &Path) -> Result<CheckoutIdentity, EngineError> {
-        let root = self
-            .git(&["rev-parse", "--show-toplevel"], Some(path))
-            .await?;
-        let git_dir = self
+        let out = self
             .git(
-                &["rev-parse", "--path-format=absolute", "--git-dir"],
+                &[
+                    "rev-parse",
+                    "--show-toplevel",
+                    "--path-format=absolute",
+                    "--git-dir",
+                ],
                 Some(path),
             )
             .await?;
+        let mut lines = out.lines();
+        let (root, git_dir) = match (lines.next(), lines.next(), lines.next()) {
+            (Some(root), Some(git_dir), None) => (root.to_owned(), git_dir.to_owned()),
+            // Fallback for a path with a `\n` in its name.
+            _ => (
+                self.git(&["rev-parse", "--show-toplevel"], Some(path))
+                    .await?,
+                self.git(
+                    &["rev-parse", "--path-format=absolute", "--git-dir"],
+                    Some(path),
+                )
+                .await?,
+            ),
+        };
         let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));
         let canonical_git_dir =
             std::fs::canonicalize(&git_dir).unwrap_or_else(|_| PathBuf::from(&git_dir));
@@ -309,6 +455,134 @@ impl Repos {
             root: canonical_root,
             git_dir: canonical_git_dir,
         })
+    }
+
+    /// Identity shared by every clone and worktree of one repository: the
+    /// root commit its trunk grew from, `commit:<sha>`. Unlike a remote URL it
+    /// survives repository renames and transfers, SSH host aliases and
+    /// transport spellings, and it needs no network. Forks share it with
+    /// their upstream (the same codebase).
+    ///
+    /// A history that cannot vouch for its root — a shallow clone, or no
+    /// commits yet — falls back to the normalized `origin` remote (else the
+    /// first remote) as `host/owner/repo`, then to
+    /// `local:sha256(deviceId ‖ NUL ‖ canonical common git dir)`, so the
+    /// repository's worktrees on this device still match each other.
+    ///
+    /// A folder below the repository's top level carries its in-repository
+    /// path (`<identity>:apps/web`): sibling folders of one monorepo, or
+    /// plain folders inside an enclosing repository, stay separate projects,
+    /// while the same subfolder in another clone or worktree still matches.
+    ///
+    /// Errors are real failures (git missing, a lock, I/O) — never a silent
+    /// fallback to a different identity form, which would regroup the
+    /// sidebar on a transient hiccup. Callers keep their last value.
+    pub async fn repository_identity(&self, path: &Path) -> Result<String, EngineError> {
+        let base = match self.trunk_root_commit(path).await? {
+            Some(root) => format!("commit:{root}"),
+            None => self.remote_or_local_identity(path).await?,
+        };
+        let prefix = self
+            .git(&["rev-parse", "--show-prefix"], Some(path))
+            .await?;
+        let prefix = prefix.trim_end_matches('/');
+        Ok(if prefix.is_empty() {
+            base
+        } else {
+            format!("{base}:{prefix}")
+        })
+    }
+
+    /// The normalized remote, else the device-scoped common-git-dir hash.
+    async fn remote_or_local_identity(&self, path: &Path) -> Result<String, EngineError> {
+        let remote = match self.git(&["remote", "get-url", "origin"], Some(path)).await {
+            Ok(url) => Some(url),
+            Err(_) => match self.git(&["remote"], Some(path)).await {
+                Ok(names) => match names.lines().next() {
+                    Some(name) => self
+                        .git(&["remote", "get-url", name.trim()], Some(path))
+                        .await
+                        .ok(),
+                    None => None,
+                },
+                Err(_) => None,
+            },
+        };
+        if let Some(remote) = remote
+            .as_deref()
+            .and_then(crate::source_control::parse_git_remote)
+        {
+            return Ok(
+                format!("{}/{}/{}", remote.host, remote.owner, remote.repository)
+                    .to_ascii_lowercase(),
+            );
+        }
+        let common_dir = self
+            .git(
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                Some(path),
+            )
+            .await?;
+        let canonical =
+            std::fs::canonicalize(&common_dir).unwrap_or_else(|_| PathBuf::from(&common_dir));
+        let mut hasher = Sha256::new();
+        hasher.update(self.inner.device_id.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(canonical.to_string_lossy().as_bytes());
+        Ok(format!("local:{}", hex(&hasher.finalize())))
+    }
+
+    /// The root of HEAD's first-parent chain — the trunk's first commit. A
+    /// merged-in unrelated history arrives as a second parent, so its roots
+    /// never displace this one. `Ok(None)` when the history can't vouch for
+    /// a root: a shallow clone (its boundary commits only look parentless,
+    /// and differ with the fetch depth) or an unborn HEAD.
+    async fn trunk_root_commit(&self, path: &Path) -> Result<Option<String>, EngineError> {
+        let shallow = self
+            .git(&["rev-parse", "--is-shallow-repository"], Some(path))
+            .await?;
+        if shallow == "true" {
+            return Ok(None);
+        }
+        let Some(head) = self
+            .git_probe(
+                &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                Some(path),
+            )
+            .await?
+        else {
+            return Ok(None); // unborn HEAD: no commits yet
+        };
+        if let Some(root) = self
+            .inner
+            .trunk_roots
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&head).cloned())
+        {
+            return Ok(Some(root));
+        }
+        let roots = self
+            .git(
+                &["rev-list", "--first-parent", "--max-parents=0", &head],
+                Some(path),
+            )
+            .await?;
+        let Some(root) = roots
+            .lines()
+            .map(str::trim)
+            .find(|sha| !sha.is_empty())
+            .map(str::to_owned)
+        else {
+            return Ok(None);
+        };
+        if let Ok(mut cache) = self.inner.trunk_roots.lock() {
+            if cache.len() >= 4096 {
+                cache.clear();
+            }
+            cache.insert(head, root.clone());
+        }
+        Ok(Some(root))
     }
 
     async fn to_repo(&self, path: &Path) -> Result<Repo, EngineError> {
@@ -365,25 +639,57 @@ impl Repos {
 
     /// `git clone <url>` under `{data_dir}/repos`. (Named `clone_repo` to keep
     /// `Clone::clone` unambiguous on the service handle.)
+    ///
+    /// Idempotent: when the destination already holds a clone whose `origin`
+    /// is the same repository (scheme, `.git`, trailing slash, embedded
+    /// credentials and owner/name case ignored), that checkout is the answer —
+    /// same reply as a fresh clone. A destination holding anything else stays
+    /// an "Already exists" error.
     pub async fn clone_repo(&self, url: &str) -> Result<Repo, EngineError> {
-        let trimmed = url.trim().trim_end_matches('/');
-        let name = trimmed
-            .trim_end_matches(".git")
-            .rsplit(['/', ':'])
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("repo")
-            .to_string();
         let repos_dir = self.inner.data_dir.join("repos");
+        self.clone_repo_into(url, &repos_dir).await
+    }
+
+    /// [`Self::clone_repo`] into `<parent>/<name>` instead: where the user
+    /// chose to keep it (New project → a folder → clone here). `parent`
+    /// must be an existing folder; the same idempotence holds.
+    pub async fn clone_repo_in(&self, url: &str, parent: &str) -> Result<Repo, EngineError> {
+        let parent = absolutize(Path::new(parent));
+        if !parent.is_dir() {
+            return Err(EngineError::Other(format!(
+                "No such folder: {}",
+                parent.display()
+            )));
+        }
+        self.clone_repo_into(url, &parent).await
+    }
+
+    async fn clone_repo_into(&self, url: &str, repos_dir: &Path) -> Result<Repo, EngineError> {
+        let trimmed = url.trim().trim_end_matches('/');
+        let name = clone_folder_name(trimmed);
         let target = repos_dir.join(&name);
         if target.exists() {
+            // `.git` must be the destination's own: `git remote` inside a
+            // plain folder would answer for an enclosing repository.
+            let origin = if target.join(".git").exists() {
+                self.git(&["remote", "get-url", "origin"], Some(&target))
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            if origin.is_some_and(|origin| same_remote(&origin, trimmed)) {
+                self.register(&target.to_string_lossy())?;
+                return self.to_repo(&target).await;
+            }
             return Err(EngineError::Other(format!(
                 "Already exists: {}",
                 target.display()
             )));
         }
-        std::fs::create_dir_all(&repos_dir)?;
-        self.git(&["clone", trimmed, &target.to_string_lossy()], None)
+        std::fs::create_dir_all(repos_dir)?;
+        // `--`: a URL is never read as an option (`--upload-pack=…`).
+        self.git(&["clone", "--", trimmed, &target.to_string_lossy()], None)
             .await?;
         self.register(&target.to_string_lossy())?;
         self.to_repo(&target).await
@@ -988,19 +1294,34 @@ impl Repos {
         Some(path.to_string_lossy().into_owned())
     }
 
+    /// Every checkout of the repository at `repo_path`, main one first.
+    /// NUL-terminated so a `\n` in a worktree's path can't forge another entry.
+    async fn worktree_paths(&self, repo_path: &Path) -> Result<Vec<PathBuf>, EngineError> {
+        let out = match self
+            .git(&["worktree", "list", "--porcelain", "-z"], Some(repo_path))
+            .await
+        {
+            Ok(out) => out,
+            // Git before 2.36 has no `-z`.
+            Err(_) => self
+                .git(&["worktree", "list", "--porcelain"], Some(repo_path))
+                .await?
+                .replace('\n', "\0"),
+        };
+        Ok(out
+            .split('\0')
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .collect())
+    }
+
     /// Whether `candidate` is the repository root or one of its linked
     /// worktrees. Filesystem resolution happens on a disposable thread because
     /// user-selected paths may be dead mounts.
     pub async fn workspace_checkout(&self, repo_path: &Path, candidate: &Path) -> Option<PathBuf> {
         let repo_path = repo_path.to_path_buf();
         let candidate = candidate.to_path_buf();
-        let worktrees: Vec<_> = self
-            .refs(&repo_path)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|row| row.worktree_path.map(PathBuf::from))
-            .collect();
+        let worktrees = self.worktree_paths(&repo_path).await.unwrap_or_default();
         disposable_worker("checkout-auth", move || {
             let candidate = std::fs::canonicalize(candidate).ok()?;
             std::iter::once(repo_path)
@@ -1008,6 +1329,20 @@ impl Repos {
                 .filter_map(|path| std::fs::canonicalize(path).ok())
                 .any(|path| path == candidate)
                 .then_some(candidate)
+        })
+        .await
+        .flatten()
+    }
+
+    /// [`Self::workspace_checkout`] for a folder that is not a repository: it
+    /// has no linked worktrees, so only the folder itself matches, and no git
+    /// runs. Resolved on a disposable thread for the same dead-mount reason.
+    pub(crate) async fn same_folder(&self, folder: &Path, candidate: &Path) -> Option<PathBuf> {
+        let folder = folder.to_path_buf();
+        let candidate = candidate.to_path_buf();
+        disposable_worker("folder-auth", move || {
+            let candidate = std::fs::canonicalize(candidate).ok()?;
+            (std::fs::canonicalize(folder).ok()? == candidate).then_some(candidate)
         })
         .await
         .flatten()
@@ -1074,8 +1409,23 @@ impl Repos {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "repo".to_string());
-        let base = self.inner.worktrees_root.join(&repo_name);
-        std::fs::create_dir_all(&base)?;
+        // Snapshot the destination once per creation. Changes never relocate
+        // existing worktrees or alter the cwd already stored on a chat.
+        let base = self.inner.worktrees.root().join(&repo_name);
+        // A location that contains the repository (e.g. its parent folder)
+        // would nest checkouts inside the primary one, where they show up as
+        // untracked embedded repositories.
+        let root = self.inner.worktrees.root();
+        if let (Ok(root), Ok(repo)) = (
+            std::fs::canonicalize(&root),
+            std::fs::canonicalize(repo_path),
+        ) && root.join(&repo_name).starts_with(&repo)
+        {
+            return Err(EngineError::Other(format!(
+                "Worktrees for {repo_name} would be created inside the repository at {}. Choose a different worktree location in Settings.",
+                repo_path.display()
+            )));
+        }
         // Auto-generate a name colliding with neither an existing dir nor branch.
         let existing: HashSet<String> = self
             .branches(repo_path)
@@ -1104,7 +1454,14 @@ impl Repos {
         let name =
             name.ok_or_else(|| EngineError::Other("Could not allocate a worktree name".into()))?;
         let path = base.join(&name);
+        #[cfg(windows)]
+        validate_windows_worktree_path(&path.to_string_lossy())?;
+        std::fs::create_dir_all(&base)?;
         let branch_name = format!("zeron/{name}");
+        #[cfg(windows)]
+        self.add_worktree_in_two_steps(repo_path, &path, &branch_name, branch)
+            .await?;
+        #[cfg(not(windows))]
         self.git(
             &[
                 "worktree",
@@ -1125,6 +1482,101 @@ impl Repos {
             name,
             checkout_id: Some(checkout.id),
         })
+    }
+
+    /// Git's built-in checkout passes `<destination>/.git` in GIT_DIR, whose
+    /// separate PATH_MAX - 40 check rejects some launchable Windows paths even
+    /// with core.longpaths enabled. Register first, then reset from the new
+    /// checkout using a short, relative GIT_DIR. Keep native add's hook and
+    /// failure semantics: incomplete checkouts are removed, hook failures
+    /// retain the populated worktree (the hook may have written user data).
+    #[cfg(any(windows, test))]
+    async fn add_worktree_in_two_steps(
+        &self,
+        repo_path: &Path,
+        path: &Path,
+        branch_name: &str,
+        base: &str,
+    ) -> Result<(), EngineError> {
+        #[cfg(windows)]
+        let git_path = windows_git_worktree_path(&path.to_string_lossy());
+        #[cfg(not(windows))]
+        let git_path = path.to_string_lossy();
+        self.git(
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "-b",
+                branch_name,
+                &git_path,
+                base,
+            ],
+            Some(repo_path),
+        )
+        .await?;
+
+        let checkout = async {
+            let head = self
+                .git(
+                    &["--git-dir=.git", "rev-parse", "--verify", "HEAD"],
+                    Some(path),
+                )
+                .await?;
+            self.git(
+                &[
+                    "--git-dir=.git",
+                    "reset",
+                    "--hard",
+                    "--no-recurse-submodules",
+                ],
+                Some(path),
+            )
+            .await?;
+            Ok::<_, EngineError>(head)
+        }
+        .await;
+        let head = match checkout {
+            Ok(head) => head,
+            Err(error) => {
+                // Force is limited to the checkout this call just registered;
+                // a failed reset may have left partially written files. Like
+                // native worktree add, keep the new branch on failure.
+                if let Err(cleanup) = self
+                    .git(
+                        &["worktree", "remove", "--force", &git_path],
+                        Some(repo_path),
+                    )
+                    .await
+                {
+                    return Err(EngineError::Other(format!(
+                        "{error}; could not remove incomplete worktree {}: {cleanup}",
+                        path.display()
+                    )));
+                }
+                return Err(error);
+            }
+        };
+
+        // Match worktree add's null old OID, initial commit, and branch flag.
+        // Let Git find the configured hook and run it from the checkout, with
+        // no explicit GIT_DIR/GIT_WORK_TREE override in the hook environment.
+        let null_oid = "0".repeat(head.len());
+        self.git(
+            &[
+                "hook",
+                "run",
+                "--ignore-missing",
+                "post-checkout",
+                "--",
+                &null_oid,
+                &head,
+                "1",
+            ],
+            Some(path),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn branch_exists(&self, path: &Path, branch: &str) -> bool {
@@ -1238,54 +1690,53 @@ impl Repos {
             .await
     }
 
-    /// Search a checkout's files and directories by fuzzy relative path. The
-    /// `ignore` walker honors `.gitignore`, `.ignore`, and global git excludes.
-    /// Dotfiles remain searchable; only repository metadata is always pruned.
+    // ── SearchHomeFolders ───────────────────────────────────────────────────
+
+    /// Folders anywhere under home whose names match `query`, from the home
+    /// workspace search index — the one projectless chats use, so it skips
+    /// dot folders, dependency and cache folders, and each repository's
+    /// ignored paths. An empty query only starts the index.
+    pub async fn search_home_folders(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> Result<HomeFolderSearchResult, EngineError> {
+        let search = self.inner.workspace_search.clone();
+        let worker = disposable_worker("home-folder-search", move || {
+            search_home_folders_blocking(&search, &query, limit)
+        });
+        match tokio::time::timeout(FILE_SEARCH_TIMEOUT, worker).await {
+            Ok(Some(result)) => result,
+            Ok(None) => Err(EngineError::Other("folder search worker exited".into())),
+            Err(_) => Err(EngineError::Other("folder search timed out".into())),
+        }
+    }
+
+    /// The new-project picker is done with the home index: drop it now
+    /// unless a projectless chat warmed it.
+    pub fn release_home_folder_search(&self) {
+        if let Ok(home) = home_search_root() {
+            self.inner.workspace_search.release_unless_warmed(&home);
+        }
+    }
+
+    /// Search a checkout's files and directories by fuzzy relative path,
+    /// from the workspace search index (fff), which honors `.gitignore`,
+    /// `.ignore`, and global git excludes. An empty query lists the chat's
+    /// featured paths first, then recently changed files.
     pub async fn search_files(
         &self,
         root: PathBuf,
         query: String,
         featured_paths: Vec<String>,
     ) -> Result<Vec<FileSearchMatch>, EngineError> {
-        let deadline = tokio::time::Instant::now() + FILE_SEARCH_TIMEOUT;
-        let gate = {
-            let mut searches = self
-                .inner
-                .file_searches
-                .lock()
-                .map_err(|_| EngineError::Other("file search registry poisoned".into()))?;
-            if let Some(gate) = searches.get(&root).and_then(std::sync::Weak::upgrade) {
-                gate
-            } else {
-                let gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-                searches.insert(root.clone(), std::sync::Arc::downgrade(&gate));
-                gate
-            }
-        };
-        let gate = tokio::time::timeout_at(deadline, gate.lock_owned())
-            .await
-            .map_err(|_| EngineError::Other("file search timed out".into()))?;
-        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
-        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
-        let worker_cancelled = cancelled.clone();
-        let cache = self.inner.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::Builder::new()
-            .name("file-search".into())
-            .spawn(move || {
-                let _gate = gate;
-                let _ = tx.send(search_files_cached(
-                    &cache.file_index,
-                    &root,
-                    &query,
-                    &featured_paths,
-                    || worker_cancelled.load(Ordering::Relaxed),
-                ));
-            })
-            .map_err(|e| EngineError::Other(format!("file search failed: {e}")))?;
-        match tokio::time::timeout_at(deadline, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(EngineError::Other("file search worker exited".into())),
+        let search = self.inner.workspace_search.clone();
+        let worker = disposable_worker("file-search", move || {
+            search_files_blocking(&search, &root, &query, &featured_paths)
+        });
+        match tokio::time::timeout(FILE_SEARCH_TIMEOUT, worker).await {
+            Ok(Some(result)) => result,
+            Ok(None) => Err(EngineError::Other("file search worker exited".into())),
             Err(_) => Err(EngineError::Other("file search timed out".into())),
         }
     }
@@ -1306,7 +1757,7 @@ impl Repos {
     ) -> Result<FolderListing, EngineError> {
         let target = match path.filter(|p| !p.trim().is_empty()) {
             Some(p) => absolutize(Path::new(&p)),
-            None => home_dir(),
+            None => session_home_dir().map_err(|error| EngineError::Other(error.to_string()))?,
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let spawned = std::thread::Builder::new()
@@ -1346,14 +1797,6 @@ impl Repos {
                 "drive listing timed out on the device".into(),
             )),
         }
-    }
-}
-
-struct CancelOnDrop(std::sync::Arc<AtomicBool>);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1403,7 +1846,7 @@ fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let truncated = entries.len() > FOLDER_LIST_MAX_ENTRIES;
     entries.truncate(FOLDER_LIST_MAX_ENTRIES);
     Ok(FolderListing {
-        path: target.to_string_lossy().to_string(),
+        path: folder_browser_path(target),
         entries,
         truncated,
     })
@@ -1737,246 +2180,260 @@ fn compact_history_commits(
         .collect()
 }
 
-type RankedFileMatch = (Option<usize>, u32, String, bool);
-
-fn compare_file_matches(
-    query: &str,
-    (featured_a, score_a, path_a, dir_a): &RankedFileMatch,
-    (featured_b, score_b, path_b, dir_b): &RankedFileMatch,
-) -> std::cmp::Ordering {
-    let empty_query = query.trim().is_empty();
-    featured_a
-        .is_none()
-        .cmp(&featured_b.is_none())
-        .then_with(|| featured_a.cmp(featured_b))
-        .then_with(|| score_b.cmp(score_a))
-        .then_with(|| {
-            empty_query
-                .then(|| path_a.split('/').count().cmp(&path_b.split('/').count()))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .then_with(|| {
-            empty_query
-                .then(|| dir_a.cmp(dir_b))
-                .unwrap_or_else(|| dir_b.cmp(dir_a))
-        })
-        .then_with(|| path_a.len().cmp(&path_b.len()))
-        .then_with(|| path_a.cmp(path_b))
+/// Whether two remote URLs name the same repository: `https://`, `ssh://` and
+/// scp-style spellings, a `.git` suffix, a trailing slash, embedded
+/// credentials, and host/owner/name case are all ignored.
+/// The folder a clone of `url` lands in: its last path segment minus
+/// `.git`. Local paths split on `\\` too (a Windows path must not become an
+/// absolute "name" that replaces the destination), and a segment that would
+/// step out of the destination (`.`, `..`) falls back to `repo`.
+fn clone_folder_name(url: &str) -> String {
+    url.trim_end_matches(['/', '\\'])
+        .trim_end_matches(".git")
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .unwrap_or("repo")
+        .to_string()
 }
 
-#[cfg(test)]
-fn search_files_blocking(
-    root: &Path,
-    query: &str,
-    featured_paths: &[String],
-) -> Result<Vec<FileSearchMatch>, EngineError> {
-    search_files_blocking_with_cancel(root, query, featured_paths, || false)
-}
-
-#[cfg(test)]
-fn search_files_blocking_with_cancel<F: Fn() -> bool + Sync>(
-    root: &Path,
-    query: &str,
-    featured_paths: &[String],
-    cancelled: F,
-) -> Result<Vec<FileSearchMatch>, EngineError> {
-    let root = canonical_search_root(root)?;
-    let index = walk_file_index(&root, &cancelled)?;
-    Ok(rank_file_matches(&index, &root, query, featured_paths))
-}
-
-fn search_files_cached<F: Fn() -> bool + Sync>(
-    cache: &FileIndexCache,
-    root: &Path,
-    query: &str,
-    featured_paths: &[String],
-    cancelled: F,
-) -> Result<Vec<FileSearchMatch>, EngineError> {
-    let root = canonical_search_root(root)?;
-    let fresh = cache
-        .lock()
-        .ok()
-        .and_then(|indexes| indexes.get(&root).cloned())
-        .filter(|index| index.built.elapsed() < FILE_INDEX_TTL);
-    let index = match fresh {
-        Some(index) => index,
-        None => {
-            let index = std::sync::Arc::new(FileIndex {
-                entries: walk_file_index(&root, &cancelled)?,
-                built: std::time::Instant::now(),
-            });
-            if let Ok(mut indexes) = cache.lock() {
-                indexes.retain(|_, index| index.built.elapsed() < FILE_INDEX_TTL);
-                indexes.insert(root.clone(), index.clone());
-            }
-            index
+pub(crate) fn same_remote(a: &str, b: &str) -> bool {
+    fn key(url: &str) -> String {
+        if let Some(remote) = crate::source_control::parse_git_remote(url) {
+            return format!(
+                "{}/{}/{}",
+                remote.host,
+                remote.owner.to_ascii_lowercase(),
+                remote.repository.to_ascii_lowercase()
+            );
         }
-    };
-    if cancelled() {
-        return Err(EngineError::Other("file search cancelled".into()));
+        // Not owner/name shaped (nested groups, local paths): compare the
+        // URL minus scheme, credentials, trailing slash and `.git`.
+        let url = url.trim().trim_end_matches('/');
+        let url = url.strip_suffix(".git").unwrap_or(url);
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let rest = match rest.split_once('/') {
+            Some((authority, path)) => format!(
+                "{}/{path}",
+                authority
+                    .rsplit_once('@')
+                    .map_or(authority, |(_, host)| host)
+            ),
+            None => rest.to_string(),
+        };
+        rest.to_ascii_lowercase()
     }
-    Ok(rank_file_matches(
-        &index.entries,
-        &root,
-        query,
-        featured_paths,
-    ))
+    key(a) == key(b)
 }
 
-fn canonical_search_root(root: &Path) -> Result<PathBuf, EngineError> {
-    std::fs::canonicalize(root)
-        .map_err(|e| EngineError::Other(format!("could not search workspace: {e}")))
-}
-
-fn walk_file_index<F: Fn() -> bool + Sync>(
-    root: &Path,
-    cancelled: &F,
-) -> Result<Vec<IndexedPath>, EngineError> {
-    if cancelled() {
-        return Err(EngineError::Other("file search cancelled".into()));
-    }
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get().min(12))
-        .unwrap_or(4);
-    let collected: std::sync::Mutex<Vec<IndexedPath>> = std::sync::Mutex::new(Vec::new());
-    let was_cancelled = AtomicBool::new(false);
-    ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .threads(threads)
-        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
-        .build_parallel()
-        .run(|| {
-            const BATCH: usize = 512;
-            struct Batch<'a> {
-                items: Vec<IndexedPath>,
-                sink: &'a std::sync::Mutex<Vec<IndexedPath>>,
-            }
-            impl Drop for Batch<'_> {
-                fn drop(&mut self) {
-                    if self.items.is_empty() {
-                        return;
-                    }
-                    if let Ok(mut all) = self.sink.lock() {
-                        all.append(&mut self.items);
-                    }
-                }
-            }
-            let mut batch = Batch {
-                items: Vec::with_capacity(BATCH),
-                sink: &collected,
-            };
-            let was_cancelled = &was_cancelled;
-            Box::new(move |entry| {
-                if was_cancelled.load(Ordering::Relaxed) {
-                    return ignore::WalkState::Quit;
-                }
-                if cancelled() {
-                    was_cancelled.store(true, Ordering::Relaxed);
-                    return ignore::WalkState::Quit;
-                }
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(err) => {
-                        tracing::debug!(%err, "file mention index skipped entry");
-                        return ignore::WalkState::Continue;
-                    }
-                };
-                let path = entry.path();
-                if path == root {
-                    return ignore::WalkState::Continue;
-                }
-                let Ok(relative) = path.strip_prefix(root) else {
-                    return ignore::WalkState::Continue;
-                };
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                if relative == ".git" || relative.starts_with(".git/") {
-                    return ignore::WalkState::Continue;
-                }
-                batch.items.push(IndexedPath {
-                    haystack: nucleo_matcher::Utf32String::from(relative.as_str()),
-                    path: relative,
-                    is_dir: entry.file_type().is_some_and(|kind| kind.is_dir()),
-                });
-                if batch.items.len() >= BATCH
-                    && let Ok(mut all) = batch.sink.lock()
-                {
-                    all.append(&mut batch.items);
-                    if all.len() >= FILE_INDEX_MAX_ENTRIES {
-                        return ignore::WalkState::Quit;
-                    }
-                }
-                ignore::WalkState::Continue
-            })
-        });
-    if was_cancelled.load(Ordering::Relaxed) || cancelled() {
-        return Err(EngineError::Other("file search cancelled".into()));
-    }
-    let mut entries = collected
-        .into_inner()
-        .map_err(|_| EngineError::Other("file index poisoned".into()))?;
-    entries.truncate(FILE_INDEX_MAX_ENTRIES);
-    Ok(entries)
-}
-
-fn rank_file_matches(
-    entries: &[IndexedPath],
+fn search_files_blocking(
+    search: &WorkspaceSearch,
     root: &Path,
     query: &str,
     featured_paths: &[String],
-) -> Vec<FileSearchMatch> {
-    let featured: HashMap<String, usize> = featured_paths
-        .iter()
-        .filter_map(|path| {
+) -> Result<Vec<FileSearchMatch>, EngineError> {
+    let root = canonical_search_root(root)?;
+    let mut matches: Vec<FileSearchMatch> = Vec::with_capacity(FILE_SEARCH_MAX_RESULTS);
+    if query.trim().is_empty() {
+        for path in featured_paths {
+            if matches.len() == FILE_SEARCH_MAX_RESULTS {
+                break;
+            }
             let path = Path::new(path);
             let full = if path.is_absolute() {
                 path.to_path_buf()
             } else {
                 root.join(path)
             };
-            let canonical = std::fs::canonicalize(full).ok()?;
-            let relative = canonical.strip_prefix(root).ok()?;
-            Some(relative.to_string_lossy().replace('\\', "/"))
-        })
-        .enumerate()
-        .fold(HashMap::new(), |mut paths, (rank, path)| {
-            paths.entry(path).or_insert(rank);
-            paths
-        });
-    let mut matcher = nucleo_matcher::Matcher::new({
-        let mut config = nucleo_matcher::Config::DEFAULT;
-        config.set_match_paths();
-        config
-    });
-    let pattern = nucleo_matcher::pattern::Pattern::parse(
-        query,
-        nucleo_matcher::pattern::CaseMatching::Smart,
-        nucleo_matcher::pattern::Normalization::Smart,
-    );
-    let mut matches: Vec<RankedFileMatch> = Vec::new();
-    for entry in entries {
-        let Some(score) = pattern.score(entry.haystack.slice(..), &mut matcher) else {
-            continue;
-        };
-        matches.push((
-            featured.get(&entry.path).copied(),
-            score,
-            entry.path.clone(),
-            entry.is_dir,
-        ));
-        if matches.len() >= RANK_BUFFER {
-            matches.sort_by(|a, b| compare_file_matches(query, a, b));
-            matches.truncate(FILE_SEARCH_MAX_RESULTS);
+            let Ok(canonical) = std::fs::canonicalize(full) else {
+                continue;
+            };
+            let Ok(relative) = canonical.strip_prefix(&root) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative.is_empty()
+                || is_git_metadata(&relative)
+                || matches.iter().any(|found| found.path == relative)
+            {
+                continue;
+            }
+            matches.push(FileSearchMatch {
+                is_dir: canonical.is_dir(),
+                path: relative,
+            });
         }
     }
-    matches.sort_by(|a, b| compare_file_matches(query, a, b));
-    matches.truncate(FILE_SEARCH_MAX_RESULTS);
-    matches
+    let found = search
+        .search_names_within(
+            &root,
+            query,
+            FILE_SEARCH_MAX_RESULTS + matches.len(),
+            NameKinds::FilesAndDirectories,
+            crate::workspace_search::NAME_SCAN_WAIT,
+        )
+        .map_err(|e| EngineError::Other(e.to_string()))?;
+    for found in found.matches {
+        if matches.len() == FILE_SEARCH_MAX_RESULTS {
+            break;
+        }
+        if is_git_metadata(&found.path)
+            || matches.iter().any(|known| known.path == found.path)
+            || crate::workspace_search::escapes_through_symlink(&root, &found.path, true)
+        {
+            continue;
+        }
+        matches.push(FileSearchMatch {
+            path: found.path,
+            is_dir: found.is_dir,
+        });
+    }
+    Ok(matches)
+}
+
+/// The home folder as the workspace search index keys it.
+fn home_search_root() -> Result<PathBuf, EngineError> {
+    let home = session_home_dir().map_err(|error| EngineError::Other(error.to_string()))?;
+    canonical_search_root(&home)
+}
+
+fn search_home_folders_blocking(
+    search: &WorkspaceSearch,
+    query: &str,
+    limit: usize,
+) -> Result<HomeFolderSearchResult, EngineError> {
+    let mut found = search_folders_under(search, &home_search_root()?, query, limit)?;
+    // The index keys Home by its canonical path; clients compare results
+    // with Home and existing projects as the folder browser spells them. A
+    // symlinked Home (`/home/me` → `/data/home/me`) must not read as a
+    // second copy of every folder.
+    if let Ok(home) = session_home_dir() {
+        for found in &mut found.matches {
+            found.path = folder_browser_path(&home.join(&found.relative));
+        }
+    }
+    Ok(found)
+}
+
+/// `SearchHomeFolders` against an already-resolved (canonical) root.
+fn search_folders_under(
+    search: &WorkspaceSearch,
+    home: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<HomeFolderSearchResult, EngineError> {
+    let query = normalize_name_query(query);
+    let query = query.as_ref();
+    // fff scores a `/` query against whole paths, where a folder loses to
+    // its many descendants; ask for the last segment's folders instead and
+    // let `rank_home_folders` check the leading segments.
+    let (index_query, candidates) = match query.trim().trim_end_matches('/').rsplit_once('/') {
+        Some((_, last)) if !last.is_empty() => (last, HOME_FOLDER_PATH_CANDIDATES),
+        _ => (query, HOME_FOLDER_CANDIDATES),
+    };
+    let found = search
+        .search_names(home, index_query, candidates, NameKinds::Directories)
+        .map_err(|e| EngineError::Other(e.to_string()))?;
+    // A `.git` probe per candidate (a few hundred stats) lets repositories
+    // rank first.
+    let candidates = found
+        .matches
         .into_iter()
-        .map(|(_, _, path, is_dir)| FileSearchMatch { path, is_dir })
-        .collect()
+        .filter(|found| !is_git_metadata(&found.path))
+        .map(|found| {
+            let is_repo = home.join(&found.path).join(".git").exists();
+            (found.path, is_repo)
+        })
+        .collect();
+    let matches = rank_home_folders(query, candidates)
+        .into_iter()
+        .take(limit)
+        .map(|(relative, is_repo)| HomeFolderMatch {
+            path: folder_browser_path(&home.join(&relative)),
+            relative,
+            is_repo,
+        })
+        .collect();
+    Ok(HomeFolderSearchResult {
+        matches,
+        indexing: found.indexing,
+    })
+}
+
+/// Keep canonical index keys internal. Ordinary Windows paths are easier for
+/// browser clients to compare with Home and existing spaces; retain extended
+/// paths when their length or names require them, and for UNC shares.
+fn folder_browser_path(path: &Path) -> String {
+    #[cfg(windows)]
+    let path = dunce::simplified(path);
+    path.to_string_lossy().into_owned()
+}
+
+/// Re-rank fuzzy folder candidates `(relative path, is a repository)`, given
+/// in index order, by how well the folder itself matches: an exact name,
+/// then a name starting with the query, then one containing it. A query
+/// with `/` matches the path's last segments instead, each query segment a
+/// prefix of its path segment (`dev/com` → `…/development/comet`). Within a
+/// tier repositories go first, then shallower folders. Candidates matching
+/// only through a typo or a parent's name are kept only when nothing better
+/// matched, ordered the same way.
+fn rank_home_folders(query: &str, candidates: Vec<(String, bool)>) -> Vec<(String, bool)> {
+    let query = query.trim().to_lowercase();
+    let segments: Vec<&str> = query.split('/').filter(|s| !s.is_empty()).collect();
+    let tier = |relative: &str| -> u8 {
+        let relative = relative.to_lowercase();
+        let path: Vec<&str> = relative.split('/').collect();
+        if query.contains('/') {
+            if segments.is_empty() || segments.len() > path.len() {
+                return 0;
+            }
+            let tail = &path[path.len() - segments.len()..];
+            if !tail
+                .iter()
+                .zip(&segments)
+                .all(|(seg, q)| seg.starts_with(q))
+            {
+                return 0;
+            }
+            return if tail.last() == segments.last() { 3 } else { 2 };
+        }
+        let name = path.last().copied().unwrap_or_default();
+        if name == query {
+            3
+        } else if name.starts_with(&query) {
+            2
+        } else {
+            u8::from(name.contains(&query))
+        }
+    };
+    let mut ranked: Vec<(u8, usize, usize, (String, bool))> = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(order, (relative, is_repo))| {
+            let depth = relative.matches('/').count();
+            (tier(&relative), depth, order, (relative, is_repo))
+        })
+        .collect();
+    if ranked.iter().any(|(tier, ..)| *tier > 0) {
+        ranked.retain(|(tier, ..)| *tier > 0);
+    }
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.3.1.cmp(&a.3.1))
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    ranked.into_iter().map(|(.., found)| found).collect()
+}
+
+/// Repository metadata is never offered, even if an index surfaced it.
+fn is_git_metadata(relative: &str) -> bool {
+    relative.split('/').any(|component| component == ".git")
+}
+
+fn canonical_search_root(root: &Path) -> Result<PathBuf, EngineError> {
+    std::fs::canonicalize(root)
+        .map_err(|e| EngineError::Other(format!("could not search workspace: {e}")))
 }
 
 /// Turn a generated chat title into the semantic portion of a Zeron branch
@@ -2160,9 +2617,466 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Win32 process working directories remain limited to MAX_PATH even when
+/// file I/O supports extended paths. A usable worktree must be able to launch
+/// Git, hooks, and agents, not merely be created on disk. Count UTF-16 units,
+/// excluding the verbatim prefix and reserving the terminating NUL.
+#[cfg(any(windows, test))]
+pub(crate) fn validate_windows_worktree_path(path: &str) -> Result<(), EngineError> {
+    if windows_git_worktree_path(path).encode_utf16().count() >= 260 {
+        return Err(EngineError::Other(
+            "This worktree path is too long to start tools on Windows. Choose a shorter location, such as C:\\worktrees.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Git's worktree command normalizes backslashes to slashes, which breaks
+/// Win32 verbatim prefixes (`\\?\` becomes `//?/`). Keep native paths for
+/// filesystem access, but pass drive/UNC paths without that prefix to Git.
+#[cfg(any(windows, test))]
+fn windows_git_worktree_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    if let Some(unc) = path.strip_prefix("//?/UNC/") {
+        return format!("//{unc}");
+    }
+    if let Some(drive) = path.strip_prefix("//?/") {
+        let bytes = drive.as_bytes();
+        if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":/" {
+            return drive.to_owned();
+        }
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_worktree_paths_strip_only_drive_and_unc_verbatim_prefixes() {
+        for (native, expected) in [
+            (
+                r"\\?\C:\other disk\日本語\repo",
+                "C:/other disk/日本語/repo",
+            ),
+            (r"\\?\UNC\server\share\repo", "//server/share/repo"),
+            (r"C:\worktrees\repo", "C:/worktrees/repo"),
+            (r"\\server\share\repo", "//server/share/repo"),
+            ("//?/C:/worktrees/repo", "C:/worktrees/repo"),
+            ("//?/UNC/server/share/repo", "//server/share/repo"),
+        ] {
+            assert_eq!(super::windows_git_worktree_path(native), expected);
+        }
+        let suffix = "folder/".repeat(50);
+        assert_eq!(
+            super::windows_git_worktree_path(&format!("//?/C:/{suffix}")),
+            format!("C:/{suffix}")
+        );
+    }
+
     use super::*;
+
+    #[test]
+    fn windows_worktree_limit_counts_utf16_without_verbatim_prefix() {
+        for prefix in ["C:/", "//?/C:/", "//server/share/", "//?/UNC/server/share/"] {
+            let prefix_len = windows_git_worktree_path(prefix).encode_utf16().count();
+            let path = format!("{prefix}{}", "a".repeat(259 - prefix_len));
+            assert!(validate_windows_worktree_path(&path).is_ok());
+            assert!(validate_windows_worktree_path(&format!("{path}a")).is_err());
+        }
+        assert!(validate_windows_worktree_path(&format!("C:/{}", "日本語".repeat(80))).is_ok());
+        assert!(validate_windows_worktree_path(&format!("C:/{}", "😀".repeat(129))).is_err());
+    }
+
+    #[tokio::test]
+    async fn worktree_location_containing_the_repository_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let code = tmp.path().join("code");
+        let repo = code.join("comet");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repos = Repos::with_worktrees_root(&tmp.path().join("data"), "test", code.clone());
+        repos
+            .git(&["init", "-b", "main"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .git(
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "init",
+                ],
+                Some(&repo),
+            )
+            .await
+            .unwrap();
+        let error = repos.create_worktree(&repo, "main").await.unwrap_err();
+        assert!(
+            error.to_string().contains("inside the repository"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 1, "only .git");
+        assert!(
+            repos
+                .branches(&repo)
+                .await
+                .unwrap()
+                .iter()
+                .all(|b| !b.starts_with("zeron/"))
+        );
+
+        // A sibling location for the same parent is fine.
+        let sibling =
+            Repos::with_worktrees_root(&tmp.path().join("data2"), "test", code.join("wt"));
+        let worktree = sibling.create_worktree(&repo, "main").await.unwrap();
+        assert!(Path::new(&worktree.path).starts_with(code.join("wt").join("comet")));
+    }
+
+    async fn two_step_fixture(hook_exit: u8) -> (tempfile::TempDir, Repos, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let repos = Repos::with_worktrees_root(
+            &tmp.path().join("data"),
+            "test",
+            tmp.path().join("worktrees"),
+        );
+        repos
+            .git(&["init", "-b", "main"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .git(&["config", "user.name", "Test"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .git(&["config", "core.autocrlf", "false"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .git(&["config", "user.email", "test@example.com"], Some(&repo))
+            .await
+            .unwrap();
+        std::fs::write(repo.join("README.txt"), "original checkout\n").unwrap();
+        std::fs::write(repo.join(".gitattributes"), "*.txt filter=fixture\n").unwrap();
+        std::fs::create_dir(repo.join(".githooks")).unwrap();
+        let hook = repo.join(".githooks/post-checkout");
+        std::fs::write(&hook, format!(
+            "#!/bin/sh\ntest -f README.txt || exit 42\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" >> hook-arguments\nprintf ran >> hook-count\nexit {hook_exit}\n"
+        )).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        repos.git(&["add", "."], Some(&repo)).await.unwrap();
+        repos
+            .git(&["commit", "-m", "fixture"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .git(&["config", "core.hooksPath", ".githooks"], Some(&repo))
+            .await
+            .unwrap();
+        (tmp, repos, repo)
+    }
+
+    #[tokio::test]
+    async fn two_step_worktree_runs_configured_hook_once_after_checkout() {
+        let (tmp, repos, repo) = two_step_fixture(0).await;
+        let path = tmp.path().join("new checkout");
+        repos
+            .add_worktree_in_two_steps(&repo, &path, "zeron/test", "main")
+            .await
+            .unwrap();
+        let head = repos
+            .git(&["rev-parse", "HEAD"], Some(&repo))
+            .await
+            .unwrap();
+        let arguments = std::fs::read_to_string(path.join("hook-arguments")).unwrap();
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            ["0".repeat(head.len()), head, "1".into()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("hook-count")).unwrap(),
+            "ran"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("README.txt")).unwrap(),
+            "original checkout\n"
+        );
+        assert!(!repo.join("hook-count").exists());
+        assert_eq!(repos.current_branch(&repo).await.unwrap(), "main");
+        assert!(repos.refs(&repo).await.unwrap().iter().any(|entry| {
+            entry
+                .worktree_path
+                .as_ref()
+                .is_some_and(|listed| same_file::is_same_file(listed, &path).unwrap_or(false))
+        }));
+    }
+
+    #[tokio::test]
+    async fn two_step_worktree_removes_partial_checkout_when_reset_fails() {
+        let (tmp, repos, repo) = two_step_fixture(0).await;
+        repos
+            .git(&["config", "filter.fixture.smudge", "exit 1"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .git(&["config", "filter.fixture.required", "true"], Some(&repo))
+            .await
+            .unwrap();
+        let path = tmp.path().join("failed checkout");
+        let error = repos
+            .add_worktree_in_two_steps(&repo, &path, "zeron/failed", "main")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("smudge"), "{error}");
+        assert!(!path.exists());
+        assert!(repos.refs(&repo).await.unwrap().iter().all(|entry| {
+            entry
+                .worktree_path
+                .as_ref()
+                .is_none_or(|listed| same_file::is_same_file(listed, &repo).unwrap_or(false))
+        }));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.txt")).unwrap(),
+            "original checkout\n"
+        );
+        assert_eq!(repos.current_branch(&repo).await.unwrap(), "main");
+    }
+
+    #[tokio::test]
+    async fn two_step_worktree_keeps_completed_checkout_when_hook_fails() {
+        let (tmp, repos, repo) = two_step_fixture(1).await;
+        let path = tmp.path().join("hook failure");
+        assert!(
+            repos
+                .add_worktree_in_two_steps(&repo, &path, "zeron/hook-failure", "main")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("hook-count")).unwrap(),
+            "ran"
+        );
+        assert!(path.join("README.txt").is_file());
+        assert!(repos.refs(&repo).await.unwrap().iter().any(|entry| {
+            entry
+                .worktree_path
+                .as_ref()
+                .is_some_and(|listed| same_file::is_same_file(listed, &path).unwrap_or(false))
+        }));
+        assert_eq!(repos.current_branch(&repo).await.unwrap(), "main");
+    }
+
+    #[test]
+    fn same_remote_ignores_scheme_suffix_slash_credentials_and_case() {
+        let canonical = "https://github.com/Acme/App";
+        for same in [
+            "https://github.com/acme/app.git",
+            "https://github.com/Acme/App/",
+            "https://x-access-token:ghu_secret@github.com/acme/app.git",
+            "git@github.com:acme/app.git",
+            "ssh://git@github.com/acme/app",
+            "http://GitHub.com/acme/app",
+        ] {
+            assert!(same_remote(canonical, same), "{same}");
+        }
+        for other in [
+            "https://github.com/acme/app2",
+            "https://github.com/other/app",
+            "https://gitlab.com/acme/app",
+        ] {
+            assert!(!same_remote(canonical, other), "{other}");
+        }
+        assert!(same_remote("/srv/git/src.git", "file:///srv/git/src.git/"));
+        assert!(!same_remote("/srv/git/src.git", "/srv/other/src.git"));
+    }
+
+    #[tokio::test]
+    async fn github_repo_names_the_origins_owner_and_name() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let repos = Repos::new(&root.path().join("data"), "device-1");
+        git(&["init", "-q"]);
+        assert_eq!(repos.github_repo(root.path()).await, None, "no origin");
+        git(&["remote", "add", "origin", "git@github.com:Acme/app.git"]);
+        assert_eq!(
+            repos.github_repo(root.path()).await.as_deref(),
+            Some("Acme/app")
+        );
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "https://gitlab.com/acme/app.git",
+        ]);
+        assert_eq!(repos.github_repo(root.path()).await, None, "not GitHub");
+    }
+
+    #[tokio::test]
+    async fn clone_repo_in_puts_the_checkout_where_the_user_chose() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&["init", "-q", "-b", "main"], &work);
+        std::fs::write(work.join("README.md"), "hi").unwrap();
+        git(&["add", "."], &work);
+        git(&["commit", "-q", "-m", "init"], &work);
+        let bare = root.path().join("app.git");
+        git(
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            root.path(),
+        );
+        let code = root.path().join("code");
+        std::fs::create_dir_all(&code).unwrap();
+        let repos = Repos::new(&root.path().join("data"), "device-1");
+        let repo = repos
+            .clone_repo_in(bare.to_str().unwrap(), code.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(repo.path, code.join("app").to_string_lossy());
+        assert!(code.join("app/README.md").exists());
+        // Again: the same checkout, not an error.
+        let again = repos
+            .clone_repo_in(bare.to_str().unwrap(), code.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(again, repo);
+        // A folder that isn't there is refused, not created.
+        let err = repos
+            .clone_repo_in(
+                bare.to_str().unwrap(),
+                root.path().join("nope").to_str().unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No such folder"), "{err}");
+    }
+
+    #[test]
+    fn clone_folder_name_is_the_last_segment_and_stays_inside() {
+        for (url, name) in [
+            ("https://github.com/acme/app.git", "app"),
+            ("https://github.com/acme/app/", "app"),
+            ("git@github.com:acme/app.git", "app"),
+            ("git@github.com:app.git", "app"),
+            ("/srv/git/app.git", "app"),
+            (r"C:\Users\me\code\app.git", "app"),
+            (r"C:\Users\me\code\app\", "app"),
+            ("https://example.com/acme/..", "repo"),
+            ("https://example.com/acme/.", "repo"),
+            (r"C:\..", "repo"),
+            ("", "repo"),
+        ] {
+            assert_eq!(clone_folder_name(url), name, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn clone_repo_is_idempotent_for_the_same_origin_only() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "git {args:?}: {status:?}");
+        };
+        // Two different upstreams that would both clone into `repos/src`.
+        let mut upstreams = Vec::new();
+        for dir in ["a", "b"] {
+            let work = root.path().join(dir).join("work");
+            std::fs::create_dir_all(&work).unwrap();
+            git(&["init", "-q", "-b", "main"], &work);
+            std::fs::write(work.join("README.md"), dir).unwrap();
+            git(&["add", "."], &work);
+            git(&["commit", "-q", "-m", "init"], &work);
+            let bare = root.path().join(dir).join("src.git");
+            git(
+                &[
+                    "clone",
+                    "-q",
+                    "--bare",
+                    work.to_str().unwrap(),
+                    bare.to_str().unwrap(),
+                ],
+                root.path(),
+            );
+            upstreams.push(bare);
+        }
+        let data = root.path().join("data");
+        let repos = Repos::new(&data, "device-1");
+        let first = repos
+            .clone_repo(upstreams[0].to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.path, data.join("repos").join("src").to_string_lossy());
+        // Same repository again (different spelling): the same success reply.
+        let again = repos
+            .clone_repo(&format!("file://{}/", upstreams[0].display()))
+            .await
+            .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(repos.list().await.len(), 1, "registered once");
+        // A different repository with the same folder name stays an error.
+        let err = repos
+            .clone_repo(upstreams[1].to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Already exists"), "{err}");
+    }
+
+    #[test]
+    fn session_home_requires_an_explicit_usable_directory() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            session_home_dir_with(|name| (name == "HOME").then(|| home.path().as_os_str().into()))
+                .unwrap(),
+            home.path()
+        );
+        assert!(session_home_dir_with(|_| None).is_err());
+        assert!(session_home_dir_with(|name| (name == "HOME").then(|| "relative".into())).is_err());
+    }
 
     fn history_commit(sha: String, parent_sha: Option<String>) -> GitHistoryCommit {
         GitHistoryCommit {
@@ -2176,30 +3090,16 @@ mod tests {
         }
     }
 
-    fn score(query: &str, candidate: &str) -> Option<u32> {
-        let mut matcher = nucleo_matcher::Matcher::new({
-            let mut config = nucleo_matcher::Config::DEFAULT;
-            config.set_match_paths();
-            config
-        });
-        nucleo_matcher::pattern::Pattern::parse(
-            query,
-            nucleo_matcher::pattern::CaseMatching::Smart,
-            nucleo_matcher::pattern::Normalization::Smart,
-        )
-        .score(
-            nucleo_matcher::Utf32String::from(candidate).slice(..),
-            &mut matcher,
-        )
-    }
-
     #[test]
     fn expand_home_rewrites_tilde_and_leaves_other_paths() {
-        let home = home_dir();
-        assert_eq!(expand_home("~"), home.to_string_lossy());
-        assert_eq!(expand_home("~/proj"), home.join("proj").to_string_lossy());
-        assert_eq!(expand_home("/abs/path"), "/abs/path");
-        assert_eq!(expand_home("~nope"), "~nope");
+        let home = session_home_dir().unwrap();
+        assert_eq!(expand_home("~").unwrap(), home.to_string_lossy());
+        assert_eq!(
+            expand_home("~/proj").unwrap(),
+            home.join("proj").to_string_lossy()
+        );
+        assert_eq!(expand_home("/abs/path").unwrap(), "/abs/path");
+        assert_eq!(expand_home("~nope").unwrap(), "~nope");
     }
 
     #[test]
@@ -2339,13 +3239,6 @@ tmpfs /run tmpfs rw 0 0
     }
 
     #[test]
-    fn fuzzy_score_matches_a_path_subsequence() {
-        assert!(score("cmp rs", "crates/ui/src/composer.rs").is_some());
-        assert!(score("composer crates", "crates/ui/src/composer.rs").is_some());
-        assert!(score("xyzq", "crates/ui/src/composer.rs").is_none());
-    }
-
-    #[test]
     fn git_history_matches_unicode_case_insensitively() {
         let mut candidate = history_commit("a1b2c3d4".into(), None);
         candidate.subject = "RÉPARER la recherche".into();
@@ -2379,9 +3272,212 @@ tmpfs /run tmpfs rw 0 0
     }
 
     #[test]
+    fn home_folder_search_finds_nested_repositories() {
+        let home = tempfile::tempdir().unwrap();
+        for dir in [
+            "work/clients/comet/.git",
+            "work/clients/comet/src",
+            "notes/comet-ideas",
+            "notes/other",
+        ] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        std::fs::write(home.path().join("notes/comet-ideas/todo.md"), b"").unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let search = WorkspaceSearch::new();
+        // The first call starts the index; wait out its scan.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let result = loop {
+            let result = search_folders_under(&search, &home, "comet", 20).unwrap();
+            if !result.indexing && !result.matches.is_empty() {
+                break result;
+            }
+            assert!(std::time::Instant::now() < deadline, "index never finished");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let found: Vec<_> = result
+            .matches
+            .iter()
+            .map(|m| (m.relative.as_str(), m.is_repo))
+            .collect();
+        // The exact name outranks the shallower prefix match.
+        assert_eq!(
+            found,
+            [("work/clients/comet", true), ("notes/comet-ideas", false)]
+        );
+        assert_eq!(
+            result.matches[0].path,
+            folder_browser_path(&home.join("work/clients/comet"))
+        );
+        assert!(
+            search_folders_under(&search, &home, "", 20)
+                .unwrap()
+                .matches
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn home_folder_search_accepts_both_windows_separators() {
+        let home = tempfile::tempdir().unwrap();
+        for dir in ["aa/bb/cc/dd/src", "aa/bb/cc/dd-other", "elsewhere/dd"] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let search = WorkspaceSearch::new();
+        search.warm(&home).unwrap();
+        assert!(search.wait_until_indexed(&home, Duration::from_secs(20)));
+
+        let forward = search_folders_under(&search, &home, "aa/bb/cc/dd", 20).unwrap();
+        assert_eq!(forward.matches[0].relative, "aa/bb/cc/dd");
+        assert!(
+            forward
+                .matches
+                .iter()
+                .any(|m| m.relative == "aa/bb/cc/dd-other")
+        );
+        for query in [r"aa\bb\cc\dd", r"aa\bb/cc\dd", r"aa\bb\cc\dd\"] {
+            let found = search_folders_under(&search, &home, query, 20).unwrap();
+            assert_eq!(found.matches, forward.matches);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn home_folder_search_preserves_literal_posix_backslashes() {
+        let home = tempfile::tempdir().unwrap();
+        let literal = r"aa\bb\cc\dd";
+        for dir in [literal, "aa/bb/cc/dd"] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let search = WorkspaceSearch::new();
+        search.warm(&home).unwrap();
+        assert!(search.wait_until_indexed(&home, Duration::from_secs(20)));
+
+        let found = search_folders_under(&search, &home, literal, 20).unwrap();
+        assert_eq!(found.matches.len(), 1);
+        assert_eq!(found.matches[0].relative, literal);
+        let forward = search_folders_under(&search, &home, "aa/bb/cc/dd", 20).unwrap();
+        assert_eq!(forward.matches.len(), 1);
+        assert_eq!(forward.matches[0].relative, "aa/bb/cc/dd");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn browser_paths_preserve_native_posix_spelling() {
+        for path in [
+            "/home/ana/code",
+            "/Users/Ana/code",
+            r"/tmp/name\with\backslashes",
+        ] {
+            assert_eq!(folder_browser_path(Path::new(path)), path);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn browser_paths_simplify_only_safe_windows_drive_paths() {
+        assert_eq!(
+            folder_browser_path(Path::new(r"\\?\C:\Users\Ana\repo")),
+            r"C:\Users\Ana\repo"
+        );
+        for path in [
+            r"\\?\C:\repo.",
+            r"\\?\C:\NUL.txt",
+            r"\\?\UNC\server\share\repo",
+        ] {
+            assert_eq!(folder_browser_path(Path::new(path)), path);
+        }
+        let long = format!(r"\\?\C:\{}\{}", "a".repeat(150), "b".repeat(150));
+        assert_eq!(folder_browser_path(Path::new(&long)), long);
+    }
+
+    fn ranked(query: &str, candidates: &[(&str, bool)]) -> Vec<String> {
+        let candidates = candidates
+            .iter()
+            .map(|(path, is_repo)| ((*path).to_owned(), *is_repo))
+            .collect();
+        rank_home_folders(query, candidates)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    #[test]
+    fn home_folders_rank_by_their_own_name() {
+        let candidates = [
+            ("Drive/notes about comet launch", false),
+            ("dev/comet/apps/ios", false),
+            ("old/comet-archive", false),
+            ("dev/comet", false),
+            ("dev/mycomet", false),
+        ];
+        assert_eq!(
+            ranked("Comet", &candidates),
+            [
+                "dev/comet",
+                "old/comet-archive",
+                // Same tier, repo flag and depth: the index's order decides.
+                "Drive/notes about comet launch",
+                "dev/mycomet",
+            ]
+        );
+    }
+
+    #[test]
+    fn home_folders_put_repositories_first_within_a_tier() {
+        let candidates = [("a/comet-docs", false), ("b/c/comet-app", true)];
+        assert_eq!(
+            ranked("comet", &candidates),
+            ["b/c/comet-app", "a/comet-docs"]
+        );
+        // Typo matches survive only when nothing contains the query, and
+        // order the same way.
+        let candidates = [
+            ("Models/Comfy/comfy_types", false),
+            ("dev/comet", true),
+            ("dev/tools", false),
+        ];
+        assert_eq!(
+            ranked("comt", &candidates),
+            ["dev/comet", "dev/tools", "Models/Comfy/comfy_types"]
+        );
+    }
+
+    #[test]
+    fn slash_queries_match_trailing_segment_prefixes() {
+        let candidates = [
+            ("Documentos/development/comet/apps", false),
+            ("Documentos/development/comet", true),
+            ("Documentos/dev/tools", false),
+            ("dev/com", false),
+        ];
+        assert_eq!(
+            ranked("dev/com", &candidates),
+            ["dev/com", "Documentos/development/comet"]
+        );
+    }
+
+    fn search_files_blocking(
+        root: &Path,
+        query: &str,
+        featured_paths: &[String],
+    ) -> Result<Vec<FileSearchMatch>, EngineError> {
+        super::search_files_blocking(&WorkspaceSearch::new(), root, query, featured_paths)
+    }
+
+    #[test]
     fn search_files_obeys_gitignore_and_returns_directories() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join(".git")).unwrap();
+        // Dotfiles are indexed only inside a real repository.
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
         std::fs::create_dir(root.path().join("src")).unwrap();
         std::fs::write(root.path().join("src/composer.rs"), "").unwrap();
         std::fs::write(root.path().join(".secret"), "").unwrap();
@@ -2445,33 +3541,6 @@ tmpfs /run tmpfs rw 0 0
         assert!(composer < path_only);
     }
 
-    #[test]
-    fn cached_search_reuses_one_walk_within_the_ttl() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("alpha.rs"), "").unwrap();
-        let cache: FileIndexCache = std::sync::Mutex::new(HashMap::new());
-
-        let first = search_files_cached(&cache, root.path(), "alpha", &[], || false).unwrap();
-        assert_eq!(first.first().map(|m| m.path.as_str()), Some("alpha.rs"));
-        std::fs::write(root.path().join("beta.rs"), "").unwrap();
-        let second = search_files_cached(&cache, root.path(), "beta", &[], || false).unwrap();
-        assert!(second.is_empty(), "{second:?}");
-    }
-
-    #[test]
-    fn cancelled_search_stops_before_walking() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("README.md"), "").unwrap();
-        let cancelled = AtomicBool::new(true);
-
-        let err = search_files_blocking_with_cancel(root.path(), "", &[], || {
-            cancelled.load(Ordering::Relaxed)
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("cancelled"));
-    }
-
     #[tokio::test]
     async fn workspace_checkout_rejects_sibling_paths() {
         let data = tempfile::tempdir().unwrap();
@@ -2490,6 +3559,77 @@ tmpfs /run tmpfs rw 0 0
                 .await
                 .is_none()
         );
+    }
+
+    async fn git(cwd: &Path, args: &[&str]) {
+        let output = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()
+            .await
+            .expect("git spawns");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_checkout_accepts_every_linked_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("repo");
+        let branch = tmp.path().join("branch");
+        let detached = tmp.path().join("detached");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&root).expect("repo dir");
+        std::fs::create_dir_all(&elsewhere).expect("unrelated dir");
+        git(&root, &["init", "-b", "main"]).await;
+        git(&root, &["commit", "--allow-empty", "-m", "initial"]).await;
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                &branch.to_string_lossy(),
+            ],
+        )
+        .await;
+        git(
+            &root,
+            &["worktree", "add", "--detach", &detached.to_string_lossy()],
+        )
+        .await;
+        let data = tmp.path().join("data");
+        let repos = Repos::with_worktrees_root(&data, "device", data.join("worktrees"));
+
+        for checkout in [&root, &branch, &detached] {
+            assert_eq!(
+                repos.workspace_checkout(&root, checkout).await,
+                std::fs::canonicalize(checkout).ok(),
+                "{}",
+                checkout.display()
+            );
+        }
+        // A newline in a worktree's path must not smuggle in another entry.
+        #[cfg(unix)]
+        {
+            let forged = tmp
+                .path()
+                .join(format!("forged\nworktree {}", elsewhere.display()));
+            git(
+                &root,
+                &["worktree", "add", "--detach", &forged.to_string_lossy()],
+            )
+            .await;
+        }
+        assert!(repos.workspace_checkout(&root, &elsewhere).await.is_none());
     }
 
     #[tokio::test]

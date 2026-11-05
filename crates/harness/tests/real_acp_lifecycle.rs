@@ -1,12 +1,12 @@
-//! Real Pi ACP + model regression for #296. Requires an authenticated Pi and
+//! Real Pi RPC + model regression for #296. Requires an authenticated Pi and
 //! fixtures/pi-slow-model.ts loaded as a Pi extension (35s delay by default).
-//! PI_ACP_EXECUTABLE and PI_ACP_PI_COMMAND can select isolated installations.
+//! PI_EXECUTABLE can select an isolated Pi installation.
 //! cargo test -p zeron-harness --test real_acp_lifecycle -- --ignored --nocapture
 
 use futures::StreamExt;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
-use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
 use zeron_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
 
 async fn live_run(cancel: bool) {
@@ -14,6 +14,8 @@ async fn live_run(cancel: bool) {
     let (steer, steering) = mpsc::channel(8);
     let interrupt = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
         steering,
         interrupt: interrupt.clone(),
         request_input: Box::new(|_| {
@@ -21,15 +23,20 @@ async fn live_run(cancel: bool) {
             let _ = tx.send(Vec::new());
             rx
         }),
+        turn: Default::default(),
     };
     let request = RunRequest {
+        mcp: None,
         prompt: "Run the shell command `printf ACP-TOOL-OK` exactly once using bash. After seeing its result, reply exactly FIRST-DONE. Do not call any other tools.".into(),
         harness: None, model: None, reasoning: None,
         model_options: serde_json::Map::new(), cwd: cwd.path().display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
+        access: Default::default(), plan: false,
         attachments: Vec::new(), worktree: None, resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
-    let mut stream = AcpHarness::pi()
+    let mut stream = zeron_harness::PiHarness::new()
         .run(request, controls)
         .await
         .expect("real Pi must start");
@@ -56,7 +63,7 @@ async fn live_run(cancel: bool) {
                     // Both messages must queue until the slow original prompt
                     // responds. The real adapter rejects overlapping prompts.
                     for word in ["SECOND-DONE", "THIRD-DONE"] {
-                        steer.send(SteerMessage { prompt: format!("Do not call tools. Reply exactly {word}."), message_id: None }).await.unwrap();
+                        steer.send(SteerMessage { prompt: format!("Do not call tools. Reply exactly {word}."), message_id: None, attachments: Vec::new(), config: None }).await.unwrap();
                     }
                 }
                 AgentEvent::TextDelta { text: delta } => text.push_str(&delta),

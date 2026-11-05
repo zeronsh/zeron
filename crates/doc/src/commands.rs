@@ -349,6 +349,7 @@ mod tests {
 
     fn run_request() -> RunRequest {
         RunRequest {
+            mcp: None,
             prompt: "hello".into(),
             harness: None,
             model: None,
@@ -357,9 +358,13 @@ mod tests {
             cwd: "/tmp".into(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             auto_approve: false,
+            access: Default::default(),
+            plan: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 }

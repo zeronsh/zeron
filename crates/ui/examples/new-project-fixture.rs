@@ -13,9 +13,21 @@ fn main() -> anyhow::Result<()> {
         let mut settings = settings::UiSettings::default();
         settings.sidebar_show_branch = true;
         if let Ok(path) = std::env::var("ZERON_FIXTURE_BACKGROUND") {
-            settings.new_thread_composer_background = Some(settings::NewThreadComposerBackground { path, name: "Uploaded background".into() });
+            settings.new_thread_composer_background = Some(settings::NewThreadComposerBackground {
+                path,
+                name: "Uploaded background".into(),
+                adjustment: settings::NewThreadBackgroundAdjustment::default(),
+            });
         }
-        settings.surface = zeron_theme::SurfacePreference::Frosted;
+        if let Some(folder) = std::env::var_os("ZERON_FIXTURE_WALLPAPER_FOLDER") {
+            settings.wallpaper_folder = Some(folder.into());
+        }
+        settings.wallpaper_theme_colors = std::env::var_os("ZERON_FIXTURE_WALLPAPER_COLORS").is_some();
+        settings.surface = if std::env::var_os("ZERON_FIXTURE_OPAQUE").is_some() {
+            zeron_theme::SurfacePreference::Opaque
+        } else {
+            zeron_theme::SurfacePreference::Frosted
+        };
         settings.save(&data).unwrap();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);

@@ -7,6 +7,7 @@ use zeron_doc::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus
 fn run_request_attachments_survive_command_round_trip() {
     let doc = SessionDoc::init("chat-1").unwrap();
     let request = zeron_proto::RunRequest {
+        mcp: None,
         prompt: "p".into(),
         harness: None,
         model: None,
@@ -15,9 +16,13 @@ fn run_request_attachments_survive_command_round_trip() {
         cwd: "/tmp".into(),
         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec!["/tmp/a.png".into()],
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     doc.queue_command(&SessionCommandEntry {
         id: "c1".into(),

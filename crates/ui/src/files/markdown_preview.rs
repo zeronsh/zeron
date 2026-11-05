@@ -2,7 +2,7 @@
 use crate::image_media::release_media;
 use crate::{
     markdown::{
-        parser::{self, Block, BlockTree},
+        parser::{self, Block, BlockTree, InlineRun},
         render::{self, LinkUi, RenderCache, RenderOptions},
     },
     theme::Theme,
@@ -35,6 +35,52 @@ fn block_source_lines(source: &str, tree: &BlockTree) -> Vec<u32> {
         .iter()
         .map(|top| starts.partition_point(|start| *start <= top.range.start) as u32)
         .collect()
+}
+
+/// A preview of a file beyond the workspace renders its local links as
+/// plain text: they would resolve against the linking chat's checkout, not
+/// the document's own folder, so their styling drops before render. Web
+/// links keep their normal handling.
+fn strip_outside_links(block: &mut Block) {
+    fn strip_runs(runs: &mut [InlineRun]) {
+        for run in runs {
+            if run.style.image.is_none()
+                && run
+                    .style
+                    .link
+                    .as_deref()
+                    .is_some_and(|target| !web_target(target))
+            {
+                run.style.link = None;
+            }
+            if let Some(image) = &mut run.style.image
+                && image
+                    .link
+                    .as_deref()
+                    .is_some_and(|target| !web_target(target))
+            {
+                image.link = None;
+            }
+        }
+    }
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => strip_runs(runs),
+        Block::BlockQuote { children } => children.iter_mut().for_each(strip_outside_links),
+        Block::List { items, .. } => items.iter_mut().flatten().for_each(strip_outside_links),
+        Block::Table { header, rows, .. } => {
+            header.iter_mut().for_each(|runs| strip_runs(runs));
+            rows.iter_mut().flatten().for_each(|runs| strip_runs(runs));
+        }
+        Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
+    }
+}
+
+/// Destinations a preview still treats as links: web navigation and mail,
+/// mirroring `preview_link_outcome`.
+fn web_target(target: &str) -> bool {
+    crate::browser::model::transcript_address(target).is_ok()
+        || (!target.chars().any(char::is_control)
+            && url::Url::parse(target).is_ok_and(|url| url.scheme() == "mailto"))
 }
 
 fn comment_block(lines: &[u32], line: u32) -> Option<usize> {
@@ -145,6 +191,7 @@ pub(super) struct MarkdownPreview {
     visible_rows: HashSet<gpui::SharedString>,
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
     code_fences_generation: u64,
+    math_generation: u64,
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
     needs_focus: bool,
@@ -193,14 +240,29 @@ impl MarkdownPreview {
             480.0,
         );
         let mut retired = Vec::new();
+        // Admission accounts current rasters, so a sharper one must still fit
+        // the document budget.
+        let mut used: usize = self
+            .images
+            .values()
+            .chain(self.diagrams.values())
+            .filter_map(|m| m.as_ref().ok())
+            .map(|m| m.bytes)
+            .sum();
         for media in self
             .images
             .values_mut()
             .chain(self.diagrams.values_mut())
             .filter_map(|m| m.as_mut().ok())
         {
-            let next = media.preview_for_view(target, window.scale_factor());
+            let others = used - media.bytes;
+            let next = media.preview_within(
+                target,
+                window.scale_factor(),
+                MAX_MEDIA_BYTES.saturating_sub(others),
+            );
             if !Arc::ptr_eq(&media.image, &next.image) {
+                used = others + next.bytes;
                 retired.push(std::mem::replace(media, next));
                 self.media_dirty = true;
             }
@@ -360,6 +422,7 @@ impl MarkdownPreview {
             visible_rows: HashSet::new(),
             code_fences: HashMap::new(),
             code_fences_generation: crate::settings::code_fences_generation(cx),
+            math_generation: crate::settings::math_generation(cx),
             copied_code: None,
             copied_clear: None,
             needs_focus: true,
@@ -417,6 +480,8 @@ impl MarkdownPreview {
         self.loading = self.tree.is_empty();
         self.truncated = truncated || clipped;
         let parsed_source: Arc<str> = Arc::from(source.as_str());
+        // Outside documents render their local links as plain text.
+        let outside = super::path_is_outside(&self.path);
         self.parse_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(120))
@@ -424,7 +489,12 @@ impl MarkdownPreview {
             let (tree, highlights, anchors, block_lines) = cx
                 .background_executor()
                 .spawn(async move {
-                    let tree = parser::parse_full(&source);
+                    let mut tree = parser::parse_full(&source);
+                    if outside {
+                        for top in &mut tree.blocks {
+                            strip_outside_links(&mut Arc::make_mut(top).block);
+                        }
+                    }
                     let block_lines = block_source_lines(&source, &tree);
                     let mut highlights = HashMap::new();
                     let mut anchors = HashMap::new();
@@ -913,43 +983,32 @@ impl MarkdownPreview {
         loaded: &crate::image_media::MediaImage,
         id: gpui::SharedString,
         name: String,
+        plate: Option<gpui::Hsla>,
         weak: gpui::WeakEntity<Self>,
     ) -> AnyElement {
-        use gpui::StyledImage as _;
-        let preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
+        let mut preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
+        preview.plate = plate;
         let source = loaded.clone();
-        div()
-            .id(id)
-            .w_full()
-            .max_w(px(loaded.width))
-            .mx_auto()
-            .max_h(px(480.0))
-            .aspect_ratio(loaded.width / loaded.height)
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label("Enlarge image")
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                let _ = weak.update(cx, |view, cx| {
-                    view.close_media_preview(cx);
-                    view.zoom_source = Some(source.clone());
-                    preview.viewer.reset();
-                    view.preview_image = Some(preview.clone());
-                    window.focus(&view.preview_focus, cx);
-                    cx.notify();
-                });
-            })
-            .child(
-                gpui::img(loaded.image.clone())
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Contain),
-            )
-            .into_any_element()
+        crate::image_media::preview_element(loaded, id, move |window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.close_media_preview(cx);
+                view.zoom_source = Some(source.clone());
+                preview.viewer.reset();
+                view.preview_image = Some(preview.clone());
+                window.focus(&view.preview_focus, cx);
+                cx.notify();
+            });
+        })
     }
 
     #[cfg(test)]
     pub(super) fn test_tree(&self) -> &BlockTree {
         &self.tree
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_suspended(&self) -> bool {
+        self.suspended
     }
 
     #[cfg(test)]
@@ -975,6 +1034,8 @@ impl MarkdownPreview {
         let open_web_link = self.open_web_link.clone();
         LinkUi {
             source_session: None,
+            source_local: false,
+            file_roots: None,
             handler: Rc::new(move |activation, _, cx| {
                 if weak.upgrade().is_none() {
                     return render::LinkOutcome::Rejected;
@@ -1023,6 +1084,7 @@ impl MarkdownPreview {
                 let top = self.tree.blocks.get(ix)?.clone();
                 let mut opts = RenderOptions::settled(format!("{}{ix}", self.scope).into());
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
+                opts.math = crate::settings::math_style(cx);
                 let editor = self.editor.as_ref().and_then(|editor| editor.upgrade());
                 let source = self.parsed_source.clone();
                 opts.tasks = Some(render::TaskUi {
@@ -1069,6 +1131,7 @@ impl MarkdownPreview {
                                 loaded,
                                 format!("{id}-image").into(),
                                 "Mermaid diagram".into(),
+                                Some(crate::markdown::mermaid::Palette::plate(theme)),
                                 diagram_owner.clone(),
                             ),
                             Some(Err(error)) => div()
@@ -1087,7 +1150,7 @@ impl MarkdownPreview {
                                 })
                                 .into_any_element(),
                         };
-                        render::DiagramUi {
+                        render::DiagramView::Diagram(render::DiagramUi {
                             body,
                             show_source: source_shown,
                             toggle_source: Rc::new(move |_, cx| {
@@ -1099,16 +1162,13 @@ impl MarkdownPreview {
                                     cx.notify();
                                 });
                             }),
-                        }
+                        })
                     })),
-                    image: Rc::new(move |image, id, theme| match images.get(&image.source) {
-                        Some(Ok(loaded)) => {
-                            let mut el =
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .child(Self::media_element(
+                    image: Some(Rc::new(move |image, id, theme| {
+                        Some(match images.get(&image.source) {
+                            Some(Ok(loaded)) => {
+                                let mut el = div().flex().flex_col().gap(px(4.0)).child(
+                                    Self::media_element(
                                         loaded,
                                         id,
                                         if image.alt.is_empty() {
@@ -1116,12 +1176,17 @@ impl MarkdownPreview {
                                         } else {
                                             image.alt.clone()
                                         },
+                                        None,
                                         image_owner.clone(),
-                                    ));
-                            if let Some(target) = image.link.clone() {
-                                let link = image_link.clone();
-                                el = el.child(
-                                    super::toolbar_button("markdown-image-link", "Open image link")
+                                    ),
+                                );
+                                if let Some(target) = image.link.clone() {
+                                    let link = image_link.clone();
+                                    el = el.child(
+                                        super::toolbar_button(
+                                            "markdown-image-link",
+                                            "Open image link",
+                                        )
                                         .on_click(move |_, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
@@ -1136,51 +1201,52 @@ impl MarkdownPreview {
                                                 .size(px(crate::surface_chrome::ICON_SIZE))
                                                 .text_color(theme.text_muted),
                                         ),
-                                );
+                                    );
+                                }
+                                el.into_any_element()
                             }
-                            el.into_any_element()
-                        }
-                        state => {
-                            let text = if image.source.starts_with("https://")
-                                || image.source.starts_with("http://")
-                            {
-                                format!("{} — {}", image.alt, image.source)
-                            } else {
-                                format!(
-                                    "{} — {}",
-                                    image.alt,
-                                    state
-                                        .and_then(|s| s.as_ref().err())
-                                        .map(String::as_str)
-                                        .unwrap_or(if image_allowed.contains(&image.source) {
-                                            "Loading image…"
-                                        } else {
-                                            "Document image preview limit reached"
+                            state => {
+                                let text = if image.source.starts_with("https://")
+                                    || image.source.starts_with("http://")
+                                {
+                                    format!("{} — {}", image.alt, image.source)
+                                } else {
+                                    format!(
+                                        "{} — {}",
+                                        image.alt,
+                                        state
+                                            .and_then(|s| s.as_ref().err())
+                                            .map(String::as_str)
+                                            .unwrap_or(if image_allowed.contains(&image.source) {
+                                                "Loading image…"
+                                            } else {
+                                                "Document image preview limit reached"
+                                            })
+                                    )
+                                };
+                                let target = image.source.clone();
+                                let external =
+                                    target.starts_with("https://") || target.starts_with("http://");
+                                div()
+                                    .id(id)
+                                    .text_color(theme.text_muted)
+                                    .child(text)
+                                    .when(external, |el| {
+                                        let link = image_link.clone();
+                                        el.cursor_pointer().on_click(move |_, window, cx| {
+                                            render::activate_link(
+                                                render::LinkTarget::new(&target, &target),
+                                                render::LinkAction::Primary,
+                                                Some(&link),
+                                                window,
+                                                cx,
+                                            );
                                         })
-                                )
-                            };
-                            let target = image.source.clone();
-                            let external =
-                                target.starts_with("https://") || target.starts_with("http://");
-                            div()
-                                .id(id)
-                                .text_color(theme.text_muted)
-                                .child(text)
-                                .when(external, |el| {
-                                    let link = image_link.clone();
-                                    el.cursor_pointer().on_click(move |_, window, cx| {
-                                        render::activate_link(
-                                            render::LinkTarget::new(&target, &target),
-                                            render::LinkAction::Primary,
-                                            Some(&link),
-                                            window,
-                                            cx,
-                                        );
                                     })
-                                })
-                                .into_any_element()
-                        }
-                    }),
+                                    .into_any_element()
+                            }
+                        })
+                    })),
                 });
                 opts.link = Some(link.clone());
                 opts.copy = Some(self.copy_ui_for(&opts.row_key, cx));
@@ -1264,6 +1330,11 @@ impl Render for MarkdownPreview {
             for runtime in self.code_fences.values() {
                 runtime.scroll.set_offset(gpui::Point::default());
             }
+            self.list.remeasure();
+        }
+        let math_generation = crate::settings::math_generation(cx);
+        if self.math_generation != math_generation {
+            self.math_generation = math_generation;
             self.list.remeasure();
         }
         if self.needs_focus {
@@ -1421,6 +1492,44 @@ mod tests {
             relative_target("docs/readme.md", "#hello"),
             Some(("docs/readme.md".into(), Some("hello".into())))
         );
+    }
+    #[test]
+    fn outside_documents_drop_local_links_and_keep_web_links() {
+        let mut tree = parser::parse_full(
+            "[local](other.md) [web](https://example.com/) [mail](mailto:reader@example.com) [![pic](shot.png)](gallery.md)",
+        );
+        for top in &mut tree.blocks {
+            strip_outside_links(&mut Arc::make_mut(top).block);
+        }
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph");
+        };
+        let links: Vec<&str> = runs
+            .iter()
+            // An image run carries its own source in `link`; only real
+            // anchors are inspected here.
+            .filter(|run| run.style.image.is_none())
+            .filter_map(|run| run.style.link.as_deref())
+            .collect();
+        assert_eq!(links, ["https://example.com/", "mailto:reader@example.com"]);
+        let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            text.contains("local"),
+            "the label stays as plain text: {text}"
+        );
+        assert!(
+            !runs
+                .iter()
+                .any(|run| run.style.link.as_deref() == Some("other.md")),
+            "a local target must lose its link styling"
+        );
+        for run in runs {
+            let Some(image) = &run.style.image else {
+                continue;
+            };
+            assert_eq!(image.source, "shot.png");
+            assert!(image.link.is_none());
+        }
     }
 }
 

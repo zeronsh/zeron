@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS packaging: build the release binary for the host arch and produce
+# macOS packaging: build the release binaries for the host arch and produce
 #   target/package/zeron-<version>-macos-<arch>.dmg          (user download)
 #   target/package/zeron-<version>-macos-<arch>-app.tar.gz   (auto-updater)
 # containing Zeron.app (unsigned unless CODESIGN_IDENTITY is set).
@@ -27,9 +27,16 @@ cargo build --release -p zeron
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
+# The background engine the app starts (sessions keep running with the app
+# closed); its own process, named for Activity Monitor.
+install -m 755 "$ROOT/target/release/zeron-engine" "$APP/Contents/MacOS/Zeron Engine"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
+
+mkdir -p "$APP/Contents/Resources/licenses"
+cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses"/parakeet-v3.txt
 
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
 # baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is
@@ -46,12 +53,14 @@ rm -rf "$ICONSET"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
-  # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
-  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
+  # (No --deep: Apple deprecated it. Nested code is signed first, inside out:
+  # the engine, then the bundle that seals it.)
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
-  codesign --deep --force --sign - "$APP"
+  codesign --deep --force --entitlements "$ROOT/dist/macos/Zeron.entitlements" --sign - "$APP"
 fi
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may

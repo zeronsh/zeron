@@ -1,0 +1,19 @@
+[package]
+name = "zeron-visual"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sandboxed Luau runtime for agent visuals: scripts build a native element tree, canvas drawings, and 3D scenes"
+
+[dependencies]
+mlua = { version = "0.12", features = ["luau"] }
+# The GLSL compiler wgpu uses, so a shader is validated exactly as it will run.
+naga = { version = "29", features = ["glsl-in"] }
+# glTF models (`s:model`): `.glb` or self-contained `.gltf`.
+gltf = { version = "1", default-features = false, features = ["import", "utils", "names", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_emissive_strength"] }
+# Texture and environment-map assets.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "hdr", "webp"] }
+thiserror.workspace = true
+# Images embedded in glTF models as data URIs.
+base64 = "0.22"

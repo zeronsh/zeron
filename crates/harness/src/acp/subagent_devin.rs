@@ -50,7 +50,8 @@ impl DevinTracker {
                 .and_then(|i| self.pending.remove(i))
                 .map(|p| p.tool_call_id)
                 // A missing replayed spawn degrades to a stable synthetic
-                // owner instead of dropping the child transcript.
+                // owner. No chip of the chat carries that id, so the engine
+                // keeps the child's traffic in the run journal only.
                 .unwrap_or_else(|| agent_id.to_owned());
             self.bound.insert(agent_id.to_owned(), parent);
             // This lifecycle update's toolCallId is the child agent id, not a

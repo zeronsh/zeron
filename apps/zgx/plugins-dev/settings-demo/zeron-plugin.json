@@ -1,0 +1,21 @@
+{
+  "id": "settings-demo",
+  "name": "Greeter",
+  "version": "1.0.0",
+  "description": "A greeting in the title bar, set up in Settings → Greeter: whether it shows, what it says, its tone.",
+  "entry": "init.luau",
+  "permissions": ["ui.add"],
+  "settings_description": "What Greeter says in the title bar, and how.",
+  "settings": [
+    { "id": "show", "kind": "switch", "section": "Greeting", "label": "Show the greeting", "description": "A word of welcome in the title bar.", "default": true },
+    { "id": "words", "kind": "text", "section": "Greeting", "label": "Greeting", "description": "What it says.", "placeholder": "Hello", "default": "Hello" },
+    { "id": "tone", "kind": "choice", "style": "segmented", "section": "Greeting", "label": "Tone", "description": "How it says it.",
+      "options": [ { "value": "plain", "label": "Plain" }, { "value": "excited", "label": "Excited" } ], "default": "plain" },
+    { "id": "place", "kind": "choice", "section": "More", "label": "Where it shows", "description": "Its place in the title bar.",
+      "options": [ { "value": "end", "label": "At the end", "description": "After the title bar's buttons." }, { "value": "start", "label": "At the start", "description": "Before the title bar's buttons." } ], "default": "end" },
+    { "id": "every", "kind": "number", "section": "More", "label": "Greet again every", "description": "How often it says hello again.", "min": 1, "max": 120, "unit": "minutes", "default": 30 },
+    { "id": "keys", "kind": "shortcut", "section": "More", "label": "Wave shortcut", "description": "Keys that wave back.", "default": "ctrl+alt+g" },
+    { "id": "album", "kind": "folder", "section": "More", "label": "Postcards folder", "description": "Where it keeps its postcards." },
+    { "kind": "permission", "permission": "screen-recording", "section": "More" }
+  ]
+}

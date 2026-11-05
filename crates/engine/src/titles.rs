@@ -166,6 +166,10 @@ impl TitleGenerator {
         if !zeron_harness::supports_titles(harness_id) {
             return None;
         }
+        // Order this entire isolated subprocess against a queued update for
+        // the same CLI. The fair registry gate prevents late title work from
+        // jumping ahead of an accepted writer.
+        let execution_lease = Arc::new(self.inner.registry.execution_lease(harness_id).await);
         // No repository instructions, files, or active coding-session context.
         let scratch = tempfile::tempdir().ok()?;
         let harness = match self.inner.registry.resolve(harness_id) {
@@ -178,10 +182,15 @@ impl TitleGenerator {
         let model = match settings.model {
             Some(model) => Some(model),
             None => cheapest_model(
-                &tokio::time::timeout(std::time::Duration::from_secs(10), harness.models())
-                    .await
-                    .ok()?
-                    .unwrap_or_default(),
+                &tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    self.inner
+                        .registry
+                        .discover_models_with_lease(harness_id, execution_lease.clone()),
+                )
+                .await
+                .ok()?
+                .unwrap_or_default(),
             ),
         };
         let title_prompt = format!(
@@ -190,7 +199,8 @@ impl TitleGenerator {
             serde_json::to_string(prompt).ok()?
         );
         for attempt in 0..=RETRY_DELAYS_MS.len() {
-            let request = RunRequest {
+            let mut request = RunRequest {
+                mcp: None,
                 prompt: title_prompt.clone(),
                 harness: Some(harness_id),
                 model: model.clone(),
@@ -199,13 +209,24 @@ impl TitleGenerator {
                 cwd: scratch.path().to_string_lossy().into_owned(),
                 sandbox: SandboxLevel::ReadOnly,
                 auto_approve: false,
+                access: Default::default(),
+                plan: false,
                 attachments: Vec::new(),
                 resume: None,
                 worktree: None,
+                env: Default::default(),
+                extra_mcp: Vec::new(),
             };
+            // A Cloud device's credential broker supplies the CLI's login;
+            // without one there is no title to generate.
+            self.inner
+                .registry
+                .prepare_run(harness_id, &mut request)
+                .await
+                .ok()?;
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                collect_text(harness.as_ref(), request),
+                collect_text(harness.as_ref(), request, Some(execution_lease.clone())),
             )
             .await
             .unwrap_or_else(|_| Err(EngineError::Other("title generation timed out".into())))
@@ -261,11 +282,14 @@ fn clean_title(raw: &str) -> String {
 async fn collect_text(
     harness: &dyn zeron_harness::Harness,
     request: RunRequest,
+    execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
     let interrupt = CancellationToken::new();
     let _cancel_on_drop = interrupt.clone().drop_guard();
     let controls = RunControls {
+        realtime: None,
+        execution_lease,
         request_input: Box::new(|_questions: Vec<UserInputQuestion>| {
             let (tx, rx) = tokio::sync::oneshot::channel::<Vec<UserInputAnswer>>();
             let _ = tx.send(Vec::new());
@@ -273,6 +297,7 @@ async fn collect_text(
         }),
         steering: steer_rx,
         interrupt: interrupt.clone(),
+        turn: Default::default(),
     };
     let mut stream = harness.run_title(request, controls).await?;
     let mut text = String::new();
@@ -356,6 +381,7 @@ mod tests {
             ],
         };
         let request = RunRequest {
+            mcp: None,
             prompt: "Title only".into(),
             harness: None,
             model: None,
@@ -364,11 +390,15 @@ mod tests {
             cwd: String::new(),
             sandbox: SandboxLevel::ReadOnly,
             auto_approve: false,
+            access: Default::default(),
+            plan: false,
             resume: None,
             attachments: vec![],
             worktree: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
         };
-        let result = collect_text(&harness, request).await;
+        let result = collect_text(&harness, request, None).await;
         assert!(
             result
                 .unwrap_err()

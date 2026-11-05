@@ -9,7 +9,7 @@
 //! statuses are snake_case).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff};
+use zeron_proto::{AgentEvent, SlashCommand, TodoItem, TodoStatus, ToolCall, ToolDiff};
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
 /// fold applies its own (smaller) cap before anything persists; this one only
@@ -165,7 +165,7 @@ fn arg_from_title(title: &str) -> Option<String> {
 /// in how much structure they put in `rawInput`, so every arm has a fallback.
 /// Title is only used when it looks like a real arg — never a placeholder
 /// label or markdown-escaped summary.
-fn typed_call(update: &Value) -> ToolCall {
+pub(super) fn typed_call(update: &Value) -> ToolCall {
     let kind = update
         .get("kind")
         .and_then(Value::as_str)
@@ -403,9 +403,11 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|e| TodoItem {
-                    text: str_field(e, "content"),
-                    done: e.get("status").and_then(Value::as_str) == Some("completed"),
+                .map(|e| {
+                    TodoItem::new(
+                        str_field(e, "content"),
+                        TodoStatus::parse(e.get("status").and_then(Value::as_str).unwrap_or("")),
+                    )
                 })
                 .collect();
             // The plan has no wire id; a stable synthetic id makes every
@@ -420,6 +422,7 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                     is_error: false,
                     output: None,
                     diff: None,
+                    exit_code: None,
                 },
             ]
         }
@@ -458,6 +461,7 @@ fn resolved_result(update: &Value, id: String) -> Option<AgentEvent> {
         is_error,
         output: tool_output(update),
         diff: tool_diff(update),
+        exit_code: None,
     })
 }
 
@@ -558,6 +562,7 @@ mod tests {
                     is_error: false,
                     output: Some("total 0".into()),
                     diff: None,
+                    exit_code: None,
                 },
             ]
         );
@@ -601,6 +606,7 @@ mod tests {
                     old_text: Some("fn old() {}".into()),
                     new_text: "fn new() {}".into(),
                 }),
+                exit_code: None,
             }
         );
     }
@@ -639,6 +645,7 @@ mod tests {
                 is_error: true,
                 output: None,
                 diff: None,
+                exit_code: None,
             }]
         );
     }
@@ -659,14 +666,8 @@ mod tests {
                 id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
                 call: ToolCall::Todo {
                     items: vec![
-                        TodoItem {
-                            text: "read code".into(),
-                            done: true
-                        },
-                        TodoItem {
-                            text: "write fix".into(),
-                            done: false
-                        },
+                        TodoItem::new("read code", TodoStatus::Completed),
+                        TodoItem::new("write fix", TodoStatus::InProgress),
                     ]
                 },
             }

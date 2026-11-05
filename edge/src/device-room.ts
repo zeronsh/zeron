@@ -6,8 +6,11 @@
  * a WebRTC fast path could slot in under the same frames).
  *
  * Frame encoding (binary): uleb128 header-length ‖ UTF-8 JSON header ‖ payload.
- * Header: { s: streamId, k: kind, to?: connId, from?: connId }.
- * - client → DO: DO stamps `from = connId` and forwards to the host socket.
+ * Header: { s: streamId, k: kind, to?: connId, from?: connId, fromDevice?: id }.
+ * - client → DO: DO stamps `from = connId` and forwards to the host socket,
+ *   with `fromDevice` when the Worker verified the client's device at dial
+ *   time (device-link.ts). The DO builds that header itself: nothing a client
+ *   puts in its own header reaches the host.
  * - host → DO: must carry `to = connId`; DO strips routing keys and delivers.
  *
  * Also holds small "sidecar" JSON slots the host publishes (repos/branches
@@ -17,7 +20,7 @@
 import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE } from "./device-nudges";
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import { AUTH_USER_HEADER, CALLER_DEVICE_HEADER, type Env } from "./env";
 
 export interface DeviceFrameHeader {
   /** Stream id, unique per (connId, logical stream). */
@@ -28,6 +31,9 @@ export interface DeviceFrameHeader {
   to?: string;
   /** Routing: client→host origin (stamped by the relay). */
   from?: string;
+  /** The client's verified device (stamped by the relay, never relayed from
+   * a client's frame). Absent when the dial didn't prove one. */
+  fromDevice?: string;
 }
 
 export const encodeDeviceFrame = (header: DeviceFrameHeader, payload: Uint8Array): Uint8Array => {
@@ -50,6 +56,8 @@ interface SocketState {
   userId: string;
   role: "host" | "client";
   connId: string;
+  /** Clients: the device the Worker verified at dial time, if any. */
+  callerDevice?: string;
   /** Accept time — the liveness floor until the socket's first auto-pong. */
   joinedAt?: number;
   nudgeAck?: boolean;
@@ -174,10 +182,21 @@ export class DeviceRoom implements DurableObject {
       } else {
         this.ctx.acceptWebSocket(pair[1], [clientTag(connId)]);
       }
-      const state: SocketState = { userId, role, connId, joinedAt: Date.now(), nudgeAck: url.searchParams.get("nudgeAck") === "1", nudgeInflight: [] };
+      const callerDevice = role === "client" ? request.headers.get(CALLER_DEVICE_HEADER) ?? undefined : undefined;
+      const state: SocketState = {
+        userId,
+        role,
+        connId,
+        ...(callerDevice ? { callerDevice } : {}),
+        joinedAt: Date.now(),
+        nudgeAck: url.searchParams.get("nudgeAck") === "1",
+        nudgeInflight: []
+      };
       pair[1].serializeAttachment(state);
       if (role === "host") this.replayNudges(pair[1]);
-      return new Response(null, { status: 101, webSocket: pair[0] });
+      // Tells the dialer its device was stamped (device-link.ts).
+      const headers = callerDevice ? { [CALLER_DEVICE_HEADER]: callerDevice } : undefined;
+      return new Response(null, { status: 101, webSocket: pair[0], headers });
     }
 
     // Sidecar slots (host-published JSON, e.g. repos snapshot §8.1).
@@ -204,6 +223,16 @@ export class DeviceRoom implements DurableObject {
         hostConnected: this.liveHost() !== undefined,
         hostSockets: this.ctx.getWebSockets(HOST_TAG).length
       });
+    }
+
+    // Internal only (CloudAccount; index.ts forwards just /ws, /sidecar,
+    // /status and /nudge): a Cloud session device belongs to its user from
+    // the moment the edge mints it, so a send made while its machine is
+    // still booting queues here instead of 404ing on an unclaimed room.
+    if (url.pathname === "/claim" && request.method === "POST") {
+      if (!owner) this.setMeta("owner", userId);
+      else if (owner !== userId) return json({ error: "forbidden" }, 403);
+      return json({ ok: true });
     }
 
     // Durable command nudge (§7). Any authenticated device of the owner may
@@ -270,7 +299,11 @@ export class DeviceRoom implements DurableObject {
         this.deliver(ws, { s: frame.header.s, k: RELAY_KIND }, encodeRelayError("host_offline"));
         return;
       }
-      this.deliver(host, { s: frame.header.s, k: frame.header.k, from: state.connId }, frame.payload);
+      this.deliver(
+        host,
+        { s: frame.header.s, k: frame.header.k, from: state.connId, ...(state.callerDevice ? { fromDevice: state.callerDevice } : {}) },
+        frame.payload
+      );
       return;
     }
     if (frame.header.k === NUDGE_ACK_KIND && state.nudgeAck) {

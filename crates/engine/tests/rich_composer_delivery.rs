@@ -20,6 +20,7 @@ use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
+use zeron_rpc::RpcService;
 
 const CHAT: &str = "rich-delivery";
 const HARNESSES: [HarnessId; 9] = [
@@ -36,12 +37,26 @@ const HARNESSES: [HarnessId; 9] = [
 
 enum Delivery {
     Run(RunRequest),
-    Steer(String),
+    Steer(String, Vec<String>),
+}
+struct DiscoveryGate {
+    started: mpsc::UnboundedSender<std::path::PathBuf>,
+    release: tokio::sync::Notify,
 }
 struct RecordingHarness {
+    discovery_gate: std::sync::Mutex<Option<Arc<DiscoveryGate>>>,
     id: HarnessId,
     delivery: mpsc::UnboundedSender<Delivery>,
     fail_start: AtomicBool,
+}
+impl RecordingHarness {
+    async fn discovery(&self, cwd: &std::path::Path) {
+        let gate = self.discovery_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.started.send(cwd.to_owned()).unwrap();
+            gate.release.notified().await;
+        }
+    }
 }
 #[async_trait]
 impl Harness for RecordingHarness {
@@ -67,6 +82,7 @@ impl Harness for RecordingHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
+        self.discovery(cwd).await;
         Ok(vec![zeron_proto::SlashCommand {
             name: "probe".into(),
             description: cwd.to_string_lossy().into_owned(),
@@ -77,6 +93,7 @@ impl Harness for RecordingHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        self.discovery(cwd).await;
         Ok(Some(vec![zeron_proto::invocation::Skill {
             name: "probe".into(),
             path: cwd.join("SKILL.md").to_string_lossy().into_owned(),
@@ -118,7 +135,7 @@ impl Harness for RecordingHarness {
                     _ = controls.interrupt.cancelled() => None,
                     message = controls.steering.recv() => {
                         let message = message?;
-                        delivery.send(Delivery::Steer(message.prompt)).unwrap();
+                        delivery.send(Delivery::Steer(message.prompt, message.attachments)).unwrap();
                         Some((Ok(AgentEvent::Steered { assistant_message_id: None, next_assistant_message_id: None }), (controls, delivery)))
                     }
                 }
@@ -130,6 +147,7 @@ impl Harness for RecordingHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -138,9 +156,13 @@ fn request(prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 fn rich_text(label: &str) -> (String, String) {
@@ -208,6 +230,7 @@ async fn setup(
     let tmp = tempfile::tempdir().unwrap();
     let (delivery, rx) = mpsc::unbounded_channel();
     let harness = Arc::new(RecordingHarness {
+        discovery_gate: Default::default(),
         id,
         delivery,
         fail_start: AtomicBool::new(false),
@@ -271,7 +294,7 @@ async fn rich_selections_survive_fresh_warm_steer_and_attachment_delivery_for_ev
             .dispatch(CHAT, id, request(&warm), None)
             .await
             .unwrap();
-        let Delivery::Steer(text) = receive(&mut rx).await else {
+        let Delivery::Steer(text, _) = receive(&mut rx).await else {
             panic!("warm run must use mailbox")
         };
         assert_eq!(text, expected(&warm, &readable, id), "{id:?}");
@@ -282,7 +305,7 @@ async fn rich_selections_survive_fresh_warm_steer_and_attachment_delivery_for_ev
             core.sessions.steer(CHAT, &steer, None).await.unwrap(),
             SteerOutcome::Accepted
         ));
-        let Delivery::Steer(text) = receive(&mut rx).await else {
+        let Delivery::Steer(text, _) = receive(&mut rx).await else {
             panic!("steer expected")
         };
         assert_eq!(text, expected(&steer, &readable, id), "{id:?}");
@@ -297,11 +320,13 @@ async fn rich_selections_survive_fresh_warm_steer_and_attachment_delivery_for_ev
             .dispatch(CHAT, id, req.clone(), None)
             .await
             .unwrap();
-        let Delivery::Run(run) = receive(&mut rx).await else {
-            panic!("attachments require a new run")
+        // Images ride the live runtime's mailbox: replacing the runtime to
+        // inline them killed its background work.
+        let Delivery::Steer(text, attachments) = receive(&mut rx).await else {
+            panic!("an attachment must not replace the live runtime")
         };
-        assert_delivered(&run.prompt, &attached, &readable, id);
-        assert_eq!(run.attachments, req.attachments);
+        assert_eq!(text, expected(&attached, &readable, id), "{id:?}");
+        assert_eq!(attachments, req.attachments);
         assert_persisted(&core, &attached, 4);
         core.shutdown().await;
     }
@@ -430,9 +455,20 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
             )
             .await
             .unwrap();
+        // A new chat's catalog comes from home; an existing projectless chat
+        // runs, and lists, from its own scratch folder.
         assert_eq!(
-            existing_chat, new_chat,
-            "projectless chat should use home: {method}"
+            new_chat[0]["description"],
+            std::env::var("HOME").unwrap(),
+            "{method}"
+        );
+        let chat_cwd = core.workspace.chat(CHAT).unwrap().unwrap().cwd.unwrap();
+        let name = chat_cwd.rsplit('/').next().unwrap();
+        let scratch = tmp.path().join("data").join("scratch").join(name);
+        assert_eq!(
+            existing_chat[0]["description"],
+            scratch.to_str().unwrap(),
+            "projectless chat should use its scratch folder: {method}"
         );
         assert!(
             client
@@ -470,5 +506,72 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
             .await
             .unwrap();
         assert_eq!(result[0]["description"], cwd.to_str().unwrap(), "{method}");
+    }
+}
+
+#[tokio::test]
+async fn project_catalog_rpcs_hold_update_leases_through_cancelled_discovery_cleanup() {
+    for method in [
+        zeron_rpc::methods::LIST_COMMANDS,
+        zeron_rpc::methods::LIST_SKILLS,
+    ] {
+        let (tmp, core, harness, _rx) = setup(HarnessId::Codex).await;
+        let root = tmp.path().join("project-catalog");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        core.workspace
+            .set_chat_cwd(CHAT, root.to_str().unwrap())
+            .unwrap();
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let gate = Arc::new(DiscoveryGate {
+            started,
+            release: tokio::sync::Notify::new(),
+        });
+        *harness.discovery_gate.lock().unwrap() = Some(gate.clone());
+        core.registry.begin_update(HarnessId::Codex);
+        let installation = core.registry.update_lease(HarnessId::Codex).await;
+        let service = core.rpc_service();
+        let caller = tokio::spawn(async move {
+            service
+                .handle(
+                    method,
+                    serde_json::json!({"harness":"codex", "chatId":CHAT}),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), starts.recv())
+                .await
+                .is_err(),
+            "{method} bypassed installation"
+        );
+        drop(installation);
+        core.registry.end_update(HarnessId::Codex);
+        let discovered_root = tokio::time::timeout(Duration::from_secs(2), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(discovered_root, root, "{method} lost project context");
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        core.registry.begin_update(HarnessId::Codex);
+        let registry = core.registry.clone();
+        let mut next_installation =
+            tokio::spawn(async move { registry.update_lease(HarnessId::Codex).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut next_installation)
+                .await
+                .is_err(),
+            "{method} released its lease before cleanup"
+        );
+        gate.release.notify_one();
+        drop(
+            tokio::time::timeout(Duration::from_secs(2), next_installation)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        core.registry.end_update(HarnessId::Codex);
+        core.shutdown().await;
     }
 }

@@ -1,0 +1,8 @@
+{
+  "id": "ping",
+  "name": "Ping",
+  "version": "1.0.0",
+  "description": "A Ping button in the title bar: how long a message takes to reach your other devices and back.",
+  "entry": "init.luau",
+  "permissions": ["ui.add", "devices"]
+}

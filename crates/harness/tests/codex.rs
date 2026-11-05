@@ -14,8 +14,8 @@ use zeron_harness::{
     CancellationToken, CodexHarness, Harness, HarnessError, RunControls, SteerMessage,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
-    ToolCall, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel,
+    TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 fn fixture_path() -> PathBuf {
@@ -35,8 +35,65 @@ fn harness() -> CodexHarness {
     CodexHarness::new().with_executable(fixture_path())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_reaped() {
+    for title_only in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let (mut controls, _steer, token) = controls("Yes");
+        controls.execution_lease = Some(Arc::new(gate.clone().read_owned().await));
+        let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(200));
+        let mut req = request("scenario:lease-shutdown");
+        req.cwd = temp.path().display().to_string();
+        let mut stream = if title_only {
+            harness.run_title(req, controls).await
+        } else {
+            harness.run(req, controls).await
+        }
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    stream.next().await.unwrap().unwrap(),
+                    AgentEvent::Done { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let pid: i32 = std::fs::read_to_string(temp.path().join("lease-child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        token.cancel();
+        drop(stream);
+        assert!(
+            gate.clone().try_write_owned().is_err(),
+            "child still owns its lease"
+        );
+        let _writer = tokio::time::timeout(Duration::from_secs(5), gate.write_owned())
+            .await
+            .expect("child shutdown releases the lease");
+        // SAFETY: signal 0 only checks the fixture PID; it sends no signal.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "lease released before child exit"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+}
+
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: Some("gpt-5.6-sol".into()),
@@ -45,9 +102,13 @@ fn request(prompt: &str) -> RunRequest {
         cwd: String::new(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -58,6 +119,8 @@ fn controls(
     let (steer_tx, steer_rx) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
         request_input: Box::new(move |questions| {
             let (tx, rx) = oneshot::channel();
             let answers: Vec<UserInputAnswer> = questions
@@ -72,6 +135,7 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        turn: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -176,6 +240,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        exit_code: Some(1),
     }));
 
     // fileChange (single add): WriteFile, refreshed at completion.
@@ -198,6 +263,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        exit_code: None,
     }));
 
     // mcpToolCall with failed status.
@@ -214,6 +280,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        exit_code: None,
     }));
 
     // webSearch lifecycle.
@@ -228,6 +295,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        exit_code: None,
     }));
 
     // Completion-only todoList still opens and closes the lifecycle.
@@ -235,14 +303,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         id: "td1".into(),
         call: ToolCall::Todo {
             items: vec![
-                TodoItem {
-                    text: "a".into(),
-                    done: true
-                },
-                TodoItem {
-                    text: "b".into(),
-                    done: false
-                },
+                TodoItem::new("a", TodoStatus::Completed),
+                TodoItem::new("b", TodoStatus::Pending),
             ]
         },
     }));
@@ -251,6 +313,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        exit_code: None,
     }));
 
     // Streamed agentMessage must not re-emit its completed text…
@@ -308,6 +371,8 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
         .send(SteerMessage {
             prompt: "redirect please".into(),
             message_id: None,
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .expect("steer queued");
@@ -344,6 +409,192 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
     );
 }
 
+/// An accepted steer joins the turn when its userMessage item lands, after
+/// the reply streaming ahead of it — `Steered` must split there, not at the
+/// `turn/steer` response (which moved the old reply's tail below the steer).
+#[tokio::test]
+async fn a_steer_splits_the_reply_where_its_message_joins_the_turn() {
+    let (controls, steer, _token) = controls("Yes");
+    steer
+        .send(SteerMessage::text("redirect please"))
+        .await
+        .expect("steer queued");
+    let events = run_to_end(&harness(), request("scenario:steer-item"), controls).await;
+    let at = |pred: &dyn Fn(&AgentEvent) -> bool| {
+        events
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("missing event: {events:?}"))
+    };
+    let still_first =
+        at(&|e| matches!(e, AgentEvent::TextDelta { text } if text == "-still-first"));
+    let steered = at(&|e| matches!(e, AgentEvent::Steered { .. }));
+    let reply = at(&|e| matches!(e, AgentEvent::TextDelta { text } if text == "steered"));
+    assert!(still_first < steered && steered < reply, "{events:?}");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+/// Only the turn in flight settles: a stale or duplicate `turn/completed`
+/// marked the running turn done mid-way (sound, notification, park).
+#[tokio::test]
+async fn a_stale_turn_completion_never_settles_the_running_turn() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:stale-completion"), controls).await;
+    let dones: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, AgentEvent::Done { .. }))
+        .collect();
+    assert_eq!(dones.len(), 1, "{events:?}");
+    let after = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "after"))
+        .expect("after");
+    assert!(dones[0].0 > after, "{events:?}");
+}
+
+/// A stop issued before the app-server announces the turn waits for
+/// `turn/started`: an earlier `turn/interrupt` is rejected, the turn runs to
+/// its end, and the host's fallback tore the whole runtime down.
+#[tokio::test]
+async fn a_stop_before_the_turn_is_announced_still_interrupts_it() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut stream = harness()
+        .run(request("scenario:stop-before-announce"), controls)
+        .await
+        .expect("run starts");
+    let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            match event.expect("event") {
+                AgentEvent::TextDelta { text } if text == "working" => turn.stop_turn(),
+                AgentEvent::Done { status, .. } => return status,
+                _ => {}
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("stopped turn settles");
+    assert_eq!(status, DoneStatus::Interrupted);
+}
+
+/// A command still running after its turn (a dev server) holds the parked
+/// runtime against the idle reaper; an interrupted turn's killed foreground
+/// command — which never gets an `item/completed` — does not.
+#[tokio::test]
+async fn open_commands_report_background_work_and_killed_ones_do_not() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut stream = harness()
+        .run(request("scenario:background-commands"), controls)
+        .await
+        .expect("run starts");
+    async fn until_done(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+        mut on: impl FnMut(&AgentEvent),
+    ) -> DoneStatus {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                let event = event.expect("event");
+                on(&event);
+                if let AgentEvent::Done { status, .. } = event {
+                    return status;
+                }
+            }
+            panic!("stream ended without Done");
+        })
+        .await
+        .expect("turn ends")
+    }
+    assert_eq!(until_done(&mut stream, |_| {}).await, DoneStatus::Completed);
+    assert!(turn.background_live(), "the dev server outlives its turn");
+
+    steer
+        .send(SteerMessage::text("run the tests"))
+        .await
+        .unwrap();
+    let stop = turn.clone();
+    let status = until_done(&mut stream, |e| {
+        if matches!(e, AgentEvent::TextDelta { text } if text == "running") {
+            stop.stop_turn();
+        }
+    })
+    .await;
+    assert_eq!(status, DoneStatus::Interrupted);
+    // The killed foreground command's process is gone once the grace passes.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(turn.background_live(), "the dev server still runs");
+
+    steer
+        .send(SteerMessage::text("stop the server"))
+        .await
+        .unwrap();
+    assert_eq!(until_done(&mut stream, |_| {}).await, DoneStatus::Completed);
+    assert!(!turn.background_live(), "nothing left running");
+}
+
+/// A command that outlived its turn is listed as the person typed it, with
+/// its output; stopping it terminates its exec session.
+#[tokio::test]
+async fn a_background_command_is_listed_read_and_terminated() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut processes = turn.watch_background_processes();
+    let mut stream = harness()
+        .run(request("scenario:background-terminate"), controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn ends");
+
+    let listed = processes.borrow_and_update().clone();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].id, "bg");
+    assert_eq!(listed[0].command, "npm run dev");
+    assert_eq!(
+        turn.background_output("bg").expect("listed").text,
+        "ready on :3000"
+    );
+
+    assert!(turn.stop_background_process("bg"));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !processes.borrow_and_update().is_empty() {
+            processes.changed().await.expect("runtime alive");
+        }
+    })
+    .await
+    .expect("the terminated command leaves the list");
+    assert!(!turn.background_live());
+}
+
 #[tokio::test]
 async fn rejected_steer_falls_back_to_a_follow_up_turn() {
     let (controls, steer, _token) = controls("Yes");
@@ -359,6 +610,8 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
                 .link()
             ),
             message_id: None,
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .expect("steer queued");
@@ -408,6 +661,8 @@ async fn approvals_round_trip_as_input_requests() {
     let token = CancellationToken::new();
     let seen = asked.clone();
     let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
         request_input: Box::new(move |questions| {
             seen.lock().unwrap().extend(questions.iter().cloned());
             let (tx, rx) = oneshot::channel();
@@ -423,9 +678,11 @@ async fn approvals_round_trip_as_input_requests() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        turn: Default::default(),
     };
     let mut req = request("scenario:approve");
     req.auto_approve = false;
+    req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
 
     let asked = asked.lock().unwrap();
@@ -460,9 +717,135 @@ async fn approval_no_answer_becomes_decline() {
     let (controls, _steer, _token) = controls("No");
     let mut req = request("scenario:decline");
     req.auto_approve = false;
+    req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
 
     // The fake only completes the turn after seeing the decline decision.
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+/// Controls whose `request_input` answers `answer_label` and records what
+/// it was asked.
+fn recording_controls(
+    answer_label: &'static str,
+) -> (
+    RunControls,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+    mpsc::Sender<SteerMessage>,
+) {
+    let (mut controls, steer, _token) = controls(answer_label);
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    controls.request_input = Box::new(move |questions| {
+        seen.lock().unwrap().extend(questions.iter().cloned());
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(
+            questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec![answer_label.into()],
+                })
+                .collect(),
+        );
+        rx
+    });
+    (controls, asked, steer)
+}
+
+#[tokio::test]
+async fn auto_accept_edits_applies_file_changes_and_asks_before_the_rest() {
+    let (controls, asked, _steer) = recording_controls("No");
+    let mut req = request("scenario:auto-edits");
+    req.auto_approve = false;
+    req.access = AccessMode::AutoAcceptEdits;
+    let events = run_to_end(&harness(), req, controls).await;
+
+    // The fake checks the untrusted / workspace-write wire and completes
+    // only after the file change is accepted and the rest declined.
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let asked = asked.lock().unwrap();
+    let headers: Vec<&str> = asked.iter().map(|q| q.header.as_str()).collect();
+    assert_eq!(headers, ["Approve command", "Approve permissions"]);
+    assert_eq!(asked[0].question, "Codex wants to run `git push`. Allow it?");
+}
+
+#[tokio::test]
+async fn plan_mode_rides_each_turn_and_leaving_it_is_explicit() {
+    let (controls, asked, steer) = recording_controls("Yes");
+    let mut req = request("scenario:plan");
+    req.plan = true;
+    let mut stream = harness().run(req, controls).await.expect("run starts");
+    // Leaving plan for supervised applies in place, from the next turn; a
+    // plain follow-up keeps naming the default mode.
+    let mut build = request("");
+    build.auto_approve = false;
+    build.access = AccessMode::Supervised;
+    let mut steers = vec![
+        SteerMessage {
+            config: Some(Box::new(build)),
+            ..SteerMessage::text("build it")
+        },
+        SteerMessage::text("plain"),
+    ]
+    .into_iter();
+    let mut events = Vec::new();
+    let mut completed = 0;
+    while completed < 3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        if let AgentEvent::Done { status, error, .. } = &event {
+            assert_eq!(*status, DoneStatus::Completed, "{error:?}");
+            completed += 1;
+            if let Some(next) = steers.next() {
+                steer.send(next).await.unwrap();
+            }
+        }
+        events.push(event);
+    }
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        "Here is the plan.\n\n# Plan\n\n1. Read\n2. Change\n\nbuild itplain"
+    );
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_resumed_thread_left_in_plan_mode_is_taken_out_of_it() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:leave-plan");
+    req.resume = Some("resume-in-plan".into());
+    req.model = None;
+    req.reasoning = None;
+    let events = run_to_end(&harness(), req, controls).await;
     assert!(
         matches!(
             events.last(),
@@ -559,28 +942,243 @@ async fn turn_failed_maps_to_errored_done() {
     );
 }
 
+/// A missing rollout, and an empty one (unreadable for good), both resume
+/// as a fresh thread with a plain-words notice.
 #[tokio::test]
 async fn resume_falls_back_to_fresh_thread() {
+    for (resume, reason) in [
+        ("resume-fail", "it isn't saved on this device"),
+        ("resume-empty", "its saved history is empty"),
+    ] {
+        let (controls, _steer, _token) = controls("Yes");
+        let mut req = request("scenario:resumed");
+        req.resume = Some(resume.into());
+        let events = run_to_end(&harness(), req, controls).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::SessionStarted { session_id, .. } if session_id == "th-fresh"
+            )),
+            "fresh thread expected: {events:?}"
+        );
+        // The lost context is said out loud, once, in the new reply.
+        let notices: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Error { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{events:?}");
+        assert_eq!(
+            notices[0],
+            format!(
+                "Couldn't restore the earlier Codex conversation ({reason}), so this reply \
+                 starts a new one without its context."
+            )
+        );
+        assert_eq!(zeron_proto::run_errors::provider_problem(notices[0]), None);
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: Some("th-fresh".into()),
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_archived_thread_is_unarchived_and_resumed() {
     let (controls, _steer, _token) = controls("Yes");
     let mut req = request("scenario:resumed");
-    req.resume = Some("resume-fail".into());
+    req.resume = Some("resume-archived".into());
     let events = run_to_end(&harness(), req, controls).await;
-
     assert!(
         events.iter().any(|e| matches!(
             e,
-            AgentEvent::SessionStarted { session_id, .. } if session_id == "th-fresh"
+            AgentEvent::SessionStarted { session_id, .. } if session_id == "th-unarchived"
         )),
-        "fresh thread expected: {events:?}"
+        "{events:?}"
     );
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+        "{events:?}"
+    );
+}
+
+/// A resume failure a fresh thread would share (bad configuration, a dead
+/// process) fails the run instead of silently dropping the conversation.
+#[tokio::test]
+async fn a_resume_refusal_fails_the_run_instead_of_starting_fresh() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:resumed");
+    req.resume = Some("resume-broken".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. })),
+        "{events:?}"
+    );
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            error: Some(error),
+            ..
+        }) => assert!(error.contains("failed to load configuration"), "{error}"),
+        other => panic!("expected an errored Done, got {other:?}"),
+    }
+}
+
+/// An app-server that dies under `thread/start` reports its exit and what it
+/// printed, not a bare "exited before responding".
+#[tokio::test]
+async fn a_crash_during_thread_setup_reports_its_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("crash-on-thread-start");
+    std::fs::create_dir(&cwd).unwrap();
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:happy");
+    req.cwd = cwd.display().to_string();
+    let events = run_to_end(&harness(), req, controls).await;
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            error: Some(error),
+            ..
+        }) => {
+            assert!(error.contains("exit code 3"), "{error}");
+            assert!(error.contains("bad toml in mcp_servers"), "{error}");
+        }
+        other => panic!("expected an errored Done, got {other:?}"),
+    }
+}
+
+/// Codex's own retries ("Reconnecting… 2/5") are progress, not transcript
+/// errors, and the final error is reported once — by the Done — in the
+/// sign-in/limit vocabulary the UI acts on.
+#[tokio::test]
+async fn retry_notices_stay_out_of_the_transcript_and_the_final_error_lands_once() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:retry-errors"), controls).await;
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+        "{events:?}"
+    );
+    let dones: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Done { status, error, .. } => Some((*status, error.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dones.len(), 1, "{events:?}");
+    let (status, error) = &dones[0];
+    assert_eq!(*status, DoneStatus::Errored);
+    let error = error.as_deref().unwrap();
+    assert!(
+        error.starts_with("Codex usage limit reached — it resets in 2h 1"),
+        "{error}"
+    );
+    assert_eq!(
+        zeron_proto::run_errors::provider_problem(error),
+        Some(zeron_proto::run_errors::ProviderProblem::LimitReached)
+    );
+}
+
+/// A final error the app-server reported before dying mid-turn is not lost
+/// with the turn's end: the crash Done carries it, ahead of the exit and
+/// the stderr it printed.
+#[tokio::test]
+async fn a_crash_after_a_final_error_reports_both() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:crash-after-error"), controls).await;
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+        "{events:?}"
+    );
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            error: Some(error),
+            ..
+        }) => {
+            assert!(
+                error.starts_with("Codex's credentials were rejected. Run codex login"),
+                "{error}"
+            );
+            assert!(
+                error.contains("codex app-server exited unexpectedly")
+                    && error.contains("lost the model client"),
+                "{error}"
+            );
+            assert_eq!(
+                zeron_proto::run_errors::provider_problem(error),
+                Some(zeron_proto::run_errors::ProviderProblem::SignedOut)
+            );
+        }
+        other => panic!("expected an errored Done, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_turn_interrupted_elsewhere_is_not_a_completed_answer() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:foreign-interrupt"), controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                error: None,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+/// Permission approvals grant what was asked; MCP elicitations are asked
+/// (a flat form) or declined (a URL flow) — never refused with a JSON-RPC
+/// error, which failed the MCP tool call. Unknown requests still are.
+#[tokio::test]
+async fn permission_and_elicitation_requests_get_valid_replies() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:server-requests"), controls).await;
     assert_eq!(
         events.last(),
         Some(&AgentEvent::Done {
             status: DoneStatus::Completed,
             result: None,
             error: None,
-            session_id: Some("th-fresh".into()),
-        })
+            session_id: Some("th-1".into()),
+        }),
+        "{events:?}"
+    );
+}
+
+/// An app-server that predates notification opt-outs refuses the handshake
+/// capability; the run asks again without it instead of failing.
+#[tokio::test]
+async fn a_refused_notification_opt_out_is_retried_without_it() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:resumed");
+    req.env
+        .insert("FAKE_CODEX_REJECT_OPT_OUT".into(), "1".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
     );
 }
 
@@ -901,6 +1499,7 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: Some(0),
         }),
     }));
     // The parent's steer (a userMessage item on the CHILD thread) arrives as
@@ -998,6 +1597,8 @@ async fn live_subagent_spawn_and_followup_keep_one_transcript() {
             steer.send(SteerMessage {
                 prompt: "Reuse the SAME existing subagent for one more task: reply exactly child-second. Use followup_task if available, otherwise send_input. Do not spawn a new agent. Wait for it to finish, then reply exactly parent-second. Do not inspect or change files.".into(),
                 message_id: None,
+                attachments: Vec::new(),
+                config: None,
             }).await.unwrap();
         }
         if turn == 2 {
@@ -1278,6 +1879,55 @@ async fn image_generation_fake_lifecycle_reaches_done_without_inline_payload() {
     }
 }
 
+/// `view_image` used to leave no trace: the model saw the image, the
+/// transcript showed nothing between its messages (#962). It reads as a
+/// file read, so the chip opens and previews the image.
+#[tokio::test]
+async fn view_image_reads_as_a_file_read() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:view-image"), controls).await;
+    let read = ToolCall::ReadFile {
+        path: "/Users/me/Documents/Codex/mockup.png".into(),
+    };
+    let tools: Vec<AgentEvent> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        tools,
+        vec![
+            AgentEvent::ToolCall {
+                id: "exec-view-1".into(),
+                call: read.clone(),
+            },
+            AgentEvent::ToolCall {
+                id: "exec-view-1".into(),
+                call: read,
+            },
+            AgentEvent::ToolResult {
+                id: "exec-view-1".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                exit_code: None,
+            },
+        ]
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+}
+
 /// Opt-in provider smoke; the engine integration test verifies the subsequent
 /// import lands under profile uploads. See docs/generated-images-validation.md.
 #[tokio::test]
@@ -1405,6 +2055,8 @@ async fn native_command_during_a_turn_waits_for_its_boundary() {
                         .send(SteerMessage {
                             prompt: "/review".into(),
                             message_id: None,
+                            attachments: Vec::new(),
+                            config: None,
                         })
                         .await
                         .unwrap();
@@ -1440,6 +2092,8 @@ async fn native_skill_and_file_references_survive_initial_and_steered_turns() {
         .send(SteerMessage {
             prompt: harness_prompt(&format!("Also {}", followup.link()), HarnessId::Codex),
             message_id: Some("skill-steer".into()),
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .unwrap();
@@ -1489,6 +2143,8 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
                             .send(SteerMessage {
                                 prompt: prompt.into(),
                                 message_id: None,
+                                attachments: Vec::new(),
+                                config: None,
                             })
                             .await
                             .unwrap();
@@ -1517,5 +2173,431 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
             "followup",
             "done"
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_model_change_sent_mid_turn_takes_effect_in_its_own_turn() {
+    let (controls, steer, _token) = controls("Yes");
+    let mut stream = harness()
+        .run(request("scenario:reconfigure"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        let working = event
+            == AgentEvent::TextDelta {
+                text: "working".into(),
+            };
+        events.push(event);
+        if working {
+            break;
+        }
+    }
+    let mut model_b = request("");
+    model_b.model = Some("model-b".into());
+    model_b.reasoning = Some(ReasoningLevel::Low);
+    for (text, config) in [
+        ("to-b", Some(model_b)),
+        ("back-to-a", Some(request(""))),
+        ("plain", None),
+    ] {
+        steer
+            .send(SteerMessage {
+                config: config.map(Box::new),
+                ..SteerMessage::text(text)
+            })
+            .await
+            .unwrap();
+    }
+    let mut completed = 0;
+    while completed < 4 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        if let AgentEvent::Done { status, error, .. } = &event {
+            assert_eq!(*status, DoneStatus::Completed, "{error:?}");
+            completed += 1;
+        }
+        events.push(event);
+    }
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["working", "to-b", "back-to-a", "plain"]);
+}
+
+#[tokio::test]
+async fn a_stopped_turn_keeps_the_app_server_for_the_next_prompt() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    assert!(harness().stops_turn_in_place());
+    let mut stream = harness()
+        .run(request("scenario:stop-in-place"), controls)
+        .await
+        .expect("run starts");
+    async fn next_event(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    ) -> Option<AgentEvent> {
+        tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .map(|r| r.expect("stream event"))
+    }
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::TextDelta { text }) if text == "working" => break,
+            Some(_) => {}
+            None => panic!("stream ended before the turn streamed"),
+        }
+    }
+    turn.stop_turn();
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::Done { status, .. }) => {
+                assert_eq!(status, DoneStatus::Interrupted);
+                break;
+            }
+            Some(_) => {}
+            None => panic!("a stopped turn must not end the app-server's stream"),
+        }
+    }
+    steer.send(SteerMessage::text("carry on")).await.unwrap();
+    let mut resumed = Vec::new();
+    loop {
+        match next_event(&mut stream).await {
+            Some(done @ AgentEvent::Done { .. }) => {
+                resumed.push(done);
+                break;
+            }
+            Some(event) => resumed.push(event),
+            None => panic!("stream ended before the next turn finished"),
+        }
+    }
+    assert!(resumed.contains(&AgentEvent::TextDelta {
+        text: "resumed".into()
+    }));
+    assert!(matches!(
+        resumed.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    drop(steer);
+    assert!(next_event(&mut stream).await.is_none());
+}
+
+#[tokio::test]
+async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    let mut req = request("must never be submitted");
+    req.cwd = dir.path().display().to_string();
+    req.mcp = Some(zeron_proto::McpServer {
+        name: "zeron".into(),
+        command: "zeron".into(),
+        args: vec!["mcp".into()],
+        env: Default::default(),
+    });
+    let (mut controls, steer, token) = controls("Yes");
+    let (voice, bridge, _events) = zeron_harness::codex::realtime::channel();
+    controls.realtime = Some(bridge);
+    let mut stream = driver.start_idle(req, controls).await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        AgentEvent::SessionStarted { .. }
+    ));
+    let (reply, receive) = oneshot::channel();
+    voice
+        .commands
+        .send(zeron_harness::codex::realtime::VoiceCommand::Start {
+            voice: None,
+            session_id: "fixture-voice".into(),
+            generation: 1,
+            reply,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        receive.await.unwrap(),
+        Err(zeron_proto::voice::VoiceRejection::NativeRuntimeUnavailable)
+    );
+    let calls = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+    assert!(!calls.contains("turn/start"));
+    assert!(!calls.contains("thread/realtime/start"));
+    assert!(calls.contains("mcp_servers"));
+    steer
+        .send(SteerMessage::text("text remains usable"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    token.cancel();
+    drop(stream);
+}
+
+/// A run whose Zeron server is side-chats-only starts its thread without
+/// Codex's agent tools, as a title run does; any other run keeps them.
+#[tokio::test]
+async fn a_side_chats_only_thread_starts_without_agent_tools() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    for side_chats_only in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request("delegate this");
+        req.cwd = dir.path().display().to_string();
+        let mut server = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "zeron".into(),
+            args: vec!["mcp".into()],
+            env: Default::default(),
+        };
+        if side_chats_only {
+            server.env.insert(
+                zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.into(),
+                "1".into(),
+            );
+        }
+        req.mcp = Some(server);
+        let (controls, _steer, token) = controls("Yes");
+        let mut stream = driver.run(req, controls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        drop(stream);
+        let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+        let start = wire
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("a thread starts");
+        let config = &start["params"]["config"];
+        assert_eq!(config["mcp_servers.zeron.command"], "zeron", "{config}");
+        for key in [
+            "features.multi_agent",
+            "features.multi_agent_v2",
+            "agents.enabled",
+        ] {
+            assert_eq!(
+                config.get(key) == Some(&serde_json::Value::Bool(false)),
+                side_chats_only,
+                "{key}: {config}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_voice_keeps_canonical_events_without_any_local_helper() {
+    use std::os::unix::fs::PermissionsExt;
+    use zeron_harness::codex::realtime::{VoiceCommand, channel};
+    use zeron_proto::voice::{VoiceEvent, remote::Sdp};
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("bin/codex");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice-native.py"),
+        &binary,
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let driver = CodexHarness::new().with_executable(binary);
+    let mut req = request("");
+    req.cwd = dir.path().display().to_string();
+    req.mcp = Some(zeron_proto::McpServer {
+        name: "zeron".into(),
+        command: "zeron".into(),
+        args: vec!["mcp".into()],
+        env: Default::default(),
+    });
+    let (mut controls, _steer, token) = controls("Yes");
+    let (voice, bridge, mut events) = channel();
+    controls.realtime = Some(bridge);
+    let mut stream = driver.start_idle(req, controls).await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        AgentEvent::SessionStarted { .. }
+    ));
+    let pump = tokio::spawn(async move { while stream.next().await.is_some() {} });
+    assert!(voice.probe_external().await.unwrap().available);
+    assert_eq!(
+        voice.probe().await.unwrap_err(),
+        zeron_proto::voice::VoiceRejection::NativeRuntimeUnavailable
+    );
+    let (reply, answer) = oneshot::channel();
+    voice
+        .commands
+        .send(VoiceCommand::External {
+            voice: None,
+            session_id: "external-session".into(),
+            generation: 1,
+            offer: Sdp::new("fixture-offer".into()).unwrap(),
+            reply,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), answer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .expose(),
+        "fixture-answer"
+    );
+    // Re-emission occurs after negotiation has completed, when there is no NativeHost.
+    std::fs::write(dir.path().join("replay-transcripts"), "true").unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let VoiceEvent::Final { transcript } = events.recv().await.unwrap() {
+                assert_eq!(transcript.session_id, "external-session");
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    voice.stop().await.unwrap();
+    assert!(!dir.path().join("helper-wire.jsonl").exists());
+    let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+    assert!(wire.contains("mcp_servers"));
+    assert!(!wire.contains("appendAudio"));
+    token.cancel();
+    pump.abort();
+}
+
+/// A wrapper around the fake app-server that dies (printing `reason`) on its
+/// first `fail` launches, then runs the fake. Counts launches in `count`.
+fn flaky_app_server(dir: &std::path::Path, fail: u32, reason: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let count = dir.join("launches");
+    let script = dir.join("codex");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nn=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > '{count}'\n\
+             if [ \"$n\" -le {fail} ]; then echo '{reason}' >&2; exit 1; fi\nexec '{fake}' \"$@\"\n",
+            count = count.display(),
+            fake = fixture_path().display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (script, count)
+}
+
+#[tokio::test]
+async fn an_app_server_that_dies_before_answering_is_relaunched() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, count) = flaky_app_server(dir.path(), 1, "cold start: not ready");
+    let (controls, _steer, _token) = controls("Yes");
+    let harness = CodexHarness::new().with_executable(script);
+    // As the happy-path test asks for it (the fake checks both).
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    req.model_options.insert(
+        "serviceTier".into(),
+        serde_json::Value::String("fast".into()),
+    );
+    let events = run_to_end(&harness, req, controls).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. })),
+        "the second launch runs the turn: {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{:?}",
+        events.last()
+    );
+    assert_eq!(std::fs::read_to_string(count).unwrap().trim(), "2");
+}
+
+#[tokio::test]
+async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, count) = flaky_app_server(dir.path(), 99, "missing libssl.so.3");
+    let (controls, _steer, _token) = controls("Yes");
+    let harness = CodexHarness::new().with_executable(script);
+    let stream = harness
+        .run(request("scenario:happy"), controls)
+        .await
+        .expect("run starts");
+    // Three relaunches, 1 + 3 + 8 s apart.
+    let events = tokio::time::timeout(
+        Duration::from_secs(30),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("gives up in time");
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            error: Some(error),
+            ..
+        }) => {
+            assert!(error.starts_with("initialize:"), "{error}");
+            assert!(
+                error.contains("missing libssl.so.3"),
+                "the stderr tail: {error}"
+            );
+        }
+        other => panic!("expected an errored Done, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(count).unwrap().trim(),
+        "4",
+        "one launch + three relaunches"
     );
 }

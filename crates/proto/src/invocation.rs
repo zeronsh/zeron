@@ -100,7 +100,7 @@ impl Invocation {
             Self::Command { name } => format!("/{name}"),
             Self::Skill { name, path, .. } => {
                 if native_skill_identity(path) {
-                    return format!("{name}");
+                    return name.clone();
                 }
                 let path: String = path
                     .bytes()
@@ -159,14 +159,13 @@ pub fn invocation_links(text: &str) -> Vec<(Range<usize>, Invocation)> {
         if !valid_invocation_name(invocation.name()) {
             continue;
         }
-        if let Invocation::Skill { path, command, .. } = &invocation {
-            if !valid_skill_path(path)
+        if let Invocation::Skill { path, command, .. } = &invocation
+            && (!valid_skill_path(path)
                 || command
                     .as_ref()
-                    .is_some_and(|command| !valid_skill_command_name(&command.name))
-            {
-                continue;
-            }
+                    .is_some_and(|command| !valid_skill_command_name(&command.name)))
+        {
+            continue;
         }
         let canonical = invocation.link();
         // Older transcripts did not escape label backticks. Accept an old
@@ -208,7 +207,12 @@ pub fn validate_harness_invocations(text: &str, harness: crate::HarnessId) -> Re
 /// Keep selected skill identity intact until Codex builds native input blocks.
 /// Other providers receive readable Markdown and their advertised command text.
 pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
-    let text = crate::file_mentions::file_mention_prompt(text);
+    // Browser annotations become plain text blocks for every provider.
+    let text = crate::annotation::annotation_prompt(&crate::file_mentions::file_mention_prompt(
+        &crate::attachment_mentions::attachment_mention_prompt(
+            &crate::chat_mentions::chat_mention_prompt(text),
+        ),
+    ));
     if harness == crate::HarnessId::Codex {
         return text;
     }
@@ -251,6 +255,9 @@ pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
 }
 
 pub fn invocation_prompt(text: &str) -> String {
+    let text = &crate::annotation::annotation_prompt(
+        &crate::attachment_mentions::attachment_mention_prompt(text),
+    );
     let mut result = String::new();
     let mut at = 0;
     for (range, invocation) in invocation_links(text) {
@@ -291,7 +298,7 @@ mod tests {
         }
     }
 
-    const HARNESSES: [crate::HarnessId; 9] = [
+    const HARNESSES: [crate::HarnessId; 10] = [
         crate::HarnessId::ClaudeCode,
         crate::HarnessId::Codex,
         crate::HarnessId::Cursor,
@@ -301,7 +308,25 @@ mod tests {
         crate::HarnessId::Pi,
         crate::HarnessId::Antigravity,
         crate::HarnessId::Opencode,
+        crate::HarnessId::Muse,
     ];
+
+    #[test]
+    fn image_chips_reach_every_provider_as_their_plain_label() {
+        let raw = format!(
+            "compare {} with {}",
+            crate::attachment_mentions::attachment_mention_link(1, None),
+            crate::attachment_mentions::attachment_mention_link(3, None)
+        );
+        assert_eq!(invocation_prompt(&raw), "compare Image 1 with Image 3");
+        for harness in HARNESSES {
+            assert_eq!(
+                harness_prompt(&raw, harness),
+                "compare Image 1 with Image 3",
+                "{harness:?}"
+            );
+        }
+    }
 
     #[test]
     fn leading_commands_respect_markdown_indentation() {

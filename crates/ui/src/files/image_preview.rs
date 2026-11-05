@@ -101,20 +101,27 @@ impl ImagePreview {
                 // Legacy chats and plain folders may not carry a checkout ID in
                 // synced metadata. Obtain only its identity from the owning host;
                 // no text response is retained or used to render the image.
-                let checkout = match context.checkout_id.clone().filter(|id| !id.is_empty()) {
-                    Some(id) => id,
-                    None => {
-                        client
-                            .read_file(zeron_proto::ReadWorkspaceFileRequest {
-                                target: context.target.clone(),
-                                path: path.clone(),
-                            })
-                            .await
-                            .map_err(|e| e.to_string())?
-                            .checkout_id
+                // Outside files skip the probe entirely — they read by
+                // absolute path with an empty checkout id.
+                let outside = super::path_is_outside(&path);
+                let checkout = if outside {
+                    String::new()
+                } else {
+                    match context.checkout_id.clone().filter(|id| !id.is_empty()) {
+                        Some(id) => id,
+                        None => {
+                            client
+                                .read_file(zeron_proto::ReadWorkspaceFileRequest {
+                                    target: context.target.clone(),
+                                    path: path.clone(),
+                                })
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .checkout_id
+                        }
                     }
                 };
-                if checkout.is_empty() {
+                if checkout.is_empty() && !outside {
                     return Err("Workspace checkout identity unavailable".into());
                 }
                 let (mime, bytes) = client
@@ -197,6 +204,7 @@ impl Render for ImagePreview {
             root = root.child(self.viewer.render(
                 display.image,
                 gpui::size(px(source.width), px(source.height)),
+                None,
                 None,
                 window,
                 cx,

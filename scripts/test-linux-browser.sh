@@ -44,7 +44,7 @@ record_fixture() {
   fixture_pid=$!
   processes+=("$fixture_pid")
   if [ -z "$capture_window" ]; then
-    for _ in $(seq 1 100); do
+    for _ in $(seq 1 150); do
       capture_window="$(xdotool search --onlyvisible --pid "$fixture_pid" 2>/dev/null | head -1 || true)"
       [ -n "$capture_window" ] && break
       kill -0 "$fixture_pid" 2>/dev/null || { cat "$output/$mode/fixture.log"; return 1; }

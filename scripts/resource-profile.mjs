@@ -118,7 +118,10 @@ try {
   for (let attempt = 0; attempt < 120; attempt++) {
     if (engine.exitCode != null) throw Error('Engine exited; inspect engine.log');
     try {
-      ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      // The engine publishes its per-start IPC bearer in its data dir
+      // (Node's undici WebSocket accepts non-standard handshake headers).
+      const token = readFileSync(`${env.ZERON_DATA_DIR}/ipc-token`, 'utf8').trim();
+      ws = new WebSocket(`ws://127.0.0.1:${port}`, { headers: { authorization: `Bearer ${token}` } });
       await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
       break;
     } catch { await sleep(250); }

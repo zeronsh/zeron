@@ -16,9 +16,19 @@ On Linux, the scanner joins the current user's `/proc` process cwd, ancestry,
 creation time and socket descriptors to listening TCP sockets. On macOS it uses
 `lsof` and `ps` for equivalent metadata. Only loopback-reachable listeners whose
 cwd belongs to a known local project are probed. The deepest matching project
-wins. Unrelated listeners and non-HTTP services are excluded. HTTP probes are
-bounded and run every two seconds, using HEAD and accepting valid HTTP status
-responses (including authentication and application errors).
+wins. Commands with explicit authentication arguments (`login`, `auth`,
+`authenticate`, `signin`, `sign-in`, `sso`, `oauth`, or `oauth2`, before `--`)
+are excluded before any connection, even when started by a Zeron terminal or
+agent. Their listeners may be one-shot browser callbacks: for example,
+`infisical login` fails with EOF if it receives a discovery HEAD without the
+browser's JSON body. This command check does not identify custom callback
+servers without an authentication argument.
+
+Unrelated listeners and non-HTTP services are excluded. Discovery runs every
+two seconds; bounded HEAD probes accept valid HTTP status responses (including
+authentication and application errors). Confirmed HTTP listeners are not
+probed again during that socket's lifetime; non-HTTP results use a capped
+exponential backoff.
 
 Zeron terminal/task/agent descendants are marked as Zeron-owned. Framework
 commands identify Vite, Next.js, Astro, Miniflare and Node servers; otherwise the
