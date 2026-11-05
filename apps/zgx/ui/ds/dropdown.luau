@@ -130,6 +130,9 @@ export type Props = {
 	keep_open: boolean?,
 	on_choose: ((value: string) -> ())?,
 	on_escape: (() -> boolean)?,
+	-- The panel's keys, the caller's first, given the highlighted item (true:
+	-- handled).
+	on_key: ((e: KeyEvent, highlighted: string?) -> boolean)?,
 	-- At the panel's top, above a rule, and under a rule at its foot: the
 	-- caller's own rows.
 	head: Node?,
@@ -868,6 +871,9 @@ return ui.component(function(props: Props): Node
 			-- opened out by the pointer (typing filters, Escape folds it).
 			local search_el: any = nil
 			local function keys(e): boolean
+				if props.on_key and props.on_key(e, hi:peek()) then
+					return true
+				end
 				-- Folded, the arrows open it out.
 				if
 					props.expanded
