@@ -109,6 +109,7 @@ mod fit_tests;
 mod editor_scroll_tests;
 #[cfg(test)]
 mod i18n_tests;
+mod updates;
 #[cfg(test)]
 mod visuals_tests;
 
@@ -716,6 +717,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
+        // What there is to update, on every device (src/updates.rs).
+        updates::install(&host);
         // Adding a project, removing one (src/projects.rs).
         projects::install(&host);
         // A session's files (src/files.rs): the files pane and editor.

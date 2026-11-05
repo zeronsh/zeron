@@ -612,48 +612,59 @@ return function(): Node
 					return nil, false
 				end
 				local card = ui.ref()
+				-- (Its place on the card, not the region's root: what leaves is laid
+				-- over what enters, and would take this one's offset on top of its own.)
 				return ui.div {
-					ref = card,
-					absolute = true,
-					left = at.x + at.w + 10,
-					-- (Beside the row's top, kept inside the window.)
-					top = function(): number
-						local h = card.height or 0
-						return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
+					pointer_events = "none",
+					w = function(): number
+						return root.width or 0
 					end,
-					ds.SessionCard {
-						session = id,
-						title = function(): string
-							local c = chat()
-							return if c then c.title else ""
+					h = function(): number
+						return root.height or 0
+					end,
+					ui.div {
+						ref = card,
+						absolute = true,
+						left = at.x + at.w + 10,
+						-- (Beside the row's top, kept inside the window.)
+						top = function(): number
+							local h = card.height or 0
+							return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
 						end,
-						time = function(): number?
-							local c = chat()
-							return if c then c.updated else nil
-						end,
-						device = function(): string?
-							return (device())
-						end,
-						here = function(): boolean
-							local _, here = device()
-							return here
-						end,
-						project = function(): string?
-							local c = chat()
-							if not c or not c.project then
-								return nil
-							end
-							for _, p in sessions.now:get().projects do
-								if p.id == c.project then
-									return p.name
+						ds.SessionCard {
+							session = id,
+							title = function(): string
+								local c = chat()
+								return if c then c.title else ""
+							end,
+							time = function(): number?
+								local c = chat()
+								return if c then c.updated else nil
+							end,
+							device = function(): string?
+								return (device())
+							end,
+							here = function(): boolean
+								local _, here = device()
+								return here
+							end,
+							project = function(): string?
+								local c = chat()
+								if not c or not c.project then
+									return nil
 								end
-							end
-							return nil
-						end,
-						branch = function(): string?
-							local c = chat()
-							return if c then c.branch else nil
-						end,
+								for _, p in sessions.now:get().projects do
+									if p.id == c.project then
+										return p.name
+									end
+								end
+								return nil
+							end,
+							branch = function(): string?
+								local c = chat()
+								return if c then c.branch else nil
+							end,
+						},
 					},
 				}
 			end, {

@@ -227,7 +227,14 @@ local function composer(chat: string, view: any, name: string): Node
 			}
 		end
 		local p = project_row(s.project)
+		local on: string? = nil
+		for _, d in sessions.now:get().devices do
+			if d.id == s.device then
+				on = d.name
+			end
+		end
 		return {
+			device = on,
 			name = s.branch,
 			worktree = p ~= nil and s.cwd ~= nil and s.cwd ~= p.path,
 			project = if p then p.name else nil,
@@ -495,6 +502,15 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		end,
 		open_link = open_link,
 		chat_of = Shared.chat_of,
+		-- (The chat this lane is beside is already on show: to it, as ever.)
+		open_sender = function(chat: string, title: string)
+			local home = home_session()
+			if chat == home then
+				open_link(`zeron-chat:{chat}`)
+			elseif home then
+				lanes.open(home, { kind = "side_chat", id = chat, title = title })
+			end
+		end,
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),

@@ -1,8 +1,9 @@
 # Windows icon
 
-`zeron.ico` contains 16, 24, 32, 48, 64, 128, and 256 pixel PNG frames
-converted from the existing `../macos/icon-1024.png` artwork with bicubic
-resampling. It preserves the artwork's transparency.
+`zeron.ico` contains 16, 24, 32, 48, 64, 128, and 256 pixel PNG frames made from
+`../icon/zeron-solid-macos-Dark.png` by `scripts/make-app-icons.py`. An `.exe`'s
+icon can't follow the system's light or dark setting, and this one reads on
+either.
 
 `apps/zeron/build.rs` compiles `zeron.rc` into the Windows executable for
 both debug and release builds. Resource ID 1 is required by GPUI's Windows

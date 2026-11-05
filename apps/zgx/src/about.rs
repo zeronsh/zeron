@@ -62,6 +62,9 @@ struct About {
     windows: RefCell<Option<WindowFactory>>,
 }
 
+/// How long a restart to update waits on the engine going with it.
+const ENGINE_STOP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
 thread_local! {
     static ABOUT: Rc<About> = Rc::default();
 }
@@ -356,6 +359,26 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                         "failed".to_string()
                     })?;
                     publish();
+                    // (The engine goes with it, so it comes back on the new
+                    // bundle's rather than running on from the old: what's
+                    // running stops cleanly, and carries on after.)
+                    // (Not for long: the update's in, and a stuck engine mustn't
+                    // keep the window from going.)
+                    let engine = engine::get();
+                    if engine.config().is_some_and(|c| c.follows_bundle()) {
+                        let stopped = std::rc::Rc::new(std::cell::Cell::new(false));
+                        let done = stopped.clone();
+                        engine.spawn(async move {
+                            if let Err(error) = engine::get().stop().await {
+                                eprintln!("zeron-zgx: updates: the engine didn't stop: {error}");
+                            }
+                            done.set(true);
+                        });
+                        let started = std::time::Instant::now();
+                        while !stopped.get() && started.elapsed() < ENGINE_STOP_PATIENCE {
+                            zgx::timer::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    }
                     if let Some(windows) = a.windows.borrow().as_ref() {
                         windows.quit();
                     }

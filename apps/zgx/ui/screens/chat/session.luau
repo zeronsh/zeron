@@ -267,6 +267,12 @@ local function Session(id: Id?): Node
 							end,
 							on_mention = shared.mention,
 							chat_of = shared.chat_of,
+							open_sender = function(chat: string, title: string)
+								local s = which()
+								if s then
+									lanes.open(s, { kind = "side_chat", id = chat, title = title })
+								end
+							end,
 							on_retry = function(message: string)
 								local s = which()
 								if s then

@@ -98,6 +98,10 @@ struct Chats {
     /// `chat.catalog` is then its catalog, as the shipping app's pickers
     /// read their run device's (`list_harnesses(device)`).
     remote: RefCell<Option<Remote>>,
+    /// Each device's catalog as last looked at whole (some looked at ahead of
+    /// time, `look_ahead`): moving to it shows this at once, while it's looked
+    /// at again, so a model is never missing for the moment that takes.
+    known_remotes: RefCell<HashMap<String, Remote>>,
     /// The chat a view has just let go of, kept a moment: a chat on its own
     /// that becomes a split is opened again at once, in its pane, and has
     /// what it had rather than reading and building it all again.
@@ -357,6 +361,9 @@ struct LetGo {
 /// How long a chat let go of is kept for another view to take it.
 const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long after connecting other devices' catalogs start being looked at.
+const LOOK_AHEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
+
 /// How many entries a reset may leave to build at once; more go to a worker and
 /// in slices.
 const BUILT_AT_ONCE: usize = 64;
@@ -365,6 +372,7 @@ const BUILD_SLICE: std::time::Duration = std::time::Duration::from_millis(3);
 const BUILD_REST: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Another device's catalog, read through the engine (`targetDeviceId`).
+#[derive(Clone)]
 struct Remote {
     device: String,
     harnesses: Vec<Json>,
@@ -730,6 +738,8 @@ fn by_field(list: Json, field: &str) -> HashMap<String, Json> {
 
 impl Chats {
     fn connected(self: &Rc<Self>, rpc: &Rpc) {
+        let me = self.clone();
+        engine::get().spawn(async move { me.look_ahead().await });
         let mut watches = Vec::new();
         let weak = Rc::downgrade(self);
         watches.push(rpc.watch("WatchSessions", json!({}), move |item| {
@@ -983,12 +993,13 @@ impl Chats {
         if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
             return;
         }
-        *self.remote.borrow_mut() = Some(Remote {
+        let known = self.known_remotes.borrow().get(device).cloned();
+        *self.remote.borrow_mut() = Some(known.unwrap_or_else(|| Remote {
             device: device.to_owned(),
             harnesses: Vec::new(),
             models: HashMap::new(),
             ready: false,
-        });
+        }));
         self.publish_catalog();
         let (me, device) = (self.clone(), device.to_owned());
         engine::get().spawn(async move { me.load_remote(device).await });
@@ -1019,8 +1030,10 @@ impl Chats {
             Err(error) => {
                 // (Unreachable: this device's catalog stands in, as before.)
                 eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
-                self.remote.borrow_mut().take();
-                self.publish_catalog();
+                if !self.known_remotes.borrow().contains_key(&device) {
+                    self.remote.borrow_mut().take();
+                    self.publish_catalog();
+                }
                 return;
             }
         };
@@ -1051,9 +1064,49 @@ impl Chats {
                         Err(error) => eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}"),
                     }
                     r.ready = left.get() == 0;
+                    if r.ready {
+                        me.known_remotes.borrow_mut().insert(device.clone(), r.clone());
+                    }
                 }
                 me.publish_catalog();
             });
+        }
+    }
+
+    /// The other devices' catalogs looked at ahead of time, one at a time so
+    /// launch doesn't feel it, so a chat on one opens with its model known.
+    async fn look_ahead(self: &Rc<Self>) {
+        zgx::timer::sleep(LOOK_AHEAD_AFTER).await;
+        for device in crate::sessions::other_devices_online() {
+            if self.known_remotes.borrow().contains_key(&device) {
+                continue;
+            }
+            let params = json!({ "targetDeviceId": device, "includeRegistry": true });
+            let Ok(list) = engine::get().call("ListHarnesses", params).await else { continue };
+            let harnesses: Vec<Json> = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|h| {
+                    h["id"].as_str() != Some("mock")
+                        && h["installed"].as_bool() != Some(false)
+                        && h["enabled"].as_bool() != Some(false)
+                })
+                .cloned()
+                .collect();
+            let mut models = HashMap::new();
+            for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
+                let params = json!({ "harness": id, "targetDeviceId": device });
+                if let Ok(list) = engine::get().call("ListModels", params).await {
+                    models.insert(id.to_owned(), list.as_array().cloned().unwrap_or_default());
+                }
+            }
+            crate::agents::remember_icons(&harnesses);
+            // (One opened meanwhile has its own, as new.)
+            self.known_remotes
+                .borrow_mut()
+                .entry(device.clone())
+                .or_insert(Remote { device, harnesses, models, ready: true });
         }
     }
 
@@ -1157,6 +1210,8 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
     }
     let mut fields = vec![
         ("state", Value::from(state)),
+        // (Every agent's models in: till then, a model may just not be here yet.)
+        ("complete", Value::Bool(done)),
         ("harnesses", Value::List(harnesses.into())),
         ("models", Value::List(models.into())),
     ];

@@ -166,6 +166,8 @@ export type Props = {
 	-- A chat as it's listed now: its title and agent's mark. Nil for one that
 	-- isn't listed, which a message from it can't open.
 	chat_of: ((id: string) -> { title: string, mark: Mark.Name? }?)?,
+	-- What pressing `Message from Chat` does: opens that chat beside this one.
+	open_sender: ((chat: string, title: string) -> ())?,
 	-- Those links' context menus where they aren't the web's (ds/markdown's
 	-- `link_menu`).
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
@@ -373,7 +375,8 @@ end
 
 -- A message another chat sent: `Message from [mark] Chat`, muted, on the right
 -- over its bubble (Zeron's `render_agent_sender`). The chat's title as it is
--- now, and a click opens it; one that isn't listed reads as it did when sent.
+-- now, and a click opens it in the panel; one that isn't listed reads as it
+-- did when sent.
 local function sender_line(m: Message, props: Props): Node
 	local from = m.sender :: { chat: string, title: string }
 	local function now(): { title: string, mark: Mark.Name? }?
@@ -425,7 +428,10 @@ local function sender_line(m: Message, props: Props): Node
 			line.hover = { color = "$text.primary" }
 			line.active = { color = "$text.primary" }
 			line.on_click = function()
-				if props.open_link then
+				if props.open_sender then
+					local live = now()
+					props.open_sender(from.chat, if live then live.title else from.title)
+				elseif props.open_link then
 					props.open_link(`zeron-chat:{from.chat}`)
 				end
 			end
