@@ -10790,6 +10790,18 @@ fn activity_rail(
             canvas(
                 move |_, _, _| (),
                 move |bounds, _, window, _| {
+                    // A settled rail never paints a path: GPUI rasterizes each
+                    // path batch in its own window-sized multisampled pass,
+                    // and rows interleave rails with text, so a screen of tool
+                    // rows meant a full-window pass per row on every frame.
+                    // Only the brief reveal below still animates as a path.
+                    if incoming_reveal >= 1.0
+                        && branch_reveal >= 1.0
+                        && (!continues || continuation_reveal >= 1.0)
+                    {
+                        paint_settled_rail(bounds, row_height, continues, color, window);
+                        return;
+                    }
                     let x = bounds.origin.x + px(ACTIVITY_TRUNK_X);
                     let branch_y = bounds.origin.y + px(row_height / 2.0);
                     let bend_y = branch_y - px(ACTIVITY_BEND_RADIUS);
@@ -10841,6 +10853,154 @@ fn activity_rail(
             .opacity(branch_reveal)
             .text_color(tint),
         )
+}
+
+/// A settled rail: the row's head (incoming trunk, elbow, branch — and the
+/// through-trunk at a fork) as one cached sprite, so the fork keeps a single
+/// alpha contribution like the path's nonzero union, plus a plain quad for
+/// any trunk continuing below the head. Sprites and quads draw in the main
+/// render pass; a path would cost a window-sized multisampled pass.
+fn paint_settled_rail(
+    bounds: Bounds<Pixels>,
+    row_height: f32,
+    continues: bool,
+    color: gpui::Hsla,
+    window: &mut Window,
+) {
+    let head = Bounds::new(
+        bounds.origin,
+        size(px(ACTIVITY_GUTTER_WIDTH), px(row_height)),
+    );
+    let image = settled_rail_image(row_height, continues, color, window);
+    let _ = window.paint_image(head, gpui::Corners::default(), image, 0, false);
+    let below = f32::from(bounds.size.height) - row_height;
+    if continues && below > 0.0 {
+        window.paint_quad(gpui::fill(
+            Bounds::new(
+                point(
+                    bounds.origin.x + px(ACTIVITY_TRUNK_X - 0.5),
+                    bounds.origin.y + px(row_height),
+                ),
+                size(px(1.0), px(below)),
+            ),
+            color,
+        ));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct RailKey {
+    row_height_bits: u32,
+    continues: bool,
+    color: [u8; 4],
+    scale_centi: u32,
+}
+
+/// Distinct settled rails kept before the cache is released (two shapes per
+/// theme and display scale in practice; the bound guards churn).
+const RAIL_CACHE_LIMIT: usize = 64;
+
+fn settled_rail_image(
+    row_height: f32,
+    continues: bool,
+    color: gpui::Hsla,
+    window: &mut Window,
+) -> Arc<gpui::RenderImage> {
+    thread_local! {
+        static RAILS: RefCell<HashMap<RailKey, Arc<gpui::RenderImage>>> = RefCell::default();
+    }
+    let scale = window.scale_factor();
+    let rgba = gpui::Rgba::from(color);
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let key = RailKey {
+        row_height_bits: row_height.to_bits(),
+        continues,
+        color: [byte(rgba.r), byte(rgba.g), byte(rgba.b), byte(rgba.a)],
+        scale_centi: (scale * 100.0).round() as u32,
+    };
+    RAILS.with(|rails| {
+        let mut rails = rails.borrow_mut();
+        if let Some(image) = rails.get(&key) {
+            return image.clone();
+        }
+        if rails.len() >= RAIL_CACHE_LIMIT {
+            for (_, image) in rails.drain() {
+                let _ = window.drop_image(image);
+            }
+        }
+        let pixels = rasterize_rail_head(row_height, continues, rgba, scale);
+        let image = Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)]));
+        rails.insert(key, image.clone());
+        image
+    })
+}
+
+/// The settled rail head at device scale: 1pt ribbons along the incoming
+/// trunk, the bend into the branch, and (at a fork) the trunk on to the
+/// head's bottom. Coverage is the union (max) of the ribbons. BGRA, straight
+/// alpha, as GPUI's sprite atlas samples it.
+fn rasterize_rail_head(
+    row_height: f32,
+    continues: bool,
+    color: gpui::Rgba,
+    scale: f32,
+) -> image::RgbaImage {
+    let width = (ACTIVITY_GUTTER_WIDTH * scale).round().max(1.0) as u32;
+    let height = (row_height * scale).round().max(1.0) as u32;
+    let bend_y = row_height / 2.0 - ACTIVITY_BEND_RADIUS;
+    let trunk_end = if continues { row_height } else { bend_y };
+    let mut polylines: Vec<Vec<Point<f32>>> = vec![vec![
+        point(ACTIVITY_TRUNK_X, 0.0),
+        point(ACTIVITY_TRUNK_X, trunk_end),
+    ]];
+    polylines.push(
+        activity_branch_points(1.0)
+            .into_iter()
+            .map(|p| point(ACTIVITY_TRUNK_X + p.x, bend_y + p.y))
+            .collect(),
+    );
+    let segments: Vec<(Point<f32>, Point<f32>)> = polylines
+        .iter()
+        .flat_map(|line| line.windows(2).map(|pair| (pair[0], pair[1])))
+        .collect();
+    let half_width = 0.5 * scale;
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut pixels = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            // Pixel centre in points.
+            let p = point((x as f32 + 0.5) / scale, (y as f32 + 0.5) / scale);
+            let distance = segments
+                .iter()
+                .map(|(a, b)| distance_to_segment(p, *a, *b))
+                .fold(f32::INFINITY, f32::min);
+            let coverage = (half_width + 0.5 - distance * scale).clamp(0.0, 1.0);
+            if coverage > 0.0 {
+                pixels.put_pixel(
+                    x,
+                    y,
+                    image::Rgba([
+                        byte(color.b),
+                        byte(color.g),
+                        byte(color.r),
+                        byte(color.a * coverage),
+                    ]),
+                );
+            }
+        }
+    }
+    pixels
+}
+
+fn distance_to_segment(p: Point<f32>, a: Point<f32>, b: Point<f32>) -> f32 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length_sq = dx * dx + dy * dy;
+    let t = if length_sq > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / length_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p.x - (a.x + t * dx)).hypot(p.y - (a.y + t * dy))
 }
 
 /// A clockwise ribbon contour. Nonzero fill unions intersecting contours,
@@ -12224,6 +12384,34 @@ mod tests {
         };
         assert_eq!(tool_disclosure_progress(true, fold, now), 1.0);
         assert_eq!(tool_disclosure_progress(false, fold, now), 0.0);
+    }
+
+    #[test]
+    fn settled_rail_head_draws_trunk_branch_and_fork_as_one_union() {
+        let color = gpui::Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.5,
+        };
+        let scale = 2.0;
+        let end = rasterize_rail_head(TOOL_TREE_ROW_HEIGHT, false, color, scale);
+        let fork = rasterize_rail_head(TOOL_TREE_ROW_HEIGHT, true, color, scale);
+        let alpha = |image: &image::RgbaImage, x: f32, y: f32| {
+            image.get_pixel((x * scale) as u32, (y * scale) as u32).0[3]
+        };
+        let middle = TOOL_TREE_ROW_HEIGHT / 2.0;
+        // Incoming trunk at the top, branch just before its end.
+        assert!(alpha(&end, ACTIVITY_TRUNK_X, 1.0) > 100);
+        assert!(alpha(&end, ACTIVITY_BRANCH_END_X - 1.0, middle) > 100);
+        // Below the bend only a fork carries the trunk on.
+        assert_eq!(alpha(&end, ACTIVITY_TRUNK_X, TOOL_TREE_ROW_HEIGHT - 1.0), 0);
+        assert!(alpha(&fork, ACTIVITY_TRUNK_X, TOOL_TREE_ROW_HEIGHT - 1.0) > 100);
+        // Nothing past the branch end (the icon's gap).
+        assert_eq!(alpha(&end, ACTIVITY_ICON_LEFT, middle), 0);
+        // A union like the path's nonzero fill: the fork is never darker
+        // than the rail colour itself.
+        assert!(fork.pixels().all(|p| p.0[3] <= 128));
     }
 
     #[test]
