@@ -404,7 +404,11 @@ end
 -- system's (ds/tabs, its `pill` look at `sm`): each as wide as its label,
 -- the chosen one on the flat selected wash; a long title fades at
 -- LABEL_MAX. (Their end keeps a slot for × and the unsaved dot.)
-local CHIP_H = 28
+-- Zeron's chip (surface_chrome.rs `tab_chip`, `TAB_CHIP_HEIGHT`): 24 tall,
+-- every one as wide (`zeron.tab.w`), 4 in at either end, its tile, title
+-- and end slot 3 apart, its title 11.5; the chosen one on its wash, the
+-- others on a fainter one under the pointer (`zeron.tab`).
+local CHIP_H = 24
 local LABEL_MAX = 140
 local SLOT = 18
 -- The band of its tabs, at the top of its card: as tall as a code pane's head, its
@@ -830,22 +834,20 @@ M.Panel = ui.component(function(props: Props): Node
 				label = title,
 				selected = is_active,
 				h = CHIP_H,
+				w = "$zeron.tab.w",
 				shrink = 0,
-				pl = ui.raw(4, "as far in as the tile is from its top"),
-				-- (The end slot sits as far in as it is from top and bottom.)
-				pr = ui.raw(2, "the tab's inset"),
-				gap = "$zeron.space.tight",
+				px = "$space.1",
+				gap = "$zeron.tab.gap",
 				items = "center",
-				rounded = "$radius.lg",
+				rounded = "$radius.md",
 				cursor = "pointer",
-				-- (As ds/tabs' pill: the chosen one on the flat wash; the
-				-- others take the hover wash under the pointer, their ink
-				-- brightening with it.)
+				-- (As Zeron's: the chosen one on its wash; the others take a
+				-- fainter one under the pointer, their ink brightening with it.)
 				bg = function(): string
 					if is_active() then
-						return "$zeron.selected.flat.bg"
+						return "$zeron.tab.selected"
 					end
-					return if hovered:get() then "$hover" else "#00000000"
+					return if hovered:get() then "$zeron.tab.hover" else "#00000000"
 				end,
 				color = function(): string
 					return if is_active() or hovered:get() then "$text.primary" else "$text.secondary"
@@ -938,11 +940,13 @@ M.Panel = ui.component(function(props: Props): Node
 				-- (Half a point down: on the label's lowercase middle, not
 				-- its line box's.)
 				ui.div { y = 0.5, shrink = 0, icon },
-				FadeText {
+				-- (Its title the room between, cut short with an ellipsis.)
+				ui.text {
 					title,
-					max_w = LABEL_MAX,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
+					grow = 1,
+					min_w = 0,
+					truncate = true,
+					text_size = "$zeron.tab.size",
 				},
 				-- Its end: × under the pointer, a dot while unsaved.
 				ui.row {
@@ -1033,8 +1037,8 @@ M.Panel = ui.component(function(props: Props): Node
 			return
 		end
 		local left = 0
-		-- (The tabs' own gap, the strip's hair.)
-		local gap = (ui.theme.get("zeron.space.hair") :: number?) or 2
+		-- (The tabs' own gap, Zeron's 4: shell/tabs.rs's strip.)
+		local gap = (ui.theme.get("space.1") :: number?) or 4
 		for i, t in list do
 			local r = chip_refs[t.id]
 			local w = if r then r.width or 0 else 0
@@ -1094,9 +1098,8 @@ M.Panel = ui.component(function(props: Props): Node
 			return pinned_now
 		end
 		local content = strip_content.width or 0
-		local hair = (ui.theme.get("zeron.space.hair") :: number?) or 2
 		local one = (ui.theme.get("space.1") :: number?) or 4
-		local needs = content + (if pinned_now then CHIP_H + hair else 0)
+		local needs = content + (if pinned_now then CHIP_H + one else 0)
 		local room = view + (if pinned_now then CHIP_H + one else 0)
 		pinned_now = needs > room + 0.5
 		return pinned_now
@@ -1129,14 +1132,14 @@ M.Panel = ui.component(function(props: Props): Node
 			fade_overflow = true,
 			ui.row {
 				ref = strip_content,
-				gap = "$zeron.space.hair",
+				gap = "$space.1",
 				items = "center",
 				ui.each(tab_list, chip, {
 					key = function(t: Tab): string
 						return t.id
 					end,
 					direction = "row",
-					gap = "$zeron.space.hair",
+					gap = "$space.1",
 					animate = motion.layout(SLIDE),
 				}),
 				-- (Only with a tab open, as Zeron's: the empty page is what it
@@ -1489,7 +1492,8 @@ M.Panel = ui.component(function(props: Props): Node
 		relative = true,
 		overflow = "hidden",
 		rounded = "$zeron.inset.radius",
-		bg = "$zeron.inset.bg",
+		-- (Frosted, Zeron's panel glass, theme.rs `panel_bg`.)
+		bg = ds.material.pick("$zeron.panel.tint", "$zeron.inset.bg"),
 		border = 1,
 		border_color = "$zeron.inset.edge",
 		ui.column { w_full = true, shrink = 0, hidden = closed, strip },
