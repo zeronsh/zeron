@@ -366,13 +366,34 @@ fn write_durably(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temp)?;
         file.write_all(contents)?;
         file.sync_all()?;
-        std::fs::rename(&temp, path)?;
+        drop(file);
+        rename_replacing(&temp, path)?;
         sync_dir(dir)
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     written
+}
+
+/// On Windows a rename over a file fails ("Access is denied") while anything has
+/// it open without delete sharing: antivirus, an indexer, a backup tool, or a
+/// script reading the record. Those opens are brief, so wait them out.
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempts = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(err)
+                if cfg!(windows)
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempts < 40 =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
 }
 
 /// The record. An unreadable one can't say what happened, so it's set aside and
@@ -1550,6 +1571,29 @@ mod tests {
         std::fs::write(dir.path().join("pull-requests.sqlite3"), "prs").unwrap();
         std::fs::write(dir.path().join("worktrees/repo/app.sqlite3"), "theirs").unwrap();
         dir
+    }
+
+    /// A reader that doesn't share delete access (as antivirus may) only delays
+    /// the record's replacement.
+    #[cfg(windows)]
+    #[test]
+    fn a_brief_reader_does_not_fail_the_record() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        std::fs::write(&path, "old").unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ only
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(reader);
+        });
+        write_durably(&path, b"new").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 
     #[test]
