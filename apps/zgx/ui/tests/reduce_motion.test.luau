@@ -37,14 +37,25 @@ end
 
 test("with motion reduced, the sidebar folds and comes back at once", function()
 	local app = reduced_shell()
-	local open_w, folded = lands_at_once(app, "#shell-sidebar", function()
+	-- (Its card, at once. The window's 5-point edge before it is a tween, fixed as
+	-- it's built: here that was before motion was reduced.)
+	local function card(act: () -> ()): (number, number)
+		local before = width(app, "#shell-sidebar")
+		act()
+		app:frames(2)
+		local landed = width(app, "#shell-sidebar")
+		app:frames(30)
+		expect(math.abs(width(app, "#shell-sidebar") - landed) <= 5).to_be(true)
+		return before, landed
+	end
+	local open_w, folded = card(function()
 		app:click('#titlebar >> role:button "Toggle sidebar"')
 	end)
-	expect(folded < open_w).to_be(true)
-	local _, back = lands_at_once(app, "#shell-sidebar", function()
+	expect(folded <= 5).to_be(true)
+	local _, back = card(function()
 		app:click('#titlebar >> role:button "Toggle sidebar"')
 	end)
-	expect(back).to_be(open_w)
+	expect(math.abs(back - open_w) <= 5).to_be(true)
 end)
 
 test("with motion reduced, the panel opens and closes at once", function()

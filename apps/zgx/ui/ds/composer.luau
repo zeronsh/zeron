@@ -307,7 +307,7 @@ local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
 -- chip): centred by their capitals, lowercase reads low beside a glyph. (A
 -- margin under them of twice that: their box stays centred, a point up.)
 local LIFT = "$zeron.space.hair"
-type Folded = { level: number, access_at: { [string]: number }, where_icon: number? }
+type Folded = { level: number, access_at: { [string]: number }, where_icon: number?, model_at: { [string]: number }? }
 local FOOTER_SIDES, FOOTER_GAP = 20, 4
 -- With cargo or a question over the draft, the draft keeps the strip's
 -- `below` over it (the theme's; read as the composer is built) rather than
@@ -956,6 +956,7 @@ return ui.component(function(props: Props): Node
 	local trailing_seen = kept("trailing_w", 0)
 	local footer_w = kept("footer_w", 0)
 	local right_w = kept("right_w", 0)
+	local model_w = kept("model_w", 0)
 	local access_w = kept("access_w", 0)
 	local where_w = kept("where_w", 0)
 	local name_w = kept("name_w", 0)
@@ -1049,6 +1050,9 @@ return ui.component(function(props: Props): Node
 		enabled = props.mention_enabled,
 		empty = props.mention_empty,
 		on_choose = props.on_mention,
+		in_view = function(): boolean
+			return (pill_w:get() or 0) > 0
+		end,
 	}
 	-- Asked to: the keys, the caret at the end.
 	if props.focus then
@@ -1228,24 +1232,12 @@ return ui.component(function(props: Props): Node
 		local on = if type(below) == "function" then below() else below == true
 		return if on then "bottom" else "top"
 	end
-	local model = ui.presence(side, function(at: string): Node
-		return ModelPicker {
-			model = props.model,
-			effort = props.effort,
-			fast = props.fast,
-			options = props.options,
-			harnesses = props.harnesses :: any,
-			models = props.models :: any,
-			placement = { side = at, align = "end", offset = 6 },
-			open_with = props.open_model,
-			showing = props.model_open,
-		}
-	end)
 	-- The footer folds a step at a time as it runs short of room, the
-	-- fullest that fits: 0, all of it; 1, the access mode without "Plan";
-	-- 2, the access mode's icon alone; 3, where it works as its icon too.
-	-- Until 3 where it works keeps the project's name and BRANCH_KEEP of the
-	-- branch's (`where_min`, fading past it).
+	-- fullest that fits: 0, all of it; 1, the model without its effort; 2,
+	-- the access mode without "Plan" too; 3, the access mode's icon alone; 4,
+	-- where it works as its icon too; 5, the model's icon alone. Until 4 where
+	-- it works keeps the project's name and BRANCH_KEEP of the branch's
+	-- (`where_min`, fading past it).
 	--
 	-- Its measures: the footer's width, the right group's, and each chip's.
 	-- A chip's width at each of its folds is kept from when it was last at
@@ -1258,6 +1250,13 @@ return ui.component(function(props: Props): Node
 	-- name (to its most) and some of the branch (none without a project).
 	-- Folded to the access mode's icon (2), it may go further: the branch
 	-- to its sliver, the name to its least.
+	-- What a footer's fold makes of the chips on the left, and of the model.
+	local function left_fold(lv: number): number
+		return math.clamp(lv - 1, 0, 3)
+	end
+	local function model_fold(lv: number): number
+		return if lv == 0 then 0 elseif lv >= 5 then 2 else 1
+	end
 	local function where_min(lv: number): number
 		local n = name_w:get()
 		if n <= 0 then
@@ -1275,6 +1274,12 @@ return ui.component(function(props: Props): Node
 		access_at[tonumber(k) :: number] = v
 	end
 	local where_icon: number? = was.where_icon
+	local model_at: { [number]: number } = {}
+	for k, v in was.model_at or {} do
+		model_at[tonumber(k) :: number] = v
+	end
+	-- (What the model's chip says: another pick, its other folds measure again.)
+	local model_says: string? = nil
 	local level = was.level
 	-- Bumped a frame after trying a fold not yet measured: its chip may lay
 	-- out no wider or narrower (the access mode without "Plan" when plan
@@ -1285,9 +1290,9 @@ return ui.component(function(props: Props): Node
 	local retry = false
 	local fold = ui.computed(function(): number
 		tried:get()
-		local f, r = footer_w:get(), right_w:get()
+		local f, r, m = footer_w:get(), right_w:get(), model_w:get()
 		-- (Not laid out yet: as it was.)
-		if f <= 0 or r <= 0 then
+		if f <= 0 or r <= 0 or m <= 0 then
 			return level
 		end
 		local a = if props.access then access_w:get() else 0
@@ -1295,27 +1300,38 @@ return ui.component(function(props: Props): Node
 		if (props.access and a <= 0) or (props.branch and w <= 0) then
 			return level
 		end
-		access_at[math.min(level, 2)] = a
-		if level >= 3 then
-			where_icon = w
+		local says = `{props.model:get()}/{props.effort:get()}`
+		if says ~= model_says then
+			if model_says ~= nil then
+				table.clear(model_at)
+			end
+			model_says = says
 		end
-		-- The room for the chips that fold (the left group): the footer less
-		-- its sides, the right group, and the gaps.
+		access_at[math.min(left_fold(level), 2)] = a
+		-- (Its widest: with no room at all it's squeezed under the icon's width.)
+		if left_fold(level) >= 3 then
+			where_icon = math.max(where_icon or 0, w)
+		end
+		model_at[model_fold(level)] = m
+		-- The footer's room: less its sides, what's on the right but the model,
+		-- and the gaps.
 		local chips = (if props.branch then 1 else 0) + (if props.access then 1 else 0)
-		local room = f - FOOTER_SIDES - FOOTER_GAP * math.max(chips, 1) - r
+		local room = f - FOOTER_SIDES - FOOTER_GAP * math.max(chips, 1) - (r - m)
 		-- What fold `lv` takes; nil, not yet measured.
 		local function needs(lv: number): number?
-			local access_w = access_at[math.min(lv, 2)]
-			local where_w = if not props.branch then 0 elseif lv >= 3 then where_icon else where_min(lv)
-			if access_w == nil or where_w == nil then
+			local left = left_fold(lv)
+			local access_w = access_at[math.min(left, 2)]
+			local where_w = if not props.branch then 0 elseif left >= 3 then where_icon else where_min(left)
+			local chip_w = model_at[model_fold(lv)]
+			if access_w == nil or where_w == nil or chip_w == nil then
 				return nil
 			end
-			return access_w + where_w
+			return access_w + where_w + chip_w
 		end
 		-- Unfolding needs a little more than folding took, so a width at
 		-- the edge cannot flicker.
-		local next = 3
-		for lv = 0, 2 do
+		local next = 5
+		for lv = 0, 4 do
 			local need = needs(lv)
 			if need == nil or need + (if lv < level then 8 else 0) <= room then
 				next = lv
@@ -1340,7 +1356,28 @@ return ui.component(function(props: Props): Node
 		for k, v in access_at do
 			at[tostring(k)] = v
 		end
-		folded:set { level = now, access_at = at, where_icon = where_icon }
+		local chip_at: { [string]: number } = {}
+		for k, v in model_at do
+			chip_at[tostring(k)] = v
+		end
+		folded:set { level = now, access_at = at, where_icon = where_icon, model_at = chip_at }
+	end)
+
+	local model = ui.presence(side, function(at: string): Node
+		return ModelPicker {
+			model = props.model,
+			effort = props.effort,
+			fast = props.fast,
+			options = props.options,
+			harnesses = props.harnesses :: any,
+			models = props.models :: any,
+			placement = { side = at, align = "end", offset = 6 },
+			open_with = props.open_model,
+			showing = props.model_open,
+			fold = function(): number
+				return model_fold(fold:get())
+			end,
+		}
 	end)
 
 	-- The access mode: its icon and name; with plan mode on, "Plan" after it
@@ -1350,7 +1387,7 @@ return ui.component(function(props: Props): Node
 		local plan = props.plan
 		access = Dropdown {
 			fold = function()
-				return math.min(fold:get(), 2)
+				return math.min(left_fold(fold:get()), 2)
 			end,
 			accent = if plan
 				then function()
@@ -2021,7 +2058,7 @@ return ui.component(function(props: Props): Node
 				return if checkout and checkout:get() == "local" then nil else "worktree"
 			end
 			local function folded(): boolean
-				return fold:get() >= 3
+				return left_fold(fold:get()) >= 3
 			end
 			local picker = Dropdown {
 				value = props.branch,
@@ -2152,7 +2189,7 @@ return ui.component(function(props: Props): Node
 				on_resize = measure(right_w, "w"),
 				items = "center",
 				shrink = 0,
-				model,
+				ui.row { on_resize = measure(model_w, "w"), items = "center", shrink = 0, model },
 				if props.usage
 					then ui.show(function(): boolean
 						local u = (props.usage :: () -> Usage?)()

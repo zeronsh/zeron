@@ -250,7 +250,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.open_external", move |arg| {
         let f = f.clone();
-        async move { f.show(arg, false).await }
+        async move { crate::plugins::preview::refuse("files.open_external")?; f.show(arg, false).await }
     });
     let f = files.clone();
     host.async_action("files.watch", move |arg| {

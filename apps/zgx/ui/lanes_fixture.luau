@@ -232,6 +232,13 @@ end }
 -- Away from the tab in front (the panel's home) and back to it, as a
 -- person switching tabs: its view made again.
 local panel_state = require("@app/screens/panel/state")
+-- (As the host says them: this fixture has no host.)
+do
+	local said = ui.shared("chat.subagents", {} :: { any })
+	ui.effect(function()
+		said:set(require("@app/screens/chat/lanes").subagents_of(require("@app/screens/chat/store").messages:get()))
+	end)
+end
 local was_active: string? = nil
 ui.command { id = "panel_home", title = "Panel home", run = function()
 	was_active = panel_state.of("chat:chat-1").active
@@ -304,12 +311,6 @@ return ui.row {
 	Panel.Panel {
 		session = session,
 		project = { id = "p1", path = "/proj", name = "proj" },
-		left = function(): number
-			return 400
-		end,
-		docked = function(): boolean
-			return true
-		end,
 		grow = 1,
 		h_full = true,
 	},

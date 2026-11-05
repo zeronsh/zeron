@@ -1,7 +1,7 @@
 -- Settings → Plugins with more than one computer, mounted on its own (no
 -- engine in a test host): what tests/plugins_devices.test.luau drives.
--- Three computers: this Mac, a devbox that's online, and a laptop that's
--- away. What the host would publish is set here (`plugins` for this Mac,
+-- Three computers: this computer, a devbox that's online, and a laptop that's
+-- away. What the host would publish is set here (`plugins` for this computer,
 -- `plugins.remote` for the device shown); what the page asks of it is
 -- stubbed to note which device each call names (`calls`), and to change
 -- the device's list as its engine would.
@@ -165,7 +165,7 @@ ui.command {
 }
 ui.command {
 	id = "switch_here",
-	title = "This Mac's plugins shown",
+	title = "This computer's plugins shown",
 	run = function()
 		publish_remote(nil)
 	end,

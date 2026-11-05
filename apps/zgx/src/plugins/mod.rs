@@ -468,6 +468,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
     let plugin_network = network::Network::default();
     host.fetch_policy(plugin_network.clone());
+    // What the app's VM (a template in preview, while it is one) may reach.
+    host.guard(preview::guard);
     let bridge = Rc::new(Bridge {
         host: host.clone(),
         network: plugin_network,
@@ -530,8 +532,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let weak = Rc::downgrade(&bridge);
     let effect = cx.ui.runtime.effect(move || {
         if let Some(b) = weak.upgrade() {
-            let sources = b.sources(true);
-            b.publish_records(&sources);
+            let (sources, list) = b.sources(true);
+            b.publish_records(&sources, &list);
         }
     });
     *bridge.records_effect.borrow_mut() = Some(effect);
@@ -1334,8 +1336,8 @@ impl Bridge {
             self.publish_pages();
         }
         self.publish_page();
-        let sources = self.sources(false);
-        self.publish_records(&sources);
+        let (sources, list) = self.sources(false);
+        self.publish_records(&sources, &list);
         if *self.loaded.borrow() == want {
             return;
         }
@@ -1390,6 +1392,11 @@ impl Bridge {
     }
 
     fn blame_as(&self, error: &str, loading: bool) {
+        // A preview asking for what it can't have yet isn't broken. (One that
+        // can't load without it makes way like any, until it's kept.)
+        if !loading && preview::refused(error) {
+            return;
+        }
         let loaded = self.loaded.borrow().clone();
         if let Some(id) = recovery::blame(error, &loaded) {
             self.plugin_failed(&id, error);
@@ -1545,7 +1552,23 @@ impl Bridge {
         let was = self.laid.borrow().id.clone();
         let name = template_name(root, &id);
         preview::set_template_running(id != live::BUILTIN);
+        // What a preview saved is kept with it, or goes with it; what failed
+        // only because it was one is tried again (`Bridge::blame_as`).
+        let was_previewing = preview::current();
+        let kept = trusted && was_previewing.as_ref().is_some_and(|p| p.id == id);
+        if kept {
+            self.host.keep_held_state();
+        } else if was_previewing.as_ref().is_some_and(|p| trusted || p.id != id) {
+            self.host.drop_held_state();
+        }
         preview::set((!trusted).then(|| preview::Preview { id: id.clone(), name: name.clone() }));
+        let retry = kept && {
+            let files = self.failed_files.borrow_mut().forget_under(&format!("{id}:"));
+            let whole = self.broken.borrow().why(&id).is_some();
+            self.broken.borrow_mut().forget(&id);
+            self.fallbacks.borrow_mut().remove(&id);
+            files || whole
+        };
         // A switch you didn't make here (an agent's use_template, a file
         // written by hand): said by the host, whatever the template shows.
         if was != id && !self.chose.replace(false) {
@@ -1572,12 +1595,15 @@ impl Bridge {
         }
         self.publish_templates();
         self.publish_page();
-        if changed > 0
-            && template
+        if (kept || (changed > 0 && template))
             && let Err(error) = self.host.reload()
         {
             eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
             self.blame_as(&error, true);
+        }
+        // What failed as a preview, laid down as it is now.
+        if retry {
+            self.look();
         }
     }
 
@@ -1764,40 +1790,42 @@ impl Bridge {
     /// What records are made from, as the window has it: followed (`track`,
     /// from the records' effect) or only read. The open chat's messages are
     /// followed only while a plugin may read them.
-    fn sources(&self, track: bool) -> records::Sources {
+    fn sources(&self, track: bool) -> (records::Sources, Value) {
         let read = |key: &str| {
             let signal = self.host.shared(key, Value::Nil).signal();
             let value = if track { signal.get() } else { signal.with_untracked(Value::clone) };
             value_json(&value)
         };
         let messages_wanted = self.items.borrow().iter().any(|i| i.status() == "on" && records::reads_messages(&i.permissions()));
-        let messages = if messages_wanted {
-            read("chat.messages")
-        } else {
-            value_json(&self.host.shared("chat.messages", Value::Nil).signal().with_untracked(Value::clone))
-        };
-        records::Sources {
-            sessions: read("sessions"),
+        // (No plugin reading them: nothing is made of a whole transcript.)
+        let messages = if messages_wanted { read("chat.messages") } else { Json::Null };
+        // The session list itself: records are made from it directly (no text of a
+        // whole account, on the main thread, each time the list moves).
+        let signal = self.host.shared("sessions", Value::Nil).signal();
+        let all = if track { signal.get() } else { signal.with_untracked(Value::clone) };
+        let sources = records::Sources {
+            sessions: Json::Null,
             messages,
             profile: read("plugins.profile"),
             hide_emails: read("plugins.hide_emails").as_bool().unwrap_or(false),
-        }
+        };
+        (sources, all)
     }
 
     /// Each plugin's records, from `sources`, holding what it may read.
-    fn publish_records(&self, sources: &records::Sources) {
+    fn publish_records(&self, sources: &records::Sources, list: &Value) {
         let items = self.items.borrow().clone();
-        let shared: Vec<(Shared, Json)> = items
+        let shared: Vec<(Shared, Value)> = items
             .iter()
             .filter(|i| i.status() == "on")
             .filter_map(|i| {
                 let shared = self.records.borrow().get(i.id()).cloned()?;
-                Some((shared, records::records_with(&i.permissions(), &i.change(), sources)))
+                Some((shared, records::published(&i.permissions(), &i.change(), sources, list)))
             })
             .collect();
         // (Set with no borrow held: a plugin's effects run at once.)
         for (shared, value) in shared {
-            shared.set(json_value(&value));
+            shared.set(value);
         }
     }
 
@@ -2825,18 +2853,7 @@ impl Bridge {
             }
         });
         // (Each of these acts on the device it names, `device`, or this one.)
-        host.async_action("plugins.set_off", {
-            let me = me.clone();
-            move |arg| {
-                let me = me.clone();
-                async move {
-                    let (id, device) = remote::id_and_device(&arg);
-                    let off = arg.field("off").is_some_and(Value::truthy);
-                    eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
-                    call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
-                }
-            }
-        });
+        set_off_action(host, me.clone());
         host.async_action("plugins.remove", {
             let me = me.clone();
             move |arg| {
@@ -3241,6 +3258,25 @@ async fn call(method: &str, params: Json) -> Result<Json, String> {
 
 /// `call`, on `device` (none: this one). A device out of reach says
 /// "offline", and the page showing it says so too.
+#[cfg(test)]
+pub(crate) fn set_off_action_for_tests(host: &ScriptHost) {
+    set_off_action(host, Weak::new());
+}
+
+/// `plugins.set_off`: a plugin off, or back on. Never an unkept preview's.
+fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
+    host.async_action("plugins.set_off", move |arg| {
+        let me = me.clone();
+        async move {
+            preview::refuse("plugins.set_off")?;
+            let (id, device) = remote::id_and_device(&arg);
+            let off = arg.field("off").is_some_and(Value::truthy);
+            eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
+            call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
+        }
+    });
+}
+
 async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
     let Some(device) = device else { return call(method, params).await };
     call(method, remote::addressed(Some(&device), params)).await.map_err(|error| {

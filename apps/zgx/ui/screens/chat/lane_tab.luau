@@ -257,10 +257,17 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			checkout = "local",
 			branch = row.branch,
 		}
-		project:set(place.project)
-		device:set(place.device)
+		-- (Started elsewhere, the panel home's group "+": that project or
+		-- device instead, its branch the project's own. The seed stays the
+		-- parent's, so the send carries the place.)
+		local at = lanes.starts:peek()[chat]
+		local start_project = if at and at.project then at.project elseif at and at.device and at.device ~= place.device then nil else place.project
+		local start_device = if at and at.device then at.device else place.device
+		local moved = start_project ~= place.project or start_device ~= place.device
+		project:set(start_project)
+		device:set(start_device)
 		checkout:set(place.checkout)
-		branch:set(place.branch)
+		branch:set(if moved then nil else place.branch)
 		seed:set(place)
 	end)
 	local where = Where.bind {
@@ -407,12 +414,7 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			req.message_id = mid
 			local sent: any = nil
 			T.send(function()
-				local here = false
-				for _, m in view.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
 					-- (On its way from this moment: the line under it says so.)
 					view.messages:push { id = mid, role = "user", text = words, waiting = "sending" }
@@ -438,6 +440,13 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		on_stop = function()
 			store.interrupt(chat)
 		end,
+		-- (Hidden while focused, its draft shown by the window's composer: only that
+		-- one's menus open, or a trigger typed there opens a second here.)
+		mention_enabled = if split and focused
+			then function(_trigger: string): boolean
+				return not focused()
+			end
+			else nil,
 		-- (A split's pane, its chat's own.)
 		question = if asks then asks.question else nil,
 		chosen = if asks then asks.chosen else nil,
@@ -494,6 +503,11 @@ local function forking(chat: string): Node
 		end
 		return ds.EmptyState { icon = "git-branch", size = "sm", fill = true, title = ui.t("chat.lane_tab.forking") :: any }
 	end, { grow = 1, w_full = true })
+end
+
+-- A lane's composer's height as measured, by its slot.
+function M.dock_height(slot: string): State<number>
+	return ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
 end
 
 M.Tab = ui.component(function(props: { tab: any }): Node
@@ -580,10 +594,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		if ever then
 			return true
 		end
-		ever = #messages:get() > 0 or loaded:get()
+		ever = messages:len() > 0 or loaded:get()
 		return ever
 	end)
-	local dock_h = ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
+	local dock_h = M.dock_height(slot)
 	-- (A split's pane, focused: the window's composer stands at its foot.)
 	local room = Dock.room(function(): number
 		return if split and focused_now() then Shared.dock_h:get() else dock_h:get()
@@ -647,9 +661,13 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		return T.Transcript {
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
+		-- (A split's pane reads as the chat page: a little wider than its
+		-- composer, running under its head and past its foot, faded.)
 		measure = function(): number
-			return prefs.conversation_width:get()
+			return prefs.conversation_width:get() + (if split then 24 else 0)
 		end,
+		side = if split then 20 else nil,
+		fade_lead = if split then 12 else nil,
 		messages = messages,
 		draft = reply,
 		offset = offset,
@@ -663,6 +681,14 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,
+		-- (A split's pane: the keys stay with this chat, in the window's composer.)
+		on_jump = if split
+			then function()
+				ui.after(0, function()
+					Shared.focus:add(1)
+				end)
+			end
+			else nil,
 		pictures = pictures,
 		sent_pictures = sent_pictures,
 		on_open_subagent = function(sub: any)
@@ -672,6 +698,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		open_link = open_link,
+		chat_of = Shared.chat_of,
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),

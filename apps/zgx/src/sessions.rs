@@ -9,7 +9,7 @@
 //!   { state = "loading" | "ready" | "offline",
 //!     here = this Mac's device id?,
 //!     devices = { { id, name, platform, here, online, seen?, version? } },
-//!     projects = { { id, name, device, path, git, github?,
+//!     projects = { { id, name, device, path, git, github?, repository?, created?,
 //!                    icon? = { emoji?, image?, hue? } } },
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
 //!                 updated, created, harness?, agent?, model?,
@@ -131,6 +131,23 @@ struct Sessions {
 
 thread_local! {
     static SESSIONS: Rc<Sessions> = Rc::new(Sessions::default());
+}
+
+#[cfg(test)]
+pub(crate) fn delete_action_for_tests(host: &ScriptHost) {
+    delete_action(host, SESSIONS.with(Rc::clone));
+}
+
+/// `sessions.delete`: a chat gone for good, so never an unkept preview's.
+fn delete_action(host: &ScriptHost, a: Rc<Sessions>) {
+    host.async_action("sessions.delete", move |id| {
+        let a = a.clone();
+        let params = json!({ "op": "deleteChat", "chatId": text(&id) });
+        async move {
+            crate::plugins::preview::refuse("sessions.delete")?;
+            a.mutate(params).await.map_err(String::from)
+        }
+    });
 }
 
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
@@ -264,11 +281,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         });
     });
     let a = s.clone();
-    host.async_action("sessions.delete", move |id| {
-        let a = a.clone();
-        let params = json!({ "op": "deleteChat", "chatId": text(&id) });
-        async move { a.mutate(params).await.map_err(String::from) }
-    });
+    delete_action(host, a);
     let a = s.clone();
     host.action("sessions.collapse", move |args| {
         let id = args.field("id").map(text).unwrap_or_default();
@@ -406,6 +419,10 @@ impl Sessions {
                     // Its GitHub repository (`owner/name`), the one a Cloud
                     // chat of it clones.
                     ("github", p["githubRepo"].as_str().filter(|r| !r.is_empty()).map_or(Value::Nil, Value::from)),
+                    // Which repository it's a clone of, on any device (opaque:
+                    // equal ones are one repository), and when it was added.
+                    ("repository", p["repositoryId"].as_str().filter(|r| !r.is_empty()).map_or(Value::Nil, Value::from)),
+                    ("created", p["createdAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
                     // The picture its people chose: `{ emoji?, image?, hue? }`,
                     // nil for its default tile.
                     ("icon", project_icon(&p["icon"])),

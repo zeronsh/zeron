@@ -797,6 +797,14 @@ return ui.component(function(props: Props): Node
 		end
 	end
 	local trigger_ref = ui.ref()
+	-- (Its trigger gone from view, as Settings stand over the page: closed, not left
+	-- with nothing to hang from.)
+	ui.effect(function()
+		local w = trigger_ref.width
+		if w ~= nil and w <= 0 and open:peek() then
+			open:set(false)
+		end
+	end)
 	local trigger = if props.trigger then props.trigger({ open = open, toggle = toggle }) else ui.button {
 		ref = trigger_ref,
 		label = props.label,

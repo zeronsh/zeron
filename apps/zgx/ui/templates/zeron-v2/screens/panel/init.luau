@@ -1286,7 +1286,6 @@ M.Panel = ui.component(function(props: Props): Node
 				session = session,
 				view = tab.id,
 				initial = tab.path,
-				docked = props.docked,
 				-- (Said with the code: Tab indents there.)
 				-- (A string, read as the tab is made.)
 				escape_hint = ui.t("panel.escape_hint"):get(),

@@ -30,15 +30,18 @@ mod acp_registry;
 mod agents;
 mod appshots;
 mod auth;
+mod carried_settings;
 mod chat;
 mod cloud;
 mod dev;
 mod completion;
+mod desktop_blur;
 mod engine;
 mod engine_update;
 mod editor_menu;
 mod favicons;
 mod files;
+mod fonts;
 mod github;
 mod haptics;
 mod heap;
@@ -47,6 +50,7 @@ mod links;
 mod pasted;
 mod math;
 mod menu_bar;
+mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
@@ -249,12 +253,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     // Signed in on an earlier run: no intro, setup at once, where sign-in
-    // leads (src/auth.rs). Asking for `intro` still plays it.
+    // leads (src/auth.rs). Asking for `intro` still plays it. The first launch
+    // of this interface by someone who finished setup before is the exception:
+    // the intro, then their username and card, once.
     if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
-        screen = Screen::Onboarding;
-        // Setup finished on this Mac before: the main window.
-        if onboarded() {
-            screen = Screen::Main;
+        if welcome_due(finished_setup_before(), welcomed()) {
+            WELCOME.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            screen = Screen::Onboarding;
+            // Setup finished on this Mac before: the main window.
+            if onboarded() {
+                screen = Screen::Main;
+            }
         }
     }
 
@@ -468,6 +478,12 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // The active template laid over Zeron's own, in `<data>/templates/.live/`
     // (src/plugins/live.rs): the host's file is fixed as it's made, so it's
     // that folder's, whichever template is in use.
+    // (A beta: the sidebar as it was in the app it replaces.)
+    if cfg!(feature = "beta") {
+        let from = engine::data_dir().map(|dir| dir.join("ui-settings.json"));
+        let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
+        carried_settings::carry(from.as_deref(), state.as_deref());
+    }
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
@@ -493,6 +509,29 @@ fn onboarded_marker() -> Option<PathBuf> {
 
 fn onboarded() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || (cfg!(feature = "beta") && finished_in_zeron_app())
+}
+
+/// This launch welcomes someone who already had Zeron to this interface.
+static WELCOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where that welcome having been seen on this computer is remembered.
+fn welcomed_marker() -> Option<PathBuf> {
+    zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("welcomed"))
+}
+
+fn welcomed() -> bool {
+    welcomed_marker().is_some_and(|path| path.is_file())
+}
+
+/// Whether someone signed in had finished setup, here or in the Zeron app.
+fn finished_setup_before() -> bool {
+    onboarded_marker().is_some_and(|path| path.is_file()) || finished_in_zeron_app()
+}
+
+/// Whether someone signed in gets the welcome: they'd finished setup before and
+/// haven't seen it. (Mid-way through their first setup, they carry on with that.)
+fn welcome_due(finished_before: bool, welcomed: bool) -> bool {
+    finished_before && !welcomed
 }
 
 /// Whether setup was finished in the Zeron app's own interface before this
@@ -547,6 +586,10 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if let Ok(step) = std::env::var("ZERON_ZGX_STEP") {
         host.shared("onboarding.start", step.as_str());
     }
+    // Their username and card only (`welcome_due`).
+    if WELCOME.load(std::sync::atomic::Ordering::Relaxed) {
+        host.shared("onboarding.welcome", true);
+    }
     // Every page again, whatever the account and this Mac have finished.
     if std::env::var_os("ZERON_ZGX_REPLAY").is_some() {
         host.shared("onboarding.replay", true);
@@ -556,6 +599,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if std::env::var("ZERON_ZGX_TRACE_TRANSCRIPT").is_ok_and(|v| v == "1") {
         host.shared("debug.trace_transcript", true);
     }
+    // How much the desktop blurs behind the glass (`window.blur`), for the
+    // glass's tint (ds/material).
+    desktop_blur::install(cx, &host);
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
     // Full screen, entered or left (`ui.invoke("window.full_screen", on)`),
@@ -570,11 +616,24 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     host.action("app.relaunch", move |_| relaunch::ask(|| windows.quit()));
     // Setup finished: remembered, and the main window opens in its place.
     let (window, windows) = (cx.window.clone(), cx.windows.clone());
+    let left = std::cell::Cell::new(false);
     host.action("app.open_main", move |_| {
+        // (Once a window, as `app.onboard`: no second main window.)
+        if left.replace(true) {
+            return;
+        }
+        WELCOME.store(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(path) = onboarded_marker() {
             let _ = path.parent().map(std::fs::create_dir_all);
             if let Err(error) = std::fs::write(&path, b"") {
                 eprintln!("zeron-zgx: setup's end wasn't remembered: {error}");
+            }
+        }
+        // (Through setup in this interface, however they came: no welcome after.)
+        if let Some(path) = welcomed_marker() {
+            let _ = path.parent().map(std::fs::create_dir_all);
+            if let Err(error) = std::fs::write(&path, b"") {
+                eprintln!("zeron-zgx: the welcome wasn't remembered: {error}");
             }
         }
         windows.open(main_window(), move |cx| open_main(cx, false));
@@ -582,7 +641,14 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     });
     // Signed out in the main window: setup again, in its window.
     let (window, windows) = (cx.window.clone(), cx.windows.clone());
+    let left = std::cell::Cell::new(false);
     host.action("app.onboard", move |_| {
+        // (Once a window: asked again before it has closed, no second setup.)
+        if left.replace(true) {
+            return;
+        }
+        // (Whoever signs in next is someone else's first run, not this welcome.)
+        WELCOME.store(false, std::sync::atomic::Ordering::Relaxed);
         windows.open(onboarding_window(), move |cx| open(cx, "app.luau", false));
         window.close();
     });
@@ -590,6 +656,11 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // `mailto:` in the mail app: what a link's `href` opens. Anything else
     // is ignored.
     host.action("open_url", |url| {
+        // A link carries out what a preview put in it.
+        if plugins::preview::current().is_some() {
+            plugins::host_bar::links_need_keeping();
+            return;
+        }
         if let Value::Str(url) = url
             && (url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:"))
             && !url.chars().any(char::is_control)
@@ -633,13 +704,15 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     transparency::install(cx, &host);
     // LaTeX math laid out for `ds/math` (src/math.rs): every window.
     math::install(&host);
+    // Mermaid diagrams drawn for `ds/mermaid` (src/mermaid.rs).
+    mermaid::install(&host);
     // A slider's detents tapped under the trackpad (src/haptics.rs).
     haptics::install(&host);
     // The engine's account (src/auth.rs), this Mac's agents (src/agents.rs)
     // and GitHub for Cloud (src/github.rs): every window but the intro's.
     if entry != "intro.luau" {
         auth::install(cx, &host);
-        agents::install(cx, &host);
+        agents::install(&host);
         acp_registry::install(cx, &host);
         github::install(cx, &host);
         // Cloud and Billing (src/cloud.rs): Settings' pages, the new chat's
@@ -668,6 +741,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
+        // The installed fonts, for Settings → Appearance's font pickers
+        // (src/fonts.rs).
+        fonts::install(&host);
         // Settings → About & updates: versions and the engine's updater
         // (src/about.rs).
         about::install(cx, &host);
@@ -1065,6 +1141,8 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
         glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
+        // (Windows: the caption buttons keep to the title row at any zoom.)
+        caption_height: Some(32.),
         ..Default::default()
     }
 }
@@ -1156,4 +1234,16 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod welcome_tests {
+    /// Someone who'd finished setup gets it once; someone new, or mid-way through
+    /// their first setup, doesn't.
+    #[test]
+    fn the_welcome_is_for_who_had_finished_setup_and_only_once() {
+        assert!(super::welcome_due(true, false));
+        assert!(!super::welcome_due(true, true));
+        assert!(!super::welcome_due(false, false));
+    }
 }

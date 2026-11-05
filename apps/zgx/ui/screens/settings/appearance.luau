@@ -10,6 +10,7 @@ local math_ = require("@ds/math")
 local appearance = require("@app/screens/shell/appearance")
 local search = require("@app/screens/settings/search")
 local prefs = require("@app/screens/settings/prefs")
+local host = require("@app/screens/settings/host")
 local wallpaper = require("@app/screens/settings/wallpaper")
 local plugin_settings = require("@app/screens/plugins/settings")
 local motion = require("@ds/motion")
@@ -30,7 +31,9 @@ search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.
 	{ key = "accent", title = ui.t("settings.appearance.accent.label"), terms = ui.t("settings.appearance.accent.terms") },
 	{ key = "reduce_motion", title = ui.t("settings.appearance.reduce_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.reduce_motion.terms") },
 	{ key = "glass", title = ui.t("settings.appearance.glass.label"), terms = ui.t("settings.appearance.glass.terms") },
+	{ key = "interface_font", title = ui.t("settings.appearance.interface_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.interface_font.terms") },
 	{ key = "text_size", title = ui.t("settings.appearance.text_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.text_size.terms") },
+	{ key = "code_font", title = ui.t("settings.appearance.code_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.code_font.terms") },
 	{ key = "code_font_size", title = ui.t("settings.appearance.code_font_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.code_font_size.terms") },
 	{ key = "conversation_width", title = ui.t("settings.appearance.conversation_width.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.conversation_width.terms") },
 	{ key = "render_math", title = ui.t("settings.appearance.render_math.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.render_math.terms") },
@@ -49,6 +52,62 @@ end
 -- rules are between rows that are there, never under the last).
 local function later(on: () -> boolean, node: Node): Node
 	return ui.show(on, ui.column { w_full = true, ds.Settings.Rule(), node })
+end
+
+-- The fonts installed on this computer (src/fonts.rs: `{ { family, mono }
+-- }`, by name), asked for once a font picker opens; nil until they come.
+local installed = ui.state("settings_installed_fonts", nil :: { { family: string, mono: boolean } }?)
+local asked = false
+local function ask_fonts()
+	if asked then
+		return
+	end
+	asked = true
+	host.call("fonts.list"):after(function(list: any)
+		installed:set(if type(list) == "table" then list else {})
+	end, function()
+		-- (Asked again as a picker next opens.)
+		asked = false
+		installed:set({})
+	end)
+end
+
+-- A font picker (the interface's, or code's, which lists monospaced fonts
+-- alone: a terminal's grid and code's columns need every letter one width):
+-- the theme's own first ("Default (Geist)", its value ""), then this
+-- computer's, searched by name. One chosen but no longer installed stays
+-- listed, so the picker still says what's chosen (the theme's own draws).
+local function font_picker(kind: "interface" | "code", value: State<string>, label: Message): Node
+	local token = if kind == "code" then "font.mono" else "font.sans"
+	local fallback = if kind == "code" then "Geist Mono" else "Geist"
+	return ds.Dropdown {
+		value = value :: any,
+		label = label,
+		width = 280,
+		search = ui.t("settings.appearance.font_search"),
+		on_open = ask_fonts,
+		items = function(): { any }
+			local chosen = value:get()
+			local own = ui.theme.get(token)
+			local out: { any } = {
+				{ value = "", label = ui.t("settings.appearance.font_default", { name = if type(own) == "string" and own ~= "" then own else fallback }):get() },
+			}
+			local listed = chosen == ""
+			for _, font in installed:get() or {} do
+				if kind == "interface" or font.mono then
+					table.insert(out, { value = font.family, label = font.family })
+					listed = listed or font.family == chosen
+				end
+			end
+			if not listed then
+				table.insert(out, 2, { value = chosen, label = chosen })
+			end
+			return out
+		end,
+		empty = function(_query: string): any
+			return { title = ui.t("settings.appearance.font_none") }
+		end,
+	}
 end
 
 -- Your picture, small, at the row's lead (nothing while there's none).
@@ -330,6 +389,14 @@ function M.view(): Node
 		ds.Settings.Section {
 			title = ui.t("settings.appearance.fonts"),
 			ds.Settings.Group {
+				-- The interface's font and code's (ds.look), as the shipping
+				-- app's Interface font and Code font: the window's font tokens,
+				-- so everything set in them follows at once.
+				row("interface_font", {
+					label = ui.t("settings.appearance.interface_font.label"),
+					description = ui.t("settings.appearance.interface_font.description"),
+					control = font_picker("interface", ds.look.interface_font, ui.t("settings.appearance.interface_font.label")),
+				}),
 				-- The interface's text: menus, settings, conversations, every
 				-- size and line height scaled from the body's (ds.look).
 				row("text_size", {
@@ -348,6 +415,11 @@ function M.view(): Node
 							return out
 						end,
 					},
+				}),
+				row("code_font", {
+					label = ui.t("settings.appearance.code_font.label"),
+					description = ui.t("settings.appearance.code_font.description"),
+					control = font_picker("code", ds.look.code_font, ui.t("settings.appearance.code_font.label")),
 				}),
 				-- Code's size: the editor, markdown's code and diffs (not
 				-- terminals), as the shipping app's Code & diff font.

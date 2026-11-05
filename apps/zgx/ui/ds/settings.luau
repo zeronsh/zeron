@@ -634,6 +634,8 @@ export type NavProps = {
 	-- Room kept over the rows, in points: the title bar's strip, where the
 	-- list runs the window's full height with the window's buttons in it.
 	top: number?,
+	-- Standing in a card: no hairline at rest, only under the pointer at its edge.
+	card: boolean?,
 	-- Rows over `head`, always shown ("Back").
 	lead: { NavItem }?,
 	-- Over the rows, under the strip and `lead` (a search field).
@@ -790,7 +792,10 @@ function M.Nav(props: NavProps): Node
 			w = 1,
 			pointer_events = "none",
 			bg = function(): string
-				return if edge_over:get() or dragging:get() then "$border.strong" else "$border.subtle"
+				if edge_over:get() or dragging:get() then
+					return "$border.strong"
+				end
+				return if props.card then "#00000000" else "$border.subtle"
 			end,
 		},
 		if #leads > 0 then ui.column { w_full = true, gap = "$zeron.list.gap", table.unpack(leads) } else nil,

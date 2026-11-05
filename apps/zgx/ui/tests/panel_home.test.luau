@@ -371,6 +371,10 @@ test("hundreds of lanes: the first five and those needing you, then Show N more;
 	app:frames(30)
 	app:click("#panel-home-subagents-head")
 	app:frames(30)
+	-- (Under the pointer its "…" stands in the count's place, as the
+	-- sidebar's own sections': the pointer elsewhere.)
+	app:hover("#panel-home-open")
+	app:frames(10)
 	expect(app:has('#panel-home-side-head >> "302"')).to_be(true)
 	expect(app:has('#panel-home-subagents-head >> "202"')).to_be(true)
 	app:click("#panel-home-subagents-head")
@@ -1013,4 +1017,191 @@ test("a part never scrolls on its own: the wheel over its rows scrolls the home,
 	local moved = page - (y_of(app, "#panel-home-device") :: number)
 	expect(moved > 0).to_be(true)
 	expect(first - (y_of(app, '#panel-home-side-list >> role:button "Open side chat Side chat 1"') :: number)).to_be(moved)
+end)
+
+-- A menu's item as it shows (its line in the tree), nil while none does
+-- (a closed menu's leave on the clock, hidden).
+local function item_line(app: any, name: string): string?
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(` "{name}" `, 1, true) and line:find(" menuitem", 1, true) and not line:find("hidden", 1, true) then
+			return line
+		end
+	end
+	return nil
+end
+local function item_shows(app: any, name: string): boolean
+	return item_line(app, name) ~= nil
+end
+
+-- Escape, and the menu gone.
+local function close_menu(app: any)
+	app:key("Escape")
+	expect(eventually(app, function(): boolean
+		return not item_shows(app, "Working first") and not item_shows(app, "Rename")
+	end, 3000)).to_be(true)
+end
+
+-- A row's top in the window, by its label.
+local function top_of(app: any, label: string): number?
+	for line in app:tree(`role:button "{label}"`):gmatch("[^\n]+") do
+		local y = line:match(" %-?%d+,(%-?%d+) %d+x%d+")
+		if y then
+			return tonumber(y)
+		end
+	end
+	return nil
+end
+
+test("a lanes part's menu: Working first puts lanes at work above the rest, kept, for side chats and subagents alike", function()
+	local app = home()
+	app:command("lanes_at_work")
+	app:frames(20)
+	-- Off: the view's order (by when they moved; subagents as spawned).
+	local SIDE_IDLE, SIDE_WORKING = "Open side chat Draft the release notes", "Open side chat Long-running refactor"
+	local SUB_DONE, SUB_RUNNING = "Open subagent read the docs", "Open subagent watch the build"
+	expect((top_of(app, SIDE_IDLE) :: number) < (top_of(app, SIDE_WORKING) :: number)).to_be(true)
+	expect((top_of(app, SUB_DONE) :: number) < (top_of(app, SUB_RUNNING) :: number)).to_be(true)
+	-- The part's title, a secondary click: its menu, the sidebar's view
+	-- options' look (ds/context_menu).
+	app:right_click("#panel-home-side-head")
+	app:frames(20)
+	expect(item_shows(app, "Working first")).to_be(true)
+	expect(item_shows(app, "Mark all done as read")).to_be(true)
+	app:click('role:menuitem "Working first"')
+	app:frames(30)
+	-- A toggle: the menu stays open, checked.
+	expect(item_shows(app, "Working first")).to_be(true)
+	expect(item_line(app, "Working first")).to_contain(" checked")
+	expect(app:state("screens/panel/home.luau::panel_home_working_first")).to_be(true)
+	close_menu(app)
+	-- On: those at work first, in both parts; each side keeps its order.
+	expect((top_of(app, SIDE_WORKING) :: number) < (top_of(app, SIDE_IDLE) :: number)).to_be(true)
+	expect((top_of(app, "Open side chat Why does the sync test flake?") :: number) < (top_of(app, SIDE_WORKING) :: number)).to_be(true)
+	expect((top_of(app, SUB_RUNNING) :: number) < (top_of(app, SUB_DONE) :: number)).to_be(true)
+	expect((top_of(app, "Open subagent scan the repo") :: number) < (top_of(app, SUB_RUNNING) :: number)).to_be(true)
+	-- Off again, from the subagents' part: the view's order again.
+	app:right_click("#panel-home-subagents-head")
+	app:frames(20)
+	app:click('role:menuitem "Working first"')
+	app:frames(30)
+	close_menu(app)
+	expect(app:state("screens/panel/home.luau::panel_home_working_first")).to_be(false)
+	expect((top_of(app, SIDE_IDLE) :: number) < (top_of(app, SIDE_WORKING) :: number)).to_be(true)
+	expect((top_of(app, SUB_DONE) :: number) < (top_of(app, SUB_RUNNING) :: number)).to_be(true)
+end)
+
+test("a lanes part's menu: Mark all done as read clears every finished lane's check at once; with none, it's disabled", function()
+	local app = home()
+	app:command("side_done")
+	app:frames(10)
+	expect(lane_row(app, "Open subagent read the docs")).to_contain("Completed")
+	expect(lane_row(app, "Open side chat Draft the release notes")).to_contain("Completed")
+	-- From the subagents' title: the session's every finished lane, not only its part's.
+	app:right_click("#panel-home-subagents-head")
+	app:frames(20)
+	expect(item_line(app, "Mark all done as read")).never.to_contain("disabled")
+	app:click('role:menuitem "Mark all done as read"')
+	app:frames(30)
+	-- Both parts' (the session's every finished lane), kept as seen.
+	expect(lane_row(app, "Open subagent read the docs")).never.to_contain("Completed")
+	expect(lane_row(app, "Open side chat Draft the release notes")).never.to_contain("Completed")
+	local kept = (app:state("screens/panel/lanes_seen.luau::panel_lanes_seen") :: any) or {}
+	expect(kept["chat-1--sub--2"] ~= nil).to_be(true)
+	expect(kept["side-b"] ~= nil).to_be(true)
+	-- (Lanes at work are left as they are.)
+	expect(kept["side-a"]).to_be_nil()
+	-- Nothing left unread: disabled.
+	app:right_click("#panel-home-side-head")
+	app:frames(20)
+	expect(item_line(app, "Mark all done as read")).to_contain("disabled")
+end)
+
+test("a lanes part's title has the sidebar's \"…\" under the pointer, opening the same menu without folding it; a row keeps its own menu", function()
+	local app = home()
+	expect(app:has("#panel-home-side-options")).to_be(false)
+	app:hover("#panel-home-side-head")
+	app:frames(10)
+	expect(app:has("#panel-home-side-options")).to_be(true)
+	app:click("#panel-home-side-options")
+	app:frames(20)
+	expect(item_shows(app, "Working first")).to_be(true)
+	-- (Not folded by it.)
+	expect(app:has('role:button "Open side chat Draft the release notes"')).to_be(true)
+	close_menu(app)
+	-- A side chat's row: the sidebar's session menu, not the part's.
+	app:right_click('role:button "Open side chat Draft the release notes"')
+	app:frames(20)
+	expect(item_shows(app, "Rename")).to_be(true)
+	expect(item_shows(app, "Working first")).to_be(false)
+	close_menu(app)
+	-- Ports have none of their own.
+	expect(app:has("#panel-home-ports-options")).to_be(false)
+end)
+
+-- The side chat made last (its id), and where its composer starts.
+local function newest_start(app: any): (string?, any)
+	local unsent = (app:state("chat_lanes_unsent") :: any) or {}
+	local starts = (app:state("chat_lanes_starts") :: any) or {}
+	for id in unsent do
+		if starts[id] then
+			return id, starts[id]
+		end
+	end
+	return nil, nil
+end
+
+test("a side chats' group has the sidebar's \"+\" under the pointer: a new side chat there, its project and device chosen", function()
+	local app = home()
+	app:command("box_project")
+	app:command("side_elsewhere")
+	app:frames(10)
+	-- By device: the devbox's group, its "+" only under the pointer.
+	app:set_state("sidebar.view", { organize = "device" })
+	app:frames(30)
+	local PLUS = "#panel-home-side-list-new-device:box"
+	expect(app:has(PLUS)).to_be(false)
+	app:hover('#panel-home-side-list >> role:button "devbox"')
+	app:frames(10)
+	expect(app:has(PLUS)).to_be(true)
+	expect(app:tree(PLUS)).to_contain('"New side chat on devbox"')
+	app:click(PLUS)
+	expect(app:wait(".side-chat-tab", { timeout_ms = 15000 })).to_be(true)
+	app:frames(20)
+	-- A side chat of the session, on the devbox, in its comet-native.
+	local id, at = newest_start(app)
+	expect(id ~= nil).to_be(true)
+	expect(((app:state("chat_lanes_unsent") :: any) or {})[id :: string]).to_be("chat-1")
+	expect(at.device).to_be("box")
+	expect(at.project).to_be("p2")
+	-- Its composer's pickers start there.
+	expect(app:state(`chat_lane_device_{id}`)).to_be("box")
+	expect(app:state(`chat_lane_project_{id}`)).to_be("p2")
+	-- Its first message makes it there.
+	app:type(".side-chat-tab >> role:textbox", "first words")
+	app:key("Enter")
+	expect(eventually(app, function(): boolean
+		return calls(app):find(`place:{id}:p2:box`, 1, true) ~= nil
+	end)).to_be(true)
+	expect(calls(app)).to_contain(`create:chat-1:{id}`)
+	-- (The group wasn't folded by it.)
+	back_home(app)
+	expect(app:has('role:button "Open side chat Try it on the devbox"')).to_be(true)
+
+	-- By project: "New side chat in comet-native", on its own device.
+	app:set_state("sidebar.view", { organize = "project" })
+	app:frames(30)
+	app:hover('#panel-home-side-list >> role:button "comet-native"')
+	app:frames(10)
+	local IN = "#panel-home-side-list-new-project:p1"
+	expect(app:tree(IN)).to_contain('"New side chat in comet-native"')
+	app:set_state("chat_lanes_starts", {})
+	app:click(IN)
+	expect(eventually(app, function(): boolean
+		return newest_start(app) ~= nil
+	end)).to_be(true)
+	local id2, at2 = newest_start(app)
+	expect(at2.project).to_be("p1")
+	expect(at2.device).to_be("d")
+	app:frames(20)
+	expect(app:state(`chat_lane_project_{id2}`)).to_be("p1")
 end)

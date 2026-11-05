@@ -359,6 +359,15 @@ local function Composer(): Node
 		branch = branch,
 		active = new_chat,
 	}
+	-- (A new chat's project, for what follows the route: its panel.)
+	ui.effect(function()
+		if new_chat() then
+			local id = project:get()
+			if route.new_chat_project:peek() ~= id then
+				route.new_chat_project:set(id)
+			end
+		end
+	end)
 
 	local running = ui.computed(function(): boolean
 		local s = open()
@@ -756,12 +765,7 @@ local function Composer(): Node
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
 			T.send(function()
-				local here = false
-				for _, m in store.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = store.messages:index_of("id", mid) ~= nil
 				if not here then
 					store.messages:push {
 						id = mid,
@@ -1239,7 +1243,9 @@ local function Composer(): Node
 			return if route.current:get().name == "plugin" then 0 else 1
 		end,
 		on_resize = function(size: { w: number, h: number })
-			if math.abs(page_h:peek() - size.h) >= 1 then
+			-- (Hidden, Settings standing in its place, it has no height: not somewhere to
+			-- move to, nor to glide back from.)
+			if size.h >= 1 and math.abs(page_h:peek() - size.h) >= 1 then
 				page_h:set(size.h)
 			end
 		end,
@@ -1278,7 +1284,7 @@ local function Composer(): Node
 					DOCK
 				),
 				on_resize = function(size: { w: number, h: number })
-					if math.abs(shared.dock_h:peek() - size.h) > 0.01 then
+					if size.h >= 1 and math.abs(shared.dock_h:peek() - size.h) > 0.01 then
 						shared.dock_h:set(size.h)
 					end
 				end,

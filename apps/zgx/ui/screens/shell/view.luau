@@ -41,6 +41,10 @@ local function owner(c: any): string?
 	if c.name == "plugin" and c.plugin and c.page then
 		return `page:{c.plugin}/{c.page}`
 	end
+	-- (A new chat's page has a panel of its own too.)
+	if c.name == "home" then
+		return "home"
+	end
 	return if c.name == "session" then c.session else nil
 end
 local function session(): string?

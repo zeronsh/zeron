@@ -211,8 +211,49 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 		-- (Answers to an older ask are let go: the newest wins.)
 		local asked = 0
 
+		-- The repositories to choose from: a project's clones and worktrees, on
+		-- any device, are one (a project with no repository is its own). Each by
+		-- its oldest's name, as the sidebar's project reads everywhere, opened
+		-- from the one on this device if there is one, else the oldest.
+		local function repositories(): { [string]: { value: string, label: string } }
+			local function older(a: any, b: any): boolean
+				local x, y = a.p.created or math.huge, b.p.created or math.huge
+				if x ~= y then
+					return x < y
+				end
+				return a.id < b.id
+			end
+			local by: { [string]: { any } } = {}
+			for id, p in zeron.projects() do
+				local key = p.repository or `project:{id}`
+				by[key] = by[key] or {}
+				table.insert(by[key], { id = id, p = p })
+			end
+			local out: { [string]: { value: string, label: string } } = {}
+			for _, members in by do
+				table.sort(members, older)
+				local value = members[1].id
+				for _, m in members do
+					if m.p.here then
+						value = m.id
+						break
+					end
+				end
+				local row = { value = value, label = members[1].p.name or members[1].id }
+				for _, m in members do
+					out[m.id] = row
+				end
+			end
+			return out
+		end
+		-- The project that speaks for `id`'s repository (`id`, if it's gone).
+		local function speaking_for(id: string?): string?
+			local row = if id then repositories()[id] else nil
+			return if row then row.value else id
+		end
+
 		-- (What's chosen, as chosen now: storage answers a beat later.)
-		local chosen = { project = (kept:peek() or {}).project, filter = (kept:peek() or {}).filter or "authored" }
+		local chosen = { project = speaking_for((kept:peek() or {}).project), filter = (kept:peek() or {}).filter or "authored" }
 		-- The picker's and the tabs' own states, following what's kept.
 		local project_value = ui.use_state(chosen.project :: string?)
 		local filter_value = ui.use_state(chosen.filter)
@@ -296,6 +337,16 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 			end)
 		end
 		find_repository()
+		-- (The clone that speaks for it changing: one added here, or the records
+		-- come in after what was kept, which may be another of its clones.)
+		ui.effect(function()
+			local p = speaking_for(chosen.project)
+			if p ~= chosen.project then
+				chosen.project = p
+				project_value:set(p)
+				find_repository()
+			end
+		end)
 
 		local function choose(p: string)
 			if p == chosen.project then
@@ -314,11 +365,15 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 			load()
 		end
 
-		-- The projects to choose from (yours, by name).
+		-- The projects to choose from (yours, by name): one row a repository.
 		local function project_options(): { any }
 			local sorted: { { value: string, label: string } } = {}
-			for id, p in zeron.projects() do
-				table.insert(sorted, { value = id, label = p.name or id })
+			local seen: { [string]: boolean } = {}
+			for _, row in repositories() do
+				if not seen[row.value] then
+					seen[row.value] = true
+					table.insert(sorted, row)
+				end
 			end
 			table.sort(sorted, function(a, b)
 				return string.lower(a.label) < string.lower(b.label)
@@ -557,6 +612,8 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				class = "github-board",
 				w_full = true,
 				h_full = true,
+				-- (Its words can be selected and copied, as a chat's can.)
+				selectable = true,
 				on_resize = function(size)
 
 					-- (No width at all is no width: the page's column closing.)
