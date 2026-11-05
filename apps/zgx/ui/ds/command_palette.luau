@@ -94,6 +94,10 @@ export type Item = {
 	session: Session?,
 	-- A setting, flipped in place (the palette stays open).
 	toggle: State<boolean>?,
+	-- Its run done in place too (the palette stays open), the row then
+	-- another, with its own id, saying what it would do next ("Switch to
+	-- light mode"), the highlight on it.
+	stays: boolean?,
 	-- The page it opens.
 	page: (() -> Page)?,
 	-- The current choice on its page (a check at its end; highlighted as
@@ -772,6 +776,8 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	local last_query, last_depth, last_scope = nil :: string?, 0, ""
 	-- Set as a page opens or closes: the row to highlight on it.
 	local land: string? = nil
+	-- Set as a row is done in place: its place, for the row it became.
+	local stayed_at: number? = nil
 
 	local function build()
 		local q = query:get()
@@ -1056,7 +1062,13 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		local fresh = q ~= last_query or d ~= last_depth or sc ~= last_scope
 		last_query, last_depth, last_scope = q, d, sc
 		local now = hi:peek()
-		if fresh or now == nil or new_by_key[now] == nil then
+		local was = stayed_at
+		stayed_at = nil
+		if not fresh and was and now and new_by_key[now] == nil and new_nav[was] then
+			-- A row done in place, now another (its next step): the highlight
+			-- stays where it was, on the row in its place.
+			hi:set(new_nav[was])
+		elseif fresh or now == nil or new_by_key[now] == nil then
 			local want = land
 			if want and new_by_key[want] then
 				land = nil
@@ -1283,6 +1295,13 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			return
 		end
 		remember(item.id)
+		if item.stays then
+			stayed_at = table.find(nav, r.key)
+			if item.run then
+				item.run()
+			end
+			return
+		end
 		open:set(false)
 		if item.run then
 			item.run()

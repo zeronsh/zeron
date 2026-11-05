@@ -362,6 +362,27 @@ test("the palette finds a session across projects and opens it", function()
 	expect(app:has('role:option "Old experiment"')).to_be(true)
 end)
 
+test("the palette switches dark and light in one step, staying open to switch back", function()
+	local app = open()
+	app:set_state("appearance", "light")
+	app:command("shell.palette")
+	app:frames(20)
+	app:type('role:textbox "Search"', "switch")
+	app:frames(30)
+	expect(app:has('#palette-list >> role:option "Switch to dark mode"')).to_be(true)
+	app:key("Enter")
+	app:frames(20)
+	expect(app:state("appearance")).to_be("dark")
+	expect(app:state("shell_palette_open")).to_be(true)
+	-- The row now goes back, highlighted where it was: Enter again does it.
+	expect(app:has('#palette-list >> role:option "Switch to light mode"')).to_be(true)
+	expect(app:has('#palette-list >> role:option "Switch to dark mode"')).to_be(false)
+	app:key("Enter")
+	app:frames(20)
+	expect(app:state("appearance")).to_be("light")
+	expect(app:state("shell_palette_open")).to_be(true)
+end)
+
 -- Where a node is: its top and its height, by its kind and label.
 local function box(app: any, scope: string, what: string): (number?, number?)
 	for line in app:tree(scope):gmatch("[^\n]+") do
