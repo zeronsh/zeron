@@ -316,9 +316,9 @@ jobs:
           rm -f "$RUNNER_TEMP/crew-signing.p12"
 
   # The standalone Crew Staging.app builds on its own runner, in parallel with
-  # the production-identity bundle: each is a full release build (~17 min, most
-  # of it the thin-LTO link) plus notarization, and they used to run back to
-  # back in one job (~40 min on the critical path).
+  # the production-identity bundle: each is a full release build plus
+  # notarization, and they used to run back to back in one job (~40 min on the
+  # critical path with thin LTO).
   macos-staging:
     if: ${{ inputs.candidate_run_id == '' }}
     needs: version

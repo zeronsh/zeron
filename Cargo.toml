@@ -182,9 +182,11 @@ ignore = "0.4"
 fff-search = "=0.11.0"
 
 [profile.release]
-# Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
-# LTO's size/speed win at a fraction of the link time; strip debug symbols.
-lto = "thin"
+# Distribution profile (scripts/package-macos.sh, scripts/package-linux.sh).
+# No cross-crate LTO: thin LTO's link was ~12 of each ~17-minute release build
+# on CI runners, on every platform; release turnaround wins over its modest
+# size/speed gain. Strip debug symbols.
+lto = false
 strip = "symbols"
 
 [profile.dev]
