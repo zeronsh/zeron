@@ -695,6 +695,8 @@ return ui.component(function(props: Props): Node
 			return ""
 		end,
 		trail = usage_ring(),
+		-- (Another chat's model and effort, shown as it's moved to: at once.)
+		roll_in_panel = true,
 		-- (Dropdown hands its label on, as the trigger's name.)
 		label = props.label or locale.t("ds.model_picker.model") :: any,
 		search = function(): string

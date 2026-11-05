@@ -707,7 +707,9 @@ type Place = {
 	glyph: () -> Icon.Name?,
 	folded: () -> boolean,
 	-- Told the name's own width as it's laid out (the footer's fold reads it).
-	on_name: ((size: Size, el: Element) -> ())?,
+	-- What the line takes of the name and the branch: their own widths, or 0
+	-- for one it doesn't show.
+	on_measures: ((name: number, branch: number) -> ())?,
 }
 local function place_line(p: Place): { Child }
 	local function has_project(): boolean
@@ -726,6 +728,18 @@ local function place_line(p: Place): { Child }
 	local function branch_min(): number
 		return math.min(BRANCH_FLOOR, math.ceil(branch_natural.width or BRANCH_FLOOR))
 	end
+	if p.on_measures then
+		local on_measures = p.on_measures
+		ui.effect(function()
+			local name_w, branch_w = natural.width, branch_natural.width
+			if name_w and branch_w then
+				on_measures(
+					if has_project() or not p.in_project() then name_w else 0,
+					if p.in_project() then branch_w else 0
+				)
+			end
+		end)
+	end
 	-- What leads: where it runs (a worktree's glyph, Cloud's, or a folder:
 	-- a local checkout's, or no project's).
 	local function lead(): string
@@ -735,7 +749,6 @@ local function place_line(p: Place): { Child }
 		ui.text {
 			name,
 			ref = natural,
-			on_resize = p.on_name,
 			absolute = true,
 			left = 0,
 			top = 0,
@@ -946,6 +959,9 @@ return ui.component(function(props: Props): Node
 	local access_w = kept("access_w", 0)
 	local where_w = kept("where_w", 0)
 	local name_w = kept("name_w", 0)
+	local branch_w = kept("branch_w", 0)
+	-- (The line has said what it takes: until then, BRANCH_MIN.)
+	local place_known = kept("place_known", false)
 	local folded = kept("fold", { level = 0, access_at = {} } :: Folded)
 	local function measure(into: State<number>, axis: "w" | "h"): (size: Size, _el: Element) -> ()
 		return function(size: Size, _el: Element)
@@ -953,6 +969,18 @@ return ui.component(function(props: Props): Node
 			if math.abs(into:peek() - v) >= 0.5 then
 				into:set(v)
 			end
+		end
+	end
+
+	local function place_measures(name: number, branch: number)
+		if math.abs(name_w:peek() - name) >= 0.5 then
+			name_w:set(name)
+		end
+		if math.abs(branch_w:peek() - branch) >= 0.5 then
+			branch_w:set(branch)
+		end
+		if not place_known:peek() then
+			place_known:set(true)
 		end
 	end
 
@@ -1244,15 +1272,14 @@ return ui.component(function(props: Props): Node
 		return if lv == 0 then 0 elseif lv >= 5 then 2 else 1
 	end
 	local function where_min(lv: number): number
-		local n = name_w:get()
-		if n <= 0 then
+		if not place_known:get() then
 			return BRANCH_MIN
 		end
-		local named = props.project == nil or props.project:get() ~= NO_PROJECT
+		local n, b = name_w:get(), branch_w:get()
 		if lv >= 2 then
-			return PLACE_CHROME + math.min(n, PROJECT_MIN) + (if named then BRANCH_FLOOR else 0)
+			return PLACE_CHROME + math.min(n, PROJECT_MIN) + math.min(b, BRANCH_FLOOR)
 		end
-		return PLACE_CHROME + math.min(n, PROJECT_MAX) + (if named then BRANCH_KEEP else 0)
+		return PLACE_CHROME + math.min(n, PROJECT_MAX) + math.min(b, BRANCH_KEEP)
 	end
 	local was = folded:peek()
 	local access_at: { [number]: number } = {}
@@ -2085,7 +2112,7 @@ return ui.component(function(props: Props): Node
 							branch = branch_name,
 							glyph = runs_in,
 							folded = folded,
-							on_name = measure(name_w, "w"),
+							on_measures = place_measures,
 						}),
 					}
 				end,
@@ -2126,7 +2153,7 @@ return ui.component(function(props: Props): Node
 							return if f and f.worktree then "worktree" else nil
 						end,
 						folded = folded,
-						on_name = measure(name_w, "w"),
+						on_measures = place_measures,
 					}),
 				}
 				else nil
