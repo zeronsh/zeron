@@ -1180,6 +1180,27 @@ ui.command {
 		)
 	end,
 }
+-- More of it, as the host streams one: the draft's words alone, its row's
+-- own (`call`) left as they were.
+ui.command {
+	id = "thought_streams",
+	title = "More of the thought arrives",
+	run = function()
+		store.draft:set { id = "th1", text = "", thought = "th-r", thought_text = "Weighing the parser first. Then the host." }
+	end,
+}
+-- Written: the row takes its words, then the draft lets them go.
+ui.command {
+	id = "thought_written",
+	title = "The thought is written",
+	run = function()
+		local n = store.messages:len()
+		store.messages:set_key({ n, "blocks", 1, "tools", 1, "call" }, "Weighing the parser first. Then the host.")
+		store.messages:set_key({ n, "blocks", 1, "tools", 1, "live" }, false)
+		store.messages:set_key({ n, "blocks", 1, "live" }, false)
+		store.draft:set { id = "", text = "" }
+	end,
+}
 ui.command {
 	id = "thought_settles",
 	title = "The thought settles",

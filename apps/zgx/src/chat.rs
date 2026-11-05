@@ -1349,7 +1349,7 @@ impl View {
                         parts.iter().rev().find(|p| p["kind"].as_str() == Some("text"))
                     });
                     let id = e["id"].as_str().unwrap_or_default();
-                    match tail {
+                    let words = match tail {
                         // (`text`, the tail's words too: the page reads the
                         // block's, and of `text` only whether any are yet.)
                         Some(tail) => Value::record([
@@ -1359,7 +1359,8 @@ impl View {
                             ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
                         ]),
                         None => draft_value(id, &e.json.as_ref().map(entry_text).unwrap_or_default()),
-                    }
+                    };
+                    with_thought(words, e["parts"].as_array())
                 }
                 _ => draft_value("", ""),
             }
@@ -2597,15 +2598,19 @@ fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<Stri
 
 /// An entry as its row reads it.
 fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
+    // (One still being written is built again with its next change.)
+    let settled = entry["status"].as_str() != Some("streaming");
+    if settled {
+        ROW_BUILD.set(Some(RowBuild::default()));
+    }
     let mut row = match with_host(entry, doc, device) {
         Some(entry) => message(&entry, model),
         None => message(entry, model),
     };
-    // (One still being written is built again with its next change.)
-    if entry["status"].as_str() != Some("streaming")
+    if let Some(mut build) = ROW_BUILD.take()
         && let Some(row) = &mut row
     {
-        share_parts(row);
+        share_parts(row, &mut build.seen);
     }
     row
 }
@@ -2631,71 +2636,79 @@ fn settle(entry: &mut Entry, at: usize, older_todo: &mut Option<(usize, Json)>) 
 /// A row's own repeats, one each: a reply holds its tools in `tools`, in
 /// `blocks` and in `compact`, its words in `text`, `copy` and a block, and
 /// every record its keys. Only one of each stays, shared.
-fn share_parts(row: &mut Value) {
-    use std::collections::HashSet;
-    /// A short word is kept for every row, while there are few of them.
-    const COMMON_LEN: usize = 16;
-    const COMMON_MOST: usize = 4096;
-    thread_local! {
-        static COMMON: RefCell<HashSet<Rc<str>>> = RefCell::default();
-    }
-    #[derive(Default)]
-    struct Seen {
-        words: HashSet<Rc<str>>,
-        records: HashMap<Rc<str>, Value>,
-    }
-    fn word(text: &mut Rc<str>, own: &mut HashSet<Rc<str>>) {
-        if text.len() <= COMMON_LEN {
-            let shared = COMMON.with_borrow_mut(|common| {
-                if let Some(known) = common.get(&**text) {
-                    return Some(known.clone());
-                }
-                (common.len() < COMMON_MOST).then(|| {
-                    common.insert(text.clone());
-                    text.clone()
-                })
-            });
-            if let Some(shared) = shared {
-                *text = shared;
-                return;
+#[derive(Default)]
+struct Seen {
+    words: std::collections::HashSet<Rc<str>>,
+    records: HashMap<Rc<str>, Value>,
+}
+
+/// A short word is kept for every row, while there are few of them.
+const COMMON_LEN: usize = 16;
+const COMMON_MOST: usize = 4096;
+thread_local! {
+    static COMMON: RefCell<std::collections::HashSet<Rc<str>>> = RefCell::default();
+    /// The settled row being built (`built_entry`): its tools so far, by the
+    /// part each is of, each built once however many of its layouts show it.
+    static ROW_BUILD: RefCell<Option<RowBuild>> = const { RefCell::new(None) };
+}
+
+#[derive(Default)]
+struct RowBuild {
+    seen: Seen,
+    tools: HashMap<*const Json, Option<Value>>,
+}
+
+fn share_word(text: &mut Rc<str>, own: &mut std::collections::HashSet<Rc<str>>) {
+    if text.len() <= COMMON_LEN {
+        let shared = COMMON.with_borrow_mut(|common| {
+            if let Some(known) = common.get(&**text) {
+                return Some(known.clone());
             }
-        }
-        match own.get(&**text) {
-            Some(known) => *text = known.clone(),
-            None => {
-                own.insert(text.clone());
-            }
-        }
-    }
-    fn walk(value: &mut Value, seen: &mut Seen) {
-        match value {
-            Value::Str(text) => word(text, &mut seen.words),
-            Value::List(items) => {
-                if let Some(items) = Rc::get_mut(items) {
-                    items.iter_mut().for_each(|item| walk(item, seen));
-                }
-            }
-            Value::Map(fields) => {
-                if let Some(fields) = Rc::get_mut(fields) {
-                    for (key, field) in fields.iter_mut() {
-                        word(key, &mut seen.words);
-                        walk(field, seen);
-                    }
-                }
-                // (A record with an id, as a tool is: its one copy.)
-                let Some(Value::Str(id)) = value.field("id").cloned() else { return };
-                match seen.records.get(&id) {
-                    Some(known) if *known == *value => *value = known.clone(),
-                    Some(_) => {}
-                    None => {
-                        seen.records.insert(id, value.clone());
-                    }
-                }
-            }
-            _ => {}
+            (common.len() < COMMON_MOST).then(|| {
+                common.insert(text.clone());
+                text.clone()
+            })
+        });
+        if let Some(shared) = shared {
+            *text = shared;
+            return;
         }
     }
-    walk(row, &mut Seen::default());
+    match own.get(&**text) {
+        Some(known) => *text = known.clone(),
+        None => {
+            own.insert(text.clone());
+        }
+    }
+}
+
+fn share_parts(value: &mut Value, seen: &mut Seen) {
+    match value {
+        Value::Str(text) => share_word(text, &mut seen.words),
+        Value::List(items) => {
+            if let Some(items) = Rc::get_mut(items) {
+                items.iter_mut().for_each(|item| share_parts(item, seen));
+            }
+        }
+        Value::Map(fields) => {
+            if let Some(fields) = Rc::get_mut(fields) {
+                for (key, field) in fields.iter_mut() {
+                    share_word(key, &mut seen.words);
+                    share_parts(field, seen);
+                }
+            }
+            // (A record with an id, as a tool is: its one copy.)
+            let Some(Value::Str(id)) = value.field("id").cloned() else { return };
+            match seen.records.get(&id) {
+                Some(known) if *known == *value => *value = known.clone(),
+                Some(_) => {}
+                None => {
+                    seen.records.insert(id, value.clone());
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Entries by their ids.
@@ -2808,9 +2821,11 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
             // one, its row.
             "text" if streaming => words_changed = true,
             "text" => rows = true,
-            // Thinking shows as a row once it has words; more of them, or
-            // more of a tool's output, show nothing new.
-            "reasoning" => rows |= was_empty && !more.trim().is_empty(),
+            // Thinking shows as a row once it has words; more of them, as
+            // it's written, are the draft's, as a reply's are. (More of a
+            // tool's output shows nothing new.)
+            "reasoning" if was_empty && !more.trim().is_empty() => rows = true,
+            "reasoning" if streaming => words_changed = true,
             _ => {}
         }
     }
@@ -3522,8 +3537,26 @@ fn thought_words(text: &str) -> String {
     text.trim().to_owned()
 }
 
-/// `tool`, for the part a reply is writing now (`live`).
+/// `tool`, for the part a reply is writing now (`live`): built once for the
+/// settled row being built, however many of its layouts show it.
 fn tool_live(part: &Json, live: bool) -> Option<Value> {
+    let at = std::ptr::from_ref(part);
+    if let Some(built) = ROW_BUILD.with_borrow(|build| build.as_ref()?.tools.get(&at).cloned()) {
+        return built;
+    }
+    let mut built = tool_row(part, live);
+    ROW_BUILD.with_borrow_mut(|build| {
+        if let Some(build) = build {
+            if let Some(built) = &mut built {
+                share_parts(built, &mut build.seen);
+            }
+            build.tools.insert(at, built.clone());
+        }
+    });
+    built
+}
+
+fn tool_row(part: &Json, live: bool) -> Option<Value> {
     let id = part["id"].as_str()?;
     let (kind, verb, target): (&str, String, Option<String>) = match part["kind"].as_str()? {
         "reasoning" => {
@@ -3944,6 +3977,22 @@ fn draft_value(id: &str, text: &str) -> Value {
     Value::record([("id", Value::from(id)), ("text", Value::from(text))])
 }
 
+/// `draft` with the thought a reply is at, when its last part is one: its id
+/// and its words so far, as its row shows them (`tool_live`). The row reads
+/// them here, so a tick of them doesn't publish the whole transcript.
+fn with_thought(draft: Value, parts: Option<&Vec<Json>>) -> Value {
+    match parts.and_then(|parts| parts.last()).filter(|p| p["kind"].as_str() == Some("reasoning")) {
+        Some(thought) => with_fields(
+            draft,
+            [
+                ("thought", Value::from(thought["id"].as_str().unwrap_or_default())),
+                ("thought_text", Value::from(thought_words(thought["text"].as_str().unwrap_or_default()).as_str())),
+            ],
+        ),
+        None => draft,
+    }
+}
+
 // -- small things ---------------------------------------------------------------
 
 fn now_seconds() -> i64 {
@@ -4149,7 +4198,7 @@ mod tests {
         drop(before.clone());
         let same = row == before;
         drop(before);
-        super::share_parts(&mut row);
+        super::share_parts(&mut row, &mut super::Seen::default());
         assert!(same);
         let tools = row.field("tools").unwrap().list();
         let grouped = row.field("blocks").unwrap().list()[0].field("tools").unwrap().list();
@@ -4157,6 +4206,28 @@ mod tests {
         assert!(Rc::ptr_eq(one, two), "one copy of a tool");
         let (Some(Value::Str(text)), Some(Value::Str(copy))) = (row.field("text"), row.field("copy")) else { panic!("words") };
         assert!(Rc::ptr_eq(text, copy), "one copy of its words");
+    }
+
+    /// A settled reply's tools are built once, for all its layouts, and read
+    /// exactly as they would built for each.
+    #[test]
+    fn a_settled_row_builds_each_tool_once_and_reads_the_same() {
+        let entry = serde_json::json!({
+            "id": "e", "role": "assistant", "status": "complete", "createdAt": 1000., "durationMs": 5000.,
+            "parts": [
+                { "id": "r", "kind": "reasoning", "text": "thinking it over" },
+                { "id": "t", "kind": "tool", "call": { "kind": "exec", "command": "cargo build" }, "output": "ok" },
+                { "id": "w", "kind": "text", "text": "Done." },
+            ],
+        });
+        let row = super::built_entry(&entry, "doc", None, None).unwrap();
+        assert_eq!(row, super::message(&entry, None).unwrap());
+        let tools = row.field("tools").unwrap().list();
+        let grouped = row.field("blocks").unwrap().list()[0].field("tools").unwrap().list();
+        let (Value::Map(one), Value::Map(two)) = (&tools[1], &grouped[1]) else { panic!("records") };
+        assert!(Rc::ptr_eq(one, two), "one tool, in both layouts");
+        // (Built for this row alone: nothing's kept for the next.)
+        assert!(super::ROW_BUILD.with_borrow(Option::is_none));
     }
 
     #[test]
@@ -4626,15 +4697,31 @@ mod tests {
         // More of a tool's output: nothing shows it.
         assert!(matches!(apply(&mut entries, &mut frame("a", "k", "put", 6)), Ok(Change::Quiet)));
         assert_eq!(entries[0]["parts"][0]["text"], "output");
-        // Thinking's first words make its row; more of them don't.
+        // Thinking's first words make its row; more of them are the draft's.
         assert!(matches!(apply(&mut entries, &mut frame("a", "r", "Hmm", 3)), Ok(Change::Rows)));
-        assert!(matches!(apply(&mut entries, &mut frame("a", "r", "…", 6)), Ok(Change::Quiet)));
+        assert!(matches!(apply(&mut entries, &mut frame("a", "r", "…", 6)), Ok(Change::Words)));
         // Words of the reply being written: the draft; of a finished one,
         // its row.
         assert!(matches!(apply(&mut entries, &mut frame("a", "t", " there", 8)), Ok(Change::Words)));
         assert!(matches!(apply(&mut entries, &mut frame("b", "t", "!", 5)), Ok(Change::Rows)));
         // Out of step (a length that doesn't match): resubscribe.
         assert!(apply(&mut entries, &mut frame("a", "t", "x", 99)).is_err());
+    }
+
+    #[test]
+    fn the_draft_carries_the_thought_a_reply_is_at() {
+        let draft = || draft_value("a", "");
+        let thought = json!({ "kind": "reasoning", "id": "r", "text": "  Weighing it.\n" });
+        let text = json!({ "kind": "text", "id": "t", "text": "Hi" });
+        // At a thought: its id, and its words as its row shows them.
+        let parts = vec![text.clone(), thought.clone()];
+        let at_it = with_thought(draft(), Some(&parts));
+        assert_eq!(text_of(&at_it, "thought"), "r");
+        assert_eq!(text_of(&at_it, "thought_text"), "Weighing it.");
+        // Past it (the reply's text or a tool has begun): its row has its words.
+        let parts = vec![thought, text];
+        assert!(with_thought(draft(), Some(&parts)).field("thought").is_none());
+        assert!(with_thought(draft(), None).field("thought").is_none());
     }
 
     #[test]
