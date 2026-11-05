@@ -27,6 +27,8 @@ jobs:
     # compatibility mode on iPhone Duo, without its vertical bars or layouts.
     # macos-latest tops out at Xcode 26; the xcode-27 image (preview) has it.
     runs-on: xcode-27
+    # App Store Connect credentials live in this environment (main only).
+    environment: apple-release
     # Cold Rust core build (release profile, thin LTO) + archive + processing.
     timeout-minutes: 90
     env:

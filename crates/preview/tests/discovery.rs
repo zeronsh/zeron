@@ -7,9 +7,9 @@ use std::{
 };
 use zeron_preview::{PreviewService, Scope};
 use zeron_proto::{ORIGIN_ENV, chat_origin, terminal_origin};
-/// Every service binds the fixed proxy port, so tests in this binary must
-/// not run concurrently: one test freeing 7331 for its own proxy to reclaim
-/// would otherwise race another test's service for it.
+/// Every service binds the proxy port (7331, else one the system picks), so
+/// tests in this binary must not run concurrently: one test holding 7331 to
+/// see its proxy move elsewhere would otherwise race another test's service.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 struct Child(std::process::Child);
 impl Drop for Child {
@@ -110,16 +110,22 @@ async fn only_agent_started_http_processes_are_exposed_and_removals_are_live() {
         .start(Arc::new(move || projects.lock().unwrap().clone()), None)
         .await;
     wait(&service, Some(local.0.id())).await;
-    if let Some(listener) = occupied {
-        assert!(service.catalog().snapshot().error.is_some());
-        drop(listener);
+    // (7331 is taken either way: held here, or by another engine already.)
+    {
+        // Its usual port taken (another engine on this computer has it): the
+        // proxy listens on another, with nothing wrong to say, and every
+        // preview's address is built on that one.
         tokio::time::timeout(Duration::from_secs(6), async {
-            while service.catalog().snapshot().error.is_some() {
+            while service.catalog().snapshot().proxy_port == 7331 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
-        .expect("proxy did not retry the freed port");
+        .expect("the proxy never moved off its taken port");
+        let snapshot = service.catalog().snapshot();
+        assert_eq!(snapshot.error, None);
+        assert_ne!(snapshot.proxy_port, 7331);
+        assert!(snapshot.services[0].url(snapshot.proxy_port).ends_with(&format!(":{}", snapshot.proxy_port)));
     }
     // Several cycles pass and the user's server never joins it.
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -133,11 +139,14 @@ async fn only_agent_started_http_processes_are_exposed_and_removals_are_live() {
     wait(&service, Some(other.0.id())).await;
     drop(other);
     wait(&service, None).await;
+    drop(occupied);
+    // Shutdown fully releases the proxy's port (whichever it got) before a
+    // profile boots.
+    let held = service.catalog().snapshot().proxy_port;
     service.shutdown().await;
-    // Shutdown fully releases the fixed proxy port before a profile boots.
     if service.catalog().snapshot().error.is_none() {
         assert!(
-            tokio::net::TcpListener::bind("127.0.0.1:7331")
+            tokio::net::TcpListener::bind(("127.0.0.1", held))
                 .await
                 .is_ok()
         );
@@ -408,7 +417,16 @@ async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed(
         }
     })
     .await
-    .expect("discovery did not find every agent server");
+    .unwrap_or_else(|_| {
+        let found: Vec<_> = service
+            .catalog()
+            .snapshot()
+            .services
+            .iter()
+            .map(|s| (s.pid, s.port, s.name.clone(), s.chat_id.clone()))
+            .collect();
+        panic!("discovery did not find every agent server: found {found:?}")
+    });
     assert!(services.iter().any(|s| s.pid == daemon));
     assert!(services.iter().any(|s| s.pid == outside.0.id()));
     assert!(services.iter().any(|s| s.pid == from_terminal.0.id()));

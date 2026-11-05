@@ -9941,6 +9941,7 @@ impl Composer {
                         attachments: attachment_paths,
                         worktree: run_worktree,
                         env: Default::default(),
+                        extra_mcp: Vec::new(),
                     },
                     message_id: message_id.clone(),
                 };
@@ -12198,9 +12199,9 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             if session_chrome_opacity > 0.0 {
-                let harness = (!self.side_chat)
-                    .then(|| self.pickers.read(cx).resolved(cx).harness)
-                    .flatten();
+                let resolved = (!self.side_chat).then(|| self.pickers.read(cx).resolved(cx));
+                let harness = resolved.as_ref().and_then(|run| run.harness);
+                let model = resolved.and_then(|run| run.model);
                 let target = {
                     let state = self.state.read(cx);
                     state
@@ -12209,7 +12210,7 @@ impl Render for Composer {
                         .filter(|device| state.local_device_id.as_ref() != Some(device))
                 };
                 self.account_usage
-                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+                    .update(cx, |usage, cx| usage.track(harness, model, target, cx));
             }
             container.child(
                 div()

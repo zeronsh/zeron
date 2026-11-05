@@ -1,5 +1,6 @@
 //! Persisted names are independent of ephemeral process/listener observations.
 use crate::discovery::{Listener, command_identity, framework};
+use zeron_preview_label::process_label;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -428,6 +429,7 @@ impl Catalog {
                 started_at: listener.started_at,
                 zeron_owned: listener.zeron_owned,
                 chat_id: listener.chat_id.clone(),
+                process: process_label(&listener.args),
             };
             next.insert(id, LocalRoute { service, listener });
         }
@@ -481,6 +483,29 @@ mod tests {
             zeron_owned: true,
             origin: Some("chat:chat".into()),
             chat_id: Some("chat".into()),
+            signing_in: false,
+        }
+    }
+    #[test]
+    fn an_advertised_service_carries_no_argument_but_its_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog =
+            Catalog::open(&temp.path().join("previews.json"), "device-id".into(), "MacBook".into())
+                .unwrap();
+        let mut listener = server(3000, 1, "server.js");
+        listener.args.extend([
+            "--token=abc".into(),
+            "--password".into(),
+            "hunter2".into(),
+            "https://user:pass@host/x?key=1".into(),
+        ]);
+        catalog
+            .replace_local(vec![(PathBuf::from("/work/my-app"), listener)])
+            .unwrap();
+        let advertised = serde_json::to_string(&catalog.snapshot().services).unwrap();
+        assert!(advertised.contains(r#""process":"node server.js""#), "{advertised}");
+        for secret in ["abc", "hunter2", "user:pass", "key=1", "--token", "--password"] {
+            assert!(!advertised.contains(secret), "{secret} in {advertised}");
         }
     }
     #[test]
@@ -507,6 +532,13 @@ mod tests {
                 .services
                 .iter()
                 .any(|s| s.hostname == "macbook.my-app-api.localhost" && s.port == 3000)
+        );
+        // (Each names what listens, its program and script only.)
+        assert!(
+            before
+                .services
+                .iter()
+                .any(|s| s.port == 3000 && s.process == "node api.js")
         );
         catalog.replace_local(Vec::new()).unwrap();
         assert!(catalog.snapshot().services.is_empty());

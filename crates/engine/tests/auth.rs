@@ -71,6 +71,8 @@ struct StubState {
     exchange_org: Mutex<String>,
     /// POST /auth/orgs answers 409 with this body ("" = creates `org_new`).
     create_org_conflict: Mutex<String>,
+    /// Bodies of `POST /plugin-keys` (a device's signing key registered).
+    plugin_keys: Mutex<Vec<serde_json::Value>>,
 }
 
 struct StubEdge {
@@ -188,6 +190,7 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
                           "firstName": "Wing", "lastName": "Test" },
                 "accessToken": token,
                 "refreshToken": format!("refresh-{n}"),
+                "stepUp": { "token": format!("ticket-{n}"), "expiresAt": 0 },
             });
             respond(&mut stream, "200 OK", &response.to_string()).await;
         }
@@ -246,6 +249,14 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
             } else {
                 respond(&mut stream, "409 Conflict", &conflict).await;
             }
+        }
+        ("POST", "/plugin-keys") => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            state.plugin_keys.lock().expect("lock").push(parsed);
+            respond(&mut stream, "200 OK", r#"{"ok":true}"#).await;
+        }
+        ("GET", "/plugin-keys") => {
+            respond(&mut stream, "200 OK", r#"{"keys":[],"now":1}"#).await;
         }
         _ => respond(&mut stream, "404 Not Found", r#"{"error":"not_found"}"#).await,
     }
@@ -306,6 +317,69 @@ async fn dev_mode_is_signed_in_with_configured_bearer() {
     auth.complete_sign_in("whatever")
         .await
         .expect("dev complete is a no-op");
+}
+
+/// The app restarts the engine as soon as a sign-in is announced, and the
+/// step-up ticket lives only in this process: what needs it (registering
+/// the plugin signing key) runs before the announcement, with the ticket.
+#[tokio::test]
+async fn a_fresh_ticket_is_used_before_the_sign_in_is_announced() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let seen: Arc<Mutex<Vec<(String, AuthState, Option<String>, bool)>>> = Arc::default();
+    let (record, probe) = (seen.clone(), auth.clone());
+    auth.on_fresh_ticket(Arc::new(move |user: String| {
+        let (record, probe) = (record.clone(), probe.clone());
+        Box::pin(async move {
+            // The bearer works already (registering needs it).
+            let bearer = probe.access_token().await.is_ok();
+            record.lock().unwrap().push((user, probe.state(), probe.step_up(), bearer));
+        })
+    }));
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state param");
+    auth.complete_sign_in(&format!("{state}.code123")).await.expect("sign-in");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let (user, state_then, ticket, bearer) = &seen[0];
+    assert_eq!(user, "user_1");
+    assert_eq!(*state_then, AuthState::SignedOut, "not announced yet");
+    assert_eq!(ticket.as_deref(), Some("ticket-1"));
+    assert!(bearer);
+    assert!(matches!(auth.state(), AuthState::NeedsOrganization { .. }), "announced after");
+}
+
+/// The app's first sign-in runs on its local engine (no edge of its own),
+/// which the app restarts into synced mode once the sign-in is announced:
+/// the plugin signing key is registered there, with the sign-in's ticket,
+/// before that.
+#[tokio::test]
+async fn a_local_engine_registers_its_signing_key_with_the_sign_ins_ticket() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("device-id"), "device-local").unwrap();
+    let core = zeron_engine::EngineCore::assemble(
+        dir.path(),
+        Arc::new(zeron_engine::HarnessRegistry::new()),
+        zeron_engine::HarnessId::Mock,
+        None,
+    )
+    .expect("a local engine");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    core.set_auth(auth.clone());
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state param");
+    auth.complete_sign_in(&format!("{state}.code123")).await.expect("sign-in");
+    // By the time the sign-in is announced (and the app would restart the
+    // engine), the key is registered with the ticket.
+    let registered = edge.state.plugin_keys.lock().unwrap().clone();
+    assert_eq!(registered.len(), 1, "{registered:?}");
+    assert_eq!(registered[0]["stepUp"], "ticket-1");
+    assert_eq!(registered[0]["deviceId"], "device-local");
+    let registration: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("plugin-signing-key.json")).unwrap()).unwrap();
+    assert_eq!((registration["registered_for"].as_str(), registration["key"].clone()), (Some("user_1"), registered[0]["key"].clone()));
 }
 
 #[tokio::test]
@@ -807,6 +881,100 @@ async fn loopback_callback_completes_headed_sign_in() {
     assert!(
         matches!(auth.state(), AuthState::SignedIn { org_id: Some(org), user } if org == "org_1" && user.name.as_deref() == Some("Wing Test"))
     );
+}
+
+#[tokio::test]
+async fn sign_in_options_shape_the_authorize_url() {
+    use zeron_engine::{ScreenHint, SignInOptions};
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+
+    // No options: the URL the desktop app has always opened.
+    let plain = auth.start_sign_in().await.expect("authorize url");
+    assert_eq!(query_param(&plain, "screen_hint"), None);
+    assert_eq!(query_param(&plain, "max_age"), None);
+
+    let create = auth
+        .start_sign_in_with(SignInOptions {
+            screen_hint: Some(ScreenHint::SignUp),
+            fresh: true,
+        })
+        .await
+        .expect("sign-up url");
+    assert_eq!(
+        query_param(&create, "screen_hint").as_deref(),
+        Some("sign-up")
+    );
+    assert_eq!(query_param(&create, "max_age").as_deref(), Some("0"));
+    assert!(query_param(&create, "state").is_some());
+
+    let existing = auth
+        .start_sign_in_with(SignInOptions {
+            screen_hint: Some(ScreenHint::SignIn),
+            fresh: false,
+        })
+        .await
+        .expect("sign-in url");
+    assert_eq!(
+        query_param(&existing, "screen_hint").as_deref(),
+        Some("sign-in")
+    );
+    assert_eq!(query_param(&existing, "max_age"), None);
+
+    // The `SignIn` params: camelCase, every field optional.
+    let parsed: SignInOptions =
+        serde_json::from_value(serde_json::json!({ "screenHint": "sign-up", "fresh": true }))
+            .expect("params");
+    assert_eq!(
+        parsed,
+        SignInOptions {
+            screen_hint: Some(ScreenHint::SignUp),
+            fresh: true
+        }
+    );
+    let empty: SignInOptions = serde_json::from_value(serde_json::json!({})).expect("empty");
+    assert_eq!(empty, SignInOptions::default());
+}
+
+#[tokio::test]
+async fn access_token_with_expiry_hands_out_the_session_bearer() {
+    let edge = StubEdge::start().await;
+    *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+
+    // Signed out: nothing to hand out.
+    assert!(matches!(
+        auth.access_token_with_expiry().await,
+        Err(TokenError::SignedOut)
+    ));
+
+    let url = auth.start_sign_in().await.expect("authorize url");
+    let callback = query_param(&url, "redirect_uri")
+        .expect("redirect")
+        .replace("%3A", ":")
+        .replace("%2F", "/");
+    let state = query_param(&url, "state").expect("state");
+    let ok = reqwest::get(format!("{callback}?code=abc&state={state}"))
+        .await
+        .expect("cb");
+    assert_eq!(ok.status().as_u16(), 200);
+    let mut state_rx = auth.watch_state();
+    wait_for(&mut state_rx, |s| s.is_signed_in()).await;
+
+    // The exchange's access token, its `exp` read out (the stub mints
+    // iat 1000 + 3600), from the cache: no refresh spent on it.
+    let (token, expires_at) = auth.access_token_with_expiry().await.expect("bearer");
+    assert_eq!(token, fake_jwt(3600, Some("org_1")));
+    assert_eq!(expires_at, Some(4600));
+    assert_eq!(edge.state.refreshes.load(Ordering::SeqCst), 0);
+
+    auth.sign_out();
+    assert!(matches!(
+        auth.access_token_with_expiry().await,
+        Err(TokenError::SignedOut)
+    ));
 }
 
 #[tokio::test]

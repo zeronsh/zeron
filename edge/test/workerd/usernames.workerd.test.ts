@@ -1,6 +1,7 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CARD_SCENES, cardHash, deriveCard } from "../../src/card";
+import { V3_BETA_CUTOFF_MS } from "../../src/earned-badges";
 import { UserDirectory, signWorkOsPayload } from "../../src/user-directory";
 
 const SECRET = "workos_whsec_test";
@@ -241,7 +242,7 @@ describe("admin usernames", () => {
     const listed = (await (await admin("/admin/users")).json()) as { users: { userId: string; username: string | null }[] };
     expect(listed.users.find((u) => u.userId === "user_house")?.username).toBe("zeron");
     const csv = await (await admin("/admin/users?format=csv")).text();
-    expect(csv).toMatch(/\n\d+,user_house,.*,zeron,\n/);
+    expect(csv).toMatch(/\n\d+,user_house,.*,zeron,,\n/);
   });
 
   it("won't take a name from someone holding it", async () => {
@@ -281,6 +282,9 @@ describe("admin usernames", () => {
 
 describe("the public card", () => {
   it("exposes exactly the card's fields", async () => {
+    // After the beta, so the claim earns nothing (the V3 BETA tests below).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(V3_BETA_CUTOFF_MS + 86_400_000);
     await webhook("user.created", user("user_public", { first_name: "Grace", last_name: "Hopper" }));
     await admin("/admin/badges", { id: "public-badge", name: "Public Badge", description: "Internal text", icon: "star" });
     await admin("/admin/badges", { id: "plain-badge", name: "Plain Badge" });
@@ -553,6 +557,212 @@ describe("a card over time", () => {
       expect(directory.claimUsername("user_old", "oldmember", 20)).toMatchObject({ card: { username: "oldmember" } });
       new UserDirectory(state, env as never);
       expect(directory.card("oldmember")).toMatchObject(deriveCard("user_old", 20));
+    });
+  });
+});
+
+describe("V3 BETA", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SECOND = 1000;
+  const HOUR = 3_600_000;
+  const V3 = { id: "v3-beta", name: "V3 BETA", icon: null };
+  const at = (ms: number) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(ms);
+  };
+  const badgesOf = async (username: string) => ((await (await readCard(username)).json()) as { badges: unknown[] }).badges;
+  const listed = async (userId: string) =>
+    ((await (await admin("/admin/users")).json()) as { users: { userId: string; firstClaimedAt: string | null; badges: { id: string; grantedAt: number }[] }[] }).users.find(
+      (u) => u.userId === userId
+    )!;
+
+  it("goes to a claim at 08:59:59Z on Nov 5 and not to one at 09:00:00Z", async () => {
+    await signUp("user_v3in", "user_v3out");
+    at(V3_BETA_CUTOFF_MS - SECOND);
+    const inside = await claim("user_v3in", "v3inside");
+    expect(((await inside.json()) as { badges: unknown[] }).badges).toEqual([V3]);
+    at(V3_BETA_CUTOFF_MS);
+    expect(((await (await claim("user_v3out", "v3outside")).json()) as { badges: unknown[] }).badges).toEqual([]);
+    expect(await badgesOf("v3inside")).toEqual([V3]);
+    expect(await badgesOf("v3outside")).toEqual([]);
+    // Dated by the claim, which the directory keeps.
+    expect(await listed("user_v3in")).toMatchObject({
+      firstClaimedAt: "2026-11-05T08:59:59.000Z",
+      badges: [{ id: "v3-beta", grantedAt: V3_BETA_CUTOFF_MS - SECOND }]
+    });
+    expect(await listed("user_v3out")).toMatchObject({ firstClaimedAt: "2026-11-05T09:00:00.000Z", badges: [] });
+  });
+
+  it("stays through a rename, a clear, a release and a new claim after the cutoff", async () => {
+    await signUp("user_v3keep", "user_v3taker");
+    at(V3_BETA_CUTOFF_MS - HOUR);
+    await claim("user_v3keep", "keeperone");
+    at(V3_BETA_CUTOFF_MS + HOUR);
+    await admin("/admin/usernames/set", { userId: "user_v3keep", username: "keepertwo" });
+    expect(await badgesOf("keepertwo")).toEqual([V3]);
+    await admin("/admin/usernames/clear", { userId: "user_v3keep" });
+    expect((await claim("user_v3keep", "keeperthree")).status).toBe(200);
+    expect(await badgesOf("keeperthree")).toEqual([V3]);
+    await admin("/admin/usernames/clear", { userId: "user_v3keep", release: true });
+    // The released name goes to someone else, who claims after the cutoff.
+    expect((await claim("user_v3taker", "keeperthree")).status).toBe(200);
+    expect(await badgesOf("keeperthree")).toEqual([]);
+    expect((await claim("user_v3keep", "keeperfour")).status).toBe(200);
+    expect(await badgesOf("keeperfour")).toEqual([V3]);
+    expect(await listed("user_v3keep")).toMatchObject({ firstClaimedAt: new Date(V3_BETA_CUTOFF_MS - HOUR).toISOString() });
+    // And through a restart, which backfills.
+    await runInDurableObject(directory(), (_instance: UserDirectory, state) => {
+      expect(new UserDirectory(state, env as never).card("keeperfour")?.badges).toEqual([V3]);
+    });
+  });
+
+  it("isn't earned by a first name an operator sets after the cutoff, nor handed out by an operator", async () => {
+    await signUp("user_v3late");
+    at(V3_BETA_CUTOFF_MS + SECOND);
+    await admin("/admin/usernames/set", { userId: "user_v3late", username: "latecomer" });
+    expect(await badgesOf("latecomer")).toEqual([]);
+    for (const [path, body] of [
+      ["/admin/badges/grant", { badgeId: "v3-beta", userIds: "all" }],
+      ["/admin/badges", { id: "v3-beta", name: "Renamed" }]
+    ] as const) {
+      const res = await admin(path, body);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "earned_badge" });
+    }
+    // Granting to a listed user awards it only if they earned it.
+    expect(await (await admin("/admin/badges/grant", { badgeId: "v3-beta", userIds: ["user_v3late"] })).json()).toEqual({ granted: 0 });
+    expect(await badgesOf("latecomer")).toEqual([]);
+    const defined = ((await (await admin("/admin/badges")).json()) as { badges: { id: string; name: string }[] }).badges;
+    expect(defined.find((b) => b.id === "v3-beta")).toMatchObject({ name: "V3 BETA" });
+  });
+
+  it("stays revoked through renames and restarts, until an operator grants it back", async () => {
+    await signUp("user_v3waived");
+    at(V3_BETA_CUTOFF_MS - HOUR);
+    await claim("user_v3waived", "waivedone");
+    expect(await badgesOf("waivedone")).toEqual([V3]);
+    const revoke = await admin("/admin/badges/revoke", { badgeId: "v3-beta", userIds: ["user_v3waived"] });
+    expect(await revoke.json()).toEqual({ revoked: 1 });
+    // Read the stored grants: public cards are cached for up to a minute.
+    const held = async () => (await listed("user_v3waived")).badges.map((b) => b.id);
+    expect(await held()).toEqual([]);
+    // A rename (which re-runs the award) and a restart (which backfills) keep it off.
+    await admin("/admin/usernames/set", { userId: "user_v3waived", username: "waivedtwo" });
+    expect(await held()).toEqual([]);
+    await runInDurableObject(directory(), (_instance: UserDirectory, state) => {
+      expect(new UserDirectory(state, env as never).card("waivedtwo")?.badges).toEqual([]);
+    });
+    // Granting lifts the waiver and awards it, dated by the claim.
+    const grant = await admin("/admin/badges/grant", { badgeId: "v3-beta", userIds: ["user_v3waived"] });
+    expect(await grant.json()).toEqual({ granted: 1 });
+    expect(await held()).toEqual(["v3-beta"]);
+    expect((await listed("user_v3waived")).badges.find((b) => b.id === "v3-beta")?.grantedAt).toBe(V3_BETA_CUTOFF_MS - HOUR);
+  });
+
+  it("sits in the same place on every card, however the grants were ordered", async () => {
+    await signUp("user_v3first", "user_v3second");
+    at(V3_BETA_CUTOFF_MS - HOUR);
+    await admin("/admin/badges", { id: "order-tester", name: "Order Tester" });
+    await admin("/admin/badges/grant", { badgeId: "order-tester", userIds: ["user_v3first"] });
+    await claim("user_v3first", "orderfirst");
+    await claim("user_v3second", "ordersecond");
+    await admin("/admin/badges/grant", { badgeId: "order-tester", userIds: ["user_v3second"] });
+    const ids = async (username: string) => ((await badgesOf(username)) as { id: string }[]).map((b) => b.id);
+    expect(await ids("orderfirst")).toEqual(await ids("ordersecond"));
+    expect((await ids("orderfirst")).sort()).toEqual(["order-tester", "v3-beta"]);
+  });
+
+  it("puts maintainer first, though it was defined last", async () => {
+    await signUp("user_maint");
+    at(V3_BETA_CUTOFF_MS - HOUR);
+    await admin("/admin/badges", { id: "early-tester", name: "Early Tester" });
+    await admin("/admin/badges/grant", { badgeId: "early-tester", userIds: ["user_maint"] });
+    await claim("user_maint", "maintfirst");
+    await admin("/admin/badges", { id: "maintainer", name: "Maintainer" });
+    await admin("/admin/badges/grant", { badgeId: "maintainer", userIds: ["user_maint"] });
+    await runInDurableObject(directory(), (instance: UserDirectory) => {
+      const ids = instance.card("maintfirst")!.badges.map((b) => b.id);
+      expect(ids[0]).toBe("maintainer");
+      expect(ids.slice(1).sort()).toEqual(["early-tester", "v3-beta"]);
+    });
+  });
+
+  it("judges names claimed before claim times were stored by their first name", async () => {
+    // Before the cutoff: the deploy that adds the column.
+    at(V3_BETA_CUTOFF_MS - 2 * 86_400_000);
+    const stub = env.USER_DIRECTORY!.get(env.USER_DIRECTORY!.idFromName("legacy-v3"));
+    await runInDurableObject(stub, (_instance: UserDirectory, state) => {
+      const sql = state.storage.sql;
+      // The directory as it was: no first claims, no V3 BETA.
+      sql.exec("DELETE FROM user_badges");
+      sql.exec("DELETE FROM badges");
+      sql.exec("ALTER TABLE users DROP COLUMN first_claimed_at");
+      const users: [string, number | null][] = [
+        ["user_early", 26],
+        ["user_renamed", 26],
+        ["user_cutoff", 26],
+        ["user_released", 26],
+        ["user_gone", 26],
+        ["user_never", null]
+      ];
+      users.forEach(([id, scenes], i) =>
+        sql.exec(
+          "INSERT INTO users (user_id, created_at, updated_at, recorded_at, user_number, card_scenes, deleted_at) VALUES (?, ?, ?, 1, ?, ?, ?)",
+          id,
+          JOINED,
+          JOINED,
+          i + 1,
+          scenes,
+          id === "user_gone" ? JOINED : null
+        )
+      );
+      const name = (username: string, userId: string, claimedAt: number, retired = false) =>
+        sql.exec("INSERT INTO usernames (username, user_id, claimed_at, retired_at) VALUES (?, ?, ?, ?)", username, userId, claimedAt, retired ? claimedAt + 1 : null);
+      name("early", "user_early", V3_BETA_CUTOFF_MS - SECOND);
+      // Renamed past the cutoff: the first, retired, name counts.
+      name("typoed", "user_renamed", V3_BETA_CUTOFF_MS - HOUR, true);
+      name("renamed", "user_renamed", V3_BETA_CUTOFF_MS + HOUR);
+      name("oncutoff", "user_cutoff", V3_BETA_CUTOFF_MS);
+      // user_released: an operator released their only name; card_scenes stays.
+      name("gonename", "user_gone", V3_BETA_CUTOFF_MS - HOUR, true);
+
+      const directory = new UserDirectory(state, env as never);
+      expect(directory.card("early")?.badges).toEqual([V3]);
+      expect(directory.card("renamed")?.badges).toEqual([V3]);
+      expect(directory.card("oncutoff")?.badges).toEqual([]);
+      const byId = new Map(directory.list().map((u) => [u.userId, u]));
+      expect(byId.get("user_early")).toMatchObject({ firstClaimedAt: "2026-11-05T08:59:59.000Z", badges: [{ id: "v3-beta", grantedAt: V3_BETA_CUTOFF_MS - SECOND }] });
+      expect(byId.get("user_renamed")).toMatchObject({ firstClaimedAt: "2026-11-05T08:00:00.000Z", badges: [{ id: "v3-beta" }] });
+      expect(byId.get("user_cutoff")).toMatchObject({ firstClaimedAt: "2026-11-05T09:00:00.000Z", badges: [] });
+      // Held a name at some point before now, which is before the cutoff.
+      expect(byId.get("user_released")).toMatchObject({ firstClaimedAt: new Date(Date.now()).toISOString(), badges: [{ id: "v3-beta" }] });
+      expect(byId.get("user_gone")?.badges).toEqual([]);
+      expect(byId.get("user_never")).toMatchObject({ firstClaimedAt: null, badges: [] });
+
+      // Again: nothing changes, nothing doubles.
+      const again = new UserDirectory(state, env as never);
+      expect(again.listBadges().find((b) => b.id === "v3-beta")?.holders).toBe(3);
+      expect(again.list().find((u) => u.userId === "user_early")?.firstClaimedAt).toBe("2026-11-05T08:59:59.000Z");
+    });
+  });
+
+  it("can't give it to a released name's owner when the backfill runs after the cutoff", async () => {
+    at(V3_BETA_CUTOFF_MS + SECOND);
+    const stub = env.USER_DIRECTORY!.get(env.USER_DIRECTORY!.idFromName("legacy-v3-late"));
+    await runInDurableObject(stub, (_instance: UserDirectory, state) => {
+      const sql = state.storage.sql;
+      sql.exec("DELETE FROM user_badges");
+      sql.exec("ALTER TABLE users DROP COLUMN first_claimed_at");
+      sql.exec(
+        "INSERT INTO users (user_id, created_at, updated_at, recorded_at, user_number, card_scenes) VALUES ('user_unknown', ?, ?, 1, 1, 26)",
+        JOINED,
+        JOINED
+      );
+      const directory = new UserDirectory(state, env as never);
+      expect(directory.list()[0]).toMatchObject({ firstClaimedAt: "2026-11-05T09:00:01.000Z", badges: [] });
     });
   });
 });

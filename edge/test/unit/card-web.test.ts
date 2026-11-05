@@ -115,3 +115,76 @@ describe("png stripping", () => {
     expect(() => stripPng(new Uint8Array([1, 2, 3]))).toThrow("not a PNG");
   });
 });
+
+describe("the card's badges", async () => {
+  const { layoutCard, BADGE_STYLES } = await import("../../../apps/card-web/site/card.js");
+  const { readFileSync } = await import("node:fs");
+  const mock = JSON.parse(readFileSync(new URL("../../../apps/card-web/mock/members.json", import.meta.url), "utf8")) as {
+    members: (typeof card & { badges: { id: string; name: string; icon: null }[] })[];
+  };
+  type Box = { x: number; y: number; w: number; h: number; border?: number; fill?: unknown };
+  type Run = { text: string; x: number; baseline: number };
+  /** The badge pills (20 high) and their labels, left to right. */
+  const pills = (member: object) => {
+    const { boxes, runs } = layoutCard(member) as { boxes: Box[]; runs: Run[] };
+    const row = boxes.filter((b) => b.h === 20).sort((a, b) => a.x - b.x);
+    const labels = runs.filter((r) => row.some((b) => r.x > b.x && r.x < b.x + b.w && r.baseline > b.y && r.baseline < b.y + b.h));
+    return { row, labels: labels.sort((a, b) => a.x - b.x).map((r) => r.text) };
+  };
+
+  it("draws V3 BETA as an outline pill like Cloud Tester's, in the read's order", () => {
+    expect(BADGE_STYLES).toMatchObject({ "cloud-tester": "outline", "v3-beta": "outline" });
+    const graham = mock.members.find((m) => m.username === "graham")!;
+    expect(graham.badges.map((b) => b.id)).toEqual(["cloud-tester", "v3-beta"]);
+    const both = pills(graham);
+    expect(both.labels).toEqual(["CLOUD TESTER", "V3 BETA"]);
+    expect(both.row).toHaveLength(2);
+    for (const pill of both.row) expect(pill).toMatchObject({ border: 1 });
+    for (const pill of both.row) expect(pill.fill).toBeUndefined();
+    // One row, 4 apart; V3 BETA's pill fits its seven characters.
+    expect(both.row[1]!.y).toBe(both.row[0]!.y);
+    expect(both.row[1]!.x).toBe(both.row[0]!.x + both.row[0]!.w + 4);
+    expect(both.row[1]!.w).toBe(8 + 7 * (0.6 * 10 + 1) + 8 + 2);
+
+    const ada = mock.members.find((m) => m.username === "ada")!;
+    expect(pills(ada)).toMatchObject({ labels: ["V3 BETA"] });
+    expect(pills(ada).row[0]).toMatchObject({ border: 1 });
+  });
+
+  it("draws a badge it has no style for as an outline pill, as the native app does", () => {
+    const graham = mock.members.find((m) => m.username === "graham")!;
+    const { row, labels } = pills({ ...graham, badges: [{ id: "early-tester", name: "Early Tester", icon: null }] });
+    expect(labels).toEqual(["EARLY TESTER"]);
+    expect(row[0]).toMatchObject({ border: 1 });
+    expect(row[0]!.fill).toBeUndefined();
+  });
+
+  it("draws Maintainer as a dark (ink) pill, first, as the edge serves it", () => {
+    expect(BADGE_STYLES).toMatchObject({ maintainer: "ink" });
+    const graham = mock.members.find((m) => m.username === "graham")!;
+    const { row, labels } = pills({
+      ...graham,
+      badges: [{ id: "maintainer", name: "Maintainer", icon: null }, ...graham.badges]
+    });
+    expect(labels).toEqual(["MAINTAINER", "CLOUD TESTER", "V3 BETA"]);
+    // The ink pill's fill, no border; the others stay outline pills.
+    expect(row[0]).toMatchObject({ fill: [0x16, 0x16, 0x16, 0x80] });
+    expect(row[0]!.border).toBeUndefined();
+    for (const pill of row.slice(1)) expect(pill).toMatchObject({ border: 1 });
+  });
+
+  it("gives every mock member's badges in one order, as the edge serves them", () => {
+    const order = ["cloud-tester", "v3-beta"];
+    for (const m of mock.members) {
+      const ids = m.badges.map((b) => b.id);
+      expect(ids).toEqual(order.filter((id) => ids.includes(id)));
+      for (const b of m.badges) expect(Object.keys(b)).toEqual(["id", "name", "icon"]);
+      expect(pills(m).labels).toEqual(m.badges.map((b) => b.name.toUpperCase()));
+    }
+    expect(mock.members.filter((m) => m.badges.some((b) => b.id === "v3-beta")).map((m) => m.badges.find((b) => b.id === "v3-beta"))).toContainEqual({
+      id: "v3-beta",
+      name: "V3 BETA",
+      icon: null
+    });
+  });
+});

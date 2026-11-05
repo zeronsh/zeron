@@ -10,6 +10,13 @@
  *   POST /auth/refresh                — WorkOS refresh → fresh tokens
  *   GET  /auth/orgs                   — caller's active org memberships
  *   POST /auth/orgs                   — create org + admin membership
+ *   POST /auth/orgs/:orgId/invitations — admin invites addresses
+ *   GET|PATCH /auth/me                — the caller's name and email
+ *   PATCH /auth/orgs/:orgId           — admin renames the org
+ *   GET  /auth/orgs/:orgId/members    — members (membership ids, never user ids)
+ *   PATCH|DELETE /auth/orgs/:orgId/members/:membershipId — admin: role / remove
+ *   GET  /auth/orgs/:orgId/invitations — admin: pending + recently expired
+ *   DELETE /auth/orgs/:orgId/invitations/:id, POST …/:id/resend — admin
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
@@ -64,6 +71,7 @@
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
+import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
 import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
@@ -90,6 +98,8 @@ import { sandboxProvider } from "./cloud/providers";
 import { FakeProvider } from "./cloud/providers/fake";
 import { runnerChatGate, runnerDeviceGate } from "./runner-access";
 import { runnerRefusal } from "./runner-policy";
+import { handleOnboardingRoute } from "./onboarding-routes";
+import { handlePluginKeyRoute } from "./plugin-keys";
 import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
 import installSh from "./install.sh";
@@ -180,6 +190,10 @@ export default {
 
     const usernameRouted = await handleUsernameRoute(request, env, auth, url);
     if (usernameRouted) return usernameRouted;
+    const onboardingRouted = await handleOnboardingRoute(request, env, auth, url);
+    if (onboardingRouted) return onboardingRouted;
+    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url);
+    if (pluginKeysRouted) return pluginKeysRouted;
 
     const cloudRouted = await handleCloudRoute(request, env, auth, url);
     if (cloudRouted) return cloudRouted;
@@ -361,20 +375,10 @@ export default {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "expected websocket" }, 426);
         }
-        const role = url.searchParams.get("role") === "host" ? "host" : "client";
-        const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
         // Dials never wake a sleeping Cloud session (viewing a chat must not
         // start a billed machine): the dial sees host_offline. Sends do —
         // through the nudge below.
-        // `d2/` — same staging→prod identity break as `s2/` above.
-        return forward(
-          env.DEVICE_ROOMS,
-          `d2/${deviceId}`,
-          request,
-          auth,
-          "/ws",
-          `?role=${role}&connId=${encodeURIComponent(connId)}`
-        );
+        return dialDeviceRoom(env, auth, request, url, deviceId);
       }
       if (parts[2] === "sidecar" && parts[3] && /^[a-z0-9-]{1,64}$/.test(parts[3])) {
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, `/sidecar/${parts[3]}`, "");

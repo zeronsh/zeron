@@ -134,6 +134,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Muse => "muse",
         HarnessId::Mock => "mock",
+        HarnessId::Registry(agent) => agent.registry_id(),
     }
 }
 
@@ -579,6 +580,7 @@ impl HarnessesPage {
     #[cfg(test)]
     pub(crate) fn show_provider_details(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         self.harnesses = Loadable::Ready(vec![HarnessDescriptor {
+            icon: None,
             id: harness,
             name: format!("{harness:?}"),
             supports_steering: false,
@@ -1675,6 +1677,7 @@ mod tests {
                 assert_eq!(page.expanded_harness, None, "nothing to open yet");
                 page.harnesses =
                     super::Loadable::Ready(vec![zeron_engine::registry::HarnessDescriptor {
+                        icon: None,
                         id: zeron_proto::HarnessId::Codex,
                         name: "Codex".into(),
                         supports_steering: false,
@@ -1715,6 +1718,7 @@ mod tests {
             super::HarnessesPage::new(state, cx)
         });
         let descriptor = |id, name: &str| zeron_engine::registry::HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             supports_steering: false,
@@ -1814,6 +1818,7 @@ mod tests {
             page
         });
         let descriptor = |id, name: &str| zeron_engine::registry::HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             supports_steering: false,

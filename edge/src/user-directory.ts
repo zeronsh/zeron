@@ -27,15 +27,20 @@
  * `cloud-tester`) and grants or revokes it for users
  * (`POST /admin/badges/{grant|revoke}`). A new badge is a new row, not new
  * code. Grants name a user id, not a directory row, so a user can hold a
- * badge before their first webhook lands.
+ * badge before their first webhook lands. Earned badges (earned-badges.ts,
+ * V3 BETA) are the exception: code defines them, and the directory grants
+ * each from what it stores (when the user first held a name), never by hand.
+ * A card shows its badges in the order they were defined, so two cards with
+ * the same badges show them alike.
  *
  * Usernames: a member card's URL (card-routes.ts). `usernames` holds every
  * name ever given, lowercase, keyed by name, so a name can't be held twice
  * however claims race. A user's name is the row without `retired_at`; a
  * retired row keeps its name out of circulation, so no one takes over a
- * deleted user's URL. The scene count a card derives from (card.ts) is stored
- * on the user at their first name, not with the name: a rename or a new claim
- * after an operator's clear keeps the card. Operators set or clear names at
+ * deleted user's URL. The scene count a card derives from (card.ts) and the
+ * time of the claim (`first_claimed_at`) are stored on the user at their
+ * first name, not with the name: a rename or a new claim after an operator's
+ * clear keeps the card and what the first claim earned. Operators set or clear names at
  * `POST /admin/usernames/{set|clear|face}`.
  *
  * Org creations: each user creates at most one org (`POST /auth/orgs`).
@@ -46,18 +51,45 @@
  * mid-way, and the next request takes it over. The admin lists show who
  * created which org.
  *
+ * Invitations (`POST /auth/orgs/{id}/invitations`): `invite_quota` and
+ * `invite_quota_day` count the addresses each user sent in the current hour
+ * and day, `INVITES_PER_HOUR` and `INVITES_PER_DAY` at most.
+ * Step-ups (step-up.ts): `step_ups` holds the hash of each live sign-in
+ * ticket, its user and expiry; a deletion drops a user's.
+ * Images (`PUT /auth/me/images`): `user_images` counts each user's against
+ * `MAX_IMAGES_PER_USER`, `MAX_IMAGE_BYTES_PER_USER` and
+ * `IMAGE_UPLOADS_PER_DAY`, and names what goes with them (user-images.ts).
+ * Org locks: `org_locks` serialises role changes, removals and admins'
+ * deletions per org (`lockOrg`), so an org is never left without an admin.
+ * Onboarding (`/onboarding`, onboarding-routes.ts): `onboarding_done` holds
+ * each page a user has finished and when they first did, at most
+ * `MAX_ONBOARDING_PAGES` per user.
+ * Plugin keys (`/plugin-keys`, plugin-keys.ts): `plugin_keys` binds each
+ * plugin signing key (raw ed25519, b64url) to the account that registered
+ * it, at most `PLUGIN_KEYS_PER_DAY` new ones a user a day. Revoked rows stay,
+ * so a key is never re-bound; deleting a user revokes theirs.
+ *
+ * Settings (auth-routes.ts): `PATCH /auth/me` writes the renamed user with the
+ * webhook's own `upsert` right away, and an org's member list reads names,
+ * pictures and usernames through `profiles`.
+ *
  * Writes are one row per sign-up or profile change, so a single instance is
  * not a hotspot.
  */
 import { DurableObject } from "cloudflare:workers";
 import { CARD_SCENES, HOLOS, cardFirstName, deriveCard, type CardFace, type Holo } from "./card";
 import { forgetCard } from "./card-cache";
+import { EARNED_BADGES, V3_BETA, earnsV3Beta, isEarnedBadge } from "./earned-badges";
 import type { Env } from "./env";
 import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
 import { foldUsername } from "./username";
+import { deleteUserBlobs } from "./user-images";
 
 export const USER_DIRECTORY_NAME = "users1";
+
+/** The badge a card shows first, ahead of the order badges were defined in. */
+const LEADING_BADGE = "maintainer";
 
 /** A new row's user number. Conflict updates never set `user_number`, so a
  * number is taken only on first insert. */
@@ -66,6 +98,21 @@ const NEXT_USER_NUMBER = "(SELECT COALESCE(MAX(user_number), 0) + 1 FROM users)"
 /** How long an org-creation claim without an org holds before another
  * request may take it over. */
 export const ORG_CLAIM_STALE_MS = 5 * 60_000;
+
+/** Invitation addresses one user may send an hour, and in 24 hours. */
+export const INVITES_PER_HOUR = 20;
+export const INVITES_PER_DAY = 50;
+/** Onboarding pages stored per user. */
+export const MAX_ONBOARDING_PAGES = 500;
+/** New plugin signing keys one user may register in 24 hours. */
+export const PLUGIN_KEYS_PER_DAY = 20;
+/** Images (`PUT /auth/me/images`) one user may hold, their bytes together,
+ * and how many they may put in 24 hours (deleted ones count). */
+export const MAX_IMAGES_PER_USER = 100;
+export const MAX_IMAGE_BYTES_PER_USER = 20_000_000;
+export const IMAGE_UPLOADS_PER_DAY = 200;
+/** How long an org's role lock holds before it lapses (a request that died). */
+export const ORG_LOCK_MS = 30_000;
 
 /** Availability checks and claims one user may make a minute. */
 const USERNAME_ATTEMPTS_PER_MINUTE = 60;
@@ -98,8 +145,13 @@ export interface DirectoryUser {
   readonly deletedAt: string | null;
   /** Null until they claim one, and once it's cleared or they're deleted. */
   readonly username: string | null;
+  /** ISO 8601, when they first held a name (claimed or set); null if never.
+   * Never changes once set: what decides earned badges. */
+  readonly firstClaimedAt: string | null;
   /** Badges held, oldest grant first. */
   readonly badges: readonly UserBadge[];
+  /** Onboarding pages finished, first finished first. */
+  readonly onboardingDone: readonly string[];
   /** The org they created through `POST /auth/orgs`, if any. */
   readonly createdOrgId: string | null;
 }
@@ -114,7 +166,8 @@ export interface PublicCard extends CardFace {
   readonly userNumber: number;
   /** `YYYY-MM-DD`, UTC. */
   readonly joinedOn: string;
-  /** Oldest grant first. */
+  /** In the order the badges were defined, oldest first: the same order on
+   * every card. */
   readonly badges: readonly { readonly id: string; readonly name: string; readonly icon: string | null }[];
 }
 
@@ -210,6 +263,67 @@ export interface DirectoryOrganization {
   readonly members: readonly OrganizationMember[];
 }
 
+/** `profiles`: what an org's member list shows of a user. */
+export interface MemberProfile {
+  readonly email: string | null;
+  readonly firstName: string | null;
+  readonly lastName: string | null;
+  readonly profilePictureUrl: string | null;
+  readonly username: string | null;
+  /** What they do, under their name (`PATCH /auth/me {title}`); null for none. */
+  readonly title: string | null;
+  /** Their own photo's key in BLOBS (`avatars/{key}`); null for none. */
+  readonly photoKey: string | null;
+}
+
+/** `registerPluginKey`'s answer. */
+export type PluginKeyRegistration =
+  | "registered"
+  | "key_taken"
+  | "key_revoked"
+  | "deleted_user"
+  | "rate_limited"
+  | "step_up_required";
+
+/** `GET /plugin-keys/:key`: who signed with it, never their user id. */
+export interface PluginKeyLookup {
+  readonly key: string;
+  /** The owner's current username; null if they have none. */
+  readonly username: string | null;
+  /** Whether it's the viewer's own key. */
+  readonly mine: boolean;
+  readonly revoked: boolean;
+  /** Not revoked, and its owner holds a live username: the only keys an
+   * engine may show as "Made by @username". Anything else reads as Unknown. */
+  readonly verified: boolean;
+  /** `pluginKeyFingerprint`: what a person compares. */
+  readonly fingerprint: string;
+  /** When it was first registered, epoch ms. */
+  readonly firstSeen: number;
+  readonly revokedAt: number | null;
+}
+
+/** One of the caller's keys in `GET /plugin-keys`. Times are epoch ms. */
+export interface PluginKeyRow {
+  readonly key: string;
+  readonly fingerprint: string;
+  readonly deviceId: string | null;
+  readonly createdAt: number;
+  readonly revokedAt: number | null;
+}
+
+/** A key's fingerprint: the first 16 bytes of SHA-256 over the raw key,
+ * lowercase hex in groups of four (`3f9a 0c12 …`). */
+export const pluginKeyFingerprint = async (key: string): Promise<string> => {
+  const raw = Uint8Array.from(atob(key.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", raw)).subarray(0, 16);
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return hex.match(/.{4}/g)!.join(" ");
+};
+
+/** `reserveImage`'s answer. */
+export type ImageReservation = "ok" | "too_many" | "too_large" | "rate_limited" | "deleted_user";
+
 const fullName = (first: string | null, last: string | null): string | null =>
   [first, last].filter(Boolean).join(" ") || null;
 
@@ -232,6 +346,12 @@ export class UserDirectory extends DurableObject<Env> {
     // An operator's choice of scene and foil for a card (null: the seed's).
     if (!columns.includes("card_scene")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN card_scene INTEGER");
     if (!columns.includes("card_holo")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN card_holo TEXT");
+    // What they do, and their own photo (Settings → Profile): the edge's,
+    // not WorkOS's, which keeps neither.
+    if (!columns.includes("title")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN title TEXT");
+    if (!columns.includes("photo_key")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN photo_key TEXT");
+    // When the user first held a name, epoch ms: set once (`recordName`).
+    if (!columns.includes("first_claimed_at")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN first_claimed_at INTEGER");
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS usernames (
       username TEXT PRIMARY KEY, user_id TEXT NOT NULL, claimed_at INTEGER NOT NULL, retired_at INTEGER,
       CHECK (length(username) BETWEEN 3 AND 20 AND username GLOB '[a-z0-9]*' AND username NOT GLOB '*[^a-z0-9_-]*'))`);
@@ -245,6 +365,9 @@ export class UserDirectory extends DurableObject<Env> {
       user_id TEXT NOT NULL, badge_id TEXT NOT NULL, granted_at INTEGER NOT NULL, note TEXT,
       PRIMARY KEY (user_id, badge_id))`);
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS user_badges_by_badge ON user_badges (badge_id)");
+    // An earned badge an operator took back from a user: the award skips them.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS earned_badge_waivers (
+      user_id TEXT NOT NULL, badge_id TEXT NOT NULL, waived_at INTEGER NOT NULL, PRIMARY KEY (user_id, badge_id))`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS organizations (
       org_id TEXT PRIMARY KEY, name TEXT, external_id TEXT, domains TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, recorded_at INTEGER NOT NULL)`);
@@ -253,6 +376,93 @@ export class UserDirectory extends DurableObject<Env> {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, recorded_at INTEGER NOT NULL)`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS org_creations (
       user_id TEXT PRIMARY KEY, claim_id TEXT NOT NULL, claimed_at INTEGER NOT NULL, org_id TEXT, created_at INTEGER)`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS invite_quota (
+      user_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, sent INTEGER NOT NULL)`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS onboarding_done (
+      user_id TEXT NOT NULL, page_id TEXT NOT NULL, done_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, page_id))`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS plugin_keys (
+      key TEXT PRIMARY KEY, user_id TEXT NOT NULL, device_id TEXT,
+      created_at INTEGER NOT NULL, revoked_at INTEGER)`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS plugin_keys_user ON plugin_keys(user_id)");
+    // step-up.ts: one row per live sign-in ticket, by its hash.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS step_ups (
+      token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS step_ups_user ON step_ups(user_id)");
+    // Images put through `PUT /auth/me/images`: their owner's quota, and what
+    // goes when the owner does. Deleted rows stay a day for the upload count.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS user_images (
+      image_key TEXT PRIMARY KEY, user_id TEXT NOT NULL, bytes INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, deleted_at INTEGER)`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS user_images_user ON user_images(user_id)");
+    // A role change or removal in an org at a time (`lockOrg`).
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS org_locks (
+      org_id TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL)`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS invite_quota_day (
+      user_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, sent INTEGER NOT NULL)`);
+    this.backfillEarnedBadges();
+  }
+
+  /**
+   * Define the earned badges, date the first claim of every user named before
+   * claims were dated, and grant each earned badge to every live user who
+   * earned it and doesn't hold it. On every start; a no-op once caught up.
+   *
+   * A user named before `first_claimed_at` existed is dated by their oldest
+   * `usernames` row: renamed and cleared names stay as retired rows with
+   * their `claimed_at`, so that is the first claim. When an operator released
+   * every name they held (the rows are gone, `card_scenes` remains), the
+   * claim is unknown but came before now, so now is its date: before the
+   * cutoff that earns the badge, as the claim did; after it, it doesn't.
+   */
+  private backfillEarnedBadges(): void {
+    this.ctx.storage.transactionSync(() => {
+      for (const b of EARNED_BADGES) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO badges (badge_id, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (badge_id) DO UPDATE SET
+             name = excluded.name, description = excluded.description, icon = excluded.icon`,
+          b.id,
+          b.name,
+          b.description,
+          b.icon,
+          Date.now()
+        );
+      }
+      this.ctx.storage.sql.exec(
+        `UPDATE users SET first_claimed_at = COALESCE((SELECT MIN(n.claimed_at) FROM usernames n WHERE n.user_id = users.user_id), ?)
+         WHERE first_claimed_at IS NULL AND (card_scenes IS NOT NULL OR user_id IN (SELECT user_id FROM usernames))`,
+        Date.now()
+      );
+      const unawarded = this.ctx.storage.sql
+        .exec(
+          `SELECT user_id FROM users u WHERE u.deleted_at IS NULL AND u.first_claimed_at IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM user_badges ub WHERE ub.user_id = u.user_id AND ub.badge_id = ?)
+             AND NOT EXISTS (SELECT 1 FROM earned_badge_waivers w WHERE w.user_id = u.user_id AND w.badge_id = ?)`,
+          V3_BETA.id,
+          V3_BETA.id
+        )
+        .toArray();
+      for (const row of unawarded) this.awardEarnedBadges(row.user_id as string);
+    });
+  }
+
+  /** Grant `userId` what their stored first claim earned, dated by it. A
+   * badge they hold stays as it is. */
+  private awardEarnedBadges(userId: string): void {
+    const [row] = this.ctx.storage.sql.exec("SELECT first_claimed_at, deleted_at FROM users WHERE user_id = ?", userId).toArray();
+    if (!row || row.deleted_at !== null) return;
+    const firstClaimedAt = row.first_claimed_at as number | null;
+    if (!earnsV3Beta(firstClaimedAt)) return;
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM earned_badge_waivers WHERE user_id = ? AND badge_id = ?", userId, V3_BETA.id).toArray().length) {
+      return;
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO user_badges (user_id, badge_id, granted_at, note) VALUES (?, ?, ?, NULL)",
+      userId,
+      V3_BETA.id,
+      firstClaimedAt
+    );
   }
 
   /** Number every user still without one — the rows recorded before numbers
@@ -338,8 +548,19 @@ export class UserDirectory extends DurableObject<Env> {
   /** Take `badgeId` back from each user. Answers how many held it. */
   revokeBadge(badgeId: string, userIds: readonly string[]): number {
     let revoked = 0;
+    const earned = isEarnedBadge(badgeId);
     this.ctx.storage.transactionSync(() => {
       for (const userId of userIds) {
+        // An earned badge stays taken: the award (and the restart backfill)
+        // skips a waived user, whatever they earned.
+        if (earned) {
+          this.ctx.storage.sql.exec(
+            "INSERT OR IGNORE INTO earned_badge_waivers (user_id, badge_id, waived_at) VALUES (?, ?, ?)",
+            userId,
+            badgeId,
+            Date.now()
+          );
+        }
         revoked += [
           ...this.ctx.storage.sql.exec(
             "DELETE FROM user_badges WHERE user_id = ? AND badge_id = ? RETURNING user_id",
@@ -350,6 +571,24 @@ export class UserDirectory extends DurableObject<Env> {
       }
     });
     return revoked;
+  }
+
+  /** Lift an operator's waiver of an earned badge and award it again to each
+   * user who earned it, dated by what earned it. Answers how many now newly
+   * hold it. */
+  restoreEarnedBadge(badgeId: string, userIds: readonly string[]): number {
+    let restored = 0;
+    this.ctx.storage.transactionSync(() => {
+      for (const userId of userIds) {
+        this.ctx.storage.sql.exec("DELETE FROM earned_badge_waivers WHERE user_id = ? AND badge_id = ?", userId, badgeId);
+        const held = () =>
+          this.ctx.storage.sql.exec("SELECT 1 FROM user_badges WHERE user_id = ? AND badge_id = ?", userId, badgeId).toArray().length > 0;
+        if (held()) continue;
+        this.awardEarnedBadges(userId);
+        if (held()) restored += 1;
+      }
+    });
+    return restored;
   }
 
   private badgeExists(badgeId: string): boolean {
@@ -380,16 +619,24 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Tombstone a deleted user: keep id, number and joined date, drop the
-   * profile and badges, and retire their username. Answers that name. */
+   * profile, badges and onboarding, and retire their username. Answers that
+   * name. */
   remove(user: WorkOsUser, deletedAt: string): string | null {
     const username = this.username(user.id);
+    // (Their photo's object goes with the caller: `photoKey` first.)
     this.retireUsername(user.id);
     this.ctx.storage.sql.exec("DELETE FROM user_badges WHERE user_id = ?", user.id);
+    this.ctx.storage.sql.exec("DELETE FROM earned_badge_waivers WHERE user_id = ?", user.id);
+    this.ctx.storage.sql.exec("DELETE FROM onboarding_done WHERE user_id = ?", user.id);
+    // Their plugins stop reading as theirs (or anyone's).
+    this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", Date.now(), user.id);
+    this.ctx.storage.sql.exec("DELETE FROM step_ups WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec(
       `INSERT INTO users (user_id, created_at, updated_at, deleted_at, recorded_at, user_number)
        VALUES (?, ?, ?, ?, ?, ${NEXT_USER_NUMBER})
        ON CONFLICT (user_id) DO UPDATE SET
          email = NULL, first_name = NULL, last_name = NULL, profile_picture_url = NULL,
+         title = NULL, photo_key = NULL,
          deleted_at = excluded.deleted_at, recorded_at = excluded.recorded_at`,
       user.id,
       user.created_at,
@@ -400,12 +647,69 @@ export class UserDirectory extends DurableObject<Env> {
     return username;
   }
 
+  /** The user's own photo's key, or null (deleted users have none). */
+  photoKey(userId: string): string | null {
+    const [row] = this.ctx.storage.sql.exec("SELECT photo_key FROM users WHERE user_id = ?", userId).toArray();
+    return (row?.photo_key as string | null | undefined) ?? null;
+  }
+
   /** The user's name, or null. */
   username(userId: string): string | null {
     const [row] = this.ctx.storage.sql
       .exec("SELECT username FROM usernames WHERE user_id = ? AND retired_at IS NULL", userId)
       .toArray();
     return (row?.username as string | undefined) ?? null;
+  }
+
+  /** The live profiles (and current usernames) of those of `userIds` the
+   * directory has: an org's member list joins on this before asking WorkOS
+   * for the rest. Keyed by user id; deleted users are left out. */
+  profiles(userIds: readonly string[]): Record<string, MemberProfile> {
+    const found: Record<string, MemberProfile> = {};
+    for (const userId of new Set(userIds)) {
+      const [row] = this.ctx.storage.sql
+        .exec(
+          `SELECT u.email, u.first_name, u.last_name, u.profile_picture_url, u.title, u.photo_key, n.username FROM users u
+           LEFT JOIN usernames n ON n.user_id = u.user_id AND n.retired_at IS NULL
+           WHERE u.user_id = ? AND u.deleted_at IS NULL`,
+          userId
+        )
+        .toArray();
+      if (!row) continue;
+      found[userId] = {
+        email: row.email as string | null,
+        firstName: row.first_name as string | null,
+        lastName: row.last_name as string | null,
+        profilePictureUrl: row.profile_picture_url as string | null,
+        username: row.username as string | null,
+        title: row.title as string | null,
+        photoKey: row.photo_key as string | null
+      };
+    }
+    return found;
+  }
+
+  /** Set a live user's title (null clears it). False when the directory
+   * doesn't have them live (not recorded yet, or deleted). */
+  setTitle(userId: string, title: string | null): boolean {
+    return (
+      [...this.ctx.storage.sql.exec("UPDATE users SET title = ? WHERE user_id = ? AND deleted_at IS NULL RETURNING user_id", title, userId)]
+        .length > 0
+    );
+  }
+
+  /** Set a live user's photo key (null clears it). Answers the key it
+   * replaced, for the caller to delete; undefined when the directory doesn't
+   * have them live. */
+  setPhoto(userId: string, key: string | null): { readonly replaced: string | null } | undefined {
+    let answer: { readonly replaced: string | null } | undefined;
+    this.ctx.storage.transactionSync(() => {
+      const [row] = this.ctx.storage.sql.exec("SELECT photo_key FROM users WHERE user_id = ? AND deleted_at IS NULL", userId).toArray();
+      if (!row) return;
+      this.ctx.storage.sql.exec("UPDATE users SET photo_key = ? WHERE user_id = ?", key, userId);
+      answer = { replaced: (row.photo_key as string | null) ?? null };
+    });
+    return answer;
   }
 
   private retireUsername(userId: string): void {
@@ -429,9 +733,17 @@ export class UserDirectory extends DurableObject<Env> {
     return row.deleted_at === null ? undefined : "deleted_user";
   }
 
-  /** The stored scene count is set once, by the user's first name. */
-  private freezeCardScenes(userId: string, scenes: number): void {
-    this.ctx.storage.sql.exec("UPDATE users SET card_scenes = COALESCE(card_scenes, ?) WHERE user_id = ?", scenes, userId);
+  /** A user was given a name at `now`: their first name, however it came,
+   * sets the stored scene count and the claim's time, once, and grants what
+   * that claim earned. Later names change neither. */
+  private recordName(userId: string, scenes: number, now: number): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE users SET card_scenes = COALESCE(card_scenes, ?), first_claimed_at = COALESCE(first_claimed_at, ?) WHERE user_id = ?",
+      scenes,
+      now,
+      userId
+    );
+    this.awardEarnedBadges(userId);
   }
 
   /** Whether a name is free; undefined past the attempt limit. A retired name
@@ -450,17 +762,18 @@ export class UserDirectory extends DurableObject<Env> {
       if (refusal) return { error: refusal };
       const held = this.username(userId);
       if (held) return held === username ? { card: this.card(username)! } : { error: "already_claimed" };
+      const now = Date.now();
       const taken =
         this.ctx.storage.sql
           .exec(
             "INSERT INTO usernames (username, user_id, claimed_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING username",
             username,
             userId,
-            Date.now()
+            now
           )
           .toArray().length === 0;
       if (taken) return { error: "username_taken" };
-      this.freezeCardScenes(userId, scenes);
+      this.recordName(userId, scenes, now);
       return { card: this.card(username)! };
     });
   }
@@ -475,14 +788,15 @@ export class UserDirectory extends DurableObject<Env> {
       const [row] = this.ctx.storage.sql.exec("SELECT user_id, retired_at FROM usernames WHERE username = ?", username).toArray();
       if (row && row.user_id !== userId) return { error: row.retired_at === null ? "username_taken" : "username_retired" };
       this.retireUsername(userId);
+      const now = Date.now();
       this.ctx.storage.sql.exec(
         `INSERT INTO usernames (username, user_id, claimed_at) VALUES (?, ?, ?)
          ON CONFLICT (username) DO UPDATE SET retired_at = NULL`,
         username,
         userId,
-        Date.now()
+        now
       );
-      this.freezeCardScenes(userId, scenes);
+      this.recordName(userId, scenes, now);
       return { card: this.card(username)! };
     });
   }
@@ -520,8 +834,9 @@ export class UserDirectory extends DurableObject<Env> {
     const badges = this.ctx.storage.sql
       .exec(
         `SELECT b.badge_id, b.name, b.icon FROM user_badges ub JOIN badges b ON b.badge_id = ub.badge_id
-         WHERE ub.user_id = ? ORDER BY ub.granted_at, ub.badge_id`,
-        row.user_id
+         WHERE ub.user_id = ? ORDER BY b.badge_id = ? DESC, b.created_at, b.rowid`,
+        row.user_id,
+        LEADING_BADGE
       )
       .toArray();
     // Field by field, never spread from a row: a new column must not go public.
@@ -577,7 +892,287 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM org_creations WHERE user_id = ? AND claim_id = ? AND org_id IS NULL", userId, claimId);
   }
 
+  /** Count `count` invitation addresses against the user's hour and day;
+   * false (and nothing counted) when that would pass `INVITES_PER_HOUR` or
+   * `INVITES_PER_DAY`. */
+  takeInviteQuota(userId: string, count: number): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      const windows = [
+        { table: "invite_quota", span: 3_600_000, cap: INVITES_PER_HOUR },
+        { table: "invite_quota_day", span: 86_400_000, cap: INVITES_PER_DAY }
+      ].map(({ table, span, cap }) => {
+        const [row] = this.ctx.storage.sql.exec(`SELECT window_start, sent FROM ${table} WHERE user_id = ?`, userId).toArray();
+        const fresh = !row || now - (row.window_start as number) >= span;
+        return { table, cap, start: fresh ? now : (row.window_start as number), sent: fresh ? 0 : (row.sent as number) };
+      });
+      if (windows.some((w) => w.sent + count > w.cap)) return false;
+      for (const w of windows) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO ${w.table} (user_id, window_start, sent) VALUES (?, ?, ?)
+           ON CONFLICT (user_id) DO UPDATE SET window_start = excluded.window_start, sent = excluded.sent`,
+          userId,
+          w.start,
+          w.sent + count
+        );
+      }
+      return true;
+    });
+  }
+
+  /** Mint a sign-in's step-up ticket (step-up.ts) for `userId`: store its
+   * hash, keep at most `max` live per user (oldest go), drop expired ones. */
+  issueStepUp(userId: string, tokenHash: string, ttlMs: number, max: number): number {
+    const now = Date.now();
+    const expiresAt = now + ttlMs;
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM step_ups WHERE expires_at <= ?", now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO step_ups (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        tokenHash,
+        userId,
+        now,
+        expiresAt
+      );
+      this.ctx.storage.sql.exec(
+        `DELETE FROM step_ups WHERE user_id = ? AND token_hash NOT IN
+           (SELECT token_hash FROM step_ups WHERE user_id = ? ORDER BY created_at DESC, token_hash LIMIT ?)`,
+        userId,
+        userId,
+        max
+      );
+    });
+    return expiresAt;
+  }
+
+  /** Whether `tokenHash` is a live ticket of `userId`'s (nothing used up). */
+  hasStepUp(userId: string, tokenHash: string | undefined): boolean {
+    if (!tokenHash) return false;
+    return (
+      this.ctx.storage.sql
+        .exec("SELECT 1 FROM step_ups WHERE token_hash = ? AND user_id = ? AND expires_at > ?", tokenHash, userId, Date.now())
+        .toArray().length > 0
+    );
+  }
+
+  /** Use up a live ticket of `userId`'s; false when it isn't one. */
+  useStepUp(userId: string, tokenHash: string | undefined): boolean {
+    if (!tokenHash) return false;
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "DELETE FROM step_ups WHERE token_hash = ? AND user_id = ? AND expires_at > ? RETURNING token_hash",
+          tokenHash,
+          userId,
+          Date.now()
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /** Count an image of `bytes` against its owner's quota before it's stored. */
+  reserveImage(userId: string, imageKey: string, bytes: number): ImageReservation {
+    return this.ctx.storage.transactionSync((): ImageReservation => {
+      if (this.userRefusal(userId) === "deleted_user") return "deleted_user";
+      const now = Date.now();
+      this.ctx.storage.sql.exec("DELETE FROM user_images WHERE deleted_at IS NOT NULL AND deleted_at <= ?", now - 86_400_000);
+      const held = this.ctx.storage.sql
+        .exec("SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM user_images WHERE user_id = ? AND deleted_at IS NULL", userId)
+        .one();
+      const today = this.ctx.storage.sql
+        .exec("SELECT COUNT(*) AS n FROM user_images WHERE user_id = ? AND created_at > ?", userId, now - 86_400_000)
+        .one().n as number;
+      if (today >= IMAGE_UPLOADS_PER_DAY) return "rate_limited";
+      if ((held.n as number) >= MAX_IMAGES_PER_USER) return "too_many";
+      if ((held.b as number) + bytes > MAX_IMAGE_BYTES_PER_USER) return "too_large";
+      this.ctx.storage.sql.exec(
+        "INSERT INTO user_images (image_key, user_id, bytes, created_at) VALUES (?, ?, ?, ?)",
+        imageKey,
+        userId,
+        bytes,
+        now
+      );
+      return "ok";
+    });
+  }
+
+  /** An image of `userId`'s is gone (deleted, or never stored). */
+  dropImage(userId: string, imageKey: string): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE user_images SET deleted_at = ? WHERE image_key = ? AND user_id = ? AND deleted_at IS NULL",
+      Date.now(),
+      imageKey,
+      userId
+    );
+  }
+
+  /** Every live image of `userId`'s, marked gone: for the caller to delete
+   * with the account. */
+  takeImages(userId: string): string[] {
+    return this.ctx.storage.sql
+      .exec("UPDATE user_images SET deleted_at = ? WHERE user_id = ? AND deleted_at IS NULL RETURNING image_key", Date.now(), userId)
+      .toArray()
+      .map((row) => row.image_key as string);
+  }
+
+  /** Take `orgId`'s role lock for `holder`, so only one role change, removal
+   * or admin's deletion runs in it at a time. False while someone else holds
+   * it; a lock older than `ORG_LOCK_MS` lapses. */
+  lockOrg(orgId: string, holder: string): boolean {
+    const now = Date.now();
+    return (
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO org_locks (org_id, holder, expires_at) VALUES (?, ?, ?)
+           ON CONFLICT (org_id) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at
+           WHERE org_locks.expires_at <= ? OR org_locks.holder = excluded.holder
+           RETURNING org_id`,
+          orgId,
+          holder,
+          now + ORG_LOCK_MS,
+          now
+        )
+        .toArray().length > 0
+    );
+  }
+
+  unlockOrg(orgId: string, holder: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM org_locks WHERE org_id = ? AND holder = ?", orgId, holder);
+  }
+
+  /** The onboarding pages a user finished: page id → ISO time first done. */
+  onboarding(userId: string): Record<string, string> {
+    const done: Record<string, string> = {};
+    for (const row of this.ctx.storage.sql.exec(
+      "SELECT page_id, done_at FROM onboarding_done WHERE user_id = ? ORDER BY done_at, page_id",
+      userId
+    )) {
+      done[row.page_id as string] = new Date(row.done_at as number).toISOString();
+    }
+    return done;
+  }
+
+  /** Record pages as finished, keeping the first time for any already done.
+   * Undefined (and nothing recorded) past `MAX_ONBOARDING_PAGES`. */
+  markOnboarding(userId: string, pageIds: readonly string[]): Record<string, string> | undefined {
+    const recorded = this.ctx.storage.transactionSync(() => {
+      const held = new Set(
+        this.ctx.storage.sql.exec("SELECT page_id FROM onboarding_done WHERE user_id = ?", userId).toArray().map((r) => r.page_id as string)
+      );
+      const fresh = [...new Set(pageIds)].filter((id) => !held.has(id));
+      if (held.size + fresh.length > MAX_ONBOARDING_PAGES) return false;
+      const now = Date.now();
+      for (const pageId of fresh) {
+        this.ctx.storage.sql.exec("INSERT INTO onboarding_done (user_id, page_id, done_at) VALUES (?, ?, ?)", userId, pageId, now);
+      }
+      return true;
+    });
+    return recorded ? this.onboarding(userId) : undefined;
+  }
+
+  /** Bind a plugin signing key (proof already checked) to `userId`. A new
+   * key needs a sign-in's step-up ticket (`stepUpHash`, step-up.ts), used up
+   * here. The same key again from its owner is a no-op that succeeds without
+   * one, so an engine can retry a registration whose answer it lost. A
+   * revoked key stays revoked. */
+  registerPluginKey(userId: string, key: string, deviceId: string | null, stepUpHash?: string): PluginKeyRegistration {
+    return this.ctx.storage.transactionSync((): PluginKeyRegistration => {
+      const [row] = this.ctx.storage.sql.exec("SELECT user_id, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+      if (row) {
+        if (row.user_id !== userId) return "key_taken";
+        return row.revoked_at === null ? "registered" : "key_revoked";
+      }
+      if (this.userRefusal(userId) === "deleted_user") return "deleted_user";
+      const now = Date.now();
+      const today = this.ctx.storage.sql
+        .exec("SELECT COUNT(*) AS n FROM plugin_keys WHERE user_id = ? AND created_at > ?", userId, now - 86_400_000)
+        .one().n as number;
+      if (today >= PLUGIN_KEYS_PER_DAY) return "rate_limited";
+      if (!this.useStepUp(userId, stepUpHash)) return "step_up_required";
+      this.ctx.storage.sql.exec(
+        "INSERT INTO plugin_keys (key, user_id, device_id, created_at) VALUES (?, ?, ?, ?)",
+        key,
+        userId,
+        deviceId,
+        now
+      );
+      return "registered";
+    });
+  }
+
+  /** Who a plugin key belongs to, as `viewerId` may see it: never the owner's
+   * user id. Undefined for a key never registered, and, to anyone but its
+   * owner, for a live key whose owner has no username: nothing vouches for
+   * it, so it reads as unknown to every engine, old ones included. Read
+   * straight from storage on every call, so a revocation shows at once. */
+  async pluginKey(key: string, viewerId: string): Promise<PluginKeyLookup | undefined> {
+    const [row] = this.ctx.storage.sql.exec("SELECT user_id, created_at, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+    if (!row) return undefined;
+    const username = this.username(row.user_id as string);
+    const mine = row.user_id === viewerId;
+    const revoked = row.revoked_at !== null;
+    if (!mine && !revoked && username === null) return undefined;
+    return {
+      key,
+      username,
+      mine,
+      revoked,
+      verified: !revoked && username !== null,
+      fingerprint: await pluginKeyFingerprint(key),
+      firstSeen: row.created_at as number,
+      revokedAt: row.revoked_at as number | null
+    };
+  }
+
+  /** The device a live key of `userId`'s was registered from (device-link.ts),
+   * or null: not theirs, revoked, or registered without one. */
+  pluginKeyDevice(key: string, userId: string): string | null {
+    const [row] = this.ctx.storage.sql
+      .exec("SELECT device_id FROM plugin_keys WHERE key = ? AND user_id = ? AND revoked_at IS NULL", key, userId)
+      .toArray();
+    return (row?.device_id as string | null | undefined) ?? null;
+  }
+
+  /** A user's plugin keys, oldest first, revoked ones included. With `since`
+   * (epoch ms), only those registered or revoked after it. */
+  async pluginKeys(userId: string, since?: number): Promise<PluginKeyRow[]> {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT key, device_id, created_at, revoked_at FROM plugin_keys WHERE user_id = ?
+           AND (? IS NULL OR created_at > ? OR revoked_at > ?) ORDER BY created_at, key`,
+        userId,
+        since ?? null,
+        since ?? null,
+        since ?? null
+      )
+      .toArray();
+    return Promise.all(
+      rows.map(async (row) => ({
+        key: row.key as string,
+        fingerprint: await pluginKeyFingerprint(row.key as string),
+        deviceId: row.device_id as string | null,
+        createdAt: row.created_at as number,
+        revokedAt: row.revoked_at as number | null
+      }))
+    );
+  }
+
+  /** Revoke one of the user's keys (the first revocation's time stays).
+   * False when the key isn't theirs. */
+  revokePluginKey(userId: string, key: string): boolean {
+    const [row] = this.ctx.storage.sql.exec("SELECT user_id FROM plugin_keys WHERE key = ?", key).toArray();
+    if (row?.user_id !== userId) return false;
+    this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE key = ?", Date.now(), key);
+    return true;
+  }
+
   list(): DirectoryUser[] {
+    const onboarding = new Map<string, string[]>();
+    for (const row of this.ctx.storage.sql.exec("SELECT user_id, page_id FROM onboarding_done ORDER BY done_at, page_id")) {
+      const done = onboarding.get(row.user_id as string) ?? [];
+      done.push(row.page_id as string);
+      onboarding.set(row.user_id as string, done);
+    }
     const badges = new Map<string, UserBadge[]>();
     for (const row of this.ctx.storage.sql.exec("SELECT * FROM user_badges ORDER BY granted_at, badge_id")) {
       const userId = row.user_id as string;
@@ -607,7 +1202,9 @@ export class UserDirectory extends DurableObject<Env> {
         updatedAt: row.updated_at as string,
         deletedAt: row.deleted_at as string | null,
         username: row.username as string | null,
+        firstClaimedAt: row.first_claimed_at === null ? null : new Date(row.first_claimed_at as number).toISOString(),
         badges: badges.get(row.user_id as string) ?? [],
+        onboardingDone: onboarding.get(row.user_id as string) ?? [],
         createdOrgId: row.created_org_id as string | null
       };
     });
@@ -882,12 +1479,19 @@ const readJson = async (request: Request): Promise<Record<string, unknown> | und
 const optionalText = (value: unknown, max: number): string | null | false =>
   value === undefined || value === null ? null : typeof value === "string" && value.length <= max ? value || null : false;
 
+const earnedBadgeError = (id: string): Response =>
+  jsonError(409, "earned_badge", `${id} is earned: never defined, nor granted to "all" (earned-badges.ts).`);
+
 /**
  * `/admin/badges`:
  *   GET                                   — every badge with its holder count
  *   POST {id, name, description?, icon?}  — define (or rename) a badge
  *   POST /grant  {badgeId, userIds | "all", note?} — answers {granted}
  *   POST /revoke {badgeId, userIds}       — answers {revoked}
+ * An earned badge (earned-badges.ts) can't be defined, and can be granted only
+ * to listed users (409 otherwise). Revoking one waives it for those users, so
+ * the award never gives it back; granting it lifts the waiver and awards it
+ * again only if they earned it, dated by what earned it.
  */
 const handleBadgeRoute = async (
   request: Request,
@@ -912,6 +1516,7 @@ const handleBadgeRoute = async (
     ) {
       return jsonError(400, "bad_request", "Expected {id (a-z, 0-9, -), name, description?, icon?}.");
     }
+    if (isEarnedBadge(body.id)) return earnedBadgeError(body.id);
     return json(await directory.defineBadge({ id: body.id, name: body.name.trim(), description, icon }));
   }
   if (action !== "grant" && action !== "revoke") return jsonError(404, "not_found", "Not found.");
@@ -939,6 +1544,10 @@ const handleBadgeRoute = async (
   }
   const ids = userIds === "all" ? "all" : [...new Set(userIds as string[])];
   if (action === "revoke") return json({ revoked: await directory.revokeBadge(body.badgeId, ids as string[]) });
+  if (isEarnedBadge(body.badgeId)) {
+    if (ids === "all") return earnedBadgeError(body.badgeId);
+    return json({ granted: await directory.restoreEarnedBadge(body.badgeId, ids) });
+  }
   const granted = await directory.grantBadge(body.badgeId, ids, note);
   if (granted === undefined) return jsonError(404, "unknown_badge", "Define the badge first (POST /admin/badges).");
   return json({ granted });
@@ -1050,7 +1659,7 @@ export const handleUserDirectoryRoute = async (
     if (!csv) return json({ count: users.length, users });
     return csvResponse(
       "zeron-users.csv",
-      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges,username,created_org_id",
+      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges,username,created_org_id,onboarding_done",
       users.map((u) => [
         String(u.userNumber),
         u.userId,
@@ -1064,7 +1673,8 @@ export const handleUserDirectoryRoute = async (
         u.deletedAt,
         u.badges.map((b) => b.id).join(";") || null,
         u.username,
-        u.createdOrgId
+        u.createdOrgId,
+        u.onboardingDone.join(";") || null
       ])
     );
   }
@@ -1109,8 +1719,13 @@ export const handleUserDirectoryRoute = async (
       if (!user) return jsonError(400, "bad_request", "Event data must be a WorkOS user.");
       if (event.event !== "user.deleted") return apply(() => directory.upsert(user));
       return apply(async () => {
+        // (Their own photo and images go too: auth-routes.ts keeps them at
+        // avatars/{key}.)
+        const photoKey = await directory.photoKey(user.id);
+        const images = await directory.takeImages(user.id);
         const username = await directory.remove(user, deletedAt);
         if (username) await forgetCard(username);
+        await deleteUserBlobs(env, user.id, photoKey, images);
       });
     }
     case "organization.created":

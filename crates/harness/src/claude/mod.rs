@@ -165,6 +165,7 @@ const SESSION_LOST: &str = "The previous Claude session could not be restored, s
 
 /// The inline `--mcp-config` JSON for an injected server (the CLI accepts a
 /// JSON string as well as a file path).
+#[cfg(test)]
 fn mcp_config_arg(mcp: &zeron_proto::McpServer) -> String {
     serde_json::json!({
         "mcpServers": {
@@ -176,6 +177,30 @@ fn mcp_config_arg(mcp: &zeron_proto::McpServer) -> String {
         }
     })
     .to_string()
+}
+
+/// The inline `--mcp-config` JSON for Zeron's own server plus the plugins'
+/// native servers ([`RunRequest::extra_mcp`]), or `None` when there are none.
+/// Zeron's own server wins a name clash.
+fn mcp_servers_config_arg(
+    mcp: Option<&zeron_proto::McpServer>,
+    extras: &[zeron_proto::McpServer],
+) -> Option<String> {
+    if mcp.is_none() && extras.is_empty() {
+        return None;
+    }
+    let mut servers = serde_json::Map::new();
+    for server in extras.iter().chain(mcp) {
+        servers.insert(
+            server.name.clone(),
+            serde_json::json!({
+                "command": server.command,
+                "args": server.args,
+                "env": server.env,
+            }),
+        );
+    }
+    Some(serde_json::json!({ "mcpServers": servers }).to_string())
 }
 
 /// The `--model` value: the 1M context window is selected via a model-id
@@ -473,11 +498,13 @@ impl ClaudeHarness {
             if !managed_mcp_config() {
                 cmd.arg("--strict-mcp-config");
             }
-        } else if let Some(mcp) = &request.mcp {
-            // Zeron's own server rides beside the user's configured servers
-            // (no `--strict-mcp-config`): the CLI merges an inline JSON
-            // config with settings-sourced ones.
-            cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
+        } else {
+            // Zeron's own server (and the plugins' native ones) ride beside
+            // the user's configured servers (no `--strict-mcp-config`): the
+            // CLI merges an inline JSON config with settings-sourced ones.
+            if let Some(config) = mcp_servers_config_arg(request.mcp.as_ref(), &request.extra_mcp) {
+                cmd.args(["--mcp-config", &config]);
+            }
             // Delegation goes through that server's side chats only. A bare
             // tool name "removes the matching tools from Claude's context"
             // (https://code.claude.com/docs/en/cli-reference), so the model
@@ -486,7 +513,11 @@ impl ClaudeHarness {
             // init frame lists it as `Task`, and `Workflow` runs agents of
             // its own; with the rule, the init frame lists neither `Task`
             // nor `Workflow` (live-verified 2.1.310).
-            if mcp.side_chats_only() {
+            if request
+                .mcp
+                .as_ref()
+                .is_some_and(|mcp| mcp.side_chats_only())
+            {
                 cmd.arg("--disallowedTools=Agent,Task,Workflow");
             }
         }
@@ -901,6 +932,7 @@ impl Harness for ClaudeHarness {
         request.worktree = None;
         request.attachments.clear();
         request.mcp = None;
+        request.extra_mcp.clear();
         request.model_options.clear();
         request.auto_approve = false;
         // Its tools are off and denied: the chat's modes do not apply.
@@ -2217,6 +2249,7 @@ mod tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         let mut cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
         let value = cmd
@@ -2250,6 +2283,7 @@ mod access_tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 
@@ -2465,5 +2499,37 @@ mod mcp_injection_tests {
             parsed["mcpServers"]["zeron"]["env"]["ZERON_CHAT_ID"],
             "chat-1"
         );
+    }
+    #[test]
+    fn mcp_servers_config_arg_adds_plugin_servers_beside_zeron() {
+        let zeron = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: Default::default(),
+        };
+        let extra = zeron_proto::McpServer {
+            name: "plugin-focus".into(),
+            command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
+            args: vec!["--stdio".into()],
+            env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+        };
+        assert_eq!(mcp_servers_config_arg(None, &[]), None);
+        let both: Value = serde_json::from_str(
+            &mcp_servers_config_arg(Some(&zeron), std::slice::from_ref(&extra)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(both["mcpServers"]["zeron"]["command"], "/opt/zeron/zeron");
+        let plugin = &both["mcpServers"]["plugin-focus"];
+        assert_eq!(
+            plugin["command"],
+            "/data/plugins/.loaded/focus/0123/bin/server"
+        );
+        assert_eq!(plugin["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(plugin["env"]["FOCUS"], "1");
+        let only: Value =
+            serde_json::from_str(&mcp_servers_config_arg(None, &[extra]).unwrap()).unwrap();
+        assert!(only["mcpServers"].get("zeron").is_none());
+        assert!(only["mcpServers"].get("plugin-focus").is_some());
     }
 }

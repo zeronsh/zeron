@@ -14,7 +14,7 @@ import { stripPng } from "./png";
 import type { PublicCard } from "./user-directory";
 
 /** Bump when the drawing changes, so every picture is drawn again. */
-export const RENDER_VERSION = 4;
+export const RENDER_VERSION = 6;
 /** Seconds a picture may be served from a browser or X's cache. */
 const IMAGE_TTL_SECONDS = 3600;
 /** Seconds to wait before asking again for a picture that couldn't be drawn. */

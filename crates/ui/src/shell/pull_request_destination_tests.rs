@@ -60,6 +60,7 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
                         state: zeron_proto::ChangeRequestState::Open,
                         base_ref: "main".into(),
                         head_ref: branch,
+                        signals: None,
                     }),
                     updated_at: Utc::now(),
                 });

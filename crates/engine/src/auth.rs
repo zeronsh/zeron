@@ -159,6 +159,44 @@ impl Serialize for AuthState {
 // Config + construction
 // ---------------------------------------------------------------------------
 
+/// Which screen the hosted sign-in opens on (AuthKit's `screen_hint`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenHint {
+    #[serde(rename = "sign-in")]
+    SignIn,
+    #[serde(rename = "sign-up")]
+    SignUp,
+}
+
+/// How a headed sign-in opens (`SignIn {screenHint?, fresh?}`). The default
+/// is the hosted page's own default, exactly as before these existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInOptions {
+    #[serde(default)]
+    pub screen_hint: Option<ScreenHint>,
+    /// Ask afresh (`max_age=0`): the hosted page doesn't go on as the
+    /// account the browser is still signed into.
+    #[serde(default)]
+    pub fresh: bool,
+}
+
+impl SignInOptions {
+    /// What the options add to the authorize URL's query (empty for none).
+    fn query(&self) -> String {
+        let mut query = String::new();
+        match self.screen_hint {
+            Some(ScreenHint::SignIn) => query.push_str("&screen_hint=sign-in"),
+            Some(ScreenHint::SignUp) => query.push_str("&screen_hint=sign-up"),
+            None => {}
+        }
+        if self.fresh {
+            query.push_str("&max_age=0");
+        }
+        query
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     /// Edge base URL (`/auth/*` routes).
@@ -282,6 +320,75 @@ struct AuthInner {
     /// The edge definitively rejected the runner's signed token request
     /// (deleted/revoked device): bearer consumers see `SignedOut`.
     runner_rejected: std::sync::atomic::AtomicBool,
+    /// The step-up ticket of the last interactive sign-in (`stepUp` from
+    /// `/auth/exchange`): proof a person just signed in, which binding a new
+    /// plugin signing key and deleting the account need. Memory only, never
+    /// on disk or over IPC; until it expires (10 min at most).
+    step_up: Mutex<Option<(String, Instant)>>,
+    /// Sign-ins begun as a step-up for the account signed in now
+    /// ([`Auth::start_step_up`]): their exchange keeps the ticket and
+    /// nothing else.
+    step_up_states: Mutex<std::collections::HashSet<String>>,
+    /// [`Auth::on_fresh_ticket`].
+    fresh_ticket: Mutex<Option<FreshTicketHook>>,
+}
+
+/// The longest a step-up ticket is kept.
+const STEP_UP_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long a sign-in waits on what must happen while its ticket is fresh
+/// ([`Auth::on_fresh_ticket`]) before it's announced anyway.
+const FRESH_TICKET_WAIT: Duration = Duration::from_secs(8);
+
+/// What runs when an interactive sign-in (or step-up) brings a fresh ticket,
+/// given the signed-in user's id: before a sign-in is announced, so before
+/// the app restarts the engine and the in-memory ticket is gone.
+pub type FreshTicketHook =
+    Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Why [`Auth::delete_account`] didn't.
+#[derive(Debug)]
+pub enum DeleteAccountError {
+    /// The edge wants a fresh sign-in first ([`Auth::start_step_up`]).
+    StepUpRequired,
+    /// No account is signed in here.
+    SignedOut,
+    /// The edge couldn't be reached (the text says why).
+    Offline(String),
+    /// The edge refused: `invalid` (the address typed isn't the account's),
+    /// `last_admin` (the only admin of `organization`, which others are in),
+    /// `busy` (another admin change is under way: try again), or `upstream`
+    /// (anything else on the edge's side).
+    Refused { code: String, organization: Option<String> },
+}
+
+impl DeleteAccountError {
+    /// Its stable code: `step_up_required`, `signed_out`, `offline`, or the
+    /// edge's (`invalid`, `last_admin`, `busy`, `upstream`).
+    pub fn code(&self) -> &str {
+        match self {
+            DeleteAccountError::StepUpRequired => "step_up_required",
+            DeleteAccountError::SignedOut => "signed_out",
+            DeleteAccountError::Offline(_) => "offline",
+            DeleteAccountError::Refused { code, .. } => code,
+        }
+    }
+}
+
+impl std::fmt::Display for DeleteAccountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeleteAccountError::StepUpRequired => write!(f, "Sign in again to confirm it's you, then delete the account"),
+            DeleteAccountError::SignedOut => write!(f, "Sign in first"),
+            DeleteAccountError::Offline(why) => write!(f, "Zeron couldn't reach its server: {why}"),
+            DeleteAccountError::Refused { code, organization } => match (code.as_str(), organization) {
+                ("invalid", _) => write!(f, "That isn't this account's email address"),
+                ("last_admin", Some(org)) => write!(f, "You're the only admin of {org}: make someone else an admin first"),
+                ("last_admin", None) => write!(f, "You're the only admin of an organization others are in: make someone else an admin first"),
+                ("busy", _) => write!(f, "Another change to your organizations is under way; try again in a moment"),
+                _ => write!(f, "The account couldn't be deleted right now; try again later"),
+            },
+        }
+    }
 }
 
 #[derive(Default)]
@@ -376,6 +483,9 @@ impl Auth {
                 loopback: tokio::sync::Mutex::new(None),
                 runner,
                 runner_rejected: std::sync::atomic::AtomicBool::new(false),
+                step_up: Mutex::new(None),
+                step_up_states: Mutex::new(std::collections::HashSet::new()),
+                fresh_ticket: Mutex::new(None),
             }),
         }
     }
@@ -425,6 +535,11 @@ impl Auth {
             }
         }
         Self::new(config)
+    }
+
+    /// The edge this auth signs in against.
+    pub fn edge_url(&self) -> &str {
+        &self.inner.config.edge_url
     }
 
     pub fn workos_enabled(&self) -> bool {
@@ -577,11 +692,28 @@ impl Auth {
     /// Begin a headed sign-in: returns the AuthKit authorize URL redirecting to our
     /// loopback callback server (bound lazily on an ephemeral port).
     pub async fn start_sign_in(&self) -> Result<String, EngineError> {
+        self.start_sign_in_with(SignInOptions::default()).await
+    }
+
+    /// [`Self::start_sign_in`] with how the hosted page opens: on making an
+    /// account or on signing in, and whether it asks afresh rather than
+    /// going on as the account the browser is already signed into.
+    pub async fn start_sign_in_with(&self, options: SignInOptions) -> Result<String, EngineError> {
         if self.inner.workos.is_none() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)
         }
         let port = self.ensure_loopback().await?;
-        Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback")))
+        Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback"), options))
+    }
+
+    /// The bearer for a local client that calls the edge itself (IPC-only
+    /// `AccessToken`), with its expiry (unix seconds) when the token says.
+    /// Refreshed as [`Self::access_token`] refreshes; the refresh token never
+    /// leaves the engine.
+    pub async fn access_token_with_expiry(&self) -> Result<(String, Option<i64>), TokenError> {
+        let token = self.access_token().await?;
+        let expires_at = jwt_claims(&token).and_then(|claims| claims.exp);
+        Ok((token, expires_at))
     }
 
     /// Begin a headless sign-in: the redirect is the edge's hosted paste-code page —
@@ -591,7 +723,10 @@ impl Auth {
             return String::new();
         }
         let edge = self.inner.config.edge_url.trim_end_matches('/');
-        self.begin_sign_in(&format!("{edge}/auth/cli/callback"))
+        self.begin_sign_in(
+            &format!("{edge}/auth/cli/callback"),
+            SignInOptions::default(),
+        )
     }
 
     /// Finish a headless sign-in with the pasted `state.code` string. The state half
@@ -615,7 +750,122 @@ impl Auth {
             ));
         };
         let result = self.exchange_code(code).await?;
-        self.finish_sign_in(result, generation)
+        self.finish_exchange(state, result, generation).await
+    }
+
+    /// What must run while a sign-in's step-up ticket is fresh (registering
+    /// this device's plugin signing key): awaited, briefly, before the
+    /// sign-in is announced, and again on each step-up.
+    pub fn on_fresh_ticket(&self, hook: FreshTicketHook) {
+        *lock(&self.inner.fresh_ticket) = Some(hook);
+    }
+
+    async fn run_fresh_ticket(&self, user_id: String) {
+        let hook = lock(&self.inner.fresh_ticket).clone();
+        if let Some(hook) = hook
+            && tokio::time::timeout(FRESH_TICKET_WAIT, hook(user_id)).await.is_err()
+        {
+            tracing::warn!("auth: what a fresh sign-in runs took too long; signing in anyway");
+        }
+    }
+
+    /// The step-up ticket of the last interactive sign-in, while it's
+    /// fresh. Not used up here: the edge uses it up when it binds a new key
+    /// or deletes the account.
+    pub fn step_up(&self) -> Option<String> {
+        let mut slot = lock(&self.inner.step_up);
+        match slot.as_ref() {
+            Some((ticket, until)) if Instant::now() < *until => Some(ticket.clone()),
+            _ => {
+                *slot = None;
+                None
+            }
+        }
+    }
+
+    /// Begin a fresh interactive sign-in as the account signed in now, for
+    /// a step-up ticket alone (the session stays as it is). Returns the URL
+    /// to open, as [`Self::start_sign_in`]; a sign-in as anyone else is
+    /// refused when it lands.
+    pub async fn start_step_up(&self) -> Result<String, EngineError> {
+        if self.inner.workos.is_none() || self.user_id().is_none() {
+            return Err(EngineError::Other("Sign in first".into()));
+        }
+        let port = self.ensure_loopback().await?;
+        let url = self.begin_sign_in(
+            &format!("http://127.0.0.1:{port}/callback"),
+            SignInOptions { fresh: true, ..SignInOptions::default() },
+        );
+        if let Some(state) = url.split("&state=").nth(1).and_then(|rest| rest.split('&').next()) {
+            lock(&self.inner.step_up_states).insert(state.to_owned());
+        }
+        Ok(url)
+    }
+
+    /// Delete the signed-in account (`DELETE /auth/me`), with the step-up
+    /// ticket of a fresh sign-in. `confirm`: the account's email, as typed.
+    /// Signed out after.
+    pub async fn delete_account(&self, confirm: &str) -> Result<(), DeleteAccountError> {
+        if self.user_id().is_none() {
+            return Err(DeleteAccountError::SignedOut);
+        }
+        let Some(ticket) = self.step_up() else {
+            return Err(DeleteAccountError::StepUpRequired);
+        };
+        let res = self
+            .authed_send(
+                reqwest::Method::DELETE,
+                "/auth/me",
+                Some(serde_json::json!({ "confirm": confirm, "stepUp": ticket })),
+            )
+            .await
+            .map_err(|e| DeleteAccountError::Offline(e.to_string()))?;
+        let status = res.status().as_u16();
+        if (200..300).contains(&status) {
+            *lock(&self.inner.step_up) = None;
+            let mut sign_in = lock(&self.inner.sign_in);
+            self.clear_session(&mut sign_in);
+            return Ok(());
+        }
+        let body: serde_json::Value = res.json().await.unwrap_or_default();
+        match (status, body["error"].as_str().unwrap_or_default()) {
+            (403, "step_up_required") => {
+                *lock(&self.inner.step_up) = None;
+                Err(DeleteAccountError::StepUpRequired)
+            }
+            (_, code) => Err(DeleteAccountError::Refused {
+                code: match code {
+                    "invalid" | "last_admin" | "busy" => code.to_owned(),
+                    _ => "upstream".to_owned(),
+                },
+                organization: body["organization"].as_str().map(str::to_owned),
+            }),
+        }
+    }
+
+    /// A code exchanged: a step-up keeps its ticket if it's the account
+    /// signed in now (and changes nothing else); a sign-in signs in.
+    async fn finish_exchange(&self, state: &str, result: SignInResult, generation: u64) -> Result<(), EngineError> {
+        if lock(&self.inner.step_up_states).remove(state) {
+            if self.user_id().as_deref() != Some(result.user.id.as_str()) {
+                return Err(EngineError::Other("That was another account: sign in as the one using Zeron here".into()));
+            }
+            let fresh = result.step_up.is_some();
+            self.keep_step_up(result.step_up);
+            if fresh {
+                self.run_fresh_ticket(result.user.id).await;
+            }
+            return Ok(());
+        }
+        let (user, org_id) = self.commit_sign_in(result, generation)?;
+        // While the ticket is in this process: the app restarts the engine
+        // as soon as the sign-in is announced.
+        self.run_fresh_ticket(user.id.clone()).await;
+        self.announce_sign_in(user, org_id, generation)
+    }
+
+    fn keep_step_up(&self, step_up: Option<(String, Duration)>) {
+        *lock(&self.inner.step_up) = step_up.map(|(ticket, ttl)| (ticket, Instant::now() + ttl.min(STEP_UP_TTL)));
     }
 
     pub fn sign_out(&self) {
@@ -632,6 +882,8 @@ impl Auth {
     fn clear_session(&self, sign_in: &mut SignInLifecycle) {
         sign_in.generation = sign_in.generation.wrapping_add(1);
         sign_in.pending.clear();
+        *lock(&self.inner.step_up) = None;
+        lock(&self.inner.step_up_states).clear();
         *lock(&self.inner.stored) = None;
         *lock(&self.inner.access) = None;
         self.retry_refresh();
@@ -722,7 +974,7 @@ impl Auth {
 
     // -- internals ----------------------------------------------------------
 
-    fn begin_sign_in(&self, redirect_uri: &str) -> String {
+    fn begin_sign_in(&self, redirect_uri: &str, options: SignInOptions) -> String {
         let state = uuid::Uuid::new_v4().to_string();
         {
             let mut sign_in = lock(&self.inner.sign_in);
@@ -734,11 +986,12 @@ impl Auth {
         }
         let client_id = self.inner.workos.clone().unwrap_or_default();
         format!(
-            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}",
+            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}{}",
             self.inner.config.workos_api_base.trim_end_matches('/'),
             url_encode(&client_id),
             url_encode(redirect_uri),
-            state
+            state,
+            options.query()
         )
     }
 
@@ -767,10 +1020,20 @@ impl Auth {
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
+        struct StepUp {
+            token: String,
+            /// Epoch ms.
+            #[serde(default)]
+            expires_at: i64,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Exchange {
             user: WireUser,
             access_token: String,
             refresh_token: String,
+            #[serde(default)]
+            step_up: Option<StepUp>,
         }
         let url = format!(
             "{}/auth/exchange",
@@ -815,10 +1078,16 @@ impl Auth {
             },
             access_token: body.access_token,
             refresh_token: body.refresh_token,
+            step_up: body.step_up.filter(|s| !s.token.is_empty()).map(|s| {
+                let left_ms = s.expires_at - chrono::Utc::now().timestamp_millis();
+                let ttl = if s.expires_at > 0 { Duration::from_millis(left_ms.max(0) as u64) } else { STEP_UP_TTL };
+                (s.token, ttl)
+            }),
         })
     }
 
-    fn finish_sign_in(&self, result: SignInResult, generation: u64) -> Result<(), EngineError> {
+    /// Keep a sign-in's credentials (not yet announced): its user and org.
+    fn commit_sign_in(&self, result: SignInResult, generation: u64) -> Result<(AuthUser, Option<String>), EngineError> {
         // Serialize the final commit with sign-out. A callback can consume its
         // OAuth state and spend time exchanging the code; if cancellation wins
         // during that await, its old generation must never restore credentials.
@@ -829,6 +1098,7 @@ impl Auth {
             ));
         }
         let org_id = jwt_claims(&result.access_token).and_then(|c| c.org_id);
+        self.keep_step_up(result.step_up.clone());
         *lock(&self.inner.access) = Some(AccessEntry::fresh(result.access_token));
         let session = StoredSession {
             refresh_token: result.refresh_token,
@@ -838,11 +1108,22 @@ impl Auth {
         self.persist(Some(&session));
         *lock(&self.inner.stored) = Some(session);
         self.retry_refresh();
-        tracing::info!(email = %result.user.email, org = org_id.as_deref().unwrap_or("<none>"),
+        Ok((result.user, org_id))
+    }
+
+    /// Say a committed sign-in is in, unless a sign-out came first.
+    fn announce_sign_in(&self, user: AuthUser, org_id: Option<String>, generation: u64) -> Result<(), EngineError> {
+        let sign_in = lock(&self.inner.sign_in);
+        if sign_in.generation != generation {
+            return Err(EngineError::Other(
+                "sign-in was canceled — start again from Zeron".into(),
+            ));
+        }
+        tracing::info!(email = %user.email, org = org_id.as_deref().unwrap_or("<none>"),
             "auth: signed in");
         self.inner
             .state_tx
-            .send_replace(state_for(result.user, org_id));
+            .send_replace(state_for(user, org_id));
         self.inner
             .token_tx
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
@@ -1310,6 +1591,8 @@ struct SignInResult {
     user: AuthUser,
     access_token: String,
     refresh_token: String,
+    /// The step-up ticket and how long it's good for.
+    step_up: Option<(String, Duration)>,
 }
 
 fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
@@ -1321,6 +1604,27 @@ fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
             org_id: Some(org_id),
         },
         None => AuthState::NeedsOrganization { user },
+    }
+}
+
+/// The session's bearer, whether or not the sign-in is announced yet
+/// ([`Auth::session_bearer`]).
+struct SessionBearer(Auth);
+
+#[async_trait::async_trait]
+impl zeron_rpc::TokenSource for SessionBearer {
+    async fn token(&self) -> Result<String, TokenError> {
+        self.0.access_token().await
+    }
+}
+
+impl Auth {
+    /// A token source for what runs while a sign-in's ticket is fresh
+    /// ([`Auth::on_fresh_ticket`]): the session's bearer, already there
+    /// though the sign-in isn't announced yet (the plain source says signed
+    /// out until it is).
+    pub fn session_bearer(&self) -> Arc<dyn zeron_rpc::TokenSource> {
+        Arc::new(SessionBearer(self.clone()))
     }
 }
 
@@ -1401,7 +1705,7 @@ async fn handle_loopback_conn(
         match (code, state) {
             (Some(code), Some(state)) => match auth.take_pending(state) {
                 Some(generation) => match auth.exchange_code(code).await {
-                    Ok(result) => match auth.finish_sign_in(result, generation) {
+                    Ok(result) => match auth.finish_exchange(state, result, generation).await {
                         Ok(()) => (
                             "200 OK",
                             page("Signed in. You can close this tab and return to Zeron."),

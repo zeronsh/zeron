@@ -47,6 +47,10 @@ pub struct HarnessDescriptor {
     /// Whether this harness honors plan mode.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supports_plan: bool,
+    /// An agent added from the ACP registry: its one-ink SVG icon, for the
+    /// pickers (built-in agents have marks of their own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 impl HarnessDescriptor {
@@ -92,6 +96,7 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
         enabled: None,
         access_modes: harness.access_modes().to_vec(),
         supports_plan: harness.supports_plan(),
+        icon: None,
     }
 }
 
@@ -728,6 +733,61 @@ impl HarnessRegistry {
         }
     }
 
+    /// Registers an agent added from the ACP registry (or replaces its slot,
+    /// once updated): the generic ACP harness, launched from its record.
+    pub fn register_registry_agent(&self, record: &zeron_harness::acp_registry::Record) {
+        let Some(agent) = zeron_proto::RegistryAgent::new(&record.id) else {
+            return;
+        };
+        let name = record.name.clone();
+        let harness = zeron_harness::AcpHarness::registry(agent, &name);
+        let descriptor = HarnessDescriptor {
+            icon: record.icon_svg.clone(),
+            ..describe(&harness)
+        };
+        let id = descriptor.id;
+        let slot = Slot::Lazy {
+            descriptor,
+            installed: Box::new(move || zeron_harness::acp_registry::installed(agent)),
+            factory: Box::new(move || {
+                Ok(Arc::new(zeron_harness::AcpHarness::registry(agent, &name)) as Arc<dyn Harness>)
+            }),
+        };
+        if self.slots().insert(id, slot).is_none() {
+            self.order().push(id);
+        }
+    }
+
+    /// Forgets a registry agent removed from this device.
+    pub fn unregister(&self, id: HarnessId) {
+        if id.registry().is_none() {
+            return;
+        }
+        self.slots().remove(&id);
+        self.order().retain(|h| *h != id);
+        let changed = {
+            let mut prefs = self.prefs();
+            let before = prefs.disabled.len() + prefs.native_subagents_off.len();
+            prefs.disabled.retain(|h| *h != id);
+            prefs.native_subagents_off.retain(|h| *h != id);
+            before != prefs.disabled.len() + prefs.native_subagents_off.len()
+        };
+        if changed {
+            self.persist_prefs();
+        }
+    }
+
+    /// The catalog for a client: registry agents only for one that asked
+    /// for them (`includeRegistry`) — an older client reads harness ids
+    /// strictly and would refuse the whole list over one it doesn't know.
+    pub fn descriptors_for(&self, include_registry: bool) -> Vec<HarnessDescriptor> {
+        let mut list = self.descriptors();
+        if !include_registry {
+            list.retain(|d| d.id.registry().is_none());
+        }
+        list
+    }
+
     pub fn resolve(&self, id: HarnessId) -> Result<Arc<dyn Harness>, HarnessError> {
         let mut slots = self.slots();
         match slots.get(&id) {
@@ -762,6 +822,14 @@ impl HarnessRegistry {
                 };
                 descriptor.enabled = Some(enabled.contains(id));
                 descriptor.can_install = zeron_harness::install::can_install(*id);
+                // An agent from the ACP registry keeps its icon in its record:
+                // a slot resolved since (its first run, a model listing) is
+                // described by its harness, which carries none.
+                if descriptor.icon.is_none()
+                    && let Some(agent) = id.registry()
+                {
+                    descriptor.icon = zeron_harness::acp_registry::record(agent).and_then(|r| r.icon_svg);
+                }
                 Some(descriptor)
             })
             .collect()
@@ -811,6 +879,7 @@ fn full_registry() -> HarnessRegistry {
                 is_error: false,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-2".into(),
@@ -824,6 +893,7 @@ fn full_registry() -> HarnessRegistry {
                 is_error: false,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
             AgentEvent::TextDelta {
                 text: "The `SegmentWriter` appends into `LoroText` so the oplog stays RLE-merged:\n\n```rust\nfolded = fold_event_into_parts(&folded, &event);\nwriter.sync(&folded)?; // 120ms coalesced commits\n```\n\nSynced to every device through the session room. *Mock harness reporting in.*".into(),
@@ -838,6 +908,7 @@ fn full_registry() -> HarnessRegistry {
     }));
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::ClaudeCode,
             name: "Claude Code".into(),
             supports_steering: true,
@@ -869,6 +940,7 @@ fn full_registry() -> HarnessRegistry {
     let codex_cli_identity = registry.codex_cli_identity_handle();
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Codex,
             name: "Codex".into(),
             supports_steering: true,
@@ -900,6 +972,7 @@ fn full_registry() -> HarnessRegistry {
     // CursorHarness exactly. Native step-boundary steering; no effort ladder.
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Cursor,
             name: "Cursor".into(),
             supports_steering: true,
@@ -920,6 +993,7 @@ fn full_registry() -> HarnessRegistry {
     // advertised model ids instead of a `thought_level` option.
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Devin,
             name: "Devin".into(),
             supports_steering: true,
@@ -940,6 +1014,7 @@ fn full_registry() -> HarnessRegistry {
     // session via the `thought_level` config option.
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Grok,
             name: "Grok".into(),
             supports_steering: true,
@@ -964,6 +1039,7 @@ fn full_registry() -> HarnessRegistry {
     // config over ACP today (hybrid reasoning is model-internal).
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Hermes,
             name: "Hermes".into(),
             supports_steering: true,
@@ -980,6 +1056,7 @@ fn full_registry() -> HarnessRegistry {
     );
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Fx,
             name: "fx".into(),
             supports_steering: true,
@@ -997,6 +1074,7 @@ fn full_registry() -> HarnessRegistry {
     // Native Pi RPC. Thinking levels are discovered per model.
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Pi,
             name: "Pi".into(),
             supports_steering: true,
@@ -1018,6 +1096,7 @@ fn full_registry() -> HarnessRegistry {
     // run sends the first advertised variant id for the picked level).
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Opencode,
             name: "OpenCode".into(),
             supports_steering: true,
@@ -1044,6 +1123,7 @@ fn full_registry() -> HarnessRegistry {
     // the ladder lives on each model rather than the harness.
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Antigravity,
             name: "Antigravity".into(),
             supports_steering: true,
@@ -1062,6 +1142,7 @@ fn full_registry() -> HarnessRegistry {
     // pattern: the static descriptor mirrors MuseHarness exactly.
     registry.register_lazy(
         HarnessDescriptor {
+            icon: None,
             id: HarnessId::Muse,
             name: "Muse Code".into(),
             supports_steering: true,
@@ -1086,6 +1167,7 @@ mod tests {
     #[test]
     fn mid_turn_steering_requires_support_and_a_step_boundary() {
         let mut descriptor = HarnessDescriptor {
+            icon: None,
             id: HarnessId::Mock,
             name: "Mock".into(),
             supports_steering: true,
@@ -1115,6 +1197,7 @@ mod tests {
         let counted = calls.clone();
         registry.register_lazy(
             HarnessDescriptor {
+                icon: None,
                 id: HarnessId::Mock,
                 name: "Lazy Mock".into(),
                 supports_steering: true,
@@ -1283,6 +1366,7 @@ mod tests {
     fn test_slot(registry: &HarnessRegistry, id: HarnessId, installed: bool) {
         registry.register_lazy(
             HarnessDescriptor {
+                icon: None,
                 id,
                 name: format!("{id:?}"),
                 supports_steering: true,
@@ -1368,6 +1452,7 @@ mod tests {
         let probe = Arc::clone(&found);
         registry.register_lazy(
             HarnessDescriptor {
+                icon: None,
                 id: HarnessId::Grok,
                 name: "Grok".into(),
                 supports_steering: true,

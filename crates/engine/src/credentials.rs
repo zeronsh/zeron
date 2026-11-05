@@ -1433,10 +1433,23 @@ fn is_github_login(login: &str) -> bool {
 /// when there is none, or when it's a bot's (an agent that configured the
 /// App it pushes as). An identity the user chose stays.
 async fn configure_git_identity(home: &Path, identity: &GitIdentity) {
+    // `git config --global` writes $XDG_CONFIG_HOME/git/config when that file
+    // exists. An XDG_CONFIG_HOME outside `home` belongs to another home (this
+    // process's own, when `home` is a sandbox or a test directory), so `home`'s is
+    // used instead; otherwise the identity lands in that other user's config.
+    // When `home` is this process's own, its XDG_CONFIG_HOME is the user's
+    // wherever it lives: replacing it would hide an identity kept there, and
+    // ~/.gitconfig (which wins over it) would get the machine's.
+    let own_home = std::env::var_os("HOME").is_some_and(|own| Path::new(&own) == home);
+    let xdg_config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|dir| own_home || dir.starts_with(home))
+        .unwrap_or_else(|| home.join(".config"));
     let git = |args: &[&str]| {
         let mut cmd = tokio::process::Command::new("git");
         cmd.args(args)
             .env("HOME", home)
+            .env("XDG_CONFIG_HOME", &xdg_config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -1611,9 +1624,11 @@ mod tests {
     async fn the_machine_identity_never_overrides_the_users_own() {
         let home = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
+            // XDG_CONFIG_HOME too: with the developer's set, `--global` is their real config.
             let out = std::process::Command::new("git")
                 .args(args)
                 .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", home.path().join(".config"))
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .unwrap();

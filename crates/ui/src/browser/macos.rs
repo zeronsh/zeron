@@ -32,6 +32,10 @@ struct BrowserStore {
     profile: Option<super::profile::BrowserProfile>,
     store: Option<Retained<objc2_web_kit::WKWebsiteDataStore>>,
     preview_hosts: std::collections::BTreeSet<String>,
+    /// The local preview proxy's port, as the previews' addresses carry it:
+    /// 7331, unless another engine on this computer holds that and the
+    /// engine's proxy listens elsewhere.
+    preview_port: Option<u16>,
 }
 #[derive(Clone, Default)]
 pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
@@ -80,8 +84,9 @@ impl BrowserData {
                     _ => objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
                 }
             });
+            let port = data.preview_port.unwrap_or(zeron_proto::PREVIEW_PROXY_PORT);
             if let Err(error) =
-                configure_preview_proxy(data.store.as_ref().unwrap(), &data.preview_hosts)
+                configure_preview_proxy(data.store.as_ref().unwrap(), &data.preview_hosts, port)
             {
                 tracing::warn!(%error, "preview hostname proxy unavailable");
             }
@@ -99,18 +104,21 @@ impl BrowserData {
         let Some(host) = url.host_str() else {
             return;
         };
-        if url.scheme() != "http"
-            || url.port() != Some(zeron_proto::PREVIEW_PROXY_PORT)
-            || !host.ends_with(".localhost")
-        {
+        // (A preview's address: a `*.localhost` name on the proxy's port,
+        // whichever the engine's proxy got.)
+        let Some(port) = url.port() else {
+            return;
+        };
+        if url.scheme() != "http" || !host.ends_with(".localhost") {
             return;
         }
         let mut data = self.0.borrow_mut();
-        if !data.preview_hosts.insert(host.into()) {
+        let moved = data.preview_port.replace(port).is_some_and(|was| was != port);
+        if !data.preview_hosts.insert(host.into()) && !moved {
             return;
         }
         if let Some(store) = &data.store {
-            if let Err(error) = configure_preview_proxy(store, &data.preview_hosts) {
+            if let Err(error) = configure_preview_proxy(store, &data.preview_hosts, port) {
                 tracing::warn!(%error, "preview hostname proxy unavailable");
             }
         }
@@ -138,6 +146,7 @@ impl BrowserData {
 fn configure_preview_proxy(
     store: &objc2_web_kit::WKWebsiteDataStore,
     hosts: &std::collections::BTreeSet<String>,
+    port: u16,
 ) -> Result<(), String> {
     if hosts.is_empty() {
         return Ok(());
@@ -170,7 +179,8 @@ fn configure_preview_proxy(
             std::mem::transmute(symbol(c"nw_proxy_config_create_http_connect")?);
         let match_domain: unsafe extern "C" fn(*mut NSObject, *const c_char) =
             std::mem::transmute(symbol(c"nw_proxy_config_add_match_domain")?);
-        let endpoint = Retained::from_raw(endpoint(c"127.0.0.1".as_ptr(), c"7331".as_ptr()))
+        let port = CString::new(port.to_string()).map_err(|_| "Invalid preview port")?;
+        let endpoint = Retained::from_raw(endpoint(c"127.0.0.1".as_ptr(), port.as_ptr()))
             .ok_or("Could not create preview endpoint")?;
         let config = Retained::from_raw(proxy(
             Retained::as_ptr(&endpoint) as *mut _,

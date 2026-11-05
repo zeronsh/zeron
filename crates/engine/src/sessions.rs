@@ -313,6 +313,8 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Plugins whose native MCP servers local runs get (absent in bare tests).
+    plugins: OnceLock<crate::plugins::Plugins>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -362,6 +364,7 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                plugins: OnceLock::new(),
             }),
         }
     }
@@ -384,6 +387,11 @@ impl SessionsEngine {
     /// at dial time, so it follows token rotation across engine restarts.
     pub fn set_ipc_token_file(&self, path: std::path::PathBuf) {
         *lock(&self.inner.ipc_token_file) = Some(path);
+    }
+
+    /// Wire the plugins service: local runs get its native MCP servers.
+    pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
+        let _ = self.inner.plugins.set(plugins);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -507,6 +515,27 @@ impl SessionsEngine {
             .await
             .ok()
             .flatten()
+    }
+
+    /// One chunk of a command's whole output, read from this host's run
+    /// journal and redacted (`ReadToolOutput`, [`crate::tool_output`]).
+    pub async fn read_tool_output(
+        &self,
+        doc_id: &str,
+        tool_id: &str,
+        offset: u64,
+    ) -> Result<zeron_proto::ToolOutputChunk, crate::tool_output::ToolOutputError> {
+        let journal = self.inner.journal.clone();
+        let (doc_id, tool_id) = (doc_id.to_owned(), tool_id.to_owned());
+        tokio::task::spawn_blocking(move || {
+            crate::tool_output::read(&journal, &doc_id, &tool_id, offset)
+        })
+        .await
+        .map_err(|e| {
+            crate::tool_output::ToolOutputError::Journal(crate::run_journal::JournalError::Io(
+                std::io::Error::other(e.to_string()),
+            ))
+        })?
     }
 
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
@@ -1830,6 +1859,7 @@ impl SessionsEngine {
                     resume: None,
                     worktree: None,
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 })
             })?;
         request.prompt = prompt.to_owned();
@@ -1971,6 +2001,7 @@ impl Inner {
                             is_error: true,
                             output: None,
                             diff: None,
+                            exit_code: None,
                         },
                         AgentEvent::Error {
                             message: "Generated image unavailable".into(),
@@ -2232,6 +2263,10 @@ impl Inner {
     /// mcp` subcommand, dialing the engine's IPC port and stamped with the
     /// originating chat + device so the agent's side chats link back here.
     /// None when the engine serves no port or its executable is unknown.
+    ///
+    /// The bearer is the agent-scoped one (`{data_dir}/ipc-token-agent`): it
+    /// reaches what the MCP tools need and nothing that decides, signs,
+    /// updates or hands out credentials ([`zeron_rpc::agent_allowed`]).
     ///
     /// The IPC bearer travels as a file PATH (`ZERON_IPC_TOKEN_FILE`), not as
     /// `ZERON_IPC_TOKEN`: some harnesses hand this env to their CLI on the
@@ -3326,6 +3361,9 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                exit_code,
+                output_truncated,
+                output_lines,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -3344,6 +3382,9 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref: subagent_ref.clone(),
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
+                exit_code: *exit_code,
+                output_truncated: *output_truncated,
+                output_lines: *output_lines,
             },
             other => other.clone(),
         })
@@ -3523,6 +3564,13 @@ async fn drive_run(
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id, side_chats_only);
     }
+    // Plugins' native MCP servers come from this host's own allowed plugins,
+    // run from their verified snapshots — never from what a sender put here.
+    request.extra_mcp = inner
+        .plugins
+        .get()
+        .map(crate::plugins::Plugins::native_mcp_servers)
+        .unwrap_or_default();
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).
@@ -5413,6 +5461,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 

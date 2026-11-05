@@ -24,6 +24,7 @@ zeron-engine.workspace = true
 zeron-rpc.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
+zeron-cli.workspace = true
 zeron-mcp.workspace = true
 zeron-notify.workspace = true
 tokio.workspace = true

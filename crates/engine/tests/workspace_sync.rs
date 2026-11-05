@@ -160,6 +160,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -323,6 +324,39 @@ async fn two_engines_share_a_workspace() {
         "rename + archive on A",
     )
     .await;
+
+    // A project's picture from B (whole, LWW) shows on A; a bad one is
+    // refused and changes nothing.
+    client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "setSpaceIcon", "spaceId": "space-1",
+                "icon": { "emoji": "🚀", "hue": "amber" } }),
+        )
+        .await
+        .expect("set space icon");
+    wait_for(
+        || {
+            a.workspace.read_spaces().unwrap_or_default().iter().any(|s| {
+                s.id == "space-1"
+                    && s.icon.as_ref().is_some_and(|i| i.emoji.as_deref() == Some("🚀") && i.hue.as_deref() == Some("amber"))
+            })
+        },
+        "space icon on A",
+    )
+    .await;
+    assert!(
+        client_b
+            .call(
+                methods::MUTATE,
+                serde_json::json!({ "op": "setSpaceIcon", "spaceId": "space-1",
+                    "icon": { "image": "file:///etc/passwd" } }),
+            )
+            .await
+            .is_err()
+    );
+    let kept = b.workspace.read_spaces().unwrap().into_iter().find(|s| s.id == "space-1").unwrap();
+    assert_eq!(kept.icon.and_then(|i| i.emoji).as_deref(), Some("🚀"));
 
     // Device rename from B visible on A.
     client_b
@@ -703,6 +737,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 checkout_id: Some("co-1".into()),
                 repository_id: None,
                 github_repo: None,
+                icon: None,
                 created_at: now,
             })
             .unwrap();
@@ -723,6 +758,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 harness_session_id: Some("hs-9".into()),
                 room_gen: None,
                 parent_chat_id: None,
+                child_kind: None,
                 harness_session_cwd: Some("/tmp/legacy".into()),
                 harness_session_harness: None,
                 space_id: Some("space-legacy".into()),
