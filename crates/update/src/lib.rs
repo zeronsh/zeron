@@ -683,6 +683,130 @@ fn dir_writable(dir: &Path) -> bool {
     }
 }
 
+/// How this copy of Zeron is installed, as `UpdateStatus` reports it. A client
+/// shows what the device can do from this and `can_apply_remotely`, rather
+/// than guessing from its platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallMethod {
+    /// Installed by the Linux installer and kept running by the service manager.
+    LinuxService,
+    /// Installed on Linux and run by the desktop app.
+    LinuxApp,
+    /// Installed by the Linux installer, but started by hand: nothing would
+    /// start it again after an update.
+    StartedByHand,
+    /// The macOS app.
+    MacApp,
+    /// The Windows installer or portable package.
+    WindowsApp,
+    /// Built from source or copied by hand.
+    Unmanaged,
+    /// A newer engine's method this client doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a device can do about its own updates, for `UpdateStatus`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAbility {
+    pub install: InstallMethod,
+    /// `ApplyUpdate` works from another device.
+    pub can_apply_remotely: bool,
+    /// Why it doesn't, in words for the person.
+    pub cannot_apply_reason: Option<String>,
+    /// What to run on the device instead, when there's a command for it.
+    pub manual_command: Option<String>,
+}
+
+/// The one command that installs Zeron on Linux.
+const LINUX_INSTALL_COMMAND: &str = "curl -fsSL https://zeron.sh/install.sh | sh";
+
+impl UpdateAbility {
+    fn refused(
+        install: InstallMethod,
+        reason: impl Into<String>,
+        manual_command: Option<&str>,
+    ) -> Self {
+        Self {
+            install,
+            can_apply_remotely: false,
+            cannot_apply_reason: Some(reason.into()),
+            manual_command: manual_command.map(str::to_owned),
+        }
+    }
+
+    /// `supervised`: something starts this engine again once it stops (see
+    /// [`running_as_installed_service`]). `systemd`: that something is the
+    /// service manager rather than the desktop app. `blocker`: why the
+    /// installation can't replace itself right now.
+    fn decide(
+        kind: &InstallKind,
+        os: &str,
+        supervised: bool,
+        systemd: bool,
+        blocker: Option<UpdateBlocker>,
+    ) -> Self {
+        match kind {
+            InstallKind::Managed { .. } if os != "linux" => Self::refused(
+                InstallMethod::Unmanaged,
+                "Zeron on a Mac updates through the Zeron app. Install the app on this Mac.",
+                None,
+            ),
+            InstallKind::Managed { .. } if !supervised => Self::refused(
+                InstallMethod::StartedByHand,
+                "Zeron was started by hand on this device, so nothing would start it again \
+                 after an update. Update it on the device, then start it again.",
+                Some("zeron update"),
+            ),
+            InstallKind::Managed { .. } => {
+                let install = if systemd {
+                    InstallMethod::LinuxService
+                } else {
+                    InstallMethod::LinuxApp
+                };
+                match blocker {
+                    Some(blocker) => Self::refused(install, blocker.to_string(), None),
+                    None => Self {
+                        install,
+                        can_apply_remotely: true,
+                        cannot_apply_reason: None,
+                        manual_command: None,
+                    },
+                }
+            }
+            InstallKind::MacApp { .. } => Self::refused(
+                InstallMethod::MacApp,
+                "Zeron on a Mac updates from the Zeron app on that Mac.",
+                None,
+            ),
+            #[cfg(windows)]
+            InstallKind::WindowsPortable { .. } => Self::refused(
+                InstallMethod::WindowsApp,
+                "Zeron on Windows updates from the Zeron app on that PC.",
+                None,
+            ),
+            InstallKind::Unmanaged => Self::refused(
+                InstallMethod::Unmanaged,
+                "This copy of Zeron wasn't installed by the installer, so it can't replace itself.",
+                (os == "linux").then_some(LINUX_INSTALL_COMMAND),
+            ),
+        }
+    }
+
+    /// This process's: how it's installed, and whether it can update from afar.
+    pub fn current() -> Self {
+        let kind = detect_install();
+        Self::decide(
+            &kind,
+            std::env::consts::OS,
+            running_as_installed_service(),
+            MANAGED_RESTART.get().is_none(),
+            kind.desktop_update_blocker(),
+        )
+    }
+}
+
 /// Where this process was installed from, resolved once: an update moves
 /// the running image aside (Windows renames it to `zeron.exe.old`), and a
 /// long-running engine must still recognise the installation it belongs to.
@@ -1202,6 +1326,22 @@ pub struct UpdateStatus {
     /// back a version (beta → stable).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub switch: bool,
+    /// How this copy is installed. Absent from older engines and from the
+    /// desktop app's own checker: unknown, so don't guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<InstallMethod>,
+    /// Whether another device can install the update (`ApplyUpdate`). Absent
+    /// from older engines: they don't say. An older engine refuses
+    /// `ApplyUpdate` itself when it can't, so treat absent as "try, and show
+    /// its refusal", never as a promise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_apply_remotely: Option<bool>,
+    /// Why it can't, in words for the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cannot_apply_reason: Option<String>,
+    /// What to run on the device instead, when there's a command for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_command: Option<String>,
 }
 
 impl UpdateStatus {
@@ -1215,7 +1355,19 @@ impl UpdateStatus {
             channel: None,
             held: None,
             switch: false,
+            install: None,
+            can_apply_remotely: None,
+            cannot_apply_reason: None,
+            manual_command: None,
         }
+    }
+
+    fn with_ability(mut self, ability: UpdateAbility) -> Self {
+        self.install = Some(ability.install);
+        self.can_apply_remotely = Some(ability.can_apply_remotely);
+        self.cannot_apply_reason = ability.cannot_apply_reason;
+        self.manual_command = ability.manual_command;
+        self
     }
 }
 
@@ -1296,7 +1448,12 @@ impl Updater {
             Role::Engine { .. } => current_version().into(),
             Role::Desktop => app_version().into(),
         };
-        let (status_tx, _) = watch::channel(UpdateStatus::initial(&version));
+        let initial = UpdateStatus::initial(&version);
+        let initial = match role {
+            Role::Engine { .. } => initial.with_ability(UpdateAbility::current()),
+            Role::Desktop => initial,
+        };
+        let (status_tx, _) = watch::channel(initial);
         let (wake_tx, _) = watch::channel(0);
         let (shutdown_tx, _) = watch::channel(false);
         let updater = Self {
@@ -1510,6 +1667,14 @@ impl Updater {
                 _ => None,
             },
             switch: offer == Offer::Switch,
+            install: None,
+            can_apply_remotely: None,
+            cannot_apply_reason: None,
+            manual_command: None,
+        };
+        let status = match &*self.role {
+            Role::Engine { .. } => status.with_ability(UpdateAbility::current()),
+            Role::Desktop => status,
         };
         if status.update_available {
             tracing::info!(
@@ -1550,12 +1715,13 @@ impl Updater {
     /// after all network and staging I/O and directly before the destructive
     /// swap/restart boundary; `None` tells the caller to wait and try again.
     async fn apply_inner(&self, require_quiescent: bool) -> anyhow::Result<Option<String>> {
+        let ability = UpdateAbility::current();
         let InstallKind::Managed { app_root } = detect_install() else {
-            bail!(
-                "this install is not update-managed — the desktop app updates from its UI; \
-                 source builds update via git"
-            );
+            bail!("{}", ability.cannot_apply_reason.unwrap_or_default());
         };
+        if !ability.can_apply_remotely {
+            bail!("{}", ability.cannot_apply_reason.unwrap_or_default());
+        }
         let manifest = fetch_latest(&self.edge_url).await?;
         if !version_newer(&manifest.version, current_version()) {
             bail!("already up to date ({})", current_version());
@@ -1683,6 +1849,110 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn managed() -> InstallKind {
+        InstallKind::Managed {
+            app_root: PathBuf::from("/home/me/.zeron/app"),
+        }
+    }
+
+    #[test]
+    fn a_linux_service_can_update_from_afar() {
+        let ability = UpdateAbility::decide(&managed(), "linux", true, true, None);
+        assert_eq!(ability.install, InstallMethod::LinuxService);
+        assert!(ability.can_apply_remotely);
+        assert_eq!(ability.cannot_apply_reason, None);
+        assert_eq!(ability.manual_command, None);
+        let app = UpdateAbility::decide(&managed(), "linux", true, false, None);
+        assert_eq!(app.install, InstallMethod::LinuxApp);
+        assert!(app.can_apply_remotely);
+    }
+
+    #[test]
+    fn what_cant_update_from_afar_says_why_and_what_to_run() {
+        let by_hand = UpdateAbility::decide(&managed(), "linux", false, false, None);
+        assert_eq!(by_hand.install, InstallMethod::StartedByHand);
+        assert!(!by_hand.can_apply_remotely);
+        assert_eq!(by_hand.manual_command.as_deref(), Some("zeron update"));
+
+        let read_only = UpdateAbility::decide(
+            &managed(),
+            "linux",
+            true,
+            true,
+            Some(UpdateBlocker::NotWritable(PathBuf::from("/opt/zeron"))),
+        );
+        assert_eq!(read_only.install, InstallMethod::LinuxService);
+        assert!(!read_only.can_apply_remotely);
+        assert!(read_only.cannot_apply_reason.unwrap().contains("/opt/zeron"));
+
+        let mac = UpdateAbility::decide(
+            &InstallKind::MacApp {
+                bundle: PathBuf::from("/Applications/Zeron.app"),
+            },
+            "macos",
+            true,
+            false,
+            None,
+        );
+        assert_eq!(mac.install, InstallMethod::MacApp);
+        assert!(!mac.can_apply_remotely);
+        assert!(mac.cannot_apply_reason.unwrap().contains("Mac"));
+        assert_eq!(mac.manual_command, None);
+
+        // No macOS headless release exists, whatever the old layout says.
+        let old_mac_service = UpdateAbility::decide(&managed(), "macos", true, true, None);
+        assert_eq!(old_mac_service.install, InstallMethod::Unmanaged);
+        assert!(!old_mac_service.can_apply_remotely);
+
+        let source = UpdateAbility::decide(&InstallKind::Unmanaged, "linux", false, false, None);
+        assert_eq!(source.install, InstallMethod::Unmanaged);
+        assert_eq!(source.manual_command.as_deref(), Some(LINUX_INSTALL_COMMAND));
+        let mac_source = UpdateAbility::decide(&InstallKind::Unmanaged, "macos", false, false, None);
+        assert_eq!(mac_source.manual_command, None);
+    }
+
+    /// An older engine's report has none of the fields; a newer engine's
+    /// method this build doesn't know is `Unknown`, not a parse failure that
+    /// would lose the whole report.
+    #[test]
+    fn older_and_newer_engines_reports_still_read() {
+        let older: UpdateStatus = serde_json::from_value(serde_json::json!({
+            "currentVersion": "0.2.100",
+            "latestVersion": "0.2.136",
+            "updateAvailable": true,
+        }))
+        .unwrap();
+        assert_eq!(older.install, None);
+        assert_eq!(older.can_apply_remotely, None);
+        assert_eq!(older.cannot_apply_reason, None);
+        assert_eq!(older.manual_command, None);
+
+        let newer: UpdateStatus = serde_json::from_value(serde_json::json!({
+            "currentVersion": "0.2.200",
+            "install": "somethingNew",
+            "canApplyRemotely": false,
+        }))
+        .unwrap();
+        assert_eq!(newer.install, Some(InstallMethod::Unknown));
+        assert_eq!(newer.can_apply_remotely, Some(false));
+    }
+
+    #[test]
+    fn the_report_names_its_fields_for_clients() {
+        let status = UpdateStatus::initial("1.0.0").with_ability(UpdateAbility::decide(
+            &managed(),
+            "linux",
+            false,
+            false,
+            None,
+        ));
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["install"], "startedByHand");
+        assert_eq!(value["canApplyRemotely"], false);
+        assert_eq!(value["manualCommand"], "zeron update");
+        assert!(value["cannotApplyReason"].is_string());
+    }
 
     #[tokio::test]
     async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
