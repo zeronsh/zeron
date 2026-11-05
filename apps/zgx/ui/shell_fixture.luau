@@ -1232,6 +1232,15 @@ ui.command {
 		publish()
 	end,
 }
+-- A section named longer than the sidebar is wide.
+ui.command {
+	id = "long_section",
+	title = "A section with a long name",
+	run = function()
+		model.places = { pinned = {}, sections = { { id = "later", name = "Everything to read again before the release goes out on Friday", sessions = { "b2" } } } }
+		publish()
+	end,
+}
 ui.command {
 	id = "fold_elsewhere",
 	title = "Later folded on another device",

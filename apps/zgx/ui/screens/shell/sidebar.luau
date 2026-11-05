@@ -728,14 +728,12 @@ local function connection_line(): Node
 				end
 				return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
 			end),
-			ui.text {
+			ds.FadeText {
 				function(): string
 					local key = CONNECTION[connection() or ""]
 				return if key then locale.s(key) else ""
 				end,
 				grow = 1,
-				min_w = 0,
-				truncate = true,
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
 			},
