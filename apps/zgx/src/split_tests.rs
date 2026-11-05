@@ -146,6 +146,29 @@ fn a_chat_dragged_to_a_chat_s_edge_sits_beside_it_and_is_focused() {
 }
 
 #[test]
+fn command_w_closes_the_right_panel_tab_before_the_focused_split_chat() {
+    let mut app = mount(&scratch("close-tab-before-chat"));
+    open(&mut app, "Fix the build");
+    split_right(&mut app, "Tidy the tests");
+    assert_eq!(panes(&mut app), 2);
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(40);
+    app.click("#panel-open-files");
+    app.frames(30);
+    assert!(app.find("#panel-strip >> role:tab").is_some());
+    app.click("#chat-composer >> role:textbox");
+    app.frames(10);
+    assert!(app.host.run_command("shell.close"));
+    app.frames(30);
+    assert!(app.find("#panel-strip >> role:tab").is_none(), "the panel tab closed");
+    assert_eq!(panes(&mut app), 2, "both split chats remain open");
+    // Once the panel has no tab, the same command closes the focused split.
+    assert!(app.host.run_command("shell.close"));
+    app.frames(30);
+    assert_eq!(panes(&mut app), 0, "one chat remains without split headers");
+}
+
+#[test]
 fn a_click_focuses_a_pane_and_its_close_takes_it_out() {
     let mut app = mount(&scratch("focus"));
     open(&mut app, "Fix the build");

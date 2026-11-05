@@ -351,12 +351,20 @@ local panel_closed = ui.state("test_panel_closed", 0)
 -- Whether the window's layout has room for a file tab's tree beside its file.
 local docked = ui.state("test_panel_docked", true)
 -- The app's ⌘W, as the shell calls it: what the panel answered.
+local visible = ui.state("test_panel_visible", true)
 local closed = ui.state("test_panel_closed_focused", "")
 ui.command {
 	id = "test.close_focused_tab",
 	title = "Close Focused Tab",
 	run = function()
 		closed:set(tostring(Panel.close_focused_tab()))
+	end,
+}
+ui.command {
+	id = "test.close_active_tab",
+	title = "Close Active Tab",
+	run = function()
+		closed:set(tostring(Panel.close_active_tab()))
 	end,
 }
 -- ⌃Tab as the shell calls it: what the panel answered.
@@ -475,6 +483,9 @@ return ui.column {
 			Workspace.forget()
 		end
 		return Panel.Panel {
+			visible = function(): boolean
+				return visible:get()
+			end,
 			session = session,
 			project = { id = "p1", path = "/proj", name = "proj" },
 			left = function(): number
