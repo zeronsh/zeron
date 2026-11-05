@@ -848,6 +848,7 @@
       "fast_mode": "快速模式",
       "default": "默认",
       "reasoning": "推理强度",
+      "account": "账号",
       "model": "模型",
       "search_starred": "搜索已加星标的模型…",
       "search_agent": "搜索 {agent} 模型…",
@@ -2673,6 +2674,7 @@
       }
     },
     "composer": {
+      "account_not_switched": "无法切换账号",
       "placeholder": "随便问，用 @ 提及…",
       "comments": "{n, plural, other {# 条评论}}",
       "edit_conflict": "队列中的消息已更改：你的编辑未保存",

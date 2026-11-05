@@ -916,6 +916,9 @@ local function Composer(): Node
 			end
 		end, function() end)
 	end)
+	local accounts = shared.model_accounts(function(): string?
+		return device:get()
+	end)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -967,6 +970,9 @@ local function Composer(): Node
 			models = function(): { ds.Model }
 				return store.catalog:get().models
 			end,
+			accounts = accounts.accounts,
+			on_account = accounts.on_account,
+			on_accounts_open = accounts.on_accounts_open,
 			-- What its context holds (the ring shows once a window is
 			-- reported, its card saying the numbers).
 			usage = function(): ds.ComposerUsage?
