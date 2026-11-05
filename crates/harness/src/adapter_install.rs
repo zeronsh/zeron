@@ -114,7 +114,7 @@ fn install_dir(pin: &NpmPin) -> Option<PathBuf> {
 
 /// The package's bin entry inside an install dir, from its own package.json
 /// (`bin` as a string, or a map preferring `bin_name`).
-fn bin_entry(dir: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathBuf> {
+pub(crate) fn bin_entry(dir: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathBuf> {
     let pkg_dir = dir.join("node_modules").join(pin.name);
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(pkg_dir.join("package.json")).ok()?).ok()?;
@@ -380,7 +380,7 @@ pub(crate) async fn ensure_installed(
         std::process::id()
     ));
     let cache_dir = root.join(".npm-cache");
-    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name).await;
+    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name, false).await;
     if let Err(e) = install {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
@@ -487,7 +487,7 @@ pub(crate) async fn ensure_installed_shim(
         std::process::id()
     ));
     let cache_dir = root.join(".npm-cache");
-    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name).await;
+    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name, false).await;
     if let Err(e) = install {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
@@ -520,6 +520,7 @@ fn npm_install_plan(
     pin: &NpmPin,
     cache_dir: &Path,
     platform: crate::executable::Platform,
+    ignore_scripts: bool,
 ) -> Result<(PathBuf, Vec<OsString>), HarnessError> {
     let (program, mut args) = if platform == crate::executable::Platform::Windows {
         let node = node_sibling_for_npm(npm, platform).ok_or_else(|| {
@@ -548,16 +549,22 @@ fn npm_install_plan(
         .map(OsString::from),
     );
     args.push(cache_dir.as_os_str().to_owned());
+    if ignore_scripts {
+        // A registry agent's package: its install scripts never run (the
+        // ACP registry quarantines packages that need them).
+        args.push(OsString::from("--ignore-scripts"));
+    }
     args.push(OsString::from(pin.spec()));
     Ok((program, args))
 }
 
-async fn install_into(
+pub(crate) async fn install_into(
     npm: &Path,
     pin: &NpmPin,
     tmp_dir: &Path,
     cache_dir: &Path,
     display_name: &str,
+    ignore_scripts: bool,
 ) -> Result<(), HarnessError> {
     let _ = std::fs::remove_dir_all(tmp_dir);
     std::fs::create_dir_all(tmp_dir)?;
@@ -571,7 +578,7 @@ async fn install_into(
         "installing ACP adapter"
     );
     let (program, args) =
-        npm_install_plan(npm, pin, cache_dir, crate::executable::Platform::current())?;
+        npm_install_plan(npm, pin, cache_dir, crate::executable::Platform::current(), ignore_scripts)?;
     let mut cmd = crate::process::Command::new(&program);
     cmd.args(args)
         .current_dir(tmp_dir)
@@ -865,7 +872,7 @@ mod tests {
         let cache = temp.path().join("cache's Ω & $(echo nope); ^ % !");
         let pin = NpmPin::parse("@scope/tool@1.2.3");
         let (program, args) =
-            npm_install_plan(&npm, &pin, &cache, crate::executable::Platform::Windows).unwrap();
+            npm_install_plan(&npm, &pin, &cache, crate::executable::Platform::Windows, false).unwrap();
         assert_eq!(program, node);
         assert_eq!(args.first(), Some(&npm.into_os_string()));
         assert_eq!(args[1], OsString::from("install"));

@@ -12,12 +12,15 @@ members = [
     "crates/audio",
     "crates/proto",
     "crates/preview",
+    "crates/preview-label",
     "crates/doc",
     "crates/sync",
     "crates/harness",
     "crates/engine",
     "crates/rpc",
     "crates/update",
+    "crates/cli",
+    "crates/launch",
     "crates/ui",
     "crates/notify",
     "crates/syntax",
@@ -30,11 +33,12 @@ members = [
     "crates/visual",
     "crates/visual-gpu",
     "crates/zatex",
+    "crates/plugin-guard",
     "apps/zeron",
 ]
 
 [workspace.package]
-version = "0.2.130"
+version = "0.2.136"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -49,12 +53,15 @@ zeron-voice-media = { path = "crates/voice-media" }
 zeron-audio = { path = "crates/audio" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
+zeron-preview-label = { path = "crates/preview-label" }
 zeron-doc = { path = "crates/doc" }
 zeron-sync = { path = "crates/sync" }
 zeron-harness = { path = "crates/harness" }
 zeron-engine = { path = "crates/engine" }
 zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
+zeron-cli = { path = "crates/cli" }
+zeron-launch = { path = "crates/launch" }
 zeron-ui = { path = "crates/ui" }
 zeron-notify = { path = "crates/notify" }
 zeron-syntax = { path = "crates/syntax" }
@@ -67,9 +74,10 @@ zeron-text = { path = "crates/text" }
 zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
+zeron-plugin-guard = { path = "crates/plugin-guard" }
 
 # CRDT
-loro = "1.13"
+loro = "1.17"
 # Wire protocol for the SessionRoom DO rooms — official Rust twin of the npm
 # `loro-protocol` package the TS edge speaks (same monorepo, byte-identical
 # frames, cross-checked by its js_snapshots tests).
@@ -183,9 +191,23 @@ strip = "symbols"
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
 opt-level = 0
+# Full DWARF was ~90% of every rlib (25 GB of target/debug/deps). Line tables
+# keep file:line in panics and backtraces; for locals in lldb, build with
+# `--profile dev-debug`.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
+
+# `cargo build --profile dev-debug`: dev with full debug info, for lldb.
+# Builds into target/dev-debug.
+[profile.dev-debug]
+inherits = "dev"
+debug = true
+
+[profile.dev-debug.package."*"]
+debug = true
 
 # Scenes rasterize in software every frame the camera moves.
 [profile.dev.package.zeron-visual]

@@ -1,0 +1,27 @@
+[package]
+name = "zeron-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# `zeron`'s command line, shared by the Zeron app, its engine helper and the
+# zgx interface: no engine, no interface. Subcommands that run the engine
+# hand over to the binary that links it, or to the engine helper beside an
+# interface that doesn't (zeron-launch).
+
+[dependencies]
+zeron-launch.workspace = true
+zeron-update.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[dev-dependencies]
+tempfile.workspace = true

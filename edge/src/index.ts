@@ -10,6 +10,13 @@
  *   POST /auth/refresh                — WorkOS refresh → fresh tokens
  *   GET  /auth/orgs                   — caller's active org memberships
  *   POST /auth/orgs                   — create org + admin membership
+ *   POST /auth/orgs/:orgId/invitations — admin invites addresses
+ *   GET|PATCH /auth/me                — the caller's name and email
+ *   PATCH /auth/orgs/:orgId           — admin renames the org
+ *   GET  /auth/orgs/:orgId/members    — members (membership ids, never user ids)
+ *   PATCH|DELETE /auth/orgs/:orgId/members/:membershipId — admin: role / remove
+ *   GET  /auth/orgs/:orgId/invitations — admin: pending + recently expired
+ *   DELETE /auth/orgs/:orgId/invitations/:id, POST …/:id/resend — admin
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
@@ -49,15 +56,26 @@
  *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
  *
  * User directory (user-directory.ts):
- *   POST /workos/webhook                — pre-bearer, WorkOS-signed user.* events
+ *   POST /workos/webhook                — pre-bearer, WorkOS-signed user, org and membership events
  *   GET  /admin/users[?format=csv]      — ADMIN_TOKEN (every user's profile + join date)
+ *   GET  /admin/organizations[?format=csv] — ADMIN_TOKEN (every org with its members)
  *   GET|POST /admin/badges              — ADMIN_TOKEN (list / define badges)
  *   POST /admin/badges/{grant|revoke}   — ADMIN_TOKEN (give or take a badge from users)
+ *   POST /admin/usernames/{set|clear|face} — ADMIN_TOKEN (give or take a username; pick a card's scene and foil)
+ *
+ * Member cards (card-routes.ts):
+ *   GET  /cards/:username               — pre-bearer, a card as JSON
+ *   GET  /c/:username, /@:username      — pre-bearer, a card's page (also routed from zeron.sh)
+ *     (every public card route goes through publicCardGate: per-IP limit, one plain 503)
+ *   GET|POST /username, GET /username/check — user bearer (claim, availability)
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
+import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
+import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
+import { publicCardGate } from "./card-gate";
 import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
@@ -80,6 +98,8 @@ import { sandboxProvider } from "./cloud/providers";
 import { FakeProvider } from "./cloud/providers/fake";
 import { runnerChatGate, runnerDeviceGate } from "./runner-access";
 import { runnerRefusal } from "./runner-policy";
+import { handleOnboardingRoute } from "./onboarding-routes";
+import { handlePluginKeyRoute } from "./plugin-keys";
 import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
 import installSh from "./install.sh";
@@ -146,6 +166,8 @@ export default {
     if (runnerRouted) return runnerRouted;
     const usersRouted = await handleUserDirectoryRoute(request, env, url);
     if (usersRouted) return usersRouted;
+    const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
+    if (cardRouted) return cardRouted;
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
@@ -165,6 +187,13 @@ export default {
       const fake = env.AUTH_MODE === "dev" ? sandboxProvider(env, "fake") : undefined;
       return fake instanceof FakeProvider ? json({ sandboxes: fake.snapshot() }) : json({ error: "not_found" }, 404);
     }
+
+    const usernameRouted = await handleUsernameRoute(request, env, auth, url);
+    if (usernameRouted) return usernameRouted;
+    const onboardingRouted = await handleOnboardingRoute(request, env, auth, url);
+    if (onboardingRouted) return onboardingRouted;
+    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url);
+    if (pluginKeysRouted) return pluginKeysRouted;
 
     const cloudRouted = await handleCloudRoute(request, env, auth, url);
     if (cloudRouted) return cloudRouted;
@@ -346,20 +375,10 @@ export default {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "expected websocket" }, 426);
         }
-        const role = url.searchParams.get("role") === "host" ? "host" : "client";
-        const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
         // Dials never wake a sleeping Cloud session (viewing a chat must not
         // start a billed machine): the dial sees host_offline. Sends do —
         // through the nudge below.
-        // `d2/` — same staging→prod identity break as `s2/` above.
-        return forward(
-          env.DEVICE_ROOMS,
-          `d2/${deviceId}`,
-          request,
-          auth,
-          "/ws",
-          `?role=${role}&connId=${encodeURIComponent(connId)}`
-        );
+        return dialDeviceRoom(env, auth, request, url, deviceId);
       }
       if (parts[2] === "sidecar" && parts[3] && /^[a-z0-9-]{1,64}$/.test(parts[3])) {
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, `/sidecar/${parts[3]}`, "");

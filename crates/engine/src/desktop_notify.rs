@@ -220,6 +220,75 @@ impl Prefs {
     }
 }
 
+/// What a banner asked for by something other than a session (a plugin's,
+/// through `PostNotification`) came to: shown, or why not.
+pub(crate) fn asked_outcome(prefs_enabled: bool, background_only: bool, focused: bool, desktop: bool) -> &'static str {
+    if !desktop {
+        "unavailable"
+    } else if !prefs_enabled {
+        "off"
+    } else if background_only && focused {
+        "held"
+    } else {
+        "posted"
+    }
+}
+
+/// A banner asked for (a plugin's): shown as the engine's own are, under
+/// the same Settings (`notificationsEnabled`, "only when in the
+/// background"), clicking it opening `target` (a session). What it came to.
+pub(crate) fn post_asked(data_dir: &Path, focus: &ViewportFocus, title: &str, body: &str, target: Option<&str>) -> &'static str {
+    let prefs = Prefs::read(data_dir);
+    let outcome = asked_outcome(prefs.enabled, prefs.background_only, focus.any(), enabled());
+    if outcome == "posted" {
+        zeron_notify::post(title, body, target);
+    }
+    outcome
+}
+
+/// A banner a plugin asked for (`PostNotification`, a service's
+/// `zeron.notify`): its body cut to 500 characters, paced per `source` (a
+/// few a minute), then as [`post_asked`]. The outcome word.
+pub(crate) fn post_for(
+    data_dir: &Path,
+    focus: &ViewportFocus,
+    source: &str,
+    title: &str,
+    body: &str,
+    session: Option<&str>,
+) -> &'static str {
+    static PACE: std::sync::LazyLock<Mutex<HashMap<String, std::collections::VecDeque<Instant>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let body: String = body.chars().take(500).collect();
+    let paced = {
+        let mut pace = PACE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        !asked_in_time(pace.entry(source.to_owned()).or_default(), Instant::now())
+    };
+    if paced {
+        return "paced";
+    }
+    let target = session.filter(|s| !s.is_empty() && s.len() <= 200);
+    post_asked(data_dir, focus, title, &body, target)
+}
+
+/// Whether one more banner from a source may show, given when its last
+/// ones did: at most [`ASKED_PER_MINUTE`] a minute, [`ASKED_APART`] apart.
+pub(crate) fn asked_in_time(history: &mut std::collections::VecDeque<Instant>, now: Instant) -> bool {
+    while history.front().is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60)) {
+        history.pop_front();
+    }
+    let apart = history.back().is_none_or(|at| now.duration_since(*at) >= ASKED_APART);
+    if apart && history.len() < ASKED_PER_MINUTE {
+        history.push_back(now);
+        return true;
+    }
+    false
+}
+
+/// Banners a source (a plugin) may show a minute, and how far apart.
+pub(crate) const ASKED_PER_MINUTE: usize = 4;
+pub(crate) const ASKED_APART: Duration = Duration::from_secs(5);
+
 const VERSIONLESS: &str = "versionless";
 
 fn versionless_key(device: &str, harness: zeron_proto::HarnessId) -> String {
@@ -433,6 +502,26 @@ pub(crate) fn spawn(core: &crate::EngineCore, data_dir: PathBuf) -> tokio::task:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_plugin_s_banner_keeps_to_the_settings_and_its_pace() {
+        assert_eq!(asked_outcome(true, false, true, true), "posted");
+        assert_eq!(asked_outcome(true, true, true, true), "held", "only when in the background, and a window is in front");
+        assert_eq!(asked_outcome(true, true, false, true), "posted");
+        assert_eq!(asked_outcome(false, false, false, true), "off");
+        assert_eq!(asked_outcome(true, false, false, false), "unavailable", "a server never shows banners");
+        let mut history = std::collections::VecDeque::new();
+        let t0 = Instant::now();
+        assert!(asked_in_time(&mut history, t0));
+        assert!(!asked_in_time(&mut history, t0 + Duration::from_secs(1)), "too soon after the last");
+        let mut at = t0;
+        for _ in 1..ASKED_PER_MINUTE {
+            at += ASKED_APART;
+            assert!(asked_in_time(&mut history, at));
+        }
+        assert!(!asked_in_time(&mut history, at + ASKED_APART), "a minute's worth");
+        assert!(asked_in_time(&mut history, t0 + Duration::from_secs(61)), "a minute on, one more");
+    }
+
     use super::*;
     use std::sync::{Arc, Mutex};
 

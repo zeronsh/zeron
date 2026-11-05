@@ -1,0 +1,3420 @@
+{
+  "language": {
+    "system": "跟随系统",
+    "en": "English",
+    "zh_hans": "简体中文"
+  },
+  "time": {
+    "now": "现在",
+    "just_now": "刚刚",
+    "yesterday": "昨天",
+    "short": {
+      "seconds": "{n}秒",
+      "minutes": "{n}分",
+      "hours": "{n}时",
+      "days": "{n}天",
+      "weeks": "{n}周",
+      "hours_minutes": "{h}小时{m}分"
+    },
+    "ago": {
+      "minutes": "{n, plural, other {# 分钟前}}",
+      "hours": "{n, plural, other {# 小时前}}",
+      "days": "{n, plural, other {# 天前}}",
+      "weeks": "{n, plural, other {# 周前}}",
+      "months": "{n, plural, other {# 个月前}}",
+      "years": "{n, plural, other {# 年前}}"
+    },
+    "month_short": "{m}月",
+    "weekday_short": "{d, select, 1 {周日} 2 {周一} 3 {周二} 4 {周三} 5 {周四} 6 {周五} 7 {周六} other {}}",
+    "date": "{year}年{m}月{day}日",
+    "month_day": "{m}月{day}日",
+    "date_time": "{date} {time}",
+    "clock_12": "{half, select, am {上午} other {下午}}{h}:{mm}"
+  },
+  "ds": {
+    "status": {
+      "working": "运行中",
+      "connecting": "连接中",
+      "waiting": "等待中",
+      "input": "待输入",
+      "input_long": "等待输入",
+      "approval": "待批准",
+      "approval_long": "等待批准",
+      "plan": "计划已就绪",
+      "plan_long": "计划已就绪",
+      "done": "已完成",
+      "done_long": "已完成",
+      "failed": "失败",
+      "limited": "受限"
+    },
+    "file_tree": {
+      "status": {
+        "modified": "已修改",
+        "added": "已添加",
+        "untracked": "未跟踪",
+        "renamed": "已重命名",
+        "deleted": "已删除",
+        "conflict": "冲突"
+      },
+      "holds": {
+        "modified": "包含已修改的文件",
+        "added": "包含已添加的文件",
+        "untracked": "包含未跟踪的文件",
+        "renamed": "包含已重命名的文件",
+        "deleted": "包含已删除的文件",
+        "conflict": "包含冲突文件"
+      },
+      "name_needed": "请输入名称",
+      "name_slash": "名称不能包含斜杠",
+      "name_reserved": "“{name}”是保留名称",
+      "name_taken_folder": "此文件夹中已有名为“{name}”的文件夹",
+      "name_taken_file": "此文件夹中已有名为“{name}”的文件",
+      "into_itself": "文件夹不能移入自身",
+      "open_new_tab": "在新标签页中打开",
+      "reveal": "在访达中显示",
+      "new_file": "新建文件…",
+      "new_folder": "新建文件夹…",
+      "add_to_chat": "添加到对话",
+      "copy_path": "拷贝路径",
+      "copy_paths": "拷贝路径",
+      "copy_relative_path": "拷贝相对路径",
+      "copy_relative_paths": "拷贝相对路径",
+      "copied": "{n, plural, =1 {已拷贝路径} other {已拷贝 # 个路径}}",
+      "copied_relative": "{n, plural, =1 {已拷贝相对路径} other {已拷贝 # 个相对路径}}",
+      "expand_all_inside": "展开其中所有文件夹",
+      "collapse_all_inside": "收起其中所有文件夹",
+      "rename": "重命名…",
+      "trash": "{n, plural, =1 {移到废纸篓} other {将 # 个项目移到废纸篓}}",
+      "delete": "{n, plural, =1 {删除} other {删除 # 个项目}}",
+      "confirm_trash_one": "将“{name}”移到废纸篓？",
+      "confirm_trash_many": "将 {n} 个项目移到废纸篓？",
+      "confirm_delete_one": "永久删除“{name}”？",
+      "confirm_delete_many": "永久删除 {n} 个项目？",
+      "collapse_all_folders": "收起所有文件夹",
+      "show_ignored_files": "显示已忽略的文件",
+      "new_folder_name": "新文件夹名称",
+      "new_file_name": "新文件名称",
+      "rename_named": "重命名 {name}",
+      "folder_name": "文件夹名称",
+      "file_name": "文件名称",
+      "go_to": "前往 {name}",
+      "filter": "筛选文件",
+      "clear_filter": "清除筛选",
+      "no_match": "没有与“{q}”匹配的文件",
+      "empty": "此文件夹为空",
+      "actions": "文件操作"
+    },
+    "session_lanes": {
+      "open_side": "打开侧边对话 {title}",
+      "open_subagent": "打开子智能体 {title}",
+      "show_more": "再显示 {n} 项",
+      "side_chats": "侧边对话",
+      "new_side": "新建侧边对话",
+      "fork": "分叉对话",
+      "subagents": "子智能体",
+      "collapse_finished": "收起 {n} 个已完成的子智能体",
+      "expand_finished": "展开 {n} 个已完成的子智能体",
+      "finished": "{n} 个已完成"
+    },
+    "session_card": {
+      "ago": "{when}前",
+      "no_project": "无项目"
+    },
+    "working": {
+      "label": "运行中",
+      "sending": "正在发送…",
+      "word": "{word}…",
+      "words": {
+        "zeroning": "归零",
+        "thinking": "思考",
+        "pondering": "琢磨",
+        "scheming": "筹划",
+        "brewing": "酝酿",
+        "weaving": "编织",
+        "tinkering": "捣鼓",
+        "musing": "沉思",
+        "composing": "构思",
+        "sifting": "筛拣",
+        "untangling": "解结",
+        "distilling": "提炼",
+        "sketching": "勾勒",
+        "plotting": "谋划",
+        "riffing": "即兴发挥",
+        "combobulating": "奇思妙想",
+        "percolating": "灵感冒泡",
+        "marinating": "慢慢入味",
+        "noodling": "胡思妙想",
+        "puzzling": "破解谜题",
+        "conjuring": "施展魔法"
+      }
+    },
+    "badge": {
+      "remove": "移除 {name}",
+      "pr": {
+        "open": "打开",
+        "merged": "已合并",
+        "closed": "已关闭",
+        "draft": "草稿",
+        "tooltip": "{state} · {title}",
+        "label": "拉取请求 {n}，{state, select, open {打开} merged {已合并} closed {已关闭} other {草稿}}"
+      },
+      "review": {
+        "approved": "已批准",
+        "changes": "需要修改",
+        "commented": "已评论",
+        "pending": "等待审查"
+      },
+      "checks": {
+        "passing": "检查通过",
+        "failing": "检查失败",
+        "running": "检查运行中"
+      },
+      "file": {
+        "added": "已添加",
+        "modified": "已修改",
+        "deleted": "已删除",
+        "renamed": "已重命名",
+        "untracked": "未跟踪",
+        "conflict": "冲突"
+      },
+      "diff": "新增 {added}，移除 {removed}"
+    },
+    "kbd": {
+      "space": "空格",
+      "spoken": {
+        "command": "Command",
+        "shift": "Shift",
+        "option": "Option",
+        "control": "Control",
+        "return": "Return",
+        "delete": "Delete",
+        "forward_delete": "向前删除",
+        "escape": "Escape",
+        "tab": "Tab",
+        "up": "上箭头",
+        "down": "下箭头",
+        "left": "左箭头",
+        "right": "右箭头"
+      }
+    },
+    "account_row": {
+      "settings": "设置"
+    },
+    "card_actions": {
+      "share_x": "分享到 X",
+      "shared": "已分享",
+      "copy_link": "拷贝链接",
+      "copied": "已拷贝",
+      "save_image": "保存图像",
+      "group": "分享你的名片"
+    },
+    "file_viewer": {
+      "status": {
+        "modified": "已修改",
+        "added": "已添加",
+        "untracked": "未跟踪",
+        "renamed": "已重命名",
+        "deleted": "已删除",
+        "conflict": "冲突",
+        "ignored": "已忽略"
+      },
+      "bytes": "{n} 字节",
+      "image_named": "图像 {name}",
+      "show_in_tree": "在文件树中显示 {name}",
+      "unsaved": "未保存的更改",
+      "zoom_in": "放大",
+      "zoom_out": "缩小",
+      "fit_or_actual": "适合窗口或实际大小",
+      "fit_or_actual_tip": "适合窗口 {fit} · 实际大小 {actual}",
+      "preview_or_source": "预览或源代码",
+      "show": "显示",
+      "preview": "预览",
+      "source": "源代码",
+      "go_to_line": "前往行…",
+      "wrap_lines": "自动换行",
+      "fold_all": "全部折叠",
+      "unfold_all": "全部展开",
+      "fit": "适合窗口",
+      "actual_size": "实际大小",
+      "copy_path": "拷贝路径",
+      "reveal": "在访达中显示",
+      "open_in_editor": "在编辑器中打开",
+      "find": "查找",
+      "deleted_on_disk": "已从磁盘删除",
+      "changed_on_disk": "磁盘上的文件已更改",
+      "keep_mine": "保留我的版本",
+      "choose": "选择文件以在此查看",
+      "hint_filter": "筛选",
+      "hint_move": "移动",
+      "hint_open": "打开",
+      "binary": {
+        "title": "{name} 不是文本",
+        "body_size": "这是一个 {size} 的二进制文件，无法在此读取。",
+        "body": "这是一个二进制文件，无法在此读取。",
+        "open_default": "在默认 App 中打开"
+      },
+      "large": {
+        "title": "{name} 太大，无法在此显示",
+        "body": "文件大小为 {size}。此处可打开不超过 {limit} 的文件；请改用编辑器打开。"
+      },
+      "gone": {
+        "title": "{name} 已删除",
+        "body": "磁盘上已没有此文件。Git 中仍有记录：从上次提交中恢复即可再次查看。"
+      },
+      "error": {
+        "title": "无法打开 {name}",
+        "body": "读取时出错。"
+      },
+      "empty": {
+        "title": "{name} 为空",
+        "body": "其中还没有内容。"
+      },
+      "lines": "{n, plural, other {# 行}}",
+      "toggle_fit": "连按两下以切换适合窗口"
+    },
+    "dropdown": {
+      "placeholder": "选择…",
+      "search_placeholder": "搜索…",
+      "no_matches": "无匹配项",
+      "nothing_matches": "没有与“{query}”匹配的内容"
+    },
+    "select": {
+      "placeholder": "选择…"
+    },
+    "context_menu": {
+      "label": "快捷菜单"
+    },
+    "dialog": {
+      "type_confirm": {
+        "before": "输入",
+        "after": "以确认。",
+        "name": "输入 {word} 以确认"
+      }
+    },
+    "settings": {
+      "nav": {
+        "pages": "设置页面",
+        "resize": "调整侧边栏大小"
+      },
+      "catalog": {
+        "nothing_matches": "没有与“{query}”匹配的内容",
+        "try_another": "试试其他词语，或查看另一个标签页。",
+        "clear_search": "清除搜索"
+      }
+    },
+    "appearance_picker": {
+      "color_scheme": "配色方案",
+      "scheme": {
+        "system": "跟随系统",
+        "light": "浅色",
+        "dark": "深色"
+      },
+      "window": "窗口",
+      "frosted": "毛玻璃",
+      "opaque": "不透明",
+      "frosted_hint": "柔和地透出桌面。",
+      "opaque_hint": "所有表面均不透明。",
+      "accent": "强调色"
+    },
+    "look": {
+      "accent": {
+        "default": "主题默认",
+        "orange": "橙色",
+        "amber": "琥珀色",
+        "green": "绿色",
+        "cyan": "青色",
+        "blue": "蓝色",
+        "pink": "粉色"
+      }
+    },
+    "shortcut_recorder": {
+      "none": "无",
+      "name": "快捷键",
+      "press": "按下快捷键",
+      "press_waiting": "按下快捷键…",
+      "change": "更改{name}，当前为 {keys}"
+    },
+    "stepper": {
+      "decrease": "减小",
+      "increase": "增大"
+    },
+    "split_button": {
+      "more": "更多选项"
+    },
+    "text_field": {
+      "show_password": "显示密码"
+    },
+    "text_area": {
+      "line_over": "第 {line} 行：{length}/{limit}"
+    },
+    "search_field": {
+      "results": "{n, plural, other {{count} 个结果}}"
+    },
+    "progress": {
+      "name": "进度",
+      "value": "{name}，{percent}%",
+      "working": "{name}，运行中"
+    },
+    "slider": {
+      "name_value": "{name}, {value}"
+    },
+    "private_text": {
+      "show_email": "显示电子邮件地址"
+    },
+    "layout": {
+      "breadcrumbs": "路径导航"
+    },
+    "org_list": {
+      "invited": "{from}邀请了你",
+      "decline": "拒绝",
+      "accept": "接受"
+    },
+    "title_bar": {
+      "toggle_sidebar": "切换侧边栏",
+      "forward": "前进"
+    },
+    "address_line": {
+      "checking_label": "正在检查地址",
+      "checking": "正在检查",
+      "available": "可用",
+      "taken": "已被使用"
+    },
+    "files_pane": {
+      "toggle_tree": "切换文件树",
+      "toggle_tree_tip": "切换文件树  {keys}",
+      "close_tree": "关闭文件树"
+    },
+    "code_editor": {
+      "pattern": {
+        "ends_in_backslash": "以 \\ 结尾",
+        "bracket_open": "[ 未闭合",
+        "nothing_to_repeat": "{c} 前没有可重复的内容",
+        "group_repeat": "此处不能重复分组",
+        "no_alternation": "模式中不能使用 |（交替）"
+      },
+      "code": "代码",
+      "no_results": "无结果",
+      "count_of": "第 {cur} 项，共 {total} 项",
+      "match_case": "区分大小写",
+      "whole_word": "全字匹配",
+      "use_pattern": "使用正则表达式",
+      "show_options": "显示选项",
+      "toggle_replace": "切换替换",
+      "find": "查找",
+      "previous_match": "上一个匹配项",
+      "next_match": "下一个匹配项",
+      "close": "关闭",
+      "replace": "替换",
+      "replace_all": "全部替换",
+      "go_to_line_label": "前往行",
+      "line": "行",
+      "line_range": "1 到 {n}",
+      "caret": "第 {line} 行，第 {column} 列",
+      "caret_selected": "第 {line} 行，第 {column} 列（已选择 {n} 个字符）",
+      "go_to_line": "前往行",
+      "edited": "已编辑",
+      "tabs": "制表符",
+      "spaces": "空格：{n}",
+      "wrap": "换行",
+      "no_wrap": "不换行",
+      "toggle_soft_wrap": "切换自动换行",
+      "cut": "剪切",
+      "paste": "粘贴",
+      "select_all": "全选",
+      "add_comment": "添加评论",
+      "go_to_line_menu": "前往行…",
+      "toggle_comment": "切换注释",
+      "move_line_up": "上移行",
+      "move_line_down": "下移行",
+      "duplicate_line": "复制行",
+      "fold": "折叠",
+      "unfold": "展开",
+      "fold_all": "全部折叠",
+      "unfold_all": "全部展开",
+      "soft_wrap": "自动换行"
+    },
+    "sidebar": {
+      "unknown_device": "未知设备",
+      "pr": {
+        "open": "打开",
+        "merged": "已合并",
+        "closed": "已关闭",
+        "draft": "草稿",
+        "tooltip": "{state} · {title}",
+        "tooltip_untitled": "{state}的拉取请求",
+        "label": "拉取请求 {n}，{state, select, open {打开} merged {已合并} closed {已关闭} other {草稿}}"
+      },
+      "subagents_running": "{n, plural, other {# 个子智能体运行中}}",
+      "session_name": "会话名称",
+      "archive": "归档",
+      "unarchive": "取消归档",
+      "session_actions": "会话操作",
+      "projects": "项目",
+      "devices": "设备",
+      "sessions": "会话",
+      "new_chat_in": "在 {name} 中新建对话",
+      "new_chat_in_on": "在 {device} 上的 {name} 中新建对话",
+      "new_chat": "新建对话",
+      "search": "搜索",
+      "pinned": "已置顶",
+      "drop_to_pin": "拖到此处以置顶",
+      "drop_sessions": "将会话拖到此处",
+      "archived": "已归档",
+      "section_options": "分区选项",
+      "rename": "重命名",
+      "archive_all": "全部归档",
+      "delete": "删除",
+      "section_name": "分区名称",
+      "project_actions": "项目操作",
+      "show_more": "再显示 {n} 项",
+      "new_section": "新建分区",
+      "settings": "设置",
+      "view": {
+        "by_project": "按项目",
+        "by_device": "按设备",
+        "none": "无",
+        "last_updated": "上次更新",
+        "created": "创建时间",
+        "branch": "分支",
+        "pr": "拉取请求",
+        "harness": "提供方",
+        "project_icon": "项目图标",
+        "location": "位置",
+        "project_filter": "项目筛选",
+        "archived": "已归档",
+        "options": "侧边栏显示选项",
+        "organize": "整理",
+        "sort": "排序",
+        "show": "显示",
+        "compact": "紧凑",
+        "create_section": "创建分区",
+        "keep_active": "折叠时显示活跃会话",
+        "devices_first": "设备优先",
+        "projects_first": "项目优先",
+        "empty_projects": "空项目"
+      },
+      "empty": "暂无会话",
+      "resize": "调整侧边栏大小",
+      "show_less": "显示更少",
+      "empty_projects_word": "空项目",
+      "empty_projects": "{n, plural, other {# 个空项目}}"
+    },
+    "git": {
+      "pull_request": "拉取请求",
+      "file": "文件",
+      "comment_on_line": "评论第 {n} 行",
+      "comment_on_old_line": "评论旧版本的第 {n} 行",
+      "running": "运行中",
+      "see_what_failed": "查看失败内容",
+      "log": "日志",
+      "check_failed": "{name}失败",
+      "check_running": "{name}运行中",
+      "passed_of": "{total} 项中有 {passed} 项通过",
+      "checks": "检查",
+      "checks_label": "检查：{summary}",
+      "checks_label_called": "检查：{summary}，{called}",
+      "someone": "某人",
+      "pushed": "推送了 {n} 次提交",
+      "pushed_to": "向 {branch} 推送了 {n} 次提交",
+      "commented_on": "评论了",
+      "commented": "发表了评论",
+      "checks_ran": "已对 {sha} 运行检查：{summary}",
+      "checks_ran_called": "已对 {sha} 运行检查：{summary}，{called}",
+      "approved": "已批准",
+      "asked_for_changes": "请求更改",
+      "merged": "已合并",
+      "merged_into": "已合并到 {base}",
+      "split": "左右对照",
+      "wrap": "长行换行",
+      "check_failed_more": "{name} 等 {n} 项未通过",
+      "check_running_more": "{name} 等 {n} 项运行中"
+    },
+    "git_changes": {
+      "files": "{count} {n, plural, other {个文件}}",
+      "files_in_folders": "{folders} 个文件夹中的 {count} {n, plural, other {个文件}}",
+      "files_match": "{total} 个文件中有 {n} 个匹配",
+      "filter": "筛选文件"
+    },
+    "github_block": {
+      "connecting": "正在连接 GitHub",
+      "contacting": "正在联系 GitHub…",
+      "waiting": "等待你在 GitHub 上批准…",
+      "expired": "代码在批准前已过期。",
+      "not_connected": "未连接",
+      "connect": "连接",
+      "disconnect": "断开连接",
+      "copy_code": "拷贝 GitHub 代码 {code}",
+      "enter_code": "在 GitHub 上输入此代码",
+      "approve": "在 GitHub 上批准 Zeron。此页面会自动继续。",
+      "open_github": "打开 GitHub",
+      "repositories": "{n, plural, other {# 个仓库}}",
+      "no_repositories": "尚未选择仓库",
+      "and_more": "{first}及另外 {n} 个",
+      "choose": "在 GitHub 上选择"
+    },
+    "lightbox": {
+      "image_copied": "已拷贝图像",
+      "copy_failed": "无法拷贝图像",
+      "path_copied": "已拷贝路径",
+      "reveal_failed": "无法在访达中显示",
+      "image": "图像",
+      "image_named": "图像 {name}",
+      "previous": "上一张图像",
+      "next": "下一张图像",
+      "zoom_out": "缩小",
+      "zoom_in": "放大",
+      "fit_or_own": "适合窗口或实际大小",
+      "fit_tip": "适合窗口  {fit}  ·  实际大小  {actual}",
+      "copy_image": "拷贝图像",
+      "copy_image_menu": "拷贝图像",
+      "copy_path": "拷贝路径",
+      "show_in_finder": "在访达中显示",
+      "not_shown_named": "无法显示 {name}",
+      "not_shown": "无法显示图片",
+      "gone": "文件已不存在。",
+      "viewer": "图像查看器",
+      "open_named": "打开 {name}",
+      "open": "打开图像",
+      "position": "第 {i} 张，共 {n} 张"
+    },
+    "composer": {
+      "access": {
+        "label": "访问权限",
+        "supervised": "需批准",
+        "supervised_hint": "运行命令和更改文件前先询问。",
+        "edits": "自动接受编辑",
+        "edits_hint": "应用编辑，执行其他操作前先询问。",
+        "full": "完全访问",
+        "full_hint": "运行命令和编辑时不询问。"
+      },
+      "plan": {
+        "mode": "计划模式",
+        "hint": "更改前先探索并提出计划。",
+        "short": "计划"
+      },
+      "checkout": {
+        "label": "检出",
+        "local": "本地检出",
+        "local_hint": "在项目自己的文件夹中工作。",
+        "worktree": "工作树",
+        "worktree_hint": "拥有独立分支的隔离副本。"
+      },
+      "work_in": "工作位置",
+      "project": {
+        "label": "项目",
+        "search": "搜索项目…",
+        "none_action": "不在项目中工作",
+        "new": "新建项目",
+        "none": "无项目"
+      },
+      "device": {
+        "label": "设备",
+        "search": "搜索设备…",
+        "you": "你"
+      },
+      "context_used": "已用上下文",
+      "dismiss": "关闭",
+      "cancel_dictation": "取消听写",
+      "attach": "附加",
+      "stop_dictating": "停止听写",
+      "dictate": "听写",
+      "queue_message": "将消息加入队列",
+      "send_message": "发送消息",
+      "stop": "停止",
+      "back": "返回",
+      "next": "下一步",
+      "submit": "提交",
+      "deny": "拒绝",
+      "always_allow": "始终允许",
+      "allow": "允许",
+      "listening": "正在听取",
+      "placeholder": {
+        "answer_picked": "输入自己的回答，或留空以使用所选选项",
+        "answer": "输入自己的回答，或选择上方的选项",
+        "instead": "或说明要改做什么…",
+        "default": "想做什么都可以…"
+      },
+      "message": "消息",
+      "branch": {
+        "label": "分支",
+        "no_ref": "无引用",
+        "search": "搜索分支…",
+        "fixed": "分支 {name}"
+      },
+      "context": {
+        "heading": "上下文窗口",
+        "percent": "{n}%",
+        "of": "{used} / {window} tokens",
+        "left": "剩余 {n} tokens",
+        "used_only": "已用 {n} tokens",
+        "no_limit": "未报告上下文上限",
+        "capacity": "容量 {n} tokens",
+        "waiting": "正在等待上下文用量",
+        "unreported": "此智能体尚未报告上下文用量"
+      }
+    },
+    "markdown": {
+      "fit_content": "适合内容",
+      "copy_code": "拷贝代码",
+      "copied": "已拷贝",
+      "view_named": "查看 {name}",
+      "done": "完成"
+    },
+    "math": {
+      "style": {
+        "fira": "无衬线",
+        "stix": "类似 Times",
+        "computer_modern": "LaTeX 默认",
+        "libertinus": "书籍衬线体",
+        "pagella": "类似 Palatino",
+        "euler": "直立书法体"
+      }
+    },
+    "tool_detail": {
+      "more_lines": "{n, plural, other {… 还有 # 行}}",
+      "diff_of": "{path} 的差异",
+      "diff_of_file": "文件差异",
+      "show_full": "{what, select, diff {显示完整差异} other {显示完整输出}}",
+      "show_full_size": "{what, select, diff {显示完整差异（{size}）} other {显示完整输出（{size}）}}",
+      "loading_full": "{what, select, diff {正在加载完整差异…} other {正在加载完整输出…}}",
+      "failed_full": "{what, select, diff {无法加载完整差异——点按以重试} other {无法加载完整输出——点按以重试}}",
+      "earlier_trimmed": "… 更早的输出已省略",
+      "exit_code": "退出码 {code}",
+      "loading_all_lines": "正在加载全部 {n} 行…",
+      "whole_offline": "运行此命令的设备已离线。等它重新上线后再试。",
+      "whole_update": "请在运行此命令的设备上更新 Zeron，以查看全部输出。",
+      "whole_unavailable": "此输出的其余部分未被保留。",
+      "whole_running": "此命令尚未完成。",
+      "whole_failed": "无法加载此输出的其余部分。请重试。"
+    },
+    "activity": {
+      "phrase": {
+        "thought": "{n, plural, =1 {思考了} other {思考了 # 次}}",
+        "search": "{n, plural, other {搜索了 # 次}}",
+        "glob": "{n, plural, =1 {列出了文件} other {列出了 # 次文件}}",
+        "read": "{n, plural, other {读取了 # 个文件}}",
+        "exec": "{n, plural, other {运行了 # 条命令}}",
+        "edit": "{n, plural, other {编辑了 # 个文件}}",
+        "write": "{n, plural, other {写入了 # 个文件}}",
+        "web": "{n, plural, =1 {搜索了网页} other {搜索了 # 次网页}}",
+        "todo": "{n, plural, =1 {更新了计划} other {更新了 # 次计划}}",
+        "agent": "{n, plural, other {运行了 # 个子智能体}}"
+      },
+      "failed": "{n} 个失败",
+      "show_fewer_lines": "显示更少行",
+      "show_all_lines": "显示全部 {n} 行",
+      "open_subagent": "打开子智能体 {title}",
+      "subagent": "子智能体",
+      "worked_for": "运行了 {secs} 秒 · {summary}"
+    },
+    "transcript": {
+      "copy_message": "拷贝消息",
+      "switched": "已从 {from} 切换到 {to}",
+      "not_delivered": "未送达——重新发送",
+      "reply": "回复",
+      "you": "你",
+      "agent": "智能体",
+      "several_messages": "多条消息",
+      "two_names": "{first}和{final}",
+      "n_messages": "{n} 条消息",
+      "mention": "提及",
+      "attach": "附加",
+      "mention_hint": "在草稿中提及所选内容",
+      "attach_hint": "将所选内容附加到消息",
+      "conversation": "对话",
+      "jump_to_latest": "跳至最新",
+      "new_reply": "新回复",
+      "display_failed": "无法显示此内容",
+      "image_failed": "无法显示这张图片",
+      "visual_failed": "无法显示这个可视化"
+    },
+    "user_message": {
+      "open_named": "打开 {name}",
+      "appshot_label": "{app} Appshot：{title}",
+      "appshot": "{app} · Appshot",
+      "you": "你",
+      "collapse": "收起消息",
+      "expand": "展开消息",
+      "show_less": "显示更少",
+      "show_more": "显示更多"
+    },
+    "reply_picture": {
+      "not_a_picture": "不是可显示的图片",
+      "gone": "文件已不存在",
+      "not_shown": "无法显示 {name}",
+      "open_named": "打开 {name}",
+      "loading_named": "{name}，正在载入",
+      "unavailable": "图片不可用",
+      "copy_image": "拷贝图片",
+      "copy_image_menu": "拷贝图片",
+      "copy_path": "拷贝路径",
+      "show_in_finder": "在访达中显示",
+      "open": "打开",
+      "actions": "图片操作"
+    },
+    "drop_overlay": {
+      "drop": "松开以附加"
+    },
+    "comment": {
+      "reply_placeholder": "回复…",
+      "reply": "回复",
+      "send_hint": "按 {key} 发送",
+      "comment": "评论",
+      "resolved": "已解决",
+      "resolve": "标记为已解决",
+      "actions": "评论操作"
+    },
+    "inline_block": {
+      "add_comment": "添加评论",
+      "comment": "评论",
+      "placeholder": "添加评论"
+    },
+    "selection_menu": {
+      "look_up": "查询“{text}”",
+      "select_all": "全选",
+      "selection": "所选内容"
+    },
+    "composer_ask": {
+      "question": "问题",
+      "approval": "批准",
+      "close": "关闭而不回答",
+      "close_esc": "关闭而不回答 · Esc",
+      "multi": "选择一个或多个选项。"
+    },
+    "composer_cargo": {
+      "remove": "移除 {name}",
+      "uploading": "正在上传 {n}%",
+      "retry_named": "重试 {name}",
+      "retry": "重试",
+      "annotation": "标注 {n}：{note}",
+      "show_fewer": "显示更少附件",
+      "show_more": "再显示 {n} 个附件",
+      "show_less": "显示更少",
+      "more": "另有 {n} 个",
+      "comment_from": "来自 {plugin}"
+    },
+    "composer_dock": {
+      "fold": "折叠{title}",
+      "open": "打开{title}",
+      "rest": "另外 {n} 项：{names}",
+      "send_now": "立即发送",
+      "steer": "引导",
+      "send_next": "下次发送",
+      "send_now_hint": "立即发送，打断当前轮次",
+      "steer_hint": "引导：在当前轮次中向智能体传话",
+      "send_next_hint": "在下一轮发送",
+      "hint_last": "{what} · {key}",
+      "save_to_queue": "保存到队列",
+      "cancel": "取消",
+      "edit": "编辑",
+      "remove": "移除",
+      "editing": "正在输入框中编辑",
+      "show_steps": "显示{later, select, true {后续} other {之前}}的 {n} 个步骤",
+      "steps": "{later, select, true {后续} other {之前}}的 {n} 个",
+      "stop_named": "停止 {name}",
+      "stop": "停止",
+      "all_done": "全部完成",
+      "dismiss_todos": "关闭待办事项列表",
+      "dismiss": "关闭",
+      "todo": "待办事项",
+      "nothing_running": "没有运行中的项目",
+      "more_running": "另外 {n} 项",
+      "stop_all": "全部停止",
+      "running": "运行中",
+      "queued_messages": "队列中的消息",
+      "queued": "已加入队列"
+    },
+    "composer_mentions": {
+      "files": "文件",
+      "commands": "命令",
+      "skills": "技能",
+      "what": {
+        "files": "文件",
+        "commands": "命令",
+        "skills": "技能"
+      },
+      "none_available": "没有可用的{what}",
+      "none_matching": "没有匹配的{what}"
+    },
+    "model_picker": {
+      "starred": "已加星标",
+      "star": "加星标",
+      "unstar": "移除星标",
+      "fast_mode": "快速模式",
+      "default": "默认",
+      "reasoning": "推理强度",
+      "model": "模型",
+      "search_starred": "搜索已加星标的模型…",
+      "search_agent": "搜索 {agent} 模型…",
+      "search_all": "搜索模型…",
+      "no_starred": "没有已加星标的模型",
+      "no_starred_hint": "为模型加星标以将其保留在此处",
+      "no_models": "没有模型",
+      "none_to_offer": "{agent}没有可用模型",
+      "not_found": "未找到模型",
+      "not_found_hint": "{where}中没有与“{q}”匹配的内容",
+      "where_starred": "已加星标的模型",
+      "where_models": "模型"
+    },
+    "effort_slider": {
+      "reasoning": "推理强度"
+    },
+    "provider_card": {
+      "resets_at": "{when}重置",
+      "usage": "{label}用量",
+      "session": "会话",
+      "week": "周",
+      "account_actions": "账户操作",
+      "switch": "切换到此账户",
+      "use_banked": "使用已储存的重置次数…",
+      "remove": "移除账户",
+      "reset_just_now": "{plan} · 限额刚刚重置",
+      "limit_reached_at": "{plan} · 已达限额，{at}重置",
+      "limit_reached_plan": "{plan} · 已达限额，{words}",
+      "limit_reached": "已达限额，{words}",
+      "window_resets": "{window}：{words}",
+      "windows": "会话 · 周",
+      "account": "账户",
+      "in_use": "使用中",
+      "banked": "{n, plural, =0 {没有已储存的重置} other {已储存 # 次重置}}",
+      "banked_now": "使用一次可立即重置会话和周限额，无需等到 {at}。",
+      "banked_kept": "保留到下次达到限额时使用。",
+      "use_reset": "使用一次重置",
+      "connect": "连接 {name} 账户",
+      "add_account": "添加账户",
+      "signing_in_to": "正在登录 {name}",
+      "signing_in_hint": "等待你在浏览器中完成操作。切换账户前不会更改任何内容。",
+      "signing_in": "正在登录",
+      "cancel": "取消",
+      "paste_code": "粘贴授权码",
+      "paste_code_hint": "登录后，页面会显示一个代码。粘贴代码以完成 {name} 登录。",
+      "code_name": "授权码",
+      "code": "代码",
+      "finish": "完成",
+      "failed": "无法登录 {name}",
+      "failed_hint": "浏览器中的操作未完成。未进行任何更改。",
+      "dismiss": "关闭",
+      "try_again": "重试",
+      "version_available": "v{v} · v{latest} 可用",
+      "update": "更新",
+      "settings": "{name}设置",
+      "enabled": "{name}已开启",
+      "installing_named": "正在安装 {name}",
+      "installing": "正在安装",
+      "install": "安装",
+      "manual": "请自行安装 {name} 以使用。",
+      "unavailable": "无法在{where}检查智能体",
+      "unavailable_hint": "已设置的智能体会继续运行。Zeron 会在可以时再次查找。",
+      "sign_in": "登录 {name}",
+      "sign_in_hint": "在浏览器中打开以登录。",
+      "banked_now_soon": "使用一次可立即重置会话和周限额。",
+      "reset_using": "正在使用重置…",
+      "reset_failed": "无法使用重置",
+      "reset_why": {
+        "mismatch": "Codex 返回的是另一个账户，未使用任何重置。",
+        "signed_out": "Codex 无法确认此登录。请先重新登录。",
+        "missing": "此账户已不再保存在其设备上。",
+        "offline": "Zeron 无法连接到此账户所在的设备。",
+        "failed": "Codex 没有确认。重试不会用掉两次。"
+      },
+      "reset_nothing": "没有需要重置的窗口，因此重置仍保留着。",
+      "reset_gone": "该重置已不可用。",
+      "reset_last": "这是最后一次已储存的重置。",
+      "resets_title": "使用一次 Codex 重置？",
+      "resets_body": "{email} 的会话和周限额将立即重置。只有在有窗口需要时才会用掉一次重置。",
+      "resets_body_hidden": "此账户的会话和周限额将立即重置。只有在有窗口需要时才会用掉一次重置。",
+      "resets_label": "已储存的重置",
+      "reset_option": "{title} · {expires} 到期",
+      "reset_option_soonest": "{title} · {expires} 到期（最早）",
+      "resets_unlisted": "Zeron 暂时无法列出它们。请关闭后稍后再试。",
+      "use_reset_confirm": "使用重置",
+      "open_terminal": "打开终端",
+      "open_page": "再次打开页面",
+      "signed_in": "已登录 {name}",
+      "signed_in_as": "已登录为 {who}。",
+      "signed_in_hint": "它的聊天使用此登录。",
+      "sign_out": "退出登录",
+      "code_check": "请确认此代码与打开的页面上的代码一致，然后在页面上确认。",
+      "use_key": "使用 {method}",
+      "use_key_hint": "为 {name} 粘贴密钥。它保存在此设备上，作为 {var}。",
+      "paste_key": "粘贴你的 {method}",
+      "paste_key_hint": "{name} 以 {var} 读取它。它保存在此设备上，不会再次显示。",
+      "key_name": "{var}",
+      "get_key": "获取密钥",
+      "save_key": "保存"
+    },
+    "command_palette": {
+      "scope": {
+        "all": "全部",
+        "sessions": "会话",
+        "commands": "命令",
+        "files": "文件",
+        "settings": "设置"
+      },
+      "pr": "拉取请求 {n}，{state, select, open {打开} merged {已合并} closed {已关闭} other {草稿}}",
+      "pinned": "已置顶",
+      "recent": "最近",
+      "loading": "正在加载…",
+      "back_from": "从{title}返回",
+      "back_tip": "返回  ⌫",
+      "search": "搜索",
+      "placeholder": "搜索会话、命令和设置…",
+      "next_scope": "下一个范围",
+      "show_all_n": "显示全部 {n} 个{what}",
+      "archived": "已归档",
+      "empty": {
+        "nothing_yet": "这里还没有内容",
+        "nothing_in_scope": "此范围内没有内容",
+        "elsewhere": "其他位置有 {n} 项。按 Delete 搜索全部内容。",
+        "no_matches": "无匹配项",
+        "nothing_in_page": "{title}中没有与“{q}”匹配的内容。按 Delete 返回。",
+        "nothing_matches": "没有与“{q}”匹配的内容。试试标题、项目、分支或设备。"
+      },
+      "verb": {
+        "open": "打开",
+        "show_all": "显示全部",
+        "turn_off": "关闭",
+        "turn_on": "开启",
+        "run": "运行"
+      },
+      "clear": "清除",
+      "back": "返回",
+      "close": "关闭",
+      "navigate": "导航",
+      "label": "命令面板"
+    },
+    "visual": {
+      "untitled": "可视化",
+      "loading": "正在加载{title}…",
+      "unavailable": "无法显示{title}",
+      "stopped": "可视化已停止",
+      "copy_error": "拷贝错误"
+    },
+    "links": {
+      "open": "打开",
+      "open_in_panel": "在浏览器面板中打开",
+      "open_outside": "在默认浏览器中打开",
+      "copy_link": "拷贝链接",
+      "copy_address": "拷贝地址",
+      "copy_path": "拷贝路径",
+      "reveal": "在访达中显示",
+      "copied_link": "已拷贝链接",
+      "link_not_ready": "此聊天的链接尚未就绪"
+    },
+    "emoji_picker": {
+      "search": "搜索表情",
+      "results": "搜索结果",
+      "none": "未找到表情",
+      "none_hint": "换个词试试",
+      "hint": "选择一个表情",
+      "kind": {
+        "recent": "最近使用",
+        "smileys": "笑脸与情感",
+        "people": "人物与身体",
+        "nature": "动物与自然",
+        "food": "食物与饮料",
+        "travel": "旅行与地点",
+        "activities": "活动",
+        "objects": "物品",
+        "symbols": "符号",
+        "flags": "旗帜"
+      },
+      "tone": {
+        "title": "肤色",
+        "default": "默认",
+        "light": "浅肤色",
+        "medium_light": "中等偏浅肤色",
+        "medium": "中等肤色",
+        "medium_dark": "中等偏深肤色",
+        "dark": "深肤色"
+      }
+    },
+    "editor_menu": {
+      "cut": "剪切",
+      "paste": "粘贴",
+      "label": "文本"
+    }
+  },
+  "settings": {
+    "general": {
+      "language": {
+        "label": "语言",
+        "terms": "语言 区域 翻译 中文 简体 英文 language locale translation chinese english",
+        "system": "跟随 Mac 的首选语言。",
+        "chosen": "菜单栏将在下次打开 Zeron 时更改。"
+      },
+      "title": "通用",
+      "terms": "偏好设置 输入框 对话 行为 preferences composer conversations behavior",
+      "send_with": {
+        "label": "发送消息的按键",
+        "terms": "回车 发送 提交 修饰键 键盘 输入框 enter return submit modifier keyboard composer",
+        "enter": "按 Shift Enter 换行。",
+        "mod_enter": "按 Enter 换行。"
+      },
+      "compact_mode": {
+        "label": "紧凑模式",
+        "description": "折叠思考过程和工具。",
+        "terms": "折叠 思考 工具 对话记录 紧凑 密度 collapse thinking tools transcript dense density"
+      },
+      "escape_stops": {
+        "label": "按 Escape 停止智能体",
+        "description": "没有打开对话框或菜单时生效。",
+        "terms": "停止 中断 取消 运行 键盘 esc interrupt cancel halt run keyboard"
+      },
+      "close_panel": {
+        "label": "关闭最后一个标签页时关闭面板",
+        "description": "否则面板会保持打开并显示主页。",
+        "terms": "右侧 面板 标签页 关闭 空"
+      },
+      "privacy": "隐私",
+      "hide_emails": {
+        "label": "隐藏电子邮件地址",
+        "description": "在所有位置模糊显示，方便共享屏幕。点按即可查看。",
+        "terms": "屏幕共享 录屏 模糊 马赛克 隐私 遮盖 screen sharing recording blur blurred mosaic private censor redact"
+      },
+      "links": "链接",
+      "links_in": {
+        "external": "默认浏览器。",
+        "tab": "对话旁边的浏览器标签页。"
+      },
+      "open_links": {
+        "label": "打开链接的位置",
+        "terms": "网页 链接 网址 浏览器 标签页 面板 外部 web link url browser tab panel zeron external"
+      },
+      "pull_requests": {
+        "label": "打开拉取请求的位置",
+        "terms": "拉取请求 徽标 看板 浏览器 pr pull request badges board browser github",
+        "native": "在 Zeron 中查看，显示在对话或拉取请求看板旁边。"
+      },
+      "thread_naming": {
+        "label": "对话命名",
+        "terms": "标题 重命名 会话 模型 titles rename sessions model",
+        "session_agent": "会话智能体",
+        "auto": "每个对话由其智能体命名。",
+        "model": "使用小型模型快速、低成本地生成标题。"
+      },
+      "git": "Git",
+      "git_description": "在此 Mac 上。",
+      "worktrees": {
+        "label": "自定工作树位置",
+        "terms": "文件夹 目录 路径 检出 分支 folder directory path checkout branches",
+        "env": "由 ZERON_WORKTREES_DIR 设置：{path}",
+        "in": "新工作树将放在 {path} 中。",
+        "in_zeron": "新工作树将放在 Zeron 的文件夹中。",
+        "folder": "文件夹",
+        "folder_hint": "按 Enter 使用此位置。",
+        "folder_name": "工作树文件夹"
+      },
+      "commit_credit": {
+        "label": "在提交中注明 Zeron",
+        "terms": "共同作者 署名 机器人 提交消息 co-author coauthor attribution bot commit message",
+        "cloud": "Cloud 始终启用",
+        "on": "智能体的提交会将 zeronsh[bot] 添加为共同作者"
+      }
+    },
+    "engine": {
+      "outdated": "更新此 Mac 上的 Zeron 以更改此设置。",
+      "offline": "Zeron 未在此 Mac 上运行。",
+      "couldnt_save": "无法保存"
+    },
+    "prefs": {
+      "milliseconds": "{n} 毫秒",
+      "seconds": "{n} 秒",
+      "default_browser": "默认浏览器",
+      "send_with": {
+        "enter": "Enter",
+        "mod_enter": "{key}"
+      },
+      "pull_requests": {
+        "native": "拉取请求视图",
+        "browser": "App 内浏览器"
+      }
+    },
+    "search": {
+      "placeholder": "搜索设置",
+      "results": "找到的设置",
+      "empty": "没有匹配的设置。"
+    },
+    "appearance": {
+      "title": "外观",
+      "terms": "主题 外观 颜色 theme look colors",
+      "description": "此 Mac 上 Zeron 的外观。",
+      "motion": "动态效果",
+      "fonts": "字体与布局",
+      "new_chat": "新建对话",
+      "new_chat_description": "新建对话时显示的内容。",
+      "pt": "{n} 磅",
+      "pt_default": "{n} 磅（默认）",
+      "scheme": {
+        "label": "模式",
+        "terms": "配色方案 系统 浅色 深色 模式 color scheme system light dark mode",
+        "description": "浅色、深色或跟随系统。",
+        "system": "跟随系统",
+        "light": "浅色",
+        "dark": "深色"
+      },
+      "theme": {
+        "light": "浅色主题",
+        "dark": "深色主题",
+        "one": "主题",
+        "terms": "主题 配色 颜色 调色板 vscode",
+        "more": "全部主题",
+        "more_description": "浏览所有主题，或从 VS Code 导入。"
+      },
+      "accent": {
+        "label": "强调色",
+        "terms": "色调 高亮 颜色 tint highlight swatch colour"
+      },
+      "reduce_motion": {
+        "label": "减弱动态效果",
+        "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring",
+        "system_on": "Mac 的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
+        "description": "移动立即完成，淡入淡出时间缩短。Mac 的“减弱动态效果”开启时始终启用。"
+      },
+      "glass": {
+        "label": "毛玻璃",
+        "terms": "玻璃 半透明 不透明 透明 模糊 材质 glass translucent opaque transparency blur vibrancy material",
+        "description": "透过窗口显示桌面。关闭时窗口不透明。"
+      },
+      "text_size": {
+        "label": "界面文字大小",
+        "terms": "界面 字体 文字 大小 菜单 对话 放大 缩小 interface font typeface text size menus conversations bigger smaller",
+        "description": "适用于菜单和对话。代码大小可在下方单独设置。"
+      },
+      "code_font_size": {
+        "label": "代码与差异字体大小",
+        "terms": "等宽 字体 编辑器 文件 大小 磅 monospace typeface editor files size points",
+        "description": "适用于代码、差异和文件。"
+      },
+      "conversation_width": {
+        "label": "对话宽度",
+        "terms": "对话记录 消息 输入框 栏 最大 宽 窄 transcript messages composer column maximum wide narrow",
+        "description": "消息和输入框的最大宽度。"
+      },
+      "render_math": {
+        "label": "渲染数学公式",
+        "terms": "公式 方程 数学 渲染 latex tex formula equation markdown katex",
+        "description": "将回复中的 LaTeX 显示为公式。关闭时显示为代码。"
+      },
+      "math_font": {
+        "label": "数学字体",
+        "terms": "公式 方程 字体 数学 latex tex formula equation typeface stix computer modern"
+      },
+      "math_size": {
+        "label": "数学公式大小",
+        "terms": "公式 方程 缩放 百分比 latex tex formula equation scale percent",
+        "description": "相对于公式周围文字的大小。"
+      },
+      "wallpaper": {
+        "label": "墙纸",
+        "terms": "背景 图像 图片 新建对话 插件 场景 background image picture new thread plugin scene",
+        "none": "无",
+        "none_description": "新建对话直接显示窗口本身。",
+        "image_description": "你自己的图片。",
+        "choose_title": "选择背景图片",
+        "images": "图片",
+        "unsupported": "无法显示该图片。请选择 PNG 或 JPEG。",
+        "couldnt_keep": "Zeron 无法保存该图片。请重试。",
+        "image": {
+          "label": "图片",
+          "terms": "背景 图片 照片 选择 替换 移除 调整 缩放 background picture photo choose replace remove adjust zoom",
+          "none": "未选择图片",
+          "missing": "图片不可用。请选择替换图片或将其移除。",
+          "adjust": "调整",
+          "choose": "选择图片",
+          "replace": "替换",
+          "remove": "移除"
+        },
+        "adjust": {
+          "title": "调整背景",
+          "body": "拖动图片调整取景，用滑块放大。",
+          "done": "完成",
+          "preview": "背景预览",
+          "zoom": "缩放"
+        },
+        "from_plugin": "来自 {name}。选择“无”或“图片”以改用你自己的设置。",
+        "open_plugin": "打开 {name}"
+      },
+      "effect": {
+        "label": "效果",
+        "terms": "背景 效果 抖动 半色调 扫描线 background effect dither ascii halftone scanlines",
+        "none": {
+          "label": "无",
+          "description": "显示原始图像。"
+        },
+        "dither": {
+          "label": "抖动",
+          "description": "用抖动色板重建图像。"
+        },
+        "ascii": {
+          "label": "ASCII",
+          "description": "用彩色字符绘制图像的亮部。"
+        },
+        "halftone": {
+          "label": "半色调",
+          "description": "用彩色印刷网点重现图像。"
+        },
+        "scanlines": {
+          "label": "扫描线",
+          "description": "添加明显的水平显示扫描线纹理。"
+        }
+      }
+    },
+    "notifications": {
+      "title": "通知",
+      "terms": "提醒 声音 横幅 alerts sounds banners",
+      "desktop_section": "桌面",
+      "sounds_section": "声音",
+      "desktop": {
+        "label": "桌面通知",
+        "terms": "提醒 横幅 系统 alerts banners system",
+        "description": "运行完成、智能体需要你处理或运行失败时通知。"
+      },
+      "agent_updates": {
+        "label": "智能体更新",
+        "terms": "命令行 横幅 新版本 cli banner new version",
+        "description": "受监视的智能体 CLI 有更新时显示横幅。"
+      },
+      "background_only": {
+        "label": "仅在后台时",
+        "terms": "焦点 后台 focus unfocused",
+        "description": "使用 Zeron 时不显示通知。"
+      },
+      "sounds": {
+        "label": "会话声音",
+        "terms": "音频 提示音 静音 audio chime mute"
+      },
+      "sound_done": {
+        "label": "任务已完成",
+        "terms": "完成 音频 声音 done finished audio sound",
+        "name": "任务完成提示音"
+      },
+      "sound_request": {
+        "label": "需要输入",
+        "terms": "问题 等待 批准 音频 声音 question waiting approval audio sound",
+        "name": "需要输入提示音"
+      },
+      "sound_attention": {
+        "label": "错误和断开连接",
+        "terms": "失败 离线 音频 声音 failure offline audio sound",
+        "name": "错误和断开连接提示音"
+      },
+      "unread": {
+        "title": "无法读取此 Mac 的通知设置",
+        "body": "横幅使用 Zeron 上次保存的设置。请稍后重试。"
+      }
+    },
+    "files": {
+      "title": "文件",
+      "terms": "编辑器 自动保存 换行 隐藏 editor autosave wrap hidden",
+      "description": "会话中文件的编辑和显示方式。",
+      "editor": "编辑器",
+      "tree": "文件树",
+      "autosave": {
+        "label": "自动保存",
+        "terms": "自动 保存 save automatically",
+        "description": "停止输入片刻后保存文件。"
+      },
+      "autosave_delay": {
+        "label": "自动保存延迟",
+        "terms": "延迟 等待 debounce wait",
+        "description": "最后一次按键后的等待时间。"
+      },
+      "word_wrap": {
+        "label": "自动换行",
+        "terms": "自动换行 长行 编辑器 soft wrap long lines editor",
+        "description": "将长行折行以适应编辑器宽度。{key} 仍可切换单个文件的换行设置。"
+      },
+      "show_all": {
+        "label": "显示隐藏和已忽略的文件",
+        "terms": "隐藏文件 忽略 文件树 dotfiles gitignore tree",
+        "description": "显示隐藏文件和项目 .gitignore 排除的文件。"
+      }
+    },
+    "shortcuts": {
+      "title": "快捷键",
+      "terms": "键盘 快捷键 按键 keyboard keybindings hotkeys keys",
+      "row_terms": "快捷键 按键 shortcut keybinding hotkey keys",
+      "description": "常用操作的快捷键。",
+      "empty_title": "暂无快捷键",
+      "empty_body": "添加的 Zeron 快捷键会显示在此处。",
+      "reset": "重置",
+      "reset_label": "将{name}重置为 {keys}",
+      "restore": "恢复默认设置",
+      "recording": "按 Esc 取消。",
+      "taken": "{keys} 已分配给“{name}”。",
+      "appshot": {
+        "section": "Appshots",
+        "label": "捕获 Appshot",
+        "terms": "快捷键 截图 捕获 shortcut hotkey screenshot capture",
+        "description": "其他 App 位于前台时也可使用。在 Appshots 中更改。",
+        "change": "更改"
+      }
+    },
+    "appshots": {
+      "title": "Appshots",
+      "terms": "截取 截图 窗口 应用 快捷键 capture screenshot window app shortcut",
+      "description": "逐项设置权限。屏幕录制用于截取窗口；辅助功能可选，用于添加屏幕外的应用文本。",
+      "capture_section": "截取",
+      "permissions": "权限",
+      "permissions_description": "macOS 会向打开 Zeron 的 App 请求这些权限：可能是 Zeron 本身，也可能是启动它的终端或编辑器。请在“系统设置”→“隐私与安全性”中为该 App 授权，然后退出并重新打开一次。",
+      "ready": "已就绪",
+      "required": "必需",
+      "set_up": "设置",
+      "press": "按下快捷键",
+      "press_now": "按下快捷键…",
+      "change_shortcut": "更改快捷键，当前为 {keys}",
+      "open_system_settings": "打开系统设置",
+      "changed": "更改了权限？返回 Zeron 后再次检查。",
+      "check_again": "再次检查",
+      "enabled": {
+        "label": "截取 Appshots",
+        "terms": "截图 窗口 screenshot window",
+        "description": "截取的内容会设为待提交，供查看，绝不会自动发送。"
+      },
+      "sound": {
+        "label": "截取声音",
+        "terms": "提示音 chime",
+        "description": "Appshot 准备就绪时播放声音。"
+      },
+      "shortcut": {
+        "label": "全局快捷键",
+        "terms": "快捷键 按键 hotkey keys",
+        "ready": "其他应用处于前台时也可使用此快捷键。",
+        "unavailable": "此快捷键不可用。请选择其他组合键。"
+      },
+      "destination": {
+        "label": "目标位置",
+        "terms": "会话 输入框 session composer",
+        "last_description": "使用已打开的会话，或返回上次用于 Appshot 的会话。",
+        "new_description": "在新会话的输入框中将截取内容设为待提交，保留现有草稿。",
+        "automatic_description": "使用已打开的会话；没有打开的会话时使用新会话输入框。",
+        "automatic": "自动",
+        "last": "上次会话",
+        "new": "新建会话"
+      },
+      "capture": {
+        "label": "窗口截取",
+        "terms": "屏幕录制 权限 screen recording permission",
+        "description": "屏幕录制允许 Zeron 截取最前方的窗口。macOS 可能要求重新启动一次。",
+        "allow": "允许截取窗口"
+      },
+      "text": {
+        "label": "应用文本",
+        "terms": "辅助功能 权限 accessibility permission",
+        "description": "辅助功能可添加可见及屏幕外的应用文本。不启用也可以截图。",
+        "allow": "启用文本截取"
+      }
+    },
+    "providers": {
+      "title": "提供方",
+      "terms": "提供方 智能体 命令行 安装 启用 停用 账户 登录 harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse install enable disable accounts sign in login",
+      "agent_settings": "智能体设置",
+      "agents": {
+        "label": "你的智能体",
+        "terms": "账户 登录 用量 套餐 切换 移除 accounts sign in usage plan switch remove"
+      },
+      "native_subagents": {
+        "label": "原生子智能体",
+        "terms": "子智能体 委派 侧边对话 任务 创建 subagent delegate side chats tasks spawn",
+        "description": "关闭时，通过侧边对话委派任务。"
+      },
+      "update_policy": {
+        "label": "更新策略",
+        "terms": "自动 升级 版本 命令行 automatic upgrade version cli"
+      },
+      "skills_dollar": {
+        "label": "使用 $ 选择技能",
+        "terms": "补全 输入框 技能 美元符号 completion composer skill dollar",
+        "description": "在输入框中输入 $ 以选择技能。"
+      },
+      "skills_separate": {
+        "label": "分开 / 命令",
+        "terms": "补全 输入框 斜杠 技能 菜单 completion composer slash skills menu",
+        "description": "不在 / 菜单中显示技能。"
+      },
+      "more": {
+        "label": "更多智能体",
+        "terms": "安装 添加 新建 install add new",
+        "description": "安装后会显示在上方，可随时登录。"
+      },
+      "this_mac": "此 Mac",
+      "couldnt_update": "无法更新 {name}",
+      "cant_reach": "Zeron 无法连接到 {device}。",
+      "try_later": "请稍后重试。",
+      "policy": {
+        "notify": "通知",
+        "auto": "空闲时自动更新",
+        "off": "关闭",
+        "notify_note": "仅在你选择更新时更新。",
+        "auto_note": "没有对话使用它运行时自动更新。",
+        "off_note": "不检查新版本。"
+      },
+      "dialog_body": "位于 {device}。更改立即生效。",
+      "done": "完成",
+      "updates": "更新",
+      "description": "设备上的编码智能体及其登录账户。",
+      "device": "设备",
+      "add": {
+        "row_label": "添加其他智能体",
+        "row_description": "{n, plural, other {ACP 注册表中还有 # 个智能体}}。",
+        "row_description_none": "ACP 注册表中的所有智能体。",
+        "back": "返回{page}",
+        "title": "添加智能体",
+        "description": "{n, plural, other {所有支持 Agent Client Protocol 的智能体：目前共 # 个}}。",
+        "description_none": "所有支持 Agent Client Protocol 的智能体。",
+        "search": "搜索智能体",
+        "built_in": "内置",
+        "added": "已添加",
+        "update_badge": "可更新",
+        "no_match_title": "没有名为“{q}”的智能体",
+        "no_match_body": "试试搜索开发者名称或它的用途。",
+        "clear": "清除搜索",
+        "offline": "Zeron 目前无法连接到注册表：以下是之前的列表。",
+        "unavailable": "无法列出 {device} 上的注册表",
+        "unavailable_hint": "Zeron 目前无法连接到它。请稍后重试。",
+        "try_again": "重试",
+        "gone_title": "注册表中没有此智能体",
+        "gone_body": "它可能已被移出注册表。返回查看现有的智能体。",
+        "fact": {
+          "by": "开发者",
+          "version": "版本",
+          "license": "许可证",
+          "source": "源代码",
+          "runs": "运行方式",
+          "checked": "校验",
+          "models": "模型",
+          "sign_in": "登录"
+        },
+        "runs": {
+          "binary": "从 {host} 下载适用于 {device} 的版本。",
+          "npx": "使用 Node.js 运行，{device} 已安装。",
+          "npx_missing": "需要在 {device} 上安装 Node.js，目前尚未安装。",
+          "uvx": "使用 uv 运行，{device} 已安装。",
+          "uvx_missing": "需要在 {device} 上安装 uv，目前尚未安装。",
+          "none": "没有适用于 {device} 的版本。"
+        },
+        "checked": {
+          "sha": "与注册表发布的校验和比对。",
+          "none": "注册表没有为此版本发布校验和。",
+          "npm": "来自 npm 的 {version} 版本，不运行其安装脚本。",
+          "pypi": "来自 PyPI 的 {version} 版本。"
+        },
+        "models": "添加后使用 {name} 自己的模型。",
+        "sign_in": "在浏览器中，使用你在该服务的账号登录。",
+        "consent": "{name} 会以你的权限在 {device} 上运行。与这里的其他智能体一样，它可以读取和修改项目中的文件并运行命令。",
+        "add": "添加到 {device}",
+        "adding_hint": "这可能需要一分钟。",
+        "added_title": "{name} 已就绪",
+        "added_body": "它已出现在 {device} 的提供方中，并已开启。",
+        "open_providers": "打开提供方",
+        "failed_title": "无法添加 {name}",
+        "failed_offline": "Zeron 无法连接到 {device}。未做任何更改。",
+        "failed_body": "{reason}。{device} 上未做任何更改。",
+        "on_device": "位于 {device}",
+        "installed": "版本 {version}，即注册表中的最新版本。",
+        "outdated": "版本 {version}；注册表中有 {latest}。",
+        "update_to": "更新到 {version}",
+        "remove": "移除",
+        "remove_row": "从 {device} 移除",
+        "remove_title": "要从 {device} 移除 {name} 吗？",
+        "remove_body": "它的安装将被删除。使用过它的对话会保留，重新添加后即可继续。",
+        "couldnt_remove": "无法移除 {name}",
+        "own_row": "运行你自己的智能体",
+        "own_row_description": "你自己构建的，或尚未收录在注册表中的智能体。",
+        "own": {
+          "title": "运行你自己的智能体",
+          "description": "你自己构建的，或尚未收录在注册表中的智能体。它在 {device} 上运行，使用 Agent Client Protocol。",
+          "name": "名称",
+          "name_hint": "在提供方和输入框中显示的名称。",
+          "name_placeholder": "Halcyon 智能体",
+          "command": "命令",
+          "command_hint": "程序及其参数，与在终端中运行时相同。",
+          "env": "环境变量",
+          "env_hint": "每行一个。保存在 {device} 上，不会同步。",
+          "failed": "无法添加你的智能体"
+        },
+        "env": {
+          "label": "环境变量",
+          "description": "启动时使用的变量，每行一个。保存在 {device} 上，不会同步。"
+        },
+        "terminal": {
+          "title": "登录 {name}",
+          "body": "它的登录在 {device} 上运行。回答它的提问，然后选择完成。",
+          "label": "{name} 的登录"
+        },
+        "remove_row_description": "使用过它的对话会保留。"
+      }
+    },
+    "devices": {
+      "title": "设备",
+      "terms": "设备 电脑 远程 此设备 其他设备 重命名 machines computers remote this device other devices rename",
+      "yours": {
+        "label": "你的设备",
+        "terms": "在线 上次在线 版本 系统 online last seen version system"
+      },
+      "rename_one": {
+        "label": "重命名设备",
+        "terms": "名称 重命名 name rename call"
+      },
+      "online": "在线",
+      "offline": "离线",
+      "last_seen": "上次在线：{ago}",
+      "couldnt_rename": "无法重命名",
+      "try_later": "请稍后重试。",
+      "description": "同步会话的电脑。",
+      "empty_title": "暂无设备",
+      "empty_body": "登录以在设备间同步会话。",
+      "this_device": "此设备",
+      "rename": "重命名",
+      "rename_name": "重命名 {name}",
+      "dialog": {
+        "title": "重命名设备",
+        "here": "此 Mac 在其他设备上显示的名称。",
+        "other": "此设备在所有设备上显示的名称。",
+        "field": "设备名称"
+      }
+    },
+    "members": {
+      "title": "成员",
+      "terms": "组织 团队 人员 工作区 席位 organization team people workspace seats",
+      "org_section": "组织",
+      "org_name": {
+        "label": "组织名称",
+        "terms": "重命名 团队 工作区 rename team workspace"
+      },
+      "people": {
+        "label": "成员",
+        "terms": "人员 团队 角色 管理员 移除 people team roles admin remove"
+      },
+      "invite": {
+        "label": "邀请",
+        "terms": "邀请 添加 团队成员 电子邮件 invite add teammates email"
+      },
+      "invitations": {
+        "label": "邀请",
+        "terms": "待处理 重新发送 撤销 邀请 pending resend revoke invites",
+        "description": "每份邀请在被接受或过期前一直有效。"
+      },
+      "admin": "管理员",
+      "member": "成员",
+      "someone": "某人",
+      "more_for": "{name}的更多选项",
+      "you": "你",
+      "role_of": "{name}的角色",
+      "remove_from_org": "从组织中移除",
+      "invited_on": "邀请于 {day} · 成员",
+      "invited": "已邀请 · 成员",
+      "expired": "已过期",
+      "resend": "重新发送",
+      "revoke": "撤销",
+      "couldnt_load": "无法载入成员",
+      "couldnt_load_body": "团队的访问权限未更改。",
+      "nobody": "没有此名称的成员",
+      "nobody_admin": "请检查拼写，或邀请他们。",
+      "nobody_member": "请检查拼写。",
+      "invite_someone": "邀请成员",
+      "bad_address": "有一个地址似乎有误。",
+      "sent": "{n, plural, other {已发送 # 份邀请}}",
+      "sent_body": "他们会收到 Zeron 发来的电子邮件。",
+      "exists_one": "已是成员或已受邀。",
+      "exists_many": "这些人已是成员或已受邀。",
+      "some_failed": "部分邀请未能发送。请检查后重试。",
+      "remove_name": "移除 {name}？",
+      "remove_them": "移除此成员？",
+      "remove_body": "此成员将立即失去对组织的访问权限。他们发起的对话会保留在团队中。",
+      "remove": "移除",
+      "invite_to": "邀请加入 {org}",
+      "invite_teammates": "邀请团队成员",
+      "invite_body": "他们加入后将成为成员，并各自收到 Zeron 发来的电子邮件。",
+      "send_invites": "发送邀请",
+      "addresses": "电子邮件地址",
+      "addresses_hint": "按 Enter 或输入逗号添加下一个地址。",
+      "couldnt_load_org": "无法载入你的组织",
+      "couldnt_load_org_body": "请检查连接，然后重试。",
+      "no_org": "暂无组织",
+      "no_org_body": "重新登录以创建或加入组织。",
+      "name": "名称",
+      "name_admin": "组织中所有人看到的名称。",
+      "name_member": "只有管理员可以重命名。",
+      "everyone_in": "{org}中的所有成员及其在此可执行的操作。",
+      "everyone": "组织中的所有成员。",
+      "find": "查找成员"
+    },
+    "about": {
+      "title": "关于与更新",
+      "terms": "关于 版本 构建 更新 升级 发布 about version build updates upgrade release",
+      "updates_section": "更新",
+      "links_section": "链接",
+      "version": {
+        "label": "版本",
+        "terms": "引擎 版本 构建 关于 zeron engine version build about",
+        "description": "此 Mac 上的引擎。"
+      },
+      "updates": {
+        "label": "检查更新",
+        "terms": "更新 升级 最新 发布 下载 安装 update upgrade newest release download install"
+      },
+      "release_notes": {
+        "label": "版本说明",
+        "terms": "更新日志 新功能 更改 changelog what's new changes",
+        "description": "每个版本的更改内容。"
+      },
+      "website": {
+        "label": "网站",
+        "terms": "网站 主页 zeron.sh home page"
+      },
+      "copy_version": {
+        "label": "拷贝版本信息",
+        "terms": "拷贝 剪贴板 支持 问题报告 copy clipboard support bug report"
+      },
+      "build": "{commit} · {day}",
+      "ago": {
+        "just_now": "刚刚",
+        "minutes": "{n} 分钟前",
+        "hours": "{n, plural, =1 {1 小时前} other {# 小时前}}",
+        "days": "{n, plural, =1 {昨天} other {# 天前}}"
+      },
+      "state": {
+        "checking": "正在检查更新…",
+        "checking_line": "正在查询最新版本。",
+        "updating": "正在更新引擎…",
+        "updating_line": "正在下载并安装 Zeron {version}。",
+        "updated": "已更新到 Zeron {version}",
+        "updated_running": "引擎正在运行新版本。",
+        "updated_starting": "引擎正在以新版本重新启动。",
+        "unmanaged": "从 Zeron App 更新",
+        "unmanaged_line": "此 Mac 的引擎随 Zeron App 安装，由该 App 更新：打开 Zeron 并选择“检查更新”。",
+        "check_again": "再次检查",
+        "couldnt_check": "无法检查更新",
+        "offline_line": "此 Mac 似乎处于离线状态。",
+        "couldnt_update": "无法更新",
+        "failed_line": "出错了。请稍后重试。",
+        "not_connected": "未连接到引擎",
+        "not_connected_line": "引擎运行后会显示 Zeron 版本。",
+        "check": "检查更新",
+        "available": "Zeron {version} 可用",
+        "you_have": "当前版本为 {version}。",
+        "update_engine": "更新引擎",
+        "unreachable_line": "引擎无法连接到版本更新源。",
+        "up_to_date": "Zeron 已是最新版本",
+        "newest_checked": "{version} 是最新版本 · 检查于{ago}",
+        "downloading": "正在下载 Zeron {version}…",
+        "downloading_line": "可以继续工作。",
+        "ready": "Zeron {version} 已准备好",
+        "ready_line": "重新启动即可完成。如果不重新启动，退出 Zeron 时会自动安装。",
+        "restart": "重新启动以更新",
+        "download_failed": "无法下载 Zeron {version}",
+        "held": "暂时无法安装 Zeron {version}",
+        "available_stable": "Zeron {version}（稳定版）可用",
+        "update": "更新",
+        "newest": "{version} 是目前已知的最新版本。"
+      },
+      "description": "查看 Zeron 的版本并保持更新。",
+      "app": {
+        "label": "此 App",
+        "built": "尚未打包 · 构建于 {built}",
+        "not_packaged": "尚未打包。",
+        "packaged": "构建于 {built}"
+      },
+      "beta": {
+        "label": "获取测试版更新",
+        "terms": "测试版 抢先 渠道 稳定版 beta stable",
+        "on": "正在获取测试版更新。关闭即可回到稳定版。",
+        "off": "抢先试用下一版 Zeron。需要 macOS {version} 或更高版本。"
+      },
+      "updates_self_description": "Zeron 会自动更新：新版本在后台下载，重新启动时安装。",
+      "version_info": {
+        "label": "版本信息",
+        "description": "用于问题报告的上述版本和构建信息。",
+        "copied": "已拷贝版本信息"
+      },
+      "updates_description": "更新会应用到此 Mac 上的引擎，与 Zeron App 的更新一样。此 App 尚未打包，因此不会在此更新。"
+    },
+    "archived": {
+      "title": "已归档",
+      "description": "{n, plural, other {# 个会话，恢复前不会显示在侧边栏中。}}",
+      "description_none": "恢复前不会显示在侧边栏中。",
+      "empty_title": "没有已归档的会话",
+      "empty_body": "在侧边栏中的会话菜单中归档会话。",
+      "search": "搜索已归档的会话",
+      "none_match": "没有与“{q}”匹配的已归档会话",
+      "group": {
+        "today": "今天",
+        "yesterday": "昨天",
+        "week": "本周",
+        "earlier": "更早"
+      },
+      "untitled": "未命名会话",
+      "restore": "恢复到侧边栏",
+      "delete_one": "删除…",
+      "delete_all": "全部删除",
+      "delete_all_title": "删除所有已归档的会话？",
+      "sessions": "{n, plural, other {# 个已归档的会话}}",
+      "its_machine": "及其 Cloud 机器",
+      "machines": "{n, plural, other {，以及 # 台 Cloud 机器，}}",
+      "delete_all_body": "{what}将被永久删除。此操作无法撤销。",
+      "couldnt_delete": "{n, plural, other {有 # 个已归档的会话无法删除。请重试。}}",
+      "show_more": "显示更多"
+    },
+    "shell": {
+      "back": "返回对话",
+      "heading": "设置",
+      "group": {
+        "personal": "个人",
+        "devices": "设备",
+        "organization": "组织",
+        "workspace": "工作区",
+        "cloud": "Cloud",
+        "customize": "自定义",
+        "plugins": "插件",
+        "browser": "浏览器"
+      }
+    },
+    "store": {
+      "says": {
+        "refused": "只有组织管理员才能执行此操作。",
+        "self": "无法在此更改你自己的成员身份。",
+        "not_found": "该项目已不存在。",
+        "invalid": "内容似乎有误。",
+        "too_large": "图片太大。请尝试较小的图片。",
+        "last_admin": "你是组织中唯一的管理员。请先将其他人设为管理员。",
+        "busy": "你的组织中有人正在更改角色。请稍后再试。",
+        "try_again": "暂时无法删除你的账户，所有内容均未删除。请稍后再试。",
+        "timed_out": "重新登录超时，所有内容均未删除。请重试。"
+      },
+      "couldnt_save_name": "无法保存你的名称",
+      "couldnt_rename_org": "无法重命名组织",
+      "couldnt_remove": "无法移除 {name}",
+      "couldnt_remove_them": "无法移除该成员",
+      "couldnt_change_role": "无法更改其角色",
+      "couldnt_revoke": "无法撤销邀请",
+      "invitation_resent": "已重新发送邀请",
+      "couldnt_resend": "无法重新发送邀请",
+      "couldnt_save_title": "无法保存你的职位",
+      "couldnt_change_photo": "无法更改你的头像",
+      "couldnt_remove_photo": "无法移除你的头像"
+    },
+    "cloud": {
+      "title": "Cloud",
+      "terms": "云 沙盒 远程 机器 运行 智能体 仓库 用量 额度 cloud sandboxes remote machines run agents github repositories usage credits",
+      "description": "让智能体在各自的机器上处理你的 GitHub 仓库。",
+      "credit": "{number} 额度",
+      "credits": "{number} 额度",
+      "range": {
+        "7d": "过去 7 天",
+        "30d": "过去 30 天",
+        "month": "本月",
+        "last_month": "上个月",
+        "90d": "过去 90 天"
+      },
+      "bar": {
+        "label": "{day}，{credits}",
+        "tooltip": "{day} · {credits}"
+      },
+      "usage": {
+        "title": "用量",
+        "terms": "额度 已使用 消耗 分钟 图表 天 范围 credits used spent minutes chart days range",
+        "description": "Cloud 对话使用的额度。1 额度相当于标准机器运行 1 分钟。",
+        "used": "已使用 {credits}",
+        "reading": "正在读取用量…",
+        "failed": "无法读取用量。Zeron 连接到 Cloud 后将显示。",
+        "out": "额度已用完。请在账单中添加额度。",
+        "left": "剩余 {credits}",
+        "range_name": "用量范围"
+      },
+      "github": {
+        "terms": "连接 断开连接 账户 克隆 推送 connect disconnect account clone push",
+        "description": "Cloud 对话通过 GitHub 克隆你的仓库并推送其分支。"
+      },
+      "repos": {
+        "title": "仓库",
+        "terms": "仓库 选择 GitHub App 安装 私有 repos choose github app install private",
+        "description": "这些仓库上的项目可以在 Cloud 上运行。请在 GitHub 上选择。",
+        "refresh": "再次检查仓库",
+        "checking": "正在检查仓库…",
+        "none": "暂无仓库",
+        "none_description": "选择 Cloud 对话可以打开的仓库。",
+        "choose": "在 GitHub 上选择",
+        "private": "私有",
+        "more": "及另外 {n} 个"
+      },
+      "unreachable": {
+        "title": "无法检查 Cloud",
+        "outdated": "此版本的 Zeron 尚无法管理 Cloud。请在“关于”中更新。",
+        "failed": "Zeron 无法连接到 Cloud。请稍后重试。"
+      },
+      "attention": {
+        "title": "Cloud 需要处理",
+        "failed": "Cloud 出错了。"
+      }
+    },
+    "billing": {
+      "title": "账单",
+      "terms": "账单 付款 额度 套餐 订阅 购买 发票 billing payment stripe credits plan subscription purchase invoice",
+      "description": "额度用于运行你的 Cloud 对话。",
+      "hours": "约 {n} 小时",
+      "try_later": "请稍后重试。",
+      "changed": {
+        "plan": "你使用的是 {plan}：每月 {credits}",
+        "ended": "你的套餐已结束",
+        "wont_renew": "你的套餐将不再续订",
+        "will_renew": "你的套餐将续订",
+        "added": "已添加 {credits}"
+      },
+      "plan_line": {
+        "past_due": "上次付款未成功。请更新银行卡以保留套餐。",
+        "ends": "于 {date} 结束。在此之前可继续使用套餐额度。",
+        "renews": "于 {date} 续订。"
+      },
+      "stripe_failed": "无法打开 Stripe 页面",
+      "credits": {
+        "title": "额度",
+        "terms": "余额 剩余 每月 额外 小时 balance left remaining monthly extra hours",
+        "description": "Cloud 对话可使用的额度。1 额度相当于标准机器运行 1 分钟。",
+        "none": "选择套餐或购买额度以运行 Cloud 对话。",
+        "unit": "{n, plural, other {额度}}",
+        "split": "套餐额度 {plan}，额外额度 {extra}",
+        "plan_label": "套餐额度",
+        "no_plan": "暂无套餐。请在下方选择。",
+        "of_resets": "总计 {total} · {date}重置",
+        "of": "总计 {total}",
+        "extra_label": "额外额度",
+        "extra_description": "永不过期。套餐额度用完后使用。"
+      },
+      "plan": {
+        "title": "套餐",
+        "terms": "订阅 基础 专业 最高级 每月 价格 管理 取消 续订 subscription subscribe base pro max monthly price manage cancel renew",
+        "description": "套餐额度每月发放，月底到期。",
+        "current_plan": "当前套餐",
+        "switch": "切换",
+        "choose": "选择 {plan}",
+        "card_name": "{plan} 套餐",
+        "current": "当前",
+        "per_month": "/ 每月",
+        "a_month": "每月 {credits}",
+        "current_row": "{plan} · 每月 {price}",
+        "manage": "管理订阅"
+      },
+      "extra": {
+        "title": "额外额度",
+        "terms": "购买 额度包 充值 永不过期 buy purchase packs top up never expire",
+        "description": "一次购买，永不过期，套餐额度用完后使用。",
+        "packs": "{n, plural, other {# 个额度包}} · {hours}",
+        "packs_name": "额度包",
+        "buy": "以 {price} 购买"
+      },
+      "load_failed": "无法载入账单",
+      "unavailable": {
+        "title": "目前无法在此购买套餐和额度",
+        "body": "你的额度仍会显示在此处。"
+      },
+      "pending": {
+        "title": "在浏览器中完成",
+        "body": "完成后此页面会更新。"
+      }
+    },
+    "profile": {
+      "title": "账户",
+      "terms": "账户 个人资料 你 我 卡片 会员 登录 account profile you me card member sign in",
+      "description_org": "你在 {org} 中向所有人展示的资料。",
+      "description_team": "你向团队展示的资料。",
+      "photo": {
+        "label": "头像",
+        "terms": "头像 照片 图片 avatar picture image",
+        "own": "在 Zeron 中显示在你的名称旁。",
+        "from_sign_in": "来自你登录时使用的账户。",
+        "avatar": "你的头像",
+        "change": "更改",
+        "choose": "选择头像",
+        "images": "图像",
+        "open_failed": "无法打开该图片",
+        "open_failed_body": "Zeron 无法将其读取为 PNG 或 JPEG。",
+        "preview": "头像的显示效果",
+        "zoom": "缩放"
+      },
+      "crop": {
+        "title": "你的头像",
+        "body": "拖动以调整位置，缩放以填满圆形。",
+        "confirm": "使用头像"
+      },
+      "name": {
+        "label": "名称",
+        "terms": "显示名称 名字 姓氏 重命名 display name first last rename",
+        "description": "团队成员对你的称呼，会显示在会员卡上。",
+        "empty": "请填写名称，方便团队成员称呼你。",
+        "too_long": "名称太长。"
+      },
+      "job_title": {
+        "label": "职位",
+        "terms": "工作 角色 职位 职责 job role position what you do",
+        "description": "显示在你的名称下方。",
+        "placeholder": "你的工作",
+        "too_long": "职位太长。"
+      },
+      "username": {
+        "label": "用户名",
+        "terms": "用户名 会员卡 地址 领取 handle card address claim",
+        "not_chosen": "尚未选择。你的会员卡需要一个用户名。"
+      },
+      "email": {
+        "label": "登录身份",
+        "terms": "电子邮件 地址 邮件 账户 组织 同步 email address mail account organization sync",
+        "not_signed_in": "未登录",
+        "local": "会话保留在此 Mac 上。",
+        "org": "属于 {org}。你的会话会在所有设备间同步。",
+        "sync": "你的会话会在所有设备间同步。"
+      },
+      "card": {
+        "label": "会员卡",
+        "terms": "分享 拷贝 链接 share copy link x twitter",
+        "share_text": "刚刚领取了我的 Zeron 会员卡",
+        "none": "暂无会员卡"
+      },
+      "devices": {
+        "label": "已登录的设备",
+        "terms": "设备 机器 电脑 devices machines computers",
+        "this": "此设备"
+      },
+      "sign_out": {
+        "label": "退出登录",
+        "terms": "退出登录 离开 账户 会话 log out logout leave account session",
+        "busy": "正在退出登录…",
+        "description": "此 Mac 将停止同步，直到你重新登录。",
+        "confirm_title": "退出登录 Zeron？",
+        "confirm_body": "你的会话会保留在账户中。此 Mac 上将重新打开设置流程。"
+      },
+      "delete": {
+        "label": "删除账户",
+        "terms": "移除 关闭 账户 抹掉 永久 remove close account erase forever",
+        "busy": "正在删除你的账户…",
+        "description": "永久删除你的账户、会员卡和组织成员身份。",
+        "failed": "无法删除你的账户",
+        "confirm_title": "删除你的账户？",
+        "confirm_body_org": "你将离开 {org}，并在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。你需要重新登录以确认是你本人。",
+        "confirm_body": "你将在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。你需要重新登录以确认是你本人。",
+        "step_up": {
+          "title": "要删除你的账户，请重新登录",
+          "body": "请在浏览器中完成登录。登录后，你的账户将立即被删除。"
+        }
+      },
+      "claim": {
+        "open": "领取用户名",
+        "title": "领取用户名",
+        "body": "你的会员卡地址。只能选择一次，将永久属于你。",
+        "confirm": "领取",
+        "placeholder": "yourname",
+        "invalid": "3 到 20 个字母、数字、_ 或 -。"
+      },
+      "save": "保存更改",
+      "signed_out": {
+        "description": "登录后在 Zeron 中展示真实的你。",
+        "yours": "登录后即可拥有",
+        "name": "你的名称和头像",
+        "name_description": "让团队成员在你分享的每个对话旁看到你。",
+        "card": "你的会员卡",
+        "card_description": "按加入时间编号，拥有专属地址。",
+        "sessions": "随处可用的会话",
+        "sessions_description": "在手机或另一台电脑上接着聊。",
+        "sign_in": "登录"
+      },
+      "keys": {
+        "label": "签名密钥",
+        "terms": "密钥 签名 插件 模板 安全 撤销 指纹 设备 keys signing plugins templates revoke fingerprint",
+        "description": "你的设备使用这些密钥为你制作的插件和模板签名。如果有你不认识的密钥，请撤销它。",
+        "this_mac": "这台 Mac",
+        "another_device": "其他设备",
+        "new": "新",
+        "added": "添加于 {date}",
+        "revoked": "撤销于 {date}",
+        "revoke": "撤销",
+        "revoke_title": "撤销此密钥？",
+        "revoke_body": "由它签名的插件和模板将不再算作你的。",
+        "revoke_failed": "无法撤销该密钥",
+        "none": "还没有签名密钥。",
+        "none_how": "签名插件时会自动创建一个。",
+        "failed": "无法加载你的签名密钥",
+        "retry": "重试"
+      }
+    },
+    "browser": {
+      "title": "浏览器",
+      "description": "你登录的网站会在这台 Mac 上保持登录，每个账户分开保存。",
+      "terms": "浏览器 网页 网站 链接 搜索引擎 主页 缩放 历史记录 Cookie 登录 检查器 browser",
+      "search_engine": {
+        "label": "搜索引擎",
+        "description": "在地址栏中输入的文字会用它搜索。",
+        "terms": "搜索 谷歌 必应 地址栏 google duckduckgo bing brave kagi ecosia",
+        "custom": "自定义",
+        "custom_label": "搜索地址",
+        "custom_hint": "用 %s 表示搜索词所在的位置。",
+        "custom_invalid": "请使用在网站之后包含 %s 的网址，例如 https://example.com/search?q=%s。在此之前将使用 Google 搜索。"
+      },
+      "home_page": {
+        "label": "新标签页打开",
+        "terms": "主页 起始页 新标签页 home",
+        "start": "起始页：你的项目预览。",
+        "custom": "每次都打开此页面。",
+        "placeholder": "起始页"
+      },
+      "default_zoom": {
+        "label": "页面缩放",
+        "description": "用 {zoom_in} 和 {zoom_out} 缩放某个网站，即可为它保留单独的缩放。",
+        "terms": "缩放 文字大小 放大 zoom"
+      },
+      "site_zoom": {
+        "label": "{n, plural, other {# 个网站有单独的缩放}}",
+        "description": "{n, plural, other {# 个网站保留了你设置的缩放。}}",
+        "reset": "全部重置",
+        "reset_one": "重置 {site} 的缩放"
+      },
+      "history": "历史记录",
+      "history_terms": "历史记录 访问过的页面 最近 history",
+      "history_description": "你访问过的页面，按账户保存在这台 Mac 上。",
+      "keep_history": {
+        "label": "保留历史记录",
+        "description": "方便你再次找到某个页面。关闭后，不再保留新的页面。",
+        "terms": "历史记录 隐私 记录"
+      },
+      "clear_history": {
+        "label": "清除历史记录",
+        "description": "{n, plural, =0 {尚未保留任何页面。} other {已保留 # 个页面。}}",
+        "terms": "清除 删除 历史记录 浏览数据",
+        "span": "时间范围",
+        "button": "清除"
+      },
+      "span": {
+        "hour": "过去一小时",
+        "day": "过去 24 小时",
+        "week": "过去 7 天",
+        "month": "过去 4 周",
+        "all": "全部时间"
+      },
+      "cleared": "已清除历史记录",
+      "history_search": "搜索历史记录",
+      "history_none_match": "没有匹配的页面。",
+      "history_more": "显示更多",
+      "forget": "从历史记录中移除 {page}",
+      "developer": "开发者",
+      "inspectable": {
+        "label": "允许检查页面",
+        "description": "在浏览器的 ⋯ 菜单中加入“检查页面”，对此后打开的页面生效。",
+        "terms": "开发者工具 网页检查器 检查元素 控制台 devtools"
+      },
+      "page_title": "浏览",
+      "links_and_search": "链接与搜索",
+      "zoom": "缩放"
+    },
+    "browser_history": {
+      "title": "历史记录",
+      "visited": "访问过的页面",
+      "empty": "你在浏览器中访问的页面会显示在这里。",
+      "today": "今天",
+      "yesterday": "昨天",
+      "empty_title": "还没有历史记录",
+      "off": "“保留历史记录”已关闭，访问的页面不会被保留。"
+    }
+  },
+  "common": {
+    "loading": "正在加载…",
+    "something_went_wrong": "出错了。",
+    "open": "打开",
+    "close": "关闭",
+    "clear": "清除",
+    "rename": "重命名",
+    "delete": "删除",
+    "remove": "移除",
+    "copy": "拷贝",
+    "archive": "归档",
+    "dismiss": "关闭",
+    "save": "保存",
+    "discard": "舍弃",
+    "reload": "重新载入",
+    "more": "更多",
+    "try_again": "重试",
+    "continue": "继续",
+    "cancel": "取消",
+    "search": "搜索",
+    "back": "返回",
+    "retry": "重试",
+    "edit": "编辑"
+  },
+  "shell": {
+    "sidebar": {
+      "unknown_device": "未知设备",
+      "chats": "对话",
+      "local": "本地",
+      "you": "你",
+      "filter": {
+        "a_plugin": "某个插件",
+        "state": {
+          "working": "运行中",
+          "input": "等待输入",
+          "approval": "等待批准",
+          "failed": "失败",
+          "done": "已完成",
+          "idle": "空闲"
+        },
+        "list_sep": "、",
+        "list_last": "{rest}和{last}",
+        "notice": "{by}仅显示{list}的会话",
+        "show_all": "显示全部"
+      },
+      "project_filter": {
+        "search": "搜索项目…",
+        "new_project": "新建项目",
+        "all_projects": "所有项目"
+      },
+      "connection": {
+        "unsaved": "无法保存更改",
+        "offline": "离线中——发送的消息已保存",
+        "reconnecting": "正在重新连接…"
+      },
+      "update_notice": "更新通知",
+      "star": "在 GitHub 上加星标",
+      "copied": "已拷贝{what}",
+      "menu": {
+        "sections": "分区",
+        "new_section": "新建分区",
+        "path": "路径",
+        "no_folder": "尚无文件夹",
+        "zeron_link": "Zeron 对话链接",
+        "link_not_ready": "对话链接尚未就绪",
+        "codex_link": "Codex 对话链接",
+        "harness_session_id": "提供方会话 ID",
+        "session_id": "会话 ID",
+        "pin": "置顶",
+        "unpin": "取消置顶",
+        "move_to": "移至",
+        "archive_working": "请先停止：智能体仍在运行",
+        "delete": "删除…",
+        "rename": "重命名…",
+        "remove": "移除…",
+        "edit_project": "编辑项目…"
+      },
+      "project": {
+        "rename_title": "重命名项目",
+        "name": "项目名称",
+        "remove_title": "移除项目？",
+        "this_project": "此项目",
+        "its_device": "其设备",
+        "removing": "移除“{name}”会永久删除 {device} 上的{n, plural, other {# 个会话}}。此操作无法撤销。",
+        "couldnt_remove": "无法移除项目",
+        "edit": {
+          "title": "编辑项目",
+          "name": "名称",
+          "name_empty": "请填写名称",
+          "icon": "图标",
+          "preview": "项目图标",
+          "kind": {
+            "default": "默认",
+            "emoji": "表情",
+            "image": "图片"
+          },
+          "color": "颜色",
+          "hue": {
+            "violet": "紫罗兰",
+            "indigo": "靛蓝",
+            "blue": "蓝色",
+            "sky": "天蓝",
+            "cyan": "青色",
+            "teal": "蓝绿",
+            "emerald": "翠绿",
+            "lime": "黄绿",
+            "amber": "琥珀",
+            "orange": "橙色",
+            "rose": "玫红",
+            "pink": "粉色"
+          },
+          "default_artwork": "使用项目中找到的仓库标志。",
+          "default_initial": "首字母，配上你选的颜色。",
+          "drop": "将图片拖到此处",
+          "drop_release": "松开以使用此图片",
+          "choose": "选择图片",
+          "formats": "PNG 或 JPEG，将裁成正方形",
+          "replace": "更换",
+          "zoom": "缩放",
+          "crop": "图片在图标中的位置，拖动可移动。",
+          "save": "保存",
+          "saving": "正在保存…",
+          "error": {
+            "upload": "无法上传图片，请重试。",
+            "offline": "当前离线，无法上传图片。",
+            "signed_out": "登录后才能上传图片。",
+            "too_large": "图片太大。",
+            "open": "无法打开该图片，请选择 PNG 或 JPEG。",
+            "save": "无法保存项目，请重试。",
+            "save_outdated": "这台 Mac 上的 Zeron 需要更新才能保存项目图标。更新后再保存。",
+            "save_gone": "此项目已在另一台设备上被移除。",
+            "save_offline": "这台 Mac 上的 Zeron 没有响应，请稍后再试。"
+          }
+        }
+      },
+      "session": {
+        "new_session": "新建会话",
+        "will_delete": "“{title}”将被永久删除。此操作无法撤销。",
+        "delete_title": "删除会话？",
+        "rename_title": "重命名会话",
+        "name": "名称",
+        "name_placeholder": "会话名称"
+      }
+    },
+    "boundary": {
+      "failed": {
+        "title": "{name}未能载入",
+        "body": "修复后再次保存文件，即可在此恢复。"
+      },
+      "screen": {
+        "update_notice": "更新通知",
+        "session_page": "会话页面",
+        "new_chat_page": "新建对话页面",
+        "composer": "输入框",
+        "panel": "面板",
+        "files": "文件",
+        "sidebar": "侧边栏",
+        "page": "页面",
+        "rail": "导航栏",
+        "title_bar": "标题栏",
+        "settings": "设置",
+        "update_watch": "更新监视器",
+        "search": "搜索",
+        "new_project": "新建项目"
+      }
+    },
+    "title_bar": {
+      "hide_details": "隐藏会话详情",
+      "show_details": "显示会话详情",
+      "panel": "面板",
+      "panel_tooltip": "面板  {key}"
+    },
+    "page": {
+      "plugin": "插件",
+      "plugin_off": "其插件目前未启用。",
+      "resize_files": "调整文件区域大小"
+    },
+    "keys": {
+      "title": {
+        "shell_new_chat": "新建对话",
+        "shell_new_project": "新建项目",
+        "shell_archive": "归档会话",
+        "shell_pin": "置顶或取消置顶此会话",
+        "shell_model_picker": "选择模型",
+        "shell_toggle_sidebar": "切换侧边栏",
+        "shell_toggle_files": "切换面板",
+        "shell_toggle_files_tab": "切换文件",
+        "shell_toggle_terminal": "切换终端",
+        "panel_annotate": "标注元素",
+        "panel_new_browser_tab": "新建浏览器标签页",
+        "panel_focus_address": "打开位置",
+        "panel_reload_page": "重新载入页面",
+        "shell_next_session": "下一个会话",
+        "shell_previous_session": "上一个会话",
+        "session_n": "会话 {i}",
+        "shell_palette": "搜索",
+        "shell_settings": "设置",
+        "shell_find": "查找",
+        "shell_close": "关闭",
+        "shell_reload": "重新启动 Zeron",
+        "shell_reload_interface": "重新加载界面"
+      },
+      "group": {
+        "sessions": "会话",
+        "panels": "面板",
+        "go": "前往",
+        "app": "应用"
+      }
+    },
+    "palette": {
+      "sessions": "会话",
+      "open": "打开",
+      "unarchive": "取消归档",
+      "new_chat_in": "在以下位置新建对话…",
+      "search_projects": "搜索项目…",
+      "projects": "项目",
+      "start": "开始",
+      "no_project": "无项目",
+      "no_projects": "暂无项目",
+      "scheme": {
+        "system": "跟随系统",
+        "light": "浅色",
+        "dark": "深色"
+      },
+      "theme": "模式",
+      "use_template": "使用模板：{name}",
+      "templates": "模板",
+      "use_theme": "使用主题：{name}",
+      "themes": "主题",
+      "use": "使用",
+      "recent_files": "最近使用的文件",
+      "files": "文件",
+      "in_files": "在文件中",
+      "new_chat": "新建对话",
+      "actions": "操作",
+      "new_project": "新建项目",
+      "toggle_sidebar": "切换侧边栏",
+      "archive_session": "归档会话",
+      "settings": "设置",
+      "settings_page": "设置：{title}",
+      "go_to": "前往",
+      "frosted_glass": "磨砂玻璃",
+      "search": "搜索会话、命令和文件…",
+      "app": "应用",
+      "reload_zeron": "重新启动 Zeron",
+      "reload_interface": "重新加载界面"
+    },
+    "add_project": {
+      "something_went_wrong": "出错了",
+      "not_connected": "设备未连接",
+      "no_folder_at": "{path} 处没有文件夹",
+      "not_a_folder": "{path} 不是文件夹",
+      "couldnt_add": "无法添加项目",
+      "go_to": "前往",
+      "open": "打开",
+      "add_project": "添加项目",
+      "search_folders": "搜索文件夹…",
+      "loading_folders": "正在加载文件夹…",
+      "add_this_folder": "添加此文件夹",
+      "add": "添加",
+      "folders": "文件夹",
+      "folder_failed_hint": "按 ← 返回，或尝试其他文件夹。",
+      "no_folders_match": "没有匹配的文件夹",
+      "no_folders_hint": "输入 ~/code 或 /mnt 等路径以跳转。",
+      "in_home": "在个人文件夹中",
+      "clone_here": "将 {repo} 克隆到此处",
+      "clone_section": "克隆",
+      "clone": "克隆",
+      "cloning": "正在克隆 {repo}…",
+      "couldnt_clone": "无法克隆 {repo}",
+      "search_locations": "搜索位置…",
+      "loading_locations": "正在加载位置…",
+      "no_locations": "未找到位置",
+      "no_locations_hint": "试试个人文件夹或驱动器名称。",
+      "home": "个人文件夹",
+      "locations": "位置",
+      "devices": "设备",
+      "offline": "离线",
+      "title": "新建项目",
+      "search_devices": "搜索设备…",
+      "no_devices": "未找到设备",
+      "no_devices_hint": "试试其他设备名称。",
+      "cloud": "Cloud",
+      "cloud_hint": "你的 GitHub 仓库",
+      "cloud_title": "Cloud",
+      "search_repos": "搜索仓库…",
+      "loading_repos": "正在加载你的仓库…",
+      "no_repos": "没有找到仓库",
+      "no_repos_hint": "Cloud 会列出 Zeron GitHub 应用可以访问的仓库。可在“设置 → Cloud”中添加更多。",
+      "no_repos_yet": "还没有仓库",
+      "choose_repos": "在“设置 → Cloud”中选择仓库",
+      "github_not_connected": "尚未连接 GitHub",
+      "connect_github": "在“设置 → Cloud”中连接 GitHub",
+      "repos_failed": "无法加载你的仓库",
+      "repos_failed_hint": "返回并再次选择 Cloud以重试。",
+      "repos_offline": "现在无法连接 Zeron",
+      "private": "私有",
+      "on_device": "在 {device} 上",
+      "from_github": "来自 GitHub",
+      "add_cloud_project": "添加项目"
+    }
+  },
+  "onboarding": {
+    "skip_for_now": "暂时跳过",
+    "signin": {
+      "title": "欢迎使用\nZeron",
+      "lines": {
+        "phone": "在手机上接着聊。",
+        "machines": "在你的任意设备上运行智能体。",
+        "cloud": "将对话交给 Zeron Cloud，放心去忙别的。"
+      },
+      "waiting": "请在浏览器中完成登录。",
+      "failed": "无法登录。未进行任何更改。",
+      "have_account": "我已有账户",
+      "waiting_browser": "等待浏览器",
+      "create": "创建账户"
+    },
+    "appearance": {
+      "sign_out": "退出登录",
+      "title": "打造你的专属外观",
+      "body": "选择一种外观。你可以随时在设置中更改。"
+    },
+    "done": {
+      "owner": "所有者",
+      "member": "成员",
+      "who": {
+        "two": "{a}和{b}",
+        "more": "{a}、{b}和另外 {n} 人"
+      },
+      "invites_sent": "{n, plural, other {已发送 # 份邀请}}",
+      "invites_join": "{n, plural, other {{who}接受邀请后将成为成员。}}",
+      "synced": {
+        "label": "对话保持同步",
+        "description": "你的对话和智能体会在所有设备间同步。"
+      },
+      "local": {
+        "label": "对话保留在此 Mac 上",
+        "description": "随时登录，将对话同步到其他设备。"
+      },
+      "open_org": "打开{org}",
+      "open_zeron": "打开 Zeron",
+      "title_org": "{org}已准备就绪",
+      "title": "一切就绪",
+      "body": "以下是已完成的设置。",
+      "body_owner": "你是所有者。以下是已完成的设置。",
+      "body_member": "你是成员。以下是已完成的设置。"
+    },
+    "github": {
+      "title": "连接 GitHub",
+      "body": "Cloud 智能体在各自的设备上处理你的仓库。连接 GitHub 后，它们便可克隆和推送。"
+    },
+    "org": {
+      "creating": "正在创建",
+      "title": "为组织命名",
+      "failed": "无法创建 {name}。未保存任何内容。",
+      "body": "团队成员加入时会看到此名称。",
+      "field": "组织名称",
+      "placeholder": "你的公司或团队"
+    },
+    "invite": {
+      "one_address": "一个地址",
+      "failed_one": "{why, select, invalid {Zeron 无法向 {who} 发送邀请。} exists {{who} 已加入或已受邀。} other {无法向 {who} 发送邀请。}}",
+      "failed_many": "{why, select, invalid {Zeron 无法向 {who} 发送邀请，另外 {n} 份邀请也未发送。} exists {{who} 已加入或已受邀，另外 {n} 份邀请未发送。} other {无法向 {who} 发送邀请，另外 {n} 份邀请也未发送。}}",
+      "nothing_sent": "未发送任何邀请。{says}",
+      "bad_addresses": "{n, plural, other {# 个地址似乎有误。}}",
+      "too_many": "每次最多 {max} 个。",
+      "invited_teammate": "受邀的团队成员",
+      "invited": "已邀请",
+      "sending": "正在发送",
+      "send_invites": "发送邀请",
+      "send_n": "{n, plural, other {发送 # 份邀请}}",
+      "title": "邀请团队成员",
+      "sent": "{n, plural, other {已发送 # 份邀请。他们会收到 Zeron 发来的电子邮件。}}",
+      "body": "你共享的对话和智能体会为所有人保持同步。",
+      "field": "电子邮件地址",
+      "hint": "按 Enter 或输入逗号添加下一个地址。他们加入后将成为成员。"
+    },
+    "username": {
+      "checking_label": "正在检查用户名",
+      "checking": "正在检查",
+      "available": "可用",
+      "taken": "已被使用",
+      "reserved": "已保留",
+      "invalid": "只能使用字母、数字、_ 和 -",
+      "start": "以字母或数字开头",
+      "short": "至少 {n} 个字符",
+      "long": "最多 {n} 个字符",
+      "unknown": "无法检查",
+      "saving": "正在保存",
+      "title": "领取你的用户名",
+      "failed": "无法保存 @{name}。{says}未进行任何更改。",
+      "body": "这是你的名片地址，一经领取便永久属于你。",
+      "field": "用户名",
+      "placeholder": "用户名"
+    },
+    "card": {
+      "draft": "刚刚领取了我的 Zeron 名片",
+      "failed_title": "你的名片未能载入",
+      "failed_body": "{says}请稍后重试。"
+    },
+    "providers": {
+      "title_install": "安装智能体",
+      "title": "你的智能体",
+      "looking": "正在此 Mac 上查找编码智能体…",
+      "unavailable": "Zeron 运行你已经使用的编码智能体。",
+      "none": "此 Mac 上还没有智能体。请安装一个以继续。",
+      "found": "{n, plural, other {在此 Mac 上找到 # 个智能体。请登录你想使用的智能体。}}",
+      "this_mac": "此 Mac"
+    },
+    "try_again": "重试"
+  },
+  "intro": {
+    "headline": {
+      "your": "你的",
+      "agents": "智能体，",
+      "anywhere": "随处可用。"
+    },
+    "get_started": "开始使用"
+  },
+  "chat": {
+    "init": {
+      "couldnt_show": "无法显示{what}",
+      "home": "新建对话页面",
+      "session": "此对话",
+      "composer": "输入框"
+    },
+    "session": {
+      "missing_title": "找不到此对话",
+      "missing_body": "它可能已归档，或所在设备尚未同步。",
+      "new_chat": "新建对话",
+      "offline_title": "暂时无法载入此对话",
+      "offline_body": "Zeron 重新连接到智能体后将立即显示。"
+    },
+    "home": {
+      "title": "添加项目以开始使用",
+      "body": "项目是你的一台设备上的文件夹。",
+      "action": "添加项目"
+    },
+    "link_notice": {
+      "offline_intent": "离线中——恢复连接后将发送消息。",
+      "offline": "离线",
+      "reconnecting_intent": "正在重新连接——连接恢复后将发送消息。",
+      "reconnecting": "正在重新连接…",
+      "the_host": "主机",
+      "unreachable": "无法连接到{host}——连接恢复后将发送消息。"
+    },
+    "lane_tab": {
+      "subagent": "子智能体",
+      "side_chat": "侧边对话",
+      "placeholder": "询问侧边对话…",
+      "didnt_send": "消息未发送",
+      "couldnt_fork": "无法分叉此对话",
+      "forking": "正在分叉…",
+      "retry": "重试"
+    },
+    "lanes": {
+      "subagent": "子智能体",
+      "need_conversation": "开始对话后才能创建侧边对话。",
+      "new_side_chat": "新建侧边对话",
+      "side_chat": "侧边对话",
+      "couldnt_create": "无法创建侧边对话。"
+    },
+    "zeron_commands": {
+      "model": "Zeron：选择智能体、模型和推理强度",
+      "new": "Zeron：开始新对话",
+      "resume": "Zeron：搜索并打开对话",
+      "settings": "Zeron：打开设置",
+      "files": "Zeron：打开项目文件",
+      "terminal": "Zeron：打开终端",
+      "rename": "Zeron：重命名此对话",
+      "stop": "Zeron：停止当前运行"
+    },
+    "find": {
+      "no_results": "无结果",
+      "tally": "第 {at} 项，共 {n} 项",
+      "toolbar": "在对话中查找",
+      "find": "查找",
+      "previous": "上一个匹配项",
+      "next": "下一个匹配项"
+    },
+    "appshots": {
+      "limit": "请先移除一个 Appshot，再添加新的（待提交的 Appshot 限额为 96 MB）。",
+      "couldnt_capture": "无法捕获 Appshot"
+    },
+    "chat_links": {
+      "untitled": "未命名对话"
+    },
+    "invocations": {
+      "couldnt_list": "无法列出命令"
+    },
+    "reply_images": {
+      "couldnt_read": "无法读取"
+    },
+    "where": {
+      "ago": {
+        "just_now": "刚刚",
+        "minutes": "{n} 分钟前",
+        "hours": "{n} 小时前",
+        "days": "{n} 天前"
+      },
+      "device": {
+        "offline": "离线",
+        "offline_seen": "离线 · 上次在线：{ago}",
+        "cloud_from": "独立设备，基于 {repo}",
+        "cloud": "独立设备"
+      },
+      "project": {
+        "missing": "项目不存在",
+        "elsewhere": "在其他设备上",
+        "gone": "已不在此设备上"
+      },
+      "branch": {
+        "default": "默认",
+        "current": "当前",
+        "worktree": "工作树"
+      },
+      "branches_empty": {
+        "no_matches": "无匹配项",
+        "no_matches_hint": "没有与“{query}”匹配的分支",
+        "loading": "正在加载分支…",
+        "offline": "设备离线",
+        "offline_hint": "设备恢复连接后将显示其分支。",
+        "error": "无法读取分支",
+        "error_cloud_hint": "GitHub 未响应。将使用仓库的默认分支。",
+        "error_hint": "Git 未响应此项目的请求。",
+        "none": "没有分支",
+        "none_hint": "此项目的文件夹中还没有分支。"
+      },
+      "blocked": {
+        "project_gone": "该项目已不存在。请选择其他项目或不选择项目。",
+        "cloud_needs_project": "Cloud 对话需要在项目中运行。请选择 Cloud 可以打开的项目。"
+      }
+    },
+    "composer": {
+      "placeholder": "随便问，用 @ 提及…",
+      "comments": "{n, plural, other {# 条评论}}",
+      "edit_conflict": "队列中的消息已更改：你的编辑未保存",
+      "edit_not_saved": "你的编辑未保存",
+      "didnt_send": "消息未发送",
+      "starting_cloud": "正在启动 Cloud 设备…",
+      "starting": "正在开始对话…",
+      "didnt_start": "对话未能开始",
+      "attach_files": "附加文件",
+      "edit_locked": "该消息正在其他设备上编辑",
+      "edit_unavailable": "暂时无法编辑该消息",
+      "couldnt_stop_task": "无法停止该进程",
+      "commands_or_skills": "命令或技能",
+      "drop_to_mention": "松开以提及"
+    }
+  },
+  "panel": {
+    "tab": {
+      "plugin": "插件",
+      "browser": "浏览器",
+      "files": "文件",
+      "terminal": "终端 {n}",
+      "actions": "标签页操作",
+      "close": "关闭标签页",
+      "close_tooltip": "关闭标签页  {key}",
+      "close_others": "关闭其他标签页",
+      "close_left": "关闭左侧标签页",
+      "close_right": "关闭右侧标签页",
+      "unsaved": "未保存的更改"
+    },
+    "strip": {
+      "label": "面板标签页",
+      "new_tab": "新建标签页",
+      "expand": "展开面板",
+      "collapse": "收起面板"
+    },
+    "empty": {
+      "browser": "浏览器",
+      "files": "文件查看器",
+      "terminal": "终端",
+      "title": "打开标签页",
+      "side_chat": "侧边对话",
+      "fork": "分叉对话"
+    },
+    "plugin_off": "其插件目前未启用。",
+    "broken": {
+      "browser": {
+        "title": "浏览器未能载入",
+        "body": "修复后再次保存文件，即可在此恢复。"
+      },
+      "terminals": {
+        "title": "终端未能载入",
+        "body": "修复后再次保存文件，即可在此恢复。"
+      },
+      "tab": {
+        "title": "此标签页未能载入",
+        "body": "修复后再次保存文件，即可在此恢复原状。"
+      }
+    },
+    "escape_hint": "按 Escape 前往文件所在的标签页",
+    "nothing": {
+      "title": "没有打开的项目",
+      "body": "打开会话以使用其面板。"
+    },
+    "close_question": {
+      "title": "关闭此标签页？",
+      "running": "“{title}”中仍有内容在运行。关闭标签页会结束运行。",
+      "unsaved": "“{title}”有未保存的更改。关闭标签页会舍弃这些更改。"
+    },
+    "terminal": {
+      "no_session": "此标签页没有可供运行的会话。",
+      "offline": "Zeron 暂时无法连接到此会话的设备。",
+      "update": "更新 Zeron 以在此使用终端。",
+      "failed": "终端未能打开",
+      "label": "终端"
+    },
+    "browser": {
+      "command": {
+        "annotate": "标注元素",
+        "new_tab": "新建浏览器标签页",
+        "open_location": "打开位置",
+        "reload": "重新载入页面",
+        "zoom_in": "放大",
+        "zoom_out": "缩小",
+        "zoom_reset": "实际大小"
+      },
+      "bar": "浏览器",
+      "history": "历史记录",
+      "forward": "前进",
+      "address": "地址",
+      "address_placeholder": "网站或 localhost:3000",
+      "page_controls": "页面",
+      "stop": "停止",
+      "annotate": "标注",
+      "annotate_tooltip": "标注元素  {key}",
+      "open_in_browser": "在浏览器中打开",
+      "find": {
+        "no_results": "无结果",
+        "tally": "第 {current} 项，共 {count} 项",
+        "label": "在页面中查找",
+        "placeholder": "查找",
+        "previous": "上一个匹配项",
+        "next": "下一个匹配项"
+      },
+      "start": {
+        "open_preview": "打开 {name} 预览",
+        "preview_title": "预览你的成果",
+        "browse_title": "在对话旁浏览",
+        "preview_body": "在上方输入此项目中运行的开发服务器、任意网站或 localhost 地址。",
+        "looking": "正在查找此项目中的开发服务器…",
+        "body": "输入网站或 localhost 地址。指向页面中的部分内容，即可将其附加到消息。"
+      },
+      "web_page": "网页",
+      "offline_title": "当前处于离线状态",
+      "offline_body": "请检查连接，然后重试。",
+      "failed_title": "无法载入此页面",
+      "note": {
+        "label": "标注备注",
+        "field": "备注",
+        "placeholder": "添加备注…"
+      },
+      "zoom": {
+        "reset": "重置缩放",
+        "reset_to": "缩放 {level}，重置为默认值"
+      },
+      "more": "更多",
+      "menu": {
+        "zoom": "缩放 {level}",
+        "copy_link": "复制链接",
+        "inspect": "检查页面",
+        "history": "历史记录…",
+        "settings": "浏览器设置…"
+      },
+      "file_title": "无法在此显示该文件",
+      "file_body": "请在默认浏览器中打开以下载它。",
+      "suggest": {
+        "label": "建议",
+        "go": "打开网址",
+        "search": "用 {engine} 搜索",
+        "dev_server": "开发服务器",
+        "remove": "从历史记录中移除 {page}"
+      },
+      "navigation": "导航",
+      "annotate_page": {
+        "hint": "指向一个元素，或拖出一个区域",
+        "keys": "按住 Shift 点按以添加 · 按 Esc 结束",
+        "selected": "已选择 {n} 个",
+        "region": "区域"
+      },
+      "download": {
+        "label": "下载",
+        "untitled": "下载",
+        "asking": "选择保存位置…",
+        "percent": "{n}%",
+        "saved": "已保存",
+        "failed": "无法下载",
+        "failed_why": "无法下载：{why}",
+        "show": "在访达中显示",
+        "dismiss": "关闭 {name}",
+        "saving": "正在保存…"
+      }
+    },
+    "browser_api": {
+      "empty": "输入网站或 localhost 地址。",
+      "invalid_characters": "此地址包含无效字符。",
+      "local_file": "无法在浏览器中打开本地文件。请从“文件”或对话中的文件链接打开。",
+      "invalid": "输入有效的网站或 localhost 地址。",
+      "scheme": "仅支持 http 和 https 地址。",
+      "credentials": "请使用不含用户名或密码的地址。"
+    },
+    "home": {
+      "label": "会话主页",
+      "open": "打开",
+      "unknown_device": "未知设备",
+      "away": "离线：暂时无法连接",
+      "no_project": "无项目",
+      "actions": "操作",
+      "actions_loading": "正在载入操作…",
+      "retry": "重试",
+      "add_action": "添加操作",
+      "setup_suffix": "{name}（初始化）",
+      "edit_action": "编辑操作",
+      "edit_named": "编辑 {name}",
+      "run_named": "运行 {name}",
+      "import": "导入",
+      "import_named": "导入 {name}",
+      "side_chats": "侧边对话",
+      "subagents": "子代理",
+      "open_side": "打开侧边对话 {title}",
+      "open_subagent": "打开子代理 {title}",
+      "editor": {
+        "add_title": "添加操作",
+        "edit_title": "编辑操作",
+        "name": "名称",
+        "command": "命令",
+        "icon": "图标",
+        "setup": "创建工作树时自动运行",
+        "save": "保存操作",
+        "saving": "正在保存…",
+        "delete": "删除操作",
+        "delete_title": "删除操作？",
+        "delete_body": "“{name}”将被永久删除。",
+        "delete_confirm": "删除",
+        "err_name": "请填写操作名称",
+        "err_name_long": "操作名称不能超过 80 个字符",
+        "err_command": "请填写操作命令",
+        "err_command_long": "操作命令不能超过 16384 字节",
+        "icon_play": "运行",
+        "icon_test": "测试",
+        "icon_lint": "检查",
+        "icon_configure": "配置",
+        "icon_build": "构建",
+        "icon_debug": "调试"
+      },
+      "ports": "端口",
+      "port_open_external": "在默认浏览器中打开",
+      "port_copy": "复制网址",
+      "port_copied": "网址已复制",
+      "port_closed": "已关闭",
+      "previews_unavailable": "本地预览暂时不可用"
+    }
+  },
+  "files": {
+    "name_fallback": "文件",
+    "delete": {
+      "title": "永久删除？",
+      "one": "“{name}”将从磁盘删除，而非移到废纸篓。此操作无法撤销。",
+      "many": "{n} 个项目将从磁盘删除，而非移到废纸篓。此操作无法撤销。"
+    },
+    "comment": {
+      "placeholder": "添加评论",
+      "submit": "评论",
+      "you": "你"
+    },
+    "unreachable": {
+      "title": "无法连接到这些文件",
+      "body": "运行此会话的设备没有响应。"
+    },
+    "unreadable": {
+      "title": "无法读取这些文件",
+      "body": "Zeron 无法列出此文件夹。"
+    },
+    "none": {
+      "title": "这里没有文件",
+      "body": "打开项目中的会话以查看其文件。"
+    },
+    "broken": {
+      "title": "文件未能载入",
+      "body": "修复后再次保存文件，即可在此恢复原状。"
+    },
+    "workspace": {
+      "offline": "Zeron 暂时无法连接到此会话的设备。",
+      "unreadable_text": "这不是 Zeron 可读取的文本。",
+      "not_remade": "无法重新创建 {name}",
+      "not_saved": "无法保存 {name}",
+      "not_read_yet": "尚未从磁盘读取。",
+      "cant_save_here": "无法在此保存 {name}",
+      "read_only": "Zeron 可以显示此文件，但无法写入。",
+      "not_moved": "无法移动 {name}",
+      "changed": "操作前文件已更改。请重试。",
+      "cant_rename": "无法在此重命名文件",
+      "cant_move": "无法在此移动文件",
+      "not_made": "无法创建 {name}",
+      "cant_delete": "无法在此删除文件",
+      "not_deleted": "无法删除 {name}",
+      "not_revealed": "无法在访达中显示 {name}",
+      "not_opened": "无法打开 {name}"
+    }
+  },
+  "engine": {
+    "update": {
+      "restart": "重新启动以更新",
+      "out_of_date": "Zeron 引擎版本过旧",
+      "restart_tip": "Zeron 已在后台更新。重新启动引擎会结束其中正在运行的任务。",
+      "theirs_tip": "引擎是在此 App 外启动的：请在那里重新启动以更新。",
+      "short": "引擎已过期",
+      "old": "此版本 Zeron 需要更新的引擎",
+      "old_tip": "引擎版本低于此版本的要求。打开“关于与更新”即可回到稳定版。",
+      "short_old": "需要更新的引擎"
+    }
+  },
+  "account": {
+    "api": {
+      "says": {
+        "offline": "暂时无法连接到 Zeron。",
+        "signed_out": "你已退出登录。",
+        "taken": "此用户名已被使用。",
+        "reserved": "此用户名已保留。",
+        "invalid": "这还不是有效的用户名。",
+        "already_claimed": "你已有用户名。",
+        "not_ready": "你的账户仍在设置中。请稍后重试。",
+        "rate_limited": "尝试次数过多。请等待一分钟后重试。",
+        "refused": "你无法访问此组织。",
+        "failed": "出错了。"
+      }
+    },
+    "auth": {
+      "says": {
+        "cancelled": "登录已取消。",
+        "denied": "登录在浏览器中被拒绝。准备好后请重试。",
+        "timed_out": "浏览器未能完成登录。请重试。",
+        "offline": "无法连接到 Zeron。请检查连接，然后重试。",
+        "expired": "你已退出登录。请重新登录以继续。",
+        "failed": "登录未完成。请重试。"
+      }
+    }
+  },
+  "plugins": {
+    "words": {
+      "place": {
+        "window": "窗口",
+        "sidebar": "侧边栏",
+        "sidebar_row": "侧边栏行",
+        "title_bar": "标题栏",
+        "rail": "侧边栏的导航栏",
+        "settings": "设置",
+        "new_chat": "新对话",
+        "new_chat_background": "新建对话的背景",
+        "chat": "对话",
+        "chat_header": "对话的标题区",
+        "message": "消息",
+        "message_box": "消息输入框",
+        "files_pane": "文件面板",
+        "file_row": "文件行",
+        "file_tab": "文件标签页",
+        "open_file": "打开的文件",
+        "side_panel": "侧边面板",
+        "chats": "对话",
+        "main_window": "主窗口",
+        "page_area": "页面区域",
+        "chat_page": "对话页面",
+        "new_chat_page": "新建对话页面",
+        "zeron": "Zeron 的一部分",
+        "zeron_parts": "Zeron 的部分内容"
+      },
+      "list": "{rest}和{last}",
+      "list_sep": "、",
+      "none_listed": "未列出",
+      "programs": "程序",
+      "permission": {
+        "ui_add": {
+          "title": "向 Zeron 界面添加内容"
+        },
+        "ui_change": {
+          "title": "更改{places}的显示方式",
+          "detail": "它可以隐藏、重新排序、重命名或重新绘制其中的内容。"
+        },
+        "ui_replace": {
+          "title": "用自己的界面替换{places}",
+          "detail": "它的代码作为 Zeron 的一部分运行：可以做你能做的任何事。"
+        },
+        "profile_read": {
+          "title": "查看你的姓名、用户名和照片"
+        },
+        "sessions_read": {
+          "title": "查看你的会话标题和状态"
+        },
+        "messages_read": {
+          "title": "读取当前对话中的消息"
+        },
+        "account_email": {
+          "title": "查看你的电子邮件地址"
+        },
+        "files_read": {
+          "title": "查看项目中的文件名和路径"
+        },
+        "panel_tabs": {
+          "title": "在对话的面板中打开标签页"
+        },
+        "pages_add": {
+          "title": "向侧边栏添加页面"
+        },
+        "github": {
+          "title": "查看你在 GitHub 上的拉取请求",
+          "detail": "通过你已登录的 GitHub CLI (gh) 查看。插件不会看到你的登录信息。"
+        },
+        "github_write": {
+          "title": "以你的身份评论拉取请求"
+        },
+        "notifications": {
+          "title": "向你发送通知",
+          "detail": "与其他通知一样，可在“设置”→“通知”中管理。"
+        },
+        "links_open": {
+          "title": "打开链接",
+          "detail": "使用你在“设置”→“链接”中选择的打开方式。"
+        },
+        "navigate": {
+          "title": "打开对话和页面"
+        },
+        "compose": {
+          "title": "在消息输入框中填写文本",
+          "detail": "仍由你来发送。"
+        },
+        "network": {
+          "title": "连接互联网",
+          "title_any": "连接到互联网上的任何网站",
+          "title_hosts": "连接到这些地方"
+        },
+        "clipboard": {
+          "title": "读取和更改你的剪贴板"
+        },
+        "files": {
+          "title": "打开和保存你选择的文件"
+        },
+        "web": {
+          "title": "显示网页"
+        },
+        "windows": {
+          "title": "打开自己的窗口"
+        },
+        "tools": {
+          "title": "为你的智能体提供工具"
+        },
+        "devices": {
+          "title": "在你的设备之间发送数据"
+        },
+        "commands": {
+          "title": "以你的身份在此 Mac 上运行 {list}",
+          "title_on": "以你的身份在 {device} 上运行 {list}",
+          "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。",
+          "detail_anything": "这些程序可以使用你的登录做你能做的任何事。"
+        },
+        "native": {
+          "title": "在此 Mac 上为你的智能体运行它自己的程序",
+          "title_on": "在 {device} 上为你的智能体运行它自己的程序",
+          "detail": "它可以执行你能做的任何操作。"
+        },
+        "service": {
+          "title": "在此设备上后台运行",
+          "title_on": "在 {device} 上后台运行",
+          "detail": "让它的窗口和你的智能体可以从你的任何设备使用它。它只会做你另外允许的事。"
+        }
+      },
+      "author": {
+        "zeron": "由 Zeron 制作",
+        "you": "由你制作",
+        "verified": "由 @{username} 制作",
+        "unknown": "作者未知"
+      },
+      "about": {
+        "failed": "已停止运行：{reason}",
+        "broken": "无法载入。",
+        "tampered": "自你允许后已发生更改。",
+        "asks_more": "请求的权限超出你的授权。",
+        "waiting": "等待你的授权。",
+        "no_description": "无描述。"
+      },
+      "grants": "它可以{list}。",
+      "update": {
+        "refused": "未安装版本 {version}：{reason}。",
+        "refused_unversioned": "未安装该版本：{reason}。",
+        "available": "有可用更新：{version}。",
+        "available_unversioned": "有可用更新。",
+        "added": "它还请求{list}；将先征求你的许可。",
+        "removed": "它不再请求{list}。"
+      },
+      "unverified": "未验证",
+      "from": "来自 {where}",
+      "from_file": "来自文件",
+      "more": "另有 {n} 项",
+      "diff": {
+        "commands": "以你的身份运行更多程序",
+        "mcp": "在你的智能体旁运行另一个程序",
+        "mcp_gone": "停止在你的智能体旁运行它的程序",
+        "tools_added": "为你的智能体提供新工具",
+        "tools_changed": "对你的智能体说法已改变的工具",
+        "service": "运行另一个后台服务",
+        "entry": "从另一个文件启动",
+        "network": "连接到更多地方",
+        "settings": "它的设置已更改",
+        "ui_replace": "用自己的界面替换{places}"
+      },
+      "can_anything": "{name}：可以做你能做的任何事",
+      "any_site": "互联网上的任何网站",
+      "near_host": "{host}：这台 Mac 或你的网络",
+      "details": {
+        "changes": "它更改的 Zeron 部分",
+        "replaces": "它替换的界面",
+        "changes_since": "自你允许以来还更改"
+      }
+    },
+    "page": {
+      "title": "插件",
+      "description": "插件在你每台电脑上为 Zeron 添加的功能，以及为智能体提供的工具。",
+      "search": "搜索插件",
+      "tabs": "插件",
+      "installed": "已安装",
+      "yours": "你的插件",
+      "package_filter": "Zeron 插件",
+      "install_title": "安装插件",
+      "installed_toast": "已安装 {name}",
+      "installed_toast_version": "已安装 {name} {version}",
+      "updated_toast": "已更新 {name}",
+      "updated_toast_version": "已更新 {name} {version}",
+      "couldnt_install": "无法安装插件",
+      "couldnt_update": "无法更新 {name}",
+      "settings_of": "{name}设置",
+      "review": "查看",
+      "show_folder": "显示文件夹",
+      "builtin": "{name}是 Zeron 的一部分",
+      "remove_named": "移除 {name}",
+      "update": "更新",
+      "updating": "正在更新…",
+      "none_yours": "你还没有插件",
+      "none": "暂无插件",
+      "none_body": "请智能体创建一个。",
+      "show_plugins_folder": "显示插件文件夹",
+      "remove_title": "移除此插件？",
+      "remove_body": "它会立即在 Zeron 的所有位置停止运行。其文件夹会移到插件文件夹的已移除项目中，以便日后恢复。",
+      "new_title": "新建插件",
+      "new_body": "创建一个以你的身份签名的专属文件夹。请智能体填充内容，或自行编辑 init.luau。",
+      "make_it": "创建",
+      "name": "名称",
+      "name_placeholder": "我的插件",
+      "install_dialog_title": "安装插件",
+      "install_dialog_body": "粘贴 .zeron-plugin 文件、GitHub 发布版本或仓库的链接，或选择文件。Zeron 会检查签名者，你需要在插件运行前允许其请求的权限。",
+      "install": "安装",
+      "link": "链接",
+      "choose_file": "选择文件",
+      "offline_title": "插件暂不可用",
+      "offline_body": "Zeron 重新运行后，你已允许的插件会恢复。",
+      "cant_reach": "现在无法连接 {device}。等它上线后再试一次。",
+      "couldnt_switch": "无法开启或关闭 {name}",
+      "couldnt_remove": "无法移除该插件",
+      "none_body_device": "从链接安装一个，或在那台电脑上添加。",
+      "install_link": "从链接安装",
+      "install_more": "安装",
+      "device_offline_title": "{device} 已离线",
+      "device_offline_body": "等它重新上线并运行 Zeron 后，它的插件会显示在这里。",
+      "try_again": "重试",
+      "remove_body_device": "它会立即在 {device} 上的 Zeron 各处停止。它的文件夹会移到那台电脑插件文件夹的已移除项目中，以便你想找回。",
+      "install_dialog_title_device": "在 {device} 上安装插件",
+      "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
+      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台 Mac 的插件。",
+      "setup_title": "完成账户设置",
+      "setup_body": "选择工作空间后，你的插件会立即加载。"
+    },
+    "consent": {
+      "made_by_you": "由你制作",
+      "made_by": "由 @{username} 制作",
+      "unknown_author": "作者未知",
+      "tampered_why": "你允许后它发生了更改。请在运行前重新查看。",
+      "unknown_why": "Zeron 无法确定制作者。仅在信任来源时允许。",
+      "nothing": "无需授权",
+      "asks_nothing": "除了在自己的空间中运行外，它没有请求其他权限。",
+      "allow_title": "允许 {name}？",
+      "tampered": "自你允许后已发生更改",
+      "asks_again": "它现在还请求：",
+      "asks": "它请求：",
+      "mine": "这是我的…",
+      "not_now": "暂不",
+      "allow": "允许",
+      "on_device": "在 {device} 上",
+      "unverified_why": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许。",
+      "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。",
+      "made_on_your_device": "由你的另一台设备制作",
+      "grew": "自你允许以来新增：",
+      "allow_there": "请在{device}上允许：它会在那台电脑的 Zeron 中询问。",
+      "mine_confirm": "将{name}签名为你自己的插件？仅当它是你亲自编写的：从现在起，Zeron 会在这台 Mac 上把它当作你的插件。",
+      "mine_cancel": "取消",
+      "mine_sign": "签名为我的",
+      "details": "详细信息",
+      "details_hide": "隐藏详细信息"
+    },
+    "permissions": {
+      "screen_recording": {
+        "title": "屏幕录制",
+        "description": "允许 {name} 截取最前方的窗口。macOS 可能要求重新打开 Zeron 一次。",
+        "grant": "允许屏幕录制"
+      },
+      "accessibility": {
+        "title": "辅助功能",
+        "description": "允许 {name} 读取其他应用窗口中的文本。",
+        "grant": "允许辅助功能"
+      },
+      "note": "macOS 会向打开 Zeron 的 App 请求这些权限：可能是 Zeron 本身，也可能是启动它的终端或编辑器。请在“系统设置”→“隐私与安全性”中为该 App 授权，然后退出并重新打开一次。"
+    },
+    "settings": {
+      "granted": "已授权",
+      "required": "必需",
+      "open_system_settings": "打开系统设置",
+      "check_named": "再次检查 {name}",
+      "check_again": "再次检查",
+      "a_number": "数字",
+      "at_least": "至少 {n}",
+      "at_most": "最多 {n}",
+      "none": "无",
+      "choose_named": "选择 {name}",
+      "folder_title": "{plugin}：{setting}",
+      "couldnt_choose_folder": "无法选择该文件夹",
+      "choose": "选择",
+      "description": "{name}插件的设置。插件会在你更改时读取这些设置。",
+      "terms": "插件 plugin",
+      "permission_terms": "权限 隐私 允许 permission privacy macos allow",
+      "wallpaper": {
+        "label": "用作墙纸",
+        "on": "新建对话显示 {name} 绘制的内容，代替“外观”中的墙纸。",
+        "off": "让新建对话显示 {name} 绘制的内容。关闭后恢复“外观”中的墙纸。",
+        "instead_of": "当前墙纸来自 {other}。开启后改用 {name}。",
+        "terms": "墙纸 背景 新建对话 效果 wallpaper background new chat effect"
+      }
+    },
+    "init": {
+      "waiting": "{name}正在等待你的授权",
+      "review": "查看",
+      "template_waiting_body": "来自其他人的模板。",
+      "failed": "{name}已停止运行",
+      "failed_body": "在插件更新或修复前，Zeron 会在不使用它的情况下继续运行。",
+      "show_folder": "显示文件夹",
+      "template_failed": "你的模板中的 {name} 有错误",
+      "template_failed_body": "修复并保存前，这部分将显示默认界面。",
+      "template_broken": "{name}无法运行",
+      "template_broken_body": "修复并保存模板前，将显示默认界面。"
+    }
+  },
+  "templates": {
+    "page": {
+      "title": "模板",
+      "description": "Zeron 的完整界面。模板未包含的部分使用默认界面。",
+      "search": "搜索模板",
+      "tabs": "模板",
+      "installed": "已安装",
+      "yours": "你的模板",
+      "author": {
+        "zeron": "由 Zeron 制作",
+        "you": "由你制作",
+        "verified": "由 @{username} 制作",
+        "unknown": "作者未知",
+        "named": "由 {name} 制作"
+      },
+      "about": {
+        "broken": "无法运行，已显示默认界面：{error}",
+        "errors": "部分内容显示默认界面：{error}",
+        "out_of_date": "为 Zeron {version} 制作。此后 Zeron 已更新。",
+        "out_of_date_unversioned": "为较早版本的 Zeron 制作。此后 Zeron 已更新。",
+        "no_description": "无描述。"
+      },
+      "package_filter": "Zeron 模板",
+      "export_title": "导出模板",
+      "couldnt_export": "无法导出 {name}",
+      "exported": "已导出 {name}",
+      "exported_body": "已用你的身份签名：安装者会看到它来自你。",
+      "import_title": "导入模板",
+      "couldnt_import": "无法导入模板",
+      "installed_toast": "已安装 {name}",
+      "waiting": "{name}正在等待你的操作",
+      "waiting_body": "这是其他人制作的模板。安装前请查看签名者。",
+      "review": "查看",
+      "more_for": "{name}的更多选项",
+      "show_folder": "显示文件夹",
+      "duplicate": "制作副本",
+      "couldnt_duplicate": "无法制作 {name} 的副本",
+      "export": "导出…",
+      "use": "使用",
+      "couldnt_use": "无法使用 {name}",
+      "in_use": "使用中",
+      "none_yours": "你还没有模板",
+      "none_body": "请智能体创建一个，或从默认界面的副本开始。",
+      "show_templates_folder": "显示模板文件夹",
+      "delete_title": "删除此模板？",
+      "delete_body": "模板会保留在模板文件夹中，以便日后恢复。如果正在使用，Zeron 会切换到默认界面。",
+      "couldnt_delete": "无法删除模板",
+      "new_title": "新建模板",
+      "new_body": "默认界面的副本，供你修改。请智能体修改，或自行编辑其文件。",
+      "make_it": "创建",
+      "couldnt_make": "无法创建模板",
+      "name": "名称",
+      "name_placeholder": "我的模板",
+      "install_more": "安装",
+      "install_title": "安装模板",
+      "install_dialog_title": "安装模板",
+      "install_dialog_body": "粘贴 .zeron-template 文件、GitHub 发布版或代码仓库的链接，或选择一个文件。Zeron 会检查是谁签名的，在使用前由你允许。",
+      "link": "链接",
+      "install": "安装",
+      "choose_file": "选择文件",
+      "couldnt_install": "无法安装该模板",
+      "update": "更新",
+      "updating": "正在更新",
+      "updated_toast": "已更新 {name}",
+      "updated_toast_version": "已更新 {name} {version}",
+      "couldnt_update": "无法更新 {name}"
+    },
+    "consent": {
+      "made_by_you": "由你制作",
+      "made_by": "由 @{username} 制作",
+      "unknown_author": "作者未知",
+      "whom_verified": "@{username}",
+      "whom_you": "你自己",
+      "whom_unknown": "发送者",
+      "checking": "正在检查模板…",
+      "nothing": "没有待处理的请求",
+      "nothing_body": "此模板已处理。",
+      "install_title": "安装 {name}？",
+      "keep_title": "保留 {name}？",
+      "keep_trust": "仅在信任其来源时保留",
+      "keep_body": "这个模板由代理创建、修改或切换而来，或在你上次保留后又有改动。保留之前它只是预览：Zeron 不允许它运行程序、使用你的账户、更改插件、模板或文件，也不允许它向代理发送内容。保留后，它将拥有 Zeron 的全部能力。",
+      "keep_files": "{n, plural, other {# 个文件}}，以当前内容为准",
+      "keep_files_detail": "如果它们再次改动，Zeron 会再次询问。",
+      "keep": "保留",
+      "trust": "仅在信任{whom}时安装",
+      "trust_body": "模板作为 Zeron 的一部分运行：它会替换 Zeron 的界面，并能做 Zeron 能做的一切，可访问你的对话、文件、账户和智能体。",
+      "unknown_body": "Zeron 无法确定签名所用密钥的所有者。仅在信任来源时安装。",
+      "signature": "签名有效",
+      "signature_detail": "自使用密钥 {key} 签名后，内容未发生更改。",
+      "files": "{n, plural, other {# 个文件}}",
+      "files_made_for": "{n, plural, other {# 个文件}} · 为 Zeron {version} 制作",
+      "left_out": "{n, plural, other {# 个文件未包含}}",
+      "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自己的版本：{files}",
+      "not_now": "暂不",
+      "install": "安装",
+      "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",
+      "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。"
+    }
+  },
+  "themes": {
+    "page": {
+      "title": "主题",
+      "description": "Zeron 的配色。你的主题可与任何模板搭配使用。",
+      "search": "搜索主题",
+      "tabs": "主题",
+      "all": "全部",
+      "builtin": "内置",
+      "from_templates": "来自模板",
+      "yours": "你的",
+      "import": "导入主题",
+      "hint": "主题只包含配色，因此适用于任何模板，也不能做其他事情。",
+      "about": {
+        "default": "默认主题，浅色和深色",
+        "both": "浅色和深色",
+        "light": "仅浅色",
+        "dark": "仅深色"
+      },
+      "byline": {
+        "builtin": "内置",
+        "template": "来自 {name}",
+        "imported": "已导入"
+      },
+      "needs_fixing": "此主题有需要修复的地方。",
+      "in_use": "使用中",
+      "for_light": "浅色",
+      "for_dark": "深色",
+      "use": "使用",
+      "couldnt_use": "无法使用此主题",
+      "use_light": "仅用于浅色",
+      "use_dark": "仅用于深色",
+      "show_template": "在“模板”中显示",
+      "more_for": "{name} 的更多选项",
+      "rename": "重命名",
+      "remove": "移除",
+      "rename_title": "重命名主题",
+      "couldnt_rename": "无法重命名主题",
+      "name": "名称",
+      "remove_title": "要移除此主题吗？",
+      "remove_body": "它将从“你的”中移除。使用此主题的地方将恢复为默认主题。",
+      "none_yours": "还没有你的主题",
+      "none_yours_body": "导入 VS Code 配色主题：主题的 .json 文件或扩展的文件夹。也可以将其拖放到此页面。",
+      "none_templates": "没有模板带有主题",
+      "none_templates_body": "当模板带有自己的配色时，会显示在这里，可与任何模板搭配使用。",
+      "choose_source": "选择主题",
+      "vscode_theme": "VS Code 主题",
+      "drop": "拖放以导入",
+      "import_failed": "无法导入此主题",
+      "skipped": "部分主题未能导入：{names}",
+      "imported_toast": "{count, plural, one {已导入主题} other {已导入 # 个主题}}",
+      "imported_body": "它在“你的”中。"
+    }
+  }
+}

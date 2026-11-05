@@ -21,5 +21,6 @@ async-trait.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
+zeron-theme.workspace = true
 zeron-visual.workspace = true
 tempfile.workspace = true

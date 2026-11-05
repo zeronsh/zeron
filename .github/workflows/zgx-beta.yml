@@ -1,0 +1,258 @@
+name: zgx beta
+
+# Zeron.app's beta channel: the zgx interface (apps/zgx, its `beta` feature)
+# as the Zeron app itself, with the latest stable release's own engine inside
+# (scripts/package-zgx-beta.sh). Testers keep Zeron.app's engine, data and
+# device; the app updates itself from the beta channel and goes back to
+# Stable when they turn beta off (crates/update `channel`).
+#
+# Published to the beta channel only — R2 `comet-native-releases/beta/*`
+# (zeron.sh/releases/beta/*, the manifest last) — and as a GitHub
+# pre-release that's never the latest. It never writes release.yml's
+# channel: not `comet-native-releases/manifest.json`, not `latest.txt`.
+#
+# Trigger: push a tag `beta-v<workspace version>-beta.<n>`, the workspace
+# version being the next release's (newer than the latest stable):
+#   git tag beta-v0.2.136-beta.1 && git push origin beta-v0.2.136-beta.1
+# or run it by hand with a version (builds and uploads the artifacts, no
+# release, no channel).
+#
+# Armed by the repository variable ZGX_BETA_ENABLED=true: until it's set,
+# every job is skipped. The `apple-release` and `cloudflare` environments
+# must also admit `beta-v*` tags, or a tag's run gets no signing,
+# notarization or R2 credentials.
+
+on:
+  push:
+    tags: ["beta-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The beta's version, <workspace version>-beta.<n>.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zgx-beta-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Apple silicon only, as release.yml's macOS build.
+  macos:
+    if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    environment: ${{ startsWith(github.ref, 'refs/tags/beta-v') && 'apple-release' || '' }}
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      engine: ${{ steps.inspect.outputs.engine }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: version (beta-v<workspace version>-beta.<n>, newer than stable)
+        id: version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          workspace="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version="${GITHUB_REF_NAME#beta-v}"
+          else
+            version="$VERSION_INPUT"
+          fi
+          case "$version" in
+            "$workspace"-beta.*) ;;
+            *) echo "$version is not $workspace-beta.<n> (Cargo.toml's version is $workspace)"; exit 1 ;;
+          esac
+          number="${version#"$workspace"-beta.}"
+          case "$number" in
+            ''|*[!0-9]*) echo "the beta number '$number' is not a number"; exit 1 ;;
+          esac
+          stable="$(curl -fsS --retry 3 https://zeron.sh/releases/latest.txt)"
+          # A beta is of the next release: newer than the stable it carries.
+          if [ "$(printf '%s\n%s\n' "$stable" "$workspace" | sort -V | tail -1)" != "$workspace" ] || [ "$stable" = "$workspace" ]; then
+            echo "the workspace's $workspace isn't newer than stable $stable: bump it first"; exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "stable=$stable"
+          } >>"$GITHUB_OUTPUT"
+      - name: the stable release's app (its engine goes in)
+        env:
+          STABLE: ${{ steps.version.outputs.stable }}
+        run: |
+          file="zeron-$STABLE-macos-arm64-app.tar.gz"
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/stable-manifest.json" https://zeron.sh/releases/manifest.json
+          sha="$(jq -r --arg f "$file" '.files[$f].sha256 // empty' "$RUNNER_TEMP/stable-manifest.json")"
+          [ -n "$sha" ] || { echo "the stable manifest has no checksum for $file"; exit 1; }
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/$file" "https://zeron.sh/releases/$file"
+          echo "$sha  $RUNNER_TEMP/$file" | shasum -a 256 -c -
+          echo "STABLE_APP=$RUNNER_TEMP/$file" >>"$GITHUB_ENV"
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      # zgx's terminals are Ghostty's, built with Zig 0.16 (zgx-ghostty-sys).
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
+          restore-keys: zgx-ghostty-
+      # Only the interface is built (its workspace links the shared crates);
+      # the engine is stable's.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-beta
+          workspaces: apps/zgx -> target
+      - name: import Developer ID certificate
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          pass="$(openssl rand -hex 16)"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          printf '%s' "$MACOS_CERT_P12" | base64 -d >"$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
+          [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
+          echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+      - name: notary credentials
+        if: env.AC_API_KEY_P8 != ''
+        run: |
+          printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
+          {
+            echo "NOTARY_KEY_PATH=$RUNNER_TEMP/ac_api_key.p8"
+            echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
+            echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
+          } >>"$GITHUB_ENV"
+      - name: package dmg
+        env:
+          BETA_VERSION: ${{ steps.version.outputs.version }}
+          CARGO_FLAGS: --locked
+        run: ZGX_BETA_ENGINE="$STABLE_APP" scripts/package-zgx-beta.sh
+      - name: inspect the bundle
+        id: inspect
+        env:
+          BETA_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          app="target/package-beta/Zeron.app"
+          plist="$app/Contents/Info.plist"
+          plutil -p "$plist"
+          test "$(plutil -extract CFBundleIdentifier raw "$plist")" = sh.zeron.app
+          test "$(plutil -extract ZeronVersion raw "$plist")" = "$BETA_VERSION"
+          test "$("$app/Contents/MacOS/zeron" --version)" = "zeron $BETA_VERSION"
+          test -x "$app/Contents/MacOS/Zeron Engine"
+          test -f "$app/Contents/Resources/ui/app.luau"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$app"
+          if [ -n "${NOTARY_KEY_PATH:-}" ]; then
+            spctl --assess --type execute --verbose=2 "$app"
+            xcrun stapler validate "$app"
+          fi
+          echo "engine=$(plutil -extract ZeronEngineVersion raw "$plist")" >>"$GITHUB_OUTPUT"
+          du -sh "$app"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zgx-beta-macos-${{ runner.arch }}
+          path: |
+            target/package-beta/*.dmg
+            target/package-beta/*.tar.gz
+          if-no-files-found: error
+
+  # The GitHub pre-release: never the latest release (Zeron's updater and
+  # download links follow releases/latest), with the beta's manifest.
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/beta-v')
+    needs: macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.macos.outputs.version }}
+      ENGINE: ${{ needs.macos.outputs.engine }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: artifacts and the beta manifest
+        run: |
+          ls -l dist/
+          test -f "dist/zeron-$VERSION-macos-arm64.dmg"
+          test -f "dist/zeron-$VERSION-macos-arm64-app.tar.gz"
+          # crates/update's Manifest: the beta's version, the stable engine it
+          # carries (a switch back to Stable weighs it) and its macOS floor.
+          manifest=$(jq -n --arg version "$VERSION" --arg engine "$ENGINE" \
+            '{version: $version, engineVersion: $engine, minimumMacOS: "13.0", files: {}}')
+          for f in dist/*; do
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
+              '.files[$name] = {sha256: $sha}' <<<"$manifest")
+          done
+          printf '%s' "$manifest" > beta-manifest.json
+          cat beta-manifest.json
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: Zeron ${{ needs.macos.outputs.version }}
+          prerelease: true
+          make_latest: "false"
+          files: |
+            dist/*
+            beta-manifest.json
+          body: |
+            Zeron ${{ needs.macos.outputs.version }}, a beta of the next Zeron app.
+
+            - It replaces Zeron.app and keeps your Zeron: the same engine, data, account and device.
+            - Once installed, it updates from the beta channel. To go back, turn off **Get beta updates** in Settings → About & updates; Zeron then installs the latest stable release.
+            - macOS 13 or later, Apple silicon.
+
+  # The beta channel on R2: zeron.sh/releases/beta/*. Every key is under
+  # `beta/`: never the stable manifest.json or latest.txt.
+  channel:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/beta-v')
+    needs: [macos, release]
+    runs-on: ubuntu-latest
+    environment: cloudflare
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: b57dde68ee5964dccc025437b5478a5b
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: the manifest the release carries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern beta-manifest.json --dir .
+      - name: upload to R2 (zeron.sh/releases/beta/*)
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: |
+          put() {
+            case "$1" in
+              beta/?*) ;;
+              *) echo "refusing to write $1: only beta/* is this workflow's"; exit 1 ;;
+            esac
+            npx wrangler@4 r2 object put "comet-native-releases/$1" --file "$2" --remote
+          }
+          for f in dist/*; do
+            put "beta/$(basename "$f")" "$f"
+          done
+          # Last, so no reader sees a version before its files.
+          put beta/manifest.json beta-manifest.json

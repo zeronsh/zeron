@@ -132,6 +132,8 @@ fn mocked(base: &str) -> ProbeEndpoints {
         claude_loopback_token: format!("{base}/v1/oauth/token"),
         claude_profile: format!("{base}/api/oauth/profile"),
         codex_usage: format!("{base}/backend-api/wham/usage"),
+        codex_reset_credits: format!("{base}/backend-api/wham/rate-limit-reset-credits"),
+        codex_consume_reset: format!("{base}/backend-api/wham/rate-limit-reset-credits/consume"),
         grok_usage: format!("{base}/v1/billing?format=credits"),
         github_api: base.to_string(),
         github_login: base.to_string(),
@@ -1905,4 +1907,107 @@ async fn a_failed_sign_ins_output_is_redacted_before_the_ui_sees_it() {
         message,
         "failed at https://auth.x.ai/device?… with code [code] token=[redacted]"
     );
+}
+
+// ── Codex banked resets ─────────────────────────────────────────────────────
+
+/// Codex's `auth.json` for `account_id` (`tokens.account_id` and the
+/// id token's claim agree, as the CLI writes them).
+fn codex_auth(email: &str, account_id: &str) -> String {
+    let id_token = jwt(serde_json::json!({
+        "email": email,
+        "https://api.openai.com/auth": { "chatgpt_account_id": account_id, "chatgpt_plan_type": "plus" },
+    }));
+    serde_json::json!({
+        "tokens": { "id_token": id_token, "access_token": "codex-access", "account_id": account_id }
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn codex_banked_resets_list_persist_and_redeem_against_the_mock() {
+    // Who the usage endpoint says the token belongs to (a mismatch: another).
+    let answers_for = Arc::new(Mutex::new("acct-ada".to_string()));
+    let consumed = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let (who, sent) = (answers_for.clone(), consumed.clone());
+    let server = MockServer::start(move |method, path, body| match (method, path) {
+        ("GET", "/backend-api/wham/usage") => (
+            200,
+            serde_json::json!({
+                "account_id": *lock(&who),
+                "plan_type": "plus",
+                "rate_limit": { "primary_window": { "used_percent": 100, "limit_window_seconds": 18000 } },
+                "rate_limit_reset_credits": { "available_count": 2 },
+            })
+            .to_string(),
+        ),
+        ("GET", "/backend-api/wham/rate-limit-reset-credits") => (
+            200,
+            serde_json::json!({
+                "available_count": 2,
+                "credits": [
+                    { "id": "credit-1", "reset_type": "codex_rate_limits", "status": "available",
+                      "title": "Full reset (Weekly + 5 hr)", "expires_at": "2030-01-04T02:01:00Z" },
+                    { "id": "credit-2", "reset_type": "codex_rate_limits", "status": "available",
+                      "title": "Full reset (Weekly + 5 hr)", "expires_at": "2030-01-12T02:01:00Z" },
+                ]
+            })
+            .to_string(),
+        ),
+        ("POST", "/backend-api/wham/rate-limit-reset-credits/consume") => {
+            lock(&sent).push(serde_json::from_str(body).unwrap_or_default());
+            (200, r#"{"code":"reset"}"#.into())
+        }
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    write(&config.codex_home.join("auth.json"), &codex_auth("ada@example.com", "acct-ada"));
+
+    // The probe loads the credits alongside the usage.
+    let codex = rows(&accounts.list(true).await.unwrap(), HarnessId::Codex);
+    assert_eq!(codex.len(), 1);
+    let credits = codex[0].codex_reset_credits.clone().expect("credits listed");
+    assert_eq!(credits.available_count, 2);
+    assert_eq!(credits.credits[0].id, "credit-1");
+    assert!((codex[0].usage_windows[0].used_fraction - 1.0).abs() < 1e-6);
+    let account = codex[0].id.clone();
+
+    // They're in the on-disk usage cache: a restarted engine shows them
+    // before it probes again.
+    let (restarted, _) = accounts_with(tmp.path(), mocked(&server.base));
+    let cold = rows(&restarted.list(false).await.unwrap(), HarnessId::Codex);
+    assert_eq!(cold[0].codex_reset_credits.as_ref().map(|c| c.available_count), Some(2));
+
+    // Redeeming checks the account, then sends Codex's own request.
+    let outcome = accounts
+        .consume_codex_reset_credit(&account, "credit-1", "key-1")
+        .await
+        .unwrap();
+    assert_eq!(outcome.outcome, "reset");
+    assert_eq!(
+        lock(&consumed).as_slice(),
+        [serde_json::json!({ "redeem_request_id": "key-1", "credit_id": "credit-1" })]
+    );
+
+    // The token answering for another account: no redemption is sent...
+    *lock(&answers_for) = "acct-someone-else".into();
+    let refused = accounts
+        .consume_codex_reset_credit(&account, "credit-2", "key-2")
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("different account"), "{refused}");
+    assert_eq!(server.hits("POST /backend-api/wham/rate-limit-reset-credits/consume"), 1);
+    // ...and a fresh engine's probe shows no numbers for it.
+    let fresh = tempfile::tempdir().unwrap();
+    let (other, config) = accounts_with(fresh.path(), mocked(&server.base));
+    write(&config.codex_home.join("auth.json"), &codex_auth("ada@example.com", "acct-ada"));
+    let refused = rows(&other.list(true).await.unwrap(), HarnessId::Codex);
+    assert!(refused[0].usage_windows.is_empty());
+    assert!(refused[0].codex_reset_credits.is_none());
+
+    // Nothing to redeem with: refused before any request.
+    assert!(accounts.consume_codex_reset_credit(&account, "", "key-3").await.is_err());
+    assert!(accounts.consume_codex_reset_credit("no-such-account", "credit-2", "key-4").await.is_err());
 }

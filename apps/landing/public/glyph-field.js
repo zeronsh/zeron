@@ -1,12 +1,10 @@
-// Zeron glyph field — a dark-mode descendant of anara.com's hero ASCII background.
+// Zeron glyph field: the hero's background, a grid of glyphs set in engraved stone.
 //
-// Anara: pale-gray math equations on white, cut into cloud-like gaps by a noise field,
-// a pointer trail that darkens cells, 0.88 scroll parallax.
-// Zeron: the same grid, but set in engraved stone. Text is agent traces and zero-math,
-// glyphs sit barely above the obsidian, a slow violet light shaft sweeps through them
-// (the canyon beam), and the pointer leaves a violet afterglow instead of ink.
+// Text is agent traces and zero-math, glyphs sit barely above the obsidian, a slow
+// violet light shaft sweeps through them (the canyon beam), the pointer leaves a
+// violet afterglow, and the grid scrolls with a gentle parallax.
 //
-// Cells are scattered by a hash (no clouds), and fade to `clearOpacity` behind the
+// Cells are scattered by a hash, and fade to `clearOpacity` behind the
 // text and elements they're told to keep legible, so copy sits on clean ground.
 //
 // mountGlyphField(host, opts) → { destroy }
@@ -221,7 +219,7 @@ export function mountGlyphField(host, opts = {}) {
   };
   const onScroll = () => { sraf ||= requestAnimationFrame(applyScroll); };
 
-  // pointer afterglow (Anara's trail, softer)
+  // pointer afterglow
   const LIFE = 650, SPACING = 12;
   let lx0 = -1e9, ly0 = -1e9, traf = 0;
   const loop = () => {

@@ -1,0 +1,9 @@
+{
+  "id": "focus",
+  "name": "Focus",
+  "version": "1.0.0",
+  "description": "A Focus button in the title bar: while it's on, the sidebar shows only what's working or needs you.",
+  "entry": "init.luau",
+  "permissions": ["ui.add", "ui.change"],
+  "ui": { "change": ["#sidebar"] }
+}

@@ -537,6 +537,7 @@ impl EngineHandle {
                     .iter()
                     .map(|c| c.to_string())
                     .collect(),
+                build: None,
             },
             deferred_state: None,
         }
@@ -594,6 +595,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
                 workspace_scope: WorkspaceScope::Synced,
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                build: None,
             })
         }
         Err(err) => Err(err),
@@ -2175,6 +2177,9 @@ impl AppState {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    exit_code: None,
+                    output_truncated: false,
+                    output_lines: None,
                 }],
                 created_at: created_at + 1,
                 device_id: "local".into(),
@@ -4523,6 +4528,10 @@ fn spawn_change_request_watch(
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        // A host that rejects the checkout (a removed worktree, a folder it
+        // no longer knows) keeps rejecting it, so failed subscribes back off.
+        const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut retry_delay = RETRY_DELAY;
         loop {
             let params = watch_params(&target, local_device_id.as_deref());
 
@@ -4531,7 +4540,10 @@ fn spawn_change_request_watch(
                 .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, params)
                 .await
             {
-                Ok(subscription) => subscription,
+                Ok(subscription) => {
+                    retry_delay = RETRY_DELAY;
+                    subscription
+                }
                 Err(RpcError::UnknownMethod(_)) => {
                     tracing::debug!(
                         device = %target.device_id,
@@ -4561,7 +4573,8 @@ fn spawn_change_request_watch(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
                     continue;
                 }
             };
@@ -5158,6 +5171,7 @@ mod tests {
                     workspace_scope: WorkspaceScope::Local,
                     cursor_sdk_version: None,
                     capabilities: zeron_proto::capabilities::current(),
+                    build: None,
                 },
                 state: state_rx,
             }),
@@ -5456,8 +5470,18 @@ mod tests {
                 .expect("embedded lifecycle")
                 .borrow()
                 .clone(),
-            DeferredEngineState::Waiting
+            // A saved session with no organization: the account's setup
+            // isn't finished (the engine waits on it as it waits to assemble).
+            DeferredEngineState::Onboarding
         ));
+        // The app's onboarding wait sees it as still waiting, not failed.
+        let mut deferred = handle.deferred_state().expect("embedded lifecycle");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), wait_for_deferred_engine(&mut deferred))
+                .await
+                .is_err(),
+            "onboarding is a wait, never an error"
+        );
 
         let info: EngineInfo = handle
             .client()
@@ -5475,6 +5499,32 @@ mod tests {
             .await
             .is_err(),
             "cloud data waits for organization onboarding"
+        );
+        // What this app asks during onboarding waits, never errors: its
+        // watch streams and data calls. Only plugin and template calls (which
+        // this app never makes) answer `setup_incomplete` at once.
+        for method in [methods::WATCH_CHATS, methods::WATCH_DEVICES, methods::WATCH_SPACES, methods::WATCH_SESSIONS] {
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    handle.client().call(method, serde_json::json!({})),
+                )
+                .await
+                .is_err(),
+                "{method} waits for organization onboarding"
+            );
+        }
+        let auth = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle.client().subscribe(methods::AUTH_STATUS, serde_json::json!({})),
+        )
+        .await
+        .expect("AuthStatus answers during onboarding");
+        assert!(auth.is_ok(), "{:?}", auth.err());
+        let plugins = handle.client().call(methods::LIST_PLUGINS, serde_json::json!({})).await;
+        assert!(
+            matches!(&plugins, Err(RpcError::Capability(code)) if code == "setup_incomplete"),
+            "{plugins:?}"
         );
         assert!(!dir.path().join("orgs").exists());
         handle.shutdown().await;
@@ -5560,6 +5610,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -5580,6 +5631,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: base + TimeDelta::minutes(created_min),
         }
     }
@@ -7124,9 +7176,9 @@ mod tests {
     fn project_filter_and_projects_span_a_repository_across_devices() {
         let mut state = AppState::new();
         state.local_device_id = Some("laptop".into());
-        let mut remote = space("remote", "metal", "/w/anara", 1);
+        let mut remote = space("remote", "metal", "/w/marigold", 1);
         remote.repository_id = Some("commit:abc".into());
-        let mut local = space("local", "laptop", "/h/anara", 2);
+        let mut local = space("local", "laptop", "/h/marigold", 2);
         local.repository_id = Some("commit:abc".into());
         let other = space("other", "laptop", "/h/notes", 3);
         state.apply_spaces(vec![remote, local, other]);
@@ -7168,8 +7220,8 @@ mod tests {
 
         // A two-device project tags both hosts; a one-device one keeps the
         // plain host tag.
-        let anara = state.projects().into_iter().next().unwrap();
-        let (tag, _) = state.project_device_tag(&anara, Utc::now());
+        let marigold = state.projects().into_iter().next().unwrap();
+        let (tag, _) = state.project_device_tag(&marigold, Utc::now());
         assert!(tag.starts_with("@ ") && tag.contains(" · "), "{tag}");
         let notes = state.projects().into_iter().nth(1).unwrap();
         assert_eq!(
@@ -8050,14 +8102,14 @@ mod tests {
 
     #[test]
     fn chat_location_joins_project_and_branch() {
-        let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/soccertcg"));
+        let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/marigold"));
         c.branch = Some("zeron/rebalance".into());
         assert_eq!(
             chat_location(&c).as_deref(),
-            Some("soccertcg · zeron/rebalance")
+            Some("marigold · zeron/rebalance")
         );
         c.branch = None;
-        assert_eq!(chat_location(&c).as_deref(), Some("soccertcg"));
+        assert_eq!(chat_location(&c).as_deref(), Some("marigold"));
         c.cwd = None;
         c.branch = Some("main".into());
         assert_eq!(chat_location(&c).as_deref(), Some("main"));

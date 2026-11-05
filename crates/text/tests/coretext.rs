@@ -247,7 +247,7 @@ fn broad_corpus() -> Vec<String> {
         "Edit /Users/wing/Documents/GitHub/comet-native/crates/text/src/layout.rs and ~/Library/Application Support/Zeron/config.toml today.",
         "C:\\Program Files\\Zeron\\bin\\zeron.exe --config C:\\Users\\wing\\AppData\\Roaming\\Zeron\\settings.json --verbose",
         "Docs at https://developer.apple.com/documentation/coretext/1509588-ctframesettercreateframe?language=objc#discussion and more.",
-        "Mail wing@anara.com or visit http://www.example.org:8080/path/to/resource.html?a=1&b=two#section-3 for further info.",
+        "Mail ada@example.net or visit http://www.example.org:8080/path/to/resource.html?a=1&b=two#section-3 for further info.",
         "git@github.com:chenglou/pretext.git, ssh://git@host.example.com:2222/repo.git, and file:///tmp/some%20file.txt are URLs.",
         // numbers / punctuation
         "Prices: $1,234.56, €99.99, £0.50, ¥10,000; percentages like 12.5% and -3.2%; ranges 10–20 and 1990-2000; ratios 16:9.",

@@ -14,8 +14,17 @@ import type { Env } from "./env";
 const API = "https://api.workos.com";
 
 /** Thrown for rejected WorkOS calls; routes map it to 401 (same as the old
- * server's WorkOsAuthFailed). */
-export class WorkOsAuthFailed extends Error {}
+ * server's WorkOsAuthFailed), or, for the account/org settings calls, by
+ * `status` and `code` (the WorkOS HTTP status and error code). */
+export class WorkOsAuthFailed extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly code?: string
+  ) {
+    super(message);
+  }
+}
 
 export interface ExchangeResult {
   readonly user: {
@@ -37,6 +46,8 @@ export interface OrgMembership {
   readonly id: string;
   readonly organizationId: string;
   readonly name: string;
+  /** Role slug, e.g. `admin`; null when WorkOS names none. */
+  readonly role: string | null;
 }
 
 interface WireUser {
@@ -56,17 +67,20 @@ interface WireMembership {
   id: string;
   organization_id: string;
   organization_name?: string | null;
+  role?: { slug?: string | null } | null;
 }
 
 const failed = async (res: Response): Promise<never> => {
   let message = "authentication failed";
+  let code: string | undefined;
   try {
-    const body = (await res.json()) as { message?: string; error_description?: string; error?: string };
+    const body = (await res.json()) as { message?: string; error_description?: string; error?: string; code?: unknown };
     message = body.message ?? body.error_description ?? body.error ?? message;
+    if (typeof body.code === "string") code = body.code;
   } catch {
     /* non-JSON error body */
   }
-  throw new WorkOsAuthFailed(message);
+  throw new WorkOsAuthFailed(message, res.status, code);
 };
 
 const post = async (apiKey: string, path: string, body: unknown): Promise<Response> =>
@@ -140,7 +154,8 @@ export const listOrgs = async (apiKey: string, userId: string): Promise<OrgMembe
   return r.data.map((m) => ({
     id: m.id,
     organizationId: m.organization_id,
-    name: m.organization_name ?? m.organization_id
+    name: m.organization_name ?? m.organization_id,
+    role: m.role?.slug ?? null
   }));
 };
 
@@ -169,4 +184,237 @@ export const createOrg = async (
     if (!fallback.ok) return failed(fallback);
   }
   return { organizationId: org.id };
+};
+
+/** How one invitation went: `exists` = already a member or already invited. */
+export type InvitationOutcome = "sent" | "invalid" | "exists" | "failed";
+
+/** Invite `email` to the org as a member; WorkOS sends the email. Never
+ * throws, and never logs the address. */
+export const sendInvitation = async (
+  apiKey: string,
+  invitation: { readonly email: string; readonly organizationId: string; readonly inviterUserId: string }
+): Promise<InvitationOutcome> => {
+  const send = (roleSlug?: string) =>
+    post(apiKey, "/user_management/invitations", {
+      email: invitation.email,
+      organization_id: invitation.organizationId,
+      inviter_user_id: invitation.inviterUserId,
+      ...(roleSlug ? { role_slug: roleSlug } : {})
+    });
+  try {
+    let res = await send("member");
+    let code = res.ok ? undefined : await errorCode(res);
+    // Role slugs are per-environment config (as in createOrg): without a
+    // "member" role, the default role is the member one.
+    if (code === "invalid_role") {
+      res = await send();
+      code = res.ok ? undefined : await errorCode(res);
+    }
+    if (res.ok) return "sent";
+    if (code === "invalid_request_parameters") return "invalid";
+    if (code === "email_already_invited_to_organization" || code === "user_already_organization_member") return "exists";
+    console.warn("workos: invitation failed", res.status, code ?? "no code");
+    return "failed";
+  } catch (e) {
+    console.warn("workos: invitation failed", e instanceof Error ? e.name : "error");
+    return "failed";
+  }
+};
+
+const errorCode = async (res: Response): Promise<string | undefined> => {
+  try {
+    const body = (await res.json()) as { code?: unknown };
+    return typeof body.code === "string" ? body.code : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Account and org settings (auth-routes.ts: /auth/me, /auth/orgs/{id}/…).
+// Every failure throws WorkOsAuthFailed with the WorkOS status and code;
+// nothing here logs, so no name, address or id reaches the tail.
+// ---------------------------------------------------------------------------
+
+/** The fields of a WorkOS user object the settings routes use (wire names;
+ * the same shape the directory's webhook upsert takes). */
+export interface WireProfile {
+  readonly id: string;
+  readonly email: string;
+  readonly first_name: string | null;
+  readonly last_name: string | null;
+  readonly profile_picture_url: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface OrgMember {
+  readonly membershipId: string;
+  readonly userId: string;
+  readonly role: string | null;
+  readonly status: string;
+  /** ISO 8601, when the membership was created. */
+  readonly createdAt: string;
+}
+
+export interface MembershipRef {
+  readonly membershipId: string;
+  readonly organizationId: string;
+  readonly userId: string;
+}
+
+export interface WireInvitation {
+  readonly id: string;
+  readonly email: string;
+  /** `pending`, `accepted`, `expired` or `revoked`. */
+  readonly state: string;
+  readonly organization_id: string | null;
+  readonly expires_at: string;
+  readonly created_at: string;
+}
+
+/** Rows a settings list reads at most (members, invitations). */
+export const SETTINGS_LIST_CAP = 200;
+
+const call = (apiKey: string, method: string, path: string, body?: unknown): Promise<Response> =>
+  fetch(`${API}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" })
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+  });
+
+const ok = async <T>(res: Response): Promise<T> => {
+  if (!res.ok) return failed(res);
+  return (await res.json()) as T;
+};
+
+/** Read a WorkOS list to its end or `SETTINGS_LIST_CAP` rows. */
+const listAll = async <T>(apiKey: string, path: string, params: Record<string, string>): Promise<T[]> => {
+  const rows: T[] = [];
+  let after: string | null = null;
+  do {
+    const query = new URLSearchParams({ ...params, limit: "100", ...(after ? { after } : {}) });
+    const page: { data: T[]; list_metadata?: { after?: string | null } } = await ok(await call(apiKey, "GET", `${path}?${query}`));
+    rows.push(...page.data);
+    after = page.list_metadata?.after ?? null;
+  } while (after && rows.length < SETTINGS_LIST_CAP);
+  return rows.slice(0, SETTINGS_LIST_CAP);
+};
+
+const profileOf = (u: WireProfile): WireProfile => ({
+  id: u.id,
+  email: u.email,
+  first_name: u.first_name ?? null,
+  last_name: u.last_name ?? null,
+  profile_picture_url: u.profile_picture_url ?? null,
+  created_at: u.created_at,
+  updated_at: u.updated_at
+});
+
+export const getUser = async (apiKey: string, userId: string): Promise<WireProfile> =>
+  profileOf(await ok<WireProfile>(await call(apiKey, "GET", `/user_management/users/${encodeURIComponent(userId)}`)));
+
+export const updateUserName = async (
+  apiKey: string,
+  userId: string,
+  firstName: string,
+  lastName: string
+): Promise<WireProfile> =>
+  profileOf(
+    await ok<WireProfile>(
+      await call(apiKey, "PUT", `/user_management/users/${encodeURIComponent(userId)}`, {
+        first_name: firstName,
+        last_name: lastName
+      })
+    )
+  );
+
+/** Delete a user for good (Settings → Profile → Delete account). One that's
+ * already gone counts as deleted. */
+export const deleteUser = async (apiKey: string, userId: string): Promise<void> => {
+  const res = await call(apiKey, "DELETE", `/user_management/users/${encodeURIComponent(userId)}`);
+  if (!res.ok && res.status !== 404) await failed(res);
+};
+
+/** An org's active memberships, oldest first (at most `SETTINGS_LIST_CAP`). */
+export const listOrgMembers = async (apiKey: string, organizationId: string): Promise<OrgMember[]> => {
+  const rows = await listAll<WireMembership & { user_id: string; status: string; created_at: string }>(
+    apiKey,
+    "/user_management/organization_memberships",
+    { organization_id: organizationId, statuses: "active", order: "asc" }
+  );
+  return rows.map((m) => ({
+    membershipId: m.id,
+    userId: m.user_id,
+    role: m.role?.slug ?? null,
+    status: m.status,
+    createdAt: m.created_at
+  }));
+};
+
+/** One membership; undefined when WorkOS has no such id. */
+export const getMembership = async (apiKey: string, membershipId: string): Promise<MembershipRef | undefined> => {
+  const res = await call(apiKey, "GET", `/user_management/organization_memberships/${encodeURIComponent(membershipId)}`);
+  if (res.status === 404) return undefined;
+  const m = await ok<{ id: string; organization_id: string; user_id: string }>(res);
+  return { membershipId: m.id, organizationId: m.organization_id, userId: m.user_id };
+};
+
+export const removeMembership = async (apiKey: string, membershipId: string): Promise<void> => {
+  const res = await call(apiKey, "DELETE", `/user_management/organization_memberships/${encodeURIComponent(membershipId)}`);
+  if (!res.ok) return failed(res);
+};
+
+export const setMembershipRole = async (apiKey: string, membershipId: string, roleSlug: string): Promise<void> => {
+  const res = await call(apiKey, "PUT", `/user_management/organization_memberships/${encodeURIComponent(membershipId)}`, {
+    role_slug: roleSlug
+  });
+  if (!res.ok) return failed(res);
+};
+
+/** Every invitation to the org, newest first (at most `SETTINGS_LIST_CAP`). */
+export const listInvitations = async (apiKey: string, organizationId: string): Promise<WireInvitation[]> =>
+  listAll<WireInvitation>(apiKey, "/user_management/invitations", { organization_id: organizationId, order: "desc" });
+
+/** One invitation; undefined when WorkOS has no such id. */
+export const getInvitation = async (apiKey: string, invitationId: string): Promise<WireInvitation | undefined> => {
+  const res = await call(apiKey, "GET", `/user_management/invitations/${encodeURIComponent(invitationId)}`);
+  if (res.status === 404) return undefined;
+  return ok<WireInvitation>(res);
+};
+
+export const revokeInvitation = async (apiKey: string, invitationId: string): Promise<void> => {
+  const res = await call(apiKey, "POST", `/user_management/invitations/${encodeURIComponent(invitationId)}/revoke`, {});
+  if (!res.ok) return failed(res);
+};
+
+/** WorkOS re-sends the invitation's email; `unsupported` when this WorkOS
+ * has no resend endpoint (404). */
+export const resendInvitation = async (apiKey: string, invitationId: string): Promise<"sent" | "unsupported"> => {
+  const res = await call(apiKey, "POST", `/user_management/invitations/${encodeURIComponent(invitationId)}/resend`, {});
+  if (res.status === 404) return "unsupported";
+  if (!res.ok) return failed(res);
+  return "sent";
+};
+
+/** Delete an org for good (with its memberships and invitations). One that's
+ * already gone counts as deleted. */
+export const deleteOrg = async (apiKey: string, organizationId: string): Promise<void> => {
+  const res = await call(apiKey, "DELETE", `/organizations/${encodeURIComponent(organizationId)}`);
+  if (!res.ok && res.status !== 404) await failed(res);
+};
+
+export const renameOrg = async (
+  apiKey: string,
+  organizationId: string,
+  name: string
+): Promise<{ organizationId: string; name: string }> => {
+  const org = await ok<{ id: string; name: string }>(
+    await call(apiKey, "PUT", `/organizations/${encodeURIComponent(organizationId)}`, { name })
+  );
+  return { organizationId: org.id, name: org.name };
 };

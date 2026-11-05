@@ -1,0 +1,21 @@
+[package]
+name = "zeron-launch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# How a Zeron app starts its engine helper: the executable beside the app,
+# the environment it's given, detached. Shared by the engine (managed.rs),
+# the command line (zeron-cli) and the zgx app, with no engine linked in.
+
+[dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile.workspace = true

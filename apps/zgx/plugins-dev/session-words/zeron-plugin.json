@@ -1,0 +1,8 @@
+{
+  "id": "session-words",
+  "name": "Session words",
+  "version": "1.0.0",
+  "description": "What a chat is doing, said in its header in Zeron's language: a plugin with its own translations (locales/).",
+  "entry": "init.luau",
+  "permissions": ["ui.add", "sessions.read"]
+}

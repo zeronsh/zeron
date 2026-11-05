@@ -109,6 +109,14 @@ name = "settings-search-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "right-panel-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "session-card-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "side-chat-seen-fixture"
 required-features = ["appshots-fixture"]
 

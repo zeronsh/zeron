@@ -1,0 +1,202 @@
+{
+	// Zeron dark. Saving this file restyles every open window in place.
+	//
+	// Dark reads depth by light, not shadow: what is nearer is lighter, its
+	// edge a faint white hairline, even all round (no highlight along its
+	// top); shadows sit under it soft and dark, felt more than seen.
+	// The window is glass: a deep scrim over the blur, dark but letting the
+	// desktop's colour through.
+	"name": "zeron-dark",
+	"type": "dark",
+	"extends": "zgx-dark",
+	"tokens": {
+		// The window's scrim over the under-window blur.
+		"background": "#0b0b0dcc",
+		"glass.tint": "#0b0b0dcc",
+		// zgx's own surfaces (its tooltips): lifted above the menus it shows over (a deep charcoal), opaque, so a tooltip reads as one.
+		"popover.bg": "#2a2a2f",
+		"surface": {
+			"sunken": "#000000c2",
+			"base": "#ffffff08",
+			"raised": "#ffffff0f",
+			// Popovers and sheets: their own darker glass over a backdrop blur.
+			"overlay": "#1b1b1ee0"
+		},
+		"text": {
+			"primary": "#ededef",
+			// Muted text is the primary at less opacity, not a grey: it takes
+			// the colour of whatever is behind it, glass or opaque.
+			"secondary": "alpha({text.primary}, 0.6)",
+			"tertiary": "alpha({text.primary}, 0.42)",
+			"disabled": "alpha({text.primary}, 0.28)"
+		},
+		"border": "#ffffff12",
+		"border.subtle": "#ffffff0a",
+		"border.strong": "#ffffff2e",
+		// The accent: the intro's dusk violet, dusty in the dark (low
+		// saturation, a touch warm toward mauve) as the light theme's is on
+		// paper; a saturated violet on dark glass reads as plain purple.
+		"accent": "#9277b0",
+		"accent.hover": "#9e85bb",
+		"accent.text": "#ffffff",
+		"danger": "#f87171",
+		"warning": "#facc15",
+		"success": "#34d399",
+		"info": "#60a5fa",
+		// Washes over whatever is under them: hover a breath, pressed more.
+		"hover": "#ffffff0d",
+		"pressed": "#ffffff17",
+		"selection.item": "#ffffff1a",
+		// Scrollbars: no track (the content runs under it, as macOS's
+		// overlay bars), a thumb of the text's own ink, faint at rest and
+		// firmer under the pointer or dragged.
+		"scrollbar": {
+			"track": "#00000000",
+			"thumb": "alpha({text.primary}, 0.26)",
+			"thumb.active": "alpha({text.primary}, 0.44)"
+		},
+		// What dims the window under a dialog: deep, so the dialog is all
+		// there is.
+		"backdrop": "#00000059",
+		"focus.ring": "alpha({accent}, 0.6)",
+		"shadow": {
+			"sm": "0 1 2 0 #00000059",
+			"md": "0 4 12 0 #00000066",
+			"lg": "0 12 32 0 #00000080"
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": { "xs": 11, "sm": 12, "md": 13, "lg": 15, "xl": 20, "xxl": 28 },
+			"line": { "xs": 14, "sm": 16, "md": 18, "lg": 20, "xl": 26, "xxl": 34 }
+		},
+		// The spacing scale, the same in every theme: every padding, margin
+		// and gap is one of these (or zeron.space.hair / snug, the two
+		// half-steps controls need).
+		"space": { "1": 4, "2": 8, "3": 12, "4": 16, "5": 24, "6": 32, "7": 48, "8": 64 },
+		"radius": { "sm": 4, "md": 6, "lg": 8, "xl": 12 },
+		"control.height": 32,
+
+		"zeron": {
+			"window": "#0e0e10",
+			// A wall of printed cards in a dark room: the window's colour over
+			// each, so their paper reads as lit from the words' side, not
+			// brighter than the way on.
+			"wall": { "scrim": "alpha({zeron.window}, 0.22)", "veil": "alpha({zeron.window}, 0.66)", "shadow": "0 0 0 0 #00000000" },
+			// A card's sky behind it, in the dark: a glow, not a wallpaper.
+			"card": { "glow": 0.38 },
+			// Code: pale palette steps (300), one perceived lightness, so no
+			// hue shouts on dark glass. Words carry the hue (keywords violet
+			// as the accent, functions blue, types gold, strings green,
+			// numbers peach, properties a blush); the structure (comments,
+			// operators, punctuation) is the text's own ink, fainter. The
+			// body sits a touch under full white, so a page of code doesn't glare.
+			"syntax": {
+				"text": "alpha({text.primary}, 0.9)",
+				"keyword": "{palette.violet.300}", "function": "{palette.blue.300}", "type": "{palette.amber.300}",
+				"string": "{palette.green.300}", "escape": "{palette.cyan.300}", "regex": "{palette.teal.300}",
+				"number": "{palette.orange.300}", "constant": "{palette.orange.300}", "macro": "{palette.fuchsia.300}",
+				"property": "{palette.rose.200}", "variable": "{palette.pink.300}", "attribute": "{palette.yellow.300}",
+				"label": "{palette.indigo.300}", "tag": "{palette.red.300}",
+				"comment": "alpha({text.primary}, 0.46)", "operator": "alpha({text.primary}, 0.66)", "punctuation": "alpha({text.primary}, 0.5)",
+				"heading": "{palette.violet.300}", "link": "{palette.blue.300}", "url": "alpha({text.primary}, 0.42)",
+				"emphasis": "{palette.pink.300}", "strong": "{palette.orange.200}", "quote": "alpha({text.primary}, 0.6)",
+				"inserted": "{palette.green.400}", "deleted": "{palette.red.400}", "hunk": "{palette.violet.300}", "meta": "alpha({text.primary}, 0.6)"
+			},
+			// A pull request's badge, by its state.
+			"pr": { "open": "{palette.green.400}", "merged": "{palette.violet.400}", "closed": "{palette.red.400}", "draft": "{palette.gray.400}" },
+			// A file's git status in a tree.
+			"git": {
+				"modified": "{palette.amber.400}", "added": "{palette.green.400}", "untracked": "{palette.emerald.400}",
+				"renamed": "{palette.violet.400}", "deleted": "{palette.red.400}", "conflict": "{palette.red.400}"
+			},
+			// File icons: the drawing with its accents lifted for the dark.
+			"files": { "light": 0, "dark": 1 },
+			// An agent's status: a palette hue a state, light steps on the dark.
+			"status": {
+				"working": "{text.secondary}", "connecting": "{palette.blue.400}", "waiting": "{palette.gray.400}",
+				"input": "{palette.indigo.400}", "approval": "{palette.amber.400}", "plan": "{palette.violet.400}",
+				"done": "{palette.emerald.400}", "failed": "{palette.red.400}", "limited": "{palette.orange.400}",
+				"dot": {
+					"working": "{text.secondary}", "connecting": "{palette.blue.400}", "waiting": "{palette.gray.400}",
+					"input": "{palette.indigo.400}", "approval": "{palette.amber.400}", "plan": "{palette.violet.400}",
+					"done": "{palette.emerald.400}", "failed": "{palette.red.400}", "limited": "{palette.orange.400}"
+				}
+			},
+			// A raised thing's edge; no light along its top.
+			"edge": "#ffffff0d",
+			"highlight": "0 0 0 0 #00000000",
+			// Under what is raised: close and soft.
+			"lift": "0 1 3 0 #00000066",
+			// Sunken: cut into the glass, its top lip in shadow, its rim a
+			// faint light hairline.
+			"well": { "edge": "#ffffff17", "inset": "0 1 0 0 #000000cc" },
+			// A switch, flat and glassy: a translucent track, a white knob.
+			"switch": {
+				"track": "#ffffff24",
+				"on": "alpha({accent}, 0.78)",
+				"knob_lift": "0 1 2 0 #00000059"
+			},
+			// Selected: lighter, a firmer edge.
+			"selected": {
+				"bg": "#ffffff1c",
+				"ring": "#ffffff14",
+				"highlight": "0 0 0 0 #00000000",
+				"lift": "0 2 6 0 #00000073",
+				// Flat, as Zeron's sidebar rows: the shared wash alone.
+				"flat": { "bg": "#ebebeb24" }
+			},
+			// The way on: near-white, brighter under the pointer, sinking
+			// when pressed.
+			"primary": { "bg": "#ececee", "hover": "#ffffff", "active": "#d2d2d7", "text": "#0b0b0c" },
+			// Beside it: a fill of white, firmer as it is touched.
+			"secondary": { "bg": "#ffffff14", "hover": "#ffffff1f", "active": "#ffffff29" },
+			// Destructive: red filled; lighter under the pointer in dark, deeper in light.
+			"destructive": { "bg": "{palette.red.600}", "hover": "{palette.red.500}", "active": "{palette.red.700}" },
+			"accent.active": "#83699f",
+			// Menus and dropdowns: a deep charcoal over macOS's popover material
+			// (a light grey frost in dark), so it reads as our dark glass.
+			"menu": { "tint": "#111113a6", "solid": "#1c1c1f", "shadow": "0 20 56 0 #00000052", "selected": "#ebebeb17" },
+			// A search's matched letters: the accent's wash firmer than light's
+			// (a faint violet on charcoal all but vanishes).
+			"match": { "wash": "alpha({accent}, 0.34)" },
+			// A field: cut into the glass (a darker wash than the window, as
+			// the composer sits), its edge a faint light hairline that firms
+			// under the pointer.
+			"field": { "bg": "#00000038", "hover": "#0000004d", "edge": "#ffffff14", "edge_hover": "#ffffff26" },
+			"check": { "bg": "#00000038", "edge": "#ffffff38" },
+			// Tones: the palette's 300s and 400s, pale enough to read on dark
+			// glass; their washes a touch firmer than light's (a faint hue
+			// on charcoal all but vanishes).
+			// A visual's chart colours after the accent (ds/visual_ink): brighter on dark glass.
+			"visual": { "series": { "teal": "{palette.teal.400}", "amber": "{palette.amber.400}", "rose": "{palette.rose.400}", "violet": "{palette.violet.400}", "lime": "{palette.lime.400}", "sky": "{palette.sky.400}" } },
+			"tone": {
+				"info": { "ink": "{palette.blue.300}", "wash": "alpha({palette.blue.400}, 0.14)", "edge": "alpha({palette.blue.400}, 0.3)" },
+				"success": { "ink": "{palette.emerald.300}", "wash": "alpha({palette.emerald.400}, 0.14)", "edge": "alpha({palette.emerald.400}, 0.3)" },
+				"warning": { "ink": "{palette.amber.300}", "wash": "alpha({palette.amber.400}, 0.14)", "edge": "alpha({palette.amber.400}, 0.3)" },
+				"danger": { "ink": "{palette.red.300}", "wash": "alpha({palette.red.400}, 0.15)", "edge": "alpha({palette.red.400}, 0.32)" },
+				"accent": { "ink": "{palette.violet.300}", "wash": "alpha({accent}, 0.2)", "edge": "alpha({accent}, 0.4)" }
+			},
+			"badge": { "wash": 0.14, "ink": 0.9 },
+			"review": { "approved": "{palette.emerald.400}", "changes": "{palette.red.400}", "pending": "{palette.amber.400}" },
+			"checks": { "passing": "{palette.emerald.400}", "failing": "{palette.red.400}", "running": "{palette.amber.400}" },
+			"diff": { "added": "{palette.emerald.400}", "removed": "{palette.red.400}" },
+			// The accent presets a person can choose (crates/theme AccentPreset),
+			// each at this theme's step: lighter on dark.
+			"accents": { "default": "#9277b0", "zeron": "{palette.violet.400}", "orange": "{palette.orange.400}", "amber": "{palette.amber.400}", "green": "{palette.green.400}", "cyan": "{palette.cyan.400}", "blue": "{palette.blue.400}", "pink": "{palette.pink.400}" },
+			// A dialog: the menu's glass, over a deep dim.
+			"dialog": { "shadow": "0 24 64 0 #00000080" },
+			// The composer: a darker wash than the window under it (the pill
+			// sits into the glass, as Zeron's does), a faint cool hairline;
+			// opaque, a lifted charcoal.
+			// Files carried over a chat: the whole chat dimmed under "Drop to
+			// attach" (Zeron's scrim at two thirds: 0.4 black dark, its light
+			// counterpart light).
+			"drop": { "scrim": "#00000066" },
+			// The lightbox: a deep scrim over a blur of the window, the picture
+			// on it with no edge of its own (dark reads it by light).
+			"lightbox": { "scrim": "#060607e0", "shadow": "0 0 0 0 #00000000" },
+			"composer": { "tint": "#08080a59", "solid": "#18181b", "edge": "#c7d2de17", "shadow": "0 12 32 0 #00000066" }
+		}
+	}
+}

@@ -80,7 +80,7 @@ emits its Vitest shutdown-state diagnostic; the focused checkpoint run is clean.
 
 ```sh
 cargo test -p zeron-sync -p zeron-rpc --features zeron-sync/mock-server
-cargo test -p zeron-engine --lib --test session_publication --test restart_resume --test local_profiles --test codex_subagents
+cargo test -p zeron-engine --lib --test session_publication --test restart_resume --test misc
 cargo test -p zeron-update
 cargo test -p zeron-ui --lib -- --test-threads=1
 npm --prefix edge run typecheck

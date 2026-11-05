@@ -3698,6 +3698,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            icon: None,
             created_at: Utc::now() - TimeDelta::minutes(created_minutes_ago),
         }
     }
@@ -3720,6 +3721,7 @@ mod tests {
             harness_session_harness: None,
             harness_session_cwd: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: Some(space.into()),
             last_seen_at: None,
             room_gen: None,
@@ -4361,6 +4363,7 @@ mod tests {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                icon: None,
                 created_at: Utc::now(),
             }];
             state.selected_space = Some("project".into());
@@ -4545,6 +4548,7 @@ mod tests {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                icon: None,
                 created_at: Utc::now(),
             }];
             state.selected_space = Some("project".into());
@@ -4608,6 +4612,7 @@ mod tests {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                icon: None,
                 created_at: Utc::now(),
             }];
             state.selected_space = Some("project".into());

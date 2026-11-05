@@ -72,6 +72,9 @@ impl Command {
     pub(crate) fn as_std_mut(&mut self) -> &mut std::process::Command {
         &mut self.metadata
     }
+    pub(crate) fn as_std(&self) -> &std::process::Command {
+        &self.metadata
+    }
 
     pub(super) fn prepare(&self) -> io::Result<Prepared> {
         // CreateProcessW's error for a missing working directory reads like a

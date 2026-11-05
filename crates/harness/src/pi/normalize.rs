@@ -144,6 +144,7 @@ impl Normalizer {
                     is_error: frame["isError"].as_bool().unwrap_or(false),
                     output: output.map(|s| cap(&s, 16384)),
                     diff,
+                    exit_code: None,
                 });
             }
             "compaction_end" => {

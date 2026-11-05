@@ -1,0 +1,278 @@
+{
+  "page": {
+    "pulls": "Pull requests"
+  },
+  "command": {
+    "refresh": "Refresh pull requests"
+  },
+  "badge": {
+    "open": "Open pull request {number}: {title}",
+    "plain": "Pull request"
+  },
+  "notices": {
+    "title": "Pull request #{number} {said}",
+    "merged": "merged",
+    "closed": "closed without merging",
+    "review_wanted": "is waiting for your review",
+    "changes": "has changes requested",
+    "failing": "has failing checks"
+  },
+  "time": {
+    "just_now": "just now",
+    "minutes": "{n, plural, one {# minute} other {# minutes}} ago",
+    "hours": "{n, plural, one {# hour} other {# hours}} ago",
+    "days": "{n, plural, one {# day} other {# days}} ago"
+  },
+  "people": {
+    "someone": "someone",
+    "you": "You"
+  },
+  "board": {
+    "title": "Pull requests",
+    "refresh": "Refresh",
+    "project": "Project",
+    "choose_project": "Choose a project",
+    "search_projects": "Search projects…",
+    "hint": "Open pull requests in a project's repository on GitHub.",
+    "filter": "Filter",
+    "filters": {
+      "authored": "Authored",
+      "reviewing": "Reviewing",
+      "all": "All"
+    },
+    "search": "Search pull requests",
+    "status": {
+      "draft": "Draft",
+      "changes": "Changes requested",
+      "conflicts": "Merge conflicts",
+      "approved": "Approved",
+      "ci_failing": "CI failing",
+      "ci_pending": "CI pending",
+      "ci_passed": "CI passed"
+    },
+    "empty": {
+      "authored_title": "No pull requests authored by you",
+      "authored_body": "Your open pull requests in this repository will appear here.",
+      "reviewing_title": "No reviews requested",
+      "reviewing_body": "Pull requests waiting for your review will appear here.",
+      "all_title": "No open pull requests",
+      "all_body": "This repository has no open pull requests. New ones will appear here.",
+      "nomatch_title": "Nothing matches “{q}”",
+      "nomatch_body": "Try another word, or another filter.",
+      "choose_title": "Choose a project",
+      "choose_body": "Choose a project to see its pull requests.",
+      "norepo_title": "No repository on GitHub",
+      "norepo_body": "No GitHub repository was found for this project's folder on this Mac."
+    },
+    "failed_title": "Couldn't load pull requests",
+    "try_again": "Try again",
+    "load_more": "Load more",
+    "count": "{shown} of {total}"
+  },
+  "checks": {
+    "not_reported": "Not reported",
+    "passed": "Passed",
+    "check": "Check",
+    "see_failed": "See what failed",
+    "details": "Details",
+    "none": "No checks reported",
+    "unavailable": "CI unavailable",
+    "none_body": "This pull request has no checks.",
+    "unavailable_body": "Check details are unavailable. Open this pull request on GitHub."
+  },
+  "viewer": {
+    "tabs": {
+      "summary": "Summary",
+      "code": "Code",
+      "activity": "Activity"
+    },
+    "refresh": "Refresh",
+    "open_github": "Open on GitHub",
+    "more": "More",
+    "menu": {
+      "reopen": "Reopen pull request",
+      "ready": "Ready for review",
+      "draft": "Convert to draft",
+      "close": "Close pull request"
+    },
+    "loading": "Loading",
+    "loading_pr": "Loading the pull request…",
+    "failed_title": "Couldn't load the pull request",
+    "try_again": "Try again",
+    "no_pr": "This tab has no pull request.",
+    "description": "Description",
+    "no_description": "No description provided.",
+    "review": "Review",
+    "comment": "Comment",
+    "approve": "Approve",
+    "approving": "Approving…",
+    "request_changes": "Request changes",
+    "requesting_changes": "Requesting changes…",
+    "leave_review": "Leave a review",
+    "leave_comment": "Leave a comment",
+    "couldnt_send": "Couldn't send: {why}",
+    "busy": "Something else is on its way to GitHub.",
+    "edit_comment": "Edit comment",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "delete_comment": "Delete comment",
+    "delete_ask": "Delete this comment?",
+    "edit": "Edit",
+    "comment_line": "Comment on this line",
+    "outdated": "Outdated",
+    "verdict": {
+      "approved": "Approved",
+      "changes": "Asked for changes",
+      "dismissed": "Dismissed",
+      "commented": "Commented",
+      "when": "{verdict}, {when}"
+    },
+    "pictures": {
+      "show": "Show {name}",
+      "hide": "Hide {name}",
+      "view": "View {name}",
+      "image": "image"
+    },
+    "code": {
+      "loading": "Loading the diff…",
+      "failed": "Couldn't load the diff.",
+      "empty": "No changes to show here.",
+      "cut": "The first {n} lines.",
+      "open_file": "Open {path} on GitHub",
+      "send_failed": "Couldn't send that to GitHub",
+      "no_files_title": "No files changed",
+      "no_files_body": "This pull request changes no files."
+    },
+    "merge": {
+      "title": "Merge",
+      "how": "How it goes in",
+      "draft_title": "Draft",
+      "draft_body": "Mark it ready for review before it can be merged.",
+      "ready": "Ready for review",
+      "marking_ready": "Marking ready…",
+      "conflicts_title": "Conflicts with {base}",
+      "conflicts_body": "Files it changes changed on {base} too. Resolve them on the branch, then merge.",
+      "behind_title": "Behind {base}",
+      "behind_body": "{base} has moved on, and this repository wants the branch up to date first.",
+      "update": "Update branch",
+      "updating": "Updating…",
+      "not_yet_title": "Not yet",
+      "not_yet_body": "It can't be merged yet: {said}.",
+      "why": {
+        "changes": "changes were asked for",
+        "review": "it needs an approving review",
+        "check_failed": "a check failed",
+        "checks_running": "checks are still running",
+        "rules": "the repository's rules aren't met yet",
+        "join": ", and "
+      },
+      "checking_title": "Checking",
+      "checking_body": "GitHub is working out whether it can be merged.",
+      "ready_title": "Ready to merge",
+      "unstable_body": "Some checks failed, but none this repository requires.",
+      "approved_by": "Approved by {names}",
+      "names_join": ", ",
+      "names_last": " and ",
+      "every_check": "every check passed",
+      "no_conflicts": "no conflicts with {base}",
+      "parts_join": ", ",
+      "couldnt": {
+        "merge": "Couldn't merge",
+        "close": "Couldn't close it",
+        "reopen": "Couldn't reopen it",
+        "draft": "Couldn't make it a draft",
+        "ready": "Couldn't mark it ready",
+        "update": "Couldn't update the branch",
+        "other": "GitHub said no"
+      },
+      "merged_title": "Merged #{number} into {base}",
+      "merged_by_when": "By {by}, {when}.",
+      "merged_by": "By {by}.",
+      "merged_when": "Merged, {when}.",
+      "merged_plain": "Merged.",
+      "closed_title": "Closed",
+      "closed_when": "Closed without merging, {when}.",
+      "closed_plain": "Closed without merging.",
+      "reopen": "Reopen pull request",
+      "squash": "Squash and merge",
+      "squash_body": "{n, plural, =0 {The commits become} one {The commit becomes} other {The # commits become}} one on {base}, with the title as its message.",
+      "merge_commit": "Merge commit",
+      "merge_commit_body": "The commits as they are, joined by a merge commit.",
+      "rebase": "Rebase and merge",
+      "rebase_body": "The commits replayed onto {base}, one by one.",
+      "delete_branch": "Delete the branch after",
+      "delete_branch_body": "{branch} goes from GitHub. Its chats keep their history.",
+      "merging": "Merging…",
+      "merge_pr": "Merge pull request",
+      "branch_kept": "{branch} couldn't be deleted: {why}.",
+      "working": "Working",
+      "ready_end": "."
+    },
+    "activity": {
+      "resolved": "Resolved",
+      "unresolved": "Unresolved",
+      "outdated": "Outdated",
+      "reply": "Reply",
+      "where_join": " · ",
+      "open_where": "Open {at} on GitHub",
+      "verbs": {
+        "approved": "approved",
+        "changes": "asked for changes",
+        "reviewed": "reviewed",
+        "dismissed": "had a review dismissed",
+        "commented": "commented"
+      },
+      "empty_title": "No activity yet",
+      "empty_body": "Comments and reviews will appear here. Start the conversation below."
+    },
+    "details": "Details"
+  },
+  "gh": {
+    "no_cli": "GitHub's CLI isn't on this Mac: install gh, then sign in with `gh auth login`.",
+    "sign_in": "Sign in to GitHub on this Mac with `gh auth login`.",
+    "not_found": "GitHub can't find it, or your account can't see it.",
+    "rate_limit": "GitHub's rate limit was reached. Try again in a few minutes.",
+    "rate_limit_until": "GitHub's rate limit was reached. Zeron asks again at {at}.",
+    "no_answer": "GitHub didn't answer.",
+    "unreadable": "GitHub's answer couldn't be read.",
+    "said_no": "GitHub said no."
+  },
+  "pulls": {
+    "not_pr": "That isn't a pull request on GitHub.",
+    "not_found": "GitHub can't find this pull request, or your account can't see it.",
+    "not_merged": "GitHub didn't merge it.",
+    "no_folder": "This project's folder isn't on this Mac.",
+    "no_repo": "No GitHub repository was found for this folder."
+  },
+  "git_slot": {
+    "create": "Create pull request"
+  },
+  "git_history": {
+    "open_pr": "Open pull request #{number}: {title}",
+    "view": "View on GitHub",
+    "copy_link": "Copy GitHub link",
+    "copied": "Link copied",
+    "not_github": "This repository isn't on GitHub",
+    "picture": "{login} on GitHub"
+  },
+  "panel_row": {
+    "label": "Pull request #{number}, {state}: {title}",
+    "state": {
+      "open": "open",
+      "draft": "draft",
+      "merged": "merged",
+      "closed": "closed"
+    },
+    "checks": {
+      "passing": "Passing",
+      "failing": "Failing",
+      "running": "Running"
+    },
+    "checks_said": {
+      "passing": "Checks passing",
+      "failing": "Checks failing",
+      "running": "Checks running"
+    }
+  }
+}

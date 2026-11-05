@@ -1,0 +1,278 @@
+{
+  "page": {
+    "pulls": "拉取请求"
+  },
+  "command": {
+    "refresh": "刷新拉取请求"
+  },
+  "badge": {
+    "open": "打开拉取请求 {number}：{title}",
+    "plain": "拉取请求"
+  },
+  "notices": {
+    "title": "拉取请求 #{number}{said}",
+    "merged": "已合并",
+    "closed": "已关闭，未合并",
+    "review_wanted": "等待你的审查",
+    "changes": "需要修改",
+    "failing": "有检查失败"
+  },
+  "time": {
+    "just_now": "刚刚",
+    "minutes": "{n, plural, other {# 分钟前}}",
+    "hours": "{n, plural, other {# 小时前}}",
+    "days": "{n, plural, other {# 天前}}"
+  },
+  "people": {
+    "someone": "某人",
+    "you": "你"
+  },
+  "board": {
+    "title": "拉取请求",
+    "refresh": "刷新",
+    "project": "项目",
+    "choose_project": "选择项目",
+    "search_projects": "搜索项目…",
+    "hint": "查看项目的 GitHub 仓库中打开的拉取请求。",
+    "filter": "筛选",
+    "filters": {
+      "authored": "我创建的",
+      "reviewing": "待我审查",
+      "all": "全部"
+    },
+    "search": "搜索拉取请求",
+    "status": {
+      "draft": "草稿",
+      "changes": "需要修改",
+      "conflicts": "合并冲突",
+      "approved": "已批准",
+      "ci_failing": "CI 检查失败",
+      "ci_pending": "CI 检查等待中",
+      "ci_passed": "CI 检查通过"
+    },
+    "empty": {
+      "authored_title": "没有你创建的拉取请求",
+      "authored_body": "你在此仓库中打开的拉取请求会显示在这里。",
+      "reviewing_title": "没有审查请求",
+      "reviewing_body": "等待你审查的拉取请求会显示在这里。",
+      "all_title": "没有打开的拉取请求",
+      "all_body": "此仓库没有打开的拉取请求。新的拉取请求会显示在这里。",
+      "nomatch_title": "没有与“{q}”匹配的内容",
+      "nomatch_body": "试试其他词语或筛选条件。",
+      "choose_title": "选择项目",
+      "choose_body": "选择项目以查看其拉取请求。",
+      "norepo_title": "GitHub 上没有仓库",
+      "norepo_body": "未找到此 Mac 上该项目文件夹对应的 GitHub 仓库。"
+    },
+    "failed_title": "无法载入拉取请求",
+    "try_again": "重试",
+    "load_more": "加载更多",
+    "count": "{total} 项中显示 {shown} 项"
+  },
+  "checks": {
+    "not_reported": "未报告",
+    "passed": "已通过",
+    "check": "检查",
+    "see_failed": "查看失败内容",
+    "details": "详情",
+    "none": "没有报告检查",
+    "unavailable": "CI 不可用",
+    "none_body": "此拉取请求没有检查。",
+    "unavailable_body": "检查详情不可用。请在 GitHub 上打开此拉取请求。"
+  },
+  "viewer": {
+    "tabs": {
+      "summary": "摘要",
+      "code": "代码",
+      "activity": "动态"
+    },
+    "refresh": "刷新",
+    "open_github": "在 GitHub 上打开",
+    "more": "更多",
+    "menu": {
+      "reopen": "重新打开拉取请求",
+      "ready": "准备好接受审查",
+      "draft": "转换为草稿",
+      "close": "关闭拉取请求"
+    },
+    "loading": "正在加载",
+    "loading_pr": "正在加载拉取请求…",
+    "failed_title": "无法载入拉取请求",
+    "try_again": "重试",
+    "no_pr": "此标签页没有拉取请求。",
+    "description": "描述",
+    "no_description": "未提供描述。",
+    "review": "审查",
+    "comment": "评论",
+    "approve": "批准",
+    "approving": "正在批准…",
+    "request_changes": "请求修改",
+    "requesting_changes": "正在请求修改…",
+    "leave_review": "提交审查",
+    "leave_comment": "发表评论",
+    "couldnt_send": "无法发送：{why}",
+    "busy": "其他操作正在发送到 GitHub。",
+    "edit_comment": "编辑评论",
+    "cancel": "取消",
+    "save": "保存",
+    "delete": "删除",
+    "delete_comment": "删除评论",
+    "delete_ask": "删除此评论？",
+    "edit": "编辑",
+    "comment_line": "评论此行",
+    "outdated": "已过时",
+    "verdict": {
+      "approved": "已批准",
+      "changes": "请求了修改",
+      "dismissed": "已撤销",
+      "commented": "已评论",
+      "when": "{verdict}，{when}"
+    },
+    "pictures": {
+      "show": "显示{name}",
+      "hide": "隐藏{name}",
+      "view": "查看{name}",
+      "image": "图像"
+    },
+    "code": {
+      "loading": "正在加载差异…",
+      "failed": "无法载入差异。",
+      "empty": "这里没有可显示的更改。",
+      "cut": "前 {n} 行。",
+      "open_file": "在 GitHub 上打开 {path}",
+      "send_failed": "无法发送到 GitHub",
+      "no_files_title": "没有更改文件",
+      "no_files_body": "此拉取请求没有更改任何文件。"
+    },
+    "merge": {
+      "title": "合并",
+      "how": "合并方式",
+      "draft_title": "草稿",
+      "draft_body": "合并前请先标记为准备好接受审查。",
+      "ready": "准备好接受审查",
+      "marking_ready": "正在标记为准备好…",
+      "conflicts_title": "与 {base} 存在冲突",
+      "conflicts_body": "此请求更改的文件在 {base} 上也有更改。请先在分支上解决冲突，再合并。",
+      "behind_title": "落后于 {base}",
+      "behind_body": "{base} 已有新提交，此仓库要求先更新分支。",
+      "update": "更新分支",
+      "updating": "正在更新…",
+      "not_yet_title": "暂不可合并",
+      "not_yet_body": "暂时无法合并：{said}。",
+      "why": {
+        "changes": "需要修改",
+        "review": "需要获得批准的审查",
+        "check_failed": "有检查失败",
+        "checks_running": "检查仍在运行",
+        "rules": "尚未满足仓库规则",
+        "join": "，且"
+      },
+      "checking_title": "正在检查",
+      "checking_body": "GitHub 正在确定能否合并。",
+      "ready_title": "可以合并",
+      "unstable_body": "部分检查失败，但都不是此仓库要求的检查。",
+      "approved_by": "已获 {names} 批准",
+      "names_join": "、",
+      "names_last": "和",
+      "every_check": "所有检查均已通过",
+      "no_conflicts": "与 {base} 无冲突",
+      "parts_join": "，",
+      "couldnt": {
+        "merge": "无法合并",
+        "close": "无法关闭",
+        "reopen": "无法重新打开",
+        "draft": "无法转换为草稿",
+        "ready": "无法标记为准备好",
+        "update": "无法更新分支",
+        "other": "GitHub 拒绝了请求"
+      },
+      "merged_title": "已将 #{number} 合并到 {base}",
+      "merged_by_when": "由 {by} 合并，{when}。",
+      "merged_by": "由 {by} 合并。",
+      "merged_when": "已合并，{when}。",
+      "merged_plain": "已合并。",
+      "closed_title": "已关闭",
+      "closed_when": "已关闭但未合并，{when}。",
+      "closed_plain": "已关闭但未合并。",
+      "reopen": "重新打开拉取请求",
+      "squash": "压缩合并",
+      "squash_body": "{n, plural, =0 {这些提交} =1 {该提交} other {这 # 次提交}}将在 {base} 上合并为一次提交，并以标题作为提交消息。",
+      "merge_commit": "合并提交",
+      "merge_commit_body": "保留原有提交，并用一次合并提交将其合并。",
+      "rebase": "变基并合并",
+      "rebase_body": "将提交逐一应用到 {base} 上。",
+      "delete_branch": "合并后删除分支",
+      "delete_branch_body": "从 GitHub 删除 {branch}。其对话保留历史记录。",
+      "merging": "正在合并…",
+      "merge_pr": "合并拉取请求",
+      "branch_kept": "无法删除 {branch}：{why}。",
+      "working": "运行中",
+      "ready_end": "。"
+    },
+    "activity": {
+      "resolved": "已解决",
+      "unresolved": "未解决",
+      "outdated": "已过时",
+      "reply": "回复",
+      "where_join": " · ",
+      "open_where": "在 GitHub 上打开 {at}",
+      "verbs": {
+        "approved": "已批准",
+        "changes": "请求了修改",
+        "reviewed": "已审查",
+        "dismissed": "审查已被撤销",
+        "commented": "已评论"
+      },
+      "empty_title": "暂无动态",
+      "empty_body": "评论和审查会显示在这里。在下方开始对话。"
+    },
+    "details": "详情"
+  },
+  "gh": {
+    "no_cli": "此 Mac 上没有 GitHub CLI：请安装 gh，然后使用 `gh auth login` 登录。",
+    "sign_in": "在此 Mac 上使用 `gh auth login` 登录 GitHub。",
+    "not_found": "GitHub 找不到此内容，或你的账户无权查看。",
+    "rate_limit": "已达到 GitHub 请求频率限制。请几分钟后重试。",
+    "rate_limit_until": "已达到 GitHub 请求频率限制。Zeron 将在 {at} 再次尝试。",
+    "no_answer": "GitHub 未响应。",
+    "unreadable": "无法读取 GitHub 的响应。",
+    "said_no": "GitHub 拒绝了请求。"
+  },
+  "pulls": {
+    "not_pr": "这不是 GitHub 上的拉取请求。",
+    "not_found": "GitHub 找不到此拉取请求，或你的账户无权查看。",
+    "not_merged": "GitHub 未合并此拉取请求。",
+    "no_folder": "此项目的文件夹不在此 Mac 上。",
+    "no_repo": "未找到此文件夹对应的 GitHub 仓库。"
+  },
+  "git_slot": {
+    "create": "创建拉取请求"
+  },
+  "git_history": {
+    "open_pr": "打开拉取请求 #{number}：{title}",
+    "view": "在 GitHub 上查看",
+    "copy_link": "复制 GitHub 链接",
+    "copied": "已复制链接",
+    "not_github": "这个仓库不在 GitHub 上",
+    "picture": "GitHub 上的 {login}"
+  },
+  "panel_row": {
+    "label": "拉取请求 #{number}，{state}：{title}",
+    "state": {
+      "open": "打开",
+      "draft": "草稿",
+      "merged": "已合并",
+      "closed": "已关闭"
+    },
+    "checks": {
+      "passing": "通过",
+      "failing": "未通过",
+      "running": "运行中"
+    },
+    "checks_said": {
+      "passing": "检查通过",
+      "failing": "检查未通过",
+      "running": "检查运行中"
+    }
+  }
+}
