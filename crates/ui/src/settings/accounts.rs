@@ -2034,25 +2034,10 @@ impl Render for AccountsPage {
             .map(|s| s.accounts.len())
             .filter(|&n| n > 0);
 
-        let provider_icon = |harness: HarnessId| match harness {
-            HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
-            HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
-            HarnessId::Devin => (crate::icons::DEVIN_MARK, None),
-            HarnessId::Grok => (crate::icons::GROK_MARK, None),
-            HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
-            HarnessId::Pi => (crate::icons::PI_MARK, None),
-            HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
-            HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
-            HarnessId::Muse => (crate::icons::MUSE_MARK, Some(crate::icons::muse_brand())),
-            _ => (
-                crate::icons::CLAUDE_MARK,
-                Some(crate::icons::claude_brand()),
-            ),
-        };
         // Brand mark inside a 24px centered box (zeron: `grid size-6
         // place-items-center [&_svg]:size-4`).
         let provider_mark = |harness: HarnessId, theme: &Theme| {
-            let (mark, tint) = provider_icon(harness);
+            let (mark, tint) = crate::pickers::harness_brand_icon(harness);
             div()
                 .flex_none()
                 .size(px(24.0))
@@ -2495,6 +2480,11 @@ mod tests {
             }
         }
         assert!(!signs_in(HarnessId::Mock));
+        assert!(!signs_in(HarnessId::Droid));
+        assert_eq!(provider_name(HarnessId::Droid), "Factory Droid");
+        let (mark, tint) = crate::pickers::harness_brand_icon(HarnessId::Droid);
+        assert_eq!(mark, crate::icons::DROID_MARK);
+        assert!(tint.is_none());
         // Antigravity has no quota to show and keeps a single login.
         assert!(!reports_usage(HarnessId::Antigravity) && reports_usage(HarnessId::Codex));
         assert!(keeps_one_login(HarnessId::Antigravity) && !keeps_one_login(HarnessId::Cursor));

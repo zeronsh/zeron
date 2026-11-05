@@ -17001,6 +17001,102 @@ mod exit_regressions {
         (shell, cx, dir)
     }
 
+    #[gpui::test]
+    fn pending_plan_keeps_approval_controls_inside_viewport(cx: &mut TestAppContext) {
+        use zeron_doc::{MessagePart, MessageStatus, SessionMessageEntry};
+        let (shell, cx, _dir) = pull_request_shell(cx);
+        cx.update(|_, cx| motion::set_reduced_motion(cx, false));
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        state.update(cx, |state, cx| {
+            state.no_project = true;
+            state.apply_chats(vec![super::tests::chat_with_path(None, None)]);
+            state.select_chat(Some("chat".into()), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let plan = (1..=6)
+            .map(|ix| format!("## {ix}. Plan section\n\n1. First step\n2. Second step\n\n"))
+            .collect::<String>();
+        let proposal = serde_json::from_value(serde_json::json!({
+            "kind": "tool",
+            "id": "plan",
+            "call": {
+                "kind": "unknown",
+                "name": "ExitSpecMode",
+                "input": {"title": "Todo app", "plan": plan}
+            }
+        }))
+        .unwrap();
+        let entry = SessionMessageEntry {
+            id: "assistant".into(),
+            role: zeron_doc::MessageRole::Assistant,
+            parts: vec![
+                proposal,
+                MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "approval".into(),
+                    questions: vec![zeron_proto::UserInputQuestion {
+                        id: "approve".into(),
+                        header: "Approve plan".into(),
+                        question: "Review the plan above. Allow Droid to start implementing it?"
+                            .into(),
+                        options: vec!["Yes".into(), "No".into()],
+                        multi_select: false,
+                        prefill: None,
+                        multiline: false,
+                    }],
+                    resolved: false,
+                    answers: None,
+                },
+            ],
+            created_at: 0,
+            device_id: "remote-device".into(),
+            status: Some(MessageStatus::Streaming),
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let mut opening = entry.clone();
+        if let MessagePart::Input { questions, .. } = &mut opening.parts[1] {
+            questions.clear();
+        }
+        state.update(cx, |state, cx| {
+            state
+                .receive_transcript_frame(zeron_doc::TranscriptFrame::reset(&[opening]), cx)
+                .unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        state.update(cx, |state, cx| {
+            state
+                .receive_transcript_frame(zeron_doc::TranscriptFrame::reset(&[entry]), cx)
+                .unwrap();
+        });
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear());
+            cx.run_until_parked();
+        }
+        let panel = cx
+            .debug_bounds("question-panel")
+            .expect("pending plan needs its approval panel");
+        for selector in ["wizard-option-0", "wizard-option-1", "wizard-submit"] {
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            assert!(
+                bounds.top() >= px(0.0) && bounds.bottom() <= px(880.0),
+                "{selector} must remain on screen: {bounds:?}; panel={panel:?}"
+            );
+        }
+        let no = cx.debug_bounds("wizard-option-1").unwrap();
+        cx.simulate_click(no.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let submit = cx.debug_bounds("wizard-submit").unwrap();
+        cx.simulate_click(submit.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("question-panel").is_none());
+    }
+
     fn open_pull_request(cx: &mut gpui::VisualTestContext, number: u32) {
         cx.update(|window, cx| {
             window.dispatch_action(

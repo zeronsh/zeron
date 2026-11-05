@@ -1036,6 +1036,23 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::PiHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
     );
+    registry.register_lazy(
+        HarnessDescriptor {
+            icon: None,
+            id: HarnessId::Droid,
+            name: "Factory Droid".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+            access_modes: AccessMode::ALL.to_vec(),
+            supports_plan: true,
+        },
+        Box::new(|| zeron_harness::DroidHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::DroidHarness::new()) as Arc<dyn Harness>)),
+    );
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
@@ -1209,6 +1226,7 @@ mod tests {
                 HarnessId::Hermes,
                 HarnessId::Fx,
                 HarnessId::Pi,
+                HarnessId::Droid,
                 HarnessId::Opencode,
                 HarnessId::Antigravity,
                 HarnessId::Muse
@@ -1274,6 +1292,16 @@ mod tests {
         assert_eq!(pi.display_name(), "Pi");
         assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
         assert!(pi.reasoning_levels().is_empty());
+        let droid = registry.resolve(HarnessId::Droid).unwrap();
+        let descriptor = registry.descriptors().into_iter()
+            .find(|d| d.id == HarnessId::Droid).unwrap();
+        let driver = describe(droid.as_ref());
+        assert_eq!(descriptor.name, driver.name);
+        assert_eq!(descriptor.supports_steering, driver.supports_steering);
+        assert_eq!(descriptor.steering_mode, driver.steering_mode);
+        assert_eq!(descriptor.reasoning_levels, driver.reasoning_levels);
+        assert_eq!(descriptor.access_modes, driver.access_modes);
+        assert_eq!(descriptor.supports_plan, driver.supports_plan);
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
@@ -1896,6 +1924,7 @@ mod gate_tests {
             HarnessId::Hermes,
             HarnessId::Fx,
             HarnessId::Pi,
+            HarnessId::Droid,
             HarnessId::Opencode,
             HarnessId::Antigravity,
             HarnessId::Muse,

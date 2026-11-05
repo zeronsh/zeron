@@ -369,7 +369,7 @@ fn page_terms(section: SettingsSection) -> &'static str {
         SettingsSection::Shortcuts => "keyboard keybindings hotkeys keys",
         SettingsSection::Harnesses | SettingsSection::Agents => {
             "harnesses agents cli claude code codex cursor devin grok hermes pi opencode \
-             antigravity muse install enable disable update policy accounts sign in login"
+             antigravity muse droid factory install enable disable update policy accounts sign in login"
         }
         SettingsSection::Devices => "machines computers remote this device other devices rename",
         SettingsSection::Cloud => "machine remote github repositories usage",
@@ -786,6 +786,22 @@ mod tests {
             Target::Setting(SettingId::NativeSubagents).fallback(),
             Some(Target::Page(SettingsSection::Harnesses))
         );
+    }
+
+    #[test]
+    fn droid_and_factory_queries_find_the_providers_page() {
+        for query in [
+            "droid",
+            "Factory",
+            "factory droid",
+            "droid install",
+            "factory login",
+        ] {
+            assert_eq!(top(query), Target::Page(SettingsSection::Harnesses), "{query}");
+            let hits = search(query, |section| section == SettingsSection::Harnesses);
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].entry.target, Target::Page(SettingsSection::Harnesses));
+        }
     }
 
     #[test]
