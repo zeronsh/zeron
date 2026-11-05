@@ -14183,6 +14183,8 @@ dependencies = [
  "anyhow",
  "cpal 0.17.3",
  "hound",
+ "ort",
+ "ort-sys",
  "parakeet-rs",
  "reqwest",
  "rubato",

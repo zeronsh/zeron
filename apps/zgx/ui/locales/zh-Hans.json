@@ -3039,6 +3039,10 @@
         "navigate": {
           "title": "打开对话和页面"
         },
+        "dictation": {
+          "title": "使用本地听写",
+          "detail": "在本设备上录制麦克风音频并接收转写文本。从 Hugging Face 下载经过验证的模型。"
+        },
         "compose": {
           "title": "在消息输入框中填写文本",
           "detail": "仍由你来发送。"

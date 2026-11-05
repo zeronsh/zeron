@@ -270,6 +270,8 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "arrow-up-right", "plugins.words.permission.links_open.title", "plugins.words.permission.links_open.detail")
 	elseif permission == "navigate" then
 		return line(false, "map-arrow-right", "plugins.words.permission.navigate.title")
+	elseif permission == "dictation" then
+		return line(false, "microphone", "plugins.words.permission.dictation.title", "plugins.words.permission.dictation.detail")
 	elseif permission == "compose" then
 		return line(false, "chat-round-line", "plugins.words.permission.compose.title", "plugins.words.permission.compose.detail")
 	elseif permission == "network" then

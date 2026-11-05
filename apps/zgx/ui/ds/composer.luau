@@ -152,6 +152,18 @@ export type Props = {
 	-- chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
 	on_send: ((text: string) -> ())?,
+    before_send: (() -> boolean)?,
+    editor: any?,
+    on_editor_change: (() -> ())?,
+    on_editor_caret: (() -> ())?,
+    on_editor_blur: (() -> ())?,
+    on_editor_focus: (() -> ())?,
+    on_send_press: (() -> ())?,
+    on_editor_key_up: ((any) -> boolean)?,
+    dictation_slot: boolean?,
+    dictation_target: string?,
+    voice_level: (() -> number)?,
+    voice_status: (() -> string)?,
 	on_stop: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
 	-- dictation): true if it did something with it.
@@ -832,7 +844,8 @@ fn fill(input: FillInput) -> vec4<f32> {
  let a1 = 0.5 + 0.5 * sin(i * 1.71 + t * 7.3);
  let a2 = 0.5 + 0.5 * sin(i * 0.37 - t * 2.9 + 1.3);
  let env = 0.55 + 0.45 * sin(t * 1.9 + i * 0.11);
- let h = 0.12 + 0.88 * a1 * a2 * env;
+ let level = input.params[1].x;
+ let h = 0.12 + 0.88 * a1 * a2 * env * level;
  let y = abs(input.p.y / input.size.y - 0.5) * 2.0;
  let a = clamp((h - y) * input.size.y * 0.5 * input.scale, 0.0, 1.0);
  return vec4(ink.rgb, ink.a * a);
@@ -939,7 +952,7 @@ return ui.component(function(props: Props): Node
 	end
 	local value = props.value
 	local running = props.running
-	local field = ui.ref()
+	local field = props.editor or ui.ref()
 	local pill = ui.ref()
 
 	-- What it is laid out from, as layout last measured it (0: not yet):
@@ -1024,6 +1037,7 @@ return ui.component(function(props: Props): Node
 		value:set("")
 	end
 	local function send()
+        if props.before_send and props.before_send() then return end
 		local text = value:peek()
 		if asking() then
 			answer()
@@ -1038,7 +1052,7 @@ return ui.component(function(props: Props): Node
 		value:set("")
 	end
 	local function stopping(): boolean
-		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking()
+		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking() and not dictating()
 	end
 
 	-- Mentions at the caret.
@@ -1398,8 +1412,9 @@ return ui.component(function(props: Props): Node
 			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
 		end,
 		disabled = function()
-			return disabled() or not (has_text() or has_cargo())
+			return disabled() or not (has_text() or has_cargo() or dictating())
 		end,
+		on_press = props.on_send_press,
 		on_click = send,
 		Icon { name = "arrow-up", size = 14 },
 	}
@@ -1554,7 +1569,7 @@ return ui.component(function(props: Props): Node
 						opacity = ui.loop { from = 0.35, to = 1, duration = 900, fps = 30 },
 					},
 					ui.text {
-						locale.t("ds.composer.listening"),
+						if props.voice_status then props.voice_status else locale.t("ds.composer.listening"),
 						shrink = 0,
 						text_size = "$font.size.sm",
 						weight = "$font.weight.medium",
@@ -1809,7 +1824,14 @@ return ui.component(function(props: Props): Node
 				-- behind each file, command or skill mentioned.
 				highlight = mentions.highlight,
 				active_descendant = m.descendant,
-				on_caret = m.on_caret,
+				on_caret = function(line, column, anchor, focus)
+                    m.on_caret(line, column, anchor, focus)
+                    if props.on_editor_caret then props.on_editor_caret() end
+                end,
+                on_change = props.on_editor_change,
+                on_blur = props.on_editor_blur,
+                on_focus = props.on_editor_focus,
+                on_key_up = props.on_editor_key_up,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
@@ -1933,7 +1955,8 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
-				mic,
+				-- Keep the width used by the collapsed editor and its caret hitbox.
+				if props.dictation_slot then ui.row { min_w = CONTROL, provide = { dictation_target = props.dictation_target }, ui.slot("zeron.composer.dictation", { direction = "row", items = "center", gap = "$space.2" }) } else mic,
 				ui.show(stopping, stop_button),
 				ui.show(function()
 					return not stopping()

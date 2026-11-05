@@ -60,7 +60,7 @@ pub const MAX_OPTIONS: usize = 24;
 pub const MAX_TEXT: usize = 2000;
 const MAX_LABEL: usize = 80;
 const MAX_DESCRIPTION: usize = 400;
-const KINDS: &[&str] = &["switch", "choice", "text", "number", "shortcut", "folder", "permission", "wallpaper"];
+const KINDS: &[&str] = &["switch", "choice", "text", "number", "shortcut", "folder", "permission", "wallpaper", "action"];
 /// The place a plugin replaces to draw a new chat's wallpaper.
 pub const WALLPAPER_PLACE: &str = "#new-chat-background";
 
@@ -461,6 +461,22 @@ impl Book {
         changed
     }
 
+    pub fn is_action(&self, plugin: &str, id: &str) -> bool {
+        self.held.get(plugin).is_some_and(|h| h.declared.iter().any(|s| s.id == id && s.kind == "action"))
+    }
+
+    /// Runtime choices are bounded and validated like manifest choices. They
+    /// never let a plugin set the person's stored selection.
+    pub fn set_options(&mut self, plugin: &str, id: &str, options: &Json) -> Result<(), String> {
+        let held = self.held.get_mut(plugin).ok_or("That plugin isn't on")?;
+        let setting = held.declared.iter_mut().find(|s| s.id == id && s.kind == "choice").ok_or("Not a choice setting")?;
+        let mut raw = setting.json.clone();
+        raw["options"] = options.clone();
+        let next = declared(plugin, &json!({"settings":[raw]}), false).into_iter().next().ok_or("No valid options")?;
+        *setting = next;
+        Ok(())
+    }
+
     /// Plugin `id`'s values, defaults filled in (none declared: empty).
     pub fn values(&self, id: &str) -> Map<String, Json> {
         self.held.get(id).map(|h| values(&h.declared, &h.stored)).unwrap_or_default()
@@ -547,6 +563,27 @@ pub fn manifest_in(snapshot: &Path) -> Option<Json> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dictation_settings_support_actions_and_validated_dynamic_choices() {
+        let manifest = serde_json::json!({"settings":[
+            {"id":"download", "kind":"action", "label":"Download model"},
+            {"id":"input", "kind":"choice", "options":[{"value":"system", "label":"System default"}]}
+        ]});
+        let mut book = super::Book::new(None);
+        book.sync(&[super::On { id:"dictation".into(), name:"Dictation".into(), hash:"v1".into(), builtin:true }], |_| Some(manifest.clone()));
+        assert!(book.is_action("dictation", "download"));
+        assert!(!book.is_action("other", "download"));
+        assert!(!book.is_action("dictation", "input"));
+        assert!(book.set("dictation", "download", &serde_json::json!(true)).is_err());
+        book.set_options("dictation", "input", &serde_json::json!([{"value":"system"},{"value":"usb","label":"USB mic"}])).unwrap();
+        book.set("dictation", "input", &serde_json::json!("usb")).unwrap();
+        assert_eq!(book.values("dictation")["input"], "usb");
+        assert!(book.set_options("other", "input", &serde_json::json!([])).is_err());
+        assert!(book.set_options("dictation", "input", &serde_json::json!([])).is_err());
+        book.set_options("dictation", "input", &serde_json::json!([{"value":"system"}])).unwrap();
+        assert_eq!(book.values("dictation")["input"], "system");
+    }
+
     use super::*;
 
     fn manifest() -> Json {

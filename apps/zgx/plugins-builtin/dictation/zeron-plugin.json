@@ -1,0 +1,19 @@
+{
+  "id": "dictation",
+  "name": "Dictation",
+  "version": "1.0.0",
+  "description": "Local speech to editable text. Audio stays on this device; you choose when to send.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "permissions": ["ui.add", "dictation", "compose"],
+  "settings_description": "Download a model once, then hold the microphone or shortcut to dictate offline. No coding-agent voice connection is used.",
+  "settings": [
+    { "id": "model", "kind": "choice", "label": "Model", "default": "parakeet-tdt-0.6b-v3-int8", "options": [{ "value": "parakeet-tdt-0.6b-v3-int8", "label": "Parakeet TDT 0.6B v3 (INT8)", "description": "25 languages including Spanish. About 670 MB. Local CPU transcription." }] },
+    { "id": "download", "kind": "action", "label": "Download model", "description": "Downloads verified weights from Hugging Face. Transcription works offline." },
+    { "id": "cancel-download", "kind": "action", "label": "Cancel download" },
+    { "id": "remove", "kind": "action", "label": "Remove model" },
+    { "id": "input", "kind": "choice", "label": "Microphone", "default": "system", "options": [{ "value": "system", "label": "System default" }] },
+    { "id": "refresh-inputs", "kind": "action", "label": "Refresh microphones" },
+    { "id": "shortcut", "kind": "shortcut", "label": "Hold to dictate", "default": "cmd+d", "description": "Hold while speaking, then release the key or a modifier to transcribe. Escape cancels." }
+  ]
+}
