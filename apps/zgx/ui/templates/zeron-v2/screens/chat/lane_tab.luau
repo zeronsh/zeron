@@ -461,6 +461,14 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,
+		-- (A split's pane: the keys stay with this chat, in the window's composer.)
+		on_jump = if split
+			then function()
+				ui.after(0, function()
+					Shared.focus:add(1)
+				end)
+			end
+			else nil,
 		pictures = pictures,
 		sent_pictures = sent_pictures,
 		on_open_subagent = function(sub: any)

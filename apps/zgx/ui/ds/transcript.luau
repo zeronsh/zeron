@@ -124,6 +124,10 @@ export type Props = {
 	on_attach: ((q: Quote.Quote) -> ())?,
 	-- A prompt that wasn't delivered, sent again (by its id).
 	on_retry: ((id: string) -> ())?,
+	-- "Jump to latest" pressed. (It has the keys, and leaves as the view
+	-- arrives: this says where they go instead of the next control's, which
+	-- may be another chat's.)
+	on_jump: (() -> ())?,
 	-- Kept outside the view (shared state), it brings a view made again
 	-- back where it was: the message at the view's top, and how far above
 	-- the top it started, written as the view goes; nil at the end.
@@ -1658,9 +1662,7 @@ local function Transcript(props: Props): Node
 			ref = list,
 			label = locale.t("ds.transcript.conversation"),
 			data = messages,
-			key = function(m: Message): string
-				return m.id
-			end,
+			key = "id",
 			row = row,
 			row_text = function(i: number): string
 				local m = messages:peek()[i]
@@ -1873,7 +1875,18 @@ local function Transcript(props: Props): Node
 					active = { bg = "$zeron.menu.solid" },
 				}, "menu")
 				pill.shadow = "$shadow.md"
+				local pill_ref = ui.ref()
+				pill.ref = pill_ref
 				pill.on_click = function()
+					-- (It leaves as the view arrives: the keys go where it's
+					-- told, not on to the next control.)
+					if props.on_jump then
+						local el = pill_ref:peek()
+						if el then
+							el:blur()
+						end
+						props.on_jump()
+					end
 					to_end(list, offset, count:peek())
 				end
 				pill[1] = ui.show(writing, status.StatusDot { kind = "working" })
