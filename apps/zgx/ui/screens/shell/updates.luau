@@ -36,7 +36,19 @@ local GLYPH = 16
 -- glyph clear of its end.
 local INSET_L, INSET_R, GAP = 4, 6, 5
 local WIDTH, MARK, ACTION_H = 340, 28, 26
-local MOST_ROWS_H = 340
+-- The most the list stands, Update all's strip included; past that it scrolls.
+local MOST_LIST_H = 240
+local ROW_H = 52
+local HEAD_H = 44
+local EDGE_FADE = 20
+-- The room over the first row with nothing else up there.
+local TOP_ROOM = 8
+local SKIP_W = 30
+-- Update all's list: its lines, and how tall before it scrolls.
+local REVIEW_ROW_H, REVIEW_MARK = 40, 24
+local REVIEW_LIST_H = 6 * REVIEW_ROW_H
+-- (A dialog's way out takes 130.)
+local DIALOG_GONE_MS = 150
 
 local agents = ui.shared("updates", { rows = {} })
 local about = ui.shared("about", { app_version = "", available = false })
@@ -58,6 +70,48 @@ ui.effect(function()
 		toast.show { title = locale.s("shell.updates.not_applied"), body = locale.s("shell.updates.not_applied_body"), tone = "danger" }
 	end
 end)
+
+-- Updates skipped, kept until there's a newer one: each row's id and what it
+-- offered then. (A new release, or a new failure, shows again.)
+local skipped = ui.persist("shell_updates_skipped", {} :: { [string]: string })
+
+-- What a row offers that can be skipped; nil: it can't be (it's under way, or
+-- only needs a restart).
+local function skip_token(r: any): string?
+	if r.active or (r.phase ~= "available" and r.phase ~= "failed") then
+		return nil
+	end
+	return r.latest or r.message or r.phase
+end
+
+toast.action("updates.unskip", function(ids: { string })
+	local now = table.clone(skipped:peek())
+	for _, id in ids do
+		now[id] = nil
+	end
+	skipped:set(now)
+end)
+
+local function skip(list: { any })
+	local now = table.clone(skipped:peek())
+	local ids: { string } = {}
+	for _, r in list do
+		local token = skip_token(r)
+		if token then
+			now[r.id] = token
+			table.insert(ids, r.id)
+		end
+	end
+	if #ids == 0 then
+		return
+	end
+	skipped:set(now)
+	toast.show {
+		title = locale.s("shell.updates.skipped", { n = #ids }),
+		body = locale.s("shell.updates.skipped_body"),
+		action = { label = locale.s("shell.updates.undo"), run = "updates.unskip", value = ids },
+	}
+end
 
 -- This Mac's Zeron, as About & updates has it: nothing unless it can update
 -- itself and a release is there for it.
@@ -118,13 +172,20 @@ end
 -- Everything there is to say: this Mac's Zeron, others', then the agents.
 local rows = ui.computed(function(): { any }
 	local out: { any } = {}
+	local passed = skipped:get()
+	local function add(r: any)
+		local token = skip_token(r)
+		if token == nil or passed[r.id] ~= token then
+			table.insert(out, r)
+		end
+	end
 	local here = zeron_here()
 	if here then
-		table.insert(out, here)
+		add(here)
 	end
 	local given: any = agents:get()
 	for _, r in (given and given.rows) or {} do
-		table.insert(out, r)
+		add(r)
 	end
 	return out
 end)
@@ -364,11 +425,39 @@ local function action_button(r: any, close: () -> ()): Node
 	}
 end
 
+-- A row's skip: quiet words at its end, in the same place on every row. (One
+-- that can't be skipped keeps the room, so its action stays where it was.)
+local function skip_button(r: any): Node
+	if skip_token(r) == nil then
+		return ui.div { shrink = 0, w = ui.raw(SKIP_W, "a skip's room") }
+	end
+	return ui.button {
+		id = `update-skip-{r.id}`,
+		label = `{locale.s("shell.updates.skip")} · {name_of(r)}`,
+		tooltip = locale.s("shell.updates.skip_hint"),
+		h = ACTION_H,
+		w = ui.raw(SKIP_W, "a skip's room"),
+		p = 0,
+		shrink = 0,
+		items = "center",
+		justify = "end",
+		bg = "#00000000",
+		color = "$text.tertiary",
+		hover = { color = "$text.primary", bg = "#00000000" },
+		active = { bg = "#00000000" },
+		cursor = "pointer",
+		on_click = function()
+			skip({ r })
+		end,
+		ui.text { ui.t("shell.updates.skip"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
+	}
+end
+
 local function row(r: any, close: () -> ()): Node
 	return ui.row {
 		id = `update-row-{r.id}`,
 		w_full = true,
-		min_h = ui.raw(52, "a row of two lines and its room"),
+		min_h = ui.raw(ROW_H, "a row of two lines and its room"),
 		px = "$space.3",
 		py = "$space.2",
 		gap = "$space.3",
@@ -378,19 +467,20 @@ local function row(r: any, close: () -> ()): Node
 			grow = 1,
 			min_w = 0,
 			gap = ui.raw(1, "a name and its line, one thing"),
-			ui.text { name_of(r), literal = true, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary", truncate = true },
-			ui.text {
+			ds.FadeText { name_of(r), literal = true, w_full = true, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary", truncate = true },
+			ds.FadeText {
 				line_of(r),
 				literal = true,
+				w_full = true,
 				text_size = "$font.size.xs",
 				color = if r.phase == "failed" and r.connected then "$danger" else "$text.secondary",
 				tabular = true,
-				truncate = true,
 			},
 		},
 		if r.active then ui.div { shrink = 0, status.StatusIcon { kind = "working", size = 14 } } else nil,
 		if r.phase == "updated" then ui.div { shrink = 0, color = "$success", ds.Icon { name = "check", size = 14 } } else nil,
 		if r.action then action_button(r, close) else nil,
+		skip_button(r),
 	}
 end
 
@@ -474,75 +564,163 @@ local function can_update_all(): boolean
 	return #p.agents + #p.zerons + (if p.here then 1 else 0) > 1
 end
 
--- The panel's second look at Update all: what it will do, before it does.
-local function confirm(confirming: any): Node
-	local p = plan(rows:peek())
-	local function fact(words: string, ink: string?): Node
-		return ui.text { words, literal = true, wrap = true, w_full = true, text_size = "$font.size.sm", color = ink or "$text.secondary" }
-	end
-	local parts: { any } = { id = "updates-confirm", w_full = true, px = "$space.3", pb = "$space.3", gap = "$space.2" }
-	if #p.agents > 0 then
-		table.insert(parts, fact(locale.s("shell.updates.plan_agents", { n = #p.agents })))
-	end
-	if #p.zerons > 0 then
-		table.insert(parts, fact(locale.s("shell.updates.plan_zerons", { n = #p.zerons })))
-	end
-	if p.here then
-		table.insert(parts, fact(locale.s("shell.updates.plan_here")))
-	end
-	if p.chats > 0 then
-		table.insert(parts, fact(locale.s("shell.updates.plan_chats", { n = p.chats }), "$text.primary"))
-	end
-	for i, s in p.skipped do
-		if i > 3 then
-			table.insert(parts, fact(locale.s("shell.updates.plan_skips_more", { n = #p.skipped - 3 }), "$text.tertiary"))
-			break
-		end
-		table.insert(parts, fact(locale.s("shell.updates.plan_skip", { name = name_of(s.r), device = s.r.device_name, why = s.why }), "$text.tertiary"))
-	end
-	table.insert(parts, ui.row {
+-- A line of Update all's list: its mark, its name, and on the far side what it
+-- goes to, or why it's left out.
+local function review_row(r: any, side: string, out: boolean?): Node
+	return ui.row {
 		w_full = true,
-		pt = "$space.1",
-		gap = "$space.2",
-		justify = "end",
-		ui.button {
-			id = "updates-confirm-cancel",
-			label = ui.t("common.cancel"),
-			h = ACTION_H,
-			px = ui.raw(10, "an action's inset"),
-			items = "center",
-			rounded = "$radius.full",
-			bg = "$hover",
+		h = ui.raw(REVIEW_ROW_H, "a line of the list and its room"),
+		gap = "$space.3",
+		items = "center",
+		opacity = if out then 0.55 else 1,
+		ui.div { shrink = 0, mark_of(r, REVIEW_MARK) },
+		ds.FadeText {
+			name_of(r),
+			literal = true,
+			grow = 1,
+			text_size = "$font.size.sm",
+			weight = "$font.weight.medium",
+			color = "$text.primary",
+		},
+		ds.FadeText {
+			side,
+			literal = true,
+			shrink = 1,
+			max_w = "60%",
+			tabular = true,
+			text_size = "$font.size.xs",
 			color = "$text.secondary",
-			hover = { color = "$text.primary" },
-			cursor = "pointer",
-			on_click = function()
-				confirming:set(false)
-			end,
-			ui.text { ui.t("common.cancel"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
 		},
-		ui.button {
-			id = "updates-confirm-go",
-			label = ui.t("shell.updates.update_all"),
-			h = ACTION_H,
-			px = ui.raw(10, "an action's inset"),
-			items = "center",
-			rounded = "$radius.full",
-			bg = "$text.primary",
-			color = "$background",
-			hover = { opacity = 0.85 },
-			cursor = "pointer",
-			on_click = function()
-				confirming:set(false)
-				update_all()
-			end,
-			ui.text { ui.t("shell.updates.update_all"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
-		},
-	})
-	return ui.column(parts)
+	}
 end
 
-local function panel(open: any, anchor: any): Node
+local function review_caption(words: string): Node
+	return ds.FadeText {
+		words,
+		literal = true,
+		w_full = true,
+		pt = "$space.2",
+		pb = "$space.1",
+		text_size = "$font.size.xs",
+		color = "$text.tertiary",
+	}
+end
+
+local function going_to(r: any): string
+	if r.installed and r.latest then
+		return `{r.installed} → {r.latest}`
+	end
+	return r.latest or ""
+end
+
+-- What's in the list, built as it opens: what goes, by device, then what can't.
+local function review_list(): Node
+	local p = plan(rows:peek())
+	local going: { any } = {}
+	for _, list in { p.agents, p.zerons } do
+		for _, r in list do
+			table.insert(going, r)
+		end
+	end
+	if p.here then
+		table.insert(going, 1, p.here)
+	end
+	local groups = by_device(going)
+	local parts: { any } = { w_full = true, pb = "$space.1" }
+	for _, g in groups do
+		if #groups > 1 then
+			table.insert(parts, review_caption(g.name))
+		end
+		for _, r in g.rows do
+			table.insert(parts, review_row(r, going_to(r)))
+		end
+	end
+	if #p.skipped > 0 then
+		table.insert(parts, review_caption(locale.s("shell.updates.not_included")))
+		for _, s in p.skipped do
+			local where = if s.r.here or #groups < 2 then s.why else `{s.r.device_name} · {s.why}`
+			table.insert(parts, review_row(s.r, where, true))
+		end
+	end
+	local notes: { any } = { w_full = true, gap = "$space.1" }
+	local function note(words: string, ink: string?)
+		table.insert(notes, ui.text {
+			words,
+			literal = true,
+			wrap = true,
+			w_full = true,
+			text_size = "$font.size.xs",
+			line_height = "$font.line.xs",
+			color = ink or "$text.secondary",
+		})
+	end
+	if #p.agents > 0 then
+		note(locale.s("shell.updates.plan_agents"))
+	end
+	if p.chats > 0 then
+		note(locale.s("shell.updates.plan_chats", { n = p.chats }), "$text.primary")
+	end
+	if p.here then
+		note(locale.s("shell.updates.plan_here"))
+	end
+	return ui.column {
+		id = "updates-review",
+		w_full = true,
+		gap = "$space.3",
+		ui.scroll {
+			w_full = true,
+			max_h = ui.raw(REVIEW_LIST_H, "six lines, then it scrolls"),
+			fade = { EDGE_FADE, EDGE_FADE },
+			fade_overflow = true,
+			ui.column(parts),
+		},
+		if #notes > 0 then ui.column(notes) else nil,
+	}
+end
+
+-- Update all's second look: what it will do, before it does.
+local function review(open: any): Node
+	return ds.Dialog {
+		open = open,
+		title = ui.t("shell.updates.all_title"),
+		body = function(): string
+			local p = plan(rows:get())
+			local n = #p.agents + #p.zerons + (if p.here then 1 else 0)
+			local devices: { [string]: boolean } = {}
+			for _, list in { p.agents, p.zerons } do
+				for _, r in list do
+					devices[if r.here then "" else r.device] = true
+				end
+			end
+			if p.here then
+				devices[""] = true
+			end
+			local d = 0
+			for _ in devices do
+				d += 1
+			end
+			if d > 1 then
+				return locale.s("shell.updates.all_count_devices", { n = n, devices = d })
+			end
+			return locale.s("shell.updates.all_count", { n = n })
+		end,
+		size = "md",
+		build = review_list,
+		aside = {
+			label = ui.t("shell.updates.skip_all"),
+			on_click = function()
+				-- (Once it has left: the button it hangs from goes with the last.)
+				local list = rows:peek()
+				ui.after(DIALOG_GONE_MS, function()
+					skip(list)
+				end)
+			end,
+		},
+		confirm = { label = ui.t("shell.updates.update_all"), on_click = update_all },
+	}
+end
+
+local function panel(open: any, anchor: any, reviewing: any): Node
 	local function close()
 		open:set(false)
 	end
@@ -553,19 +731,88 @@ local function panel(open: any, anchor: any): Node
 		placement = { side = "bottom", align = "end", offset = 6 },
 		w = WIDTH,
 		build = function()
-			local confirming = ui.use_state(false)
+			local offset = ui.use_state(0)
+			-- The room over the first row: Update all's, when it's there.
+			local function above(): number
+				return if can_update_all() then HEAD_H else TOP_ROOM
+			end
+			-- How tall its rows are: a fair guess as it opens, then measured.
+			local content_h = ui.use_state(above() + #rows:peek() * ROW_H)
 			return ui.column {
 				w_full = true,
-				ui.row {
+				relative = true,
+				-- (No title on show: what it's called, for what reads it aloud.)
+				label = locale.s("shell.updates.title"),
+				ui.scroll {
 					w_full = true,
-					h = ui.raw(44, "the panel's head"),
-					pl = "$space.3",
-					pr = "$space.2",
-					items = "center",
-					justify = "between",
-					ui.text { ui.t("shell.updates.title"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
-					ui.show(
-						can_update_all,
+					offset = offset,
+					-- As tall as its rows, up to its most. (A scroll with no height
+					-- of its own stands at a fixed one, whatever it holds.)
+					h = function(): number
+						return math.min(content_h:get(), MOST_LIST_H)
+					end,
+					-- Each edge fades where there's more to scroll that way; the top
+					-- reaches the panel's edge, under Update all.
+					fade = function(): { number }
+						local o = offset:get()
+						local most = math.max(0, content_h:get() - MOST_LIST_H)
+						return { math.min(o, above() + EDGE_FADE), math.min(math.max(0, most - o), EDGE_FADE) }
+					end,
+					ui.column {
+						w_full = true,
+						shrink = 0,
+						pt = function(): any
+							return ui.raw(above(), "the room over the first row")
+						end,
+						-- (Nothing over the rows: the same room under them, so they sit
+						-- in the middle.)
+						pb = function(): any
+							return if can_update_all() then "$space.1" else ui.raw(TOP_ROOM, "as much as over them")
+						end,
+						on_resize = function(size: { w: number, h: number })
+							if math.abs(size.h - content_h:peek()) >= 0.5 then
+								content_h:set(size.h)
+							end
+						end,
+						ui.presence(signature, function(_: string): Node
+							local groups = by_device(rows:peek())
+							local parts: { any } = { w_full = true }
+							for _, g in groups do
+								if #groups > 1 then
+									table.insert(parts, ds.FadeText {
+										g.name,
+										literal = true,
+										w_full = true,
+										px = "$space.3",
+										pt = "$space.2",
+										text_size = "$font.size.xs",
+										color = "$text.tertiary",
+									})
+								end
+								for _, r in g.rows do
+									table.insert(parts, row(r, close))
+								end
+							end
+							return ui.column(parts)
+						end, { w_full = true }),
+					},
+				},
+				-- Update all, over the list, which scrolls away under it. (Its strip
+				-- takes its own presses: a row faded out beneath it isn't there to
+				-- be pressed.)
+				ui.show(
+					can_update_all,
+					ui.row {
+						absolute = true,
+						left = 0,
+						right = 0,
+						top = 0,
+						h = ui.raw(HEAD_H, "Update all's strip"),
+						on_press = function() end,
+						pl = "$space.3",
+						pr = "$space.2",
+						items = "center",
+						justify = "end",
 						ui.button {
 							id = "updates-all",
 							label = ui.t("shell.updates.update_all"),
@@ -575,54 +822,16 @@ local function panel(open: any, anchor: any): Node
 							rounded = "$radius.full",
 							bg = "$text.primary",
 							color = "$background",
-							-- (Out of the way while its summary's up, but still there: a
-							-- press on what's gone reads as a press outside the panel.)
-							opacity = function(): number
-								return if confirming:get() then 0 else 1
-							end,
-							pointer_events = function(): any
-								return if confirming:get() then "none" else nil
-							end,
 							hover = { opacity = 0.85 },
 							cursor = "pointer",
 							on_click = function()
-								confirming:set(true)
+								close()
+								reviewing:set(true)
 							end,
 							ui.text { ui.t("shell.updates.update_all"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
-						}
-					),
-				},
-				ui.presence(function(): string
-					return if confirming:get() then "confirm" else ""
-				end, function(which: string): Node
-					return if which == "confirm" then confirm(confirming) else ui.div { w_full = true, h = 0 }
-				end, { w_full = true }),
-				ui.scroll {
-					w_full = true,
-					max_h = MOST_ROWS_H,
-					pb = "$space.1",
-					ui.presence(signature, function(_: string): Node
-						local groups = by_device(rows:peek())
-						local parts: { any } = { w_full = true }
-						for _, g in groups do
-							if #groups > 1 then
-								table.insert(parts, ui.text {
-									g.name,
-									literal = true,
-									px = "$space.3",
-									pt = "$space.2",
-									text_size = "$font.size.xs",
-									color = "$text.tertiary",
-									truncate = true,
-								})
-							end
-							for _, r in g.rows do
-								table.insert(parts, row(r, close))
-							end
-						end
-						return ui.column(parts)
-					end, { w_full = true }),
-				},
+						},
+					}
+				),
 			}
 		end,
 	})
@@ -680,6 +889,7 @@ end
 
 M.Button = ui.component(function(): Node
 	local open = ui.use_state(false)
+	local reviewing = ui.use_state(false)
 	local hovered = ui.use_state(false)
 	-- (Nothing left to say: nothing left open.)
 	ui.effect(function()
@@ -730,8 +940,9 @@ M.Button = ui.component(function(): Node
 				return ds.Icon { name = if which == "done" then "check" else "download", size = GLYPH }
 			end, { w = GLYPH, h = GLYPH, shrink = 0 }),
 	}
-	-- (The popover draws its anchor.)
-	return panel(open, trigger)
+	-- (The popover draws its anchor. The dialog stands apart from it: a press
+	-- in one reads as a press outside the other.)
+	return ui.div { shrink = 0, panel(open, trigger, reviewing), review(reviewing) }
 end)
 
 M.shown = shown
