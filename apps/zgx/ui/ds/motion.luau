@@ -174,6 +174,28 @@ function M.arrive(x: number, y: number): ElementParams
 	} :: any)
 end
 
+-- A seam (a column's edge, a split's divider) dragged past its limit
+-- gives `NUDGE` points more and comes back, once each time the drag gets
+-- there (Zeron's resize-edge bounce): `BOUNCE_MS` long, out in the first
+-- `BOUNCE_OUT` of it and home in the rest, both smoothstep, so it starts
+-- and lands still. With motion reduced, none.
+M.BOUNCE_MS, M.BOUNCE_OUT = 220, 0.32
+-- (Smoothstep, 3t² − 2t³, is exactly this curve.)
+M.SMOOTHSTEP = "cubicBezier(.3333,0,.6667,1)"
+-- `anime.animate`'s params for a state of points: out to `toward` (-1 or
+-- 1) times `NUDGE`, and back to 0. nil with motion reduced.
+function M.bounce(toward: number): TableParams?
+	if M.reduced_now() then
+		return nil
+	end
+	return {
+		value = {
+			{ to = toward * M.NUDGE, duration = M.BOUNCE_MS * M.BOUNCE_OUT, ease = M.SMOOTHSTEP },
+			{ to = 0, duration = M.BOUNCE_MS * (1 - M.BOUNCE_OUT), ease = M.SMOOTHSTEP },
+		},
+	} :: any
+end
+
 -- Snappy: what answers a press at once (the lightbox's picture growing out
 -- of its thumbnail and going back, its zoom). It moves from the press's own
 -- frame, fast at first and easing into place with no give: a strong
