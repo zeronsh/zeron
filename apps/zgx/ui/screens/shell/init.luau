@@ -542,10 +542,12 @@ return function(): Node
 				grow = 1,
 				min_h = 0,
 				w_full = true,
-				-- (Settings stand in its place and the page's, under the top bar.)
+				-- (Settings stand in its place and the page's, under the top bar.
+				-- Over the page: its edge takes the pointer a little into it.)
 				ui.div {
 					h_full = true,
 					shrink = 0,
+					z = 1,
 					hidden = in_settings,
 					boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
 						return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = 42 }

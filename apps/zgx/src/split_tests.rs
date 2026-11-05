@@ -1654,6 +1654,64 @@ fn a_window_resized_reflows_the_page_live() {
     assert_eq!(widths.len(), 20, "the transcript took {widths:?}");
 }
 
+/// The divider between two panes: dragged past a pane's least, it bounces
+/// (the pane gives a few points more, at most 5, and comes back) and its
+/// light dims while it's held there; double-clicked, the panes take equal
+/// shares again, easing there, as a pane coming or going does.
+#[test]
+fn a_divider_bounces_at_a_pane_s_least_and_double_clicked_evens_the_panes() {
+    let mut app = mount(&scratch("divider"));
+    split_of(&mut app, &["a1", "a3"]);
+    open(&mut app, "Fix the build");
+    app.frames(30);
+    assert_eq!(panes(&mut app), 2);
+    let divider = "#split-divider-row:/1";
+    let width = |app: &mut TestApp, id: &str| app.bounds(&format!("#split-pane-{id}")).width;
+    let light = |app: &mut TestApp| {
+        let id = app.find(divider).expect("the divider");
+        app.ui.prepare_frame();
+        let scene = app.ui.scene.borrow();
+        scene.effects(*scene.children(id).first().expect("its light")).opacity
+    };
+    let (button, m) = (PointerButton::Primary, Modifiers::default());
+    let (x, y) = middle(app.bounds(divider));
+    // Dragged past the right pane's least, and held there.
+    app.ui.input.forget_clicks();
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, m);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, m);
+    let mut seen = Vec::new();
+    for step in 1..=4 {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x + 900. * step as f32 / 4., y }, m);
+        app.frame();
+        seen.push(width(&mut app, "a3"));
+    }
+    for _ in 0..20 {
+        app.frame();
+        seen.push(width(&mut app, "a3"));
+    }
+    let rest = *seen.last().unwrap();
+    let least = seen.iter().copied().fold(f32::MAX, f32::min);
+    assert!(least < rest - 2. && least >= rest - 5.5, "the pane gave a few points past its least and came back: {seen:?}");
+    assert!(light(&mut app) < 0.02, "its light dims, held at the least");
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x: x + 900., y, button }, m);
+    app.ui.input.forget_clicks();
+    app.frames(20);
+    assert!(width(&mut app, "a1") > width(&mut app, "a3") + 200., "dragged apart");
+    // Double-clicked: equal again, easing there.
+    let (x, y) = middle(app.bounds(divider));
+    let before = width(&mut app, "a3");
+    for _ in 0..2 {
+        pointer(&mut app, InputEvent::PointerDown { x, y, button });
+        app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, m);
+    }
+    app.ui.input.forget_clicks();
+    let mid = width(&mut app, "a3");
+    app.frames(40);
+    let (a, b) = (width(&mut app, "a1"), width(&mut app, "a3"));
+    assert!(near(a, b), "equal shares again: {a} and {b}");
+    assert!(mid > before + 0.5 && mid < b - 0.5, "it eases there: {before} → {mid} → {b}");
+}
+
 /// A row in the sidebar follows the column's width: its edge dragged wider,
 /// a row and the words in it are that much wider.
 #[test]

@@ -14,6 +14,7 @@
 
 local ds = require("@ds")
 local motion = require("@ds/motion")
+local seam = require("@ds/seam")
 local locale = require("@ds/locale")
 local route = require("@app/screens/shell/route")
 local shell_view = require("@app/screens/shell/view")
@@ -643,6 +644,8 @@ return function(props: Props): Node
 	local drag_held = ui.use_state(nil :: { w: number }?)
 	-- The pointer over its edge (its hairline stronger, as the sidebar's).
 	local edge_over = ui.use_state(false)
+	-- Its edge's drag: a bounce past its least or most, added to its width.
+	local edge_drag = seam.drag()
 	-- Whether a step (opening, closing, expanding, a column beside it going
 	-- or coming) is under way: its edge is out of reach until it lands.
 	local stepping = ui.use_state(false)
@@ -1014,12 +1017,12 @@ return function(props: Props): Node
 		if stepping:peek() ~= (easing ~= nil) then
 			stepping:set(easing ~= nil)
 		end
-		open_w:set(base + off:peek())
+		open_w:set(base + off:peek() + edge_drag.nudge:peek())
 	end)
-	-- (Following the step as it eases.)
+	-- (Following the step as it eases, and its edge's bounce.)
 	ui.effect(function()
 		local o = off:get()
-		local w = base + o
+		local w = base + o + edge_drag.nudge:get()
 		if open_w:peek() ~= w then
 			open_w:set(w)
 		end
@@ -1035,13 +1038,16 @@ return function(props: Props): Node
 		local g = goal:get()
 		return if g > 0 then g else rest_w:get()
 	end
+	-- The widest it may be asked to be: what leaves the page what it wants.
+	local function most_w(): number
+		return math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
+	end
 	-- Its width asked for (its edge dragged, or keyed): never past what
 	-- leaves the page what it wants; kept as the width it takes with its tree
 	-- docked.
 	local function set_width(want: number)
 		local tree = if fit.current:peek().files then TREE else 0
-		local most = math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
-		local w = math.clamp(want, FILES_MIN, most)
+		local w = math.clamp(want, FILES_MIN, most_w())
 		files_w:set(reserve() + w - tree)
 		if not chosen:peek() then
 			chosen:set(true)
@@ -1136,23 +1142,23 @@ return function(props: Props): Node
 		return shown:get()
 	end
 	-- (No hairline down its left; its card's edge is that.)
-	-- Its edge, dragged: wider or narrower (the page keeps its least). Over the
-	-- gap before its card as well as a little into it: the gap is where a hand
-	-- goes for it, and the card clips what's its own, so this stands beside it.
+	-- Its edge, dragged: wider or narrower (the page keeps its least),
+	-- bouncing past either; double-clicked, back to its share, easing there,
+	-- the width chosen forgotten. The gap before its card, taking the pointer
+	-- `seam.REACH` each side of the gap's middle: the gap is where a hand goes
+	-- for it, and the card clips what's its own, so this stands beside it.
 	-- (Pressed itself, so it keeps the pointer as it's dragged. Not while
-	-- expanded: it's as wide as it goes.)
-	local panel_edge_inside = 6
+	-- expanded: it's as wide as it goes. Out of reach while the panel moves.)
 	local panel_edge = ui.div {
 			absolute = true,
 			right = function(): number
-				return WINDOW_EDGE + open_w:get() - panel_edge_inside
+				return ui.raw(WINDOW_EDGE + open_w:get() + gap_before:get() / 2 - seam.REACH, "the seam's reach past the gap's middle")
 			end,
 			top = ui.raw(TOP_BAR, "as the panel's top"),
 			bottom = ui.raw(WINDOW_EDGE, "the window's edge"),
 			w = function(): number
-				return if expanded() then 0 else panel_edge_inside + gap_before:get()
+				return if expanded() then 0 else ui.raw(2 * seam.REACH, "the seam's reach either side")
 			end,
-			-- (Out of reach while the panel moves.)
 			pointer_events = function(): string
 				return if stepping:get() then "none" else "auto"
 			end,
@@ -1195,31 +1201,44 @@ return function(props: Props): Node
 				return true
 			end,
 			on_press = function(e)
+				if e.clicks == 2 then
+					if chosen:peek() then
+						chosen:set(false)
+					end
+					resplit()
+					return
+				end
 				-- (From where it stands.)
 				from_x, from_w, resizing = e.x, open_w:peek(), true
 				drag_held:set({ w = inner_w() })
 			end,
 			on_pointer_move = function(e)
 				if resizing then
-					set_width(from_w - (e.x - from_x))
+					local want = from_w - (e.x - from_x)
+					edge_drag.at(want, FILES_MIN, most_w())
+					set_width(want)
 				end
 			end,
 			on_release = function()
 				resizing = false
 				drag_held:set(nil)
+				edge_drag.release()
 			end,
 			-- What lights: the gap, as between two panes.
 			ui.div {
 				absolute = true,
-				left = 0,
+				left = function(): number
+					return ui.raw(seam.REACH - gap_before:get() / 2, "the gap, in the seam's reach")
+				end,
 				top = 0,
 				bottom = 0,
 				w = gap_before,
 				rounded = "$radius.full",
 				pointer_events = "none",
-				bg = function(): string
-					return if edge_over:get() or drag_held:get() ~= nil then "$border.strong" else "#00000000"
-				end,
+				bg = "$border.strong",
+				opacity = seam.lit(function(): boolean
+					return (edge_over:get() or drag_held:get() ~= nil) and not stepping:get()
+				end, edge_drag),
 			},
 	}
 
@@ -1597,10 +1616,12 @@ return function(props: Props): Node
 		end)
 		return ui.column(item)
 	end
-	-- A divider between two panes: dragging it moves their split, at once; a little
-	-- wider than the gap to take the pointer, lit under it.
+	-- A divider between two panes: dragging it moves their split, at once,
+	-- bouncing at either pane's least; double-clicked, its panes take equal
+	-- shares again, easing there. It takes the pointer `seam.REACH` each side
+	-- of the gap's middle, its gap lit under it.
 	local PANE_LEAST_WIDE, PANE_LEAST_TALL = 288, 160
-	local DIVIDER_REACH = 3
+	local DIVIDER_REACH = seam.REACH - splits.GAP / 2
 	local function divider(id: string): Node
 		local function find(list: { any }): any
 			for _, d in list do
@@ -1617,7 +1638,25 @@ return function(props: Props): Node
 		local row = first == nil or first.axis == "row"
 		local lit = ui.use_state(false)
 		local held = ui.use_state(false)
+		local drag = seam.drag()
+		-- The press, and the last move (`moved`, `least`): what its bounce
+		-- goes past, after the drag too.
 		local start: any = nil
+		local last: any = nil
+		local function apply(s: any)
+			splits.resize(s.path, s.part, s.shares, s.moved, s.least, drag.nudge:peek() / s.length)
+		end
+		local was_nudge = 0
+		ui.effect(function()
+			local n = drag.nudge:get()
+			if n == 0 and was_nudge == 0 then
+				return
+			end
+			was_nudge = n
+			if last then
+				apply(last)
+			end
+		end)
 		local item: { [any]: any } = {
 			id = `split-divider-{id}`,
 			pointer_events = "auto",
@@ -1627,23 +1666,34 @@ return function(props: Props): Node
 			end,
 			on_press = function(e: any)
 				local d = find(splits.dividers:peek())
-				if d then
-					local area = splits.area()
-					local span = if row then area.w else area.h
-					start = { at = if row then e.x else e.y, shares = splits.shares_at(d.path), path = d.path, part = d.at, length = d.length.p * span + d.length.q }
-					held:set(true)
+				if not d then
+					return
 				end
+				last = nil
+				if e.clicks == 2 then
+					splits.even(d.path)
+					return
+				end
+				local area = splits.area()
+				local span = if row then area.w else area.h
+				start = { at = if row then e.x else e.y, shares = splits.shares_at(d.path), path = d.path, part = d.at, length = d.length.p * span + d.length.q }
+				held:set(true)
 			end,
 			on_pointer_move = function(e: any)
 				local s = start
 				if s and s.length > 0 then
 					local moved = ((if row then e.x else e.y) - s.at) / s.length
-					splits.resize(s.path, s.part, s.shares, moved, math.min(0.45, (if row then PANE_LEAST_WIDE else PANE_LEAST_TALL) / s.length))
+					local least = math.min(0.45, (if row then PANE_LEAST_WIDE else PANE_LEAST_TALL) / s.length)
+					local lo, hi = splits.bounds(s.shares, s.part, least)
+					drag.at((s.shares[s.part] + moved) * s.length, lo * s.length, hi * s.length)
+					last = { path = s.path, part = s.part, shares = s.shares, moved = moved, least = least, length = s.length }
+					apply(last)
 				end
 			end,
 			on_release = function()
 				start = nil
 				held:set(false)
+				drag.release()
 			end,
 			-- What lights: the gap itself.
 			ui.div {
@@ -1654,9 +1704,10 @@ return function(props: Props): Node
 				bottom = if row then 0 else DIVIDER_REACH,
 				rounded = "$radius.full",
 				pointer_events = "none",
-				bg = function(): string
-					return if lit:get() or held:get() then "$border.strong" else "#00000000"
-				end,
+				bg = "$border.strong",
+				opacity = seam.lit(function(): boolean
+					return lit:get() or held:get()
+				end, drag),
 			},
 		}
 		-- Placed at its gap's insets, reaching a little past it each side to take the

@@ -49,6 +49,7 @@ local IconButton = icon_button.IconButton
 local ToggleButton = require("@self/toggle_button")
 local ContextMenu = require("@self/context_menu")
 local motion = require("@self/motion")
+local seam = require("@self/seam")
 local locale = require("@self/locale")
 -- A session's row, its corner, its group's header and pager: shared with
 -- every other list of sessions (the panel home's).
@@ -367,6 +368,8 @@ return ui.component(function(props: Props): Node
 	local dragging = ui.use_state(false)
 	local edge_over = ui.use_state(false)
 	local from_x, from_w = 0, 0
+	-- Its edge's drag: a bounce past its least or most, added to its width.
+	local edge_drag = seam.drag()
 	local easing: any = nil
 	local was_folded = collapsed:peek()
 	-- Its width is where it's going (`base`, which its edge dragged or the
@@ -414,11 +417,11 @@ return ui.component(function(props: Props): Node
 		else
 			base = to
 		end
-		shown_w:set(math.max(base + step:peek(), 0))
+		shown_w:set(math.max(base + step:peek() + edge_drag.nudge:peek(), 0))
 	end)
-	-- (Following the step as it eases.)
+	-- (Following the step as it eases, and the edge's bounce.)
 	ui.effect(function()
-		local w = math.max(base + step:get(), 0)
+		local w = math.max(base + step:get() + edge_drag.nudge:get(), 0)
 		if shown_w:peek() ~= w then
 			shown_w:set(w)
 		end
@@ -5040,17 +5043,19 @@ fn layer(input:LayerInput)->vec4<f32> {
 	if #feet > 0 then
 		table.insert(body, ui.column { w_full = true, shrink = 0, gap = "$zeron.list.gap", table.unpack(feet) })
 	end
-	-- Its edge: dragged, it resizes (242 to 400), following the pointer at once.
-	-- (Pressed itself, so it keeps the pointer as it's dragged.) A card's reaches
-	-- across the gap beside it, which lights as it does between the panel and the
-	-- page, over the card's height; `gap`: how far past the sidebar that is.
+	-- Its edge: dragged, it resizes (242 to 400), following the pointer at once,
+	-- bouncing past either end; double-clicked, back to its default width,
+	-- easing there. (Pressed itself, so it keeps the pointer as it's dragged.)
+	-- A card's is the gap beside it, which lights as it does between the panel
+	-- and the page, over the card's height; `gap`: how wide that is. It takes
+	-- the pointer `seam.REACH` each side of the gap's middle.
 	local function edge_handle(gap: number, top: number, bottom: number): Node
 		return ui.div {
 			absolute = true,
-			right = ui.raw(-gap, "over the gap beside it"),
+			right = ui.raw(-gap / 2 - seam.REACH, "the seam's reach past the gap's middle"),
 			top = top,
 			bottom = bottom,
-			w = ui.raw(6 + gap, "a little into it, and the gap"),
+			w = ui.raw(2 * seam.REACH, "the seam's reach either side"),
 			cursor = "col_resize",
 			label = locale.t("ds.sidebar.resize"),
 			pointer_events = function()
@@ -5060,21 +5065,32 @@ fn layer(input:LayerInput)->vec4<f32> {
 				edge_over:set(inside)
 			end,
 			on_press = function(e)
+				if e.clicks == 2 then
+					wide:set(WIDE)
+					return
+				end
 				from_x, from_w = e.x, wide:peek()
 				resizing = true
 				dragging:set(true)
 			end,
 			on_pointer_move = function(e)
 				if resizing then
-					wide:set(math.clamp(from_w + e.x - from_x, MIN_W, MAX_W))
+					local want = from_w + e.x - from_x
+					edge_drag.at(want, MIN_W, if limit then math.min(MAX_W, limit()) else MAX_W)
+					wide:set(math.clamp(want, MIN_W, MAX_W))
 				end
 			end,
 			on_release = function()
 				resizing = false
 				dragging:set(false)
+				edge_drag.release()
 			end,
 		}
 	end
+	-- Its edge lit: under the pointer and as it's dragged, not held past an end.
+	local edge_lit = seam.lit(function(): boolean
+		return (edge_over:get() or dragging:get()) and not collapsed:get()
+	end, edge_drag)
 	local root = ui.column {
 		id = if is_island then "rail" else nil,
 		w = if props.card
@@ -5162,12 +5178,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 				bottom = 0,
 				w = 1,
 				pointer_events = "none",
-				bg = function()
-					-- (The cards beside it are its edge at rest; the
-					-- hairline shows only under the pointer and as it's dragged.)
-					return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
-				end,
-				opacity = shown_wide,
+				-- (The cards beside it are its edge at rest; the
+				-- hairline shows only under the pointer and as it's dragged.)
+				bg = "$border.strong",
+				opacity = edge_lit,
 			},
 		if props.card then nil else edge_handle(0, 0, 0),
 	}
@@ -5197,10 +5211,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 			w = gap,
 			rounded = "$radius.full",
 			pointer_events = "none",
-			bg = function()
-				return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
-			end,
-			opacity = shown_wide,
+			bg = "$border.strong",
+			opacity = edge_lit,
 		},
 		edge_handle(gap, card_top, 5),
 	}
