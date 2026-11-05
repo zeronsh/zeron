@@ -3355,8 +3355,7 @@ fn reply_copy_text(entry: &Json) -> String {
 /// A reply's parts in order, as the shipping app lays them out (crates/ui
 /// transcript.rs, its non-compact rows): its text, and between the text each
 /// run of consecutive tools (thinking with them) as a group of its own,
-/// keyed by its first part. A subagent's tools never share a group with the
-/// others, nor thinking with them. A group is open while the reply streams
+/// keyed by its first part. A group is open while the reply streams
 /// and it is the reply's tail.
 fn blocks(entry: &Json) -> Value {
     let parts: Vec<&Json> = entry["parts"].as_array().into_iter().flatten().collect();
@@ -3418,18 +3417,12 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
                 }
             }
             Some("tool") => {
-                if group.first().is_some_and(|head| is_agent(head) != is_agent(part)) {
-                    flush(&mut out, &mut group, group_last);
-                }
                 group.push(part);
                 group_last = ix;
             }
             Some("reasoning") => {
                 if part["text"].as_str().unwrap_or_default().trim().is_empty() {
                     continue;
-                }
-                if group.first().is_some_and(|head| is_agent(head)) {
-                    flush(&mut out, &mut group, group_last);
                 }
                 group.push(part);
                 group_last = ix;
@@ -3706,7 +3699,7 @@ fn subagent_title(call: &Json) -> String {
         .unwrap_or_else(|| "Subagent".into())
 }
 
-/// A subagent's call (its own group, as the shipping app's agent chips).
+/// A subagent's call.
 fn is_agent(part: &Json) -> bool {
     let call = &part["call"];
     let name = match call["kind"].as_str() {
@@ -3730,8 +3723,8 @@ fn group_summary(group: &[&Json]) -> String {
         n => segments.push(format!("thought {n} times")),
     }
     if !calls.is_empty() {
-        let (mut commands, mut reads, mut searches, mut fetches, mut todos, mut other, mut failed) =
-            (0, 0, 0, 0, 0, 0, 0);
+        let (mut commands, mut reads, mut searches, mut fetches, mut todos, mut agents, mut other, mut failed) =
+            (0, 0, 0, 0, 0, 0, 0, 0);
         let mut edited: Vec<String> = Vec::new();
         for p in &calls {
             if p["isError"].as_bool() == Some(true) {
@@ -3756,6 +3749,7 @@ fn group_summary(group: &[&Json]) -> String {
                 "search" | "glob" | "webSearch" => searches += 1,
                 "webFetch" => fetches += 1,
                 "todo" => todos += 1,
+                _ if is_agent(p) => agents += 1,
                 _ => other += 1,
             }
         }
@@ -3778,6 +3772,9 @@ fn group_summary(group: &[&Json]) -> String {
         }
         if todos > 0 {
             tools.push("updated todos".into());
+        }
+        if agents > 0 {
+            tools.push(if agents == 1 { "ran a subagent".into() } else { format!("ran {agents} subagents") });
         }
         if other > 0 {
             tools.push(format!("called {}", plural(other, "tool", "tools")));

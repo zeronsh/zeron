@@ -98,7 +98,7 @@ local GLYPH: { [Kind]: Icon.Name } = {
 	glob = "folder-with-files",
 	web = "global",
 	todo = "checklist",
-	agent = "bot",
+	agent = "side-chat",
 	thought = "chat-round-line",
 }
 
@@ -376,6 +376,12 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 	}
 end
 
+-- A subagent still at work, whatever its reply has moved on to.
+local function agent_working(t: Tool): boolean
+	local sub = (t :: any).subagent
+	return t.kind == "agent" and sub ~= nil and sub.status == "running"
+end
+
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
 -- one; `running`: it is the one in flight, its glyph the working loader.)
 local function row(
@@ -388,9 +394,6 @@ local function row(
 ): Node
 	if now().kind == "thought" then
 		return thought_row(now, below, writing, group)
-	end
-	local function tint(): string
-		return if now().failed then "$danger" else "$text.secondary"
 	end
 	local id = now().id
 	local function has_call(): boolean
@@ -440,7 +443,12 @@ local function row(
 			relative = true,
 			overflow = "hidden",
 			bg = "#00000000",
-			hover = { bg = "#00000000" },
+			-- (A row that opens says so under the pointer: its words and glyph
+			-- come up, as its group's header does.)
+			color = function(): string
+				return if now().failed then "$danger" else "$text.secondary"
+			end,
+			hover = if opens then { bg = "#00000000", color = "$text.primary" } else { bg = "#00000000" },
 			active = { bg = "#00000000" },
 			-- Only a row that opens is a stop for the keys (a long run of
 			-- tools isn't a long run of stops), its ring showing there.
@@ -475,7 +483,6 @@ local function row(
 				absolute = true,
 				left = GLYPH_LEFT,
 				top = (ROW - GLYPH_SIZE) / 2,
-				color = tint,
 				ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
 					name = function(): Icon.Name
 						return GLYPH[now().kind]
@@ -496,7 +503,6 @@ local function row(
 					literal = true,
 					shrink = 0,
 					text_size = "$font.size.sm",
-					color = "$text.secondary",
 				},
 				ui.show(
 					function(): boolean
@@ -642,6 +648,20 @@ return ui.component(function(props: Props): Node
 			return false
 		end
 	end
+	-- Its subagents still at work: on show with their branches, the group
+	-- folded or not.
+	local working = ui.computed(function(): { Tool }
+		local out: { Tool } = {}
+		for _, x in tools:get() do
+			if agent_working(x) then
+				table.insert(out, x)
+			end
+		end
+		return out
+	end)
+	local function pinned(): boolean
+		return not opened:get() and #working:get() > 0
+	end
 	-- The rows exist while the tree is open or folding: folded away, they'd
 	-- be built for nothing as a list scrolls, and a selection across the
 	-- reply would take text no one can see.
@@ -730,8 +750,8 @@ return ui.component(function(props: Props): Node
 					return row(function(): Tool
 						return now:get()
 					end, below_of(t), function(): boolean
-						return live() and last()
-					end, props.open_subagent, props.thought, props.key)
+							return (live() and last()) or agent_working(now:get())
+						end, props.open_subagent, props.thought, props.key)
 				end, {
 					key = function(t: Tool): string
 						return t.id
@@ -740,5 +760,27 @@ return ui.component(function(props: Props): Node
 				})
 			),
 		},
+		-- (Under the folded tree: a tool's row, opening its lane as ever.)
+		ui.show(
+			pinned,
+			ui.each(working, function(t: Tool)
+				local now = ui.computed(function(): Tool
+					return by_id:get()[t.id] or t
+				end)
+				return row(function(): Tool
+					return now:get()
+				end, function(): boolean
+					local list = working:get()
+					return #list > 0 and list[#list].id ~= t.id
+				end, function(): boolean
+					return true
+				end, props.open_subagent, props.thought, props.key)
+			end, {
+				key = function(t: Tool): string
+					return t.id
+				end,
+				enter = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" },
+			})
+		),
 	}
 end)
