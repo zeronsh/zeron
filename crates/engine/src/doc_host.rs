@@ -1187,6 +1187,13 @@ impl DocHost {
         Ok(())
     }
 
+    /// Start no new work until [`Self::lift_quiesce`]: a new version trying out
+    /// an update, whose changes may yet be undone. Controls keep working, as
+    /// they do in a quiesce, and what queues meanwhile runs when it's lifted.
+    pub fn hold_work(&self) {
+        self.inner.quiesced.store(true, Ordering::SeqCst);
+    }
+
     /// End a quiesce and run everything that queued meanwhile.
     pub fn lift_quiesce(&self) {
         if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
