@@ -22,15 +22,19 @@ local route = require("@app/screens/shell/route")
 local M = {}
 
 -- The bar's tab height and its tile, as a session's tab (shell/session_tabs).
-local BUTTON_H, TILE, RING = 28, 24, 2.5
--- The download glyph's own place: all the button lights up under the pointer.
-local SLOT = 28
+-- The gap between circles is cut out of the one behind, not painted: what's
+-- under the button shows through it, whatever the button's state or the theme.
+local BUTTON_H, TILE, GAP_CUT = 28, 24, 2.5
 -- How far along each circle stands: enough of the one behind shows to know it.
-local STEP = 15
+local STEP = 18
+-- A circle's mark: a little right of its middle on those behind, to sit in the
+-- middle of what shows of them.
+local MARK_SIDE, MARK_NUDGE = 13, 2
 local MOST = 3
 local GLYPH = 16
--- Between its marks and its glyph's place.
-local GAP = 4
+-- The button's insets: its circles as far in as they are from its top, its
+-- glyph clear of its end.
+local INSET_L, INSET_R, GAP = 2, 6, 5
 local WIDTH, MARK, ACTION_H = 340, 28, 26
 local MOST_ROWS_H = 340
 
@@ -114,7 +118,7 @@ local function stack_w(): number
 end
 
 function M.width(): number
-	return if shown() then stack_w() + GAP + SLOT else 0
+	return if shown() then INSET_L + stack_w() + GAP + GLYPH + INSET_R else 0
 end
 
 -- What the button's glyph says of them all.
@@ -133,8 +137,11 @@ local function state(): string
 end
 
 -- A row's mark on its tile, whatever it's on.
-local function mark_of(r: any, size: number): Node
+local function mark_of(r: any, size: number, bare: boolean?): Node
 	if r.kind == "zeron" then
+		if bare then
+			return ui.svg { src = "assets/icons/zeron-mark.svg", w = size, h = size, shrink = 0 }
+		end
 		-- (Its logo on the white tile the agents' marks wear.)
 		return ui.row {
 			w = size,
@@ -156,6 +163,7 @@ local function mark_of(r: any, size: number): Node
 		icon = r.agent_icon,
 		seed = r.harness,
 		size = size,
+		bare = bare,
 	}
 end
 
@@ -450,9 +458,20 @@ local function panel(open: any, anchor: any): Node
 	})
 end
 
--- A circle of the stack, on the mark's own tile. Its ring is the bar's colour,
--- so where one circle lies over the next, the bar shows between them.
+-- A circle behind another, as a crescent: the whole circle less the one in
+-- front of it and the gap around that.
+local CRESCENT = (function(): string
+	local r, far = TILE / 2, TILE / 2 + GAP_CUT
+	local a = (STEP * STEP + r * r - far * far) / (2 * STEP)
+	local h = math.sqrt(r * r - a * a)
+	local x, top, bottom = r - a, r - h, r + h
+	return `code:<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {TILE} {TILE}"><path fill="#ffffff" d="M{x} {top}A{r} {r} 0 1 1 {x} {bottom}A{far} {far} 0 0 0 {x} {top}Z"/></svg>`
+end)()
+
+-- A circle of the stack: the mark's own tile colour, the mark on it. Ink-only
+-- marks take their tile's ink, as on the list's tiles.
 local function tile(at: number): Node
+	local behind = at > 1
 	return ui.show(function(): boolean
 		return #marks:get() >= at
 	end, ui.div {
@@ -462,25 +481,25 @@ local function tile(at: number): Node
 		left = (at - 1) * STEP,
 		w = TILE,
 		h = TILE,
-		rounded = "$radius.full",
-		bg = "$background",
+		if behind
+			then ui.svg { src = CRESCENT, tint = "$zeron.mark.bg", absolute = true, left = 0, top = 0, w = TILE, h = TILE }
+			else ui.div { absolute = true, left = 0, top = 0, w = TILE, h = TILE, rounded = "$radius.full", bg = "$zeron.mark.bg" },
 		ui.row {
 			absolute = true,
-			left = RING,
-			top = RING,
-			w = TILE - RING * 2,
-			h = TILE - RING * 2,
+			left = if behind then MARK_NUDGE else 0,
+			top = 0,
+			w = TILE,
+			h = TILE,
 			items = "center",
 			justify = "center",
-			overflow = "hidden",
-			rounded = "$radius.full",
+			color = "#000000",
 			ui.presence(function(): string
 				local r = marks:get()[at]
 				return if r then r.id else ""
 			end, function(id: string): Node
 				for _, r in marks:peek() do
 					if r.id == id then
-						return mark_of(r, TILE - RING * 2)
+						return mark_of(r, MARK_SIDE, true)
 					end
 				end
 				return ui.div {}
@@ -511,10 +530,22 @@ M.Button = ui.component(function(): Node
 			end,
 			expanded = open,
 			h = BUTTON_H,
+			pl = ui.raw(INSET_L, "as far in as they are from its top"),
+			pr = ui.raw(INSET_R, "clear of its end"),
 			gap = ui.raw(GAP, "its marks and its glyph"),
 			items = "center",
+			rounded = "$radius.lg",
 			cursor = "pointer",
 			pointer_events = "auto",
+			bg = function(): string
+				if open:get() then
+					return "$zeron.selected.flat.bg"
+				end
+				return if hovered:get() then "$hover" else "#00000000"
+			end,
+			color = function(): string
+				return if open:get() or hovered:get() then "$text.primary" else "$text.secondary"
+			end,
 			on_hover = function(inside: boolean)
 				hovered:set(inside)
 			end,
@@ -522,30 +553,12 @@ M.Button = ui.component(function(): Node
 				open:set(not open:peek())
 			end,
 			ui.div(stack),
-			-- (Only the glyph lights up, on its own place, as a tab does.)
-			ui.row {
-				w = SLOT,
-				h = SLOT,
-				shrink = 0,
-				items = "center",
-				justify = "center",
-				rounded = "$radius.lg",
-				bg = function(): string
-					if open:get() then
-						return "$zeron.selected.flat.bg"
-					end
-					return if hovered:get() then "$hover" else "#00000000"
-				end,
-				color = function(): string
-					return if open:get() or hovered:get() then "$text.primary" else "$text.secondary"
-				end,
-				ui.presence(state, function(which: string): Node
-					if which == "working" then
-						return status.StatusIcon { kind = "working", size = GLYPH }
-					end
-					return ds.Icon { name = if which == "done" then "check" else "download", size = GLYPH }
-				end, { w = GLYPH, h = GLYPH, shrink = 0 }),
-			},
+			ui.presence(state, function(which: string): Node
+				if which == "working" then
+					return status.StatusIcon { kind = "working", size = GLYPH }
+				end
+				return ds.Icon { name = if which == "done" then "check" else "download", size = GLYPH }
+			end, { w = GLYPH, h = GLYPH, shrink = 0 }),
 	}
 	-- (The popover draws its anchor.)
 	return panel(open, trigger)
