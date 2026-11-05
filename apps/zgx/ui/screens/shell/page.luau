@@ -247,6 +247,9 @@ return function(props: Props): Node
 				return home() and not on_plugin()
 			end,
 			width = props.width,
+			picture = function(): any
+				return if appearance.showing:peek() == "image" then appearance.image:peek() else nil
+			end,
 			key = function(): string
 				local showing = appearance.showing:get()
 				if showing == "image" then
