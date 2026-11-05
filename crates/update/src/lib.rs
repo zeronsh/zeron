@@ -618,6 +618,14 @@ impl InstallKind {
     /// effect at the next launch ("install on quit"). Either way the caller
     /// must quit after this succeeds.
     pub fn apply_desktop(&self, staged: &Path, relaunch: bool) -> anyhow::Result<()> {
+        // The engine is trying a new version out (asked from another device), and
+        // going back from that needs the installed app to stay as it was.
+        if channel::data_dir()
+            .and_then(transaction::read)
+            .is_some_and(|update| update.in_progress())
+        {
+            bail!("An update is already in progress on this device.");
+        }
         match self {
             Self::MacApp { bundle } => {
                 apply_mac_app(staged, bundle)?;

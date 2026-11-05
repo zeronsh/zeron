@@ -41,6 +41,22 @@ pub(crate) fn boot(data_dir: &Path) -> anyhow::Result<()> {
     })
 }
 
+/// An engine that didn't come through [`boot`] (the app embedding one when it
+/// can't start its helper) mustn't open databases a trial has changed or a restore
+/// is part way through. [`boot`]'s own starts never get here in those states, apart
+/// from the trial itself.
+pub(crate) fn refuse_mid_update(data_dir: &Path) -> Result<(), crate::EngineError> {
+    use transaction::Phase;
+    let mid_update = transaction::read(data_dir)
+        .is_some_and(|update| matches!(update.phase, Phase::Trial | Phase::Restoring));
+    if mid_update && !transaction::in_trial() {
+        return Err(crate::EngineError::Other(
+            "Zeron is finishing an update. Try again in a moment.".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Give up on this trial: the old version takes it from here.
 fn fail(data_dir: &Path, why: &str) -> ! {
     tracing::error!(%why, "update trial failed");
@@ -188,4 +204,41 @@ pub(crate) fn commit_without_a_profile(config: &EngineConfig) {
         tokio::time::sleep(TIDY_AFTER).await;
         transaction::tidy_latest(&data_dir);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(dir: &Path, phase: &str) {
+        std::fs::write(
+            dir.join("update-transaction.json"),
+            serde_json::json!({
+                "id": "abc", "from": "1.0.0", "target": "2.0.0",
+                "layout": {"versioned": {"app_root": "/nowhere"}},
+                "phase": phase,
+                "restart": "relaunch",
+                "requestedAt": 1, "deadlineSecs": 60,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_embedded_engine_keeps_out_of_databases_mid_update() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(refuse_mid_update(dir.path()).is_ok(), "no update");
+        for (phase, refused) in [
+            ("requested", false),
+            ("trial", true),
+            ("restoring", true),
+            ("updated", false),
+            ("rolledBack", false),
+            ("failed", false),
+        ] {
+            record(dir.path(), phase);
+            assert_eq!(refuse_mid_update(dir.path()).is_err(), refused, "{phase}");
+        }
+    }
 }
