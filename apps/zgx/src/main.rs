@@ -315,6 +315,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     about::install_on_quit();
     // Reload Zeron: the windows closed, a fresh launch in this one's place.
     relaunch::after_quit();
+    // Windows: done, without the main thread's thread-locals dropped on the
+    // way out. zgx-desktop keeps its WebView2 environments in one; released
+    // by ExitProcess, after COM's own teardown, they crash (combase.dll), and
+    // every quit with a web view open was reported as a crash.
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        // SAFETY: this process, ended where it would have been anyway.
+        unsafe { windows_sys::Win32::System::Threading::TerminateProcess(windows_sys::Win32::System::Threading::GetCurrentProcess(), 0) };
+    }
     Ok(())
 }
 
