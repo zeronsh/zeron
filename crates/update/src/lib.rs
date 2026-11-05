@@ -1526,6 +1526,11 @@ pub struct UpdateStatus {
     /// `currentVersion` to go by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateReport>,
+    /// On a macOS app install, the installed app's version, which is what
+    /// `latestVersion` is compared with. It isn't `currentVersion` on a beta,
+    /// whose engine is stable's. Absent elsewhere and from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
 }
 
 impl UpdateStatus {
@@ -1544,6 +1549,7 @@ impl UpdateStatus {
             cannot_apply_reason: None,
             manual_command: None,
             update: None,
+            app_version: None,
         }
     }
 
@@ -1637,6 +1643,7 @@ impl Updater {
         let initial = match role {
             Role::Engine { .. } => UpdateStatus {
                 update: channel::data_dir().and_then(transaction::report),
+                app_version: installed_app_version(),
                 ..initial.with_ability(UpdateAbility::current())
             },
             Role::Desktop => initial,
@@ -1832,15 +1839,22 @@ impl Updater {
     }
 
     fn publish(&self, manifest: Manifest) {
-        // The desktop app's bundle carries the engine a switch must not go
-        // below; the engine's own report has no bundle of its own to weigh.
-        let running_engine = match (&*self.role, detect_install()) {
-            (Role::Desktop, InstallKind::MacApp { bundle }) => bundle_engine_version(&bundle),
+        // A macOS app's bundle carries the engine a switch must not go below, and
+        // its own version is what releases are compared with: a beta's engine is
+        // stable's, so by the engine's version a newer beta looks like nothing new.
+        let bundle = match detect_install() {
+            InstallKind::MacApp { bundle } => Some(bundle),
             _ => None,
+        };
+        let running_engine = bundle.as_deref().and_then(bundle_engine_version);
+        let app_version = bundle.as_deref().and_then(bundle_app_version);
+        let running = match &*self.role {
+            Role::Engine { .. } => app_version.as_deref().unwrap_or(&self.version),
+            Role::Desktop => &self.version,
         };
         let offer = offer(
             &manifest,
-            &self.version,
+            running,
             manifest.channel,
             running_engine.as_deref(),
             channel::macos_version(),
@@ -1862,10 +1876,12 @@ impl Updater {
             cannot_apply_reason: None,
             manual_command: None,
             update: None,
+            app_version: None,
         };
         let status = match &*self.role {
             Role::Engine { .. } => UpdateStatus {
                 update: channel::data_dir().and_then(transaction::report),
+                app_version,
                 ..status.with_ability(UpdateAbility::current())
             },
             Role::Desktop => status,
@@ -1915,9 +1931,11 @@ impl Updater {
     /// Publish the update's latest state, after something settled it.
     pub fn refresh_update_report(&self) {
         let update = channel::data_dir().and_then(transaction::report);
+        let app_version = installed_app_version();
         self.status_tx.send_modify(|status| {
             status.update = update;
             status.current_version = self.version.to_string();
+            status.app_version = app_version;
         });
     }
 
@@ -1994,6 +2012,14 @@ impl Updater {
             version: manifest.version,
             update_id,
         }))
+    }
+}
+
+/// The installed macOS app's own version.
+fn installed_app_version() -> Option<String> {
+    match detect_install() {
+        InstallKind::MacApp { bundle } => bundle_app_version(&bundle),
+        _ => None,
     }
 }
 

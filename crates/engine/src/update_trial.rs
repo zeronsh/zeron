@@ -163,6 +163,8 @@ pub(crate) fn prove_and_commit(core: &EngineCore, config: &EngineConfig) {
         tracing::info!(version = %trial.target, "update committed");
         if let Some(updater) = &updater {
             updater.refresh_update_report();
+            // What's on offer has changed: this is the version it was comparing with.
+            updater.check_now();
         }
         // What every other start does during assembly.
         match tokio::task::spawn_blocking(move || sessions.recover_stale()).await {
