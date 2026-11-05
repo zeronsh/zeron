@@ -85,6 +85,9 @@ serde_json = "1"
 similar = "2"
 # (A conversation link's workspace locator, hashed as the shipping app does.)
 sha2 = "0.10"
+# A long chat's rows out of view, compressed (src/chat.rs `FoldedEntry`): the
+# version png and zip already bring.
+miniz_oxide = "0.8"
 open = "5"
 # The engine's local IPC (src/engine/rpc.rs): one plain WebSocket on
 # 127.0.0.1, the version zgx's own examples speak it with.
