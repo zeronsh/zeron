@@ -84,3 +84,43 @@ fn a_sidebar_label_that_does_not_fit_fades_at_its_end() {
         );
     }
 }
+
+/// The words of a node's subtree, and where they start.
+fn words_x(app: &mut TestApp, id: &str) -> f32 {
+    let root = app.find(id).unwrap_or_else(|| panic!("{id} shows"));
+    let scene = app.ui.scene.borrow();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        stack.extend(scene.children(n).iter().copied());
+        if let NodeKind::Text { text, .. } = scene.kind(n)
+            && !text.trim().is_empty()
+        {
+            return scene.bounds(n).x;
+        }
+    }
+    panic!("{id} says nothing")
+}
+
+/// Under Star on GitHub, the connection line's words start where the
+/// banner's do, whichever glyph leads them (they stood 5 to the left after
+/// the offline dot, on them after the reconnecting ring).
+#[test]
+fn the_foot_s_words_share_one_edge() {
+    for state in [
+        "connection_offline",
+        "connection_unsaved",
+        "connection_reconnecting",
+    ] {
+        let mut app = mount();
+        assert!(app.host.run_command(state));
+        app.frames(30);
+        let (line, star) = (
+            words_x(&mut app, "connection-line"),
+            words_x(&mut app, "star-banner"),
+        );
+        assert!(
+            (line - star).abs() < 0.5,
+            "{state}: the line's words at {line}, Star on GitHub's at {star}"
+        );
+    }
+}
