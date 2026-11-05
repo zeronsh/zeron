@@ -86,6 +86,9 @@ export type Props = {
 	detail: (string | Message | () -> string)?,
 	-- After the detail, at the trigger's end (the model chip's usage ring).
 	trail: Node?,
+	-- The label and detail roll only for a change made in the open panel; one
+	-- from elsewhere (another chat's own choice shown) is there at once.
+	roll_in_panel: boolean?,
 	-- The search field's placeholder (a function follows what it names);
 	-- `false`, no search.
 	search: (string | Message | boolean | () -> string)?,
@@ -702,6 +705,11 @@ return ui.component(function(props: Props): Node
 				else glyph())
 		end
 	end
+	local rolls = if props.roll_in_panel
+		then function(): boolean
+			return open:peek()
+		end
+		else nil
 	-- The detail, shown only while it says something (an empty one would
 	-- still take the trigger's gap) and the trigger hasn't folded it away.
 	local detail: Child = nil
@@ -717,6 +725,7 @@ return ui.component(function(props: Props): Node
 			said,
 			mb = TRIGGER[tone].lift,
 			roll = true,
+			rolls = rolls,
 			color = TRIGGER[tone].detail,
 		})
 	end
@@ -740,10 +749,10 @@ return ui.component(function(props: Props): Node
 				local over = (text.width or 0) > (clip.width or 0) + 0.5
 				return { 0, if over then CHIP_FADE else 0 }
 			end,
-			RollText { chosen, ref = text, shrink = 0, color = TRIGGER[tone].label },
+			RollText { chosen, rolls = rolls, ref = text, shrink = 0, color = TRIGGER[tone].label },
 		}
 	else
-		label_node = FadeText { chosen, roll = true, color = TRIGGER[tone].label }
+		label_node = FadeText { chosen, roll = true, rolls = rolls, color = TRIGGER[tone].label }
 	end
 	-- Opening: the search cleared, on the chosen item, in view. (Open
 	-- already, it stays as it is: asked again, by its shortcut or its

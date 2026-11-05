@@ -133,6 +133,34 @@ test("one not in use says what's wrong with it; one that can't be switched to is
 	expect(string.find(app:state("calls"), "switch_on", 1, true)).to_be(nil)
 end)
 
+-- How many words the chip's model is drawn as: one at rest, one a letter
+-- while it rolls.
+local function letters(app: any): number
+	local _, n = string.gsub(app:tree('role:button "Model"'), "\n", "")
+	return n
+end
+
+test("the chip's model doesn't roll for a change from elsewhere, and does for a pick", function()
+	local app = with_accounts({})
+	app:click('role:button "Model"')
+	app:frames(30)
+	app:key("Escape")
+	app:frames(60)
+	local at_rest = letters(app)
+	-- (As moving to a chat on another model, or refocusing a pane, does.)
+	app:set_state("chat_model", "sonnet")
+	app:frames(3)
+	expect(letters(app)).to_be(at_rest)
+	expect(app:tree('role:button "Model"')).to_contain("Sonnet")
+	app:frames(60)
+	-- Picked in its panel: it rolls.
+	app:click('role:button "Model"')
+	app:frames(30)
+	app:set_state("chat_model", "opus")
+	app:frames(3)
+	expect(letters(app) > at_rest).to_be(true)
+end)
+
 test("an agent with no accounts has neither", function()
 	local app = with_accounts(here({}))
 	expect(app:has("#model-picker-usage")).to_be(false)
