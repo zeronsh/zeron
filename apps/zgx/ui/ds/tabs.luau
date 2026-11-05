@@ -34,7 +34,7 @@ export type Props = {
 	on_change: ((value: any) -> ())?,
 }
 
-local SPRING: SpringOptions = { stiffness = 420, damping = 34 }
+local SPRING: SpringOptions = motion.TAB_SPRING
 
 return function(props: Props): Node
 	local value = props.value
