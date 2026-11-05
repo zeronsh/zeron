@@ -76,9 +76,15 @@ const UNPACK_FACTOR: u64 = 4;
 pub(crate) const UNKNOWN_ARTIFACT_BYTES: u64 = 300 * 1024 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
 
+// Only Unix runs the watchdog as its own process; on Windows the old version
+// stays on as it.
+#[cfg(unix)]
 const WATCH_ID_ENV: &str = "ZERON_UPDATE_WATCH_ID";
+#[cfg(unix)]
 const WATCH_PID_ENV: &str = "ZERON_UPDATE_WATCH_PID";
+#[cfg(unix)]
 const WATCH_DATA_ENV: &str = "ZERON_UPDATE_WATCH_DATA";
+#[cfg(unix)]
 const WATCH_ARGS_ENV: &str = "ZERON_UPDATE_WATCH_ARGS";
 
 /// The hidden subcommand that runs [`run_watchdog`].

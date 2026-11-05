@@ -3625,6 +3625,7 @@ mod tests {
 
     /// A Grok installed in the folder `install`, inside the fixture's root, whose
     /// update really changes what it reports.
+    #[cfg(unix)]
     fn cli_fixture(install: &str) -> (tempfile::TempDir, super::HarnessUpdateCoordinator) {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
@@ -5093,6 +5094,7 @@ esac
 
     /// A different owner at the same path: the check's plan isn't what would
     /// run now.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_plan_that_differs_from_the_checks_is_refused() {
         let temp = tempfile::tempdir().unwrap();

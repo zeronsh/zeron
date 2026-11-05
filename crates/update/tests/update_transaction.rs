@@ -26,15 +26,17 @@ fn this_version() -> String {
         if std::env::var_os(zeron_update::INSTALLED_AT_ENV).is_some() {
             return "2.0.0".into();
         }
-        return std::fs::read_to_string(dir.join("zeron-version"))
-            .unwrap_or_else(|_| "1.0.0".into());
+        std::fs::read_to_string(dir.join("zeron-version")).unwrap_or_else(|_| "1.0.0".into())
     }
     // A macOS bundle says in its Info.plist; a versioned folder is its name.
-    if dir.ends_with("Contents/MacOS") {
-        return zeron_update::bundle_app_version(dir.parent().unwrap().parent().unwrap()).unwrap();
-    }
     #[cfg(unix)]
-    dir.file_name().unwrap().to_str().unwrap().to_owned()
+    {
+        if dir.ends_with("Contents/MacOS") {
+            return zeron_update::bundle_app_version(dir.parent().unwrap().parent().unwrap())
+                .unwrap();
+        }
+        dir.file_name().unwrap().to_str().unwrap().to_owned()
+    }
 }
 
 fn docs(data: &Path) -> PathBuf {
