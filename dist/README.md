@@ -14,7 +14,7 @@ Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
   the installers rewrite `Exec`, `TryExec`, and `Icon` to absolute paths under
   `~/.zeron/app/current`, since `~/.local/bin` is often not on a desktop
   session's `PATH`)
-- `zeron.png` — 1024×1024 Zeron app icon
+- `zeron.png` — 1024×1024 Zeron app icon (`scripts/make-app-icons.py`)
 - `install.sh` — installs into `~/.zeron/app/<version>` behind a `current`
   symlink (the curl installer's layout, which the in-app updater manages),
   links `~/.local/bin/zeron` to it, and writes the desktop entry and icon under
@@ -52,14 +52,11 @@ installed builds can update into Zeron. CI runs this on tags
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
      dist/macos/Info.plist > Zeron.app/Contents/Info.plist
    ```
-3. Icon: generate `zeron.icns` from `dist/macos/icon-1024.png` (the macOS-shaped
-   variant of the artwork — squircle mask, margins, and shadow pre-baked, since
-   `sips` can't apply an alpha mask) and place it at
-   `Zeron.app/Contents/Resources/zeron.icns`:
-   ```sh
-   mkdir zeron.iconset && sips -z 256 256 dist/macos/icon-1024.png --out zeron.iconset/icon_256x256.png
-   iconutil -c icns zeron.iconset -o Zeron.app/Contents/Resources/zeron.icns
-   ```
+3. Icon: `scripts/macos-app-icon.sh Zeron.app/Contents/Resources` writes
+   `Assets.car` from `dist/macos/Zeron.icon` (light, dark, clear and tinted, on
+   macOS 26 and later; compiling it takes Xcode 26 or later) and `zeron.icns`
+   from `dist/macos/icon-1024.png` (earlier macOS and the dmg). All the app's
+   icons are made from the art in `dist/icon` by `scripts/make-app-icons.py`.
 4. Sign + notarize (required for distribution):
    ```sh
    codesign --deep --force --options runtime --sign "Developer ID Application: …" Zeron.app
