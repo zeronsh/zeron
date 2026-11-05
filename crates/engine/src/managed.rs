@@ -299,6 +299,12 @@ impl Engine {
         if let Some(runtime) = runtime {
             runtime.shutdown().await;
         }
+        // macOS: the engine never starts its successor as a new process, so an
+        // update asked of it happens here, in this one, with the data directory
+        // let go. Without an update this does nothing. (Elsewhere a relaunch has
+        // already started the process that does this on its way up.)
+        #[cfg(target_os = "macos")]
+        crate::update_trial::boot(&config.data_dir)?;
         outcome
     }
 }

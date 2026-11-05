@@ -15,9 +15,10 @@
 //!   tarball into a new versioned dir, then restart into a trial of it that
 //!   moves the symlink only once it has proved it's ready ([`transaction`]).
 //! - **MacApp** (running out of an app bundle): download the app tarball, swap the
-//!   bundle directory, relaunch. Driven by the UI.
+//!   bundle directory, relaunch, driven by the UI; or, asked from another device,
+//!   the engine's own trial of it ([`transaction`]).
 //! - **WindowsPortable** (the Windows installer or portable zip — both carry
-//!   `zeron-update.json`): swap the executable in place. Driven by the UI.
+//!   `zeron-update.json`): swap the executable in place, the same two ways.
 //! - **Unmanaged** (source builds, hand-copied binaries): report only — the
 //!   UI's advisory strip links to [`RELEASES_PAGE`].
 //!
@@ -473,8 +474,12 @@ fn http_client_with_timeouts(connect: Duration, read: Duration) -> anyhow::Resul
 
 fn validate_release_override(value: &str) -> anyhow::Result<String> {
     let url = reqwest::Url::parse(value.trim()).context("invalid update feed URL")?;
+    // A test install's local feed, in a debug build only: release builds can't be
+    // pointed anywhere but HTTPS.
+    let local_test_feed =
+        cfg!(debug_assertions) && url.scheme() == "http" && url.host_str() == Some("127.0.0.1");
     anyhow::ensure!(
-        url.scheme() == "https" && url.host_str().is_some(),
+        local_test_feed || (url.scheme() == "https" && url.host_str().is_some()),
         "update feed must use HTTPS"
     );
     anyhow::ensure!(
@@ -617,7 +622,9 @@ impl InstallKind {
             Self::MacApp { bundle } => {
                 apply_mac_app(staged, bundle)?;
                 // The swap copied the staged bundle; the cache is spent.
-                if let Some(version_dir) = staged.parent() {
+                if let Some(version_dir) = staged.parent()
+                    && !process_runs_from(version_dir)
+                {
                     let _ = std::fs::remove_dir_all(version_dir);
                 }
                 if relaunch {
@@ -776,22 +783,46 @@ impl UpdateAbility {
                     },
                 }
             }
-            InstallKind::MacApp { .. } => Self::refused(
+            // The app's background engine can carry out an update itself. One
+            // run any other way has nothing to bring it back.
+            InstallKind::MacApp { .. } => Self::desktop(
                 InstallMethod::MacApp,
-                "Zeron on a Mac updates from the Zeron app on that Mac.",
-                None,
+                "This Zeron wasn't started by the app, so nothing would bring it back after an \
+                 update. Update it from the Zeron app on that Mac.",
+                supervised,
+                blocker,
             ),
             #[cfg(windows)]
-            InstallKind::WindowsPortable { .. } => Self::refused(
+            InstallKind::WindowsPortable { .. } => Self::desktop(
                 InstallMethod::WindowsApp,
-                "Zeron on Windows updates from the Zeron app on that PC.",
-                None,
+                "This Zeron wasn't started by the app, so nothing would bring it back after an \
+                 update. Update it from the Zeron app on that PC.",
+                supervised,
+                blocker,
             ),
             InstallKind::Unmanaged => Self::refused(
                 InstallMethod::Unmanaged,
                 "This copy of Zeron wasn't installed by the installer, so it can't replace itself.",
                 (os == "linux").then_some(LINUX_INSTALL_COMMAND),
             ),
+        }
+    }
+
+    fn desktop(
+        install: InstallMethod,
+        unsupervised: &str,
+        supervised: bool,
+        blocker: Option<UpdateBlocker>,
+    ) -> Self {
+        match blocker {
+            _ if !supervised => Self::refused(install, unsupervised, None),
+            Some(blocker) => Self::refused(install, blocker.to_string(), None),
+            None => Self {
+                install,
+                can_apply_remotely: true,
+                cannot_apply_reason: None,
+                manual_command: None,
+            },
         }
     }
 
@@ -808,6 +839,10 @@ impl UpdateAbility {
     }
 }
 
+/// Set on a new version on trial: the installation it's running in place of
+/// (macOS: the app bundle; Windows: the folder).
+pub const INSTALLED_AT_ENV: &str = "ZERON_INSTALLED_AT";
+
 /// Where this process was installed from, resolved once: an update moves
 /// the running image aside (Windows renames it to `zeron.exe.old`), and a
 /// long-running engine must still recognise the installation it belongs to.
@@ -815,6 +850,14 @@ pub fn detect_install() -> InstallKind {
     static INSTALL: std::sync::OnceLock<InstallKind> = std::sync::OnceLock::new();
     INSTALL
         .get_or_init(|| {
+            // A new version on trial runs from beside the installation it's
+            // going to become.
+            if let Some(installed) = std::env::var_os(INSTALLED_AT_ENV).map(PathBuf::from) {
+                #[cfg(windows)]
+                return InstallKind::WindowsPortable { directory: installed };
+                #[cfg(not(windows))]
+                return InstallKind::MacApp { bundle: installed };
+            }
             let Ok(exe) = std::env::current_exe() else {
                 return InstallKind::Unmanaged;
             };
@@ -887,6 +930,12 @@ pub fn installed_version(kind: &InstallKind) -> Option<String> {
 pub fn bundle_engine_version(bundle: &Path) -> Option<String> {
     let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?;
     plist_string(&plist, "ZeronEngineVersion").or_else(|| plist_string(&plist, "CFBundleShortVersionString"))
+}
+
+/// The app's own version in a macOS bundle (a beta's isn't its engine's).
+pub fn bundle_app_version(bundle: &Path) -> Option<String> {
+    let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?;
+    plist_string(&plist, "CFBundleShortVersionString")
 }
 
 /// A string value from an XML property list (the packaging template;
@@ -1254,9 +1303,96 @@ fn prune_stale_stages(updates: &Path, keep: &str) {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_name() != keep {
+        if entry.file_name() != keep && !process_runs_from(&entry.path()) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
+    }
+}
+
+/// Whether any process runs an executable from under `dir`. A bundle that's still
+/// in use mustn't be deleted: with its image gone, AppleSystemPolicy rejects every
+/// process it forks, thousands of times a minute (#1037). Can't tell: yes.
+pub fn process_runs_from(dir: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let mut pids = vec![0 as libc::pid_t; 8192];
+        let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: the buffer is `bytes` long; the call writes at most that.
+        let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        if count <= 0 {
+            return true;
+        }
+        let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        pids.iter().take(count as usize).filter(|pid| **pid > 0).any(|&pid| {
+            // SAFETY: `path` is PROC_PIDPATHINFO_MAXSIZE bytes, as the call needs.
+            let len =
+                unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+            len > 0 && Path::new(std::ffi::OsStr::from_bytes(&path[..len as usize])).starts_with(&dir)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// Bundles an update set aside (`.Zeron.app.old-…`) or left half-installed
+/// (`.Zeron.app.new-…`), once nothing runs from them.
+pub fn prune_retired_mac_bundles(bundle: &Path) {
+    let (Some(parent), Some(name)) = (bundle.parent(), bundle.file_name()) else {
+        return;
+    };
+    let name = name.to_string_lossy();
+    let (old, new) = (format!(".{name}.old-"), format!(".{name}.new-"));
+    // An update waiting to be tried needs its copy.
+    let waiting = channel::data_dir()
+        .and_then(transaction::read)
+        .filter(|update| update.in_progress())
+        .and_then(|update| match update.layout {
+            transaction::Layout::MacBundle { incoming, .. } => Some(incoming),
+            _ => None,
+        });
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if (file_name.starts_with(&old) || file_name.starts_with(&new))
+            && waiting.as_deref() != Some(entry.path().as_path())
+            && !process_runs_from(&entry.path())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Exchange two bundles in one step: `incoming` becomes `bundle` and the old one
+/// is left under the retired name. Nothing ever finds `bundle` missing.
+pub(crate) fn swap_mac_bundles(incoming: &Path, bundle: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_bytes());
+        let (from, to) = (c(incoming)?, c(bundle)?);
+        // SAFETY: both are NUL-terminated paths.
+        if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("swapping in the new app");
+        }
+        let parent = bundle.parent().context("app bundle has no parent directory")?;
+        let name = bundle.file_name().context("app bundle has no name")?.to_string_lossy();
+        let retired = parent.join(format!(".{name}.old-{}", std::process::id()));
+        // If this is lost to a crash, it's tidied up under the name it has.
+        let _ = std::fs::rename(incoming, &retired);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (incoming, bundle);
+        bail!("macOS app updates are not supported on {}", std::env::consts::OS)
     }
 }
 
@@ -1292,7 +1428,9 @@ pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
         let _ = std::fs::remove_dir_all(&fresh);
         return Err(err).context("installing the new app bundle");
     }
-    let _ = std::fs::remove_dir_all(&old);
+    // Not deleted: the background engine, this very app, or an update's trial may
+    // still be running from it. Gone once nothing is (#1037).
+    prune_retired_mac_bundles(bundle);
     Ok(())
 }
 
@@ -1736,6 +1874,9 @@ impl Updater {
 
     /// One check; returns false on fetch failure (retry sooner).
     async fn check_once(&self) -> bool {
+        if let InstallKind::MacApp { bundle } = detect_install() {
+            prune_retired_mac_bundles(&bundle);
+        }
         match fetch_latest(&self.edge_url).await {
             Ok(manifest) => {
                 self.publish(manifest);
@@ -1787,9 +1928,6 @@ impl Updater {
     /// swap/restart boundary; `None` tells the caller to wait and try again.
     async fn apply_inner(&self, require_quiescent: bool) -> anyhow::Result<Option<AppliedUpdate>> {
         let ability = UpdateAbility::current();
-        let InstallKind::Managed { app_root } = detect_install() else {
-            bail!("{}", ability.cannot_apply_reason.unwrap_or_default());
-        };
         if !ability.can_apply_remotely {
             bail!("{}", ability.cannot_apply_reason.unwrap_or_default());
         }
@@ -1800,35 +1938,33 @@ impl Updater {
             bail!("An update is already in progress on this device.");
         }
         let manifest = fetch_latest(&self.edge_url).await?;
-        if !version_newer(&manifest.version, current_version()) {
+        let Some(prepared) =
+            prepare_this_install(&self.edge_url, &manifest, &data_dir).await?
+        else {
             bail!("already up to date ({})", current_version());
-        }
-        prepare_install(&self.edge_url, &manifest, &app_root, &data_dir).await?;
+        };
         if require_quiescent && !self.quiescent_now() {
             return Ok(None);
         }
-        let installed = installed_version(&InstallKind::Managed {
-            app_root: app_root.clone(),
-        })
-        .unwrap_or_else(|| current_version().to_owned());
         // Already on disk as `current`: there's nothing to try out, only to
         // restart into.
-        let update_id = if installed == manifest.version {
-            None
-        } else {
-            let requested = transaction::request(
-                &data_dir,
-                &app_root,
-                &installed,
-                &manifest.version,
-                if MANAGED_RESTART.get().is_some() {
-                    transaction::RestartMode::Relaunch
-                } else {
-                    transaction::RestartMode::Service { unit: service_unit() }
-                },
-            )?;
-            self.refresh_update_report();
-            Some(requested.id)
+        let update_id = match prepared.layout {
+            None => None,
+            Some(layout) => {
+                let requested = transaction::request(
+                    &data_dir,
+                    layout,
+                    &prepared.from,
+                    &manifest.version,
+                    if MANAGED_RESTART.get().is_some() {
+                        transaction::RestartMode::Relaunch
+                    } else {
+                        transaction::RestartMode::Service { unit: service_unit() }
+                    },
+                )?;
+                self.refresh_update_report();
+                Some(requested.id)
+            }
         };
         let updater = self.clone();
         let restarting = update_id.clone();
@@ -1853,6 +1989,101 @@ impl Updater {
     }
 }
 
+/// A release ready to try.
+struct PreparedInstall {
+    from: String,
+    /// `None`: it's already what's installed.
+    layout: Option<transaction::Layout>,
+}
+
+/// Whatever this kind of install needs done before anything stops. `None`: nothing
+/// newer to install. A release that isn't installable here is an error, in words
+/// for the person.
+async fn prepare_this_install(
+    edge_url: &str,
+    manifest: &Manifest,
+    data_dir: &Path,
+) -> anyhow::Result<Option<PreparedInstall>> {
+    match detect_install() {
+        InstallKind::Managed { app_root } => {
+            if !version_newer(&manifest.version, current_version()) {
+                return Ok(None);
+            }
+            prepare_install(edge_url, manifest, &app_root, data_dir).await?;
+            let from = installed_version(&InstallKind::Managed {
+                app_root: app_root.clone(),
+            })
+            .unwrap_or_else(|| current_version().to_owned());
+            Ok(Some(PreparedInstall {
+                layout: (from != manifest.version)
+                    .then_some(transaction::Layout::Versioned { app_root }),
+                from,
+            }))
+        }
+        InstallKind::MacApp { bundle } => {
+            // The engine's version isn't the app's (a beta carries stable's).
+            let from = bundle_app_version(&bundle).context("reading the installed app's version")?;
+            match offer(
+                manifest,
+                &from,
+                manifest.channel,
+                bundle_engine_version(&bundle).as_deref(),
+                channel::macos_version(),
+            ) {
+                Offer::Newer | Offer::Switch => {}
+                Offer::Held(why) => bail!(why),
+                Offer::Current => return Ok(None),
+            }
+            let parent = bundle.parent().context("app bundle has no parent directory")?;
+            let download = artifact_size(edge_url, manifest, &mac_app_artifact(&manifest.version))
+                .await
+                .unwrap_or(transaction::UNKNOWN_ARTIFACT_BYTES);
+            // A staged copy and the one beside the installed app.
+            if let Err(why) = transaction::ensure_room(data_dir, parent, download.saturating_mul(2)) {
+                bail!(why);
+            }
+            let staged = stage_mac_app(edge_url, manifest, data_dir).await?;
+            let name = bundle.file_name().context("app bundle has no name")?.to_string_lossy();
+            let incoming = parent.join(format!(".{name}.new-{}", transaction::new_id()));
+            // Everything that can fail about installing it happens here, with
+            // nothing stopped: it's a plain copy, and then one atomic swap.
+            if let Err(err) = run("ditto", &[&staged.to_string_lossy(), &incoming.to_string_lossy()]) {
+                let _ = std::fs::remove_dir_all(&incoming);
+                return Err(err).context("copying the new app into place");
+            }
+            if let Some(version_dir) = staged.parent()
+                && !process_runs_from(version_dir)
+            {
+                let _ = std::fs::remove_dir_all(version_dir);
+            }
+            Ok(Some(PreparedInstall {
+                from,
+                layout: Some(transaction::Layout::MacBundle { bundle, incoming }),
+            }))
+        }
+        #[cfg(windows)]
+        InstallKind::WindowsPortable { directory } => {
+            let from = windows::installed_version(&directory)
+                .unwrap_or_else(|| current_version().to_owned());
+            if !version_newer(&manifest.version, &from) {
+                return Ok(None);
+            }
+            let download = artifact_size(edge_url, manifest, &windows::artifact(&manifest.version))
+                .await
+                .unwrap_or(transaction::UNKNOWN_ARTIFACT_BYTES);
+            if let Err(why) = transaction::ensure_room(data_dir, &directory, download) {
+                bail!(why);
+            }
+            let incoming = windows::stage(edge_url, manifest, &directory).await?;
+            Ok(Some(PreparedInstall {
+                from,
+                layout: Some(transaction::Layout::WindowsFolder { directory, incoming }),
+            }))
+        }
+        InstallKind::Unmanaged => bail!("this install doesn't update itself"),
+    }
+}
+
 /// What `ApplyUpdate` answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedUpdate {
@@ -1873,7 +2104,7 @@ pub async fn prepare_install(
     let download = if app_root.join(&manifest.version).join("zeron").exists() {
         0
     } else {
-        artifact_size(edge_url, manifest)
+        artifact_size(edge_url, manifest, &headless_artifact(&manifest.version))
             .await
             .unwrap_or(transaction::UNKNOWN_ARTIFACT_BYTES)
     };
@@ -1885,9 +2116,9 @@ pub async fn prepare_install(
 }
 
 /// What the feed says the release's download weighs, if it says.
-async fn artifact_size(edge_url: &str, manifest: &Manifest) -> Option<u64> {
+async fn artifact_size(edge_url: &str, manifest: &Manifest, file: &str) -> Option<u64> {
     let base = manifest.channel.base(&release_base(edge_url).ok()?);
-    let url = format!("{base}/{}", headless_artifact(&manifest.version));
+    let url = format!("{base}/{file}");
     let response = http_client().ok()?.head(&url).send().await.ok()?;
     response.status().is_success().then(|| response.content_length())?
 }
@@ -2055,19 +2286,24 @@ mod tests {
         assert!(!read_only.can_apply_remotely);
         assert!(read_only.cannot_apply_reason.unwrap().contains("/opt/zeron"));
 
-        let mac = UpdateAbility::decide(
-            &InstallKind::MacApp {
-                bundle: PathBuf::from("/Applications/Zeron.app"),
-            },
+        let bundle = InstallKind::MacApp {
+            bundle: PathBuf::from("/Applications/Zeron.app"),
+        };
+        let mac = UpdateAbility::decide(&bundle, "macos", true, false, None);
+        assert_eq!(mac.install, InstallMethod::MacApp);
+        assert!(mac.can_apply_remotely, "the app's background engine can");
+        let mac_by_hand = UpdateAbility::decide(&bundle, "macos", false, false, None);
+        assert!(!mac_by_hand.can_apply_remotely);
+        assert!(mac_by_hand.cannot_apply_reason.unwrap().contains("Mac"));
+        let mac_translocated = UpdateAbility::decide(
+            &bundle,
             "macos",
             true,
             false,
-            None,
+            Some(UpdateBlocker::Translocated),
         );
-        assert_eq!(mac.install, InstallMethod::MacApp);
-        assert!(!mac.can_apply_remotely);
-        assert!(mac.cannot_apply_reason.unwrap().contains("Mac"));
-        assert_eq!(mac.manual_command, None);
+        assert!(!mac_translocated.can_apply_remotely);
+        assert!(mac_translocated.cannot_apply_reason.unwrap().contains("Applications"));
 
         // No macOS headless release exists, whatever the old layout says.
         let old_mac_service = UpdateAbility::decide(&managed(), "macos", true, true, None);

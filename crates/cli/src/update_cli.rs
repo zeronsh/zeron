@@ -60,7 +60,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             .unwrap_or_else(|| zeron_update::current_version().to_owned());
             let requested = zeron_update::transaction::request(
                 &data_dir,
-                &app_root,
+                zeron_update::transaction::Layout::Versioned { app_root: app_root.clone() },
                 &from,
                 &manifest.version,
                 zeron_update::transaction::RestartMode::Service {

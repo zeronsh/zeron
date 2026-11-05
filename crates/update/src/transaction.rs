@@ -30,6 +30,14 @@
 //! A reconnect can't tell an update from a rollback, so clients match the update
 //! id from `ApplyUpdate` with [`UpdateReport`] in `UpdateStatus`.
 //!
+//! The other platforms keep the same rule with their own idea of `current`
+//! ([`Layout`]). A macOS app's new bundle waits beside the installed one and
+//! becomes it in one atomic swap; the engine replaces itself in place, so it is
+//! the same process, in the same session, with the same access. Windows can't
+//! replace a process, so the old one starts the new exe from beside the installed
+//! one and stays on as the watchdog; moving the exe into place is the commit.
+//! Neither needs the app to be open.
+//!
 //! Only the SQLite stores roll back. Files outside them (journals, settings,
 //! attachments, the saved session) aren't copied, which is why the trial doesn't
 //! touch chats' journals until it has committed.
@@ -111,13 +119,145 @@ pub enum RestartMode {
     Relaunch,
 }
 
+/// What "the installed version" is on this device, and how it changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Layout {
+    /// `app_root/<version>` and a `current` symlink.
+    Versioned { app_root: PathBuf },
+    /// `bundle` is the installed app; `incoming` is the new one beside it.
+    MacBundle { bundle: PathBuf, incoming: PathBuf },
+    /// `directory/zeron.exe` is installed; `incoming` is the new exe, in a folder
+    /// of its own inside `directory`.
+    WindowsFolder { directory: PathBuf, incoming: PathBuf },
+}
+
+impl Layout {
+    /// Where a release has to fit.
+    fn root(&self) -> PathBuf {
+        match self {
+            Self::Versioned { app_root } => app_root.clone(),
+            Self::MacBundle { bundle, .. } => {
+                bundle.parent().unwrap_or(bundle).to_path_buf()
+            }
+            Self::WindowsFolder { directory, .. } => directory.clone(),
+        }
+    }
+
+    /// The new version's executable called `name`.
+    fn new_binary(&self, target: &str, name: &std::ffi::OsStr) -> PathBuf {
+        match self {
+            Self::Versioned { app_root } => app_root.join(target).join(name),
+            Self::MacBundle { incoming, .. } => incoming.join("Contents/MacOS").join(name),
+            Self::WindowsFolder { incoming, .. } => incoming.clone(),
+        }
+    }
+
+    /// The installed executable called `name`.
+    fn installed_binary(&self, name: &std::ffi::OsStr) -> PathBuf {
+        match self {
+            Self::Versioned { app_root } => app_root.join("current").join(name),
+            Self::MacBundle { bundle, .. } => bundle.join("Contents/MacOS").join(name),
+            Self::WindowsFolder { directory, .. } => directory.join("zeron.exe"),
+        }
+    }
+
+    /// What the new version needs told, since it's running from beside the
+    /// installation rather than from it.
+    fn installed_at(&self) -> Option<&Path> {
+        match self {
+            Self::Versioned { .. } => None,
+            Self::MacBundle { bundle, .. } => Some(bundle),
+            Self::WindowsFolder { directory, .. } => Some(directory),
+        }
+    }
+
+    /// The version this executable is, and the one that's installed. `None` when
+    /// it isn't part of this installation (a build started by hand beside it).
+    fn whoami(&self, transaction: &Transaction) -> Option<Whoami> {
+        let exe = std::env::current_exe().ok()?;
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let inside = |dir: &Path| {
+            std::fs::canonicalize(dir).is_ok_and(|dir| exe.starts_with(dir))
+        };
+        match self {
+            Self::Versioned { app_root } => {
+                let current = std::fs::read_link(app_root.join("current")).ok()?;
+                Some(Whoami {
+                    me: version_dir(&exe)?,
+                    current: current.file_name()?.to_str()?.to_owned(),
+                })
+            }
+            Self::MacBundle { bundle, incoming } => {
+                let current = crate::bundle_app_version(bundle)?;
+                let me = if inside(incoming) {
+                    transaction.target.clone()
+                } else if inside(bundle) {
+                    current.clone()
+                } else {
+                    return None;
+                };
+                Some(Whoami { me, current })
+            }
+            Self::WindowsFolder { directory, incoming } => {
+                #[cfg(windows)]
+                let recorded = crate::windows::installed_version(directory);
+                #[cfg(not(windows))]
+                let recorded: Option<String> = None;
+                let current = recorded.unwrap_or_else(|| transaction.from.clone());
+                let me = if inside(incoming) {
+                    transaction.target.clone()
+                } else if inside(&directory.join("zeron.exe")) {
+                    current.clone()
+                } else {
+                    return None;
+                };
+                Some(Whoami { me, current })
+            }
+        }
+    }
+
+    /// Make the new version the installed one, in one step that can't be half
+    /// done. This is the commit.
+    fn commit(&self, target: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Versioned { app_root } => {
+                crate::apply_headless(app_root, target)?;
+                sync_dir(app_root).context("saving the new version as current")
+            }
+            Self::MacBundle { bundle, incoming } => crate::swap_mac_bundles(incoming, bundle),
+            #[cfg(windows)]
+            Self::WindowsFolder { directory, incoming } => {
+                crate::windows::commit_trial(incoming, directory, target)
+            }
+            #[cfg(not(windows))]
+            Self::WindowsFolder { .. } => bail!("not supported on this platform"),
+        }
+    }
+
+    /// What's left once the update has settled either way. Nothing in use is
+    /// deleted: a process whose image is gone is what AppleSystemPolicy rejects
+    /// (#1037), and Windows refuses anyway.
+    fn tidy(&self) {
+        match self {
+            Self::Versioned { .. } => {}
+            Self::MacBundle { bundle, .. } => crate::prune_retired_mac_bundles(bundle),
+            Self::WindowsFolder { incoming, .. } => {
+                if let Some(folder) = incoming.parent() {
+                    let _ = std::fs::remove_dir_all(folder);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
     pub id: String,
     pub from: String,
     pub target: String,
-    pub app_root: PathBuf,
+    pub layout: Layout,
     pub phase: Phase,
     pub restart: RestartMode,
     pub requested_at: i64,
@@ -540,7 +680,7 @@ fn trial_deadline(store_bytes: u64) -> Duration {
     (BASE_DEADLINE + DEADLINE_PER_GIB.saturating_mul(gib)).min(MAX_DEADLINE)
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     use sha2::Digest as _;
     let mut hasher = sha2::Sha256::new();
     hasher.update(crate::now_ms().to_le_bytes());
@@ -558,7 +698,7 @@ fn new_id() -> String {
 /// start of `from` carries it out. Refuses if one is already under way.
 pub fn request(
     data_dir: &Path,
-    app_root: &Path,
+    layout: Layout,
     from: &str,
     target: &str,
     restart: RestartMode,
@@ -566,14 +706,14 @@ pub fn request(
     if read(data_dir).is_some_and(|existing| existing.in_progress()) {
         bail!("An update is already in progress on this device.");
     }
-    if let Err(why) = ensure_room(data_dir, app_root, 0) {
+    if let Err(why) = ensure_room(data_dir, &layout.root(), 0) {
         bail!(why);
     }
     let transaction = Transaction {
         id: new_id(),
         from: from.to_owned(),
         target: target.to_owned(),
-        app_root: app_root.to_path_buf(),
+        layout,
         phase: Phase::Requested,
         restart,
         requested_at: crate::now_ms(),
@@ -601,16 +741,6 @@ struct Whoami {
 
 fn version_dir(path: &Path) -> Option<String> {
     Some(path.parent()?.file_name()?.to_str()?.to_owned())
-}
-
-fn whoami(app_root: &Path) -> Option<Whoami> {
-    let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    let current = std::fs::read_link(app_root.join("current")).ok()?;
-    Some(Whoami {
-        me: version_dir(&exe)?,
-        current: current.file_name()?.to_str()?.to_owned(),
-    })
 }
 
 /// What to do about a record, given who's starting.
@@ -658,7 +788,7 @@ pub struct Trial {
     pub id: String,
     pub target: String,
     data_dir: PathBuf,
-    app_root: PathBuf,
+    layout: Layout,
     deadline: Instant,
 }
 
@@ -697,8 +827,7 @@ pub fn commit_trial() -> anyhow::Result<()> {
         return Ok(());
     };
     crash_point("trial-before-commit");
-    crate::apply_headless(&trial.app_root, &trial.target)?;
-    sync_dir(&trial.app_root).context("saving the new version as current")?;
+    trial.layout.commit(&trial.target)?;
     crash_point("commit-flipped");
     settle_committed(&trial.data_dir, &trial.id)?;
     *lock_trial() = None;
@@ -709,10 +838,21 @@ fn settle_committed(data_dir: &Path, id: &str) -> anyhow::Result<()> {
     let Some(transaction) = read(data_dir).filter(|t| t.id == id && t.in_progress()) else {
         return Ok(());
     };
+    let layout = transaction.layout.clone();
     finish(data_dir, transaction, Phase::Updated, None)?;
     crash_point("commit-recorded");
     discard_snapshots(data_dir);
+    layout.tidy();
     Ok(())
+}
+
+/// Tidy up after the latest update again. At the commit itself the old version's
+/// watchdog is still on its way out, and it counts as something running from the
+/// old bundle.
+pub fn tidy_latest(data_dir: &Path) {
+    if let Some(latest) = read(data_dir).filter(|update| !update.in_progress()) {
+        latest.layout.tidy();
+    }
 }
 
 /// Options for [`boot`].
@@ -751,18 +891,35 @@ pub fn boot<G>(
         // Nothing's in progress, so no backup is needed any more, including
         // one a crash left behind. Cheap when there's none.
         discard_snapshots(data_dir);
+        transaction.layout.tidy();
         return Ok(());
     }
-    let Some(who) = whoami(&transaction.app_root) else {
+    let Some(who) = transaction.layout.whoami(&transaction) else {
         // Not running from that installation (a build started by hand beside
         // it): leave the record for the installation to settle.
         return Ok(());
     };
     match step_for(&transaction, &who) {
         Step::Proceed => Ok(()),
-        Step::StartTrial => {
+        step @ (Step::StartTrial | Step::Rollback) => {
+            if step == Step::Rollback && still_being_tried(&transaction) {
+                bail!("the new version is still being tried");
+            }
+            // Two can get here at once: the desktop app sees its engine's port go
+            // quiet while that engine is on its way out. Whoever takes the data
+            // directory first acts; the other finds it already done.
             let guard = hold_data_dir()?;
-            start_trial(data_dir, options, transaction, guard)
+            let Some(transaction) = read(data_dir).filter(|t| t.in_progress()) else {
+                return Ok(());
+            };
+            match step_for(&transaction, &who) {
+                Step::StartTrial => start_trial(data_dir, options, transaction, guard),
+                Step::Rollback if still_being_tried(&transaction) => {
+                    bail!("the new version is still being tried")
+                }
+                Step::Rollback => roll_back(data_dir, transaction),
+                _ => bail!("another start is already dealing with this update"),
+            }
         }
         Step::RunTrial => {
             tracing::info!(id = %transaction.id, version = %transaction.target, "running as an update trial");
@@ -774,21 +931,10 @@ pub fn boot<G>(
                 id: transaction.id,
                 target: transaction.target,
                 data_dir: data_dir.to_path_buf(),
-                app_root: transaction.app_root,
+                layout: transaction.layout,
                 deadline: Instant::now() + deadline,
             });
             Ok(())
-        }
-        Step::Rollback => {
-            // Started while the trial is still running (the desktop app seeing
-            // its engine's port go quiet, in the moment the data directory is
-            // between owners): not a failed trial. Past the deadline it can't
-            // be that, so a reused pid can't hold this up for ever.
-            if transaction.phase == Phase::Trial && trial_still_running(&transaction) {
-                bail!("the new version is still being tried");
-            }
-            let _guard = hold_data_dir()?;
-            roll_back(data_dir, transaction)
         }
         Step::SettleCommitted => {
             tracing::info!(id = %transaction.id, "update committed");
@@ -804,8 +950,10 @@ pub fn boot<G>(
                 "Zeron {} was installed while this update was running, so the update stopped there.",
                 who.me
             );
+            let layout = transaction.layout.clone();
             finish(data_dir, transaction, Phase::Failed, Some(reason))?;
             discard_snapshots(data_dir);
+            layout.tidy();
             Ok(())
         }
         Step::WaitForRestore => {
@@ -814,20 +962,21 @@ pub fn boot<G>(
     }
 }
 
+/// Started while the trial is still running (the desktop app seeing its engine's
+/// port go quiet, in the moment the data directory is between owners): not a
+/// failed trial. Past the deadline it can't be that, so a reused pid can't hold
+/// this up for ever.
+fn still_being_tried(transaction: &Transaction) -> bool {
+    transaction.phase == Phase::Trial && trial_still_running(transaction)
+}
+
 fn trial_still_running(transaction: &Transaction) -> bool {
     let Some(pid) = transaction.trial_pid.filter(|pid| *pid != std::process::id()) else {
         return false;
     };
     let started = transaction.trial_started_at.unwrap_or(transaction.requested_at);
     let elapsed = (crate::now_ms() - started).max(0) as u64 / 1000;
-    #[cfg(unix)]
-    let running = process_running(pid as libc::pid_t);
-    #[cfg(not(unix))]
-    let running = {
-        let _ = pid;
-        false
-    };
-    running && elapsed < transaction.deadline_secs
+    process_running(pid) && elapsed < transaction.deadline_secs
 }
 
 /// Back up, leave a watchdog, become the new version.
@@ -839,18 +988,17 @@ fn start_trial<G>(
 ) -> anyhow::Result<()> {
     let give_up = |transaction: Transaction, why: String, cause: String| {
         tracing::error!(%cause, "update stopped before the new version ran");
+        let layout = transaction.layout.clone();
         finish(data_dir, transaction, Phase::Failed, Some(why))?;
         discard_snapshots(data_dir);
+        layout.tidy();
         Ok(())
     };
     let exe_name = std::env::current_exe()?
         .file_name()
         .context("this executable has no name")?
         .to_owned();
-    let new_binary = transaction
-        .app_root
-        .join(&transaction.target)
-        .join(&exe_name);
+    let new_binary = transaction.layout.new_binary(&transaction.target, &exe_name);
     if !new_binary.is_file() {
         let why = format!(
             "Zeron {}'s files are missing, so it stayed on {}.",
@@ -871,7 +1019,7 @@ fn start_trial<G>(
     transaction.trial_pid = Some(std::process::id());
     write(data_dir, &transaction)?;
     crash_point("trial-marked");
-    if let Err(err) = spawn_watchdog(data_dir, options, &transaction) {
+    if let Err(err) = prepare_watchdog(data_dir, options, &transaction) {
         // Without a watchdog a stuck new version would never be stopped. Nothing
         // has touched the data yet, so there's nothing to restore.
         let why = format!(
@@ -883,7 +1031,7 @@ fn start_trial<G>(
     crash_point("watchdog-started");
     drop(guard);
     tracing::info!(version = %transaction.target, "starting the new version as a trial");
-    let err = exec(&new_binary, &options.engine_args);
+    let err = hand_over(data_dir, options, &mut transaction, &new_binary);
     // Only reached if the new binary couldn't be started at all.
     let why = format!(
         "Zeron {} couldn't start here, so it stayed on {}.",
@@ -892,14 +1040,66 @@ fn start_trial<G>(
     give_up(transaction, why, err.to_string())
 }
 
+/// Become the new version: the same process, so that a service manager, and
+/// macOS's idea of who this is, see nothing change. Returns only on failure.
 #[cfg(unix)]
-fn exec(binary: &Path, args: &[OsString]) -> std::io::Error {
+fn hand_over(
+    _data_dir: &Path,
+    options: &BootOptions,
+    transaction: &mut Transaction,
+    binary: &Path,
+) -> std::io::Error {
     use std::os::unix::process::CommandExt as _;
-    std::process::Command::new(binary).args(args).exec()
+    let mut command = std::process::Command::new(binary);
+    command.args(&options.engine_args);
+    if let Some(installed) = transaction.layout.installed_at() {
+        command.env(crate::INSTALLED_AT_ENV, installed);
+    }
+    command.exec()
 }
 
-#[cfg(not(unix))]
-fn exec(_binary: &Path, _args: &[OsString]) -> std::io::Error {
+/// Windows can't replace a process: start the new version, and stay on as its
+/// watchdog until it's settled. Returns only on failure to start it.
+#[cfg(windows)]
+fn hand_over(
+    data_dir: &Path,
+    options: &BootOptions,
+    transaction: &mut Transaction,
+    binary: &Path,
+) -> std::io::Error {
+    let mut command = std::process::Command::new(binary);
+    command.args(&options.engine_args);
+    if let Some(installed) = transaction.layout.installed_at() {
+        command.env(crate::INSTALLED_AT_ENV, installed);
+    }
+    let child = match spawn_detached(&mut command) {
+        Ok(child) => child,
+        Err(err) => return err,
+    };
+    transaction.trial_pid = Some(child.id());
+    if let Err(err) = write(data_dir, transaction) {
+        tracing::error!(error = %format!("{err:#}"), "couldn't record the trial's process");
+    }
+    let args = options
+        .engine_args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_name().map(ToOwned::to_owned))
+        .unwrap_or_default();
+    watch(data_dir, &transaction.id, child.id(), &args, &exe_name);
+    std::process::exit(0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hand_over(
+    _data_dir: &Path,
+    _options: &BootOptions,
+    _transaction: &mut Transaction,
+    _binary: &Path,
+) -> std::io::Error {
     std::io::Error::other("not supported on this platform")
 }
 
@@ -924,6 +1124,7 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
     }
     let from = transaction.from.clone();
     let target = transaction.target.clone();
+    let layout = transaction.layout.clone();
     finish(
         data_dir,
         transaction,
@@ -932,6 +1133,7 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
     )?;
     crash_point("rollback-recorded");
     discard_snapshots(data_dir);
+    layout.tidy();
     Ok(())
 }
 
@@ -943,18 +1145,18 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
 /// than a child: the new version takes over this process and would never collect
 /// it, so it's left to the service manager to reap.
 #[cfg(unix)]
-fn spawn_watchdog(
+fn prepare_watchdog(
     data_dir: &Path,
     options: &BootOptions,
     transaction: &Transaction,
 ) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt as _;
     let exe = std::env::current_exe()?;
     let args: Vec<String> = options
         .engine_args
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    use std::os::unix::process::CommandExt as _;
     let mut command = std::process::Command::new("/bin/sh");
     // A new version that exits in milliseconds has the service manager stopping
     // everything in the unit before the watchdog can set up its handler. Held
@@ -989,37 +1191,35 @@ fn spawn_watchdog(
     Ok(())
 }
 
+/// On Windows this process stays on as the watchdog (`hand_over`).
 #[cfg(not(unix))]
-fn spawn_watchdog(
+fn prepare_watchdog(
     _data_dir: &Path,
     _options: &BootOptions,
     _transaction: &Transaction,
 ) -> anyhow::Result<()> {
-    bail!("not supported on this platform")
+    Ok(())
 }
 
-/// Keep watching the new version until it commits or isn't there any more.
+/// The hidden subcommand's entry: keep watching the new version.
 #[cfg(unix)]
 pub fn run_watchdog() -> anyhow::Result<()> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static TERMINATED: AtomicBool = AtomicBool::new(false);
     extern "C" fn on_term(_: libc::c_int) {
-        TERMINATED.store(true, Ordering::SeqCst);
+        TERMINATED.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     // SAFETY: the handler only stores to an atomic; the rest are plain calls on
     // a local set.
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
-        // Blocked by whoever started this (`spawn_watchdog`), so that one sent
+        // Blocked by whoever started this (`prepare_watchdog`), so that one sent
         // early waited for the handler above.
         let mut term: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut term);
         libc::sigaddset(&mut term, libc::SIGTERM);
         libc::sigprocmask(libc::SIG_UNBLOCK, &term, std::ptr::null_mut());
     }
-
     let id = std::env::var(WATCH_ID_ENV).context("no update to watch")?;
-    let pid: libc::pid_t = std::env::var(WATCH_PID_ENV)
+    let pid: u32 = std::env::var(WATCH_PID_ENV)
         .context("no process to watch")?
         .parse()
         .context("no process to watch")?;
@@ -1027,22 +1227,40 @@ pub fn run_watchdog() -> anyhow::Result<()> {
     let engine_args: Vec<String> =
         serde_json::from_str(&std::env::var(WATCH_ARGS_ENV).unwrap_or_else(|_| "[]".into()))
             .unwrap_or_default();
+    let exe_name = std::env::current_exe()?
+        .file_name()
+        .context("this executable has no name")?
+        .to_owned();
+    watch(&data_dir, &id, pid, &engine_args, &exe_name);
+    Ok(())
+}
 
+#[cfg(not(unix))]
+pub fn run_watchdog() -> anyhow::Result<()> {
+    bail!("not used on this platform")
+}
+
+static TERMINATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Until the trial settles or the process is gone: stop it at the deadline, and
+/// see to it that the old version gets started once it's gone.
+fn watch(data_dir: &Path, id: &str, pid: u32, engine_args: &[String], exe_name: &std::ffi::OsStr) {
+    use std::sync::atomic::Ordering;
     const TICK: Duration = Duration::from_millis(250);
     /// How long a dead trial's service manager gets to act on its own.
     const MANAGER_GRACE: Duration = Duration::from_secs(15);
     let mut gone_since: Option<Instant> = None;
     loop {
-        let Some(transaction) = read(&data_dir).filter(|t| t.id == id && t.phase == Phase::Trial)
+        let Some(transaction) = read(data_dir).filter(|t| t.id == id && t.phase == Phase::Trial)
         else {
-            return Ok(());
+            return;
         };
         let alive = process_running(pid);
         let terminated = TERMINATED.load(Ordering::SeqCst);
         if terminated && alive {
             // Someone stopped the service, trial and all: that's theirs to
             // decide. Its next start finds the trial unfinished and goes back.
-            return Ok(());
+            return;
         }
         if alive {
             let started = transaction.trial_started_at.unwrap_or(transaction.requested_at);
@@ -1050,15 +1268,12 @@ pub fn run_watchdog() -> anyhow::Result<()> {
             if elapsed >= transaction.deadline_secs {
                 let minutes = (transaction.deadline_secs / 60).max(1);
                 note_trial_failure(
-                    &data_dir,
+                    data_dir,
                     &format!("The new version didn't finish starting within {minutes} min."),
                 );
                 tracing::error!(pid, "update trial missed its deadline; stopping it");
                 eprintln!("zeron-update: the update trial missed its deadline; stopping it");
-                // Not SIGTERM: it's stuck, and a clean exit wouldn't count as a
-                // failure to a service manager that restarts on failure.
-                // SAFETY: plain syscall on a pid we were given.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
+                kill_process(pid);
             }
         } else {
             let since = *gone_since.get_or_insert_with(Instant::now);
@@ -1073,13 +1288,13 @@ pub fn run_watchdog() -> anyhow::Result<()> {
                         if !unit_has_job(unit) {
                             start_unit(unit);
                         }
-                        return Ok(());
+                        return;
                     }
                 }
                 RestartMode::Relaunch => {
                     if since.elapsed() >= Duration::from_secs(1) {
-                        relaunch_current(&transaction.app_root, &engine_args);
-                        return Ok(());
+                        relaunch_installed(&transaction.layout, exe_name, engine_args);
+                        return;
                     }
                 }
             }
@@ -1088,13 +1303,9 @@ pub fn run_watchdog() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
-pub fn run_watchdog() -> anyhow::Result<()> {
-    bail!("not supported on this platform")
-}
-
 #[cfg(unix)]
-fn process_running(pid: libc::pid_t) -> bool {
+fn process_running(pid: u32) -> bool {
+    let pid = pid as libc::pid_t;
     // SAFETY: signal 0 only checks that the process exists.
     if unsafe { libc::kill(pid, 0) } != 0 {
         return false;
@@ -1106,12 +1317,81 @@ fn process_running(pid: libc::pid_t) -> bool {
     {
         return state != 'Z';
     }
+    #[cfg(target_os = "macos")]
+    {
+        const SZOMB: u32 = 5;
+        // SAFETY: an all-zero proc_bsdinfo is valid, and the call writes at most
+        // the size it's given.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                // Non-zero: answer for a zombie too.
+                1,
+                (&raw mut info).cast(),
+                size,
+            )
+        };
+        if read == size {
+            return info.pbi_status != SZOMB;
+        }
+    }
     true
 }
 
+#[cfg(windows)]
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: the handle is checked before use and closed once.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let read = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        read != 0 && code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_running(_pid: u32) -> bool {
+    false
+}
+
+/// Not a polite stop: it's stuck, and a clean exit wouldn't count as a failure
+/// to a service manager that restarts on failure.
+#[cfg(unix)]
+fn kill_process(pid: u32) {
+    // SAFETY: plain syscall on a pid we were given.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+}
+
+#[cfg(windows)]
+fn kill_process(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    // SAFETY: the handle is checked before use and closed once.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn kill_process(_pid: u32) {}
+
 /// Whether something asked the service manager to act on this unit: a stop or
 /// restart is a queued job, a unit stopping because its process exited isn't.
-#[cfg(unix)]
 fn unit_has_job(unit: &str) -> bool {
     std::process::Command::new("systemctl")
         .args(["--user", "show", unit, "-p", "Job", "--value"])
@@ -1122,7 +1402,6 @@ fn unit_has_job(unit: &str) -> bool {
         })
 }
 
-#[cfg(unix)]
 fn start_unit(unit: &str) {
     let started = std::process::Command::new("systemctl")
         .args(["--user", "--no-block", "start", unit])
@@ -1134,23 +1413,46 @@ fn start_unit(unit: &str) {
 
 /// Start the old version, which will put things back. It may lose a race for the
 /// data directory with the desktop app starting it too, which is just as good.
-#[cfg(unix)]
-fn relaunch_current(app_root: &Path, engine_args: &[String]) {
-    use std::os::unix::process::CommandExt as _;
-    let Some(name) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.file_name().map(ToOwned::to_owned))
-    else {
-        return;
-    };
-    let started = std::process::Command::new(app_root.join("current").join(name))
-        .args(engine_args)
-        .stdin(std::process::Stdio::null())
-        .process_group(0)
-        .spawn();
-    if let Err(err) = started {
+fn relaunch_installed(layout: &Layout, exe_name: &std::ffi::OsStr, engine_args: &[String]) {
+    let mut command = std::process::Command::new(layout.installed_binary(exe_name));
+    command.args(engine_args).stdin(std::process::Stdio::null());
+    if let Err(err) = spawn_detached(&mut command) {
         eprintln!("zeron-update: couldn't start the previous version: {err}");
     }
+}
+
+/// Started to outlive whoever started it.
+#[cfg(unix)]
+fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0).spawn()
+}
+
+#[cfg(windows)]
+fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Out of the app's job too, when the job allows it (as the engine's own start).
+    let detached = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    command.creation_flags(detached | CREATE_BREAKAWAY_FROM_JOB);
+    match command.spawn() {
+        Ok(child) => Ok(child),
+        Err(_) => {
+            command.creation_flags(detached);
+            command.spawn()
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    command.spawn()
 }
 
 #[cfg(test)]
@@ -1169,7 +1471,7 @@ mod tests {
             id: "abc".into(),
             from: "1.0.0".into(),
             target: "2.0.0".into(),
-            app_root: PathBuf::from("/nowhere"),
+            layout: Layout::Versioned { app_root: PathBuf::from("/nowhere") },
             phase,
             restart: RestartMode::Relaunch,
             requested_at: 1,
@@ -1348,16 +1650,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app_root = dir.path().join("app");
         std::fs::create_dir_all(&app_root).unwrap();
-        let first = request(dir.path(), &app_root, "1.0.0", "2.0.0", RestartMode::Relaunch).unwrap();
-        let again = request(dir.path(), &app_root, "1.0.0", "2.0.0", RestartMode::Relaunch);
+        let first = request(dir.path(), Layout::Versioned { app_root: app_root.clone() }, "1.0.0", "2.0.0", RestartMode::Relaunch).unwrap();
+        let again = request(dir.path(), Layout::Versioned { app_root: app_root.clone() }, "1.0.0", "2.0.0", RestartMode::Relaunch);
         assert!(again.unwrap_err().to_string().contains("already in progress"));
 
         fail_request(dir.path(), &first.id, "couldn't restart".into());
         let failed = read(dir.path()).unwrap();
         assert_eq!(failed.phase, Phase::Failed);
         assert_eq!(failed.report().state, UpdateState::Failed);
-        let next = request(dir.path(), &app_root, "1.0.0", "2.0.0", RestartMode::Relaunch).unwrap();
+        let next = request(dir.path(), Layout::Versioned { app_root: app_root.clone() }, "1.0.0", "2.0.0", RestartMode::Relaunch).unwrap();
         assert_ne!(next.id, first.id);
+    }
+
+    /// A trial that died under a parent that hasn't noticed still has a pid, and
+    /// must not count as running.
+    #[cfg(unix)]
+    #[test]
+    fn a_zombie_doesnt_count_as_running() {
+        let mut child = std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = child.id();
+        let waited = std::time::Instant::now();
+        while process_running(pid) {
+            assert!(waited.elapsed() < Duration::from_secs(5), "still counted as running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.wait().unwrap();
     }
 
     #[test]

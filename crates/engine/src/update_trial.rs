@@ -19,6 +19,8 @@ const EDGE_PROOF: Duration = Duration::from_secs(3 * 60);
 /// Still running a moment after being ready: catches a failure just after
 /// startup, before it can't be undone.
 const SETTLE: Duration = Duration::from_secs(5);
+/// Long enough for the old version's watchdog to have gone.
+const TIDY_AFTER: Duration = Duration::from_secs(2);
 /// A trial that gives up. Not zero: a service restarted only on failure has to
 /// start the old version.
 const TRIAL_FAILED_EXIT: i32 = 75;
@@ -154,6 +156,8 @@ pub(crate) fn prove_and_commit(core: &EngineCore, config: &EngineConfig) {
             Err(err) => tracing::error!(error = %err, "stale-session recovery panicked"),
         }
         doc_host.lift_quiesce();
+        tokio::time::sleep(TIDY_AFTER).await;
+        transaction::tidy_latest(&proof.data_dir);
     });
 }
 
@@ -181,5 +185,7 @@ pub(crate) fn commit_without_a_profile(config: &EngineConfig) {
             tracing::error!(error = %format!("{err:#}"), "couldn't commit the update");
             fail(&data_dir, "The new version couldn't be saved as the current one.");
         }
+        tokio::time::sleep(TIDY_AFTER).await;
+        transaction::tidy_latest(&data_dir);
     });
 }
