@@ -738,8 +738,10 @@ test("Escape in a file's editor takes the keyboard to the file's tab (Tab indent
 	end)).to_be(true)
 end)
 
--- A tab dragged along the strip takes another's place as it crosses that
--- one's middle, the strip making room as it goes; let go, it stays there.
+-- A tab dragged along the strip takes another's place as its middle crosses
+-- that one's, the strip making room as it goes; let go, it stays there.
+-- (Grabbed near its left and let go over zeta's middle: its own middle is
+-- then past zeta's.)
 test("a tab dragged over another takes its place, and stays when dropped", function()
 	local app = open_panel()
 	open_files(app)
@@ -748,7 +750,7 @@ test("a tab dragged over another takes its place, and stays when dropped", funct
 	open_files(app)
 	pick(app, "zeta.txt")
 	expect(tab_titles(app)).to_be("long.txt,zeta.txt")
-	app:drag('#panel-strip >> role:tab "zeta.txt"', '#panel-strip >> role:tab "long.txt"')
+	app:drag('#panel-strip >> role:tab "long.txt"', '#panel-strip >> role:tab "zeta.txt"')
 	app:frames(20)
 	expect(tab_titles(app)).to_be("zeta.txt,long.txt")
 	expect(app:error()).to_be_nil()
