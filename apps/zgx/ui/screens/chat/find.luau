@@ -73,7 +73,8 @@ M.matches = ui.computed(function(): { Match }
 	if not M.shown:get() or q == "" then
 		return out
 	end
-	for row, m in store.messages:get() do
+	for row = 1, store.messages:len() do
+		local m = store.messages:at(row)
 		for _, src in sources(m) do
 			for n, b in blocks_of(src.key, src.text, src.breaks) do
 				for k = 1, MarkdownFind.count(b, q) do

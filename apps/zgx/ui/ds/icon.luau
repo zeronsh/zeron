@@ -91,6 +91,7 @@ export type Name =
 	| "flag"
 	| "upload-minimalistic"
 	| "arrow-down"
+	| "download"
 	| "alt-arrow-up"
 	| "stop"
 	| "action-play"

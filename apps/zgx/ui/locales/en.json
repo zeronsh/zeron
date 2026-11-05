@@ -14,7 +14,9 @@
       "hours": "{n}h",
       "days": "{n}d",
       "weeks": "{n}w",
-      "hours_minutes": "{h}h {m}m"
+      "hours_minutes": "{h}h {m}m",
+      "minutes_seconds": "{m}m {s}s",
+      "hours_minutes_seconds": "{h}h {m}m {s}s"
     },
     "ago": {
       "minutes": "{n, plural, one {# minute ago} other {# minutes ago}}",
@@ -848,6 +850,7 @@
       "fast_mode": "Fast mode",
       "default": "Default",
       "reasoning": "REASONING",
+      "account": "Account",
       "model": "Model",
       "search_starred": "Search starred models…",
       "search_agent": "Search {agent} models…",
@@ -1077,7 +1080,6 @@
         "description": "Blurred everywhere, for screen sharing. Click one to see it.",
         "terms": "screen sharing recording blur blurred mosaic private censor redact"
       },
-      "links": "Links",
       "links_in": {
         "external": "Your default browser.",
         "tab": "A browser tab beside the conversation."
@@ -1085,11 +1087,6 @@
       "open_links": {
         "label": "Open links in",
         "terms": "web link url browser tab panel zeron external"
-      },
-      "pull_requests": {
-        "label": "Open pull requests in",
-        "terms": "pr pull request badges board browser github",
-        "native": "Inspect them in Zeron, beside the conversation or the Pull requests board."
       },
       "thread_naming": {
         "label": "Thread naming",
@@ -1129,10 +1126,6 @@
       "send_with": {
         "enter": "Enter",
         "mod_enter": "{key}"
-      },
-      "pull_requests": {
-        "native": "Pull request view",
-        "browser": "In-app browser"
       }
     },
     "search": {
@@ -2438,6 +2431,45 @@
       "on_device": "On {device}",
       "from_github": "From GitHub",
       "add_cloud_project": "Add project"
+    },
+    "updates": {
+      "available": "Update available",
+      "button": "{n, plural, one {# update} other {# updates}}",
+      "check_again": "Check again",
+      "copied": "Copied. Run it on {device}",
+      "copy_command": "Copy command",
+      "downloading": "Downloading…",
+      "failed": "Update failed",
+      "failed_named": "Couldn't update {name}",
+      "installing": "Installing…",
+      "manual": "needs doing by hand",
+      "not_applied": "Zeron didn't update",
+      "not_applied_body": "It restarted on the same version. You can try again from the update button.",
+      "offline": "Offline",
+      "on_that_device": "updates from that device",
+      "plan_agents": "{n, plural, one {Updates # agent. It waits for what's running to finish} other {Updates # agents. Each waits for what's running to finish}}",
+      "plan_chats": "{n, plural, one {Stops # running chat. It picks up again after the restart} other {Stops # running chats. They pick up again after the restart}}",
+      "plan_here": "Downloads Zeron for this device, then asks you to restart",
+      "plan_skip": "Skips {name} on {device}: {why}",
+      "plan_skips_more": "{n, plural, one {and # more} other {and # more}}",
+      "plan_zerons": "{n, plural, one {Updates Zeron on # other device} other {Updates Zeron on # other devices}}",
+      "preparing": "Preparing…",
+      "ready": "{version} is ready. Restart to finish",
+      "restart": "Restart",
+      "retry": "Retry update",
+      "stops_chats": "{n, plural, one {Stops # running chat, which picks up again after} other {Stops # running chats, which pick up again after}}",
+      "this_device": "This device",
+      "title": "Updates",
+      "update": "Update",
+      "update_all": "Update all",
+      "update_anyway": "Update anyway",
+      "update_there": "{versions} · update from that device",
+      "updated": "Updated",
+      "updated_to": "Updated to {version}",
+      "verifying": "Verifying…",
+      "version": "Version {version} available",
+      "view_steps": "View steps",
+      "waiting": "Waiting for the current run"
     }
   },
   "onboarding": {
@@ -2673,6 +2705,7 @@
       }
     },
     "composer": {
+      "account_not_switched": "Couldn't switch accounts",
       "placeholder": "Ask anything, @ to mention…",
       "comments": "{n, plural, one {# comment} other {# comments}}",
       "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",

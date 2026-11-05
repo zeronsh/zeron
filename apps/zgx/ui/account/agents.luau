@@ -128,6 +128,27 @@ function M.switch(id: string, account: string)
 	ui.call("agents.switch", { id = id, account = account }):after(function() end, quietly())
 end
 
+-- Each device's accounts for its composers, by device id ("": this one's),
+-- by agent (only an agent that signs in and reports usage): `{ id, email,
+-- plan, active, can_switch, error?, windows = { { label, used } } }`.
+M.on_device = ui.shared("agents.on_device", {} :: { [string]: { [string]: { any } } })
+
+-- Their accounts, on first sight of a device. (A host with no accounts to
+-- say, a fixture's: none come.)
+function M.watch_device(key: string)
+	pcall(ui.invoke, "agents.watch_device", key)
+end
+
+-- Their usage again (the limit on asking the provider applies).
+function M.refresh_device(key: string)
+	pcall(ui.invoke, "agents.refresh_device", key)
+end
+
+-- That account in use on the device: a promise, rejecting with why not.
+function M.switch_on(key: string, id: string, account: string): any
+	return ui.call("agents.switch_on", { device = key, id = id, account = account })
+end
+
 function M.remove(id: string, account: string)
 	ui.call("agents.remove", { id = id, account = account }):after(function() end, quietly())
 end

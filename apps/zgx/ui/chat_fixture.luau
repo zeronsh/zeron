@@ -78,6 +78,21 @@ local function note(what: string)
 	table.insert(said, what)
 	calls:set(table.concat(said, ","))
 end
+-- (The composer's accounts: `agents.on_device` set by a test, what's asked of
+-- the host noted.)
+do
+	local stub_agents = require("@account/agents") :: any
+	stub_agents.watch_device = function(key: string)
+		note(`watch_device:{key}`)
+	end
+	stub_agents.refresh_device = function(key: string)
+		note(`refresh_device:{key}`)
+	end
+	stub_agents.switch_on = function(key: string, id: string, account: string): any
+		note(`switch_on:{key}:{id}:{account}`)
+		return { after = function(_: any, done: (any) -> ()) done(nil) end }
+	end
+end
 
 local function publish(id: string, patch: { [string]: any }?)
 	local s = table.clone(META[id] or {})
@@ -1163,6 +1178,27 @@ ui.command {
 			{ n, "blocks", 1, "tools", 1, "call" },
 			"Weighing the parser first.\n\n**The parser**\n\nIt reads the whole file on every keystroke, and the file is the transcript, so the cost grows with the chat. A cursor into the last block would read only what changed, which is what the host already keeps.\n\n**The host**\n\nIt sends each block whole as it grows, so the parser's input is the bottleneck twice over. The last line is the freshest thought."
 		)
+	end,
+}
+-- More of it, as the host streams one: the draft's words alone, its row's
+-- own (`call`) left as they were.
+ui.command {
+	id = "thought_streams",
+	title = "More of the thought arrives",
+	run = function()
+		store.draft:set { id = "th1", text = "", thought = "th-r", thought_text = "Weighing the parser first. Then the host." }
+	end,
+}
+-- Written: the row takes its words, then the draft lets them go.
+ui.command {
+	id = "thought_written",
+	title = "The thought is written",
+	run = function()
+		local n = store.messages:len()
+		store.messages:set_key({ n, "blocks", 1, "tools", 1, "call" }, "Weighing the parser first. Then the host.")
+		store.messages:set_key({ n, "blocks", 1, "tools", 1, "live" }, false)
+		store.messages:set_key({ n, "blocks", 1, "live" }, false)
+		store.draft:set { id = "", text = "" }
 	end,
 }
 ui.command {

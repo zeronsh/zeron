@@ -14,7 +14,9 @@
       "hours": "{n}时",
       "days": "{n}天",
       "weeks": "{n}周",
-      "hours_minutes": "{h}小时{m}分"
+      "hours_minutes": "{h}小时{m}分",
+      "minutes_seconds": "{m}分{s}秒",
+      "hours_minutes_seconds": "{h}小时{m}分{s}秒"
     },
     "ago": {
       "minutes": "{n, plural, other {# 分钟前}}",
@@ -848,6 +850,7 @@
       "fast_mode": "快速模式",
       "default": "默认",
       "reasoning": "推理强度",
+      "account": "账号",
       "model": "模型",
       "search_starred": "搜索已加星标的模型…",
       "search_agent": "搜索 {agent} 模型…",
@@ -1077,7 +1080,6 @@
         "description": "在所有位置模糊显示，方便共享屏幕。点按即可查看。",
         "terms": "屏幕共享 录屏 模糊 马赛克 隐私 遮盖 screen sharing recording blur blurred mosaic private censor redact"
       },
-      "links": "链接",
       "links_in": {
         "external": "默认浏览器。",
         "tab": "对话旁边的浏览器标签页。"
@@ -1085,11 +1087,6 @@
       "open_links": {
         "label": "打开链接的位置",
         "terms": "网页 链接 网址 浏览器 标签页 面板 外部 web link url browser tab panel zeron external"
-      },
-      "pull_requests": {
-        "label": "打开拉取请求的位置",
-        "terms": "拉取请求 徽标 看板 浏览器 pr pull request badges board browser github",
-        "native": "在 Zeron 中查看，显示在对话或拉取请求看板旁边。"
       },
       "thread_naming": {
         "label": "对话命名",
@@ -1129,10 +1126,6 @@
       "send_with": {
         "enter": "Enter",
         "mod_enter": "{key}"
-      },
-      "pull_requests": {
-        "native": "拉取请求视图",
-        "browser": "App 内浏览器"
       }
     },
     "search": {
@@ -2438,6 +2431,45 @@
       "on_device": "在 {device} 上",
       "from_github": "来自 GitHub",
       "add_cloud_project": "添加项目"
+    },
+    "updates": {
+      "available": "有可用更新",
+      "button": "{n, plural, other {# 个更新}}",
+      "check_again": "再次检查",
+      "copied": "已复制。请在 {device} 上运行",
+      "copy_command": "复制命令",
+      "downloading": "正在下载…",
+      "failed": "更新失败",
+      "failed_named": "无法更新 {name}",
+      "installing": "正在安装…",
+      "manual": "需要手动更新",
+      "not_applied": "Zeron 未更新",
+      "not_applied_body": "它以相同版本重新启动了。你可以通过更新按钮重试。",
+      "offline": "离线",
+      "on_that_device": "请在该设备上更新",
+      "plan_agents": "{n, plural, other {更新 # 个智能体。每个都会等当前运行结束}}",
+      "plan_chats": "{n, plural, other {将停止 # 个运行中的聊天。重新启动后会继续}}",
+      "plan_here": "为此设备下载 Zeron，然后请你重新启动",
+      "plan_skip": "跳过 {device} 上的 {name}：{why}",
+      "plan_skips_more": "{n, plural, other {还有 # 项}}",
+      "plan_zerons": "{n, plural, other {更新另外 # 台设备上的 Zeron}}",
+      "preparing": "正在准备…",
+      "ready": "{version} 已就绪。重新启动以完成",
+      "restart": "重新启动",
+      "retry": "重试更新",
+      "stops_chats": "{n, plural, other {将停止 # 个运行中的聊天，之后会继续}}",
+      "this_device": "此设备",
+      "title": "更新",
+      "update": "更新",
+      "update_all": "全部更新",
+      "update_anyway": "仍然更新",
+      "update_there": "{versions} · 请在该设备上更新",
+      "updated": "已更新",
+      "updated_to": "已更新到 {version}",
+      "verifying": "正在验证…",
+      "version": "版本 {version} 可用",
+      "view_steps": "查看步骤",
+      "waiting": "正在等待当前运行结束"
     }
   },
   "onboarding": {
@@ -2673,6 +2705,7 @@
       }
     },
     "composer": {
+      "account_not_switched": "无法切换账号",
       "placeholder": "随便问，用 @ 提及…",
       "comments": "{n, plural, other {# 条评论}}",
       "edit_conflict": "队列中的消息已更改：你的编辑未保存",
