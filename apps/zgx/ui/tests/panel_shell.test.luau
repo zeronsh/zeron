@@ -1,7 +1,7 @@
 -- The right panel in the main window (A's ui/shell_fixture.luau, read as it
 -- is): closing a chat's last tab closes that chat's panel, easing shut as
 -- the title bar's toggle closes it, and leaves the other chats' alone;
--- opened again, it shows its empty page.
+-- opened again, it shows its empty page, its block in the panel's middle.
 
 local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
 	local tries = math.ceil((ms or 15000) / 50)
@@ -29,6 +29,19 @@ local function panel_width(app: any): number
 	return 0
 end
 
+-- Where node `#id` stands in the window: x, y, w, h.
+local function box(app: any, id: string): { x: number, y: number, w: number, h: number }?
+	for line in app:tree("#shell"):gmatch("[^\n]+") do
+		if line:find(` #{id} `, 1, true) or line:sub(-#id - 2) == ` #{id}` then
+			local x, y, w, h = line:match(" (%-?%d+),(%-?%d+) (%d+)x(%d+)")
+			if x then
+				return { x = tonumber(x) :: number, y = tonumber(y) :: number, w = tonumber(w) :: number, h = tonumber(h) :: number }
+			end
+		end
+	end
+	return nil
+end
+
 local function show_chat(app: any, title: string)
 	app:click(`#shell-sidebar >> role:button "{title}"`)
 	app:frames(20)
@@ -52,13 +65,12 @@ local function open_files_tab(app: any)
 	app:frames(30)
 end
 
-test("closing a chat's last tab closes its panel, easing shut; other chats keep theirs; reopened, its empty page", function()
+test("closing a chat's last tab closes its panel, easing shut; other chats keep theirs; reopened, its empty page, centred", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 800)
 	app:frames(30)
 	expect(app:error()).to_be_nil()
-	-- (Settings → General's "Close the panel with its last tab", on.)
-	app:set_state("settings_close_panel_with_last_tab", true)
+	-- (Settings → General's "Close the panel with its last tab": on, untouched.)
 	-- Two chats, each with its panel open and a tab in it.
 	show_chat(app, "Write the docs")
 	open_files_tab(app)
@@ -94,6 +106,23 @@ test("closing a chat's last tab closes its panel, easing shut; other chats keep 
 	app:click('#titlebar >> role:button "Panel"')
 	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
 	expect(app:has("#panel-strip >> role:tab")).to_be(false)
+	-- Its block in the middle of the page, as much room over it as under it.
+	expect(eventually(app, function(): boolean
+		app:frames(5)
+		local page, block = box(app, "panel-empty"), box(app, "panel-home-block")
+		if not page or not block or block.h <= 0 or block.h >= page.h then
+			return false
+		end
+		local over, under = block.y - page.y, (page.y + page.h) - (block.y + block.h)
+		return over > 24 and math.abs(over - under) <= 1
+	end)).to_be(true)
+	-- A window too short for it: it starts at the page's top and scrolls.
+	app:resize(1200, 360)
+	expect(eventually(app, function(): boolean
+		app:frames(5)
+		local page, block = box(app, "panel-empty"), box(app, "panel-home-block")
+		return page ~= nil and block ~= nil and block.h > page.h and block.y == page.y
+	end)).to_be(true)
 end)
 
 -- The focused node's line, as the tree says.
