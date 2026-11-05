@@ -319,11 +319,37 @@ impl SubagentOff {
     }
 }
 
+/// Whether `entry` plainly has a row, from its parts alone: building it would
+/// say so too, at the cost of all a long chat's rows each time it opens. `false`
+/// only means that takes building it.
+fn plainly_has_row(entry: &Json) -> bool {
+    if entry["id"].as_str().is_none() {
+        return false;
+    }
+    match entry["role"].as_str() {
+        Some("user") => true,
+        // As `blocks_of`: a tool that isn't its output alone, or a thought with words.
+        Some("assistant") => entry["parts"].as_array().into_iter().flatten().any(|part| match part["kind"].as_str() {
+            Some("tool") => !display_tool(part),
+            Some("reasoning") => !part["text"].as_str().unwrap_or_default().trim().is_empty(),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a part of `entry` names a subagent (`tool_row`), all `subagents_in` finds.
+fn names_subagent(entry: &Json) -> bool {
+    entry["parts"].as_array().into_iter().flatten().any(|part| part["subagentRef"].as_str().is_some_and(|name| !name.is_empty()))
+}
+
 /// `entry`, as the worker folds it.
 fn fold_off(at: usize, id: String, entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> FoldedOff {
-    let row = built_entry(entry, doc, device, model);
+    // (Its row is built here only if what's wanted of it isn't plain from its parts.)
+    let plain = plainly_has_row(entry) && !names_subagent(entry);
+    let row = (!plain).then(|| built_entry(entry, doc, device, model)).flatten();
     let subagents = row.as_ref().and_then(subagents_in).map_or(Vec::new(), |found| found.iter().filter_map(SubagentOff::of).collect());
-    let bytes = row.and_then(|_| serde_json::to_vec(entry).ok()).map(|bytes| compressed(&bytes));
+    let bytes = (plain || row.is_some()).then(|| serde_json::to_vec(entry).ok()).flatten().map(|bytes| compressed(&bytes));
     FoldedOff { at, id, bytes, subagents, sum: sum_of(entry), todo: latest_todo(std::iter::once(entry)).cloned() }
 }
 
@@ -5841,6 +5867,49 @@ mod tests {
         let whole = tool(&stamped["parts"][1]).unwrap();
         assert!(whole.field("chat").is_none() && whole.field("output_truncated").is_none());
         assert!(with_host(&json!({ "parts": [exec("t2", false)] }), "c1", None).is_none());
+    }
+
+    #[test]
+    fn a_row_plainly_there_is_one_building_it_makes() {
+        let tool = |id: &str| json!({ "kind": "tool", "id": id, "resolved": true, "call": { "kind": "exec", "command": "ls" } });
+        let show = json!({ "kind": "tool", "id": "s", "resolved": true, "call": { "kind": "mcp", "server": "zeron", "tool": "show_visual", "input": {} } });
+        let thought = |text: &str| json!({ "kind": "reasoning", "id": "r", "text": text });
+        let reply = |parts: Vec<Json>| json!({ "id": "a", "role": "assistant", "status": "done", "parts": parts });
+        let cases = [
+            (json!({ "id": "u", "role": "user", "parts": [] }), true),
+            (reply(vec![tool("t")]), true),
+            (reply(vec![thought("words")]), true),
+            (reply(vec![show.clone(), tool("t")]), true),
+            // Not plain: nothing said, though building may find a row.
+            (reply(vec![thought("  ")]), false),
+            (reply(vec![show]), false),
+            (reply(vec![]), false),
+            (json!({ "role": "user", "parts": [] }), false),
+            (json!({ "id": "x", "role": "switch", "parts": [] }), false),
+        ];
+        for (entry, plain) in cases {
+            assert_eq!(super::plainly_has_row(&entry), plain, "{entry}");
+            if plain {
+                assert!(super::message(&entry, None).is_some(), "plainly a row, but none built: {entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_subagent_is_named_in_its_part_or_is_in_no_row() {
+        let part = |extra: Json| {
+            let mut part = json!({ "kind": "tool", "id": "t", "resolved": true, "call": { "kind": "unknown", "name": "Agent: look", "input": { "prompt": "Look" } } });
+            part.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            part
+        };
+        let reply = |part: Json| json!({ "id": "a", "role": "assistant", "status": "done", "parts": [part] });
+        let named = reply(part(json!({ "subagentRef": "doc--sub--1", "subagentStatus": "done" })));
+        assert!(super::names_subagent(&named));
+        assert!(super::subagents_in(&super::message(&named, None).unwrap()).is_some());
+        for unnamed in [reply(part(json!({}))), reply(part(json!({ "subagentRef": "" })))] {
+            assert!(!super::names_subagent(&unnamed));
+            assert!(super::subagents_in(&super::message(&unnamed, None).unwrap()).is_none());
+        }
     }
 
     #[test]
