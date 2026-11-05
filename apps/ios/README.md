@@ -156,6 +156,15 @@ are ready. A new simulator can provide isolated evidence; it does not prove an
 existing physical-device or TestFlight upgrade safe. Credential import, `-signedout`
 and demo/dev authentication are not fresh authenticated staging acceptance.
 
+Same-bundle upgrades also keep the legacy SwiftUI app's persisted scene session,
+whose configuration names SwiftUI's `AppSceneDelegate`. UIKit restores it without
+calling `configurationForConnecting`, so `SceneDelegate` would never run (blank
+window) and SwiftUI traps with "Missing AppGraph" on backgrounding.
+`LegacySceneRepair` (`Zeron/App/AppDelegate.swift`) swaps in `SceneDelegate` as
+the scene connects; a link that cold-launches such an install is lost on that
+launch. Fresh installs can't show this: reproduce by installing a SwiftUI-lifecycle
+app with the same bundle id first, then the native build over it.
+
 Same-bundle upgrades retain `Application Support/CometDocs`. After online
 Scaffold identity verification, before constructing `CoreClient` or starting any
 writer, `crewPrepareLegacyBackup` imports the matching scoped cache into

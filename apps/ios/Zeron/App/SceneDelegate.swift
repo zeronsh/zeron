@@ -24,6 +24,17 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         options connectionOptions: UIScene.ConnectionOptions
     ) {
         guard let scene = scene as? UIWindowScene else { return }
+        connect(scene, urlContexts: connectionOptions.urlContexts)
+    }
+
+    /// Builds the window and shell once; later calls only deliver links.
+    /// UIKit reaches it through `willConnect`; a scene restored from the
+    /// legacy app's session reaches it through `LegacySceneRepair`.
+    func connect(_ scene: UIWindowScene, urlContexts: Set<UIOpenURLContext>) {
+        guard window == nil else {
+            for context in urlContexts { acceptURL(context.url) }
+            return
+        }
         let window = UIWindow(windowScene: scene)
         window.overrideUserInterfaceStyle = UIUserInterfaceStyle(rawValue: UserDefaults.standard.integer(forKey: "appearance")) ?? .unspecified
         window.tintColor = Palette.accent
@@ -69,7 +80,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             guard let text = note.object as? String, let url = URL(string: text) else { return }
             self?.acceptURL(url)
         }
-        for context in connectionOptions.urlContexts { acceptURL(context.url) }
+        for context in urlContexts { acceptURL(context.url) }
         if !args.contains("-lab") { shellShown() }
 
         #if DEBUG
