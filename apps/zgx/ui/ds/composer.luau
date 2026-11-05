@@ -123,6 +123,11 @@ export type Props = {
 	-- functions of them, followed in place as a catalog comes and changes).
 	harnesses: { ModelPicker.Harness } | State<{ ModelPicker.Harness }> | () -> { ModelPicker.Harness },
 	models: { ModelPicker.Model } | State<{ ModelPicker.Model }> | () -> { ModelPicker.Model },
+	-- A model's agent's accounts, putting one in use, and asking after them
+	-- again (ds.ModelPicker's).
+	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
+	on_account: ((harness: string, id: string) -> ())?,
+	on_accounts_open: (() -> ())?,
 	-- How much of the model's context is used (0 to 1): a ring beside its
 	-- chip.
 	context: (number | () -> number)?,
@@ -651,12 +656,6 @@ local function work_in(
 	return ui.column { w_full = true, table.unpack(rows) }
 end
 
--- The context ring: a faint track under an arc from twelve o'clock, alone
--- (no percentage), in a chip-high box of its own. As Zeron's: the text's
--- own ink while there is room, amber from three quarters full, red from
--- nine tenths.
-local fill_color = context_usage.ink
-
 -- The ring, in a chip-high box of its own, washed under the pointer as the
 -- chips beside it are. Given what the context holds, it opens the card
 -- above (below, with the menus below) as the pointer rests on it or the
@@ -681,20 +680,7 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 			tooltip = if usage then context_usage.Card { usage = usage } else nil,
 			tooltip_placement = if at then { side = at, align = "end", offset = 8 } else nil,
 			tooltip_delay = 150,
-			-- (The chips' glyph size, 12 across its ink, so it reads as one of
-			-- them rather than a size up.)
-			ui.canvas {
-				w = 12,
-				h = 12,
-				shrink = 0,
-				draw = function(c, w, h)
-					local f = fraction()
-					c:stroke(ui.path():arc(w / 2, h / 2, 5.25, 0, 360), "$border.strong", 1.5)
-					if f > 0 then
-						c:stroke(ui.path():arc(w / 2, h / 2, 5.25, -90, 360 * f), fill_color(f), 1.5, { cap = "round" })
-					end
-				end,
-			},
+			context_usage.Ring { fraction = fraction },
 		}
 	end
 	if not usage then
@@ -721,7 +707,9 @@ type Place = {
 	glyph: () -> Icon.Name?,
 	folded: () -> boolean,
 	-- Told the name's own width as it's laid out (the footer's fold reads it).
-	on_name: ((size: Size, el: Element) -> ())?,
+	-- What the line takes of the name and the branch: their own widths, or 0
+	-- for one it doesn't show.
+	on_measures: ((name: number, branch: number) -> ())?,
 }
 local function place_line(p: Place): { Child }
 	local function has_project(): boolean
@@ -740,6 +728,18 @@ local function place_line(p: Place): { Child }
 	local function branch_min(): number
 		return math.min(BRANCH_FLOOR, math.ceil(branch_natural.width or BRANCH_FLOOR))
 	end
+	if p.on_measures then
+		local on_measures = p.on_measures
+		ui.effect(function()
+			local name_w, branch_w = natural.width, branch_natural.width
+			if name_w and branch_w then
+				on_measures(
+					if has_project() or not p.in_project() then name_w else 0,
+					if p.in_project() then branch_w else 0
+				)
+			end
+		end)
+	end
 	-- What leads: where it runs (a worktree's glyph, Cloud's, or a folder:
 	-- a local checkout's, or no project's).
 	local function lead(): string
@@ -749,7 +749,6 @@ local function place_line(p: Place): { Child }
 		ui.text {
 			name,
 			ref = natural,
-			on_resize = p.on_name,
 			absolute = true,
 			left = 0,
 			top = 0,
@@ -960,6 +959,9 @@ return ui.component(function(props: Props): Node
 	local access_w = kept("access_w", 0)
 	local where_w = kept("where_w", 0)
 	local name_w = kept("name_w", 0)
+	local branch_w = kept("branch_w", 0)
+	-- (The line has said what it takes: until then, BRANCH_MIN.)
+	local place_known = kept("place_known", false)
 	local folded = kept("fold", { level = 0, access_at = {} } :: Folded)
 	local function measure(into: State<number>, axis: "w" | "h"): (size: Size, _el: Element) -> ()
 		return function(size: Size, _el: Element)
@@ -967,6 +969,18 @@ return ui.component(function(props: Props): Node
 			if math.abs(into:peek() - v) >= 0.5 then
 				into:set(v)
 			end
+		end
+	end
+
+	local function place_measures(name: number, branch: number)
+		if math.abs(name_w:peek() - name) >= 0.5 then
+			name_w:set(name)
+		end
+		if math.abs(branch_w:peek() - branch) >= 0.5 then
+			branch_w:set(branch)
+		end
+		if not place_known:peek() then
+			place_known:set(true)
 		end
 	end
 
@@ -1258,15 +1272,14 @@ return ui.component(function(props: Props): Node
 		return if lv == 0 then 0 elseif lv >= 5 then 2 else 1
 	end
 	local function where_min(lv: number): number
-		local n = name_w:get()
-		if n <= 0 then
+		if not place_known:get() then
 			return BRANCH_MIN
 		end
-		local named = props.project == nil or props.project:get() ~= NO_PROJECT
+		local n, b = name_w:get(), branch_w:get()
 		if lv >= 2 then
-			return PLACE_CHROME + math.min(n, PROJECT_MIN) + (if named then BRANCH_FLOOR else 0)
+			return PLACE_CHROME + math.min(n, PROJECT_MIN) + math.min(b, BRANCH_FLOOR)
 		end
-		return PLACE_CHROME + math.min(n, PROJECT_MAX) + (if named then BRANCH_KEEP else 0)
+		return PLACE_CHROME + math.min(n, PROJECT_MAX) + math.min(b, BRANCH_KEEP)
 	end
 	local was = folded:peek()
 	local access_at: { [number]: number } = {}
@@ -1371,6 +1384,9 @@ return ui.component(function(props: Props): Node
 			options = props.options,
 			harnesses = props.harnesses :: any,
 			models = props.models :: any,
+			accounts = props.accounts,
+			on_account = props.on_account,
+			on_accounts_open = props.on_accounts_open,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			showing = props.model_open,
@@ -2096,7 +2112,7 @@ return ui.component(function(props: Props): Node
 							branch = branch_name,
 							glyph = runs_in,
 							folded = folded,
-							on_name = measure(name_w, "w"),
+							on_measures = place_measures,
 						}),
 					}
 				end,
@@ -2137,7 +2153,7 @@ return ui.component(function(props: Props): Node
 							return if f and f.worktree then "worktree" else nil
 						end,
 						folded = folded,
-						on_name = measure(name_w, "w"),
+						on_measures = place_measures,
 					}),
 				}
 				else nil

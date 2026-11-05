@@ -14,7 +14,8 @@
 -- (the first entry: a function, a state, or a string). Other props style the
 -- text; `ref`, `shrink`, `grow`, `min_w`, `max_w` go to its box. `anchor =
 -- "end"` for a label held by its right edge: the old characters rise out
--- from that edge too.
+-- from that edge too. `rolls`: asked as the text changes, false for a change
+-- that isn't one to watch (the new text at once).
 
 local motion = require("@self/motion")
 local prefers = require("@self/prefers")
@@ -78,7 +79,7 @@ return ui.component(function(props: { [any]: any }): Node
 	local box: { [any]: any } = {}
 	for k, v in props do
 		-- (`children`: what ui.component adds of a component's own.)
-		if k ~= 1 and k ~= "children" and k ~= "anchor" then
+		if k ~= 1 and k ~= "children" and k ~= "anchor" and k ~= "rolls" then
 			if BOX[k] then
 				box[k] = v
 			end
@@ -119,7 +120,7 @@ return ui.component(function(props: { [any]: any }): Node
 		local from = last
 		last = now
 		count += 1
-		if motion.reduced_now() or from == "" then
+		if motion.reduced_now() or from == "" or (props.rolls ~= nil and not props.rolls()) then
 			roll:set(nil)
 			return
 		end
