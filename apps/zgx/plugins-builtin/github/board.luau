@@ -9,15 +9,16 @@
 -- tabbed as a chat's), the viewer drawing it (viewer.luau). GitHub is asked
 -- through gh on this Mac (pulls.luau).
 --
--- The page is a settings-like column: its title (and a way to ask again),
--- under it the project's picker and the repository it found, the filters
--- as the design system's tabs, and the pull requests as rows of one card
+-- The page is the design system's page (ds/page), as Settings' are: its
+-- title, the repository it found under it, the project's picker and a way
+-- to ask again on the title's line, the filters as the page's tabs, and
+-- the pull requests as rows of one card
 -- headed by its search (a quiet field, as the changes panel's filter):
 -- each row its title, what it changes, its state and number, who opened
 -- it (their GitHub picture by their name) and its status line (the board's
 -- `row_status`), washed edge to edge under the pointer, the one open on
--- the selection wash. Nothing in the head needs room (a title and a chip),
--- so it holds at a pane's width; there the gutters tighten.
+-- the selection wash. At a pane's width the gutters tighten and the
+-- choices on the title's line go under it.
 --
 -- What it was looking at (the project, the filter) is kept between runs
 -- (`zeron.store`), so a reload or a relaunch finds it as it was.
@@ -28,7 +29,6 @@ local ListRow = require("@ds/list_row").ListRow
 local Button = require("@ds/button")
 local IconButton = require("@ds/icon_button").IconButton
 local Text = require("@ds/text")
-local Tabs = require("@ds/tabs")
 local Dropdown = require("@ds/dropdown")
 local SearchField = require("@ds/search_field")
 local FadeText = require("@ds/fade_text")
@@ -37,8 +37,8 @@ local banner = require("@ds/banner")
 local skeleton = require("@ds/skeleton")
 local people = require("@ds/people")
 local control = require("@ds/control")
--- A page's gutters in its card, Settings' and the viewer's rule.
-local layout = require("@ds/layout")
+-- The page every page in the page's card is (Settings' too), and its room.
+local Page = require("@ds/page")
 
 export type Item = {
 	number: number,
@@ -206,7 +206,6 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 		local state = ui.use_state("idle")
 		local failed = ui.use_state(nil :: string?)
 		local open = ui.use_state(nil :: Item?)
-		local width = ui.use_state(0)
 		-- (Answers to an older ask are let go: the newest wins.)
 		local asked = 0
 
@@ -380,33 +379,17 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 			return sorted
 		end
 
-		-- The page's head: its title and a way to ask again; under it the
-		-- project's picker (a chip) and the repository it shows (or what to
-		-- do first).
-		local function head(): Node
-			return ui.column {
-			w_full = true,
-			gap = "$space.2",
-			ui.row {
-				w_full = true,
-				gap = "$space.3",
-				items = "center",
-				Text { zeron.t("board.title"), style = "title", heading = 1, grow = 1, min_w = 0 },
-				IconButton {
-					icon = "refresh",
-					label = zeron.s("board.refresh"),
-					tone = "quiet",
-					disabled = function(): boolean
-						return repo:get() == nil
-					end,
-					on_click = function()
-						load({ refresh = true, quiet = state:peek() == "ready" })
-					end,
-				},
-			},
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
+		-- The page's head, as every page's (ds/page): its title, the project's
+		-- repository under it (or what to do first), and on the title's line
+		-- the project's choice (what the whole page is about, as Providers'
+		-- device is) and a way to ask again.
+		local function description(): string
+			local r = repo:get()
+			return if r then zeron.s("board.on_github", { repo = r }) else zeron.s("board.hint")
+		end
+		local function actions(): Node
+			return ui.row {
+				gap = "$space.1",
 				items = "center",
 				Dropdown {
 					value = project_value,
@@ -420,38 +403,35 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 						choose(id)
 					end,
 				},
-				Text {
-					function(): string
-						return repo:get() or zeron.s("board.hint")
+				IconButton {
+					icon = "refresh",
+					label = zeron.s("board.refresh"),
+					tone = "quiet",
+					disabled = function(): boolean
+						return repo:get() == nil
 					end,
-					style = "caption",
-					tone = "tertiary",
-					truncate = true,
-					grow = 1,
-					min_w = 0,
+					on_click = function()
+						load({ refresh = true, quiet = state:peek() == "ready" })
+					end,
 				},
-			},
-		}
+			}
 		end
 
-		-- The filters as the design system's tabs.
-		local function filters(): Node
+		-- The filters: the page's tabs.
+		local function filters(): any
 			local options = {}
 			for _, f in FILTER_KEYS do
 				table.insert(options, { value = f, label = zeron.s(`board.filters.{f}`) })
 			end
-			return ui.div {
-			id = "github-board-filters",
-			w_full = true,
-			Tabs {
+			return {
+				id = "github-board-filters",
 				value = filter_value,
 				options = options,
 				label = zeron.s("board.filter"),
 				on_change = function(f: any)
 					set_filter(f)
 				end,
-			},
-		}
+			}
 		end
 
 		-- The search: a quiet field heading the card, its words on the rows'
@@ -601,53 +581,21 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 			end, { w_full = true, grow = 1, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" })
 		end
 
-		-- (A page's gutters, tighter in a pane: ds/layout.)
-		local function gutter(): string
-			return layout.gutter(width:get())
-		end
-
 		local function board_page(): Node
-			return ui.column {
+			-- In the page's room as Settings' pages are in theirs: the same
+			-- top, gutters (tighter in a pane) and header. Its column is the
+			-- wide one: a board's rows carry status, checks and who at their
+			-- ends.
+			return Page.Frame {
 				class = "github-board",
-				w_full = true,
-				h_full = true,
-				-- (Its words can be selected and copied, as a chat's can.)
 				selectable = true,
-				on_resize = function(size)
-
-					-- (No width at all is no width: the page's column closing.)
-					local w = math.floor(size.w)
-					if w > 0 and w ~= width:peek() then
-						width:set(w)
-					end
-				end,
-				ui.scroll {
-					w_full = true,
-					h_full = true,
-					fade = { 16, 16 },
-					fade_overflow = true,
-					ui.column {
-						w_full = true,
-						min_h = "100%",
-						items = "center",
-						px = gutter,
-						-- (Its first words as far under the card's top as a
-						-- settings page's and a transcript's.)
-						pt = layout.TOP,
-						pb = "$space.6",
-						-- (A column the gallery's git pages' width at most, centred: on
-						-- a wide window the rows hold together rather than stretch.
-						-- Wider than a page that reads: a board's rows carry their
-						-- status, checks and who, at their ends.)
-						ui.column {
-							w_full = true,
-							max_w = layout.WIDE,
-							gap = "$space.5",
-							head(),
-							filters(),
-							list(),
-						},
-					},
+				Page.Page {
+					title = zeron.t("board.title"),
+					width = "wide",
+					description = description,
+					actions = actions(),
+					tabs = filters(),
+					list(),
 				},
 			}
 		end
