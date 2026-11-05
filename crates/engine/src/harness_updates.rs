@@ -193,6 +193,46 @@ impl UpdatePlan {
         }
     }
 
+    /// Whether an update someone asked for can go ahead while chats use this
+    /// CLI, with chats that are running keeping the version they started on and
+    /// new ones getting the new one. `Err` says why not, in words for the person.
+    ///
+    /// That takes an install that keeps the old version's files. A chat's process
+    /// lives for its whole session and goes on loading files from where it
+    /// started: lazily imported chunks, sidecars, helpers it spawns. Replacing
+    /// them under it gives it missing-module errors or a mix of two versions.
+    fn while_chats_run(&self, harness: HarnessId) -> Result<(), &'static str> {
+        const REPLACES_FILES: &str = "Updating replaces files running chats still load.";
+        match self {
+            // Zeron's own installers: a folder per version, and old ones go only
+            // when nothing is running from them.
+            UpdatePlan::Registry(_) | UpdatePlan::AntigravityArchive | UpdatePlan::CodexStandalone(_) => Ok(()),
+            UpdatePlan::Homebrew(_) => Err("Homebrew deletes the old version straight away."),
+            UpdatePlan::Package { .. } => Err(REPLACES_FILES),
+            UpdatePlan::MuseLauncher(_) => Err("Updating removes the version running chats use."),
+            UpdatePlan::Command { executable, .. } => {
+                let real = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.clone());
+                match harness {
+                    // The native install: `versions/<version>`, a symlink to the
+                    // newest, and cleanup that skips versions in use.
+                    HarnessId::ClaudeCode
+                        if real
+                            .parent()
+                            .and_then(Path::file_name)
+                            .is_some_and(|name| name == "versions") =>
+                    {
+                        Ok(())
+                    }
+                    // Chats run Cursor through its SDK, not this CLI.
+                    HarnessId::Cursor => Ok(()),
+                    HarnessId::Grok if !real.components().any(|part| part.as_os_str() == "node_modules") => Ok(()),
+                    HarnessId::Opencode => Err("Updating replaces the program in place."),
+                    _ => Err(REPLACES_FILES),
+                }
+            }
+        }
+    }
+
     /// The installation owner whose updater this plan runs, when another CLI
     /// can share it: a Homebrew prefix, or the npm global prefix an npm
     /// package's self-updater reinstalls into.
@@ -758,6 +798,7 @@ impl HarnessUpdateCoordinator {
                         can_apply: provider(harness).update_args.is_some(),
                         manual_command: Some(provider(harness).manual_command.to_string())
                             .filter(|command| !command.is_empty()),
+                        wait_reason: None,
                         compatibility: None,
                         held_back: None,
                     },
@@ -1554,24 +1595,39 @@ impl HarnessUpdateCoordinator {
                 },
             );
         }
-        self.inner.registry.begin_update(harness);
+        // An update someone asked for doesn't wait for chats when its installer
+        // leaves their files alone. It then doesn't drain them either: running
+        // chats and new ones carry on, and only new processes get the new
+        // version. Automatic updates still pick a quiet moment.
+        let wait_reason = match plan.while_chats_run(harness) {
+            Ok(()) if !automatic => None,
+            Ok(()) => Some("Waiting for running chats to finish, as automatic updates do.".to_owned()),
+            Err(why) => Some(format!("Waiting for running chats to finish. {why}")),
+        };
         let mut intent = UpdateIntentGuard {
             coordinator: self.clone(),
             harness,
             complete: false,
         };
-        self.mutate(harness, |status| {
-            status.phase = HarnessUpdatePhase::WaitingForIdle;
-            status.progress = None;
-            status.error = None;
-        });
-        let lease = tokio::select! {
-            _ = cancel.cancelled() => {
-                self.finish_cancelled(harness);
-                intent.finish();
-                return Err("update cancelled".into());
+        let lease = match wait_reason {
+            None => None,
+            Some(reason) => {
+                self.inner.registry.begin_update(harness);
+                self.mutate(harness, |status| {
+                    status.phase = HarnessUpdatePhase::WaitingForIdle;
+                    status.wait_reason = Some(reason);
+                    status.progress = None;
+                    status.error = None;
+                });
+                Some(tokio::select! {
+                    _ = cancel.cancelled() => {
+                        self.finish_cancelled(harness);
+                        intent.finish();
+                        return Err("update cancelled".into());
+                    }
+                    lease = self.inner.registry.update_lease(harness) => lease,
+                })
             }
-            lease = self.inner.registry.update_lease(harness) => lease,
         };
         if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
             drop(lease);
@@ -1580,7 +1636,9 @@ impl HarnessUpdateCoordinator {
             return Err("update cancelled".into());
         }
         self.mutate(harness, |status| {
-            status.phase = HarnessUpdatePhase::Preparing
+            status.phase = HarnessUpdatePhase::Preparing;
+            status.wait_reason = None;
+            status.error = None;
         });
         tokio::task::yield_now().await;
         if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
@@ -1607,7 +1665,7 @@ impl HarnessUpdateCoordinator {
         // CLIs update themselves (and get updated by hand) between checks. One
         // already at or past the release the check found must not be
         // "updated" to it: at best a no-op, for an in-place release switch a
-        // silent downgrade. Nothing runs it now: the exclusive lease is held.
+        // silent downgrade.
         //
         // The wait for the lease can be long. Everything that decides what
         // runs is read again here, with nothing able to change it under us
@@ -1829,12 +1887,16 @@ impl HarnessUpdateCoordinator {
             Err(error) => Err(format!("post-update verification failed: {error}")),
         };
         if harness == HarnessId::Antigravity && result.is_ok() {
-            // pruning runs under the update lease, so none of this engine's
-            // sessions can be launching the superseded server meanwhile.
-            let _ = tokio::task::spawn_blocking(
-                zeron_harness::acp::prune_superseded_antigravity_installs,
-            )
-            .await;
+            // Pruned only when nothing's using it, so none of this engine's
+            // sessions can be launching the superseded server meanwhile. If
+            // chats are running it waits for a later update.
+            let idle = lease.is_some() || self.inner.registry.try_update_lease(harness).is_some();
+            if idle {
+                let _ = tokio::task::spawn_blocking(
+                    zeron_harness::acp::prune_superseded_antigravity_installs,
+                )
+                .await;
+            }
         }
         drop(lease);
         let previous_phase = lock(&self.inner.cancellations)
@@ -2114,6 +2176,7 @@ impl HarnessUpdateCoordinator {
                 error: None,
                 can_apply: provider(harness).update_args.is_some(),
                 manual_command: None,
+                wait_reason: None,
                 compatibility: None,
                 held_back: None,
             })
@@ -2138,6 +2201,7 @@ impl HarnessUpdateCoordinator {
                     error: None,
                     can_apply: provider(harness).update_args.is_some(),
                     manual_command: None,
+                    wait_reason: None,
                     compatibility: None,
                     held_back: None,
                 });
@@ -2552,6 +2616,7 @@ impl HarnessUpdateCoordinator {
         let enabled = self.inner.registry.enabled_set().contains(&harness);
         self.mutate(harness, |status| {
             status.progress = None;
+            status.wait_reason = None;
             status.phase = if !enabled || status.policy == HarnessUpdatePolicy::Off {
                 HarnessUpdatePhase::Dormant
             } else {
@@ -3552,15 +3617,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// A Grok whose updater replaces files in place (under `node_modules`), so
+    /// that even an update someone asked for waits for running chats.
     fn automatic_fixture() -> (tempfile::TempDir, super::HarnessUpdateCoordinator) {
+        cli_fixture("node_modules")
+    }
+
+    /// A Grok installed in the folder `install`, inside the fixture's root, whose
+    /// update really changes what it reports.
+    fn cli_fixture(install: &str) -> (tempfile::TempDir, super::HarnessUpdateCoordinator) {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
-        let executable = temp.path().join("agent");
+        std::fs::create_dir_all(temp.path().join(install)).unwrap();
+        let executable = temp.path().join(install).join("agent");
         std::fs::write(temp.path().join("version"), "1.0.0\n").unwrap();
         std::fs::write(
             &executable,
             r#"#!/bin/sh
-root="$(dirname "$0")"
+root="$(dirname "$0")/.."
 case "$1:$2" in
   version:) cat "$root/version" ;;
   update:--check)
@@ -4591,10 +4665,6 @@ esac
         );
         assert_eq!(codex.upgrade_command(), "brew upgrade --cask codex");
         assert_eq!(codex.upgrade_args(), ["upgrade", "--cask", "codex"]);
-        assert!(super::can_apply_update(
-            HarnessId::Codex,
-            std::path::Path::new("/opt/homebrew/Caskroom/codex/0.159.0/bin/codex")
-        ));
 
         let devin = super::homebrew_package(std::path::Path::new(
             "/opt/homebrew/Caskroom/devin-cli/3000.10.21/bin/devin",
@@ -4978,8 +5048,9 @@ esac
     async fn a_reinstall_during_the_idle_wait_refuses_to_run_the_updater() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let temp = tempfile::tempdir().unwrap();
+        // Under `node_modules`: an installer that waits for running chats.
         let script = |dir: &str| {
-            let dir = temp.path().join(dir);
+            let dir = temp.path().join(dir).join("node_modules");
             std::fs::create_dir_all(&dir).unwrap();
             let target = dir.join("grok");
             std::fs::write(
@@ -5015,8 +5086,8 @@ esac
 
         let error = apply.await.unwrap().unwrap_err();
         assert!(error.contains("changed since it was checked"), "{error}");
-        assert!(!temp.path().join("first/updater-ran").exists());
-        assert!(!temp.path().join("second/updater-ran").exists());
+        assert!(!temp.path().join("first/node_modules/updater-ran").exists());
+        assert!(!temp.path().join("second/node_modules/updater-ran").exists());
         coordinator.shutdown().await;
     }
 
@@ -5146,6 +5217,136 @@ esac
         );
         let plan = super::update_plan(HarnessId::ClaudeCode, &node_global, plain).unwrap();
         assert!(matches!(plan, super::UpdatePlan::Package { .. }), "{}", plan.identity());
+    }
+
+    /// A chat is running, and someone asks for the update: an installer that
+    /// keeps old files goes ahead now, without draining or holding up anyone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_update_someone_asked_for_goes_ahead_under_a_running_chat() {
+        let (temp, coordinator) = cli_fixture("standalone");
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        assert_eq!(coordinator.status(HarnessId::Grok).phase, HarnessUpdatePhase::Available);
+        let running = coordinator.inner.registry.execution_lease(HarnessId::Grok).await;
+
+        let version = tokio::time::timeout(Duration::from_secs(10), coordinator.apply(HarnessId::Grok))
+            .await
+            .expect("it must not wait for the running chat")
+            .unwrap();
+        assert_eq!(version, "2.0.0");
+        assert_eq!(std::fs::read_to_string(temp.path().join("version")).unwrap(), "2.0.0\n");
+        assert_eq!(coordinator.status(HarnessId::Grok).phase, HarnessUpdatePhase::Updated);
+        assert_eq!(coordinator.status(HarnessId::Grok).wait_reason, None);
+        // The running chat was never told to wind down, and new ones can start.
+        assert!(!coordinator.inner.registry.update_pending(HarnessId::Grok));
+        let another = tokio::time::timeout(
+            Duration::from_secs(2),
+            coordinator.inner.registry.execution_lease(HarnessId::Grok),
+        )
+        .await
+        .expect("a new chat must not be held up");
+        drop((running, another));
+        coordinator.shutdown().await;
+    }
+
+    /// Automatic updates pick a quiet moment, whatever the installer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_automatic_update_still_waits_for_a_quiet_moment() {
+        use zeron_proto::HarnessUpdatePolicy;
+        let (temp, coordinator) = cli_fixture("standalone");
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let running = coordinator.inner.registry.execution_lease(HarnessId::Grok).await;
+        coordinator.set_policy(HarnessId::Grok, HarnessUpdatePolicy::AutoWhenIdle);
+        wait_for_phase(&coordinator, HarnessId::Grok, HarnessUpdatePhase::WaitingForIdle).await;
+        let reason = coordinator.status(HarnessId::Grok).wait_reason.unwrap();
+        assert!(reason.contains("automatic"), "{reason}");
+        assert_eq!(std::fs::read_to_string(temp.path().join("version")).unwrap(), "1.0.0\n");
+        drop(running);
+        wait_for_phase(&coordinator, HarnessId::Grok, HarnessUpdatePhase::Updated).await;
+        coordinator.shutdown().await;
+    }
+
+    /// An installer that replaces files waits even when asked, and its row says why.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_installer_that_replaces_files_waits_and_says_why() {
+        let (temp, coordinator) = cli_fixture("node_modules");
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let running = coordinator.inner.registry.execution_lease(HarnessId::Grok).await;
+        let apply = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.apply(HarnessId::Grok).await })
+        };
+        wait_for_phase(&coordinator, HarnessId::Grok, HarnessUpdatePhase::WaitingForIdle).await;
+        let reason = coordinator.status(HarnessId::Grok).wait_reason.unwrap();
+        assert!(reason.contains("replaces files running chats still load"), "{reason}");
+        assert_eq!(std::fs::read_to_string(temp.path().join("version")).unwrap(), "1.0.0\n");
+        drop(running);
+        assert_eq!(apply.await.unwrap().unwrap(), "2.0.0");
+        assert_eq!(coordinator.status(HarnessId::Grok).wait_reason, None);
+        coordinator.shutdown().await;
+    }
+
+    /// The installers' verdicts, from what they were found to do to a running
+    /// process's files.
+    #[cfg(unix)]
+    #[test]
+    fn which_installers_can_go_ahead_while_chats_run() {
+        use super::UpdatePlan;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = |path: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap();
+            path
+        };
+        let command = |path: &std::path::Path| UpdatePlan::Command {
+            executable: path.to_path_buf(),
+            args: &["update"],
+        };
+        let claude_native = file(".local/share/claude/versions/2.1.0");
+        let claude_other = file("somewhere/claude");
+        let grok_standalone = file(".grok/bin/grok");
+        let grok_npm = file("lib/node_modules/@xai-official/grok/bin/grok");
+        let plain = file("bin/tool");
+        let ok = |plan: UpdatePlan, harness| plan.while_chats_run(harness).is_ok();
+
+        assert!(ok(command(&claude_native), HarnessId::ClaudeCode));
+        assert!(!ok(command(&claude_other), HarnessId::ClaudeCode));
+        assert!(ok(command(&plain), HarnessId::Cursor));
+        assert!(ok(command(&grok_standalone), HarnessId::Grok));
+        assert!(!ok(command(&grok_npm), HarnessId::Grok));
+        for harness in [HarnessId::Pi, HarnessId::Hermes, HarnessId::Opencode] {
+            assert!(!ok(command(&plain), harness), "{harness:?}");
+        }
+        assert!(ok(UpdatePlan::AntigravityArchive, HarnessId::Antigravity));
+        assert!(ok(
+            UpdatePlan::CodexStandalone(super::CodexStandaloneInstall {
+                root: root.clone(),
+                target: "aarch64-apple-darwin".into(),
+            }),
+            HarnessId::Codex
+        ));
+        assert!(!ok(
+            UpdatePlan::Homebrew(super::HomebrewPackage {
+                brew: root.join("bin/brew"),
+                cask: true,
+                token: "codex".into(),
+            }),
+            HarnessId::Codex
+        ));
+        assert!(!ok(
+            UpdatePlan::Package {
+                owner: super::ownership::PackageOwner::Bun,
+                launcher: plain.clone(),
+                package: "@anthropic-ai/claude-code",
+                tag: "latest".into(),
+            },
+            HarnessId::ClaudeCode
+        ));
+        assert!(!ok(UpdatePlan::MuseLauncher(plain.clone()), HarnessId::Muse));
     }
 
     #[test]
