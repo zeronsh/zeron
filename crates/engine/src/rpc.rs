@@ -3575,12 +3575,16 @@ impl RpcService for EngineRpc {
             }
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
             methods::APPLY_UPDATE => {
-                let version = self
+                let applied = self
                     .updater()?
                     .apply()
                     .await
                     .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
-                RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
+                RpcReply::value(&serde_json::json!({
+                    "ok": true,
+                    "version": applied.version,
+                    "updateId": applied.update_id,
+                }))
             }
             methods::WATCH_HARNESS_UPDATES => {
                 let coordinator = self.harness_updates()?;

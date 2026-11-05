@@ -12,9 +12,8 @@
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
 //!   installer and the Linux tarball's `install.sh`): download the headless
-//!   tarball into a new versioned dir, flip the symlink, then restart the
-//!   service (daemon) or relaunch (desktop). Same flow the installer script
-//!   performs, natively.
+//!   tarball into a new versioned dir, then restart into a trial of it that
+//!   moves the symlink only once it has proved it's ready ([`transaction`]).
 //! - **MacApp** (running out of an app bundle): download the app tarball, swap the
 //!   bundle directory, relaunch. Driven by the UI.
 //! - **WindowsPortable** (the Windows installer or portable zip — both carry
@@ -44,7 +43,9 @@ pub mod windows;
 
 pub mod channel;
 pub mod desktop;
+pub mod transaction;
 pub use channel::Channel;
+pub use transaction::{UpdateReport, UpdateState};
 
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {
@@ -1123,10 +1124,23 @@ pub fn running_as_installed_service() -> bool {
 }
 
 fn in_zeron_service_cgroup(cgroups: &str) -> bool {
+    in_service_cgroup(cgroups, &service_unit())
+}
+
+fn in_service_cgroup(cgroups: &str, unit: &str) -> bool {
     cgroups
         .lines()
         .filter_map(|line| line.rsplit(':').next())
-        .any(|path| path.split('/').any(|part| part == "zeron.service"))
+        .any(|path| path.split('/').any(|part| part == unit))
+}
+
+/// The systemd unit this engine runs as. `ZERON_SERVICE_UNIT` names another, so
+/// a test install beside a real one can never restart the real one.
+pub fn service_unit() -> String {
+    std::env::var("ZERON_SERVICE_UNIT")
+        .ok()
+        .filter(|unit| !unit.trim().is_empty())
+        .unwrap_or_else(|| "zeron.service".to_owned())
 }
 
 /// Restart the installed engine service (the same units `zeron daemon` and the
@@ -1146,10 +1160,28 @@ pub fn restart_service() -> anyhow::Result<()> {
             &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.app")],
         )
     } else {
-        run(
-            "systemctl",
-            &["--user", "--no-block", "restart", "zeron.service"],
-        )
+        ask_systemd_to_restart(&service_unit())
+    }
+}
+
+/// Called from inside the unit, `systemctl` is in the cgroup being stopped and can
+/// be killed by the very restart it asked for. Killed isn't refused: only an exit
+/// status says it didn't work.
+fn ask_systemd_to_restart(unit: &str) -> anyhow::Result<()> {
+    let output = std::process::Command::new("systemctl")
+        .args(["--user", "--no-block", "restart", unit])
+        .output()
+        .context("running systemctl")?;
+    restart_outcome(output.status.code(), &output.stderr)
+}
+
+fn restart_outcome(code: Option<i32>, stderr: &[u8]) -> anyhow::Result<()> {
+    match code {
+        None | Some(0) => Ok(()),
+        Some(code) => bail!(
+            "systemctl restart failed ({code}): {}",
+            String::from_utf8_lossy(stderr).trim()
+        ),
     }
 }
 
@@ -1342,6 +1374,12 @@ pub struct UpdateStatus {
     /// What to run on the device instead, when there's a command for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_command: Option<String>,
+    /// The latest update asked of this engine and how it went. Match its `id`
+    /// with `ApplyUpdate`'s `updateId`: reconnecting doesn't say whether the
+    /// update worked or went back. Absent from older engines, which only have
+    /// `currentVersion` to go by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateReport>,
 }
 
 impl UpdateStatus {
@@ -1359,6 +1397,7 @@ impl UpdateStatus {
             can_apply_remotely: None,
             cannot_apply_reason: None,
             manual_command: None,
+            update: None,
         }
     }
 
@@ -1450,7 +1489,10 @@ impl Updater {
         };
         let initial = UpdateStatus::initial(&version);
         let initial = match role {
-            Role::Engine { .. } => initial.with_ability(UpdateAbility::current()),
+            Role::Engine { .. } => UpdateStatus {
+                update: channel::data_dir().and_then(transaction::report),
+                ..initial.with_ability(UpdateAbility::current())
+            },
             Role::Desktop => initial,
         };
         let (status_tx, _) = watch::channel(initial);
@@ -1570,6 +1612,8 @@ impl Updater {
                             && matches!(*self.role, Role::Engine { .. })
                             && auto_update_enabled()
                             && let InstallKind::Managed { .. } = detect_install()
+                            && UpdateAbility::current().can_apply_remotely
+                            && !self.went_back_from_latest()
                         {
                             self.auto_apply_when_idle().await;
                         }
@@ -1621,8 +1665,8 @@ impl Updater {
             // the newest release. Re-check quiescence immediately before the
             // symlink swap: work can begin while that network/disk I/O runs.
             match self.apply_inner(true).await {
-                Ok(Some(version)) => {
-                    tracing::info!(%version, "auto-update applied; service restarting");
+                Ok(Some(applied)) => {
+                    tracing::info!(version = %applied.version, "auto-update accepted; service restarting");
                     return;
                 }
                 Ok(None) => {
@@ -1671,9 +1715,13 @@ impl Updater {
             can_apply_remotely: None,
             cannot_apply_reason: None,
             manual_command: None,
+            update: None,
         };
         let status = match &*self.role {
-            Role::Engine { .. } => status.with_ability(UpdateAbility::current()),
+            Role::Engine { .. } => UpdateStatus {
+                update: channel::data_dir().and_then(transaction::report),
+                ..status.with_ability(UpdateAbility::current())
+            },
             Role::Desktop => status,
         };
         if status.update_available {
@@ -1702,10 +1750,33 @@ impl Updater {
         }
     }
 
-    /// Stage + apply the newest release on THIS device (managed installs only),
-    /// then restart the service after a short delay so the caller's RPC reply
-    /// flushes before systemd/launchd kills this process.
-    pub async fn apply(&self) -> anyhow::Result<String> {
+    /// The latest release is one this device already tried and went back from.
+    /// Trying again on a timer would cut running chats off every hour for the
+    /// same result; a person asking still can.
+    fn went_back_from_latest(&self) -> bool {
+        let latest = self.status_tx.borrow().latest_version.clone();
+        channel::data_dir()
+            .and_then(transaction::read)
+            .is_some_and(|last| {
+                last.phase == transaction::Phase::RolledBack
+                    && latest.as_deref() == Some(last.target.as_str())
+            })
+    }
+
+    /// Publish the update's latest state, after something settled it.
+    pub fn refresh_update_report(&self) {
+        let update = channel::data_dir().and_then(transaction::report);
+        self.status_tx.send_modify(|status| {
+            status.update = update;
+            status.current_version = self.version.to_string();
+        });
+    }
+
+    /// Stage the newest release on THIS device and restart into a trial of it.
+    /// The answer goes out first: the restart waits a moment so that it can.
+    /// What became of the update is `UpdateStatus`'s `update`, under the id
+    /// answered here.
+    pub async fn apply(&self) -> anyhow::Result<AppliedUpdate> {
         self.apply_inner(false)
             .await?
             .ok_or_else(|| anyhow::anyhow!("update became busy before apply"))
@@ -1714,7 +1785,7 @@ impl Updater {
     /// `require_quiescent` is used by automatic updates. It deliberately checks
     /// after all network and staging I/O and directly before the destructive
     /// swap/restart boundary; `None` tells the caller to wait and try again.
-    async fn apply_inner(&self, require_quiescent: bool) -> anyhow::Result<Option<String>> {
+    async fn apply_inner(&self, require_quiescent: bool) -> anyhow::Result<Option<AppliedUpdate>> {
         let ability = UpdateAbility::current();
         let InstallKind::Managed { app_root } = detect_install() else {
             bail!("{}", ability.cannot_apply_reason.unwrap_or_default());
@@ -1722,23 +1793,103 @@ impl Updater {
         if !ability.can_apply_remotely {
             bail!("{}", ability.cannot_apply_reason.unwrap_or_default());
         }
+        let data_dir = channel::data_dir()
+            .context("this engine has no data directory")?
+            .to_path_buf();
+        if transaction::read(&data_dir).is_some_and(|last| last.in_progress()) {
+            bail!("An update is already in progress on this device.");
+        }
         let manifest = fetch_latest(&self.edge_url).await?;
         if !version_newer(&manifest.version, current_version()) {
             bail!("already up to date ({})", current_version());
         }
-        stage_headless(&self.edge_url, &manifest, &app_root).await?;
+        prepare_install(&self.edge_url, &manifest, &app_root, &data_dir).await?;
         if require_quiescent && !self.quiescent_now() {
             return Ok(None);
         }
-        apply_headless(&app_root, &manifest.version)?;
-        tokio::spawn(async {
+        let installed = installed_version(&InstallKind::Managed {
+            app_root: app_root.clone(),
+        })
+        .unwrap_or_else(|| current_version().to_owned());
+        // Already on disk as `current`: there's nothing to try out, only to
+        // restart into.
+        let update_id = if installed == manifest.version {
+            None
+        } else {
+            let requested = transaction::request(
+                &data_dir,
+                &app_root,
+                &installed,
+                &manifest.version,
+                if MANAGED_RESTART.get().is_some() {
+                    transaction::RestartMode::Relaunch
+                } else {
+                    transaction::RestartMode::Service { unit: service_unit() }
+                },
+            )?;
+            self.refresh_update_report();
+            Some(requested.id)
+        };
+        let updater = self.clone();
+        let restarting = update_id.clone();
+        tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(800)).await;
             if let Err(err) = restart_service() {
                 tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
+                if let (Some(id), Some(data_dir)) = (&restarting, channel::data_dir()) {
+                    transaction::fail_request(
+                        data_dir,
+                        id,
+                        "Zeron couldn't restart to install the update, so nothing changed.".into(),
+                    );
+                    updater.refresh_update_report();
+                }
             }
         });
-        Ok(Some(manifest.version))
+        Ok(Some(AppliedUpdate {
+            version: manifest.version,
+            update_id,
+        }))
     }
+}
+
+/// What `ApplyUpdate` answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedUpdate {
+    pub version: String,
+    /// `UpdateStatus`'s `update.id`, to find out how it went. Absent when the
+    /// version was already installed and only needed a restart.
+    pub update_id: Option<String>,
+}
+
+/// Everything before an update has to stop anything: refuse if there's no room,
+/// then download, verify and unpack the release beside the running one.
+pub async fn prepare_install(
+    edge_url: &str,
+    manifest: &Manifest,
+    app_root: &Path,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    let download = if app_root.join(&manifest.version).join("zeron").exists() {
+        0
+    } else {
+        artifact_size(edge_url, manifest)
+            .await
+            .unwrap_or(transaction::UNKNOWN_ARTIFACT_BYTES)
+    };
+    if let Err(why) = transaction::ensure_room(data_dir, app_root, download) {
+        bail!(why);
+    }
+    stage_headless(edge_url, manifest, app_root).await?;
+    Ok(())
+}
+
+/// What the feed says the release's download weighs, if it says.
+async fn artifact_size(edge_url: &str, manifest: &Manifest) -> Option<u64> {
+    let base = manifest.channel.base(&release_base(edge_url).ok()?);
+    let url = format!("{base}/{}", headless_artifact(&manifest.version));
+    let response = http_client().ok()?.head(&url).send().await.ok()?;
+    response.status().is_success().then(|| response.content_length())?
 }
 
 /// Wall-clock check deadlines with failure backoff.
@@ -1854,6 +2005,24 @@ mod tests {
         InstallKind::Managed {
             app_root: PathBuf::from("/home/me/.zeron/app"),
         }
+    }
+
+    /// A test install beside a real one names its own unit, and then the real
+    /// one's cgroup isn't its own.
+    #[test]
+    fn the_service_is_recognised_by_its_own_unit_only() {
+        let cgroups = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zeron.service\n";
+        assert!(in_service_cgroup(cgroups, "zeron.service"));
+        assert!(!in_service_cgroup(cgroups, "zeron-test.service"));
+    }
+
+    /// Inside the unit, the restart kills the `systemctl` that asked for it.
+    #[test]
+    fn a_restart_that_kills_its_own_systemctl_still_counts() {
+        assert!(restart_outcome(None, b"").is_ok());
+        assert!(restart_outcome(Some(0), b"").is_ok());
+        let refused = restart_outcome(Some(1), b"Unit not found.").unwrap_err();
+        assert!(refused.to_string().contains("Unit not found."), "{refused}");
     }
 
     #[test]
