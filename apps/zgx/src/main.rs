@@ -1129,8 +1129,10 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
         glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
-        // (Windows: the caption buttons keep to the title row at any zoom.)
-        caption_height: Some(32.),
+        // (Windows: the caption buttons keep to the title row at any zoom,
+        // the bar's whole 38, as Zeron's: shell.rs
+        // `render_windows_caption_controls`, `Theme::TITLEBAR_HEIGHT`.)
+        caption_height: Some(38.),
         ..Default::default()
     }
 }
