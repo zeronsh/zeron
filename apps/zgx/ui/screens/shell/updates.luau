@@ -41,6 +41,24 @@ local MOST_ROWS_H = 340
 local agents = ui.shared("updates", { rows = {} })
 local about = ui.shared("about", { app_version = "", available = false })
 
+-- A restart to update asked for, kept across it: this Mac's Zeron should come
+-- back on another version, and if it doesn't, it says so rather than offering
+-- the same update as though nothing had happened.
+local restarted_from = ui.persist("shell_update_restarted_from", nil :: string?)
+local asked_this_run = false
+ui.effect(function()
+	local from = restarted_from:get()
+	local a: any = about:get()
+	local have = if a then a.app_version else ""
+	if from == nil or asked_this_run or have == nil or have == "" then
+		return
+	end
+	restarted_from:set(nil)
+	if have == from then
+		toast.show { title = locale.s("shell.updates.not_applied"), body = locale.s("shell.updates.not_applied_body"), tone = "danger" }
+	end
+end)
+
 -- This Mac's Zeron, as About & updates has it: nothing unless it can update
 -- itself and a release is there for it.
 local function zeron_here(): any?
@@ -171,8 +189,8 @@ local function name_of(r: any): string
 	return if r.kind == "zeron" then "Zeron" else r.name or ""
 end
 
--- Running chats on its device: updating its Zeron restarts its engine, and
--- ends them.
+-- Running chats on its device: updating its Zeron restarts its engine, which
+-- stops them, and they carry on after.
 local function running_on(device: string, here: boolean): number
 	local n = 0
 	for _, c in sessions.now:get().chats or {} do
@@ -202,6 +220,10 @@ local function line_of(r: any): string
 	elseif p == "verifying" then
 		return locale.s("shell.updates.verifying")
 	elseif p == "ready" then
+		local n = running_on("", true)
+		if n > 0 then
+			return locale.s("shell.updates.stops_chats", { n = n })
+		end
 		return locale.s("shell.updates.ready", { version = r.latest or "" })
 	elseif p == "updated" then
 		return if r.installed
@@ -213,6 +235,9 @@ local function line_of(r: any): string
 		elseif r.latest then locale.s("shell.updates.version", { version = r.latest })
 		else locale.s("shell.updates.available")
 	if r.kind == "zeron" and not r.here then
+		if r.why_not then
+			return r.why_not
+		end
 		if r.action == nil then
 			return locale.s("shell.updates.update_there", { versions = versions })
 		end
@@ -235,6 +260,8 @@ local function label_of(r: any): string
 		return locale.s("shell.updates.restart")
 	elseif a == "steps" then
 		return locale.s("shell.updates.view_steps")
+	elseif a == "copy" then
+		return locale.s("shell.updates.copy_command")
 	elseif a == "cancel" then
 		return locale.s("common.cancel")
 	elseif a == "retry" then
@@ -256,6 +283,11 @@ end
 -- What pressing its action does.
 local function act(r: any, close: () -> ())
 	local a = r.action
+	if a == "copy" then
+		ui.clipboard.write(r.manual_command or "")
+		toast.show { title = locale.s("shell.updates.copied", { device = r.device_name }) }
+		return
+	end
 	if a == "steps" then
 		close()
 		pcall(ui.invoke, "agents.target", if r.here then nil else r.device)
@@ -264,7 +296,14 @@ local function act(r: any, close: () -> ())
 	end
 	local name = name_of(r)
 	if r.kind == "zeron" and r.here then
+		if a == "restart" then
+			local about_now: any = about:peek()
+			asked_this_run = true
+			restarted_from:set(about_now and about_now.app_version)
+		end
 		ui.call("about.apply", {}):after(function() end, function(err: any)
+			asked_this_run = false
+			restarted_from:set(nil)
 			failed(name, err)
 		end)
 	elseif r.kind == "zeron" then
@@ -282,7 +321,7 @@ end
 -- to do (a restart to finish; a list of one).
 local function action_button(r: any, close: () -> ()): Node
 	local primary = r.action == "restart" or (#rows:peek() == 1 and (r.action == "update" or r.action == "retry"))
-	local enabled = r.connected or r.action == "steps"
+	local enabled = r.connected or r.action == "steps" or r.action == "copy"
 	return ui.button {
 		id = `update-action-{r.id}`,
 		label = `{label_of(r)} · {name_of(r)}`,
@@ -370,22 +409,117 @@ local function signature(): string
 	return table.concat(parts, "\n")
 end
 
-local function update_all()
-	for _, r in rows:peek() do
-		if r.kind == "agent" and r.action == "update" and r.connected then
-			act(r, function() end)
+-- What Update all would do, now: what it updates, what running chats that
+-- stops, and what it can't reach and why.
+local function plan(list: { any }): any
+	local out: any = { agents = {}, zerons = {}, here = nil, chats = 0, skipped = {} }
+	for _, r in list do
+		local go = r.connected and r.action == "update"
+		if go and r.kind == "agent" then
+			table.insert(out.agents, r)
+		elseif go and r.here then
+			out.here = r
+		elseif go then
+			table.insert(out.zerons, r)
+			out.chats += running_on(r.device, false)
+		elseif r.phase == "available" and not r.connected then
+			table.insert(out.skipped, { r = r, why = locale.s("shell.updates.offline") })
+		elseif r.phase == "available" and r.action == "steps" then
+			table.insert(out.skipped, { r = r, why = locale.s("shell.updates.manual") })
+		elseif r.phase == "available" and r.kind == "zeron" and (r.action == nil or r.action == "copy") then
+			table.insert(out.skipped, { r = r, why = r.why_not or locale.s("shell.updates.on_that_device") })
 		end
+	end
+	return out
+end
+
+-- Everything it can do, in the order that strands nothing: agents, other
+-- devices' Zeron, then this Mac's, which ends by asking to restart.
+local function update_all()
+	local p = plan(rows:peek())
+	local function close() end
+	for _, r in p.agents do
+		act(r, close)
+	end
+	for _, r in p.zerons do
+		act(r, close)
+	end
+	if p.here then
+		act(p.here, close)
 	end
 end
 
 local function can_update_all(): boolean
-	local n = 0
-	for _, r in rows:get() do
-		if r.kind == "agent" and r.action == "update" and r.connected then
-			n += 1
-		end
+	local p = plan(rows:get())
+	return #p.agents + #p.zerons + (if p.here then 1 else 0) > 1
+end
+
+-- The panel's second look at Update all: what it will do, before it does.
+local function confirm(confirming: any): Node
+	local p = plan(rows:peek())
+	local function fact(words: string, ink: string?): Node
+		return ui.text { words, literal = true, wrap = true, w_full = true, text_size = "$font.size.sm", color = ink or "$text.secondary" }
 	end
-	return n > 1
+	local parts: { any } = { id = "updates-confirm", w_full = true, px = "$space.3", pb = "$space.3", gap = "$space.2" }
+	if #p.agents > 0 then
+		table.insert(parts, fact(locale.s("shell.updates.plan_agents", { n = #p.agents })))
+	end
+	if #p.zerons > 0 then
+		table.insert(parts, fact(locale.s("shell.updates.plan_zerons", { n = #p.zerons })))
+	end
+	if p.here then
+		table.insert(parts, fact(locale.s("shell.updates.plan_here")))
+	end
+	if p.chats > 0 then
+		table.insert(parts, fact(locale.s("shell.updates.plan_chats", { n = p.chats }), "$text.primary"))
+	end
+	for i, s in p.skipped do
+		if i > 3 then
+			table.insert(parts, fact(locale.s("shell.updates.plan_skips_more", { n = #p.skipped - 3 }), "$text.tertiary"))
+			break
+		end
+		table.insert(parts, fact(locale.s("shell.updates.plan_skip", { name = name_of(s.r), device = s.r.device_name, why = s.why }), "$text.tertiary"))
+	end
+	table.insert(parts, ui.row {
+		w_full = true,
+		pt = "$space.1",
+		gap = "$space.2",
+		justify = "end",
+		ui.button {
+			id = "updates-confirm-cancel",
+			label = ui.t("common.cancel"),
+			h = ACTION_H,
+			px = ui.raw(10, "an action's inset"),
+			items = "center",
+			rounded = "$radius.full",
+			bg = "$hover",
+			color = "$text.secondary",
+			hover = { color = "$text.primary" },
+			cursor = "pointer",
+			on_click = function()
+				confirming:set(false)
+			end,
+			ui.text { ui.t("common.cancel"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
+		},
+		ui.button {
+			id = "updates-confirm-go",
+			label = ui.t("shell.updates.update_all"),
+			h = ACTION_H,
+			px = ui.raw(10, "an action's inset"),
+			items = "center",
+			rounded = "$radius.full",
+			bg = "$text.primary",
+			color = "$background",
+			hover = { opacity = 0.85 },
+			cursor = "pointer",
+			on_click = function()
+				confirming:set(false)
+				update_all()
+			end,
+			ui.text { ui.t("shell.updates.update_all"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
+		},
+	})
+	return ui.column(parts)
 end
 
 local function panel(open: any, anchor: any): Node
@@ -399,6 +533,7 @@ local function panel(open: any, anchor: any): Node
 		placement = { side = "bottom", align = "end", offset = 6 },
 		w = WIDTH,
 		build = function()
+			local confirming = ui.use_state(false)
 			return ui.column {
 				w_full = true,
 				ui.row {
@@ -420,13 +555,28 @@ local function panel(open: any, anchor: any): Node
 							rounded = "$radius.full",
 							bg = "$text.primary",
 							color = "$background",
+							-- (Out of the way while its summary's up, but still there: a
+							-- press on what's gone reads as a press outside the panel.)
+							opacity = function(): number
+								return if confirming:get() then 0 else 1
+							end,
+							pointer_events = function(): any
+								return if confirming:get() then "none" else nil
+							end,
 							hover = { opacity = 0.85 },
 							cursor = "pointer",
-							on_click = update_all,
+							on_click = function()
+								confirming:set(true)
+							end,
 							ui.text { ui.t("shell.updates.update_all"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
 						}
 					),
 				},
+				ui.presence(function(): string
+					return if confirming:get() then "confirm" else ""
+				end, function(which: string): Node
+					return if which == "confirm" then confirm(confirming) else ui.div { w_full = true, h = 0 }
+				end, { w_full = true }),
 				ui.scroll {
 					w_full = true,
 					max_h = MOST_ROWS_H,

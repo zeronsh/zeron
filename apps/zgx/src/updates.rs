@@ -14,7 +14,9 @@
 //! A device gone quiet keeps its last rows, marked not `connected`: its
 //! actions wait for it. Zeron on another device updates from here when its
 //! engine manages its own install (`ApplyUpdate`, a tarball's or the
-//! installer's, on Linux); elsewhere the app there does (`can_apply` false).
+//! installer's, on Linux); elsewhere the app there does (no `action`). One that
+//! doesn't come back on a new version in time says so: a reconnect alone isn't
+//! proof it updated.
 
 use std::{
     cell::{Cell, RefCell},
@@ -34,6 +36,8 @@ use crate::engine::{self, rpc::{Rpc, Watch}};
 /// restarts, and says its new version once it's back.
 const ZERON_UPDATE_PATIENCE: Duration = Duration::from_secs(180);
 const RETRY_MOST_SECS: u64 = 30;
+/// A Zeron asked to update that hasn't come back on a new version.
+const NOT_APPLIED: &str = "It didn't come back on the new version";
 
 /// Zeron on another device, as `UpdateStatus` says.
 #[derive(Clone, Default, PartialEq)]
@@ -41,6 +45,11 @@ struct Zeron {
     current: String,
     latest: Option<String>,
     available: bool,
+    /// Whether it says it can update from here (nothing: an engine too old
+    /// to say), why not in its words, and what to run there instead.
+    can_apply: Option<bool>,
+    why_not: Option<String>,
+    manual_command: Option<String>,
 }
 
 #[derive(Default)]
@@ -245,6 +254,9 @@ impl Updates {
             current: item["currentVersion"].as_str().unwrap_or_default().to_owned(),
             latest: item["latestVersion"].as_str().map(Into::into),
             available: usable && item["updateAvailable"].as_bool().unwrap_or(false),
+            can_apply: item["canApplyRemotely"].as_bool(),
+            why_not: item["cannotApplyReason"].as_str().map(Into::into),
+            manual_command: item["manualCommand"].as_str().map(Into::into),
         };
         if let Some(d) = self.devices.borrow_mut().get_mut(id) {
             if d.updating_from.as_deref().is_some_and(|from| from != zeron.current) {
@@ -305,7 +317,10 @@ impl Updates {
                 .borrow_mut()
                 .get_mut(&device)
                 .filter(|d| d.updating_from.as_deref() == Some(from.as_str()))
-                .map(|d| d.updating_from = None)
+                .map(|d| {
+                    d.updating_from = None;
+                    d.zeron_error = Some(NOT_APPLIED.into());
+                })
                 .is_some();
             if late {
                 me.publish();
@@ -328,8 +343,11 @@ impl Updates {
         let mut order: Vec<(&String, &Device)> = devices.iter().collect();
         order.sort_by_key(|(id, d)| (Some(id.as_str()) != here.as_deref(), d.name.clone()));
         let mut rows = Vec::new();
+        // (This Mac's Zeron is the app's own, whatever its engine says.)
         for (id, d) in &order {
-            rows.extend(zeron_row(id, d));
+            if Some(id.as_str()) != here.as_deref() {
+                rows.extend(zeron_row(id, d));
+            }
         }
         for (id, d) in &order {
             let is_here = Some(id.as_str()) == here.as_deref();
@@ -355,8 +373,9 @@ fn zeron_row(id: &str, d: &Device) -> Option<Value> {
     if !updating && !zeron.available && d.zeron_error.is_none() {
         return None;
     }
-    // (`ApplyUpdate` updates a managed install: there, its tarball's.)
-    let can_apply = d.platform == "linux";
+    // As it says; an engine too old to say is tried where it can be (a Linux
+    // service can, and says why not if it can't).
+    let can_apply = zeron.can_apply.unwrap_or(d.platform == "linux");
     let phase = if updating {
         "installing"
     } else if d.zeron_error.is_some() {
@@ -383,6 +402,15 @@ fn zeron_row(id: &str, d: &Device) -> Option<Value> {
     }
     if !updating && can_apply {
         fields.push(("action", Value::from(if d.zeron_error.is_some() { "retry" } else { "update" })));
+    }
+    if !updating && !can_apply {
+        if let Some(why) = &zeron.why_not {
+            fields.push(("why_not", Value::from(why.as_str())));
+        }
+        if let Some(command) = &zeron.manual_command {
+            fields.push(("manual_command", Value::from(command.as_str())));
+            fields.push(("action", Value::from("copy")));
+        }
     }
     Some(Value::record(fields))
 }
@@ -521,7 +549,7 @@ mod tests {
     fn another_device_s_zeron_shows_only_with_an_update_and_updates_on_linux() {
         let mut d = Device { name: "metal".into(), platform: "linux".into(), online: true, connected: true, ..Device::default() };
         assert!(zeron_row("m", &d).is_none());
-        d.zeron = Some(Zeron { current: "1".into(), latest: Some("2".into()), available: false });
+        d.zeron = Some(Zeron { current: "1".into(), latest: Some("2".into()), ..Zeron::default() });
         assert!(zeron_row("m", &d).is_none());
         d.zeron.as_mut().unwrap().available = true;
         let row = zeron_row("m", &d).unwrap();
@@ -530,6 +558,18 @@ mod tests {
         // A Mac's or a PC's app updates itself, there.
         d.platform = "macos".into();
         assert!(zeron_row("m", &d).unwrap().field("action").is_none());
+        // What it says of itself comes first.
+        d.zeron.as_mut().unwrap().can_apply = Some(true);
+        assert_eq!(zeron_row("m", &d).unwrap().field("action").map(text).as_deref(), Some("update"));
+        d.platform = "linux".into();
+        let z = d.zeron.as_mut().unwrap();
+        z.can_apply = Some(false);
+        z.why_not = Some("It was started by hand".into());
+        z.manual_command = Some("zeron update".into());
+        let row = zeron_row("m", &d).unwrap();
+        assert_eq!(row.field("action").map(text).as_deref(), Some("copy"));
+        assert_eq!(row.field("why_not").map(text).as_deref(), Some("It was started by hand"));
+        d.zeron.as_mut().unwrap().can_apply = None;
         // Being updated: nothing to press.
         d.platform = "linux".into();
         d.updating_from = Some("1".into());

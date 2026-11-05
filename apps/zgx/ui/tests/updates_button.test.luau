@@ -103,3 +103,48 @@ test("another device's Zeron says when it updates there, and what stopping costs
 	expect(app:has('"1.0 → 1.1 · update from that device"')).to_be(true)
 	expect(app:has('role:button "Update · Zeron"')).to_be(true)
 end)
+
+test("Update all says what it will do first, and what it can't reach", function()
+	local app = open({
+		row("here", "Claude Code", "claude-code", "update"),
+		row("metal", "Grok", "grok", "update"),
+		row("metal", "Codex", "codex", "steps"),
+		row("away", "Pi", "pi", "update", false),
+	})
+	app:click("#updates-button")
+	app:frames(10)
+	app:click("#updates-all")
+	app:frames(10)
+	expect(app:has("#updates-confirm")).to_be(true)
+	expect(app:has('"Updates 2 agents. Each waits for what\'s running to finish"')).to_be(true)
+	expect(app:has('"Skips Codex on metal: needs doing by hand"')).to_be(true)
+	expect(app:has('"Skips Pi on away: Offline"')).to_be(true)
+	-- Nothing happens until it's said yes to.
+	app:click("#updates-confirm-cancel")
+	app:frames(10)
+	expect(app:has("#updates-confirm")).to_be(false)
+end)
+
+test("a device that says it can't update from here says why, and offers what to run", function()
+	local app = open({
+		{
+			id = "box:zeron",
+			device = "box",
+			device_name = "box",
+			here = false,
+			connected = true,
+			kind = "zeron",
+			phase = "available",
+			installed = "1.0",
+			latest = "1.1",
+			why_not = "It was started by hand",
+			manual_command = "zeron update",
+			action = "copy",
+			active = false,
+		},
+	})
+	app:click("#updates-button")
+	app:frames(10)
+	expect(app:has('"It was started by hand"')).to_be(true)
+	expect(app:has('role:button "Copy command · Zeron"')).to_be(true)
+end)
