@@ -316,7 +316,14 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			}
 		end
 		local p = project_row(s.project)
+		local on: string? = nil
+		for _, d in sessions.now:get().devices do
+			if d.id == s.device then
+				on = d.name
+			end
+		end
 		return {
+			device = on,
 			name = s.branch,
 			worktree = p ~= nil and s.cwd ~= nil and s.cwd ~= p.path,
 			project = if p then p.name else nil,

@@ -1,8 +1,8 @@
 {
   "ds/sidebar.luau": "fa85fbe22d5634a1",
   "ds/tokens.luau": "8708aba4b1b3f32c",
-  "screens/chat/composer.luau": "c3d78812c153a211",
-  "screens/chat/lane_tab.luau": "a2f30b0c761ac71e",
+  "screens/chat/composer.luau": "d4a97ce4d1d2230c",
+  "screens/chat/lane_tab.luau": "923d711d67eac0a7",
   "screens/panel/init.luau": "b9ed1d6301eb8384",
   "screens/shell/init.luau": "fc0f7670ad159512",
   "screens/shell/page.luau": "52c73aba63f55184",

@@ -86,7 +86,7 @@ export type Notice = {
 }
 export type Answer = { values: { string }, text: string }
 -- Where an existing chat works (`branch_fixed`).
-export type Fixed = { name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string? }
+export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string? }
 export type Props = {
 	value: State<string>,
 	placeholder: (string | Message)?,
@@ -306,6 +306,11 @@ local BRANCH_KEEP, PLACE_CHROME = 72, 50
 -- first, to that, then the name to its least, then the chip folds to its
 -- glyph. (Never a bare "›" with nothing after it.)
 local PROJECT_MIN, PROJECT_MAX, BRANCH_MAX, BRANCH_FLOOR = 44, 140, 180, 36
+-- The device's name before them: how wide at most, kept before the access
+-- mode folds, and least.
+local DEVICE_MAX, DEVICE_KEEP, DEVICE_MIN = 120, 72, 36
+-- What a chevron between two of them takes, with its gap.
+local PLACE_CHEVRON = 14
 -- The footer's chips: one height, one corner (the menus' row corner),
 -- each lead (a glyph's 12) 6 in all round, and as far from its words.
 local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
@@ -568,8 +573,8 @@ local function on_cloud(device: State<string?>?, devices: any): boolean
 	return false
 end
 
--- The head of where-it-works's panel: "Work in", then the project, the
--- device it runs on and the checkout, each a row opening its choices
+-- The head of where-it-works's panel: "Work in", then the device it runs
+-- on, the project there and the checkout, each a row opening its choices
 -- beside the panel (the project's with "New project" under them).
 local function work_in(
 	project: State<string?>?,
@@ -582,6 +587,31 @@ local function work_in(
 	local rows: { Node } = {
 		Menu.Heading { locale.t("ds.composer.work_in") },
 	}
+	if device and devices then
+		-- Following the devices as they come and go; with none, no row.
+		local function choices(): { Choice }
+			local out: { Choice } = {}
+			for _, d in list_of(devices) :: { Device } do
+				local icon: Icon.Name = if d.cloud then "cloud" else "monitor"
+				table.insert(out, {
+					value = d.value,
+					label = d.label,
+					icon = icon,
+					tag = if d.you then locale.s("ds.composer.device.you") else nil,
+					warn = d.offline,
+					description = d.description,
+					disabled = d.disabled,
+				})
+			end
+			return out
+		end
+		table.insert(
+			rows,
+			ui.show(function(): boolean
+				return #choices() > 0
+			end, submenu(locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
+		)
+	end
 	if project and projects then
 		-- Following the projects as they come and go.
 		local function choices(): { Choice }
@@ -617,31 +647,6 @@ local function work_in(
 			}, function(): { Choice }
 				return { worded({ value = NO_PROJECT, icon = "folder" }, { label = "ds.composer.project.none" }) }
 			end)
-		)
-	end
-	if device and devices then
-		-- Following the devices as they come and go; with none, no row.
-		local function choices(): { Choice }
-			local out: { Choice } = {}
-			for _, d in list_of(devices) :: { Device } do
-				local icon: Icon.Name = if d.cloud then "cloud" else "monitor"
-				table.insert(out, {
-					value = d.value,
-					label = d.label,
-					icon = icon,
-					tag = if d.you then locale.s("ds.composer.device.you") else nil,
-					warn = d.offline,
-					description = d.description,
-					disabled = d.disabled,
-				})
-			end
-			return out
-		end
-		table.insert(
-			rows,
-			ui.show(function(): boolean
-				return #choices() > 0
-			end, submenu(locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
 		)
 	end
 	if checkout then
@@ -699,6 +704,8 @@ end
 -- PROJECT_MIN; folded, the glyph alone. Its ink is the chip's own (the
 -- chevron a step quieter), so the chip's hover lifts all of it.
 type Place = {
+	-- The device it runs on, by name (nil: none to say).
+	device: (() -> string?)?,
 	-- The project (nil: none named), and whether it works in one at all.
 	project: () -> Project?,
 	in_project: () -> boolean,
@@ -710,7 +717,7 @@ type Place = {
 	-- Told the name's own width as it's laid out (the footer's fold reads it).
 	-- What the line takes of the name and the branch: their own widths, or 0
 	-- for one it doesn't show.
-	on_measures: ((name: number, branch: number) -> ())?,
+	on_measures: ((name: number, branch: number, device: number) -> ())?,
 }
 local function place_line(p: Place): { Child }
 	local function has_project(): boolean
@@ -725,7 +732,13 @@ local function place_line(p: Place): { Child }
 	end
 	-- The name's and the branch's own widths, measured unseen: each keeps
 	-- its least of itself, or all of a shorter one (never padded out).
-	local natural, branch_natural = ui.ref(), ui.ref()
+	local natural, branch_natural, device_natural = ui.ref(), ui.ref(), ui.ref()
+	local function device_name(): string
+		return if p.device then p.device() or "" else ""
+	end
+	local function has_device(): boolean
+		return device_name() ~= ""
+	end
 	local function branch_min(): number
 		return math.min(BRANCH_FLOOR, math.ceil(branch_natural.width or BRANCH_FLOOR))
 	end
@@ -736,7 +749,8 @@ local function place_line(p: Place): { Child }
 			if name_w and branch_w then
 				on_measures(
 					if has_project() or not p.in_project() then name_w else 0,
-					if p.in_project() then branch_w else 0
+					if p.in_project() then branch_w else 0,
+					if has_device() then (device_natural.width or 0) + PLACE_CHEVRON else 0
 				)
 			end
 		end)
@@ -767,10 +781,45 @@ local function place_line(p: Place): { Child }
 			pointer_events = "none",
 			aria_hidden = true,
 		},
+		ui.text {
+			device_name,
+			ref = device_natural,
+			absolute = true,
+			left = 0,
+			top = 0,
+			opacity = 0,
+			pointer_events = "none",
+			aria_hidden = true,
+		},
 		ui.presence(lead, function(kind: string): Node
 			-- (Its kind named, for tests: "place-lead-worktree".)
 			return ui.div { class = `place-lead-{kind}`, Icon { name = kind :: Icon.Name, size = 12 } }
 		end, { shrink = 0, w = 12, h = 12, items = "center", justify = "center", id = "composer-place-lead" }),
+		ui.show(function(): boolean
+			return unfolded() and has_device()
+		end, ui.row {
+			shrink = 1,
+			min_w = function(): number
+				return PLACE_CHEVRON + math.min(DEVICE_MIN, math.ceil(device_natural.width or DEVICE_MIN))
+			end :: any,
+			gap = "$space.1",
+			items = "center",
+			FadeText {
+				device_name,
+				roll = true,
+				id = "composer-place-device",
+				mb = LIFT,
+				max_w = DEVICE_MAX,
+				shrink = 1,
+				fade = 16,
+			},
+			ui.div {
+				shrink = 0,
+				color = "$text.disabled",
+				aria_hidden = true,
+				Icon { name = "alt-arrow-right-bold", size = 10 },
+			},
+		}),
 		ui.show(function(): boolean
 			return unfolded() and (has_project() or not p.in_project())
 		end, FadeText {
@@ -961,6 +1010,7 @@ return ui.component(function(props: Props): Node
 	local where_w = kept("where_w", 0)
 	local name_w = kept("name_w", 0)
 	local branch_w = kept("branch_w", 0)
+	local device_w = kept("device_w", 0)
 	-- (The line has said what it takes: until then, BRANCH_MIN.)
 	local place_known = kept("place_known", false)
 	local folded = kept("fold", { level = 0, access_at = {} } :: Folded)
@@ -973,9 +1023,12 @@ return ui.component(function(props: Props): Node
 		end
 	end
 
-	local function place_measures(name: number, branch: number)
+	local function place_measures(name: number, branch: number, device: number)
 		if math.abs(name_w:peek() - name) >= 0.5 then
 			name_w:set(name)
+		end
+		if math.abs(device_w:peek() - device) >= 0.5 then
+			device_w:set(device)
 		end
 		if math.abs(branch_w:peek() - branch) >= 0.5 then
 			branch_w:set(branch)
@@ -1276,11 +1329,11 @@ return ui.component(function(props: Props): Node
 		if not place_known:get() then
 			return BRANCH_MIN
 		end
-		local n, b = name_w:get(), branch_w:get()
+		local n, b, d = name_w:get(), branch_w:get(), device_w:get()
 		if lv >= 2 then
-			return PLACE_CHROME + math.min(n, PROJECT_MIN) + math.min(b, BRANCH_FLOOR)
+			return PLACE_CHROME + math.min(n, PROJECT_MIN) + math.min(b, BRANCH_FLOOR) + math.min(d, DEVICE_MIN + PLACE_CHEVRON)
 		end
-		return PLACE_CHROME + math.min(n, PROJECT_MAX) + math.min(b, BRANCH_KEEP)
+		return PLACE_CHROME + math.min(n, PROJECT_MAX) + math.min(b, BRANCH_KEEP) + math.min(d, DEVICE_KEEP + PLACE_CHEVRON)
 	end
 	local was = folded:peek()
 	local access_at: { [number]: number } = {}
@@ -2078,6 +2131,19 @@ return ui.component(function(props: Props): Node
 			local function folded(): boolean
 				return left_fold(fold:get()) >= 3
 			end
+			-- The device chosen, by name, leading the chip.
+			local function chosen_device(): string?
+				if not props.device or not props.devices then
+					return nil
+				end
+				local v = props.device:get()
+				for _, d in list_of(props.devices) :: { Device } do
+					if d.value == v then
+						return d.label
+					end
+				end
+				return nil
+			end
 			local picker = Dropdown {
 				value = props.branch,
 				label = locale.t("ds.composer.branch.label") :: any,
@@ -2109,6 +2175,7 @@ return ui.component(function(props: Props): Node
 						active = { bg = "$pressed", color = "$text.secondary" },
 						on_click = menu.toggle,
 						table.unpack(place_line {
+							device = chosen_device,
 							project = chosen_project,
 							in_project = in_project,
 							branch = branch_name,
@@ -2136,6 +2203,10 @@ return ui.component(function(props: Props): Node
 						return locale.s("ds.composer.branch.fixed", { name = if f and f.name then f.name else "" })
 					end,
 					table.unpack(place_line {
+						device = function(): string?
+							local f = fixed()
+							return if f then f.device else nil
+						end,
 						project = function(): Project?
 							local f = fixed()
 							if f and f.project then

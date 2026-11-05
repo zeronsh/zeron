@@ -919,7 +919,14 @@ local function Composer(): Node
 		end
 		local lb = live_branch:get()
 		local name = if lb.key:sub(1, #s.id + 1) == `{s.id}|` then lb.name else (s :: any).branch
+		local on: string? = nil
+		for _, d in sessions.now:get().devices do
+			if d.id == (s :: any).device then
+				on = d.name
+			end
+		end
 		return {
+			device = on,
 			name = name,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,
