@@ -14,7 +14,9 @@
       "hours": "{n}时",
       "days": "{n}天",
       "weeks": "{n}周",
-      "hours_minutes": "{h}小时{m}分"
+      "hours_minutes": "{h}小时{m}分",
+      "minutes_seconds": "{m}分{s}秒",
+      "hours_minutes_seconds": "{h}小时{m}分{s}秒"
     },
     "ago": {
       "minutes": "{n, plural, other {# 分钟前}}",

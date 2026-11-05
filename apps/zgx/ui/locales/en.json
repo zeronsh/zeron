@@ -14,7 +14,9 @@
       "hours": "{n}h",
       "days": "{n}d",
       "weeks": "{n}w",
-      "hours_minutes": "{h}h {m}m"
+      "hours_minutes": "{h}h {m}m",
+      "minutes_seconds": "{m}m {s}s",
+      "hours_minutes_seconds": "{h}h {m}m {s}s"
     },
     "ago": {
       "minutes": "{n, plural, one {# minute ago} other {# minutes ago}}",
