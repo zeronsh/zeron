@@ -13,11 +13,14 @@
 --                                         its key's cap at its end
 --   PanelHome.Heading { label, trail? }   a part's title
 --   PanelHome.Lanes { id, list, label, icon, open, on_toggle, items, name,
---                     on_open, expanded, on_expand, harness? }
+--                     on_open, expanded, on_expand, harness?,
+--                     working_first?, options? }
 --                                         a part of lanes (side chats,
 --                                         subagents) drawn as the sidebar's
 --                                         groups (ds/session_row): it folds,
---                                         only its rows in view built
+--                                         only its rows in view built; with
+--                                         `options`, its own menu (a "…" on
+--                                         its title, a secondary click on it)
 --   PanelHome.inner(inset)                a corner `inset` in from a row's
 --
 -- Plugins' rows on the page (`hook:panel.empty`) take `Choice` for the
@@ -33,6 +36,8 @@ local Tooltip = require("@self/tooltip")
 -- Side chats and subagents listed as the sidebar lists sessions.
 local SessionRow = require("@self/session_row")
 local Tile = require("@self/tile")
+local ContextMenu = require("@self/context_menu")
+local IconButton = require("@self/icon_button").IconButton
 
 local M = {}
 
@@ -231,6 +236,20 @@ export type LanesProps = {
 	icon: ((lane: Lane) -> Icon.Name?)?,
 	-- Each lane's tooltip (a port's command line); nil, none.
 	tooltip: ((lane: Lane) -> string)?,
+	-- Those at work (working, running) above the rest, each kept in the
+	-- view's order otherwise.
+	working_first: (() -> boolean)?,
+	-- The part's own menu (ds/context_menu's entries, asked as it opens):
+	-- a "…" on its title under the pointer, as the sidebar's own sections
+	-- have, and a secondary click on its title or round its rows (a row's
+	-- own menu, where it has one, stays the row's). Nil, none.
+	options: (() -> { ContextMenu.Entry }?)?,
+	-- A "+" on each group's header under the pointer, as the sidebar's
+	-- project headers have: `new_label` names it ("New side chat in
+	-- zeron"), and `on_new` is handed the header's groups, the outermost
+	-- first and its own last (a project's, a device's, or both). Nil, none.
+	on_new: ((groups: { LaneGroup }) -> ())?,
+	new_label: ((group: LaneGroup) -> string)?,
 }
 
 -- Whether a lane shows past the first few, and in a folded group: at
@@ -238,6 +257,11 @@ export type LanesProps = {
 local function active(l: Lane): boolean
 	local k = l.status
 	return k == "working" or k == "running" or k == "input" or k == "approval" or k == "done" or k == "failed"
+end
+
+-- At work now: above the rest with `working_first`.
+local function at_work(l: Lane): boolean
+	return l.status == "working" or l.status == "running"
 end
 
 -- A lane as a session's row reads it (ds/session_row): its state one the
@@ -370,7 +394,15 @@ function M.Lanes(props: LanesProps): Node
 		for i, l in list do
 			came[l] = i
 		end
+		-- (Those at work first, as asked: each side in that order still.)
+		local first = props.working_first ~= nil and props.working_first()
 		table.sort(list, function(a: Lane, b: Lane): boolean
+			if first then
+				local wa, wb = at_work(a), at_work(b)
+				if wa ~= wb then
+					return wa
+				end
+			end
 			local x, y = sort_key(a), sort_key(b)
 			if x ~= y then
 				return x > y
@@ -718,10 +750,33 @@ function M.Lanes(props: LanesProps): Node
 		local gkey = first.gkey
 		if first.kind == "group" then
 			local g = first.group :: LaneGroup
+			local on_new = props.on_new
+			local plus: Node? = nil
+			if on_new then
+				local label = if props.new_label then props.new_label(g) else g.name
+				plus = IconButton {
+					id = `{props.list}-new-{gkey}`,
+					icon = "plus",
+					label = label,
+					tooltip = label,
+					size = "sm",
+					tone = "quiet",
+					on_click = function()
+						local it = now:peek() :: Item?
+						if not (it and it.group) then
+							return
+						end
+						local groups = table.clone(it.path or {})
+						table.insert(groups, it.group :: LaneGroup)
+						on_new(groups)
+					end,
+				}
+			end
 			return ui.div {
 				w_full = true,
 				h = M.LANE_H,
 				SessionRow.Header {
+					trail = plus,
 					-- (An inner group's hangs off its outer group's trunk.)
 					tree = tree_of(now),
 					gap = M.LANE_H - SessionRow.SLOT,
@@ -842,7 +897,37 @@ function M.Lanes(props: LanesProps): Node
 			},
 		}
 	end
-	return ui.column {
+	-- Its own menu: a "…" at its title's end under the pointer (or while
+	-- the menu is open), as the sidebar's own sections have it, opening
+	-- under it at its end; the same menu on a secondary click.
+	local options = props.options
+	local menu_open = ui.use_state(false)
+	local hovered = ui.use_state(false)
+	local open_at: ((x: number, y: number) -> boolean)? = nil
+	local dots_ref = ui.ref()
+	local dots: Node? = nil
+	if options then
+		dots = IconButton {
+			id = `{props.id}-options`,
+			ref = dots_ref,
+			icon = "more-horizontal",
+			label = locale.t("ds.sidebar.section_options"),
+			tooltip = locale.s("ds.sidebar.section_options"),
+			size = "sm",
+			tone = "quiet",
+			lit = menu_open,
+			on_click = function()
+				local el, at = dots_ref:peek(), open_at
+				if not (el and at) then
+					return
+				end
+				local menu_w = (ui.theme.get("zeron.menu.width") :: number?) or 232
+				local x, y, w, h = el.x or 0, el.y or 0, el.width or 0, el.height or 0
+				at(x + w - menu_w, y + h + 4)
+			end,
+		}
+	end
+	local part = ui.column {
 		id = props.id,
 		class = "panel-home-fold",
 		w_full = true,
@@ -854,6 +939,12 @@ function M.Lanes(props: LanesProps): Node
 			count = function(): number
 				return #all:get()
 			end,
+			trail = dots,
+			trail_shown = if dots
+				then function(): boolean
+					return hovered:get() or menu_open:get()
+				end
+				else nil,
 			frame = {
 				id = `{props.id}-head`,
 				w_full = true,
@@ -863,6 +954,11 @@ function M.Lanes(props: LanesProps): Node
 				focusable = true,
 				focus = control.ring,
 				rounded = M.inner(4),
+				on_hover = if options
+					then function(inside: boolean)
+						hovered:set(inside)
+					end
+					else nil,
 				on_key = function(e: any): boolean?
 					if (e.key == "Enter" or e.key == " ") and not (e.cmd or e.ctrl or e.alt) then
 						props.on_toggle()
@@ -911,6 +1007,21 @@ function M.Lanes(props: LanesProps): Node
 				end, pager(solo_state, `{props.list}-pager`)),
 			},
 		},
+	}
+	if not options then
+		return part
+	end
+	return ContextMenu {
+		label = locale.t("ds.sidebar.section_options"),
+		open = menu_open,
+		w_full = true,
+		hook = function(at: (x: number, y: number) -> boolean)
+			open_at = at
+		end,
+		items = function(): { ContextMenu.Entry }?
+			return options()
+		end,
+		part,
 	}
 end
 
