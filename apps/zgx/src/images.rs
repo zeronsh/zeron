@@ -1,4 +1,4 @@
-//! A picture on this Mac, for the lightbox (ui/ds/lightbox.luau): copied to
+//! A picture on this computer, for the lightbox (ui/ds/lightbox.luau): copied to
 //! the clipboard, or shown in Finder. A script can't load a file into a
 //! `Bitmap` for `ui.clipboard.write_image`, so the host does it.
 //!

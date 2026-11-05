@@ -52,10 +52,9 @@ M.right_pane_takeover_width = policy.right_pane_takeover_width
 export type Column = policy.Column
 export type Fit = policy.Fit
 
--- Files' least here: the panel's docked tree at its own width (wider than
--- Zeron's Files at its least), so the fit shows Files only where the file
--- beside the tree keeps the panel's least.
-M.TREE = (ui.theme.get("zeron.files.tree") :: number?) or policy.FILES_PANEL_MIN
+-- What a file tab's tree adds to the panel's width: nothing. It stands beside the
+-- file inside the panel, whatever the panel's width.
+M.TREE = 0
 
 -- When each column was last opened (asked for): an order, newest highest.
 local sequence = ui.state("shell_panel_sequence", 1)
@@ -66,6 +65,9 @@ local function session(): string?
 	local c = route.chat:peek()
 	if c.name == "plugin" then
 		return `page:{c.plugin}/{c.page}`
+	end
+	if c.name == "home" then
+		return "home"
 	end
 	return if c.name == "session" then c.session else nil
 end
@@ -133,10 +135,12 @@ M.current = ui.computed(function(): Fit
 	local width = if preferred then preferred() else M.SIDEBAR_DEFAULT
 	local c = route.chat:get()
 	-- (A plugin's page's panel is its own, ranked by its key.)
-	local id = if c.name == "session" then c.session elseif c.name == "plugin" then `page:{c.plugin}/{c.page}` else nil
-	local on_session = route.current:get().name == "session"
-	local on_page = route.current:get().name == "plugin"
-	local open_panel = (on_session or on_page) and view.files:get()
+	local id = if c.name == "session" then c.session elseif c.name == "plugin" then `page:{c.plugin}/{c.page}` elseif c.name == "home" then "home" else nil
+	-- (Held under settings: the panel stands beside them as it was, in v3.)
+	local on_session = c.name == "session"
+	local on_page = c.name == "plugin"
+	local on_home = c.name == "home"
+	local open_panel = (on_session or on_page or on_home) and view.files:get()
 	-- (A page has no files to dock a tree for.)
 	local open_tree = on_session and view.files:get()
 	if vw <= 0 then

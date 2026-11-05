@@ -81,7 +81,7 @@ fn every_resize_edge_shows_its_cursor_alone_and_in_a_split() {
     app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, m);
     app.ui.input.forget_clicks();
     app.frames(40);
-    assert_eq!(app.tree().matches("\"Close pane\"").count(), 2, "split in two");
+    assert_eq!(app.tree().matches("#split-pane-").count(), 2, "split in two");
     assert!(app.error().is_none(), "{:?}", app.error());
     check(&mut app, "in a split");
     // A panel tab, in the title bar's band: the hand. (The bar is a strip

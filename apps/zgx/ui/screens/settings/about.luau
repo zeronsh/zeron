@@ -327,55 +327,64 @@ function M.view(): Node
 				then ui.t("settings.about.updates_self_description")
 				else ui.t("settings.about.updates_description"),
 			ds.Settings.Group {
-				row("updates", {
-					label = function(): string
-						return now_update().title
-					end,
-					description = function(): string
-						return now_update().line
-					end,
-					-- (Updating is the one accented action; the rest ask again.)
-					control = ui.row {
-						items = "center",
-						ui.show(function(): boolean
-							return now_update().accent == true
-						end, ds.Button {
-							function(): string
-								return now_update().action or ""
-							end,
-							tone = "accent",
-							size = "sm",
-							on_click = M.update,
+				ui.column {
+					w_full = true,
+					row("updates", {
+						label = function(): string
+							return now_update().title
+						end,
+						description = function(): string
+							return now_update().line
+						end,
+						-- (Updating is the one accented action; the rest ask again.)
+						control = ui.row {
+							items = "center",
+							ui.show(function(): boolean
+								return now_update().accent == true
+							end, ds.Button {
+								function(): string
+									return now_update().action or ""
+								end,
+								tone = "accent",
+								size = "sm",
+								on_click = M.update,
+							}),
+							ui.show(function(): boolean
+								local u = now_update()
+								return u.action ~= nil and not u.accent
+							end, ds.Button {
+								function(): string
+									return now_update().action or ""
+								end,
+								tone = "secondary",
+								size = "sm",
+								on_click = M.check,
+							}),
+						},
+					}),
+					-- The release channel (a macOS app install).
+					-- (A row that comes and goes brings its own hairline: none under the
+					-- one above while it's away.)
+					ui.show(function(): boolean
+						return M.now:get().channels == true
+					end, ui.column {
+						w_full = true,
+						ds.Settings.Rule(),
+						row("beta", {
+						label = ui.t("settings.about.beta.label"),
+						description = function(): string
+							local a = M.now:get()
+							if a.channel_note then
+								return a.channel_note
+							end
+							return if a.channel == "beta"
+								then ui.t("settings.about.beta.on"):get()
+								else ui.t("settings.about.beta.off", { version = a.beta_minimum or "13.0" }):get()
+						end,
+						control = ds.Switch { value = beta, label = ui.t("settings.about.beta.label"), on_change = M.set_beta },
 						}),
-						ui.show(function(): boolean
-							local u = now_update()
-							return u.action ~= nil and not u.accent
-						end, ds.Button {
-							function(): string
-								return now_update().action or ""
-							end,
-							tone = "secondary",
-							size = "sm",
-							on_click = M.check,
-						}),
-					},
-				}),
-				-- The release channel (a macOS app install).
-				ui.show(function(): boolean
-					return M.now:get().channels == true
-				end, row("beta", {
-					label = ui.t("settings.about.beta.label"),
-					description = function(): string
-						local a = M.now:get()
-						if a.channel_note then
-							return a.channel_note
-						end
-						return if a.channel == "beta"
-							then ui.t("settings.about.beta.on"):get()
-							else ui.t("settings.about.beta.off", { version = a.beta_minimum or "13.0" }):get()
-					end,
-					control = ds.Switch { value = beta, label = ui.t("settings.about.beta.label"), on_change = M.set_beta },
-				})),
+					}),
+				},
 			},
 		},
 		ds.Settings.Section {

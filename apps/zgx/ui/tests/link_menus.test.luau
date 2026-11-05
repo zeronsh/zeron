@@ -139,7 +139,7 @@ test("a web link keeps its href: the app takes the click, else zgx opens it", fu
 	expect(app:state("links_last")).to_be("system:https://example.com/a.rs")
 end)
 
-test("a file link: Open, Reveal in Finder on this Mac, Copy path", function()
+test("a file link: Open, Reveal in Finder on this computer, Copy path", function()
 	local app = setup()
 	menu(app, 'role:link "the parser"')
 	expect(shows(app, "Open")).to_be(true)

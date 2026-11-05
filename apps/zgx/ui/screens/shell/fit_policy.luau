@@ -17,6 +17,9 @@ M.CHAT_PANEL_MIN = 300
 -- composer's line beside its controls (45 at 240, 5 at 200, then the line
 -- opens out with its controls overlapping) and the reply a 240-point column.
 M.PANE_MIN = 288
+-- What stands round a split's panes beside the sidebar and the panel: the window's
+-- edge each side (5) and the gaps after the sidebar and before the panel (4).
+M.PAGE_EDGES = 18
 
 export type Column = { open: boolean, at: number }
 export type Fit = { sidebar: boolean, right: boolean, files: boolean, sidebar_limit: number }
@@ -25,7 +28,10 @@ export type Fit = { sidebar: boolean, right: boolean, files: boolean, sidebar_li
 -- are one across), each at its least, the gaps between them and the window's
 -- round them. One across is the chat's least.
 function M.page_floor(across: number, gap: number): number
-	return M.CHAT_PANEL_MIN + (across - 1) * (M.PANE_MIN + gap)
+	if across <= 1 then
+		return M.CHAT_PANEL_MIN
+	end
+	return M.PAGE_EDGES + across * M.PANE_MIN + (across - 1) * gap
 end
 
 -- What the page asks of the sidebar: its panes no narrower than the panel
@@ -36,7 +42,7 @@ function M.page_comfort(page_floor: number): number
 		return page_floor
 	end
 	-- (`gap` is small beside a pane: the count comes out whole.)
-	local across = 1 + math.round((page_floor - M.CHAT_PANEL_MIN) / M.PANE_MIN - 0.02)
+	local across = math.round((page_floor - M.PAGE_EDGES) / M.PANE_MIN - 0.02)
 	return page_floor + across * (M.RIGHT_PANE_MIN - M.PANE_MIN)
 end
 

@@ -141,12 +141,12 @@ test("a chat alone goes as it always has: the sidebar stays, or hides for room a
 	local app = split(1100)
 	toggle(app)
 	expect(sidebar_shows(app)).to_be(true)
-	expect(panel_w(app)).to_be(360)
+	expect(panel_w(app)).to_be(422)
 	toggle(app)
 	app:resize(880, 800)
 	app:frames(30)
 	toggle(app)
-	expect(panel_w(app)).to_be(360)
+	expect(panel_w(app)).to_be(440)
 	expect(sidebar_shows(app)).to_be(false)
 	expect(app:state("shell_collapsed")).to_be(false)
 	toggle(app)
@@ -160,7 +160,7 @@ test("a chat alone in a narrow window: anything opening its panel shows it, as i
 	expect(sidebar_shows(app)).to_be(true)
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
-	expect(panel_w(app)).to_be(360)
+	expect(panel_w(app)).to_be(440)
 	expect(sidebar_shows(app)).to_be(false)
 	-- Closed by its toggle, the sidebar's back, as ever.
 	toggle(app)
@@ -171,7 +171,7 @@ test("a chat alone in a narrow window: anything opening its panel shows it, as i
 	app:frames(30)
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
-	expect(panel_w(app)).to_be(360)
+	expect(panel_w(app)).to_be(372)
 	expect(sidebar_shows(app)).to_be(true)
 end)
 
@@ -179,7 +179,7 @@ test("panes stacked are as wide as the page: one across, as a chat alone", funct
 	local app = split(1100, { kind = "col", children = { leaf("a1"), leaf("a2") } })
 	toggle(app)
 	expect(sidebar_shows(app)).to_be(true)
-	expect(panel_w(app)).to_be(360)
+	expect(panel_w(app)).to_be(422)
 end)
 
 test("the window narrowed: the panel gives its width, then the sidebar hides, then the panes narrow; widened, the sidebar's back", function()
@@ -345,6 +345,69 @@ test("Expand is only ever the person's, and the sidebar opened over it closes no
 	expect(sidebar_shows(app)).to_be(true)
 	expect(expanded(app, "a1")).to_be(true)
 	expect(panel_w(app) > 500).to_be(true)
+end)
+
+test("a pane added as the sidebar steps aside: the panes and the composer keep together as they ease", function()
+	local app = split(1440, row(PAIR))
+	toggle(app)
+	local function span(target: string): (number, number)
+		local x, w = (app:tree(target):match("[^\n]+") :: string):match(" (%-?%d+),%-?%d+ (%d+)x%d+")
+		return tonumber(x) :: number, tonumber(w) :: number
+	end
+	local focused = if (app:tree("#shell-page"):match(" (%-?%d+),") == app:tree("#split-pane-a1"):match(" (%-?%d+),")) then "a1" else "a2"
+	app:set_state("inset_split_trees", { row(TRIO) })
+	local last_a1: number? = nil
+	for frame = 1, 40 do
+		app:frames(1)
+		local x1, w1 = span("#split-pane-a1")
+		local x2, w2 = span("#split-pane-a2")
+		local x3 = span("#split-pane-a3")
+		-- Never into each other, whatever the page is doing: the new one too.
+		expect(`frame {frame}: {x1 + w1 <= x2 + 1}`).to_be(`frame {frame}: true`)
+		expect(`frame {frame}: {x2 + w2 <= x3 + 1}`).to_be(`frame {frame}: true`)
+		-- The composer's frame goes with its pane, not ahead of it.
+		local px = span("#shell-page")
+		local fx = span(`#split-pane-{focused}`)
+		expect(`frame {frame}: {math.abs(px - fx) <= 1}`).to_be(`frame {frame}: true`)
+		-- No snap into place at the end: late on, only small steps.
+		if frame > 20 and last_a1 then
+			expect(`frame {frame}: {math.abs(w1 - last_a1) <= 12}`).to_be(`frame {frame}: true`)
+		end
+		last_a1 = w1
+	end
+	-- Settled, three alike across the room.
+	local _, w1 = span("#split-pane-a1")
+	local _, w3 = span("#split-pane-a3")
+	expect(math.abs(w1 - w3) <= 1).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a chat landing on a lone chat: that chat eases down from the whole page, the new one opening beside it", function()
+	local app = split(1440)
+	local page_x, page_w = box(app, "#shell-page")
+	expect(page_w > 600).to_be(true)
+	app:set_state("inset_split_trees", { row(PAIR) })
+	local narrowest = math.huge
+	local last_w: number? = nil
+	for frame = 1, 40 do
+		app:frames(1)
+		local x1, w1 = box(app, "#split-pane-a1")
+		local x2 = box(app, "#split-pane-a2")
+		-- It keeps its place at the page's left: never out of its zero width.
+		expect(`frame {frame}: {math.abs(x1 - page_x) <= 1}`).to_be(`frame {frame}: true`)
+		-- Only ever narrowing, to its half: no collapsing first and growing back.
+		if last_w then
+			expect(`frame {frame}: {w1 <= last_w + 1}`).to_be(`frame {frame}: true`)
+		end
+		last_w = w1
+		narrowest = math.min(narrowest, w1)
+		expect(`frame {frame}: {x1 + w1 <= x2 + 1}`).to_be(`frame {frame}: true`)
+	end
+	local _, w1 = box(app, "#split-pane-a1")
+	local _, w2 = box(app, "#split-pane-a2")
+	expect(math.abs(w1 - w2) <= 1).to_be(true)
+	expect(narrowest >= w1 - 1).to_be(true)
+	expect(app:error()).to_be_nil()
 end)
 
 test("a split with more panes shown: the sidebar steps aside for room, and isn't closed", function()

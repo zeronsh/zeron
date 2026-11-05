@@ -22,5 +22,14 @@
   "commands": [
     "gh",
     "git"
+  ],
+  "settings": [
+    {
+      "id": "open_pr_links",
+      "kind": "switch",
+      "label": "Open pull request links in Zeron",
+      "description": "A pull request link in a chat opens here, beside the chat. Off, it opens where your other links do.",
+      "default": true
+    }
   ]
 }

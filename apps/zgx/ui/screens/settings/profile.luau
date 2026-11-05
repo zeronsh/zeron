@@ -63,6 +63,8 @@ local function sign_out()
 	auth.sign_out(function()
 		store.forget()
 		leaving:set(false)
+		-- (The shell may ask too, as it sees this window signed out: the host opens
+		-- setup once a window.)
 		host.invoke("app.onboard")
 	end)
 end

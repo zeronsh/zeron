@@ -35,6 +35,7 @@ local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local view = require("@app/screens/shell/view")
 local Links = require("@ds/links")
+local plugin_links = require("@app/screens/shell/plugin_links")
 local MenuAt = require("@ds/menu_at")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
@@ -197,6 +198,9 @@ return function(): Node
 		return route.session:peek() ~= nil or route.page:peek() ~= nil
 	end
 	Links.opener = function(url: string): boolean
+		if plugin_links.take(route.session:peek(), url) then
+			return true
+		end
 		if prefs.open_links:peek() ~= "zeron" then
 			return false
 		end
@@ -489,7 +493,7 @@ return function(): Node
 				}
 				else nil,
 			boundary.screen(boundary.named("shell.boundary.screen.title_bar"), "@app/screens/shell/title_bar", function(TitleBar): Node
-				return TitleBar { collapsed = collapsed :: any, files = files, art = art }
+				return TitleBar { collapsed = collapsed :: any, files = files, art = art, caption_over_art = true }
 			end, { pass = true }),
 		},
 		-- A session's card, its row rested on (Zeron's hover card): over the

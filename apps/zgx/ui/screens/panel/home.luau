@@ -78,6 +78,9 @@ end
 local sidebar_view = ui.shared("sidebar.view", {} :: { [string]: any })
 -- Folded or not, per session and part (open unless folded).
 local folds = ui.persist("panel_home_folds", {} :: { [string]: boolean })
+-- Side chats and subagents at work above the rest (their parts' menus'
+-- "Working first"), kept across launches as the sidebar's view options are.
+local working_first = ui.persist("panel_home_working_first", false)
 -- Shown whole ("Show less") or not, per session and part (its first few
 -- unless shown whole), as the sidebar's groups keep theirs.
 local whole = ui.state("panel_home_whole", {} :: { [string]: boolean })
@@ -159,7 +162,8 @@ export type Props = {
 	open_plugin_tab: (session: string, tab: { [string]: any }) -> (),
 	-- An action run in a terminal tab of its own (its name, and what runs it).
 	open_action: (title: string, run: { [string]: any }) -> (),
-	new_side_chat: ((session: string) -> ())?,
+	-- (`at`: where its composer starts instead of the session's place.)
+	new_side_chat: ((session: string, at: { project: string?, device: string? }?) -> ())?,
 	fork: ((session: string) -> ())?,
 	side: ((session: string) -> { any })?,
 	subagents: (() -> { any })?,
@@ -910,10 +914,95 @@ local function lanes(props: Props, sid: string): Node
 			sidebar.archive(l.id)
 		end
 	end
+	-- A part of lanes' own menu (side chats', subagents'; ds/panel_home
+	-- `options`): those at work first, a toggle kept for both; every
+	-- finished lane of the session not yet seen marked seen, at once.
+	local function unread(): { any }
+		local out = {}
+		for _, list in { side:get(), subs:get() } do
+			for _, l in list do
+				-- (Their state shows done or failed only while unseen.)
+				if l.status == "done" or l.status == "failed" then
+					table.insert(out, { id = l.id, at = l.at })
+				end
+			end
+		end
+		return out
+	end
+	local function lanes_options(): { any }
+		local waiting = unread()
+		return {
+			{
+				label = locale.s("panel.home.working_first"),
+				icon = "status-working",
+				checked = function(): boolean
+					return working_first:get()
+				end,
+				keep_open = true,
+				on_select = function()
+					working_first:set(not working_first:peek())
+				end,
+			},
+			{ separator = true },
+			{
+				label = locale.s("panel.home.mark_all_read"),
+				icon = "check-circle",
+				disabled = #waiting == 0,
+				on_select = function()
+					lanes_seen.mark_all(waiting)
+				end,
+			},
+		}
+	end
+	-- A side chats' group's "+": a new side chat of the session, its
+	-- composer starting in that group's project and on its device (the
+	-- header's groups: a project's, a device's, or both). A device other
+	-- than the project's takes that device's project of the same name, else
+	-- lets the composer pick one there.
+	local function new_in(groups: { any })
+		local new_side = props.new_side_chat
+		if not new_side then
+			return
+		end
+		local parent = chat_of(sid)
+		local project: string? = if parent then parent.project else nil
+		local device: string? = nil
+		for _, g in groups do
+			if g.kind == "project" then
+				local id = string.match(g.key, "project:([^/]+)$")
+				project = if id == "none" then "none" else id
+			elseif g.kind == "device" then
+				local id = string.match(g.key, "device:([^/]+)$")
+				if id and id ~= "none" then
+					device = id
+				end
+			end
+		end
+		local p = project_of(project)
+		if device and p and p.device ~= device then
+			local same: string? = nil
+			for _, other in sessions.now:peek().projects do
+				if other.device == device and (other.name == p.name or other.path == p.path) then
+					same = other.id
+				end
+			end
+			project = same
+		elseif not device and p then
+			device = p.device
+		end
+		new_side(sid, { project = project, device = device })
+	end
+	local function new_label(g: any): string
+		if g.kind == "device" then
+			return locale.s("panel.home.new_side_on", { name = g.name })
+		end
+		return locale.s("panel.home.new_side_in", { name = g.name })
+	end
 	-- (`extra`: a part of something else than sessions, ports: its rows'
 	-- glyph, always leading. `flat`: never grouped. `archive`: its rows'
-	-- corner action. `tooltip`: its rows'.)
-	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, tooltip: ((any) -> string)?): Node
+	-- corner action. `tooltip`: its rows'. `lanes_part`: side chats' or
+	-- subagents', with their own menu.)
+	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, tooltip: ((any) -> string)?, lanes_part: boolean?): Node
 		return ui.show(
 			function(): boolean
 				return #items() > 0
@@ -938,6 +1027,15 @@ local function lanes(props: Props, sid: string): Node
 				items = items,
 				name = name,
 				on_open = on_open,
+				working_first = if lanes_part
+					then function(): boolean
+						return working_first:get()
+					end
+					else nil,
+				options = if lanes_part then lanes_options :: any else nil,
+				-- (Side chats' groups: a new one there.)
+				on_new = if id == "panel-home-side" and props.new_side_chat then new_in :: any else nil,
+				new_label = new_label :: any,
 			}
 		)
 	end
@@ -1055,7 +1153,7 @@ local function lanes(props: Props, sid: string): Node
 			if props.open_side then
 				props.open_side(sid, l.child)
 			end
-		end, side_menu, nil, false, side_archive),
+		end, side_menu, nil, false, side_archive, nil, true),
 		part("panel-home-subagents", "panel-home-subagent-list", "panel.home.subagents", "subagents", function(): { any }
 			return subs:get()
 		end, function(l: any): string
@@ -1072,7 +1170,7 @@ local function lanes(props: Props, sid: string): Node
 					props.open_subagent(sid, l.sub)
 				end
 			end)
-		end, nil, true),
+		end, nil, true, nil, nil, true),
 	}
 end
 
@@ -1123,6 +1221,10 @@ M.Page = ui.component(function(props: Props): Node
 			props.open_kind("terminal")
 		end },
 	}
+	-- (A new chat with no project: no folder for a file viewer to show.)
+	if props.key == "no-project" then
+		table.remove(choices, 2)
+	end
 	if sid and props.new_side_chat and props.fork then
 		local new_side, fork = props.new_side_chat, props.fork
 		table.insert(choices, { id = "panel-open-side-chat", icon = "side-chat", label = "panel.empty.side_chat", key = "S", run = function()
@@ -1202,7 +1304,6 @@ M.Page = ui.component(function(props: Props): Node
 			w_full = true,
 			max_w = 380,
 			px = "$space.4",
-			pt = ui.raw(16, "the transcript's own gap over its first message (ds/transcript TURN_GAP), so the two start level"),
 			pb = "$space.6",
 			gap = "$space.5",
 			table.unpack(parts),

@@ -104,15 +104,15 @@ end
 
 test("the page wants its panes' least and the gaps; one pane is the chat's least", function()
 	expect(floor(1)).to_be(fit.CHAT_PANEL_MIN)
-	expect(floor(2)).to_be(592)
-	expect(floor(3)).to_be(884)
-	expect(floor(4)).to_be(1176)
-	expect(floor(5)).to_be(1468)
-	expect(floor(6)).to_be(1760)
-	-- What each pane has at that: the window's three gaps and the gaps
+	expect(floor(2)).to_be(598)
+	expect(floor(3)).to_be(890)
+	expect(floor(4)).to_be(1182)
+	expect(floor(5)).to_be(1474)
+	expect(floor(6)).to_be(1766)
+	-- What each of two or more has at that: what stands round them and the gaps
 	-- between them out of it, shared.
-	for n = 1, 6 do
-		expect((floor(n) - 3 * GAP - (n - 1) * GAP) / n).to_be(fit.PANE_MIN)
+	for n = 2, 6 do
+		expect((floor(n) - fit.PAGE_EDGES - (n - 1) * GAP) / n).to_be(fit.PANE_MIN)
 	end
 end)
 
@@ -137,12 +137,12 @@ test("the fit itself takes no account of panes: a window narrowing keeps its old
 end)
 
 test("the panel's share leaves the panes what they want, and keeps its own least", function()
-	-- 1100, no sidebar: half of 812 would leave them under 592.
+	-- 1100, no sidebar: half of 812 would leave them under 598.
 	expect(fit.content_split(812, floor(2))).to_be(360)
 	-- Plenty: half.
 	expect(fit.content_split(2000, floor(2))).to_be(1000)
 	-- Between: what the panes leave it.
-	expect(fit.content_split(1100, floor(2))).to_be(508)
+	expect(fit.content_split(1100, floor(2))).to_be(502)
 	-- One pane is the chat's.
 	expect(fit.content_split(700, floor(1))).to_be(fit.content_split(700))
 	-- Too little for the panes: its least, and they narrow.
@@ -150,8 +150,8 @@ test("the panel's share leaves the panes what they want, and keeps its own least
 end)
 
 test("the most the panel takes leaves the panes what they want, down to its least", function()
-	expect(fit.panel_room(1440, 256, 0, floor(2))).to_be(592)
-	expect(fit.panel_room(1100, 0, 0, floor(2))).to_be(508)
+	expect(fit.panel_room(1440, 256, 0, floor(2))).to_be(586)
+	expect(fit.panel_room(1100, 0, 0, floor(2))).to_be(502)
 	-- Too little: its least, whatever the panes want; its tree counted in it.
 	expect(fit.panel_room(1100, 0, 0, floor(3))).to_be(360)
 	expect(fit.panel_room(1100, 0, 288, floor(3))).to_be(72)

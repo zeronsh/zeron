@@ -75,7 +75,7 @@ export type Child = {
 -- A project's chosen picture: an emoji, or an uploaded image's https URL,
 -- on a palette hue (each optional; none of them is no icon).
 export type ProjectIcon = { emoji: string?, image: string?, hue: string? }
-export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, icon: ProjectIcon? }
+export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, repository: string?, created: number?, icon: ProjectIcon? }
 -- `online`: its presence heartbeat fresh (this device always); `seen`: its
 -- last beat, in unix seconds, to judge that again as time passes.
 -- `cloud`: one of Cloud's (the account's, or a session's machine): never a

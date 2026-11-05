@@ -132,7 +132,9 @@ end
 local function panel(props: ContainerProps): ContainerProps
 	glass.style(props, "menu")
 	props.bg = function()
-		return if material.see_through() then "$zeron.dialog.tint" else "$zeron.dialog.solid"
+		-- (As its glass above: solid where a popup can't blur, or what's behind shows
+		-- through sharp.)
+		return if material.menus_see_through() then "$zeron.dialog.tint" else "$zeron.dialog.solid"
 	end
 	props.rounded = "$zeron.dialog.radius"
 	props.shadow = "$zeron.dialog.shadow"

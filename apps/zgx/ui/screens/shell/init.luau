@@ -35,6 +35,7 @@ local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local view = require("@app/screens/shell/view")
 local Links = require("@ds/links")
+local plugin_links = require("@app/screens/shell/plugin_links")
 local MenuAt = require("@ds/menu_at")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
@@ -135,8 +136,8 @@ return function(): Node
 		fit.toggle_sidebar()
 	end
 	runs["shell.toggle_files"] = function()
-		local name = route.current:peek().name
-		if name == "session" or name == "plugin" then
+		local name = route.chat:peek().name
+		if name == "session" or name == "plugin" or name == "home" then
 			fit.toggle_panel()
 		end
 	end
@@ -157,6 +158,12 @@ return function(): Node
 			local focused = if splits then splits.focused:peek() else nil
 			if splits and focused and splits.shown:peek() ~= nil then
 				splits.close(focused)
+				return
+			end
+			-- A chat alone: its tab. (The last gone, a new chat; the window closes from
+			-- there.)
+			local tabs: any = boundary.load("@app/screens/shell/session_tabs")
+			if tabs and tabs.close_showing() then
 				return
 			end
 		end
@@ -208,6 +215,9 @@ return function(): Node
 		return route.session:peek() ~= nil or route.page:peek() ~= nil
 	end
 	Links.opener = function(url: string): boolean
+		if plugin_links.take(route.session:peek(), url) then
+			return true
+		end
 		if prefs.open_links:peek() ~= "zeron" then
 			return false
 		end
@@ -382,9 +392,47 @@ return function(): Node
 		end
 		was_settings = now
 	end)
-	-- Whether the title bar stands over a wallpaper: a new chat's.
-	local function art(): boolean
-		return route.current:get().name == "home" and appearance.showing:get() ~= "none"
+	-- Settings: in the page's place, under the top bar and beside the panel, its tabs
+	-- still there, its own list of pages down its side and the way back to the chats at
+	-- its head.
+	local function settings_view(): Node
+		return
+		ui.show(
+				in_settings,
+				ui.column {
+					id = "shell-settings",
+					-- Zeron's Settings are no plugin's to change or add to: what you
+					-- allow plugins and templates is decided here (Settings →
+					-- Plugins and Templates). Sealed, with all it holds.
+					hook = false,
+					w_full = true,
+					h_full = true,
+					focusable = true,
+					focus = { outline = 0 },
+					-- (Focus comes here as it shows: none left on a row of the chats
+					-- now out of sight, where keys would go unseen.)
+					on_mount = function(el)
+						el:focus()
+					end,
+					on_key = function(e): boolean
+						if e.key == "Escape" then
+							route.leave_settings()
+							return true
+						end
+						return false
+					end,
+					on_navigate = function(e)
+						if e.direction == "back" then
+							route.back()
+						else
+							route.forward()
+						end
+					end,
+					boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
+						return settings.View({ inset = true, collapsed = collapsed :: any })
+					end),
+				}
+			)
 	end
 	local frosted = ui.computed(function(): number
 		return if material.see_through() then 1 else 0
@@ -474,17 +522,22 @@ return function(): Node
 			w_full = true,
 			h_full = true,
 			relative = true,
-			hidden = in_settings,
 			ui.row {
 				grow = 1,
 				min_h = 0,
 				w_full = true,
-				boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
-					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H }
-				end),
+				-- (Settings stand in its place and the page's, under the top bar.)
+				ui.div {
+					h_full = true,
+					shrink = 0,
+					hidden = in_settings,
+					boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
+						return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = 42 }
+					end),
+				},
 				boundary.screen(boundary.named("shell.boundary.screen.page"), "@app/screens/shell/page", function(Page): Node
-					return Page { files = files, width = window_w }
-				end),
+					return Page { files = files, width = window_w, away = in_settings, settings = settings_view }
+				end, { pass = true }),
 			},
 			-- The rail, while the sidebar is collapsed: floating over the page at
 			-- the window's bottom left. (Not mounted while `view.rail` is off.)
@@ -492,6 +545,7 @@ return function(): Node
 				then ui.div {
 					id = "shell-rail",
 					absolute = true,
+					hidden = in_settings,
 					left = ds.island.metrics().inset,
 					bottom = ds.island.metrics().inset,
 					boundary.screen(boundary.named("shell.boundary.screen.rail"), "@app/screens/shell/sidebar", function(Sidebar): Node
@@ -500,7 +554,16 @@ return function(): Node
 				}
 				else nil,
 			boundary.screen(boundary.named("shell.boundary.screen.title_bar"), "@app/screens/shell/title_bar", function(TitleBar): Node
-				return TitleBar { collapsed = collapsed :: any, files = files, art = art }
+				-- (A new chat's art is in its card, under the top bar: nothing there for
+				-- the bar's controls to need glass over.)
+				return TitleBar {
+					collapsed = collapsed :: any,
+					files = files,
+					art = function(): boolean
+						return false
+					end,
+					panel_on_home = true,
+				}
 			end, { pass = true }),
 		},
 		-- A session's card, its row rested on (Zeron's hover card): over the
@@ -600,46 +663,6 @@ return function(): Node
 				exit = motion.transition({ opacity = 0, duration = 100 }),
 			}),
 		},
-		-- Settings: a page of its own over the whole window, its own list of
-		-- pages down its side and the way back to the chats at its head.
-		-- (Esc goes back: taken here, so a field or a menu elsewhere keeps
-		-- its own Esc.)
-		ui.show(
-			in_settings,
-			ui.column {
-				id = "shell-settings",
-				-- Zeron's Settings are no plugin's to change or add to: what you
-				-- allow plugins and templates is decided here (Settings →
-				-- Plugins and Templates). Sealed, with all it holds.
-				hook = false,
-				w_full = true,
-				h_full = true,
-				focusable = true,
-				focus = { outline = 0 },
-				-- (Focus comes here as it shows: none left on a row of the chats
-				-- now out of sight, where keys would go unseen.)
-				on_mount = function(el)
-					el:focus()
-				end,
-				on_key = function(e): boolean
-					if e.key == "Escape" then
-						route.leave_settings()
-						return true
-					end
-					return false
-				end,
-				on_navigate = function(e)
-					if e.direction == "back" then
-						route.back()
-					else
-						route.forward()
-					end
-				end,
-				boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
-					return settings.View()
-				end),
-			}
-		),
 		-- What's said for a moment (a plugin's toast, a notice): over
 		-- everything, once for the window.
 		ds.toast.Host {},

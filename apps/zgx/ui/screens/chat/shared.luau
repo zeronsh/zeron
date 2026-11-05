@@ -367,6 +367,45 @@ function M.mention_chat(id: string)
 	M.cargo:push { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark }
 end
 
+-- A chat as it's listed now, for what says who sent a message: its title (its
+-- short id, untitled) and its agent's mark. Nil for one that isn't listed.
+function M.chat_of(id: string): { title: string, mark: string? }?
+	local now = sessions.now:get()
+	local found: any = nil
+	for _, c in now.chats do
+		if c.id == id then
+			found = c
+			break
+		end
+	end
+	if not found then
+		for _, c in now.archived or {} do
+			if c.id == id then
+				found = c
+				break
+			end
+		end
+	end
+	if not found then
+		for _, list in now.children or {} do
+			for _, c in list do
+				if c.id == id then
+					found = c
+					break
+				end
+			end
+			if found then
+				break
+			end
+		end
+	end
+	if not found then
+		return nil
+	end
+	local title = string.match(string.gsub(found.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
+	return { title = if title ~= "" then title else string.sub(id, 1, 8), mark = found.agent }
+end
+
 -- A chat chip's text as it goes.
 function M.chat_link(title: string, id: string): string
 	return ChatLinks.link(title, id) or ""

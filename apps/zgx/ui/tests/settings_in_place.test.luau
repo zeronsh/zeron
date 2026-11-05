@@ -250,7 +250,7 @@ test("Providers shows another device's agents when it's chosen", function()
 	expect(asked(app, "agents.target:box")).to_be(true)
 	expect(shows(app, PAGE, "Codex")).to_be(true)
 	expect(shows(app, PAGE, "Claude Code")).to_be(false)
-	-- Back to this Mac: no device named, the engine's own.
+	-- Back to this computer: no device named, the engine's own.
 	app:click(`{PAGE} >> role:button "Device"`)
 	app:frames(10)
 	app:click('role:menuitem "MacBook Pro"')
@@ -373,18 +373,18 @@ test("Profile's fields stay the same nodes as the card moves over and beside the
 	expect(node(app, PAGE, "textbox", "Name")).to_be(field)
 end)
 
-test("Notifications says when this Mac's banner settings can't be read, and holds its switches", function()
+test("Notifications says when this computer's banner settings can't be read, and holds its switches", function()
 	local app = open("General")
 	app:command("settings_stub.refuse_next")
 	app:click(`{NAV} >> role:tab "Notifications"`)
 	app:frames(20)
-	expect(shows(app, PAGE, "Couldn't read this Mac's notification settings")).to_be(true)
+	expect(shows(app, PAGE, "Couldn't read this computer's notification settings")).to_be(true)
 	app:click(`{PAGE} >> role:switch "Desktop notifications"`)
 	app:frames(10)
 	expect(asked(app, "notifications.set")).to_be(false)
 	app:click(`{PAGE} >> role:button "Try again"`)
 	app:frames(20)
-	expect(shows(app, PAGE, "Couldn't read this Mac's notification settings")).to_be(false)
+	expect(shows(app, PAGE, "Couldn't read this computer's notification settings")).to_be(false)
 end)
 
 test("Appearance's code font size is kept as chosen, for the editor to read", function()
@@ -492,7 +492,7 @@ test("About says which Zeron this is, and that this app isn't what updates", fun
 	expect(shows(app, PAGE, '"0.2.131"')).to_be(true)
 	expect(shows(app, PAGE, "abcdef1 · ")).to_be(true)
 	expect(shows(app, PAGE, "Not packaged yet")).to_be(true)
-	expect(shows(app, PAGE, "Updates go to the engine on this Mac")).to_be(true)
+	expect(shows(app, PAGE, "Updates go to the engine on this computer")).to_be(true)
 	-- Copied for a bug report.
 	app:click(`{PAGE} >> role:button "Copy"`)
 	app:frames(6)
@@ -521,7 +521,7 @@ test("an engine up to date says so and when it was checked; a check finds a newe
 	app:set_state("settings_stub_about_next", "offline")
 	app:click(`{PAGE} >> role:button "Check for updates"`)
 	app:frames(6)
-	expect(shows(app, PAGE, "This Mac seems to be offline")).to_be(true)
+	expect(shows(app, PAGE, "This computer seems to be offline")).to_be(true)
 	app:set_state("settings_stub_about_next", "ok")
 	app:click(`{PAGE} >> role:button "Try again"`)
 	app:frames(6)
@@ -608,7 +608,7 @@ test("a sign-in that asks for a code takes it pasted back, and the account arriv
 	expect(shows(app, PAGE, "Paste the authorization code")).to_be(false)
 end)
 
-test("an account whose window is used up says when it starts over, in this Mac's time", function()
+test("an account whose window is used up says when it starts over, in this computer's time", function()
 	local app = open("Providers")
 	local now = os.time()
 	local at = now + 2 * 3600
@@ -910,13 +910,13 @@ local function count(app: any, scope: string, text: string): number
 	return n
 end
 
-test("signing keys list this Mac first, then the others; a revoked one stays quietly", function()
+test("signing keys list this computer first, then the others; a revoked one stays quietly", function()
 	local app = open("Account")
 	app:scroll(PAGE, 2000)
 	app:frames(10)
 	expect(app:has(`{PAGE} >> "Signing keys"`)).to_be(true)
 	expect(app:has(`{PAGE} >> #setting-signing_keys >> ~"If you don't recognise a key, revoke it."`)).to_be(true)
-	local _, mac = box(app, `{PAGE} >> "This Mac"`)
+	local _, mac = box(app, `{PAGE} >> "This computer"`)
 	local _, dev = box(app, `{PAGE} >> "dev"`)
 	local _, old = box(app, `{PAGE} >> "old-laptop"`)
 	expect(mac < dev and dev < old).to_be(true)

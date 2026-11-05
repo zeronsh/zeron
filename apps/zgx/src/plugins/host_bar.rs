@@ -25,18 +25,21 @@
 //! `toast_floor`, a shared value the host publishes (`follow`).
 //!
 //! A template replaces the whole interface, `ds/` and its toasts included,
-//! so nothing here comes from the scripts: the toasts are a layer of the
-//! host's own (a zgx portal at the window's root), kept the root's last
-//! child after every layout (`keep_on_top`), so a script's modal, layer or
-//! native view opened after them still draws under them and can't take
-//! their clicks; their colours, type and glyphs are fixed here, never the
+//! so nothing here comes from the scripts: the toasts are on the host's top
+//! layer (zgx's `View::top_layer`), over whatever a script opens in the window
+//! and live under its modals, so nothing there covers them or takes their
+//! clicks. While a preview shows, what the scripts open stays in the window
+//! (`PopupsInWindow`), since a popover in a window of its own would be over
+//! this layer too. (zgx provides that around a plugin's nodes itself, following
+//! decision controls, so a plugin's own popup in its own window is still over
+//! these.) their colours, type and glyphs are fixed here, never the
 //! theme's tokens (a template sets those), only following whether the
 //! theme is light or dark; and their buttons run host commands.
 
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use zgx::compose::{ModalPlacement, PlacementEdge, View, button, column, component, modal, row, svg, switch, text};
+use zgx::compose::{View, button, column, component, modal, row, svg, switch, text};
 use zgx::cursor::Cursor;
 use zgx::scene::{BoxShadow, Color, NodeId, Scene, Transform};
 use zgx::semantics::{Live, Role};
@@ -133,6 +136,11 @@ impl Notice {
 thread_local! {
     static NOTICES: RefCell<Option<zgx::reactive::Signal<Vec<Shown>>>> = const { RefCell::new(None) };
     static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Whether Zeron shows Chinese now, as the toasts last read it.
+    static CHINESE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether a preview shows: the scripts' popups stay in the window then,
+    /// under the toasts (`compose`).
+    static POPUPS_HELD: RefCell<Option<zgx::reactive::Signal<bool>>> = const { RefCell::new(None) };
 }
 
 /// A notice as shown, with its id.
@@ -198,12 +206,26 @@ pub fn dev_toasts(cx: &mut WindowContext) -> Option<View> {
     Some(chrome)
 }
 
+/// A preview asked to open a link or a page: it can once you keep it. Asked
+/// again, the same toast starts over (`notice`).
+pub fn links_need_keeping() {
+    let title = if CHINESE.with(std::cell::Cell::get) { "保留这个模板后才能打开链接" } else { "Keep this template to open links" };
+    notice(Notice { title: title.into(), body: String::new(), tone: Tone::Neutral, action: None, stays: false });
+}
+
 /// The main window's root: the host's `chrome` above the scripts' view,
 /// which takes the rest of the window, its full width and every point the
 /// chrome leaves (the scripts' root, `#shell`, sizes itself to it). (The
 /// toasts in it are a layer over the window and take no room.)
 pub fn compose(chrome: View, scripts: View) -> View {
-    column().w_full().h_full().child(chrome).child(scripts.grow().min_h(0.))
+    let scripts = scripts.grow().min_h(0.);
+    // A popup in a window of its own is over this one, the toasts too: while
+    // a preview shows, what the scripts open stays in the window.
+    let scripts = match POPUPS_HELD.with(|h| h.borrow().clone()) {
+        Some(held) => zgx::compose::provide(zgx::compose::PopupsInWindow(held), scripts),
+        None => scripts,
+    };
+    column().w_full().h_full().child(chrome).child(scripts)
 }
 
 // ── Look ────────────────────────────────────────────────────────────────────
@@ -416,9 +438,12 @@ fn pill(title: &str, ink: Ink, open: impl FnMut() + 'static) -> View {
 fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_script::Value>) -> View {
     let now = runtime.signal(preview::current());
     let minimised = runtime.signal(false);
+    let popups_held = runtime.signal(now.with_untracked(Option::is_some));
+    POPUPS_HELD.with(|h| *h.borrow_mut() = Some(popups_held.clone()));
     {
         let (now, minimised) = (now.clone(), minimised.clone());
         preview::on_change(move |p| {
+            popups_held.set(p.is_some());
             // Another template in preview: shown open again.
             if now.with_untracked(|was| was.as_ref().map(|w| &w.id) != p.map(|p| &p.id)) {
                 minimised.set(false);
@@ -441,6 +466,7 @@ fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_sc
             (now.get(), heard.get(), folded.get(), themes.kind().is_dark(), matches!(locale.get(), zgx_script::Value::Str(l) if l.starts_with("zh")))
         },
         move |(preview, list, mini, dark, chinese), _| {
+            CHINESE.with(|c| c.set(chinese));
             let ink = if dark { DARK } else { LIGHT };
             let mut out = column().items_end().gap(GAP);
             for shown in list {
@@ -494,13 +520,8 @@ fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_sc
     );
     component(move |_| {
         modal("Zeron", shown)
-            .layer()
+            .top_layer()
             .autofocus(false)
-            .modal_placement(ModalPlacement {
-                x: PlacementEdge::End,
-                y: PlacementEdge::End,
-                insets: [0., OFF_CORNER, OFF_CORNER, 0.],
-            })
             .p(0.)
             .bg(Color(0, 0, 0, 0))
             .border(0.)
@@ -512,6 +533,9 @@ fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_sc
             .child(
                 column()
                     .id("host-toasts")
+                    .absolute()
+                    .right(OFF_CORNER)
+                    .bottom(OFF_CORNER)
                     .items_end()
                     .pointer_events(false)
                     .on_mount(|handle| {
@@ -521,7 +545,8 @@ fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_sc
                                 c.node = Some(handle.node());
                             }
                         });
-                        keep_on_top(handle);
+                        // Where the app's toasts stand, as this is laid out.
+                        handle.on_layout(measure);
                     })
                     .child(stack),
             )
@@ -580,40 +605,6 @@ fn measure() {
         if let Some(c) = c.borrow_mut().as_mut() {
             c.told = over;
         }
-    });
-}
-
-/// Keeps what holds `handle` (the host's layer) the window root's last
-/// child, drawn over everything and hit first: as it mounts and after every
-/// layout that changes (a script's modal or layer opening raises itself to
-/// the end, which lays the root out again).
-fn keep_on_top(handle: zgx::compose::NodeHandle) {
-    let Some(scene) = handle.scene() else { return };
-    let node = handle.node();
-    let raise = move || {
-        let Ok(mut scene) = scene.try_borrow_mut() else { return };
-        let root = scene.root();
-        let mut top = node;
-        loop {
-            match scene.parent(top) {
-                Some(parent) if parent == root => break,
-                Some(parent) => top = parent,
-                None => return,
-            }
-        }
-        let children = scene.children(root);
-        if children.last() == Some(&top) {
-            return;
-        }
-        let mut order: Vec<_> = children.iter().copied().filter(|c| *c != top).collect();
-        order.push(top);
-        scene.reorder_children(root, &order);
-    };
-    let first = raise.clone();
-    first();
-    handle.on_layout(move || {
-        raise();
-        measure();
     });
 }
 
@@ -711,6 +702,25 @@ mod tests {
             }
             preview::set(None);
         }
+    }
+
+    /// A preview asked for a link: one toast, however often, in the language
+    /// shown; and while it shows, popups stay in the window.
+    #[test]
+    fn a_link_in_a_preview_says_to_keep_it_and_popups_stay_in_the_window() {
+        preview::set(Some(sleek()));
+        let mut app = mount();
+        app.frames(4);
+        links_need_keeping();
+        links_need_keeping();
+        app.frames(6);
+        let texts = host_texts(&mut app);
+        assert_eq!(texts.matches("Keep this template to open links").count(), 1, "{texts}");
+        let held = POPUPS_HELD.with(|h| h.borrow().clone()).expect("the toasts hold it");
+        assert!(held.get(), "popups stay in the window during a preview");
+        preview::set(None);
+        app.frames(4);
+        assert!(!held.get(), "and go where they like once it's over");
     }
 
     /// Its line follows the language Zeron shows; the rest of the host's
@@ -919,51 +929,56 @@ mod tests {
             &path,
             r##"
 local up = ui.shared("cover_up", false)
+local others = ui.shared("cover_others", false)
+local spot = ui.div { id = "cover-anchor", w = 10, h = 10 }
 return ui.column {
     id = "shell", w_full = true, h_full = true,
+    spot,
     ui.modal {
         open = up, label = "Cover", dismiss_on_backdrop = false,
         w = 2000, h = 2000, bg = "#ff0000", p = 0,
         ui.button { id = "fake", w_full = true, h_full = true, on_click = function() end, "Keep" },
     },
-    ui.layer { open = up, ui.div { id = "cover-layer", w = 2000, h = 2000, bg = "#00ff00" } },
+    ui.layer { open = others, z = 2147483647, ui.div { id = "cover-layer", w = 2000, h = 2000, z = 2147483647, bg = "#00ff00" } },
+    ui.show(others, ui.div { id = "cover-fixed", absolute = true, top = 0, left = 0, w = 2000, h = 2000, z = 2147483647, bg = "#0000ff", on_click = function() end }),
+    ui.popover { label = "Cover", open = others, anchor = spot, w = 2000, h = 2000, ui.div { id = "cover-popover", w = 2000, h = 2000, on_click = function() end } },
 }
 "##,
         )
         .unwrap();
         preview::set(Some(sleek()));
-        let cover: std::rc::Rc<RefCell<Option<zgx_script::Shared>>> = Default::default();
-        let held = cover.clone();
-        let mut app = mount_at(path, move |host| *held.borrow_mut() = Some(host.shared("cover_up", false)));
+        let flags: std::rc::Rc<RefCell<Vec<zgx_script::Shared>>> = Default::default();
+        let held = flags.clone();
+        let mut app = mount_at(path, move |host| *held.borrow_mut() = vec![host.shared("cover_up", false), host.shared("cover_others", false)]);
         app.ui.scene.borrow_mut().resize(1240., 820.);
         app.frames(6);
-        let toast = app.find("#host-toasts").expect("the toasts");
-        let on_top = |app: &mut TestApp| {
+        let (up, others) = (flags.borrow()[0].clone(), flags.borrow()[1].clone());
+        // The hit at Keep's centre is Keep's (the host's), not the cover's.
+        let keep_takes_it = |app: &mut TestApp, over: &str| {
+            let keep = app.find("#host-preview >> role:button \"Keep\"").expect("the host's Keep");
+            let at = app.ui.scene.borrow().transformed_bounds(keep);
+            let hit = app.ui.input.pointer_target(&app.ui.scene.borrow(), at.x + at.width / 2., at.y + at.height / 2.);
             let scene = app.ui.scene.borrow();
-            let root = scene.root();
-            let mut top = toast;
-            while let Some(p) = scene.parent(top) {
-                if p == root {
-                    break;
-                }
-                top = p;
-            }
-            scene.children(root).last() == Some(&top)
+            assert!(hit.is_some_and(|h| h == keep || scene.ancestors(h).any(|a| a == keep)), "Keep takes its click over {over}: {hit:?}");
         };
-        assert!(on_top(&mut app), "the toasts over the window as they open");
-        cover.borrow().as_ref().unwrap().set(zgx_script::Value::from(true));
+        keep_takes_it(&mut app, "nothing");
+        // A layer, a fixed box at the highest `z`, and a popover drawn in the
+        // window. (A popover in a window of its own needs zgx's
+        // `PopupsInWindow`: a test has no second window to show it.)
+        others.set(zgx_script::Value::from(true));
+        app.frames(12);
+        for cover in ["#cover-layer", "#cover-fixed", "#cover-popover"] {
+            assert!(app.find(cover).is_some(), "{cover} is up");
+        }
+        keep_takes_it(&mut app, "a layer, a fixed box and a popover");
+        // (A modal closes what's anchored outside it.)
+        others.set(zgx_script::Value::from(false));
+        up.set(zgx_script::Value::from(true));
         app.frames(12);
         assert!(app.find("#fake").is_some(), "the script's modal is open");
-        assert!(on_top(&mut app), "still over everything once the script's modal and layer opened");
-        // The hit at Keep's centre is Keep's (the host's), not the cover's.
         // (The script's own "Keep" is a fake: two match the label alone.)
         assert!(app.find("role:button \"Keep\"").is_none(), "the fake and the host's");
-        let keep = app.find("#host-preview >> role:button \"Keep\"").expect("the host's Keep");
-        let at = app.ui.scene.borrow().transformed_bounds(keep);
-        let hit = app.ui.input.pointer_target(&app.ui.scene.borrow(), at.x + at.width / 2., at.y + at.height / 2.);
-        let scene = app.ui.scene.borrow();
-        assert!(hit.is_some_and(|h| h == keep || scene.ancestors(h).any(|a| a == keep)), "Keep takes its click: {hit:?}");
-        drop(scene);
+        keep_takes_it(&mut app, "a modal");
         // And clicks there run the host's commands, under the script's modal.
         super::super::HOST_COMMANDS_RAN.with(|r| r.borrow_mut().clear());
         app.click("#host-preview >> role:button \"Keep\"");
