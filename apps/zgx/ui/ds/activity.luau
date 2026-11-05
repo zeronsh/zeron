@@ -62,6 +62,8 @@ export type Tool = {
 	diff: ToolDetail.Diff?,
 }
 
+export type Writing = { words: (id: string) -> string?, seeded: () -> boolean }
+
 export type Props = {
 	tools: () -> { Tool },
 	live: (() -> boolean)?,
@@ -79,6 +81,12 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
+	-- A thought being written: `words`, a thought's words as they arrive, by
+	-- its id (nil for one not being written: the reply's draft holds them,
+	-- so a tick of them doesn't build its rows again); `seeded`, whether what
+	-- a row finds as it's made stays as it is rather than fading in (a chat
+	-- opened mid-thought).
+	thought: Writing?,
 }
 
 local GLYPH: { [Kind]: Icon.Name } = {
@@ -217,7 +225,7 @@ local THOUGHT_ROOM = THOUGHT_BUTTON + 6
 -- taken off the words' height to count their lines.
 local THOUGHT_GAP = 12
 
-local function thought_row(now: () -> Tool, below: () -> boolean): Node
+local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writing?, group: string?): Node
 	local id = now().id
 	local line = ui.theme.get("zeron.prose.small.line") :: number
 	local folded_h = THOUGHT_LINES * line
@@ -235,7 +243,8 @@ local function thought_row(now: () -> Tool, below: () -> boolean): Node
 	end
 	-- (A thought named only, without its words: its name.)
 	local function words(): string
-		return now().call or now().verb
+		local arriving = if writing then writing.words(id) else nil
+		return arriving or now().call or now().verb
 	end
 	-- Folds once the words run past four lines (half a point over for
 	-- rounding); a ref reads 0 before its first layout, so a thought stands
@@ -329,8 +338,12 @@ local function thought_row(now: () -> Tool, below: () -> boolean): Node
 						y = rise,
 						Markdown {
 							text = words,
-							-- (Parsed incrementally while it can grow.)
-							key = if now().live then `thought:{id}` else nil,
+							-- (Parsed incrementally while it can grow, its words
+							-- fading in as a reply's do. Named by its group too:
+							-- a part's id is only its own chat's.)
+							key = if now().live then `thought:{group or ""}:{id}` else nil,
+							veil = now().live == true,
+							veil_seed = if writing then writing.seeded() else nil,
 							small = true,
 							ink = "$text.secondary",
 						},
@@ -365,9 +378,16 @@ end
 
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
 -- one; `running`: it is the one in flight, its glyph the working loader.)
-local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean, open_subagent: ((sub: any) -> ())?): Node
+local function row(
+	now: () -> Tool,
+	below: () -> boolean,
+	running: () -> boolean,
+	open_subagent: ((sub: any) -> ())?,
+	writing: Writing?,
+	group: string?
+): Node
 	if now().kind == "thought" then
-		return thought_row(now, below)
+		return thought_row(now, below, writing, group)
 	end
 	local function tint(): string
 		return if now().failed then "$danger" else "$text.secondary"
@@ -711,7 +731,7 @@ return ui.component(function(props: Props): Node
 						return now:get()
 					end, below_of(t), function(): boolean
 						return live() and last()
-					end, props.open_subagent)
+					end, props.open_subagent, props.thought, props.key)
 				end, {
 					key = function(t: Tool): string
 						return t.id
