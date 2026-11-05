@@ -18,6 +18,7 @@ local Icon = require("@self/icon")
 local FadeText = require("@self/fade_text")
 local Menu = require("@self/menu")
 local control = require("@self/control")
+local material = require("@self/material")
 local field = require("@self/field")
 local locale = require("@self/locale")
 
@@ -114,7 +115,7 @@ return ui.component(function(props: Props): Node
 			return open:get()
 		end,
 		bg = function()
-			return if hovered:get() or open:get() then "$zeron.field.hover" else "$zeron.field.bg"
+			return if hovered:get() or open:get() then "$zeron.field.hover" elseif material.see_through() then "$zeron.field.glass" else "$zeron.field.bg"
 		end,
 		border_color = function()
 			if invalid() then

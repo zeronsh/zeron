@@ -9,7 +9,9 @@
 -- (28). `tone`: `normal` (the secondary ink) or `quiet` (the tertiary,
 -- for controls that sit among content and shouldn't draw the eye) or
 -- `danger` (quiet, turning to the danger's wash and ink under the pointer:
--- a delete among other actions).
+-- a delete among other actions) or `bar` (the secondary ink, held under the
+-- pointer and pressed, the wash alone coming: a title bar's controls, as
+-- Zeron's, whose glyphs never brighten).
 -- `lit` (a boolean, state or function) holds it lit while what it opens
 -- is open. `tooltip_side` moves the tooltip off whatever it would cover
 -- (`"bottom"` in a bar at the top of something). Children, if given, take
@@ -49,13 +51,19 @@ local recipe = ui.variants {
 				hover = { bg = "$zeron.menu.danger", color = "$danger" },
 				active = { bg = "$zeron.menu.danger", color = "$danger" },
 			},
+			bar = {
+				color = "$zeron.bar.ink",
+				hover = { bg = "$zeron.bar.hover", color = "$zeron.bar.ink" },
+				active = { bg = "$zeron.bar.pressed", color = "$zeron.bar.ink" },
+			},
 		},
 		-- Lit: what it opens is open (the hover wash, held, the ink full;
-		-- below, over either tone).
+		-- below, over either tone; a bar's keeps its ink).
 		lit = { [true] = {}, [false] = {} },
 	},
 	compound = {
 		{ lit = true, bg = "$hover", color = "$text.primary" },
+		{ lit = true, tone = "bar", bg = "$zeron.bar.hover", color = "$zeron.bar.ink" },
 	},
 	defaults = { size = "md", tone = "normal", lit = false },
 }
@@ -63,7 +71,7 @@ local recipe = ui.variants {
 local GLYPH = { sm = "$zeron.icon_button.glyph.sm", md = "$zeron.icon_button.glyph.md", lg = "$zeron.icon_button.glyph.lg" }
 
 export type Size = "sm" | "md" | "lg"
-export type Tone = "normal" | "quiet" | "danger"
+export type Tone = "normal" | "quiet" | "danger" | "bar"
 export type Side = "top" | "bottom" | "left" | "right"
 export type Props = Merge<ContainerProps, {
 	icon: (Icon.Name | () -> Icon.Name)?,

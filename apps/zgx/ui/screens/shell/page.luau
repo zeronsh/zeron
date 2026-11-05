@@ -204,7 +204,9 @@ return function(props: Props): Node
 		top = ui.raw(-1, "over the card's 1-point edge"),
 		bottom = ui.raw(-1, "over the card's 1-point edge"),
 		pointer_events = "none",
-		bg = "$zeron.inset.bg",
+		-- (Frosted, no fill of its own: the page on the window's frost, as
+		-- Zeron's transcript is; its edge says where it is.)
+		bg = ds.material.pick("$zeron.inset.tint", "$zeron.inset.bg"),
 		border = 1,
 		border_color = "$zeron.inset.edge",
 		rounded = "$zeron.inset.radius",
@@ -1723,6 +1725,8 @@ return function(props: Props): Node
 					tooltip_side = "bottom",
 					w = EXPAND,
 					h = EXPAND,
+					-- (One of the title bar's: its glyph held under the pointer.)
+					tone = "bar",
 					on_click = function()
 						shell_view.toggle_expanded()
 					end,
