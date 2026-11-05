@@ -136,6 +136,12 @@ pub struct DeviceFrameHeader {
     /// Routing: client → host origin (stamped by the relay).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// The calling device, verified by the edge (client → host only): set
+    /// by the room from a dial whose proof checked out
+    /// ([`CallerProof`]), never from a client's own frame. Absent: the
+    /// caller is an unknown device of the account.
+    #[serde(default, rename = "fromDevice", skip_serializing_if = "Option::is_none")]
+    pub from_device: Option<String>,
 }
 
 impl DeviceFrameHeader {
@@ -145,6 +151,7 @@ impl DeviceFrameHeader {
             k: k.into(),
             to: None,
             from: None,
+            from_device: None,
         }
     }
 
@@ -319,6 +326,35 @@ impl HostRelayConfig {
     }
 }
 
+/// The service as relay clients see it: every method but the ones a peer
+/// may not have answered here ([`crate::peer_refused`]: the local-only
+/// ones, allowing a plugin, a file path on the caller's device), refused
+/// before they reach it; the rest served as [`crate::Caller::Peer`], with
+/// the device the edge verified for this connection (`fromDevice`), if any.
+struct RelayGuard {
+    inner: Arc<dyn RpcService>,
+    device: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl RpcService for RelayGuard {
+    async fn handle(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<crate::RpcReply, RpcError> {
+        if crate::peer_refused(method, &params) {
+            return Err(RpcError::Failed(if crate::local_only(method) {
+                format!("{method} is only answered over this device's local IPC")
+            } else {
+                format!("{method}: only this device's own window can do that")
+            }));
+        }
+        let caller = crate::Caller::Peer { device: self.device.clone() };
+        crate::with_caller(caller, self.inner.handle(method, params)).await
+    }
+}
+
 /// The host end of the relay: one outbound WebSocket to our own DeviceRoom DO, serving
 /// `service` to every client conn through virtual string-frame connections. Immortal
 /// supervisor: quiet while signed out, reconnects with backoff when the socket drops
@@ -334,6 +370,8 @@ impl HostRelay {
         service: Arc<dyn RpcService>,
         on_nudge: NudgeHandler,
     ) -> Self {
+        // Peers never reach what only a local client may call: each
+        // virtual conn wraps it in a `RelayGuard` (make_virtual_conn).
         let task = tokio::spawn(async move {
             let mut wake = zeron_sync::wake::subscribe();
             let mut online = zeron_sync::wake::subscribe_online();
@@ -454,13 +492,19 @@ fn jitter() -> Duration {
 /// the request tasks it spawned.
 struct VirtualConn {
     in_tx: mpsc::Sender<String>,
+    /// The device the edge verified for this conn (its first frame's
+    /// `fromDevice`); a later frame naming another is dropped.
+    device: Option<String>,
 }
 
 fn make_virtual_conn(
     service: Arc<dyn RpcService>,
     conn_id: String,
+    device: Option<String>,
     host_out: mpsc::Sender<Vec<u8>>,
 ) -> VirtualConn {
+    // Peers never reach what only a local client may call.
+    let service: Arc<dyn RpcService> = Arc::new(RelayGuard { inner: service, device: device.clone() });
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
     let (srv_out_tx, mut srv_out_rx) = mpsc::channel::<String>(256);
     tokio::spawn(serve_connection(service, srv_out_tx, in_rx));
@@ -477,7 +521,7 @@ fn make_virtual_conn(
             }
         }
     });
-    VirtualConn { in_tx }
+    VirtualConn { in_tx, device }
 }
 
 /// One relay session: connect as host, serve RPC per client conn, until the socket drops.
@@ -593,9 +637,14 @@ async fn handle_host_frame(
     let Some(from) = header.from else {
         return;
     };
+    let device = header.from_device;
     let conn = conns
         .entry(from.clone())
-        .or_insert_with(|| make_virtual_conn(service.clone(), from, out_tx.clone()));
+        .or_insert_with(|| make_virtual_conn(service.clone(), from, device.clone(), out_tx.clone()));
+    if conn.device != device {
+        tracing::warn!("device-room: a conn's verified device changed; dropping the frame");
+        return;
+    }
     let text = String::from_utf8_lossy(&payload).into_owned();
     if conn.in_tx.send(text).await.is_err() {
         tracing::warn!("device-room: virtual conn dispatch loop gone");
@@ -618,10 +667,20 @@ pub struct DeviceLink {
 
 impl DeviceLink {
     pub async fn connect(url: &str) -> Result<Self, RpcError> {
-        let ws = zeron_sync::dial::connect_ws(url)
+        Self::connect_seen(url).await.map(|(link, _)| link)
+    }
+
+    /// [`Self::connect`], and the device the room verified this dial as
+    /// (its 101's `x-zeron-caller-device`), if it did.
+    async fn connect_seen(url: &str) -> Result<(Self, Option<String>), RpcError> {
+        let (ws, headers) = zeron_sync::dial::connect_ws_with_headers(url)
             .await
             .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
-        Ok(Self::from_socket(ws))
+        let stamped = headers
+            .get("x-zeron-caller-device")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        Ok((Self::from_socket(ws), stamped))
     }
 
     fn from_socket<S>(ws: zeron_sync::socket::Connection<S>) -> Self
@@ -796,6 +855,43 @@ pub struct LinkCacheConfig {
     /// is presence-driven: the workspace's peer-alive hook fires the moment
     /// heartbeats return, and the next call passes the gate.
     pub liveness: Option<PeerLivenessProbe>,
+    /// Proves which device dials (`callerDevice`…`callerProof` on the
+    /// client dial), so the edge stamps this device on every relayed frame
+    /// (`fromDevice`) and the peer serves it as `Caller::Peer{device}`.
+    /// `None`, or no proof (no registered key yet): dials unstamped.
+    pub caller_proof: Option<CallerProofFn>,
+}
+
+/// What proves the dialing device to the edge: this device's id, its
+/// registered plugin key (b64url) and that key's signature (b64url, no
+/// padding) over [`caller_proof_message`].
+#[derive(Clone, Debug)]
+pub struct CallerProof {
+    pub device: String,
+    pub key: String,
+    pub signature: String,
+}
+
+/// Signs a dial: `(target device, connId, epoch ms)` → the proof, if this
+/// device has a key to prove itself with.
+pub type CallerProofFn = Arc<dyn Fn(&str, &str, i64) -> Option<CallerProof> + Send + Sync>;
+
+/// `"zeron-device-link:v1:{target}:{connId}:{ts}"`: what a dial's proof signs.
+pub fn caller_proof_message(target: &str, conn_id: &str, ts: i64) -> String {
+    format!("zeron-device-link:v1:{target}:{conn_id}:{ts}")
+}
+
+/// `&callerDevice=…&callerKey=…&callerTs=…&callerProof=…`, or nothing when a
+/// value isn't URL-safe as is (ids, b64url).
+fn caller_query(proof: &CallerProof, ts: i64) -> String {
+    let safe = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !(safe(&proof.device) && safe(&proof.key) && safe(&proof.signature)) {
+        return String::new();
+    }
+    format!(
+        "&callerDevice={}&callerKey={}&callerTs={ts}&callerProof={}",
+        proof.device, proof.key, proof.signature
+    )
 }
 
 impl LinkCacheConfig {
@@ -813,6 +909,7 @@ impl LinkCacheConfig {
             cooldown_max: Duration::from_secs(60),
             probe_timeout: Duration::from_secs(10),
             liveness: None,
+            caller_proof: None,
         }
     }
 }
@@ -1059,22 +1156,42 @@ impl LinkCache {
             .await
             .map_err(|e| RpcError::Transport(e.to_string()))?;
         let conn_id = uuid::Uuid::new_v4().to_string();
-        let url = device_room_ws_url(
+        let mut url = device_room_ws_url(
             &self.config.edge_url,
             device_id,
             "client",
             Some(&conn_id),
             &token,
         );
+        // Which device dials, proven, so the peer knows who's asking.
+        let mut proved = false;
+        if let Some(prove) = &self.config.caller_proof {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_default();
+            if let Some(proof) = prove(device_id, &conn_id, ts) {
+                let query = caller_query(&proof, ts);
+                proved = !query.is_empty();
+                url.push_str(&query);
+            }
+        }
         tracing::info!(device = %device_id, "peer: dialing via device room");
         // Bounded connect: `DeviceLink::connect` was the one unbounded await
         // under `forward()` — a wedged edge socket hung callers indefinitely
         // and only the UI's own per-call timers saved them (silently).
         const DIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-        let link = tokio::time::timeout(DIAL_CONNECT_TIMEOUT, DeviceLink::connect(&url))
+        let link = tokio::time::timeout(DIAL_CONNECT_TIMEOUT, DeviceLink::connect_seen(&url))
             .await
             .map_err(|_| RpcError::Transport(format!("peer {device_id}: connect timed out")))?;
-        let link = Arc::new(link?);
+        let (link, stamped) = link?;
+        // Whether the room verified who dials: unstamped with a proof sent
+        // means the edge refused it (say, a key not registered yet).
+        match &stamped {
+            Some(id) => tracing::debug!(device = %device_id, "relay dial stamped as {id}"),
+            None => tracing::debug!(device = %device_id, proof_sent = proved, "relay dial unstamped"),
+        }
+        let link = Arc::new(link);
         // Readiness probe: prove the host answers before caching (an offline host bounces
         // host_offline, which closes the link and fails this call fast).
         let client = link.client();
@@ -1126,6 +1243,112 @@ impl LinkCache {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn relay_refuses_local_only_methods_and_serves_the_rest() {
+        use crate::{RpcReply, RpcService, methods};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Answers every call with its method name, counting what reached it.
+        struct Echo(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl RpcService for Echo {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, crate::RpcError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(RpcReply::Value(serde_json::json!(method)))
+            }
+        }
+
+        let reached = Arc::new(AtomicUsize::new(0));
+        let guard = super::RelayGuard { inner: Arc::new(Echo(reached.clone())), device: None };
+        assert!(crate::local_only(methods::ACCESS_TOKEN));
+        match guard
+            .handle(methods::ACCESS_TOKEN, serde_json::json!({}))
+            .await
+        {
+            Err(crate::RpcError::Failed(message)) => assert!(message.contains("local IPC")),
+            _ => panic!("a peer must never get the device's bearer"),
+        }
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            0,
+            "refused before the service"
+        );
+
+        for method in [
+            methods::LIST_HARNESSES,
+            methods::AUTH_STATUS,
+            methods::SIGN_IN,
+        ] {
+            assert!(!crate::local_only(method));
+            match guard.handle(method, serde_json::json!({})).await {
+                Ok(RpcReply::Value(value)) => assert_eq!(value, serde_json::json!(method)),
+                _ => panic!("{method} passes through the relay unchanged"),
+            }
+        }
+        assert_eq!(reached.load(Ordering::SeqCst), 3);
+    }
+
+    /// R6/R25: a peer device can't allow a plugin here, mint a review, sign,
+    /// or install from a path; it can still decline, turn off and install
+    /// from a link (which lands waiting here). What it reaches runs as a
+    /// peer.
+    #[tokio::test]
+    async fn relay_refuses_allowing_and_paths_from_peers() {
+        use crate::{RpcReply, RpcService, methods};
+        use std::sync::{Arc, Mutex};
+
+        struct Seen(Arc<Mutex<Vec<(String, crate::Caller)>>>);
+        #[async_trait::async_trait]
+        impl RpcService for Seen {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, crate::RpcError> {
+                self.0.lock().unwrap().push((method.to_owned(), crate::caller()));
+                Ok(RpcReply::Value(serde_json::json!({})))
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let guard = super::RelayGuard { inner: Arc::new(Seen(seen.clone())), device: None };
+        let hash = "ab".repeat(32);
+        for (method, params) in [
+            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
+            (methods::REVIEW_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
+            (methods::SIGN_PLUGIN, serde_json::json!({"id": "x"})),
+            (methods::DECIDE_TEMPLATE, serde_json::json!({"pending": "x", "allow": true, "hash": hash})),
+            (methods::INSTALL_PLUGIN, serde_json::json!({"path": "/tmp/x.zeron-plugin"})),
+        ] {
+            assert!(
+                guard.handle(method, params.clone()).await.is_err(),
+                "a peer must not reach {method} {params}"
+            );
+        }
+        assert!(seen.lock().unwrap().is_empty(), "refused before the service");
+
+        for (method, params) in [
+            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": false, "hash": hash})),
+            (methods::SET_PLUGIN_OFF, serde_json::json!({"id": "x", "off": true})),
+            (methods::INSTALL_PLUGIN, serde_json::json!({"url": "https://example.com/x.zeron-plugin"})),
+        ] {
+            guard.handle(method, params).await.expect(method);
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(
+            seen.iter().all(|(_, caller)| matches!(caller, crate::Caller::Peer { .. })),
+            "served as a peer: {seen:?}"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
@@ -1241,6 +1464,72 @@ mod tests {
         assert_eq!((h.s.as_str(), h.k.as_str()), ("a", "b"));
         assert_eq!(p, vec![9]);
         assert!(decode_device_frame(&[0xff, 0xff, 0xff, 0xff, 0xff, 0x01]).is_err()); // overflow
+    }
+
+    /// R14: the device the edge verified (`fromDevice`, set by the room,
+    /// never by a client) reaches the service as `Caller::Peer{device}`; a
+    /// conn whose frames name a different device later is not believed.
+    #[tokio::test]
+    async fn the_edge_verified_device_reaches_the_service() {
+        use crate::{RpcReply, RpcService};
+        use std::sync::Mutex;
+
+        struct Seen(Arc<Mutex<Vec<crate::Caller>>>);
+        #[async_trait::async_trait]
+        impl RpcService for Seen {
+            async fn handle(&self, _method: &str, _params: serde_json::Value) -> Result<RpcReply, crate::RpcError> {
+                self.0.lock().unwrap().push(crate::caller());
+                Ok(RpcReply::Value(serde_json::json!({})))
+            }
+        }
+
+        // The wire shape the room sends: `{s, k, from, fromDevice}`.
+        let wire = br#"{"s":"rpc","k":"rpc","from":"c1","fromDevice":"device-a"}"#;
+        let header: DeviceFrameHeader = serde_json::from_slice(wire).unwrap();
+        assert_eq!(header.from_device.as_deref(), Some("device-a"));
+        let encoded = encode_device_frame(&header, b"").unwrap();
+        assert_eq!(decode_device_frame(&encoded).unwrap().0, header);
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let service: Arc<dyn RpcService> = Arc::new(Seen(seen.clone()));
+        let (out_tx, _out_rx) = mpsc::channel::<Vec<u8>>(16);
+        let on_nudge: NudgeHandler = Arc::new(|_| true);
+        let mut conns = HashMap::new();
+        let frame = |from: &str, device: Option<&str>, id: u64| {
+            let mut header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND);
+            header.from = Some(from.into());
+            header.from_device = device.map(str::to_owned);
+            let call = serde_json::json!({"id": id, "method": "ListPlugins", "params": {}}).to_string();
+            encode_device_frame(&header, call.as_bytes()).unwrap()
+        };
+        handle_host_frame(&frame("c1", Some("device-a"), 1), &mut conns, &service, &out_tx, &on_nudge).await;
+        handle_host_frame(&frame("c2", None, 1), &mut conns, &service, &out_tx, &on_nudge).await;
+        // Same conn, another device: dropped.
+        handle_host_frame(&frame("c1", Some("device-b"), 2), &mut conns, &service, &out_tx, &on_nudge).await;
+        for _ in 0..50 {
+            if seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen.contains(&crate::Caller::Peer { device: Some("device-a".into()) }), "{seen:?}");
+        assert!(seen.contains(&crate::Caller::Peer { device: None }), "{seen:?}");
+    }
+
+    #[test]
+    fn a_dial_carries_its_proof() {
+        let proof = CallerProof { device: "dev-a".into(), key: "K_ey-1".into(), signature: "s1g_-".into() };
+        assert_eq!(
+            caller_query(&proof, 1700000000000),
+            "&callerDevice=dev-a&callerKey=K_ey-1&callerTs=1700000000000&callerProof=s1g_-"
+        );
+        // Anything that would need escaping isn't sent at all (unstamped).
+        let odd = CallerProof { device: "dev a&x=1".into(), ..proof };
+        assert_eq!(caller_query(&odd, 1), "");
+        assert_eq!(caller_proof_message("dev-b", "c1", 5), "zeron-device-link:v1:dev-b:c1:5");
     }
 
     #[test]

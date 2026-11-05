@@ -241,7 +241,12 @@ impl CoreClient {
     }
 
     pub fn set_session_config(&self, chat_id: String, config: ChatConfig) -> CoreResult<()> {
-        let config: zc::ChatConfig = config.try_into()?;
+        let mut config: zc::ChatConfig = config.try_into()?;
+        // The phone does not pick a mode yet: keep the chat's own.
+        if let Some(current) = self.client.session_config(&chat_id) {
+            config.access = current.access;
+            config.plan = current.plan;
+        }
         Ok(self.client.set_session_config(&chat_id, &config)?)
     }
 

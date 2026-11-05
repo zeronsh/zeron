@@ -44,7 +44,7 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   # One space per demo folder, created up-front (chats join by space id);
   # a folder already registered keeps its first space, so each is listed once.
   declare -A SPACES=()
-  for project in zeron soccertcg aether; do
+  for project in zeron marigold flint; do
     sid=$(uuidgen | tr 'A-Z' 'a-z')
     mkdir -p "$PROJECTS_DIR/$project"
     probe Mutate "{\"op\":\"createSpace\",\"spaceId\":\"$sid\",\"deviceId\":\"$DEV\",\"path\":\"$PROJECTS_DIR/$project\"}" >/dev/null
@@ -63,10 +63,10 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
     probe Mutate "{\"op\":\"setChatActivity\",\"chatId\":\"$id\",\"lastMessageAt\":$(( ($(date +%s) - $4*3600) * 1000 ))}" >/dev/null
   }
   seed "Native Zeron Rust Rewrite"    zeron zeron/main                 0  run
-  seed "Rebalance Player Stats Caps"  soccertcg    zeron/rebalance-player-stat-caps  2  run
-  seed "Craft Premium TCG Experience" soccertcg    zeron/craft-premium-tcg-exp       26 skip
+  seed "Fix the Frost Date Lookup"    marigold     zeron/frost-date-lookup           2  run
+  seed "Print Seed Packet Labels"     marigold     zeron/seed-packet-labels          26 skip
   seed "Initial Context Exploration"  zeron        zeron/initial-context-exploration 14 skip
-  seed "Soccer TCG Repo Creation"     aether       aether/main                       48 skip
+  seed "Audit Ledger Rounding"        flint        flint/main                        48 skip
   touch "$DAEMON_DIR/.demo-seeded"
 fi
 

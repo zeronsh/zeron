@@ -1,0 +1,312 @@
+{
+  "loading": "Loading",
+  "try_again": "Try again",
+  "device": {
+    "unknown": "this chat's device"
+  },
+  "tab": {
+    "changes": "Changes",
+    "history": "History",
+    "asking": "Asking git…",
+    "no_session_title": "No chat here",
+    "no_session_body": "Git shows a chat's checkout. Open it from a chat's panel."
+  },
+  "empty_page": {
+    "changes": "Changes",
+    "history": "History"
+  },
+  "scope": {
+    "label": "What changed",
+    "working": "Working tree",
+    "working_about": "Since the last commit, staged or not",
+    "branch": "Branch",
+    "branch_about": "Everything since this branch left its base",
+    "turn": "Last turn",
+    "turn_about": "What this chat's last turn changed",
+    "against": "against",
+    "base_label": "Compare with",
+    "base_choose": "Choose a branch"
+  },
+  "head": {
+    "ahead_of": "{n, plural, one {# commit} other {# commits}} ahead of {base}"
+  },
+  "state": {
+    "merge": "Merging",
+    "rebase": "Rebasing",
+    "cherry_pick": "Cherry-picking",
+    "revert": "Reverting",
+    "commit_to_finish": "Commit to finish it, once every file is as it should be."
+  },
+  "conflicts": {
+    "title": "{n, plural, one {# file has conflicts} other {# files have conflicts}}",
+    "body": "Resolve each in your editor, stage it, then commit."
+  },
+  "stage_all": "Stage all",
+  "file": {
+    "stage": "Stage",
+    "unstage": "Unstage",
+    "discard": "Discard changes"
+  },
+  "diff": {
+    "loading": "Loading the diff…",
+    "binary": "A binary file: no lines to show.",
+    "cut": "This diff is long: the rest isn't shown.",
+    "pick_title": "No file chosen",
+    "pick_body": "Choose a file to see what changed in it."
+  },
+  "empty": {
+    "working_title": "Nothing to commit",
+    "working_body": "Everything on {branch} is committed.",
+    "working_ahead": "Everything on {branch} is committed. {n, plural, one {# commit hasn't} other {# commits haven't}} been pushed.",
+    "branch_title": "No changes on this branch",
+    "branch_body": "It has nothing {base} doesn't.",
+    "turn_title": "Nothing changed this turn",
+    "turn_body": "The chat's last turn left every file as it was."
+  },
+  "pull": {
+    "button": "Pull {n}"
+  },
+  "push": {
+    "button": "Push {n}",
+    "publish": "Publish branch",
+    "pushing_label": "Pushing",
+    "pushing": "Pushing {n, plural, one {# commit} other {# commits}} to {where}",
+    "pull_then_push": "Pull, then push"
+  },
+  "more": {
+    "label": "More",
+    "fetch": "Fetch",
+    "pull": "Pull",
+    "discard_all": "Discard all changes"
+  },
+  "commit": {
+    "button": "Commit",
+    "files": "Commit {n, plural, one {# file} other {# files}}",
+    "and_push": "Commit and push",
+    "amend": "Amend the last commit",
+    "you": "You",
+    "placeholder": "What changed, and why",
+    "message": "Commit message"
+  },
+  "discard": {
+    "title_one": "Discard the changes to {name}?",
+    "title_many": "Discard changes to {n, plural, one {# file} other {# files}}?",
+    "body": "They go back to the last commit, and a new file is deleted. This can't be undone.",
+    "confirm": "Discard"
+  },
+  "branches": {
+    "label": "Branch",
+    "none": "No branch",
+    "search": "Find a branch…",
+    "new": "New branch",
+    "new_title": "New branch",
+    "new_body": "From {from}, with your changes carried over.",
+    "create": "Create and switch",
+    "name": "Branch name",
+    "name_placeholder": "feature/name",
+    "on_remote": "On {remote}, not here yet",
+    "ahead_behind": "{ahead} ahead, {behind} behind",
+    "no_match": "No branch matches “{query}”",
+    "current": "current"
+  },
+  "history": {
+    "head": "{n, plural, one {# commit} other {# commits}} on {branch}",
+    "head_more": "{n} latest commits on {branch}",
+    "older": "Show older commits",
+    "fetch": "Fetch",
+    "back": "Back to history",
+    "empty_title": "No commits yet",
+    "empty_body": "This branch's first commit will show here.",
+    "pick_title": "No commit chosen",
+    "pick_body": "Choose a commit to see what it changed.",
+    "no_files_title": "No files changed",
+    "no_files_body": "This commit changes nothing its parent had.",
+    "ref_head": "{name}: the branch you're on",
+    "ref_branch": "Branch {name}",
+    "ref_remote": "{name}, on the remote",
+    "ref_tag": "Tag {name}",
+    "no_subject": "(no subject)",
+    "copy_sha": "Copy the commit's id",
+    "copied": "Copied",
+    "open_parent": "Open parent {sha}",
+    "body_more": "Show the whole message",
+    "body_less": "Show less",
+    "committed_by": "committed by {name}",
+    "parents": "{n, plural, one {Parent} other {Parents}}",
+    "files": "{n, plural, one {# file} other {# files}}",
+    "menu": {
+      "copy_sha": "Copy commit id",
+      "copy_subject": "Copy subject",
+      "branch_here": "New branch from here"
+    },
+    "found": "{n, plural, one {# commit found} other {# commits found}}",
+    "head_all": "{n, plural, one {# commit} other {# commits}} on every branch",
+    "head_all_more": "{n} latest commits on every branch",
+    "base_tip": "{ahead} ahead of {base}, {behind} behind",
+    "all_branches": "Every branch",
+    "fetching": "Fetching",
+    "search": "Search commits",
+    "fetch_failed": "Couldn't fetch",
+    "none_found_title": "No commits found",
+    "none_found_body": "No commit's message says “{query}”.",
+    "branch_from": "From commit {sha}. Switches to it; your changes come along.",
+    "parents_n": "{n, plural, one {# parent} other {# parents}}",
+    "ref_line": {
+      "branch": "Branch: {name}",
+      "remote": "Remote branch: {name}",
+      "tag": "Tag: {name}"
+    },
+    "ref_more": "{n, plural, one {# more ref} other {# more refs}}"
+  },
+  "reason": {
+    "offline": {
+      "title": "Can't reach {device}",
+      "body": "It's offline or asleep. Its changes show here once it's back."
+    },
+    "timeout": {
+      "title": "No answer from {device}",
+      "body": "It took too long. It may be busy, or its connection slow."
+    },
+    "not_installed": {
+      "title": "Git isn't on {device}",
+      "body": "Update Zeron there: Git comes with it."
+    },
+    "off": {
+      "title": "Git is off on {device}",
+      "body": "Turn it on there, in Settings → Plugins."
+    },
+    "not_approved": {
+      "title": "Git isn't allowed on {device} yet",
+      "body": "Allow it there, in Settings → Plugins."
+    },
+    "version_mismatch": {
+      "title": "Another version of Git is on {device}",
+      "body": "Update Zeron on both devices so they match."
+    },
+    "other_author": {
+      "title": "Another Git plugin is on {device}",
+      "body": "Someone else's plugin there has the same name. Remove it there to use Zeron's."
+    },
+    "no_service": {
+      "title": "Git can't run on {device}",
+      "body": "Its version has no service. Update Zeron there."
+    },
+    "not_loaded": {
+      "title": "Git didn't start on {device}",
+      "body": "Its service failed to load. Settings → Plugins there says why."
+    },
+    "old_engine": {
+      "title": "A newer Zeron is needed on {device}",
+      "body": "Update Zeron there to use Git with this chat."
+    },
+    "interrupted": {
+      "title": "Git stopped on {device}",
+      "body": "It stopped during the call. Try again."
+    },
+    "other": {
+      "title": "Something went wrong"
+    }
+  },
+  "code": {
+    "not_a_repo": {
+      "title": "Not a git repository",
+      "body": "This chat's folder isn't in a git repository, so there's nothing to compare."
+    },
+    "no_checkout": {
+      "title": "No folder",
+      "body": "This chat isn't working in a folder."
+    },
+    "rejected": {
+      "title": "The branch moved on {remote}",
+      "body": "It has commits you don't. Pull them first, then push."
+    },
+    "auth": {
+      "title": "{remote} said no",
+      "body": "git on {device} couldn't sign in to it. Check its credentials there."
+    },
+    "network": {
+      "title": "Can't reach {remote}",
+      "body": "{device} couldn't connect to it. Check its network."
+    },
+    "nothing_staged": {
+      "title": "Nothing is staged",
+      "body": "Tick the files to commit first."
+    },
+    "no_identity": {
+      "title": "git doesn't know who you are",
+      "body": "Set your name and email for git on {device} (git config user.name, user.email)."
+    },
+    "dirty": {
+      "title": "Your changes are in the way",
+      "body": "Switching would overwrite them. Commit or discard them first."
+    },
+    "pull_conflicts": {
+      "title": "Pulling would conflict",
+      "body": "Your commits and theirs change the same lines. Nothing was changed: merge them in your editor or a terminal."
+    },
+    "no_base": {
+      "title": "No base branch",
+      "body": "There's no main or master to compare this branch with."
+    },
+    "no_turn": {
+      "title": "No turn seen yet",
+      "body": "Changes since a turn show once this chat starts its next one."
+    },
+    "detached": {
+      "title": "No branch to push",
+      "body": "The checkout is on a commit, not a branch. Make a branch first."
+    },
+    "no_remote": {
+      "title": "Nowhere to push",
+      "body": "This repository has no remote."
+    },
+    "no_upstream": {
+      "title": "Not on the remote yet",
+      "body": "Push the branch first."
+    },
+    "bad_name": {
+      "title": "Not a branch name",
+      "body": "Branch names can't have spaces, \"..\", or end in \"/\" or \".lock\"."
+    },
+    "exists": {
+      "title": "That branch exists",
+      "body": "There's a branch by that name already: switch to it instead."
+    },
+    "timeout": {
+      "title": "git took too long",
+      "body": "It may still be working on {device}. Try again in a moment."
+    },
+    "no_message": {
+      "title": "No message",
+      "body": "Say what changed, and why."
+    },
+    "git": {
+      "title": "git couldn't do it",
+      "body": "Git stopped in this chat's folder on {device}. Try again; if it keeps happening, run the same there in a terminal to see all of it."
+    },
+    "no_ref": {
+      "title": "There's no branch named {words} here",
+      "body": "Choose another branch to compare with, or fetch to bring it from {remote}."
+    },
+    "unsafe_dir": {
+      "title": "Git won't work in this folder",
+      "body": "Git doesn't trust a folder another user owns. On {device}, add it with git config --global --add safe.directory, then try again."
+    },
+    "locked": {
+      "title": "Another git command is running here",
+      "body": "Wait for it to finish, then try again. If nothing is running, remove .git/index.lock on {device}."
+    }
+  },
+  "home": {
+    "diff_label": "{adds} lines added, {dels} removed: open the branch's changes",
+    "branch_changes": "Branch changes"
+  },
+  "changes": {
+    "partial": "showing {n} of {total}"
+  },
+  "comment": {
+    "placeholder": "Say what to change here…",
+    "add": "Add to chat",
+    "where_old": "{where} (old)"
+  }
+}

@@ -12,6 +12,11 @@
 //!   running.
 //! - The model catalog and title generation run on a separate read-only
 //!   host (`--disable-shell --disable-write --no-session-log`).
+//! - Full access is `allowAll` with the `:unrestricted` profile outside the
+//!   sandbox; supervised is `promptUnmatched` with `:ask-me` in it, each
+//!   approval asked of the person. Either way every stage of a staged
+//!   approval (`a && b` is two) is answered: Muse does not carry `allowAll`
+//!   to workflow children, and each stage waits on its own decision.
 //! - The host's environment drops an inherited `META_API_KEY` (so the
 //!   user's own Muse login is used) and turns off Muse's self-update.
 pub mod account;
@@ -28,7 +33,9 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::json;
 use tokio::sync::mpsc;
-use zeron_proto::{AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode};
+use zeron_proto::{
+    AccessMode, AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
+};
 
 use crate::{Harness, HarnessError, RunControls};
 use host::{Host, Mode};
@@ -137,7 +144,7 @@ impl MuseHarness {
             Mode::ReadOnly
         } else {
             Mode::Session {
-                sandbox: !request.auto_approve
+                sandbox: !full_access(&request)
                     && request.sandbox != zeron_proto::SandboxLevel::DangerFullAccess,
             }
         };
@@ -165,7 +172,15 @@ impl MuseHarness {
                 _ = consumer.closed() => Ok(()),
             };
             if let Err(error) = result {
-                let status = runner.host.child.try_wait().ok().flatten();
+                // The first symptom of a crash is usually the pipe's ("Muse
+                // stdout closed"), racing the exit itself: give the exit and
+                // the stderr tail a moment so the message names the crash (as
+                // the Pi driver does).
+                let status =
+                    tokio::time::timeout(Duration::from_millis(250), runner.host.child.wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
                 runner.error = Some(if status.is_some() {
                     runner.host.tail.wait_closed().await;
                     crate::crash_message("Muse", status, &runner.host.tail)
@@ -201,6 +216,11 @@ impl Harness for MuseHarness {
     /// Tiers are per model (`model/list` variants).
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
+    }
+    /// Supervised asks for what Muse's policy does not already allow; full
+    /// access is `allowAll` outside the sandbox. Muse has no plan mode.
+    fn access_modes(&self) -> &[AccessMode] {
+        &[AccessMode::Supervised, AccessMode::FullAccess]
     }
     fn installed(&self) -> bool {
         self.resolve_executable().is_ok()
@@ -274,10 +294,16 @@ impl Harness for MuseHarness {
     }
 }
 
+/// Whether `request` runs without asking: allow everything, unsandboxed.
+pub(super) fn full_access(request: &RunRequest) -> bool {
+    request.auto_approve || request.access.is_full_access()
+}
+
 fn launch_matches(live: &RunRequest, next: &RunRequest) -> bool {
     live.cwd == next.cwd
-        && live.auto_approve == next.auto_approve
+        && full_access(live) == full_access(next)
         && live.sandbox == next.sandbox
         && live.env == next.env
         && live.mcp == next.mcp
+        && live.extra_mcp == next.extra_mcp
 }

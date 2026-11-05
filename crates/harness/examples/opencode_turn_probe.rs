@@ -51,10 +51,13 @@ async fn main() {
         cwd,
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: !answer_yes,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut harness = OpencodeHarness::new();
     if let Some(exe) = exe {

@@ -1,0 +1,123 @@
+{
+  "id": "parallax-scenes",
+  "name": "Parallax scenes",
+  "version": "1.0.0",
+  "description": "Zeron's member-card scenes behind a new chat, each layer moving with the pointer.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "permissions": [
+    "ui.change"
+  ],
+  "ui": {
+    "change": [
+      "#new-chat-background"
+    ]
+  },
+  "settings_description": "Zeron's member-card scenes behind a new chat. Use it as the wallpaper here; Zeron's effect is drawn over the scene.",
+  "settings": [
+    {
+      "kind": "wallpaper",
+      "section": "Wallpaper"
+    },
+    {
+      "id": "scene",
+      "kind": "choice",
+      "style": "select",
+      "section": "Scene",
+      "label": "Scene",
+      "description": "What a new chat opens on.",
+      "default": "violet-dusk",
+      "options": [
+        {
+          "value": "shuffle",
+          "label": "Shuffle",
+          "description": "Another scene each time a new chat opens."
+        },
+        {
+          "value": "violet-dusk",
+          "label": "Dusk"
+        },
+        {
+          "value": "aurora",
+          "label": "Aurora"
+        },
+        {
+          "value": "blossom",
+          "label": "Blossom"
+        },
+        {
+          "value": "lighthouse",
+          "label": "Lighthouse"
+        },
+        {
+          "value": "canyon",
+          "label": "Canyon"
+        },
+        {
+          "value": "lotus",
+          "label": "Lotus"
+        },
+        {
+          "value": "icebergs",
+          "label": "Icebergs"
+        },
+        {
+          "value": "wheat",
+          "label": "Wheat"
+        },
+        {
+          "value": "volcano",
+          "label": "Volcano"
+        },
+        {
+          "value": "terraces",
+          "label": "Terraces"
+        },
+        {
+          "value": "surf",
+          "label": "Surf"
+        },
+        {
+          "value": "saturnine",
+          "label": "Saturnine"
+        },
+        {
+          "value": "rooftops",
+          "label": "Rooftops"
+        },
+        {
+          "value": "station",
+          "label": "Station"
+        }
+      ]
+    },
+    {
+      "id": "parallax",
+      "kind": "choice",
+      "style": "segmented",
+      "section": "Motion",
+      "label": "Parallax",
+      "description": "How far the layers move with the pointer.",
+      "default": "normal",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off",
+          "description": "The scene holds still."
+        },
+        {
+          "value": "subtle",
+          "label": "Subtle"
+        },
+        {
+          "value": "normal",
+          "label": "Normal"
+        },
+        {
+          "value": "deep",
+          "label": "Deep"
+        }
+      ]
+    }
+  ]
+}

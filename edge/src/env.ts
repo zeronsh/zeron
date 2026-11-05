@@ -26,6 +26,13 @@ export interface Env {
    * routes (code exchange, refresh, orgs). Unset ⇒ those routes answer 501,
    * matching the old apps/server dev-mode behavior. */
   WORKOS_API_KEY?: string;
+  /** Signing secret of the WorkOS webhook endpoint `https://<edge>/workos/webhook`
+   * (wrangler secret), subscribed to created/updated/deleted of user,
+   * organization and organization_membership. Unset ⇒ that route answers 503
+   * and WorkOS retries. */
+  WORKOS_WEBHOOK_SECRET?: string;
+  /** Every WorkOS user and organization, with members (`users1`; user-directory.ts). */
+  USER_DIRECTORY?: DurableObjectNamespace<import("./user-directory").UserDirectory>;
   /** APNs auth key (contents of AuthKey_XXXX.p8, wrangler secret) and its
    * key id. Unset ⇒ session notifications are decided and logged, not sent. */
   APNS_KEY_P8?: string;
@@ -107,6 +114,13 @@ export interface Env {
   RUNNER_JWT_PUBLIC_KEY?: string;
   /** Operator bearer for /admin/cloud/usage (secret). Unset ⇒ route 404s. */
   ADMIN_TOKEN?: string;
+  /** Public card reads per client IP (card-gate.ts). Unset ⇒ unlimited. */
+  CARD_READS?: RateLimit;
+  /** The cards' still pictures (card-image.ts), keyed by the public card. */
+  CARD_IMAGES?: R2Bucket;
+  /** Browser Run, which draws a card's picture from its player page. Unset ⇒
+   * pictures not yet in CARD_IMAGES answer 404. */
+  BROWSER?: Fetcher;
 }
 
 /** APNs settings, when push is set up for this deployment. */
@@ -142,3 +156,9 @@ export const RUNNER_DEVICE_HEADER = "x-zeron-runner-device";
  * device, JWT `cld`). A session runner may read its account's project
  * spaces. Same strip-then-stamp discipline. */
 export const RUNNER_ACCOUNT_HEADER = "x-zeron-runner-account";
+
+/** Header the Worker stamps on a device-room client dial whose calling device
+ * it verified (device-link.ts): a runner's own device, or a device that
+ * proved possession of its registered plugin key. DeviceRoom puts it on every
+ * frame that client relays (`fromDevice`). Same strip-then-stamp discipline. */
+export const CALLER_DEVICE_HEADER = "x-zeron-caller-device";

@@ -1,0 +1,47 @@
+name: Weekly coverage
+
+# Tests no other workflow runs, so they don't rot unnoticed:
+#   - zeron-engine's integration test binaries outside scripts/ci/test-core.sh
+#     (e2e, cloud_runner, run_recovery, m5_repos_diffs_terminals, ...); live ones
+#     stay #[ignore]d;
+#   - the crates whose own tests have no runner: term, syntax, theme, veil,
+#     visual, visual-gpu, zatex, notify.
+# Nothing here gates pull requests; a failure is a weekly signal to fix or delete.
+on:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: core # saved by core-tests (ci.yml); same dependency graph
+      - name: Every zeron-engine test binary
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-engine --tests
+
+  crates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: weekly-crates
+          apt-cache: ui-browser
+          apt-packages: >-
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
+            libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev libvulkan-dev
+            pkg-config cmake
+      - name: Crates without a runner
+        run: >-
+          cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast
+          -p zeron-term -p zeron-syntax -p zeron-theme -p zeron-veil -p zeron-visual
+          -p zeron-visual-gpu -p zatex -p zeron-notify --lib --tests

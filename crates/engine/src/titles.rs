@@ -209,10 +209,13 @@ impl TitleGenerator {
                 cwd: scratch.path().to_string_lossy().into_owned(),
                 sandbox: SandboxLevel::ReadOnly,
                 auto_approve: false,
+                access: Default::default(),
+                plan: false,
                 attachments: Vec::new(),
                 resume: None,
                 worktree: None,
                 env: Default::default(),
+                extra_mcp: Vec::new(),
             };
             // A Cloud device's credential broker supplies the CLI's login;
             // without one there is no title to generate.
@@ -387,10 +390,13 @@ mod tests {
             cwd: String::new(),
             sandbox: SandboxLevel::ReadOnly,
             auto_approve: false,
+            access: Default::default(),
+            plan: false,
             resume: None,
             attachments: vec![],
             worktree: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         let result = collect_text(&harness, request, None).await;
         assert!(

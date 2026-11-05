@@ -1,0 +1,14 @@
+{
+  "text": "Hello 🌍 from legacy",
+  "messages": [
+    "first",
+    "second"
+  ],
+  "queue": [
+    "two",
+    "one"
+  ],
+  "metadata": {
+    "author": "legacy"
+  }
+}

@@ -382,6 +382,7 @@ fn demo_accounts() -> AgentAccountsSnapshot {
         plan_label: Some(plan.into()),
         active: false,
         usage_windows: vec![window("Session", 0.34, 3), window("Week", 0.12, 96)],
+        codex_reset_credits: None,
         usage_fetched_at: None,
         usage_error: None,
         display_name: None,

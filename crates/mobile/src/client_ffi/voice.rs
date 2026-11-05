@@ -402,6 +402,8 @@ impl CoreClient {
                     reasoning: None,
                     model_options: Default::default(),
                     sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                    access: Default::default(),
+                    plan: false,
                 };
                 zeron_voice_session::run(
                     control,

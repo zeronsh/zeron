@@ -329,6 +329,7 @@ fn tool_lifecycle(phase: Phase, id: String, call: ToolCall, is_error: bool) -> V
                 is_error,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
         ],
     }
@@ -458,6 +459,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     is_error: error.is_some(),
                     output: None,
                     diff: None,
+                    exit_code: None,
                 },
             ];
             if let Some(message) = error {
@@ -487,14 +489,21 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 },
             }],
             Phase::Completed => {
+                // Absent when the command never ran (declined) or Codex lost
+                // it; the doc keeps the output's tail (see zeron-doc's
+                // `command_output_tail`), this its end only.
                 let exit_code = field(item, &["exitCode", "exit_code"])
                     .and_then(Value::as_i64)
-                    .unwrap_or(0);
+                    .and_then(|code| i32::try_from(code).ok());
+                let output = field(item, &["aggregatedOutput", "aggregated_output"])
+                    .and_then(Value::as_str)
+                    .and_then(zeron_proto::command_output_cap);
                 vec![AgentEvent::ToolResult {
                     id,
-                    is_error: status == "failed" || exit_code != 0,
-                    output: None,
+                    is_error: status == "failed" || exit_code.is_some_and(|code| code != 0),
+                    output,
                     diff: None,
+                    exit_code,
                 }]
             }
         },
@@ -550,6 +559,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 is_error: status == "failed",
                 output: None,
                 diff: None,
+                exit_code: None,
             }],
         },
         "webSearch" | "web_search" => tool_lifecycle(
@@ -970,6 +980,86 @@ mod tests {
         assert_eq!(delta_text(&json!({})), None);
     }
 
+    /// A command's aggregated output and exit code ride its result, and the
+    /// doc keeps only their tail: 10 lines / 1 KB, flagged, redacted.
+    #[test]
+    fn command_execution_output_folds_to_a_short_tail() {
+        let output: String = (1..=400)
+            .map(|i| format!("line {i}: compiling crate-{i}\n"))
+            .collect::<String>()
+            + "error: GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 rejected\n";
+        let mut parts = Vec::new();
+        for event in map_item(
+            Phase::Started,
+            &json!({"type": "commandExecution", "id": "c1", "command": "cargo build"}),
+        )
+        .into_iter()
+        .chain(map_item(
+            Phase::Completed,
+            &json!({"type": "commandExecution", "id": "c1", "status": "failed",
+                    "exitCode": 101, "aggregatedOutput": output}),
+        )) {
+            zeron_doc::fold_event_into_parts(&mut parts, &event);
+        }
+        let zeron_doc::MessagePart::Tool {
+            is_error,
+            output: Some(tail),
+            output_bytes,
+            output_truncated,
+            exit_code,
+            ..
+        } = &parts[0]
+        else {
+            panic!("no tail: {parts:?}");
+        };
+        assert!(*is_error);
+        assert_eq!(*exit_code, Some(101));
+        assert!(*output_truncated);
+        assert_eq!(*output_bytes, Some(output.len() as u64));
+        assert!(tail.lines().count() <= 10, "{} lines", tail.lines().count());
+        assert!(tail.len() <= 1024, "{} bytes", tail.len());
+        assert!(tail.contains("line 400: compiling crate-400"));
+        assert!(!tail.contains("line 300:"));
+        assert!(!tail.contains("ghp_abcdef"), "token survived: {tail}");
+        assert!(tail.contains("[redacted]"));
+    }
+
+    /// Codex's other tools (an MCP call here) still leave no output in the doc.
+    #[test]
+    fn a_non_command_tool_keeps_no_output() {
+        let mut parts = Vec::new();
+        for event in [
+            AgentEvent::ToolCall {
+                id: "m1".into(),
+                call: ToolCall::Mcp {
+                    server: "s".into(),
+                    tool: "t".into(),
+                    input: None,
+                },
+            },
+            AgentEvent::ToolResult {
+                id: "m1".into(),
+                is_error: false,
+                output: Some("secret file contents\n".repeat(10)),
+                diff: None,
+                exit_code: Some(0),
+            },
+        ] {
+            zeron_doc::fold_event_into_parts(&mut parts, &event);
+        }
+        assert!(matches!(
+            &parts[0],
+            zeron_doc::MessagePart::Tool {
+                output: None,
+                output_bytes: None,
+                exit_code: None,
+                output_truncated: false,
+                resolved: true,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn command_execution_maps_exit_code_to_error() {
         let started = map_item(
@@ -996,6 +1086,7 @@ mod tests {
                 is_error: true,
                 output: None,
                 diff: None,
+                exit_code: Some(2),
             }]
         );
     }
@@ -1037,6 +1128,7 @@ mod tests {
                     is_error: true,
                     output: None,
                     diff: None,
+                    exit_code: None,
                 },
             ]
         );
@@ -1081,6 +1173,7 @@ mod tests {
                         is_error: false,
                         output: None,
                         diff: None,
+                        exit_code: None,
                     },
                 ]
             );
@@ -1115,6 +1208,7 @@ mod tests {
                     is_error: false,
                     output: None,
                     diff: None,
+                    exit_code: None,
                 },
             ]
         );

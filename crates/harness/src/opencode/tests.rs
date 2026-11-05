@@ -24,6 +24,8 @@ struct TurnWire {
     listings: Arc<std::sync::atomic::AtomicUsize>,
     /// The `pending` lists served to a reconnect sweep.
     pending: Arc<std::sync::Mutex<Value>>,
+    /// Every question put to the person, in order.
+    asked: Arc<std::sync::Mutex<Vec<UserInputQuestion>>>,
     command_failure_release: Option<tokio::sync::oneshot::Sender<()>>,
     server: tokio::task::JoinHandle<()>,
     run: tokio::task::JoinHandle<()>,
@@ -316,6 +318,8 @@ impl TurnWire {
             .then_some(steer_tx);
         let interrupt = tokio_util::sync::CancellationToken::new();
         let turn = crate::TurnControl::default();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let questions_asked = asked.clone();
         let mut request = json!({"prompt": if native_command_reply.is_some() { "/project-review" } else { "first" }, "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"});
         request
             .as_object_mut()
@@ -329,6 +333,7 @@ impl TurnWire {
                 execution_lease: None,
                 request_input: Box::new(move |questions| {
                     let answer = answer.expect("fixture must not ask for input");
+                    questions_asked.lock().unwrap().extend(questions.clone());
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(
                         questions
@@ -385,6 +390,7 @@ impl TurnWire {
             bus_connections,
             listings,
             pending,
+            asked,
             command_failure_release: matches!(
                 native_command_reply,
                 Some(NativeCommandReply::DelayedHttp404)
@@ -1929,6 +1935,362 @@ async fn permissions_do_not_auto_answer_agent_questions() {
     }})).unwrap();
     let body = wire.posted("/question/question/reply").await;
     assert_eq!(body, json!({"answers": [["No"]]}));
+}
+
+/// Waits for the fixture's first prompt, on either wire.
+async fn first_prompt(wire: &mut TurnWire, v2: bool) {
+    if v2 {
+        wire.request("/api/model").await;
+    }
+    wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+        .await;
+}
+
+/// An edit then a command, as 1.x asks them (`permission`, `patterns`,
+/// `metadata`; observed live, 1.19.4) or 2.x (`action`, `resources`).
+fn ask_edit_and_command(wire: &TurnWire, v2: bool) {
+    for (id, permission, pattern, metadata) in [
+        (
+            "per_edit",
+            "edit",
+            "src/main.rs",
+            json!({"filepath": "/work/src/main.rs"}),
+        ),
+        (
+            "per_bash",
+            "bash",
+            "cargo test",
+            json!({"command": "cargo test"}),
+        ),
+    ] {
+        if v2 {
+            wire.v2(
+                "permission.asked",
+                json!({"id": id, "sessionID": "fixture", "action": permission,
+                       "resources": [pattern], "metadata": metadata}),
+            );
+        } else {
+            wire.bus
+                .send(json!({"type": "permission.asked", "properties": {
+                    "id": id, "sessionID": "fixture", "permission": permission,
+                    "patterns": [pattern], "metadata": metadata, "always": ["*"]
+                }}))
+                .unwrap();
+        }
+    }
+}
+
+fn asked(wire: &TurnWire) -> Vec<String> {
+    wire.asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.question.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn supervised_asks_before_every_permission_and_rejects_on_no() {
+    for v2 in [false, true] {
+        for (answer, reply) in [(true, "once"), (false, "reject")] {
+            let overrides = json!({"access": "supervised"});
+            let mut wire =
+                TurnWire::start_config(false, v2, false, Some(answer), "2.0.3", overrides, false)
+                    .await;
+            first_prompt(&mut wire, v2).await;
+            ask_edit_and_command(&wire, v2);
+            for id in ["per_edit", "per_bash"] {
+                let body = wire.posted(&format!("/permission/{id}/reply")).await;
+                assert_eq!(body, json!({"reply": reply}), "{id} (v2: {v2})");
+            }
+            assert_eq!(
+                asked(&wire),
+                [
+                    "OpenCode wants to modify /work/src/main.rs. Allow it?",
+                    "OpenCode wants to run `cargo test`. Allow it?",
+                ]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn auto_accept_edits_approves_edits_and_asks_before_commands() {
+    for v2 in [false, true] {
+        let overrides = json!({"access": "auto-accept-edits"});
+        let mut wire =
+            TurnWire::start_config(false, v2, false, Some(false), "2.0.3", overrides, false).await;
+        first_prompt(&mut wire, v2).await;
+        ask_edit_and_command(&wire, v2);
+        let edit = wire.posted("/permission/per_edit/reply").await;
+        let bash = wire.posted("/permission/per_bash/reply").await;
+        assert_eq!(edit, json!({"reply": "once"}));
+        assert_eq!(bash, json!({"reply": "reject"}));
+        assert_eq!(
+            asked(&wire),
+            ["OpenCode wants to run `cargo test`. Allow it?"]
+        );
+    }
+}
+
+/// Full access, or `auto_approve` whatever the mode, approves without
+/// asking: the fixture has no answer, so a question would fail it.
+#[tokio::test]
+async fn full_access_approves_every_permission_without_asking() {
+    for (auto_approve, overrides) in [
+        (false, json!({})),
+        (false, json!({"access": "full-access"})),
+        (true, json!({"access": "supervised"})),
+    ] {
+        let mut wire =
+            TurnWire::start_config(false, false, auto_approve, None, "2.0.3", overrides, false)
+                .await;
+        first_prompt(&mut wire, false).await;
+        ask_edit_and_command(&wire, false);
+        for id in ["per_edit", "per_bash"] {
+            let body = wire.posted(&format!("/permission/{id}/reply")).await;
+            assert_eq!(body, json!({"reply": "once"}));
+        }
+        assert!(asked(&wire).is_empty());
+    }
+}
+
+#[test]
+fn permission_questions_name_what_is_asked() {
+    let question = |props: Value, dir: Option<&str>| permission_question(&props, dir).question;
+    assert_eq!(
+        question(
+            json!({"permission": "write", "patterns": ["src/a.rs"],
+                   "metadata": {"filepath": "/work/src/a.rs"}}),
+            Some("/work"),
+        ),
+        "OpenCode wants to modify src/a.rs. Allow it?"
+    );
+    // apply_patch: several files, no single filepath.
+    assert_eq!(
+        question(
+            json!({"permission": "edit", "patterns": ["a.rs", "b.rs"]}),
+            None
+        ),
+        "OpenCode wants to modify a.rs, b.rs. Allow it?"
+    );
+    assert_eq!(
+        question(json!({"action": "bash", "resources": ["git push"]}), None),
+        "OpenCode wants to run `git push`. Allow it?"
+    );
+    assert_eq!(
+        question(
+            json!({"permission": "external_directory", "patterns": ["/etc/*"],
+                   "metadata": {"filepath": "/etc/hosts", "parentDir": "/etc"}}),
+            Some("/work"),
+        ),
+        "OpenCode wants to access /etc outside the project. Allow it?"
+    );
+    assert_eq!(
+        question(
+            json!({"permission": "webfetch", "patterns": ["https://example.test"]}),
+            None,
+        ),
+        "OpenCode wants to use webfetch (https://example.test). Allow it?"
+    );
+}
+
+/// A steer adopting `plan`, as the engine sends a changed configuration.
+fn plan_config(plan: bool) -> crate::SteerMessage {
+    let config: RunRequest = serde_json::from_value(json!({
+        "prompt": "", "cwd": "", "sandbox": "workspace-write", "plan": plan
+    }))
+    .unwrap();
+    crate::SteerMessage {
+        prompt: format!("plan {plan}"),
+        message_id: None,
+        attachments: Vec::new(),
+        config: Some(Box::new(config)),
+    }
+}
+
+/// 1.x names the plan agent on each prompt in plan mode and none outside
+/// it (the server's default agent then runs, verified live on 1.19.4).
+#[tokio::test]
+async fn plan_mode_names_the_plan_agent_on_each_v1_prompt() {
+    let overrides = json!({"plan": true, "keepSteering": true});
+    let mut wire =
+        TurnWire::start_config(false, false, true, None, "2.0.3", overrides, false).await;
+    wire.request("/prompt_async").await;
+    for plan in [false, true] {
+        wire.status("busy");
+        wire.status("idle");
+        wire.idle();
+        assert_eq!(wire.done().await.0, DoneStatus::Completed);
+        let steering = wire.steering.as_ref().unwrap();
+        steering.send(plan_config(plan)).await.unwrap();
+        wire.request("/prompt_async").await;
+    }
+    let agents: Vec<Value> = wire
+        .posts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path.ends_with("/prompt_async"))
+        .map(|(_, body)| body.get("agent").cloned().unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(agents, [json!("plan"), Value::Null, json!("plan")]);
+}
+
+/// 2.x holds the agent on the session: plan mode creates it on the plan
+/// agent, and leaving or re-entering plan mode switches it before the prompt.
+#[tokio::test]
+async fn plan_mode_sets_the_v2_session_agent() {
+    let overrides = json!({"plan": true, "keepSteering": true});
+    let mut wire = TurnWire::start_config(false, true, true, None, "2.0.3", overrides, false).await;
+    first_prompt(&mut wire, true).await;
+    for plan in [false, true] {
+        wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+        wire.v2(
+            "session.execution.succeeded",
+            json!({"sessionID": "fixture"}),
+        );
+        assert_eq!(wire.done().await.0, DoneStatus::Completed);
+        let steering = wire.steering.as_ref().unwrap();
+        steering.send(plan_config(plan)).await.unwrap();
+        // Adopting a configuration re-reads the catalog first.
+        first_prompt(&mut wire, true).await;
+    }
+    let posts = wire.posts.lock().unwrap();
+    let created = posts
+        .iter()
+        .find(|(path, _)| path == "/api/session")
+        .unwrap();
+    assert_eq!(created.1["agent"], "plan");
+    let switched: Vec<&Value> = posts
+        .iter()
+        .filter(|(path, _)| path == "/api/session/fixture/agent")
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(
+        switched,
+        [&json!({"agent": "build"}), &json!({"agent": "plan"})]
+    );
+    assert!(
+        posts
+            .iter()
+            .filter(|(path, _)| path.ends_with("/prompt"))
+            .all(|(_, body)| body.get("agent").is_none())
+    );
+}
+
+#[test]
+fn access_changes_restart_the_server_and_plan_changes_do_not() {
+    let harness = OpencodeHarness::new();
+    assert_eq!(harness.access_modes(), AccessMode::ALL);
+    assert!(harness.supports_plan());
+    let request = |access: &str, auto_approve: bool, plan: bool| -> RunRequest {
+        serde_json::from_value(json!({
+            "prompt": "", "cwd": "/work", "sandbox": "workspace-write",
+            "access": access, "autoApprove": auto_approve, "plan": plan
+        }))
+        .unwrap()
+    };
+    let full = request("full-access", false, false);
+    assert!(!harness.reconfigures_in_place(&full, &request("supervised", false, false)));
+    assert!(harness.reconfigures_in_place(&full, &request("full-access", false, true)));
+    // auto_approve is full access whatever the mode says.
+    assert!(harness.reconfigures_in_place(&full, &request("supervised", true, false)));
+}
+
+#[test]
+fn access_config_asks_through_opencode_permission_rules() {
+    // 1.x: a permission object, merged into the inherited inline layer; a
+    // `deny` set there is kept, the one-word form spelled out.
+    let v1 = |inherited: Option<&str>, access| -> Value {
+        serde_json::from_str(&access_config(inherited, access, Protocol::V1).unwrap()).unwrap()
+    };
+    // Everything is asked but looking around (and, short of supervised,
+    // file changes); the catch-all leads so the named rules win.
+    let expected = |edit: &str, overrides: Value| -> Value {
+        let mut rules = json!({"*": "ask", "edit": edit, "bash": "ask", "webfetch": "ask",
+                               "websearch": "ask"});
+        for tool in UNASKED_PERMISSIONS {
+            rules[tool] = json!("allow");
+        }
+        for (name, rule) in overrides.as_object().unwrap() {
+            rules[name] = rule.clone();
+        }
+        rules
+    };
+    let edits = v1(Some(r#"{"model": "keep"}"#), AccessMode::AutoAcceptEdits);
+    assert_eq!(edits["model"], "keep");
+    assert_eq!(edits["permission"], expected("allow", json!({})));
+    let order: Vec<&String> = edits["permission"].as_object().unwrap().keys().collect();
+    assert_eq!(order[0], "*");
+    assert!(edits.get("agent").is_none());
+    let supervised = v1(
+        Some(r#"{"permission": {"bash": "deny", "read": "allow"}}"#),
+        AccessMode::Supervised,
+    );
+    assert_eq!(
+        supervised["permission"],
+        expected("ask", json!({"bash": "deny"}))
+    );
+    // The plan agent keeps its edit denial and asks before its plan file.
+    assert_eq!(
+        supervised["agent"]["plan"]["permission"]["edit"],
+        json!({"*": "deny", "*opencode/plans/*.md": "ask"})
+    );
+    let rules = supervised["agent"]["plan"]["permission"]["edit"]
+        .as_object()
+        .unwrap();
+    assert_eq!(rules.keys().collect::<Vec<_>>(), ["*", PLAN_FILES]);
+    // An inherited allow-everything is overridden; a deny-everything kept.
+    assert_eq!(
+        v1(
+            Some(r#"{"permission": "allow"}"#),
+            AccessMode::AutoAcceptEdits
+        )["permission"],
+        expected("allow", json!({}))
+    );
+    assert_eq!(
+        v1(Some(r#"{"permission": "deny"}"#), AccessMode::Supervised)["permission"]["*"],
+        "deny"
+    );
+    // 2.x: ordered rules appended after the inherited ones.
+    let v2: Value = serde_json::from_str(
+        &access_config(
+            Some(r#"{"permissions": [{"action": "read", "resource": "*", "effect": "allow"}]}"#),
+            AccessMode::Supervised,
+            Protocol::V2,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rule = |action: &str, resource: &str, effect: &str| -> Value {
+        json!({"action": action, "resource": resource, "effect": effect})
+    };
+    assert_eq!(
+        v2["permissions"],
+        json!([
+            rule("read", "*", "allow"),
+            rule("bash", "*", "ask"),
+            rule("webfetch", "*", "ask"),
+            rule("websearch", "*", "ask"),
+            rule("edit", "*", "ask"),
+        ])
+    );
+    assert_eq!(
+        v2["agents"]["plan"]["permissions"],
+        json!([rule("edit", "*", "deny"), rule("edit", PLAN_FILES, "ask")])
+    );
+    for invalid in [r#"{"permission": 1}"#, r#"{"agent": []}"#] {
+        assert!(access_config(Some(invalid), AccessMode::Supervised, Protocol::V1).is_err());
+    }
+    assert!(
+        access_config(
+            Some(r#"{"permissions": {}}"#),
+            AccessMode::Supervised,
+            Protocol::V2
+        )
+        .is_err()
+    );
 }
 
 /// 2.x (2.0.24+) answers question forms, keyed by field, on the session's

@@ -26,10 +26,13 @@ fn request(harness: HarnessId, prompt: &str, cwd: &str) -> RunRequest {
         cwd: cwd.into(),
         sandbox: SandboxLevel::ReadOnly,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 

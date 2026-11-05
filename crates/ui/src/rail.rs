@@ -119,6 +119,23 @@ pub fn rail_ticks(
     ticks
 }
 
+/// What [`rail_ticks`] depends on: the transcript and its echoes, and the
+/// rows the ticks map onto.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct RailKey {
+    transcript: u64,
+    echoes: u64,
+    rows: u64,
+}
+
+/// The rail's ticks with their transcript rows, and their message ids.
+#[derive(Clone)]
+pub(crate) struct RailTicks {
+    key: RailKey,
+    pairs: std::rc::Rc<[(RailTick, usize)]>,
+    ids: std::rc::Rc<[SharedString]>,
+}
+
 /// The active tick for a scroll position: the last tick whose transcript row is
 /// at or above the viewport-top row (the prompt whose section you're reading).
 /// Before the first tick's row, the first tick is active.
@@ -642,27 +659,62 @@ impl Transcript {
         (row_bottom > top).then_some((top, row_bottom))
     }
 
+    /// The rail's ticks paired with their rows, rebuilt only when the
+    /// transcript, its echoes or its rows change.
+    fn rail_pairs(&mut self, cx: &mut Context<Self>) -> RailTicks {
+        use std::hash::{Hash, Hasher};
+        let (transcript, echoes) = {
+            let state = self.state_entity().read(cx);
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for echo in state.pending_echoes() {
+                echo.id.hash(&mut hasher);
+                echo.parts.len().hash(&mut hasher);
+            }
+            (state.transcript_revision, hasher.finish())
+        };
+        let key = RailKey {
+            transcript,
+            echoes,
+            rows: self.rows_revision(),
+        };
+        if let Some(cached) = self.rail_ticks_mut().as_ref()
+            && cached.key == key
+        {
+            return cached.clone();
+        }
+        let ticks = {
+            let state = self.state_entity().read(cx);
+            rail_ticks(&state.transcript, state.pending_echoes())
+        };
+        // Map each tick to its transcript row (user rows share the entry id).
+        let rows: std::collections::HashMap<&str, usize> = self
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(ix, row)| (row.id.as_ref(), ix))
+            .collect();
+        let pairs: std::rc::Rc<[(RailTick, usize)]> = ticks
+            .into_iter()
+            .filter_map(|tick| {
+                let row = *rows.get(tick.message_id.as_str())?;
+                Some((tick, row))
+            })
+            .collect();
+        let ids = pairs
+            .iter()
+            .map(|(tick, _)| SharedString::from(tick.message_id.clone()))
+            .collect();
+        let ticks = RailTicks { key, pairs, ids };
+        *self.rail_ticks_mut() = Some(ticks.clone());
+        ticks
+    }
+
     /// The rail element — an absolute overlay along the transcript's left edge.
     pub fn render_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if !self.rail_enabled() {
             return gpui::Empty.into_any_element();
         }
-        let (entries, echoes) = {
-            let state = self.state_entity().read(cx);
-            (state.transcript.clone(), state.pending_echoes().to_vec())
-        };
-        let ticks = rail_ticks(&entries, &echoes);
-        // Map each tick to its transcript row (user rows share the entry id).
-        let pairs: Vec<(RailTick, usize)> = ticks
-            .into_iter()
-            .filter_map(|tick| {
-                let row = self
-                    .rows()
-                    .iter()
-                    .position(|r| r.id.as_ref() == tick.message_id.as_str())?;
-                Some((tick, row))
-            })
-            .collect();
+        let RailTicks { pairs, ids, .. } = self.rail_pairs(cx);
         // A minimap of one exchange is noise, not navigation — the original
         // rail hides below two marks (message-rail.tsx `marks.length < 2`).
         if pairs.len() < 2 {
@@ -720,21 +772,6 @@ impl Transcript {
             .collect();
         let hover = self.rail_hover().filter(|&ix| ix < n);
         let theme = Theme::of(cx).clone();
-        let senders: Vec<Option<ChatIdentity>> = {
-            let state = self.state_entity().read(cx);
-            pairs
-                .iter()
-                .map(|(tick, _)| {
-                    tick.sender.as_ref().map(|sender| {
-                        crate::transcript::chat_identity(
-                            state,
-                            Some(sender.chat_id.as_ref()),
-                            &sender.title,
-                        )
-                    })
-                })
-                .collect()
-        };
 
         // The rail centres in the band between the titlebar and the bottom
         // chrome. Pre-layout the viewport reads 0; assume a typical height
@@ -749,10 +786,6 @@ impl Transcript {
         let content = height + TICK_SLOT;
         let window_h = rail_window(content, viewport_h - band_top - band_bottom);
         let scrolls = content > window_h + 0.5;
-        let ids: std::rc::Rc<[SharedString]> = pairs
-            .iter()
-            .map(|(tick, _)| SharedString::from(tick.message_id.clone()))
-            .collect();
         // A scrolling rail keeps the lit ticks in view, moving only when
         // what's lit changes (and not under the pointer), so scrolling it by
         // hand holds.
@@ -785,11 +818,34 @@ impl Transcript {
         };
         let move_under = tick_under.clone();
 
+        // A scrolling rail only builds the ticks its window shows (and a
+        // slot either side): a long chat's hundreds of others would be laid
+        // out every frame for nothing. Scrolling it re-renders the view.
+        let shown = scrolls.then(|| {
+            let top = -f32::from(rail_scroll.offset().y);
+            (top - TICK_SLOT, top + window_h + TICK_SLOT)
+        });
+        // Only the hovered tick's card shows its sender.
+        let mut sender = hover
+            .and_then(|ix| pairs.get(ix))
+            .and_then(|(tick, _)| tick.sender.as_ref())
+            .map(|sender| {
+                crate::transcript::chat_identity(
+                    self.state_entity().read(cx),
+                    Some(sender.chat_id.as_ref()),
+                    &sender.title,
+                )
+            });
         let ticks = pairs
-            .into_iter()
-            .zip(senders)
+            .iter()
             .enumerate()
-            .map(|(ix, ((tick, _), sender))| {
+            .filter(|(ix, _)| {
+                shown.is_none_or(|(top, bottom)| {
+                    let at = tick_offset(*ix, n, height);
+                    at >= top && at <= bottom
+                })
+            })
+            .map(|(ix, (tick, _))| {
                 let distance = hover.map(|h| h.abs_diff(ix));
                 let bar_color = if distance == Some(0) || lit[ix] {
                     theme.text.opacity(0.8)
@@ -800,7 +856,7 @@ impl Transcript {
                     let theme = theme.for_popup();
                     // The sender rides over the prompt as it does over the
                     // bubble: `Message from [mark] Chat`.
-                    let sender = sender.map(|ChatIdentity { title, mark, .. }| {
+                    let sender = sender.take().map(|ChatIdentity { title, mark, .. }| {
                         div()
                             .min_w_0()
                             .flex()

@@ -28,6 +28,9 @@
 // objc 0.2's `msg_send!` checks a `cargo-clippy` feature this crate lacks.
 #![allow(unexpected_cfgs)]
 
+
+pub mod links;
+
 use std::sync::Mutex;
 
 const DISABLE_ENV: &str = "ZERON_DISABLE_NOTIFICATIONS";

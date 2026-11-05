@@ -167,6 +167,7 @@ fn candidates(
                     && !reserved_ports.contains(&l.address.port())
                     && l.pid != std::process::id()
                     && !l.is_authentication_command()
+                    && !l.signing_in
             })
             .filter_map(|mut listener| {
                 // A chat this device no longer hosts (or another engine's,
@@ -320,7 +321,7 @@ impl PreviewService {
             loop {
                 let binding = tokio::select! {
                     _ = proxy_stop.cancelled() => break,
-                    binding = proxy::serve(router.clone(), zeron_proto::PREVIEW_PROXY_PORT, proxy_stop.child_token()) => binding,
+                    binding = serve_proxy(router.clone(), &proxy_stop) => binding,
                 };
                 match binding {
                     Ok((port, tasks)) => {
@@ -330,12 +331,13 @@ impl PreviewService {
                         }
                         break;
                     }
-                    Err(error) => proxy_catalog.set_proxy_status(
-                        zeron_proto::PREVIEW_PROXY_PORT,
-                        Some(format!(
-                            "Local previews could not listen on port 7331: {error}"
-                        )),
-                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, "local previews could not start; retrying");
+                        proxy_catalog.set_proxy_status(
+                            zeron_proto::PREVIEW_PROXY_PORT,
+                            Some(format!("Local previews could not start: {error}")),
+                        )
+                    }
                 }
                 tokio::select! { _ = proxy_stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
             }
@@ -467,6 +469,34 @@ impl Connector for LocalConnector {
     }
 }
 
+
+/// The local preview proxy, listening: on its usual port, or, with that
+/// taken (another Zeron engine on this computer has it: the app's and a
+/// development one, say), on one the system picks. Every preview address is
+/// built from the port it got (`PreviewSnapshot::proxy_port`), so nothing
+/// that opens a preview depends on which.
+async fn serve_proxy(
+    router: proxy::Router,
+    stop: &CancellationToken,
+) -> anyhow::Result<(u16, Vec<tokio::task::JoinHandle<()>>)> {
+    match proxy::serve(router.clone(), zeron_proto::PREVIEW_PROXY_PORT, stop.child_token()).await {
+        Err(error) if address_in_use(&error) => {
+            tracing::info!(
+                port = zeron_proto::PREVIEW_PROXY_PORT,
+                "the preview proxy's port is taken; listening on another"
+            );
+            proxy::serve(router, 0, stop.child_token()).await
+        }
+        served => served,
+    }
+}
+
+fn address_in_use(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +511,7 @@ mod tests {
             zeron_owned: true,
             origin: Some("chat:chat".into()),
             chat_id: Some("chat".into()),
+            signing_in: false,
         }
     }
     #[test]

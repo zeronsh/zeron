@@ -166,10 +166,13 @@ fn run_request(harness: HarnessId, prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -620,6 +623,8 @@ async fn provider_cannot_change_while_a_turn_is_running() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
+                access: Default::default(),
+                plan: false,
             },
         )
         .unwrap();
@@ -652,6 +657,8 @@ async fn provider_cannot_change_while_a_turn_is_running() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
+                access: Default::default(),
+                plan: false,
             },
         })
     };

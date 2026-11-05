@@ -47,10 +47,13 @@ fn request(prompt: &str) -> RunRequest {
         cwd: String::new(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -167,6 +170,7 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: Some(0),
         }),
     }));
 
@@ -195,12 +199,14 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
         is_error: false,
         output: None,
         diff: None,
+        exit_code: Some(0),
     }));
     assert!(events.contains(&AgentEvent::ToolResult {
         id: "tool-2".into(),
         is_error: true,
         output: None,
         diff: None,
+        exit_code: None,
     }));
 
     // Informational rate-limit frames stay quiet.
@@ -1013,6 +1019,53 @@ async fn live_real_cli_single_turn() {
     ));
 }
 
+/// The real CLI in plan mode, supervised: the plan's `ExitPlanMode` and the
+/// command that follows are both asked, and the approved command runs.
+#[tokio::test]
+#[ignore = "spawns the real claude CLI; needs install + auth + network"]
+async fn live_plan_mode_asks_before_implementing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "Run the shell command `echo hi > hello.txt` with Bash. Write a one-line plan and \
+         call ExitPlanMode right away, then run it. Be brief.",
+    );
+    req.model = Some("haiku".into());
+    req.cwd = dir.path().display().to_string();
+    req.auto_approve = false;
+    req.access = zeron_proto::AccessMode::Supervised;
+    req.plan = true;
+    let (controls, _steer, asked) = approving(&["Approve plan", "Approve command"]);
+    let mut stream = ClaudeHarness::new()
+        .run(req, controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(180), async {
+        while let Some(ev) = stream.next().await {
+            if matches!(ev.expect("stream event"), AgentEvent::Done { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("live turn finished in time");
+    let headers: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.header.clone())
+        .collect();
+    assert_eq!(
+        headers.first().map(String::as_str),
+        Some("Approve plan"),
+        "{headers:?}"
+    );
+    assert!(
+        headers.iter().any(|h| h == "Approve command"),
+        "{headers:?}"
+    );
+    assert!(dir.path().join("hello.txt").exists());
+}
+
 // ---------------------------------------------------------------------------
 // Slash-command discovery
 // ---------------------------------------------------------------------------
@@ -1041,6 +1094,57 @@ async fn commands_come_from_the_initialize_control_request() {
 
 /// Live smoke against the real CLI: `cargo test -p zeron-harness --test
 /// claude -- --ignored live_commands`. No model turn, no API cost.
+/// A real background shell is listed with its command, its output file is
+/// read while it runs, and a host stop ends it through `stop_task`.
+#[tokio::test]
+#[ignore = "spawns the real claude CLI; needs install + auth + network"]
+async fn live_background_shell_is_listed_read_and_stopped() {
+    use zeron_harness::TurnControl;
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "Use the Bash tool with run_in_background set to true to run exactly: \
+         for i in $(seq 1 120); do echo tick $i; sleep 1; done \
+         Then reply STARTED and nothing else.",
+    );
+    req.model = Some("haiku".into());
+    req.cwd = dir.path().display().to_string();
+    let (mut controls, _steer, _token) = controls("A");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut processes = turn.watch_background_processes();
+    let mut stream = ClaudeHarness::new()
+        .run(req, controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn ends");
+    let listed = processes.borrow_and_update().clone();
+    eprintln!("listed: {listed:?}");
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(listed[0].command.contains("echo tick"), "{listed:?}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let output = turn.background_output(&listed[0].id).expect("listed");
+    eprintln!("output: {output:?}");
+    assert!(output.text.contains("tick"), "{output:?}");
+
+    assert!(turn.stop_background_process(&listed[0].id));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !processes.borrow_and_update().is_empty() {
+            processes.changed().await.expect("runtime alive");
+        }
+    })
+    .await
+    .expect("the stopped shell leaves the list");
+}
+
 #[tokio::test]
 #[ignore]
 async fn live_commands_discovery() {
@@ -1729,6 +1833,173 @@ async fn a_changed_model_and_effort_apply_to_the_live_process() {
     );
 }
 
+/// Controls that answer yes to approvals headed by one of `yes` and no to
+/// any other, keeping every question asked.
+fn approving(
+    yes: &'static [&'static str],
+) -> (
+    RunControls,
+    mpsc::Sender<SteerMessage>,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+) {
+    let (controls, steer, _token) = controls("No");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let controls = RunControls {
+        request_input: Box::new(move |questions| {
+            seen.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let answers = questions
+                .iter()
+                .map(|q| {
+                    let allow = yes.contains(&q.header.as_str());
+                    UserInputAnswer {
+                        question_id: q.id.clone(),
+                        labels: vec![if allow { "Yes" } else { "No" }.into()],
+                    }
+                })
+                .collect();
+            let _ = tx.send(answers);
+            rx
+        }),
+        ..controls
+    };
+    (controls, steer, asked)
+}
+
+fn done_result(events: &[AgentEvent]) -> Option<String> {
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result,
+            ..
+        }) => result.clone(),
+        other => panic!("run did not complete: {other:?} in {events:?}"),
+    }
+}
+
+#[tokio::test]
+async fn access_modes_decide_what_is_asked() {
+    use zeron_proto::AccessMode;
+
+    // Full access asks nothing, and launches as every run did before modes.
+    let (controls, _steer, asked) = approving(&[]);
+    let events = run_to_end(&harness(), request("scenario:approvals"), controls).await;
+    assert_eq!(
+        done_result(&events).as_deref(),
+        Some(
+            "bypassPermissions --dangerously-skip-permissions bash=allow edit=allow \
+             plan=allow:bypassPermissions"
+        )
+    );
+    assert!(asked.lock().unwrap().is_empty());
+
+    // Auto-accept edits: the edit goes through, the command and the plan
+    // are asked, and a no denies them.
+    let (controls, _steer, asked) = approving(&[]);
+    let mut req = request("scenario:approvals");
+    req.auto_approve = false;
+    req.access = AccessMode::AutoAcceptEdits;
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(
+        done_result(&events).as_deref(),
+        Some("acceptEdits none bash=deny edit=allow plan=deny")
+    );
+    let questions: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.question.clone())
+        .collect();
+    assert_eq!(
+        questions,
+        [
+            "Claude wants to run `rm -rf build`. Allow it?",
+            "Claude wants to start implementing its plan. Allow it?",
+        ]
+    );
+
+    // Supervised asks before each; a yes allows, and the approved plan
+    // continues in the access mode.
+    let (controls, _steer, asked) =
+        approving(&["Approve command", "Approve file change", "Approve plan"]);
+    let mut req = request("scenario:approvals");
+    req.auto_approve = false;
+    req.access = AccessMode::Supervised;
+    req.plan = true;
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(
+        done_result(&events).as_deref(),
+        Some("plan none bash=allow edit=allow plan=allow:default")
+    );
+    let headers: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.header.clone())
+        .collect();
+    assert_eq!(
+        headers,
+        ["Approve command", "Approve file change", "Approve plan"]
+    );
+}
+
+#[tokio::test]
+async fn plan_and_access_modes_switch_on_the_live_process() {
+    use zeron_proto::AccessMode;
+
+    let (controls, steer, asked) = approving(&["Approve plan"]);
+    let mut launch = request("scenario:mode-switch");
+    launch.auto_approve = false;
+    launch.access = AccessMode::Supervised;
+    launch.plan = true;
+    let mut stream = harness()
+        .run(launch.clone(), controls)
+        .await
+        .expect("run starts");
+    /// The next turn's result; it must complete.
+    async fn turn_result(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    ) -> String {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("event in time")
+                .expect("stream open")
+                .expect("stream event");
+            if let AgentEvent::Done {
+                status,
+                result,
+                error,
+                ..
+            } = event
+            {
+                assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                return result.unwrap_or_default();
+            }
+        }
+    }
+    let mut results = vec![turn_result(&mut stream).await];
+    // The chat is still in plan mode: the next turn plans again.
+    steer.send(steer_msg("plan again")).await.unwrap();
+    results.push(turn_result(&mut stream).await);
+    let mut accepting = launch.clone();
+    accepting.access = AccessMode::AutoAcceptEdits;
+    accepting.plan = false;
+    let mut switched = steer_msg("accept edits");
+    switched.config = Some(Box::new(accepting));
+    steer.send(switched).await.unwrap();
+    results.push(turn_result(&mut stream).await);
+    assert_eq!(results, ["implemented", "planned again", "accepting"]);
+    let headers: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.header.clone())
+        .collect();
+    assert_eq!(headers, ["Approve plan", "Approve command"]);
+}
+
 /// "Marked done the moment I sent it": resuming a session whose background
 /// tasks died with its old process, the CLI settles them with empty results
 /// while the new prompt is still queued. Those are not the prompt's end.
@@ -1802,6 +2073,53 @@ async fn an_unreplayed_steer_releases_the_turn_end() {
 // ---------------------------------------------------------------------------
 // Stopping a turn in place
 // ---------------------------------------------------------------------------
+
+/// A background shell is listed with its command and output once the CLI
+/// reports it, outlives its turn, and a host stop becomes the CLI's
+/// `stop_task` — after which the roster drops it.
+#[tokio::test]
+async fn background_shells_are_listed_read_and_stopped() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("A");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut processes = turn.watch_background_processes();
+    let mut stream = harness()
+        .run(request("scenario:background-shell"), controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn ends");
+
+    let listed = processes.borrow_and_update().clone();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].id, "bgsh");
+    assert_eq!(listed[0].command, "npm run dev");
+    assert_eq!(
+        listed[0].description.as_deref(),
+        Some("Start the dev server")
+    );
+    let output = turn.background_output("bgsh").expect("listed");
+    assert_eq!(output.text, "listening on :5173\nready in 412 ms");
+
+    assert!(turn.stop_background_process("bgsh"));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !processes.borrow_and_update().is_empty() {
+            processes.changed().await.expect("runtime alive");
+        }
+    })
+    .await
+    .expect("the stopped shell leaves the list");
+    assert!(turn.background_output("bgsh").is_none());
+}
 
 #[tokio::test]
 async fn a_stopped_turn_keeps_the_process_and_its_background_work() {

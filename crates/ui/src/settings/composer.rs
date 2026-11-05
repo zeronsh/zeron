@@ -73,6 +73,9 @@ pub struct ComposerDefaults {
     pub no_project: bool,
     /// Starred models (the picker's favorites rail), in starring order.
     pub favorites: Vec<FavoriteModel>,
+    /// Last access mode picked for a new chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<zeron_proto::AccessMode>,
 }
 
 impl ComposerDefaults {

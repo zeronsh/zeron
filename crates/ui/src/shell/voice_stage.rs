@@ -53,6 +53,8 @@ impl Shell {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                access: Default::default(),
+                plan: false,
             });
         let saved = settings::current(cx);
         let device = saved.codex_voice_device.unwrap_or(device);

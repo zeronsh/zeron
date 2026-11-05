@@ -1,0 +1,18 @@
+{
+  "scene": {
+    "violet_dusk": "Dusk",
+    "aurora": "Aurora",
+    "blossom": "Blossom",
+    "lighthouse": "Lighthouse",
+    "canyon": "Canyon",
+    "lotus": "Lotus",
+    "icebergs": "Icebergs",
+    "wheat": "Wheat",
+    "volcano": "Volcano",
+    "terraces": "Terraces",
+    "surf": "Surf",
+    "saturnine": "Saturnine",
+    "rooftops": "Rooftops",
+    "station": "Station"
+  }
+}

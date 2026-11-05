@@ -12,8 +12,11 @@
 //!   (`Steered`) when its user-message item enters the conversation.
 //! - STOP. `turn/interrupt` ends the turn in place (`cancelled`), leaving
 //!   the host and its background subagents running.
-//! - APPROVALS are answered from the choices the host offers: allowed once,
-//!   like every Zeron agent's tool calls (a read-only title run denies).
+//! - APPROVALS are answered from the choices the host offers, one stage at
+//!   a time: a staged approval (`cd app && make` is two) moves to its next
+//!   requirement with `approval/updated`, and each waits for its own
+//!   decision. Full access allows each once, supervised asks the person
+//!   (yes allows once, no rejects), a read-only title run denies.
 //!   QUESTIONS go to the user through [`RunControls::request_input`].
 use super::{
     catalog,
@@ -78,6 +81,11 @@ pub(super) struct Runner {
     pub input: Option<Arc<Input>>,
     dialogs: JoinSet<()>,
     questions: HashMap<String, AbortHandle>,
+    /// Per open approval, the requirement last decided (or being asked),
+    /// so a repeated `approval/updated` for it is not decided twice.
+    approvals: HashMap<String, Value>,
+    /// Supervised approvals waiting on the person, by approval id.
+    asking: HashMap<String, AbortHandle>,
     pub turn: TurnControl,
     lost_context: Option<String>,
 }
@@ -113,6 +121,8 @@ impl Runner {
             input: None,
             dialogs: JoinSet::new(),
             questions: HashMap::new(),
+            approvals: HashMap::new(),
+            asking: HashMap::new(),
             turn: TurnControl::default(),
             lost_context: None,
         }
@@ -170,7 +180,7 @@ impl Runner {
     fn approval_mode(&self) -> &'static str {
         if self.read_only {
             "denyUnmatched"
-        } else if self.request.auto_approve {
+        } else if super::full_access(&self.request) {
             "allowAll"
         } else {
             "promptUnmatched"
@@ -180,7 +190,7 @@ impl Runner {
     /// Without an explicit profile Muse applies its configured default, which
     /// can be an AI reviewer deciding approvals instead of the run.
     fn permission_profile(&self) -> &'static str {
-        if self.request.auto_approve {
+        if super::full_access(&self.request) {
             ":unrestricted"
         } else {
             ":ask-me"
@@ -189,24 +199,13 @@ impl Runner {
 
     /// Zeron's MCP server, as a session-scoped stdio server. `optional`: a
     /// server that cannot start must not fail the whole turn.
+    /// The plugins' native servers ([`RunRequest::extra_mcp`]) ride beside it.
     fn config(&self) -> Option<Value> {
-        let mcp = self.request.mcp.as_ref()?;
-        if !self.host.granted.iter().any(|c| c == "sessionMcp") {
-            tracing::warn!(
-                target: "zeron_harness::muse",
-                "this Muse Code build cannot take session MCP servers; running without Zeron's"
-            );
-            return None;
-        }
-        Some(json!({"mcpServers": {
-            mcp.name.clone(): {
-                "transport": "stdio",
-                "command": mcp.command,
-                "args": mcp.args,
-                "env": mcp.env,
-                "mode": "optional",
-            }
-        }}))
+        session_mcp_config(
+            self.request.mcp.as_ref(),
+            &self.request.extra_mcp,
+            self.host.granted.iter().any(|c| c == "sessionMcp"),
+        )
     }
 
     /// Open the session: resume the stored one, or start fresh — also when
@@ -634,7 +633,14 @@ impl Runner {
                 })
                 .await?;
             }
-            "approval/requested" => self.approve(&params)?,
+            "approval/requested" | "approval/updated" => self.approve(&params)?,
+            "approval/resolved" => {
+                let id = string(&params, "approvalId");
+                self.approvals.remove(id);
+                if let Some(task) = self.asking.remove(id) {
+                    task.abort();
+                }
+            }
             "userInput/requested" => self.ask(&params),
             "userInput/settled" => {
                 if let Some(task) = self.questions.remove(string(&params, "userInputId")) {
@@ -670,40 +676,92 @@ impl Runner {
         Ok(())
     }
 
-    /// Pick from the choices the host offers; never build one.
+    /// Decide the approval's current stage, once; a stage already resolved
+    /// (the update that reports a decision) is left alone.
     fn approve(&mut self, params: &Value) -> Result<(), HarnessError> {
+        let approval = string(params, "approvalId").to_owned();
+        let requirement = params["currentRequirementId"].clone();
+        if approval.is_empty() || requirement.is_null() {
+            return Ok(());
+        }
+        let stages = params["subject"]["stages"].as_array();
+        let stage = stages
+            .into_iter()
+            .flatten()
+            .find(|stage| stage["requirementId"] == requirement);
+        if stage.is_some_and(|stage| string(&stage["resolution"], "kind") != "unresolved")
+            || self.approvals.get(&approval) == Some(&requirement)
+        {
+            return Ok(());
+        }
+        self.approvals.insert(approval.clone(), requirement.clone());
         let choices = params["availableChoices"]
             .as_array()
             .cloned()
             .unwrap_or_default();
         let pick = |decision: &str, scope: Option<&str>| {
-            choices.iter().find(|choice| {
-                string(choice, "decision") == decision
-                    && scope.is_none_or(|scope| string(choice, "scope") == scope)
-            })
+            choices
+                .iter()
+                .find(|choice| {
+                    string(choice, "decision") == decision
+                        && scope.is_none_or(|scope| string(choice, "scope") == scope)
+                })
+                .cloned()
         };
-        let choice = if self.read_only {
-            pick("denied", None).or_else(|| pick("abort", None))
-        } else {
-            pick("approved", Some("once"))
-                .or_else(|| pick("approved", None))
-                .or_else(|| pick("approvedForSession", None))
-                .or_else(|| pick("approvedPolicyAmendment", Some("session")))
+        // A person's yes allows this once; only a run that asks nothing
+        // may take a broader choice when Muse offers no single one.
+        let once = pick("approved", Some("once")).or_else(|| pick("approved", None));
+        let deny = pick("denied", None).or_else(|| pick("abort", None));
+        let decide = {
+            let client = self.client.clone();
+            let session = self.session.clone();
+            let approval = approval.clone();
+            move |choice: Option<Value>| {
+                let Some(choice) = choice else {
+                    tracing::warn!(target: "zeron_harness::muse", "Muse offered no usable approval choice");
+                    return Ok(None);
+                };
+                client
+                    .request(
+                        "approval/decide",
+                        json!({
+                            "sessionId": session,
+                            "approvalId": approval,
+                            "requirementId": requirement,
+                            "choiceId": choice["choiceId"],
+                        }),
+                    )
+                    .map(Some)
+            }
         };
-        let Some(choice) = choice else {
-            tracing::warn!(target: "zeron_harness::muse", "Muse offered no usable approval choice");
+        let input = self.input.clone();
+        let ask = !self.read_only && !super::full_access(&self.request);
+        let Some(input) = input.filter(|_| ask) else {
+            let choice = if self.read_only || ask {
+                deny
+            } else {
+                once.or_else(|| pick("approvedForSession", None))
+                    .or_else(|| pick("approvedPolicyAmendment", Some("session")))
+            };
+            if let Some(id) = decide(choice)? {
+                self.pending.insert(id, Pending::Other("approval/decide"));
+            }
             return Ok(());
         };
-        let id = self.client.request(
-            "approval/decide",
-            json!({
-                "sessionId": self.session,
-                "approvalId": params["approvalId"],
-                "requirementId": params["currentRequirementId"],
-                "choiceId": choice["choiceId"],
-            }),
-        )?;
-        self.pending.insert(id, Pending::Other("approval/decide"));
+        let question = approval_question(params, stage);
+        let answers = (input)(vec![question.clone()]);
+        let task = self.dialogs.spawn(async move {
+            let answers = answers.await.unwrap_or_default();
+            let choice = if crate::approval::approved(&question, &answers) {
+                once
+            } else {
+                deny
+            };
+            let _ = decide(choice);
+        });
+        if let Some(previous) = self.asking.insert(approval, task) {
+            previous.abort();
+        }
         Ok(())
     }
 
@@ -769,6 +827,45 @@ impl Runner {
             );
         });
         self.questions.insert(user_input, task);
+    }
+}
+
+/// What a supervised approval asks: the stage's own command when the
+/// approval has several ("stage 2 of 3"), else the subject's.
+fn approval_question(params: &Value, stage: Option<&Value>) -> UserInputQuestion {
+    let subject = &params["subject"];
+    match string(subject, "kind") {
+        "shell" => {
+            let command = string(subject, "command");
+            let staged = stage.filter(|s| s["totalStages"].as_u64().unwrap_or(1) > 1);
+            let Some(stage) = staged else {
+                return crate::approval::command("Muse", command);
+            };
+            let argv: Vec<&str> = stage["argv"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            crate::approval::question(
+                "Approve command",
+                format!(
+                    "Muse wants to run `{}` (step {} of {} in `{command}`). Allow it?",
+                    argv.join(" "),
+                    stage["position"].as_u64().unwrap_or(1),
+                    stage["totalStages"].as_u64().unwrap_or(1),
+                ),
+            )
+        }
+        _ => {
+            let path = subject["path"]
+                .as_str()
+                .or_else(|| subject["filePath"].as_str());
+            match path {
+                Some(path) => crate::approval::edit("Muse", &[path]),
+                None => crate::approval::tool("Muse", string(params, "toolName"), None),
+            }
+        }
     }
 }
 
@@ -924,5 +1021,79 @@ mod tests {
             Some("image/jpeg")
         );
         assert_eq!(media_type(Path::new("a.svg"), b"<svg"), None);
+    }
+}
+
+/// `mcpServers` for a session: Zeron's own server and the plugins' native
+/// ones, each optional. `None` when there are none, or when the build can't
+/// take session servers (`granted` lacks `sessionMcp`).
+fn session_mcp_config(
+    mcp: Option<&zeron_proto::McpServer>,
+    extras: &[zeron_proto::McpServer],
+    session_mcp: bool,
+) -> Option<Value> {
+    if mcp.is_none() && extras.is_empty() {
+        return None;
+    }
+    if !session_mcp {
+        tracing::warn!(
+            target: "zeron_harness::muse",
+            "this Muse Code build cannot take session MCP servers; running without Zeron's"
+        );
+        return None;
+    }
+    let mut servers = serde_json::Map::new();
+    for server in extras.iter().chain(mcp) {
+        servers.insert(
+            server.name.clone(),
+            json!({
+                "transport": "stdio",
+                "command": server.command,
+                "args": server.args,
+                "env": server.env,
+                "mode": "optional",
+            }),
+        );
+    }
+    Some(json!({ "mcpServers": servers }))
+}
+
+#[cfg(test)]
+mod session_mcp_tests {
+    use super::*;
+
+    #[test]
+    fn session_mcp_config_adds_plugin_servers_beside_zeron() {
+        let zeron = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: Default::default(),
+        };
+        let extra = zeron_proto::McpServer {
+            name: "plugin-focus".into(),
+            command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
+            args: vec![],
+            env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+        };
+        assert_eq!(session_mcp_config(None, &[], true), None);
+        assert_eq!(
+            session_mcp_config(Some(&zeron), std::slice::from_ref(&extra), false),
+            None
+        );
+        let config = session_mcp_config(Some(&zeron), std::slice::from_ref(&extra), true).unwrap();
+        assert_eq!(config["mcpServers"]["zeron"]["command"], "/opt/zeron/zeron");
+        assert_eq!(
+            config["mcpServers"]["plugin-focus"],
+            json!({
+                "transport": "stdio",
+                "command": "/data/plugins/.loaded/focus/0123/bin/server",
+                "args": [],
+                "env": { "FOCUS": "1" },
+                "mode": "optional",
+            })
+        );
+        let only = session_mcp_config(None, &[extra], true).unwrap();
+        assert_eq!(only["mcpServers"].as_object().unwrap().len(), 1);
     }
 }

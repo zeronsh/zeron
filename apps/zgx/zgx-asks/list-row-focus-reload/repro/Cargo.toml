@@ -1,0 +1,23 @@
+[package]
+name = "list-row-focus-reload"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+zgx-script = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+winit = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+accesskit_macos = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+accesskit_consumer = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+accesskit_atspi_common = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+accesskit_unix = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+accesskit_windows = { git = "https://github.com/zeronsh/zgx", rev = "f6506b6e692962081f4b36f04cb87b188c2634a5" }
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = "line-tables-only"
+
+[workspace]

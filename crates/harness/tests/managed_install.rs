@@ -46,10 +46,13 @@ async fn managed_install_reaches_session_started() {
         cwd: std::env::temp_dir().display().to_string(),
         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
 
     let mut stream = tokio::time::timeout(

@@ -19,7 +19,7 @@ use zeron_doc::{
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc_as_agent, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -56,6 +56,11 @@ impl Origin {
     }
 }
 
+/// A dial failure as an RPC error.
+fn transport(error: anyhow::Error) -> RpcError {
+    RpcError::Transport(format!("{error:#}"))
+}
+
 /// `ListHarnesses` row — the engine's `HarnessDescriptor`, re-declared here
 /// so this crate does not link the engine.
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +78,10 @@ pub struct HarnessInfo {
     pub installed: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub access_modes: Vec<zeron_proto::AccessMode>,
+    #[serde(default)]
+    pub supports_plan: bool,
     /// Whether a login for this harness is present on the device, from
     /// `ListAgentAccounts`. `None` = not asked or not answerable. Advisory:
     /// detection does not see every credential source (an API key in the
@@ -135,7 +144,8 @@ pub struct Zeron {
 impl Zeron {
     /// Lazy dialer: nothing connects until the first tool call, so `zeron
     /// mcp` starts (and answers `initialize`) even before the engine is up.
-    /// Every (re)dial re-reads the engine's IPC token ([`connect_ipc`]).
+    /// Every (re)dial re-reads the engine's agent-scoped IPC token
+    /// ([`connect_ipc_as_agent`]).
     pub fn new(port: u16, data_dir: Option<std::path::PathBuf>, origin: Origin) -> Self {
         Self {
             port: Some(port),
@@ -167,7 +177,8 @@ impl Zeron {
         let Some(port) = self.port else {
             bail!("engine connection closed");
         };
-        let client = connect_ipc(port, self.data_dir.as_deref())
+        // The agent-scoped token only: this server speaks for an agent.
+        let client = connect_ipc_as_agent(port, self.data_dir.as_deref())
             .await
             .map_err(|e| {
                 anyhow!(
@@ -213,6 +224,40 @@ impl Zeron {
                     .map_err(|e| anyhow!("{method}: {e}"))
             }
             other => other.map_err(|e| anyhow!("{method}: {e}")),
+        }
+    }
+
+    /// [`Self::call`] keeping the engine's error as is, so a tool can show
+    /// a `Failed` message in its own words (no method prefix) and tell an
+    /// engine that lacks the method apart.
+    pub async fn call_rpc(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let client = self.client().await.map_err(transport)?;
+        match client.call(method, params.clone()).await {
+            Err(RpcError::Closed) => {
+                self.forget_client().await;
+                let client = self.client().await.map_err(transport)?;
+                client.call(method, params).await
+            }
+            other => other,
+        }
+    }
+
+    /// A watch stream acknowledged by the engine before it returns, so an
+    /// engine without the method answers `UnknownMethod` instead of a
+    /// silent stream (reconnecting once if the socket is gone).
+    pub async fn subscribe_checked(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<RpcSubscription, RpcError> {
+        let client = self.client().await.map_err(transport)?;
+        match client.subscribe_checked(method, params.clone()).await {
+            Err(RpcError::Closed) => {
+                self.forget_client().await;
+                let client = self.client().await.map_err(transport)?;
+                client.subscribe_checked(method, params).await
+            }
+            other => other,
         }
     }
 
@@ -851,6 +896,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -890,6 +936,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         }
     }

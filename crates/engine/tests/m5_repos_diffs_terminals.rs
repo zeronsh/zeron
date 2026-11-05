@@ -369,12 +369,12 @@ async fn repository_identity_spans_worktrees_and_clones() {
     assert!(local.starts_with("local:"), "{local}");
     git(
         &empty,
-        &["remote", "add", "upstream", "git@github.com:Anara/Comet.git"],
+        &["remote", "add", "upstream", "git@github.com:Example/Comet.git"],
     )
     .await;
     assert_eq!(
         repos.repository_identity(&empty).await.unwrap(),
-        "github.com/anara/comet"
+        "github.com/example/comet"
     );
 }
 

@@ -58,10 +58,13 @@ fn run_request(prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -437,6 +440,7 @@ async fn open_tool_call_never_quiesces() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         })
         .unwrap();
     rig.feed.send(text("Build done.")).unwrap();
@@ -477,6 +481,7 @@ async fn stale_tool_echo_stays_parked() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         })
         .unwrap();
     rig.feed

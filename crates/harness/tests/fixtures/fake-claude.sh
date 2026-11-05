@@ -452,6 +452,78 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"same","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-rc"}'
   ;;
 
+*scenario:approvals*)
+  # One tool call of each kind through the permission channel; the result
+  # says the launch's permission flags and how each call was answered.
+  mode=none
+  skip=none
+  prev=
+  for arg in "$@"; do
+    [ "$prev" = "--permission-mode" ] && mode=$arg
+    case "$arg" in *skip-permissions) skip=$arg ;; esac
+    prev=$arg
+  done
+  emit "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fable-5\",\"tools\":[],\"cwd\":\"/tmp\",\"session_id\":\"sess-ap\",\"permissionMode\":\"$mode\"}"
+  answer() {
+    read -r resp || exit 1
+    case "$resp" in
+    *"\"request_id\":\"$1\""*'"behavior":"allow"'*'"mode":"'*)
+      printf 'allow:%s' "$(printf '%s\n' "$resp" | sed 's/.*"mode":"\([^"]*\)".*/\1/')"
+      ;;
+    *"\"request_id\":\"$1\""*'"behavior":"allow"'*) printf allow ;;
+    *"\"request_id\":\"$1\""*'"behavior":"deny"'*) printf deny ;;
+    *) exit 1 ;;
+    esac
+  }
+  emit '{"type":"control_request","request_id":"cr-bash","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf build"}}}'
+  bash=$(answer cr-bash) || exit 1
+  emit '{"type":"control_request","request_id":"cr-edit","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"/tmp/a.rs","old_string":"a","new_string":"b"}}}'
+  edit=$(answer cr-edit) || exit 1
+  emit '{"type":"control_request","request_id":"cr-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"Do it."}}}'
+  plan=$(answer cr-plan) || exit 1
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$mode $skip bash=$bash edit=$edit plan=$plan\",\"errors\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-ap\"}"
+  ;;
+
+*scenario:mode-switch*)
+  # Plan mode on a live process, as 2.1.311 does it: approving ExitPlanMode
+  # leaves plan mode (a `status` frame says so), the next turn is put back
+  # in it, and a changed access mode switches with `set_permission_mode`.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-ms","permissionMode":"plan"}'
+  emit '{"type":"control_request","request_id":"cr-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"Do it."}}}'
+  read -r resp || exit 1
+  case "$resp" in *'"behavior":"allow"'*'"mode":"default"'*) ;; *) exit 21 ;; esac
+  emit '{"type":"system","subtype":"status","status":null,"permissionMode":"default","session_id":"sess-ms"}'
+  emit '{"type":"result","subtype":"success","result":"implemented","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ms"}'
+  # Still a plan-mode chat: back to plan mode before the prompt.
+  read -r switch || exit 1
+  case "$switch" in *'"subtype":"set_permission_mode"'*) ;; *) exit 22 ;; esac
+  case "$switch" in *'"mode":"plan"'*) ;; *) exit 22 ;; esac
+  id=$(printf '%s\n' "$switch" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id\",\"response\":{\"mode\":\"plan\"}}}"
+  emit '{"type":"system","subtype":"status","status":null,"permissionMode":"plan","session_id":"sess-ms"}'
+  read -r prompt || exit 1
+  case "$prompt" in *'plan again'*) ;; *) exit 23 ;; esac
+  emit "$prompt"
+  emit '{"type":"result","subtype":"success","result":"planned again","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ms"}'
+  # Plan mode off, edits accepted: one switch, then the prompt.
+  read -r switch || exit 1
+  case "$switch" in *'"subtype":"set_permission_mode"'*) ;; *) exit 24 ;; esac
+  case "$switch" in *'"mode":"acceptEdits"'*) ;; *) exit 24 ;; esac
+  id=$(printf '%s\n' "$switch" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id\",\"response\":{\"mode\":\"acceptEdits\"}}}"
+  emit '{"type":"system","subtype":"status","status":null,"permissionMode":"acceptEdits","session_id":"sess-ms"}'
+  read -r prompt || exit 1
+  case "$prompt" in *'accept edits'*) ;; *) exit 25 ;; esac
+  emit "$prompt"
+  # The new mode answers the next tool call: a command is asked (and the
+  # test says no).
+  emit '{"type":"control_request","request_id":"cr-bash","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}'
+  read -r resp || exit 1
+  case "$resp" in *'"request_id":"cr-bash"'*'"behavior":"deny"'*) ;; *) exit 26 ;; esac
+  emit '{"type":"result","subtype":"success","result":"accepting","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ms"}'
+  read -r _ || exit 0
+  ;;
+
 *scenario:resume-killed-tasks*)
   # Captured live on 2.1.286: `--resume` of a session whose background tasks
   # died with its previous process. The CLI settles them with two empty
@@ -525,6 +597,28 @@ case "$first" in
   case "$idle_stop" in *'"subtype":"interrupt"'*) ;; *) exit 9 ;; esac
   rid=$(printf '%s\n' "$idle_stop" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
   emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"still_queued\":[]}}}"
+  cat >/dev/null
+  ;;
+
+*scenario:background-shell*)
+  # `Bash` with `run_in_background`: the roster lists it, its result names
+  # its output file, and it outlives the turn until `stop_task` (frame shapes
+  # live-verified 2.1.312).
+  out="${TMPDIR:-/tmp}/fake-claude-bgsh-$$.output"
+  printf 'listening on :5173\nready in 412 ms\n' >"$out"
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-bgsh"}'
+  emit '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_dev","name":"Bash","input":{"command":"npm run dev","description":"Start the dev server","run_in_background":true}}]},"parent_tool_use_id":null}'
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bgsh","task_type":"local_bash","description":"Start the dev server"}]}'
+  emit '{"type":"system","subtype":"task_started","task_id":"bgsh","tool_use_id":"toolu_dev","description":"Start the dev server","is_backgrounded":true,"task_type":"local_bash"}'
+  emit "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_dev\",\"type\":\"tool_result\",\"content\":\"Command running in background with ID: bgsh. Output is being written to: $out. You will be notified when it completes.\",\"is_error\":false}]},\"parent_tool_use_id\":null}"
+  emit '{"type":"result","subtype":"success","result":"started","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-bgsh"}'
+  read -r stop || exit 1
+  case "$stop" in *'"subtype":"stop_task"'*'"task_id":"bgsh"'*) ;; *) exit 10 ;; esac
+  rid=$(printf '%s\n' "$stop" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{}}}"
+  emit "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bgsh\",\"tool_use_id\":\"toolu_dev\",\"status\":\"stopped\",\"output_file\":\"$out\"}"
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+  rm -f "$out"
   cat >/dev/null
   ;;
 

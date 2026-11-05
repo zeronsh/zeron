@@ -754,6 +754,36 @@ async fn workspace_mutations_validate_revision_and_publish_semantic_events() {
     let deleted = client.call(methods::DELETE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"delete", "expectedCheckoutId":checkout, "path":"src/read me.md", "expectedSourceRevision":moved["entry"]["mutationRevision"], "expectedKind":"file", "recursive":false})).await.unwrap();
     assert_eq!(deleted["status"], "applied");
     assert!(!repo.join("src/read me.md").exists());
+
+    // Created: an empty file and a folder, announced on the watch; never
+    // over an entry already there.
+    assert!(page.mutation_capabilities.unwrap().create_entry);
+    let created = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create", "expectedCheckoutId":checkout, "path":"src/new.rs", "kind":"file"})).await.unwrap();
+    assert_eq!(created["status"], "applied");
+    assert_eq!(created["entry"]["path"], "src/new.rs");
+    assert_eq!(std::fs::read(repo.join("src/new.rs")).unwrap(), b"");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame: WorkspaceFileChanges =
+                serde_json::from_value(watch.recv().await.unwrap()).unwrap();
+            if frame.changes.iter().any(|c| {
+                c.operation_id.as_deref() == Some("create") && c.path == "src/new.rs"
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let again = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create-again", "expectedCheckoutId":checkout, "path":"src/new.rs", "kind":"file"})).await.unwrap();
+    assert_eq!(again["status"], "rejected");
+    assert_eq!(again["reason"], "destinationExists");
+    let folder = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create-folder", "expectedCheckoutId":checkout, "path":"docs", "kind":"directory"})).await.unwrap();
+    assert_eq!(folder["status"], "applied");
+    assert!(repo.join("docs").is_dir());
+    let stale = client.call(methods::CREATE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"create-stale", "expectedCheckoutId":"wrong", "path":"x.rs", "kind":"file"})).await.unwrap();
+    assert_eq!(stale["reason"], "workspaceChanged");
+    assert!(!repo.join("x.rs").exists());
 }
 
 // Absolute reads take POSIX paths — the only shape a UI sends.

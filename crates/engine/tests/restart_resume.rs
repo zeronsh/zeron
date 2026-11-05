@@ -46,10 +46,13 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         cwd: cwd.into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -1239,10 +1242,13 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         cwd: cwd.clone(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let assemble_real = || {
         EngineCore::assemble(

@@ -1,0 +1,341 @@
+{
+  "about": "The gallery's Member card page, card for card (apps/zgx/ui/gallery.luau), as fixtures for comparing the web card with the native one: invented taglines, badges and styles, and the print's caption. Not what a real card page shows; served under /_gallery/<username>/player by the dev server only. Their `sky` is 0: the gallery's cards have no seed, so their character field starts at the corner.",
+  "members": [
+    {
+      "username": "graham",
+      "displayName": "Graham",
+      "userNumber": 4182,
+      "joinedOn": "2023-10-04",
+      "scene": 0,
+      "holo": "aurora",
+      "sky": 0,
+      "tagline": "Methodical big shot",
+      "badges": [
+        {
+          "id": "cohort-01",
+          "name": "Cohort 01",
+          "icon": "hash",
+          "style": "foil",
+          "glyph": "#"
+        },
+        {
+          "id": "first-500",
+          "name": "First 500",
+          "icon": "at",
+          "style": "ink",
+          "glyph": "@"
+        },
+        {
+          "id": "beta",
+          "name": "Beta",
+          "icon": null,
+          "style": "outline"
+        }
+      ]
+    },
+    {
+      "username": "ada",
+      "displayName": "Ada",
+      "userNumber": 117,
+      "joinedOn": "2024-01-12",
+      "scene": 1,
+      "holo": "secret",
+      "sky": 0,
+      "tagline": "Ships at dawn",
+      "badges": [
+        {
+          "id": "early-access",
+          "name": "Early access",
+          "icon": null,
+          "style": "ink"
+        }
+      ]
+    },
+    {
+      "username": "lin",
+      "displayName": "Lin",
+      "userNumber": 51,
+      "joinedOn": "2024-03-03",
+      "scene": 4,
+      "holo": "starlight",
+      "sky": 0,
+      "tagline": "Night owl",
+      "badges": []
+    },
+    {
+      "username": "mara",
+      "displayName": "Mara",
+      "userNumber": 2,
+      "joinedOn": "2023-06-01",
+      "scene": 2,
+      "holo": "glyph",
+      "sky": 0,
+      "tagline": "Founder",
+      "badges": [
+        {
+          "id": "founder",
+          "name": "Founder",
+          "icon": "at",
+          "style": "foil",
+          "glyph": "@"
+        },
+        {
+          "id": "year-3",
+          "name": "Year 3",
+          "icon": null,
+          "style": "ink"
+        },
+        {
+          "id": "core-team",
+          "name": "Core team",
+          "icon": null,
+          "style": "outline"
+        }
+      ]
+    },
+    {
+      "username": "mia",
+      "displayName": "Mia",
+      "userNumber": 990,
+      "joinedOn": "2024-08-19",
+      "scene": 3,
+      "holo": "reverse",
+      "sky": 0,
+      "tagline": "Quietly prolific",
+      "badges": [
+        {
+          "id": "year-1",
+          "name": "Year 1",
+          "icon": null,
+          "style": "outline"
+        },
+        {
+          "id": "invited",
+          "name": "Invited",
+          "icon": null,
+          "style": "ink"
+        }
+      ]
+    },
+    {
+      "username": "theo",
+      "displayName": "Theo",
+      "userNumber": 233,
+      "joinedOn": "2024-02-02",
+      "scene": 5,
+      "holo": "aurora",
+      "sky": 0,
+      "tagline": "Reads every diff",
+      "badges": [
+        {
+          "id": "cohort-02",
+          "name": "Cohort 02",
+          "icon": "hash",
+          "style": "foil",
+          "glyph": "#"
+        },
+        {
+          "id": "beta",
+          "name": "Beta",
+          "icon": null,
+          "style": "outline"
+        }
+      ]
+    },
+    {
+      "username": "noor",
+      "displayName": "Noor",
+      "userNumber": 1408,
+      "joinedOn": "2024-04-09",
+      "scene": 6,
+      "holo": "glyph",
+      "sky": 0,
+      "tagline": "Ships quietly",
+      "badges": [
+        {
+          "id": "year-1",
+          "name": "Year 1",
+          "icon": null,
+          "style": "ink"
+        }
+      ]
+    },
+    {
+      "username": "kai",
+      "displayName": "Kai",
+      "userNumber": 77,
+      "joinedOn": "2023-11-20",
+      "scene": 7,
+      "holo": "starlight",
+      "sky": 0,
+      "tagline": "Always in the terminal",
+      "badges": [
+        {
+          "id": "first-500",
+          "name": "First 500",
+          "icon": "at",
+          "style": "ink",
+          "glyph": "@"
+        },
+        {
+          "id": "year-2",
+          "name": "Year 2",
+          "icon": null,
+          "style": "outline"
+        }
+      ]
+    },
+    {
+      "username": "iris",
+      "displayName": "Iris",
+      "userNumber": 3021,
+      "joinedOn": "2024-07-07",
+      "scene": 8,
+      "holo": "secret",
+      "sky": 0,
+      "tagline": "Calm under deadlines",
+      "badges": [
+        {
+          "id": "invited",
+          "name": "Invited",
+          "icon": null,
+          "style": "outline"
+        }
+      ]
+    },
+    {
+      "username": "juno",
+      "displayName": "Juno",
+      "userNumber": 512,
+      "joinedOn": "2023-12-01",
+      "scene": 9,
+      "holo": "reverse",
+      "sky": 0,
+      "tagline": "Deep work",
+      "badges": [
+        {
+          "id": "early-access",
+          "name": "Early access",
+          "icon": null,
+          "style": "foil"
+        },
+        {
+          "id": "year-2",
+          "name": "Year 2",
+          "icon": null,
+          "style": "ink"
+        }
+      ]
+    },
+    {
+      "username": "sage",
+      "displayName": "Sage",
+      "userNumber": 811,
+      "joinedOn": "2026-10-30",
+      "scene": 10,
+      "holo": "glyph",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "luca",
+      "displayName": "Luca",
+      "userNumber": 884,
+      "joinedOn": "2026-10-30",
+      "scene": 11,
+      "holo": "secret",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "ari",
+      "displayName": "Ari",
+      "userNumber": 957,
+      "joinedOn": "2026-10-30",
+      "scene": 12,
+      "holo": "reverse",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "ember",
+      "displayName": "Ember",
+      "userNumber": 1030,
+      "joinedOn": "2026-10-30",
+      "scene": 13,
+      "holo": "aurora",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "rose",
+      "displayName": "Rose",
+      "userNumber": 1103,
+      "joinedOn": "2026-10-30",
+      "scene": 14,
+      "holo": "starlight",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "ren",
+      "displayName": "Ren",
+      "userNumber": 1176,
+      "joinedOn": "2026-10-30",
+      "scene": 15,
+      "holo": "glyph",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "vera",
+      "displayName": "Vera",
+      "userNumber": 1249,
+      "joinedOn": "2026-10-30",
+      "scene": 16,
+      "holo": "secret",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "cove",
+      "displayName": "Cove",
+      "userNumber": 1322,
+      "joinedOn": "2026-10-30",
+      "scene": 17,
+      "holo": "reverse",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "sol",
+      "displayName": "Sol",
+      "userNumber": 1395,
+      "joinedOn": "2026-10-30",
+      "scene": 18,
+      "holo": "aurora",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "nova",
+      "displayName": "Nova",
+      "userNumber": 1468,
+      "joinedOn": "2026-10-30",
+      "scene": 19,
+      "holo": "starlight",
+      "sky": 0,
+      "badges": []
+    },
+    {
+      "username": "seed",
+      "displayName": "Mara",
+      "userNumber": 1378,
+      "joinedOn": "2026-10-30",
+      "scene": 5,
+      "holo": "glyph",
+      "sky": 3413655082,
+      "badges": []
+    }
+  ]
+}

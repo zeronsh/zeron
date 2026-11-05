@@ -53,6 +53,7 @@ fn login() -> AgentAccount {
         ],
         usage_fetched_at: None,
         usage_error: None,
+        codex_reset_credits: None,
         display_name: None,
         organization: None,
         auth_kind: Some(AgentAuthKind::Oauth),

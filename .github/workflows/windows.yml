@@ -1,29 +1,21 @@
 name: Windows tests
 
+# Called by ci.yml (which decides when Windows runs and holds the runners for
+# it, see scripts/ci/admit.py). Dispatch it by hand for the native GUI probes.
 on:
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'apps/zeron/**'
-      - 'dist/windows/**'
-      - 'crates/**'
-      - 'scripts/test-windows-*.ps1'
-      - 'scripts/package-windows.ps1'
-      - '.github/workflows/windows.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'apps/zeron/**'
-      - 'dist/windows/**'
-      - 'crates/**'
-      - 'scripts/test-windows-*.ps1'
-      - 'scripts/package-windows.ps1'
-      - '.github/workflows/windows.yml'
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+      skip:
+        description: JSON list of jobs that already passed on the same inputs (ci.yml skips them).
+        type: string
+        default: '[]'
+      native_gui:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       native_gui:
@@ -34,74 +26,69 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: windows-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 defaults:
   run:
     shell: pwsh
 
+# Pull requests and main leave out slow and soak tests (scripts/ci/nextest.toml `ci` profile).
+env:
+  NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'default' || 'ci' }}
+  ZERON_STRESS_ROUNDS: ${{ github.event_name == 'schedule' && '100' || '14' }}
+
 jobs:
-  # The original single serial job is split into three independent jobs so they
-  # run in parallel. Together they run exactly the commands the single job ran.
-  ui-tests:
+  # Every Windows crate suite in ONE build: separate `cargo test` invocations
+  # with different package sets each recompiled the shared dependency graph
+  # (they used to be three jobs, ~20 min each, almost all of it compiling).
+  # nextest runs each test in its own process, so zeron-ui's tests run side by
+  # side (the old in-process `--test-threads=1` run needed them one at a time).
+  tests:
+    if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'tests') }}
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/windows-ci-setup
-      - name: UI tests
+        with:
+          save-rust-cache: 'true'
+      - name: Build tests
+        run: >-
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked
+          -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media
+          --features zeron-harness/native-fixture
+          --lib --bins
+          --test codex_availability --test windows_native --test opencode --test cursor_shim --test pi_rpc
+          --test background_engine --test noop_browser
+          --test worktree_on_run --test codex_catalog --test codex_login_resolution --test auth
+      # Same selection as the old commands:
+      #   UI: the zeron-ui library (native_diff_font_geometry included)
+      #   native harness security/integration + portable driver suites (OpenCode HTTP/SSE,
+      #     the Cursor shim, Pi RPC; the shell- and python-fixture suites are unix-only)
+      #   shader layout, application and updater, worktree paths, engine unit/catalog/login/auth
+      #   voice-media (runtime resolution; used to be its own build in voice-tests.yml)
+      # gpui_windows (shader layout) is a git dependency, which a filterset cannot name: the last
+      # clause picks it as "not one of the workspace packages above".
+      - name: UI, harness, shader layout, application, updater and engine tests
         env:
           RUST_BACKTRACE: '1'
-        run: |
-          # Native platform initialization runs in its own process. Keep the
-          # real-font assertion and the complete headless suite mandatory.
-          cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1 --nocapture
-          $nativeResult = $LASTEXITCODE
-          cargo test --release --locked -p zeron-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
-          $headlessResult = $LASTEXITCODE
-          if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
+        run: >-
+          cargo nextest run --config-file scripts/ci/nextest.toml --release --locked --no-fail-fast
+          -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media
+          --features zeron-harness/native-fixture
+          --lib --bins
+          --test codex_availability --test windows_native --test opencode --test cursor_shim --test pi_rpc
+          --test background_engine --test noop_browser
+          --test worktree_on_run --test codex_catalog --test codex_login_resolution --test auth
+          -E "(package(zeron-ui) & kind(lib)) | package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-voice-media) & kind(lib)) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::codex_catalog) | binary_id(zeron-engine::codex_login_resolution) | binary_id(zeron-engine::auth) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_)))) | (not package(zeron-ui) & not package(zeron-harness) & not package(zeron) & not package(zeron-update) & not package(zeron-proto) & not package(zeron-engine) & not package(zeron-voice-media) & test(layout))"
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-tests
 
-  # The crate suites compile different package sets, so the two jobs below each
-  # build what they need in parallel instead of one job building them in turn.
-  harness-app-tests:
-    runs-on: windows-2022
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/windows-ci-setup
-      - name: Native harness security and integration tests
-        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
-      # The driver suites whose fixtures run without a POSIX shell: an in-test
-      # HTTP/SSE server (OpenCode), node (the Cursor shim) and a Rust peer
-      # (Pi). The shell- and python-fixture suites are unix-only.
-      - name: Portable harness integration tests
-        run: cargo test --release --locked -p zeron-harness --features native-fixture --test opencode --test cursor_shim --test pi_rpc
-      - name: Shader layout tests
-        run: cargo test --release --locked -p gpui_windows --lib layout
-      - name: Application and updater tests
-        run: cargo test --release --locked -p zeron -p zeron-update
-
-  engine-tests:
-    runs-on: windows-2022
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/windows-ci-setup
-      - name: Worktree path compatibility
-        run: |
-          cargo test --release --locked -p zeron-proto --lib device_paths
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked -p zeron-engine --test worktree_on_run worktree_location_
-      - name: Engine unit tests
-        run: cargo test --release --locked -p zeron-engine --lib
-      - name: Harness catalog and login tests
-        run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
-      - name: Auth integration tests
-        run: cargo test --release --locked -p zeron-engine --test auth
-
+  # Restores the cache `tests` saves: the same dependencies, built with the same profile.
   app:
+    if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'app') }}
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
@@ -151,10 +138,10 @@ jobs:
             throw 'An isolated Windows startup must select local-only mode'
           }
       - name: Build rendering fixture
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
+        if: ${{ inputs.native_gui }}
         run: cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
       - name: Upload GUI test binaries
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
+        if: ${{ inputs.native_gui }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-gui-binaries
@@ -163,9 +150,15 @@ jobs:
             target/release/examples/windows-render-fixture.exe
           if-no-files-found: error
           retention-days: 1
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-app
 
   native-gui:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
+    if: ${{ inputs.native_gui }}
     needs: app
     runs-on: windows-2022
     timeout-minutes: 10

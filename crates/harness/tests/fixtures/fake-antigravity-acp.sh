@@ -5,7 +5,10 @@
 # ids, a default/auto_edit/yolo mode select, auth_required (-32000) on
 # session/new for a cwd containing "needs-login", and an `authenticate` that
 # prints its sign-in url to stderr like the real browser flow. the prompt
-# reply echoes every config option zeron set.
+# reply echoes every config option zeron set. a cwd containing "yolo-current"
+# opens the session in yolo, one containing "reject-mode" refuses mode sets,
+# and a "permissions" prompt asks to read, edit and run before replying with
+# the option zeron picked for each.
 
 emit() { printf '%s\n' "$1"; }
 rid() { printf '%s' "$1" | sed 's/.*"id":\([0-9]*\).*/\1/'; }
@@ -18,6 +21,21 @@ REJECT_MODEL=0
 SETS=""
 PROMPT_AUTH=0
 EMPTY=0
+REJECT_MODE=0
+CURRENT=$OPTIONS
+# ask $1 = kind, $2 = toolCall extras: one permission request, then the
+# picked option id (or "cancelled") from zeron's answer. runs in a command
+# substitution, so the request goes out on fd 3 (the real stdout).
+exec 3>&1
+ask() {
+  emit >&3 "{\"id\":\"perm-$1\",\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"agy-1\",\"toolCall\":{\"toolCallId\":\"t-$1\",\"kind\":\"$1\"$2},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
+  read -r ans || exit 1
+  has "$ans" "\"id\":\"perm-$1\"" || exit 13
+  case "$ans" in
+    *'"optionId":"'*) printf '%s' "$ans" | sed 's/.*"optionId":"\([^"]*\)".*/\1/' ;;
+    *) printf 'cancelled' ;;
+  esac
+}
 while read -r line; do
   if has "$line" '"method":"session/cancel"' && [ "${AUTH_AFTER_CANCEL:-0}" -eq 1 ]; then
     printf 'Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/auth?client_id=fake\n' >&2
@@ -43,10 +61,14 @@ while read -r line; do
     if has "$line" 'reject-model'; then
       REJECT_MODEL=1
     fi
+    if has "$line" 'reject-mode'; then REJECT_MODE=1; fi
+    if has "$line" 'yolo-current'; then
+      CURRENT=$(printf '%s' "$OPTIONS" | sed 's/"currentValue":"default"/"currentValue":"yolo"/')
+    fi
     if has "$line" 'needs-login' && [ "$AUTHED" -eq 0 ]; then
       emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
     else
-      emit "{\"id\":$id,\"result\":{\"sessionId\":\"agy-1\",\"configOptions\":$OPTIONS}}"
+      emit "{\"id\":$id,\"result\":{\"sessionId\":\"agy-1\",\"configOptions\":$CURRENT}}"
       emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[{\"name\":\"plan\",\"description\":\"Plan carefully\"},{\"name\":\"logout\",\"description\":\"Log out and clear stored credentials.\"}]}}}"
     fi
   elif has "$line" '"method":"session/load"'; then
@@ -63,6 +85,8 @@ while read -r line; do
   elif has "$line" '"method":"session/set_config_option"'; then
     if [ "$REJECT_MODEL" -eq 1 ] && has "$line" '"configId":"model"'; then
       emit "{\"id\":$id,\"error\":{\"code\":-32602,\"message\":\"model unavailable\"}}"
+    elif [ "$REJECT_MODE" -eq 1 ] && has "$line" '"configId":"mode"'; then
+      emit "{\"id\":$id,\"error\":{\"code\":-32602,\"message\":\"mode unavailable\"}}"
     else
       set=$(printf '%s' "$line" | sed 's/.*"configId":"\([^"]*\)".*"value":"\([^"]*\)".*/\1=\2/')
       SETS="$SETS$set;"
@@ -93,6 +117,14 @@ while read -r line; do
     if [ "$EMPTY" -eq 1 ]; then
       emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
       continue
+    fi
+    if has "$line" 'permissions'; then
+      read_pick=$(ask read ',"title":"Read lib.rs","locations":[{"path":"/w/src/lib.rs"}]')
+      edit_pick=$(ask edit ',"title":"Edit lib.rs","locations":[{"path":"/w/src/lib.rs"}]')
+      run_pick=$(ask execute ',"title":"cargo test","rawInput":{"command":"cargo test"}')
+      emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"sets:$SETS perms:read=$read_pick;edit=$edit_pick;execute=$run_pick;\"}}}}"
+      emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      exit 0
     fi
     emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"sets:$SETS\"}}}}"
     emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"

@@ -9,6 +9,7 @@ declare module "cloudflare:test" {
     REGISTRY_ROOMS: DurableObjectNamespace;
     CLOUD_ACCOUNTS: DurableObjectNamespace<import("../../src/cloud/cloud-account").CloudAccount>;
     CLOUD_INDEX: DurableObjectNamespace<import("../../src/cloud/cloud-index").CloudIndex>;
+    USER_DIRECTORY?: DurableObjectNamespace<import("../../src/user-directory").UserDirectory>;
     CLOUD_PROVISION: Workflow;
     CLOUD_WAKE: Workflow;
     CLOUD_SLEEP: Workflow;

@@ -1,6 +1,8 @@
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
+import { handlePublicCardRoute, handleUsernameRoute } from "../../src/card-routes";
+import { publicCardGate } from "../../src/card-gate";
 import { handleAdminRoute } from "../../src/cloud/billing";
 import {
   autoWakeCloudDevice,
@@ -9,18 +11,23 @@ import {
   handleRunnerPublicRoute
 } from "../../src/cloud/routes";
 import type { Env } from "../../src/env";
+import { dialDeviceRoom } from "../../src/device-link";
 import { deviceParam, forward } from "../../src/forward";
 import { runnerChatGate, runnerDeviceGate } from "../../src/runner-access";
 import { previewRoute } from "../../src/preview-route";
 import { releaseRoute } from "../../src/releases";
 import { runnerRefusal } from "../../src/runner-policy";
 import { handleVaultRoute } from "../../src/vault-routes";
+import { handleUserDirectoryRoute } from "../../src/user-directory";
+import { handleOnboardingRoute } from "../../src/onboarding-routes";
+import { handlePluginKeyRoute } from "../../src/plugin-keys";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
 export { RegistryRoom } from "../../src/registry-room";
 export { CloudAccount } from "../../src/cloud/cloud-account";
 export { CloudIndex } from "../../src/cloud/cloud-index";
+export { UserDirectory } from "../../src/user-directory";
 export { DeleteWorkflow, ProvisionWorkflow, SleepWorkflow, WakeWorkflow } from "../../src/cloud/workflows";
 
 /** Bare SQLite-backed DO; tests reach its real `ctx.storage.sql` via
@@ -117,10 +124,20 @@ export default {
     if (billing) return billing;
     const runner = await handleRunnerPublicRoute(request, env, url);
     if (runner) return runner;
+    const users = await handleUserDirectoryRoute(request, env, url);
+    if (users) return users;
+    const card = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
+    if (card) return card;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);
     if (refused) return json({ error: "forbidden", message: refused }, 403);
+    const username = await handleUsernameRoute(request, env, auth, url);
+    if (username) return username;
+    const onboarding = await handleOnboardingRoute(request, env, auth, url);
+    if (onboarding) return onboarding;
+    const pluginKeys = await handlePluginKeyRoute(request, env, auth, url);
+    if (pluginKeys) return pluginKeys;
     const cloud = await handleCloudRoute(request, env, auth, url);
     if (cloud) return cloud;
     const vault = await handleVaultRoute(request, env, auth, url);
@@ -137,8 +154,7 @@ export default {
         if (refusedDevice) return refusedDevice;
       }
       if (parts[2] === "ws") {
-        const role = url.searchParams.get("role") === "host" ? "host" : "client";
-        return forward(env.DEVICE_ROOMS, room, request, auth, "/ws", `?role=${role}&connId=${crypto.randomUUID()}`);
+        return dialDeviceRoom(env, auth, request, url, deviceId);
       }
       if (parts[2] === "nudge" && request.method === "POST") {
         autoWakeCloudDevice(env, ctx, auth, deviceId);

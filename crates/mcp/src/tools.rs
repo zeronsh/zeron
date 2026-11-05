@@ -15,12 +15,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
 use zeron_proto::{
-    Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
+    AccessMode, Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
+
+mod plugins;
+mod themes;
+pub use plugins::ListedTool;
+pub(crate) use plugins::is_plugin_tool_name;
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
@@ -42,6 +47,9 @@ pub struct Tools {
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
+    /// Which plugin tools the client was last shown ([`Self::list_all`],
+    /// [`Self::watch_plugin_tools`]).
+    plugins: plugins::PluginState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -118,18 +126,20 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a standalone session with kind chat, or a child with kind side. Omitted kind defaults to side with an origin/parent, standalone otherwise. Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["chat", "side"], "description": "chat: standalone, no parent allowed. side: requires parent or origin. Omit for legacy defaults." },
+                    "kind": { "type": "string", "enum": ["subagent", "side", "chat"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. Omitted: subagent with a parent/origin, chat otherwise." },
                     "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
                     "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Prefers a connected provider, claude-code first." },
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
-                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
+                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
+                    "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
@@ -202,7 +212,7 @@ fn catalog() -> Vec<ToolDef> {
         (
             "create_chats",
             "create_chat",
-            "Create multiple standalone or side chats concurrently (kind per request). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
+            "Create multiple chats concurrently: subagents of your chat by default, or side/standalone chats (kind per request, as create_chat). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
         ),
         (
             "send_messages",
@@ -259,6 +269,8 @@ fn catalog() -> Vec<ToolDef> {
             "required": ["path"]
         }),
     });
+    tools.extend(plugins::catalog());
+    tools.extend(themes::catalog());
     tools
 }
 
@@ -546,6 +558,7 @@ struct ListChatsArgs {
 enum ChatKind {
     Chat,
     Side,
+    Subagent,
 }
 
 #[derive(Deserialize, Default)]
@@ -577,6 +590,9 @@ struct CreateChatArgs {
     model: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
+    access: Option<String>,
+    #[serde(default)]
+    plan: bool,
     title: Option<String>,
     branch: Option<String>,
     cwd: Option<String>,
@@ -700,6 +716,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
         "archived": chat.archived,
         "parentChatId": chat.parent_chat_id,
+        "childKind": chat.child_kind,
         "status": status,
         "sessionStatus": session.as_ref().map(|s| s.status),
         "statusStale": session.as_ref().is_some_and(|s| zeron_proto::view::session_stale(s, now)),
@@ -723,6 +740,7 @@ impl Tools {
         Self {
             zeron,
             pending_turns: Default::default(),
+            plugins: Default::default(),
         }
     }
 
@@ -766,6 +784,29 @@ impl Tools {
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
+            plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
+            plugins::LIST_PLUGINS => return self.list_plugins().await,
+            plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
+            plugins::PLUGIN_STATUS => return self.plugin_status(args).await,
+            plugins::INSTALL_PLUGIN => return self.install_plugin(args).await,
+            plugins::UPDATE_PLUGIN => return self.update_plugin(args).await,
+            plugins::LIST_TEMPLATES
+            | plugins::CREATE_TEMPLATE
+            | plugins::USE_TEMPLATE
+            | plugins::TEMPLATE_STATUS
+            | plugins::DELETE_TEMPLATE
+            | plugins::DESCRIBE_APP => {
+                return self.templates(name, args).await;
+            }
+            plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
+                return self.template_packages(name, args).await;
+            }
+            theme if themes::NAMES.contains(&theme) => {
+                return self.themes(theme, args).await;
+            }
+            plugin if is_plugin_tool_name(plugin) => {
+                return self.call_plugin_tool(plugin, args).await;
+            }
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| format!("{e:#}"))
@@ -881,6 +922,8 @@ impl Tools {
                 "installed": h.installed,
                 "steersMidTurn": h.steers_mid_turn(),
                 "reasoningLevels": h.reasoning_levels,
+                "accessModes": h.access_modes,
+                "supportsPlan": h.supports_plan,
             })).collect::<Vec<_>>()
         }))
     }
@@ -986,17 +1029,25 @@ impl Tools {
             .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent))
         };
         anyhow::ensure!(
-            args.kind != Some(ChatKind::Side) || parent_chat_id.is_some(),
-            "kind side requires a parent or origin chat"
+            !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent)) || parent_chat_id.is_some(),
+            "kind {} requires a parent or origin chat",
+            if args.kind == Some(ChatKind::Side) { "side" } else { "subagent" }
         );
-        let kind = if parent_chat_id.is_some() {
-            ChatKind::Side
-        } else {
-            ChatKind::Chat
+        // A child is a subagent unless asked for as a side chat: delegated
+        // work lists under its parent's Subagents, not its side chats.
+        let kind = match (args.kind, parent_chat_id.is_some()) {
+            (_, false) => ChatKind::Chat,
+            (Some(ChatKind::Side), true) => ChatKind::Side,
+            (_, true) => ChatKind::Subagent,
         };
 
         // Delegation is one level deep: a chat that has a parent never
         // creates chats, and a new chat's parent is a top-level chat.
+        // The calling chat's sandbox and access cap the new one's: a
+        // supervised or sandboxed agent must not hand its work to one that
+        // asks nothing (the engine caps it again: rpc/agent_gate.rs).
+        let mut ceiling = AccessMode::FullAccess;
+        let mut sandbox_ceiling = SandboxLevel::DangerFullAccess;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
         {
@@ -1005,6 +1056,10 @@ impl Tools {
                 origin.parent_chat_id.is_none(),
                 "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
             );
+            if let Some(config) = origin.config {
+                ceiling = config.access;
+                sandbox_ceiling = config.sandbox;
+            }
         }
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
@@ -1057,16 +1112,51 @@ impl Tools {
             Some(raw) => Some(parse_enum("reasoning level", raw).map_err(anyhow::Error::msg)?),
             None => None,
         };
-        let sandbox: SandboxLevel = match args.sandbox.as_deref() {
+        let asked_sandbox: SandboxLevel = match args.sandbox.as_deref() {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
+        let asked_access: AccessMode = match args.access.as_deref() {
+            Some(raw) => parse_enum("access", raw).map_err(anyhow::Error::msg)?,
+            None => ceiling,
+        };
+        // Never more than this chat's own: lowered, and the reply says so.
+        let (sandbox, access, capped) =
+            zeron_proto::cap_access((asked_sandbox, asked_access), (sandbox_ceiling, ceiling));
+        let capped = capped.then(|| {
+            format!(
+                "This chat runs {} in a {} sandbox, so the new chat runs with no more: {}, {} sandbox (asked {}, {}).",
+                ceiling.label(),
+                sandbox_ceiling.label(),
+                access.label(),
+                sandbox.label(),
+                asked_access.label(),
+                asked_sandbox.label(),
+            )
+        });
+        // A Cloud machine's catalog is checked when it runs, not here; an
+        // engine predating modes lists none and runs with full access.
+        if let Some(info) = harnesses.iter().find(|h| h.id == harness).filter(|_| !args.cloud) {
+            let modes = &info.access_modes;
+            anyhow::ensure!(
+                access.is_full_access() || modes.contains(&access),
+                "{harness:?} on device {device_id} cannot run {} (accessModes: {})",
+                access.label(),
+                modes.iter().map(|m| m.label()).collect::<Vec<_>>().join(", ")
+            );
+            anyhow::ensure!(
+                !args.plan || info.supports_plan,
+                "{harness:?} on device {device_id} has no plan mode"
+            );
+        }
         let config = ChatConfig {
             harness,
             model: args.model.clone(),
             reasoning,
             model_options: Default::default(),
             sandbox,
+            access,
+            plan: args.plan,
         };
 
         let chat_id = uuid::Uuid::new_v4().to_string();
@@ -1081,6 +1171,10 @@ impl Tools {
         }
         if let Some(parent) = &parent_chat_id {
             mutate["parentChatId"] = json!(parent);
+            mutate["childKind"] = json!(match kind {
+                ChatKind::Side => zeron_proto::ChildKind::Side,
+                _ => zeron_proto::ChildKind::Subagent,
+            });
         }
         if let Some(branch) = args
             .branch
@@ -1159,6 +1253,9 @@ impl Tools {
             "title": args.title,
             "parentChatId": parent_chat_id,
         });
+        if let Some(capped) = &capped {
+            result["accessCapped"] = json!(capped);
+        }
         if signed_out {
             result["warning"] = json!(format!(
                 "{harness:?} does not look signed in on this device, so its first turn may fail. Pick a connected harness (list_harnesses) if it does."
@@ -1184,6 +1281,11 @@ impl Tools {
                 harness_session_cwd: None,
                 harness_session_harness: None,
                 parent_chat_id: parent_chat_id.clone(),
+                child_kind: match kind {
+                    ChatKind::Side => Some(zeron_proto::ChildKind::Side),
+                    ChatKind::Subagent => Some(zeron_proto::ChildKind::Subagent),
+                    ChatKind::Chat => None,
+                },
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
@@ -1516,10 +1618,13 @@ impl Tools {
                         .map(|c| c.sandbox)
                         .unwrap_or(SandboxLevel::WorkspaceWrite),
                     auto_approve: false,
+                    access: config.as_ref().map(|c| c.access).unwrap_or_default(),
+                    plan: config.as_ref().is_some_and(|c| c.plan),
                     resume: None,
                     attachments: Vec::new(),
                     worktree: None,
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 };
                 self.zeron
                     .queue_command(
@@ -1790,7 +1895,8 @@ mod tests {
                 ])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
-                      "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
+                      "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true,
+                      "accessModes": ["supervised", "auto-accept-edits", "full-access"], "supportsPlan": true },
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
                       "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
                 ])),
@@ -2147,6 +2253,7 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             running_subagents: 0,
+            background_tasks: Vec::new(),
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools
@@ -2355,6 +2462,62 @@ mod tests {
             device_id: None,
             ..Default::default()
         }
+    }
+
+    fn tools_from(world: &Arc<World>, chat: &str) -> Tools {
+        tools(world.clone(), origin(chat))
+    }
+
+    #[tokio::test]
+    async fn a_chat_creates_chats_with_no_more_access_than_its_own() {
+        let supervised = json!({
+            "id": "chat-careful", "deviceId": "dev-local", "title": "Careful",
+            "archived": false, "spaceId": "space-1",
+            "config": { "harness": "claude-code", "sandbox": "workspace-write", "access": "supervised" },
+            "createdAt": "2026-09-01T00:00:00Z"
+        });
+        let world = Arc::new(World {
+            extra_chats: vec![supervised],
+            ..Default::default()
+        });
+        let tools = tools_from(&world, "chat-careful");
+        tools.call("create_chat", json!({})).await.unwrap();
+        tools
+            .call("create_chat", json!({"access": "supervised", "plan": true}))
+            .await
+            .unwrap();
+        // Asking for more is lowered to its own, silently, and said in the
+        // reply: no full-access child, no wider sandbox.
+        let capped = tools
+            .call("create_chat", json!({"access": "full-access", "sandbox": "danger-full-access"}))
+            .await
+            .unwrap();
+        assert!(capped["accessCapped"].as_str().unwrap().contains("no more"), "{capped}");
+        let writes = world.writes.lock().unwrap();
+        let created: Vec<&Value> = writes
+            .iter()
+            .filter(|(_, w)| w["op"] == "createChat")
+            .map(|(_, w)| w)
+            .collect();
+        assert_eq!(created.len(), 3);
+        assert_eq!(created[0]["config"]["access"], "supervised", "inherited");
+        assert_eq!(created[1]["config"]["plan"], true);
+        assert_eq!(created[2]["config"]["access"], "supervised", "capped");
+        assert_eq!(created[2]["config"]["sandbox"], "workspace-write", "capped");
+        drop(writes);
+        // A top-level chat with no mode of its own runs with full access,
+        // which its chats inherit (the field is omitted on the wire).
+        tools_from(&world, "chat-alpha-1")
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        let last = writes
+            .iter()
+            .rev()
+            .find(|(_, w)| w["op"] == "createChat")
+            .unwrap();
+        assert!(last.1["config"].get("access").is_none());
     }
 
     #[tokio::test]
@@ -2568,11 +2731,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kinds_preserve_defaults_and_reject_invalid_arguments_before_writing() {
+    async fn kinds_default_children_to_subagents_and_reject_invalid_arguments_before_writing() {
         let world = Arc::new(World::default());
         let root = tools(world.clone(), Origin::default());
         for args in [
             json!({"kind":"side"}),
+            json!({"kind":"subagent"}),
             json!({"kind":"unknown"}),
             json!({"kind":"chat", "parent":"Alpha", "title":"must not write"}),
         ] {
@@ -2591,8 +2755,11 @@ mod tests {
             (json!({"kind":"chat"}), "chat", Value::Null),
             (json!({"kind":"chat", "parent":"  "}), "chat", Value::Null),
             (json!({"kind":"side"}), "side", json!("chat-alpha-1")),
-            (json!({}), "side", json!("chat-alpha-1")),
-            (json!({"parent":"Beta"}), "side", json!("chat-beta-2")),
+            (json!({"kind":"subagent"}), "subagent", json!("chat-alpha-1")),
+            // A child of your own chat, kind omitted: a subagent.
+            (json!({}), "subagent", json!("chat-alpha-1")),
+            (json!({"parent":"Beta"}), "subagent", json!("chat-beta-2")),
+            (json!({"kind":"side", "parent":"Beta"}), "side", json!("chat-beta-2")),
         ] {
             let created = from_chat.call("create_chat", args).await.unwrap();
             assert_eq!(created["kind"], kind);
@@ -2601,8 +2768,11 @@ mod tests {
             let row = &writes.last().unwrap().1;
             if kind == "chat" {
                 assert!(row.get("parentChatId").is_none());
+                assert!(row.get("childKind").is_none());
             } else {
                 assert_eq!(row["parentChatId"], parent);
+                // The row says what the child is to its parent.
+                assert_eq!(row["childKind"], kind);
             }
         }
         assert_eq!(
@@ -2614,6 +2784,11 @@ mod tests {
                 .await
                 .unwrap()["kind"],
             "side"
+        );
+        // An explicit parent from outside any chat: a subagent of it.
+        assert_eq!(
+            root.call("create_chat", json!({"parent":"Alpha"})).await.unwrap()["kind"],
+            "subagent"
         );
     }
 

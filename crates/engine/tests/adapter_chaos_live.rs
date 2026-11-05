@@ -123,9 +123,12 @@ impl Suite {
             cwd: self.cwd.clone(),
             sandbox: SandboxLevel::DangerFullAccess,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: vec![],
             worktree: None,
             resume: None,
+            extra_mcp: Vec::new(),
         }
     }
 
@@ -193,6 +196,8 @@ impl Suite {
                     reasoning: None,
                     model_options: Default::default(),
                     sandbox: SandboxLevel::DangerFullAccess,
+                    access: Default::default(),
+                    plan: false,
                 },
             )
             .unwrap();
@@ -1188,9 +1193,12 @@ fn restart_request(name: &str, cwd: &str, prompt: &str) -> RunRequest {
         cwd: cwd.into(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         resume: None,
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -1280,6 +1288,8 @@ async fn restart_durability() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::DangerFullAccess,
+                access: Default::default(),
+                plan: false,
             },
         )
         .unwrap();
