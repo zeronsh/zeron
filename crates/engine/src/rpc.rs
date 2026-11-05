@@ -1637,6 +1637,77 @@ impl EngineRpc {
 
     /// Forward a device-addressed call over the target device's relay. On transport
     /// failure the cached link is invalidated so the next call re-dials.
+    /// Another device's `UpdateStatus`, followed through its restarts: whoever
+    /// asked is there to see how an update ends, and updating is what takes that
+    /// device away for a moment. A device that can't be reached when first asked
+    /// says so; after that this keeps trying until the subscriber goes. Asking again
+    /// when nothing has come for a while covers a device that died without a word,
+    /// which leaves the old subscription quiet rather than ended. A device answers
+    /// a new subscription with its current report, so only a change is passed on.
+    async fn follow_update_status(
+        &self,
+        target: String,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        const RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+        const ASK_AGAIN: std::time::Duration = std::time::Duration::from_secs(30);
+        let first = match self.forward(&target, methods::UPDATE_STATUS, params.clone()).await? {
+            RpcReply::Stream(stream) => stream,
+            value @ RpcReply::Value(_) => return Ok(value),
+        };
+        let rpc = self.clone();
+        let followed = (Some(first), None::<serde_json::Value>);
+        let stream = futures::stream::unfold(followed, move |(mut current, mut last)| {
+            let (rpc, target, params) = (rpc.clone(), target.clone(), params.clone());
+            async move {
+                loop {
+                    if let Some(stream) = current.as_mut() {
+                        match tokio::time::timeout(ASK_AGAIN, stream.next()).await {
+                            Ok(Some(item)) => {
+                                if last.as_ref() == Some(&item) {
+                                    continue;
+                                }
+                                last = Some(item.clone());
+                                return Some((item, (current, last)));
+                            }
+                            Ok(None) => {
+                                current = None;
+                                tokio::time::sleep(RETRY).await;
+                            }
+                            Err(_) => {}
+                        }
+                    } else {
+                        tokio::time::sleep(RETRY).await;
+                    }
+                    if let Ok(RpcReply::Stream(stream)) =
+                        rpc.forward(&target, methods::UPDATE_STATUS, params.clone()).await
+                    {
+                        current = Some(stream);
+                    }
+                }
+            }
+        });
+        Ok(RpcReply::Stream(stream.boxed()))
+    }
+
+    /// `ApplyUpdate` for another device. Not reaching it means the update never
+    /// started, and that's worth saying plainly.
+    async fn forward_apply_update(
+        &self,
+        target: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        if let Some(links) = &self.links
+            && let Err(err) = links.client(target).await
+        {
+            tracing::info!(%target, error = %err, "update asked of a device that can't be reached");
+            return Err(RpcError::Failed(
+                "That device can't be reached right now, so the update didn't start.".into(),
+            ));
+        }
+        self.forward(target, methods::APPLY_UPDATE, params).await
+    }
+
     async fn forward(
         &self,
         target: &str,
@@ -2778,6 +2849,12 @@ impl RpcService for EngineRpc {
                     | methods::CLOSE_TERMINAL
             ) {
                 return self.remote_terminal(&target, method, params).await;
+            }
+            if method == methods::UPDATE_STATUS {
+                return self.follow_update_status(target, params).await;
+            }
+            if method == methods::APPLY_UPDATE {
+                return self.forward_apply_update(&target, params).await;
             }
             return self.forward(&target, method, params).await;
         }
