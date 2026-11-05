@@ -208,13 +208,16 @@ end
 -- request), one rule for all of them: `gutter(w)` each side, `$space.6`,
 -- and `$space.4` once the page is under `NARROW` wide (`w` its own width as
 -- laid out, 0 not yet: wide; or whether it's narrow); its first words
--- `TOP` under the card's top, where a transcript's first message stands;
--- and `WIDE`, a page's column when it must be wider than one that reads
--- (`zeron.settings.measure`): ds/page's `width = "wide"`. (Standard steps,
--- not tokens of Zeron's own: a template's own tokens don't lose them.)
+-- `TOP` under the card's top, the gutter's step (as far as the composer
+-- stands from a chat page's sides), so the title clears the top bar and
+-- the card's corner on the page's own rhythm (its header and sections,
+-- `$space.6` apart); and `WIDE`, a page's column when it must be wider
+-- than one that reads (`zeron.settings.measure`): ds/page's `width =
+-- "wide"`. (Standard steps, not tokens of Zeron's own: a template's own
+-- tokens don't lose them.)
 M.NARROW = 640
 M.WIDE = 960
-M.TOP = "$space.4"
+M.TOP = "$space.6"
 
 function M.narrow(w: number): boolean
 	return w > 0 and w < M.NARROW

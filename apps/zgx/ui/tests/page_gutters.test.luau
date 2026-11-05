@@ -1,5 +1,5 @@
 -- Every page in the page's card is one page (ds/page): Settings' pages and
--- a plugin's page start at the card's inner top, Settings' title 16 under
+-- a plugin's page start at the card's inner top, Settings' title 32 under
 -- it (ds/layout TOP), its column 32 in from each side wide and 16 in a
 -- narrow card (ds/layout `gutter`); the title is the same box on every
 -- page (General, Appearance, Plugins' catalog), on the column's edge, which
@@ -28,7 +28,7 @@ test("pages start at their card's top, share its gutters and their title's box",
 		local page = first(app, "#settings-page")
 		local heading = first(app, '#settings-page >> role:heading "General"')
 		local row = first(app, "#setting-language")
-		expect(`{width}: top {heading.y - page.y}`).to_be(`{width}: top 16`)
+		expect(`{width}: top {heading.y - page.y}`).to_be(`{width}: top 32`)
 		-- (The group's card stands a point outside its rows, by its edge.)
 		local left, right = row.x - 1 - page.x, page.x + page.w - (row.x + row.w + 1)
 		expect(math.abs(left - right) <= 1).to_be(true)
