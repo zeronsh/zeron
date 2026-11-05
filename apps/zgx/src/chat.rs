@@ -166,12 +166,189 @@ fn sum_of(json: &Json) -> u64 {
     hasher.finish()
 }
 
+/// A settled entry's row as its row holds it out of view: what makes it,
+/// compressed, opened as a script reads it. The transcript's scripts, a
+/// template's or a plugin's read the row it opens to, as they would any.
+struct FoldedEntry {
+    bytes: Box<[u8]>,
+    context: Rc<RowContext>,
+}
+
+/// What a chat's rows are built with (`built_entry`).
+struct RowContext {
+    doc: String,
+    device: Option<String>,
+    model: Option<String>,
+}
+
+impl zgx_script::Unfold for FoldedEntry {
+    fn unfold(&self) -> Value {
+        let json = miniz_oxide::inflate::decompress_to_vec(&self.bytes).ok();
+        let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
+        let RowContext { doc, device, model } = &*self.context;
+        built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil)
+    }
+}
+
+/// How hard a settled entry is compressed: fast, as a long chat's are made in
+/// slices between frames, and most of what it saves is had by the first level.
+const FOLD_LEVEL: i32 = 1;
+
+/// `bytes` compressed, the compressor's tables kept for the next (a compressor is
+/// about 300 KB, against the kilobytes of an entry: one a call was gigabytes
+/// allocated to open a few long chats).
+fn compressed(mut bytes: &[u8]) -> Box<[u8]> {
+    use miniz_oxide::deflate::core::{
+        CompressorOxide, TDEFLFlush, TDEFLStatus, compress, create_comp_flags_from_zip_params,
+    };
+    thread_local! {
+        static COMPRESSOR: RefCell<CompressorOxide> =
+            RefCell::new(CompressorOxide::new(create_comp_flags_from_zip_params(FOLD_LEVEL, 0, 0)));
+    }
+    COMPRESSOR.with_borrow_mut(|compressor| {
+        compressor.reset();
+        let mut out = vec![0; (bytes.len() / 2).max(64)];
+        let mut at = 0;
+        loop {
+            let (status, read, written) = compress(compressor, bytes, &mut out[at..], TDEFLFlush::Finish);
+            at += written;
+            bytes = &bytes[read..];
+            if matches!(status, TDEFLStatus::Done) {
+                break;
+            }
+            let room = out.len() * 2;
+            out.resize(room, 0);
+        }
+        out.truncate(at);
+        out.into_boxed_slice()
+    })
+}
+
+/// An entry's row, as a view keeps it: its subagents apart, as the transcript
+/// lists them without opening every row (`Subagents`).
+#[derive(Clone, Default)]
+struct Built {
+    row: Option<Value>,
+    subagents: Option<Rc<[Value]>>,
+}
+
+/// `entry` built: its row, folded if `fold`, which a row that shows or may
+/// change isn't. What it shows of it is read as the row is, and held in `Built`.
+fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
+    let RowContext { doc, device, model } = &**context;
+    let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
+    let subagents = row.as_ref().and_then(subagents_in);
+    let row = match row {
+        Some(_) if fold && entry["status"].as_str() != Some("streaming") => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
+            (Some(id), Ok(bytes)) => Some(Value::folded(
+                id.into(),
+                FoldedEntry {
+                    bytes: compressed(&bytes),
+                    context: context.clone(),
+                },
+            )),
+            _ => row,
+        },
+        row => row,
+    };
+    Built { row, subagents }
+}
+
+/// A long chat's settled entries, as a worker thread makes them: what they fold
+/// to, and all it read of them. Building and compressing thousands of rows on the
+/// main thread takes the window's time and strews its heap's pages with what
+/// little stays, so they stay held after the chat has gone. The worker's are its own.
+struct Folding {
+    results: std::sync::mpsc::Receiver<Vec<FoldedOff>>,
+}
+
+/// An entry, folded on the worker (`Folding`).
+struct FoldedOff {
+    /// Where it stood, and its id, to find it again.
+    at: usize,
+    id: String,
+    /// None: it shows nothing.
+    bytes: Option<Box<[u8]>>,
+    subagents: Vec<SubagentOff>,
+    sum: u64,
+    /// The plan in it, if there is one (`Open::older_todo`).
+    todo: Option<Json>,
+}
+
+/// A subagent's row in `Open`'s list, as plain data to cross threads.
+struct SubagentOff {
+    reference: String,
+    title: Option<String>,
+    status: Option<String>,
+    at: Option<f64>,
+}
+
+impl SubagentOff {
+    fn of(sub: &Value) -> Option<Self> {
+        let words = |key: &str| match sub.field(key) {
+            Some(Value::Str(words)) => Some(words.to_string()),
+            _ => None,
+        };
+        Some(Self {
+            reference: words("ref")?,
+            title: words("title"),
+            status: words("status"),
+            at: sub.field("at").and_then(Value::as_f64),
+        })
+    }
+
+    fn value(&self) -> Value {
+        let words = |words: &Option<String>| words.as_deref().map_or(Value::Nil, Value::from);
+        Value::record([
+            ("ref", Value::from(self.reference.as_str())),
+            ("title", words(&self.title)),
+            ("status", words(&self.status)),
+            ("at", self.at.map_or(Value::Nil, Value::Num)),
+        ])
+    }
+}
+
+/// `entry`, as the worker folds it.
+fn fold_off(at: usize, id: String, entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> FoldedOff {
+    let row = built_entry(entry, doc, device, model);
+    let subagents = row.as_ref().and_then(subagents_in).map_or(Vec::new(), |found| found.iter().filter_map(SubagentOff::of).collect());
+    let bytes = row.and_then(|_| serde_json::to_vec(entry).ok()).map(|bytes| compressed(&bytes));
+    FoldedOff { at, id, bytes, subagents, sum: sum_of(entry), todo: latest_todo(std::iter::once(entry)).cloned() }
+}
+
+/// How many entries the worker sends at a time.
+const FOLDED_AT_ONCE: usize = 64;
+
+/// A worker folding `entries`, newest first.
+fn folding(entries: Vec<(usize, String, Json)>, context: &RowContext) -> Folding {
+    let (sender, results) = std::sync::mpsc::channel();
+    let (doc, device, model) = (context.doc.clone(), context.device.clone(), context.model.clone());
+    let spawned = std::thread::Builder::new().name("zeron-fold".into()).spawn(move || {
+        let mut batch = Vec::with_capacity(FOLDED_AT_ONCE);
+        for (at, id, entry) in entries {
+            batch.push(fold_off(at, id, &entry, &doc, device.as_deref(), model.as_deref()));
+            if batch.len() == FOLDED_AT_ONCE {
+                // (The chat has gone, or a reset replaced them: nothing wants the rest.)
+                if sender.send(std::mem::take(&mut batch)).is_err() {
+                    return;
+                }
+                batch.reserve(FOLDED_AT_ONCE);
+            }
+        }
+        let _ = sender.send(batch);
+    });
+    if let Err(error) = spawned {
+        eprintln!("zeron-zgx: a chat's rows: no worker ({error})");
+    }
+    Folding { results }
+}
+
 /// What a view's chat had read and built, as it let it go.
 struct LetGo {
     id: String,
     entries: Vec<Entry>,
     older_todo: Option<(usize, Json)>,
-    built: HashMap<Rc<str>, Option<Value>>,
+    built: HashMap<Rc<str>, Built>,
     built_model: Option<Option<String>>,
     context: Option<f64>,
     context_usage: (Option<f64>, Option<f64>),
@@ -180,8 +357,9 @@ struct LetGo {
 /// How long a chat let go of is kept for another view to take it.
 const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How many entries a reset may leave to build at once; more go in slices.
-const BUILT_AT_ONCE: usize = 300;
+/// How many entries a reset may leave to build at once; more go to a worker and
+/// in slices.
+const BUILT_AT_ONCE: usize = 64;
 /// A slice of building, and the rest after it, so frames get the thread.
 const BUILD_SLICE: std::time::Duration = std::time::Duration::from_millis(3);
 const BUILD_REST: std::time::Duration = std::time::Duration::from_millis(5);
@@ -307,8 +485,10 @@ struct Open {
     /// the entries a frame changed, and hands the rest over as the same
     /// values, so the script's copy (reconciled by id) does no work for
     /// them.
-    built: HashMap<Rc<str>, Option<Value>>,
+    built: HashMap<Rc<str>, Built>,
     built_model: Option<Option<String>>,
+    /// What its rows are built with, shared by those folded.
+    row_context: Option<Rc<RowContext>>,
     /// The chat's model changed while settled entries' rows carry the last
     /// one's name: its whole copy is asked for again to build them from.
     model_moved: bool,
@@ -320,6 +500,10 @@ struct Open {
     /// Building a reset's entries a slice at a time (`build_in_steps`): what
     /// shows stays as it is until that's done.
     stepping: bool,
+    /// The worker folding its settled entries, meanwhile.
+    folding: Option<Folding>,
+    /// They have gone to it (once a build).
+    builds_started: bool,
     /// This view is the one doing it (another view of the chat waits).
     builds: bool,
 }
@@ -536,19 +720,21 @@ fn refs_value(found: &Json) -> Value {
 
 // -- every window's -----------------------------------------------------------
 
+/// A frame's list, its items by `field`. Taken, not copied: these lists come whole
+/// for every change in any chat, a chat's every field, and a copy made here would
+/// be blocks by the thousand among the window's own, where they'd stay till the next.
+fn by_field(list: Json, field: &str) -> HashMap<String, Json> {
+    let Json::Array(list) = list else { return HashMap::new() };
+    list.into_iter().filter_map(|item| Some((item[field].as_str()?.to_owned(), item))).collect()
+}
+
 impl Chats {
     fn connected(self: &Rc<Self>, rpc: &Rpc) {
         let mut watches = Vec::new();
         let weak = Rc::downgrade(self);
         watches.push(rpc.watch("WatchSessions", json!({}), move |item| {
             let Some(me) = weak.upgrade() else { return };
-            let mut by = HashMap::new();
-            for s in item.as_array().into_iter().flatten() {
-                if let Some(id) = s["chatId"].as_str() {
-                    by.insert(id.to_owned(), s.clone());
-                }
-            }
-            *me.sessions.borrow_mut() = by;
+            *me.sessions.borrow_mut() = by_field(item, "chatId");
             me.follow_asks();
             me.publish_views();
             // A turn starting or ending: the newest prompt's line follows.
@@ -570,13 +756,7 @@ impl Chats {
         let weak = Rc::downgrade(self);
         watches.push(rpc.watch("WatchChats", json!({}), move |item| {
             let Some(me) = weak.upgrade() else { return };
-            let mut by = HashMap::new();
-            for c in item.as_array().into_iter().flatten() {
-                if let Some(id) = c["id"].as_str() {
-                    by.insert(id.to_owned(), c.clone());
-                }
-            }
-            *me.chats.borrow_mut() = by;
+            *me.chats.borrow_mut() = by_field(item, "id");
             me.chats_heard.set(true);
             me.publish_views();
         }));
@@ -670,7 +850,8 @@ impl Chats {
     /// Keeps what a view's chat had for a moment (`LET_GO_KEPT`), for another
     /// view that's about to open it.
     fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
-        let Some(old) = old.filter(|o| o.heard) else { return };
+        // (Not while its rows are on a worker: it has only the ones they left.)
+        let Some(old) = old.filter(|o| o.heard && !o.stepping) else { return };
         let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
         *self.let_go.borrow_mut() = Some(LetGo { id, entries, older_todo, built, built_model, context, context_usage });
         let turn = self.let_go_turn.get() + 1;
@@ -1244,6 +1425,9 @@ impl View {
     fn resubscribe(self: &Rc<Self>) {
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.watches.clear();
+            open.folding = None;
+            open.stepping = false;
+            open.builds = false;
         }
         self.generation.set(self.generation.get() + 1);
         self.subscribe();
@@ -1270,6 +1454,9 @@ impl View {
                 }
             }
             let before = frame.get("reset").map(|_| std::mem::take(&mut open.entries));
+            if before.is_some() {
+                open.folding = None;
+            }
             let result = apply(&mut open.entries, &mut frame);
             // What it changed, to build again: on a reset, the entries that
             // differ from what this view had, unless another view of this
@@ -1390,6 +1577,7 @@ impl View {
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.stepping = true;
             open.builds = !waits;
+            open.builds_started = false;
         }
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
@@ -1435,17 +1623,53 @@ impl View {
             open.builds = true;
             self.share_built(open);
         }
-        let (model, device) = build_context(open, &chats);
-        let open_id = open.id.clone();
+        let context = build_context(open, &chats);
         let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
-        let Open { entries, older_todo, built, .. } = open;
         let started = std::time::Instant::now();
+        // The settled ones to the worker, once, with what's left of them here.
+        if !open.builds_started {
+            open.builds_started = true;
+            let Open { entries, built, .. } = open;
+            let off: Vec<(usize, String, Json)> = entries
+                .iter_mut()
+                .enumerate()
+                .take(whole_from)
+                .rev()
+                .filter(|(_, e)| !e.id.is_empty() && !built.contains_key(&e.id))
+                .filter_map(|(at, e)| Some((at, e.id.to_string(), e.json.take()?)))
+                .collect();
+            if !off.is_empty() {
+                open.folding = Some(folding(off, &context));
+            }
+        }
+        // What it has done.
+        while let Some(folding) = &open.folding {
+            let batch = match folding.results.try_recv() {
+                Ok(batch) => batch,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    open.folding = None;
+                    break;
+                }
+            };
+            for folded in batch {
+                settle_off(open, folded, &context);
+            }
+            if started.elapsed() >= BUILD_SLICE {
+                return true;
+            }
+        }
+        // The newest, whole, here; and any left settled that hasn't its row.
+        let Open { entries, older_todo, built, .. } = open;
         for (at, entry) in entries.iter_mut().enumerate().rev() {
             if entry.id.is_empty() || built.contains_key(&entry.id) {
+                if at < whole_from && entry.json.is_some() && !entry.id.is_empty() {
+                    settle(entry, at, older_todo);
+                }
                 continue;
             }
             let Some(json) = &entry.json else { continue };
-            built.insert(entry.id.clone(), built_entry(json, &open_id, device.as_deref(), model.as_deref()));
+            built.insert(entry.id.clone(), built_for(json, &context, at < whole_from));
             if at < whole_from {
                 settle(entry, at, older_todo);
             }
@@ -1458,6 +1682,7 @@ impl View {
 
     fn publish_messages(&self) {
         let chats = CHATS.with(Rc::clone);
+        let subagents;
         let list = {
             let mut slot = self.open.borrow_mut();
             let Some(open) = slot.as_mut() else { return };
@@ -1465,30 +1690,32 @@ impl View {
             if open.stepping {
                 return;
             }
-            let (model, device) = build_context(open, &chats);
-            let open_id = open.id.clone();
+            let context = build_context(open, &chats);
             let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
             let Open { entries, older_todo, built, .. } = open;
             let mut list: Vec<Value> = Vec::with_capacity(entries.len());
+            let mut seen = Subagents::default();
             for (at, e) in entries.iter_mut().enumerate() {
                 if e.id.is_empty() {
-                    list.extend(e.json.as_ref().and_then(|json| message(json, model.as_deref())));
+                    list.extend(e.json.as_ref().and_then(|json| message(json, context.model.as_deref())));
                     continue;
                 }
                 let row = match (built.get(&e.id), &e.json) {
                     (Some(row), _) => row.clone(),
                     (None, Some(json)) => {
-                        let row = built_entry(json, &open_id, device.as_deref(), model.as_deref());
+                        let row = built_for(json, &context, at < whole_from);
                         built.insert(e.id.clone(), row.clone());
                         row
                     }
-                    (None, None) => None,
+                    (None, None) => Built::default(),
                 };
-                list.extend(row);
+                list.extend(row.row);
+                seen.add(row.subagents.as_deref());
                 if at < whole_from && e.json.is_some() {
                     settle(e, at, older_todo);
                 }
             }
+            subagents = seen.0;
             let open = &*open;
             // The newest prompt, while its reply hasn't begun: sending,
             // then working, as the shipping app's working trailer says
@@ -1520,7 +1747,7 @@ impl View {
         };
         // The list first: a reply that ended takes its words into its row
         // before the draft lets them go.
-        self.subagents.set(subagents_of(&list));
+        self.subagents.set(Value::List(subagents.into()));
         self.messages.set(Value::List(list.into()));
         self.publish_draft();
         self.after_model_moved();
@@ -2579,7 +2806,7 @@ enum Change {
 /// The model's name a chat's replies carry, building them again if it's
 /// another now, and the device its visuals are read from (the chat's host,
 /// when it isn't this one).
-fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<String>) {
+fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
     let chat = chats.chat(&open.id).unwrap_or(Json::Null);
     let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
     let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, m).unwrap_or_else(|| m.to_owned()));
@@ -2593,7 +2820,15 @@ fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<Stri
         }
         open.built_model = Some(model.clone());
     }
-    (model, chats.target(&chat))
+    let device = chats.target(&chat);
+    match &open.row_context {
+        Some(context) if context.doc == open.id && context.device == device && context.model == model => context.clone(),
+        _ => {
+            let context = Rc::new(RowContext { doc: open.id.clone(), device, model });
+            open.row_context = Some(context.clone());
+            context
+        }
+    }
 }
 
 /// An entry as its row reads it.
@@ -2620,6 +2855,30 @@ fn latest_todo<'a>(newest_first: impl Iterator<Item = &'a Json>) -> Option<&'a J
     newest_first
         .flat_map(|e| e["parts"].as_array().into_iter().flatten().rev())
         .find(|p| p["kind"].as_str() == Some("tool") && p["call"]["kind"].as_str() == Some("todo"))
+}
+
+/// What the worker made of an entry, kept: its row folded, as `built_for` and
+/// `settle` would have left it.
+fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
+    let FoldedOff { at, id, bytes, subagents, sum, todo } = folded;
+    // (Where it stood, unless a frame has moved it. Gone: nothing to keep.)
+    let Open { entries, built, older_todo, .. } = open;
+    let found = entries.get(at).filter(|e| *e.id == *id).map(|_| at).or_else(|| entries.iter().position(|e| *e.id == *id));
+    let Some(place) = found else { return };
+    let entry = &mut entries[place];
+    // (A newer copy came meanwhile: it's built from that.)
+    if entry.json.is_some() {
+        return;
+    }
+    entry.sum = sum;
+    if let Some(part) = todo
+        && older_todo.as_ref().is_none_or(|(kept, _)| *kept < place)
+    {
+        *older_todo = Some((place, part));
+    }
+    let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
+    let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
+    built.insert(entry.id.clone(), Built { row, subagents });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
@@ -2717,7 +2976,7 @@ fn by_id(entries: &[Entry]) -> HashMap<&str, &Entry> {
 }
 
 /// `built` less what a reset changed: only the entries it has as they were.
-fn keep_unchanged(built: &mut HashMap<Rc<str>, Option<Value>>, before: &[Entry], now: &[Entry]) {
+fn keep_unchanged(built: &mut HashMap<Rc<str>, Built>, before: &[Entry], now: &[Entry]) {
     if built.is_empty() {
         return;
     }
@@ -2733,7 +2992,7 @@ fn keep_unchanged(built: &mut HashMap<Rc<str>, Option<Value>>, before: &[Entry],
 fn reuse_built(
     open: &mut Open,
     entries: &[Entry],
-    built: &HashMap<Rc<str>, Option<Value>>,
+    built: &HashMap<Rc<str>, Built>,
     built_model: &Option<Option<String>>,
 ) {
     if built_model.is_none() || (open.built_model.is_some() && open.built_model != *built_model) {
@@ -2898,26 +3157,39 @@ fn entry_text(entry: &Json) -> String {
 
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
 /// were spawned, with when their turn began (a message's `tools` hold all of its).
-fn subagents_of(messages: &[Value]) -> Value {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for message in messages {
-        let Some(Value::List(tools)) = message.field("tools") else { continue };
-        for tool in tools.iter() {
-            let Some(sub) = tool.field("subagent") else { continue };
-            let Some(Value::Str(reference)) = sub.field("ref") else { continue };
-            if seen.insert(reference.clone()) {
-                let field = |key: &str| sub.field(key).cloned().unwrap_or(Value::Nil);
-                out.push(Value::record([
-                    ("ref", Value::Str(reference.clone())),
-                    ("title", field("title")),
-                    ("status", field("status")),
-                    ("at", message.field("started").cloned().unwrap_or(Value::Nil)),
-                ]));
+fn subagents_in(message: &Value) -> Option<Rc<[Value]>> {
+    let Some(Value::List(tools)) = message.field("tools") else { return None };
+    let found: Vec<Value> = tools
+        .iter()
+        .filter_map(|tool| {
+            let sub = tool.field("subagent")?;
+            let reference = sub.field("ref").filter(|r| matches!(r, Value::Str(_)))?;
+            let field = |key: &str| sub.field(key).cloned().unwrap_or(Value::Nil);
+            Some(Value::record([
+                ("ref", reference.clone()),
+                ("title", field("title")),
+                ("status", field("status")),
+                ("at", message.field("started").cloned().unwrap_or(Value::Nil)),
+            ]))
+        })
+        .collect();
+    (!found.is_empty()).then(|| found.into())
+}
+
+/// A transcript's subagents as its rows are added, each once, in order.
+#[derive(Default)]
+struct Subagents(Vec<Value>, std::collections::HashSet<Rc<str>>);
+
+impl Subagents {
+    fn add(&mut self, found: Option<&[Value]>) {
+        for sub in found.into_iter().flatten() {
+            if let Some(Value::Str(reference)) = sub.field("ref")
+                && self.1.insert(reference.clone())
+            {
+                self.0.push(sub.clone());
             }
         }
     }
-    Value::List(out.into())
 }
 
 /// An entry as ds/transcript's message; nil for one it doesn't show.
@@ -4131,8 +4403,8 @@ fn base64(bytes: &[u8]) -> String {
 mod tests {
     #[test]
     fn a_reset_keeps_what_it_left_as_it_was() {
-        let built_of = |ids: &[&str]| -> std::collections::HashMap<Rc<str>, Option<zgx_script::Value>> {
-            ids.iter().map(|id| (Rc::from(*id), None)).collect()
+        let built_of = |ids: &[&str]| -> std::collections::HashMap<Rc<str>, super::Built> {
+            ids.iter().map(|id| (Rc::from(*id), super::Built::default())).collect()
         };
         let mut before: Vec<super::Entry> = [
             serde_json::json!({ "id": "a", "text": "same" }),
@@ -4181,6 +4453,67 @@ mod tests {
         let mut entries = open.entries;
         let mut words = serde_json::json!({ "append": [{ "entry": "first", "part": "p", "text": "x", "len": 1 }] });
         assert!(super::apply(&mut entries, &mut words).is_err());
+    }
+
+    /// The worker's fold, kept, is what folding here keeps.
+    #[test]
+    fn the_worker_folds_as_the_window_would() {
+        let entry = serde_json::json!({
+            "id": "e1", "role": "assistant", "status": "complete", "createdAt": 1000.0,
+            "parts": [
+                { "id": "t", "kind": "text", "text": "Some words" },
+                { "id": "k", "kind": "tool", "subagentRef": "doc--sub--1", "subagentStatus": "done",
+                  "call": { "kind": "mcp", "tool": "Agent: look", "server": "s" } },
+            ],
+        });
+        let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()) });
+        let here = super::built_for(&entry, &context, true);
+        let folding = super::folding(vec![(0, "e1".into(), entry.clone())], &context);
+        let folded = folding.results.recv().unwrap().pop().unwrap();
+        let mut open = super::Open { entries: vec![super::Entry::new(entry.clone())], ..super::Open::default() };
+        open.entries[0].json = None;
+        super::settle_off(&mut open, folded, &context);
+        let there = open.built.get("e1").expect("kept");
+        assert_eq!(there.row.as_ref().unwrap().to_json(), here.row.as_ref().unwrap().to_json());
+        assert_eq!(there.subagents.as_ref().map(|s| s[0].to_json()), here.subagents.as_ref().map(|s| s[0].to_json()));
+        assert_eq!(open.entries[0].sum, super::sum_of(&entry));
+    }
+
+    /// A row out of view holds what makes it, not itself: what it opens to is
+    /// the row it would have been, and a row with subagents still lists them.
+    #[test]
+    fn a_folded_row_opens_to_the_row_it_was() {
+        let entry = serde_json::json!({
+            "id": "e1", "role": "assistant", "status": "complete", "createdAt": 1000.0,
+            "parts": [
+                { "id": "t", "kind": "text", "text": "Some words ".repeat(200) },
+                { "id": "k", "kind": "tool", "subagentRef": "doc--sub--1", "subagentStatus": "done",
+                  "call": { "kind": "mcp", "tool": "Agent: look", "server": "s" } },
+            ],
+        });
+        let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()) });
+        let whole = super::built_for(&entry, &context, false);
+        let folded = super::built_for(&entry, &context, true);
+        let Some(Value::Folded(_)) = folded.row else { panic!("folded") };
+        let (whole_row, folded_row) = (whole.row.unwrap(), folded.row.unwrap());
+        // What a script gets, and what it reads of it.
+        assert_eq!(folded_row.to_json(), whole_row.to_json());
+        assert_eq!(folded_row.field("id").map(text).as_deref(), Some("e1"));
+        assert_eq!(folded.subagents.as_deref().map(<[Value]>::len), Some(1));
+        assert_eq!(folded.subagents, whole.subagents);
+        // It's kept small: words that repeat, a good deal less than they are.
+        let streaming = serde_json::json!({ "id": "e2", "role": "assistant", "status": "streaming", "parts": [] });
+        assert!(!matches!(super::built_for(&streaming, &context, true).row, Some(Value::Folded(_))), "still being written");
+    }
+
+    #[test]
+    fn what_a_kept_compressor_compresses_opens_again() {
+        let long = "words that repeat ".repeat(4000);
+        for input in [long.as_bytes(), b"short", b""] {
+            let out = super::compressed(input);
+            assert_eq!(miniz_oxide::inflate::decompress_to_vec(&out).unwrap(), input);
+        }
+        assert!(super::compressed(long.as_bytes()).len() < long.len() / 10);
     }
 
     #[test]
@@ -4250,8 +4583,8 @@ mod tests {
             .collect(),
             ..super::Open::default()
         };
-        let theirs: std::collections::HashMap<Rc<str>, Option<zgx_script::Value>> =
-            [(Rc::from("a"), None), (Rc::from("b"), None)].into_iter().collect();
+        let theirs: std::collections::HashMap<Rc<str>, super::Built> =
+            [(Rc::from("a"), super::Built::default()), (Rc::from("b"), super::Built::default())].into_iter().collect();
         // (Built for another model's name: none of it.)
         open.built_model = Some(Some("mine".into()));
         super::reuse_built(&mut open, &entries, &theirs, &Some(Some("theirs".into())));
@@ -4754,7 +5087,11 @@ mod tests {
             Value::record([("role", Value::from("user"))]),
             message(2., vec![tool("a", "again"), tool("b", "second")]),
         ];
-        let Value::List(found) = subagents_of(&list) else { panic!("a list") };
+        let mut seen = Subagents::default();
+        for message in &list {
+            seen.add(subagents_in(message).as_deref());
+        }
+        let found = seen.0;
         let refs: Vec<String> = found.iter().map(|s| s.field("ref").map(text).unwrap_or_default()).collect();
         assert_eq!(refs, ["a", "b"]);
         assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
