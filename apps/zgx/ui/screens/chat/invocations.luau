@@ -19,7 +19,9 @@
 local M = {}
 
 export type Row = { kind: "command" | "skill", name: string, label: string, detail: string, link: string }
-export type Catalog = { state: "loading" | "ready" | "failed", rows: { Row }, warning: string?, error: string? }
+-- (`failed`: the list that couldn't be had, "commands" or "skills", or
+-- "both"; said in the menu, as Zeron's says it.)
+export type Catalog = { state: "loading" | "ready" | "failed", rows: { Row }, failed: string? }
 export type Target = { chat: string?, space: string?, device: string?, path: string? }
 
 -- Every list, by `harness|device|place`.
@@ -60,17 +62,19 @@ function M.load(harness: string, target: Target)
 	if was and was.state == "loading" then
 		return
 	end
-	put(key, { state = "loading", rows = if was then was.rows else {}, warning = if was then was.warning else nil })
+	-- (Read again, a failure said before is said again only if it is again.)
+	put(key, { state = "loading", rows = if was then was.rows else {} })
 	local ok, promise = pcall(M.read, harness, target)
 	if not ok or not promise then
-		put(key, { state = "failed", rows = if was then was.rows else {}, error = ui.t("chat.invocations.couldnt_list"):get() })
+		put(key, { state = "failed", rows = if was then was.rows else {}, failed = "both" })
 		return
 	end
 	promise:after(function(got: any)
 		local rows = if type(got) == "table" and type(got.rows) == "table" then got.rows else {}
-		put(key, { state = "ready", rows = rows, warning = if type(got) == "table" then got.warning else nil })
-	end, function(err: any)
-		put(key, { state = "failed", rows = if was then was.rows else {}, error = tostring(err) })
+		local failed = if type(got) == "table" and type(got.failed) == "string" then got.failed else nil
+		put(key, { state = "ready", rows = rows, failed = failed })
+	end, function()
+		put(key, { state = "failed", rows = if was then was.rows else {}, failed = "both" })
 	end)
 end
 
@@ -102,6 +106,15 @@ function M.items(catalog: Catalog?, kind: "command" | "skill"): { any }?
 		end
 	end
 	return out
+end
+
+-- Why a kind's list couldn't be had, in words, or nil when it came.
+function M.failed(catalog: Catalog?, kind: "command" | "skill"): string?
+	local failed = catalog and catalog.failed
+	if failed == "both" or failed == `{kind}s` then
+		return ui.t(if kind == "command" then "chat.invocations.couldnt_list" else "chat.invocations.couldnt_list_skills"):get()
+	end
+	return nil
 end
 
 -- A row picked (the composer's `on_mention`: the item, then the trigger it

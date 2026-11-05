@@ -4,7 +4,8 @@
 --
 --   local c = Completions.bind { key, text, agent, target, files, in_chat, run }
 --   ds.Composer { mentions = c.lists, on_mention = c.on_mention,
---     mention_enabled = c.enabled, mention_empty = c.empty }
+--     mention_enabled = c.enabled, mention_empty = c.empty,
+--     mention_failed = c.failed }
 --   c.command_of(draft)   the Zeron command a whole draft is, if any
 --
 -- `key` names what it keeps (so a reload reads nothing again), `text` is the
@@ -35,6 +36,8 @@ function M.bind(b: Bind): { [string]: any }
 	-- What `@` offers: the files of where it works, searched as the mention is
 	-- typed. (`/` and `$` come from the catalog, below.)
 	local sources = ui.state(`{b.key}_mentions`, { ["/"] = {}, ["$"] = {} } :: any)
+	-- Whether the last search failed (said in the list, not "No files").
+	local search_failed = ui.state(`{b.key}_mention_search_failed`, false)
 	local function invocation_key(): string?
 		return Invocations.key(b.agent(), b.target())
 	end
@@ -124,8 +127,13 @@ function M.bind(b: Bind): { [string]: any }
 						link = require("@app/screens/chat/shared").file_link(f.path, f.dir),
 					})
 				end
+				search_failed:set(false)
 				sources:set { ["@"] = items, ["/"] = {}, ["$"] = {} }
 			end, function()
+				if searched:peek() ~= key then
+					return
+				end
+				search_failed:set(true)
 				sources:set { ["@"] = {}, ["/"] = {}, ["$"] = {} }
 			end)
 		end)
@@ -160,6 +168,19 @@ function M.bind(b: Bind): { [string]: any }
 				return nil
 			end,
 		}) :: any,
+		-- A search or a list that couldn't be had, said as Zeron's says it:
+		-- `/` its commands (and its skills, not separate), `$` its skills.
+		failed = function(trigger: string): string?
+			if trigger == "@" then
+				return if search_failed:get() then ui.t("chat.composer.couldnt_search_files"):get() else nil
+			end
+			local catalog = Invocations.catalog(invocation_key())
+			if trigger == "$" then
+				return Invocations.failed(catalog, "skill")
+			end
+			return Invocations.failed(catalog, "command")
+				or (if prefs.completion(b.agent()).separate then nil else Invocations.failed(catalog, "skill"))
+		end,
 		-- A draft that is only one of Zeron's own commands (its token goes;
 		-- anything carried stays).
 		command_of = function(draft: string): string?

@@ -268,10 +268,18 @@ end }
 stub_store.retry = function(id: string, message: string)
 	note(`retry:{id}:{message}`)
 end
--- `@` and `/`: what's in the project, what the agent lists.
+-- `@` and `/`: what's in the project, what the agent lists; after
+-- `lists_fail`, neither can be had (its device unreachable).
+local lists_fail = false
+ui.command { id = "lists_fail", title = "The file search and the agent's lists fail", run = function()
+	lists_fail = true
+end }
 local files_stub = require("@app/screens/files/api") :: any
 files_stub.search = function(target: any, query: string): any
 	note(`search:{target.chat or target.space or "?"}:{query}`)
+	if lists_fail then
+		return settled(false, "unreachable")
+	end
 	local found = {}
 	for _, path in { "src/lib.rs", "README.md" } do
 		if query == "" or string.find(string.lower(path), string.lower(query), 1, true) then
@@ -283,6 +291,9 @@ end
 local invocations_stub = require("@app/screens/chat/invocations") :: any
 invocations_stub.read = function(harness: string, target: any): any
 	note(`invocations:{harness}:{target.chat or target.space or "?"}`)
+	if lists_fail then
+		return settled(false, "unreachable")
+	end
 	return settled(true, { rows = { { kind = "command", name = "review", label = "/review", detail = "Review the diff", link = "[/review](zeron-invoke:review)" } } })
 end
 stub_store.queue = function(id: string, op: any)

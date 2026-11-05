@@ -7,7 +7,9 @@
 //!
 //!   chat.invocations { harness, target = { chat? | space?, device?, path? } }
 //!       { rows = { { kind = "command" | "skill", name, label, detail, link } },
-//!         warning? }     or an error when neither list could be had
+//!         failed? }      the list that couldn't be had ("commands" or
+//!                        "skills") when the other came; or an error when
+//!                        neither could be
 //!
 //! Commands come first in the agent's order, then its enabled skills; a
 //! command that is a skill's own alias is left to the skill. Names and paths
@@ -73,10 +75,10 @@ async fn invocations(arg: Value, local: Rc<RefCell<Option<String>>>) -> Result<V
         engine::get().call("ListSkills", params),
     )
     .await;
-    let (rows, warning) = merge(commands, skills)?;
+    let (rows, failed) = merge(commands, skills)?;
     let mut fields = vec![("rows", Value::List(rows.into_iter().map(row_value).collect::<Vec<_>>().into()))];
-    if let Some(warning) = warning {
-        fields.push(("warning", Value::from(warning.as_str())));
+    if let Some(failed) = failed {
+        fields.push(("failed", Value::from(failed)));
     }
     Ok(Value::record(fields))
 }
@@ -126,18 +128,18 @@ fn row_value(row: Row) -> Value {
 }
 
 /// The shipping composer's `merge_invocation_results`: both lists, or the one
-/// that came with a word about the other, or why neither came.
-fn merge(commands: Result<Json, String>, skills: Result<Json, String>) -> Result<(Vec<Row>, Option<String>), String> {
+/// that came with which one didn't, or why neither came.
+fn merge(commands: Result<Json, String>, skills: Result<Json, String>) -> Result<(Vec<Row>, Option<&'static str>), String> {
     let commands = commands.map(|v| v.as_array().cloned().unwrap_or_default());
     // (`null`: the agent has no skills to list.)
     let skills = skills.map(|v| v.as_array().cloned());
     match (commands, skills) {
         (Ok(commands), Ok(skills)) => Ok((candidates(&commands, &skills.unwrap_or_default()), None)),
         (Ok(commands), Err(_)) if !commands.is_empty() => {
-            Ok((candidates(&commands, &[]), Some("Skills couldn't be listed".into())))
+            Ok((candidates(&commands, &[]), Some("skills")))
         }
         (Err(_), Ok(Some(skills))) if skills.iter().any(|s| s["enabled"].as_bool() == Some(true)) => {
-            Ok((candidates(&[], &skills), Some("Commands couldn't be listed".into())))
+            Ok((candidates(&[], &skills), Some("commands")))
         }
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
@@ -295,8 +297,8 @@ mod tests {
             let read = |m: &str| -> Json {
                 serde_json::from_slice(&std::fs::read(dir.join(format!("{m}-{harness}.json"))).unwrap()).unwrap()
             };
-            let (rows, warning) = merge(Ok(read("ListCommands")), Ok(read("ListSkills"))).unwrap();
-            assert!(warning.is_none());
+            let (rows, failed) = merge(Ok(read("ListCommands")), Ok(read("ListSkills"))).unwrap();
+            assert!(failed.is_none());
             let commands = rows.iter().filter(|r| r.kind == "command").count();
             let skills = rows.iter().filter(|r| r.kind == "skill").count();
             eprintln!("{harness}: {commands} commands, {skills} skills; first {:?}", rows.first().map(|r| (&r.label, &r.detail)));
@@ -312,11 +314,11 @@ mod tests {
     #[test]
     fn one_list_failing_still_shows_the_other() {
         let commands = Ok(json!([{ "name": "review" }]));
-        let (rows, warning) = merge(commands, Err("down".into())).unwrap();
+        let (rows, failed) = merge(commands, Err("down".into())).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(warning.as_deref(), Some("Skills couldn't be listed"));
+        assert_eq!(failed, Some("skills"));
         assert!(merge(Err("down".into()), Ok(Json::Null)).is_err());
-        let (rows, warning) = merge(Ok(json!([])), Ok(Json::Null)).unwrap();
-        assert!(rows.is_empty() && warning.is_none());
+        let (rows, failed) = merge(Ok(json!([])), Ok(Json::Null)).unwrap();
+        assert!(rows.is_empty() && failed.is_none());
     }
 }

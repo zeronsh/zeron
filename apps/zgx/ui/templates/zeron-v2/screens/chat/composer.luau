@@ -509,6 +509,8 @@ local function Composer(): Node
 	-- or a new chat's project), searched as the mention is typed. (`/` and
 	-- `$` offer nothing yet.)
 	local mention_sources = ui.state("chat_mentions", { ["/"] = {}, ["$"] = {} } :: any)
+	-- Whether the last search failed (said in the list, not "No files").
+	local search_failed = ui.state("chat_mention_search_failed", false)
 	-- The agent the chat runs (its model's): whose completion settings the
 	-- composer follows.
 	local function agent(): string?
@@ -629,8 +631,13 @@ local function Composer(): Node
 						link = shared.file_link(f.path, f.dir),
 					})
 				end
+				search_failed:set(false)
 				mention_sources:set { ["@"] = items, ["/"] = {}, ["$"] = {} }
 			end, function()
+				if searched:peek() ~= key then
+					return
+				end
+				search_failed:set(true)
 				mention_sources:set { ["@"] = {}, ["/"] = {}, ["$"] = {} }
 			end)
 		end)
@@ -1199,6 +1206,19 @@ local function Composer(): Node
 					return nil
 				end,
 			}) :: any,
+			-- A search or a list that couldn't be had, said as Zeron's says it:
+			-- `/` its commands (and its skills, not separate), `$` its skills.
+			mention_failed = function(trigger: string): string?
+				if trigger == "@" then
+					return if search_failed:get() then ui.t("chat.composer.couldnt_search_files"):get() else nil
+				end
+				local catalog = Invocations.catalog(invocation_key())
+				if trigger == "$" then
+					return Invocations.failed(catalog, "skill")
+				end
+				return Invocations.failed(catalog, "command")
+					or (if prefs.completion(agent()).separate then nil else Invocations.failed(catalog, "skill"))
+			end,
 		}
 	end
 
