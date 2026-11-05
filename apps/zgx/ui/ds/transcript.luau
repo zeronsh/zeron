@@ -219,8 +219,9 @@ local WORD, ACTION, CLEAR, MARGIN, FOOT = 26, 32, 6, 8, 46
 -- How often a shown action looks whether the selection is still there.
 local WATCH = 200
 
--- The room left under the conversation's last row.
-local TAIL = 12
+-- The room left under the conversation's last row, over what floats at its
+-- foot: Zeron's (transcript.rs, the fade band and 8).
+local TAIL = 32
 -- Zeron's gaps over a message (transcript.rs `top_gap_for`): a turn's, and
 -- a prompt's under the switch seam over it.
 local TURN_GAP = 16
