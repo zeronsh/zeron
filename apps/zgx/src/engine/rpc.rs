@@ -478,14 +478,17 @@ impl Rpc {
         }
     }
 
-    fn route(&self, frame: Value) {
+    fn route(&self, mut frame: Value) {
         let Some(id) = frame.get("id").and_then(Value::as_u64) else {
             return;
         };
+        // (Its parts are taken, not copied. A frame comes parsed on the network
+        // thread; a copy here is a long chat's whole transcript, block by block,
+        // among the window's own, to pin their pages when it has gone.)
         let result = if let Some(error) = frame.get("err") {
             Some(Err(error.as_str().unwrap_or("error").to_owned()))
         } else {
-            frame.get("ok").map(|ok| Ok(ok.clone()))
+            frame.get_mut("ok").map(|ok| Ok(ok.take()))
         };
         let mut pending = self.0.pending.borrow_mut();
         match pending.get_mut(&id) {
@@ -513,7 +516,7 @@ impl Rpc {
                     }
                     return;
                 }
-                let Some(item) = frame.get("item").cloned() else {
+                let Some(item) = frame.get_mut("item").map(Value::take) else {
                     return;
                 };
                 let Some(mut on_item) = watching.on_item.take() else {
