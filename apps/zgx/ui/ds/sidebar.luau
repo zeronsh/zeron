@@ -3336,7 +3336,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				drag_y = nil
 			end,
 			drag_preview = function()
-				return lifted(TITLE, ui.text { sec_now().name, literal = true, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.secondary" })
+				-- (A long name fades at the card's end, as on its row.)
+				return lifted(TITLE, FadeText { sec_now().name, literal = true, grow = 1, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.secondary" })
 			end,
 			ui.show(
 				editing,

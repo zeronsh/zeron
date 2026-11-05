@@ -717,23 +717,30 @@ local function connection_line(): Node
 			w_full = true,
 			shrink = 0,
 			-- (Its dot on the foot's left edge: Star on GitHub's glyph's, the
-			-- filter's and the empty list's words'.)
+			-- filter's and the empty list's words'. Its words on Star on
+			-- GitHub's: the dot or the ring in a slot as wide as the star,
+			-- as far from them.)
 			px = "$space.2",
 			pb = "$space.2",
-			gap = "$space.2",
+			gap = "$zeron.space.tight",
 			items = "center",
-			ui.presence(function(): string
-				return if connection() == "reconnecting" then "ring" else "dot"
-			end, function(glyph: string): Node
-				if glyph == "ring" then
-					return ui.div { shrink = 0, status.StatusIcon { kind = "connecting", size = 10 } }
-				end
-				return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
-			end),
+			ui.row {
+				shrink = 0,
+				w = 12,
+				items = "center",
+				ui.presence(function(): string
+					return if connection() == "reconnecting" then "ring" else "dot"
+				end, function(glyph: string): Node
+					if glyph == "ring" then
+						return ui.div { shrink = 0, status.StatusIcon { kind = "connecting", size = 10 } }
+					end
+					return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
+				end),
+			},
 			ds.FadeText {
 				function(): string
 					local key = CONNECTION[connection() or ""]
-				return if key then locale.s(key) else ""
+					return if key then locale.s(key) else ""
 				end,
 				grow = 1,
 				text_size = "$font.size.xs",
