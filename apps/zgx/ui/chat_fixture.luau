@@ -78,6 +78,21 @@ local function note(what: string)
 	table.insert(said, what)
 	calls:set(table.concat(said, ","))
 end
+-- (The composer's accounts: `agents.on_device` set by a test, what's asked of
+-- the host noted.)
+do
+	local stub_agents = require("@account/agents") :: any
+	stub_agents.watch_device = function(key: string)
+		note(`watch_device:{key}`)
+	end
+	stub_agents.refresh_device = function(key: string)
+		note(`refresh_device:{key}`)
+	end
+	stub_agents.switch_on = function(key: string, id: string, account: string): any
+		note(`switch_on:{key}:{id}:{account}`)
+		return { after = function(_: any, done: (any) -> ()) done(nil) end }
+	end
+end
 
 local function publish(id: string, patch: { [string]: any }?)
 	local s = table.clone(META[id] or {})

@@ -662,6 +662,7 @@ return {
 	["ds.model_picker.fast_mode"] = "Fast mode",
 	["ds.model_picker.default"] = "Default",
 	["ds.model_picker.reasoning"] = "REASONING",
+	["ds.model_picker.account"] = "Account",
 	["ds.model_picker.model"] = "Model",
 	["ds.model_picker.search_starred"] = "Search starred models…",
 	["ds.model_picker.search_agent"] = "Search {agent} models…",
