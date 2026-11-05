@@ -127,6 +127,76 @@ struct Sessions {
     /// When states are looked at again: as the soonest one showing goes
     /// stale, so it stops showing. None while nothing would change.
     due: Cell<Option<i64>>,
+    /// Each chat's row as last built, by id: the engine sends the whole list
+    /// with any chat's change, and only that chat's row is built again.
+    rows: RefCell<HashMap<String, Row>>,
+}
+
+/// A chat's row for scripts, and what it was built from besides the chat's
+/// own entry (a change to that drops it: `forget_changed`).
+struct Row {
+    /// When it last moved (Settings → Archived's order), its time for its
+    /// parent's list, and whether it said anything since it was last seen.
+    moved: i64,
+    updated: f64,
+    unseen: bool,
+    with: RowWith,
+    value: Value,
+}
+
+#[derive(PartialEq)]
+struct RowWith {
+    status: Option<&'static str>,
+    running_subagents: u32,
+    side_chats: usize,
+    working_side_chats: u32,
+    known_project: bool,
+    agent_icon: Option<String>,
+}
+
+/// `slot` holds `item` now; whether that's new.
+fn replace_changed(slot: &RefCell<Json>, item: Json) -> bool {
+    let mut slot = slot.borrow_mut();
+    if *slot == item {
+        return false;
+    }
+    *slot = item;
+    true
+}
+
+/// Drops the rows of chats that aren't in `new`, or aren't the same there.
+fn forget_changed(rows: &mut HashMap<String, Row>, old: &Json, new: &Json) {
+    let by_id = |list: &'_ Json| -> HashMap<String, usize> {
+        let mut at = HashMap::with_capacity(list.as_array().map_or(0, Vec::len));
+        for (i, chat) in list.as_array().into_iter().flatten().enumerate() {
+            if let Some(id) = chat["id"].as_str() {
+                at.insert(id.to_owned(), i);
+            }
+        }
+        at
+    };
+    let (was, is) = (by_id(old), by_id(new));
+    rows.retain(|id, _| match (was.get(id), is.get(id)) {
+        (Some(&a), Some(&b)) => old[a] == new[b],
+        _ => false,
+    });
+}
+
+/// Whether `chat` said anything since it was last seen.
+fn unseen(chat: &Json) -> bool {
+    match (
+        chat["lastMessageAt"].as_str().and_then(unix_seconds),
+        chat["lastSeenAt"].as_str().and_then(unix_seconds),
+    ) {
+        (Some(message), Some(seen)) => message > seen,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// When `chat` last moved, for Settings → Archived's order.
+fn moved(chat: &Json) -> i64 {
+    chat["lastMessageAt"].as_str().or(chat["createdAt"].as_str()).and_then(unix_seconds).unwrap_or(0)
 }
 
 thread_local! {
@@ -306,13 +376,35 @@ impl Sessions {
     fn heard(&self, slot: Slot, item: Json) {
         match slot {
             Slot::Chats => {
-                *self.chats.borrow_mut() = item;
-                self.heard.set(true);
+                let first = !self.heard.replace(true);
+                let mut chats = self.chats.borrow_mut();
+                // (Nothing new: an idle window isn't woken for its sake.)
+                if !first && *chats == item {
+                    return;
+                }
+                forget_changed(&mut self.rows.borrow_mut(), &chats, &item);
+                *chats = item;
             }
-            Slot::Spaces => *self.spaces.borrow_mut() = item,
-            Slot::Devices => *self.devices.borrow_mut() = item,
-            Slot::Live => *self.live.borrow_mut() = item,
-            Slot::Connectivity => *self.connectivity.borrow_mut() = item,
+            Slot::Spaces => {
+                if !replace_changed(&self.spaces, item) {
+                    return;
+                }
+            }
+            Slot::Devices => {
+                if !replace_changed(&self.devices, item) {
+                    return;
+                }
+            }
+            Slot::Live => {
+                if !replace_changed(&self.live, item) {
+                    return;
+                }
+            }
+            Slot::Connectivity => {
+                if !replace_changed(&self.connectivity, item) {
+                    return;
+                }
+            }
             Slot::Places => {
                 let places = places_of_json(&item);
                 self.places_ready
@@ -436,17 +528,34 @@ impl Sessions {
         // Side chats, under their parents (as the shipping app's lanes list
         // them): each as a row of its own, and how many there are and how
         // many work now, on the parent's row.
-        let mut children: Vec<(String, Vec<Value>)> = Vec::new();
+        let mut rows = self.rows.borrow_mut();
+        let mut children: Vec<(String, Vec<(f64, Value)>)> = Vec::new();
         let mut working_children: HashMap<String, u32> = HashMap::new();
         for c in all.iter().filter(|c| !archived(c)) {
             let (Some(id), Some(parent)) = (c["id"].as_str(), c["parentChatId"].as_str()) else { continue };
-            let status = status(c, live.get(id));
-            if status.as_deref() == Some("working") {
+            let status = status_from(rows.get(id).map_or_else(|| unseen(c), |row| row.unseen), live.get(id));
+            if status == Some("working") {
                 *working_children.entry(parent.to_owned()).or_default() += 1;
+            }
+            let harness = c["config"]["harness"].as_str();
+            let with = RowWith {
+                status,
+                running_subagents: 0,
+                side_chats: 0,
+                working_side_chats: 0,
+                known_project: false,
+                agent_icon: harness.and_then(crate::agents::registry_icon),
+            };
+            if let Some(row) = rows.get(id).filter(|row| row.with == with) {
+                let row = (row.updated, row.value.clone());
+                match children.iter_mut().find(|(p, _)| p == parent) {
+                    Some((_, list)) => list.push(row),
+                    None => children.push((parent.to_owned(), vec![row])),
+                }
+                continue;
             }
             let created = c["createdAt"].as_str().and_then(unix_seconds).unwrap_or(0);
             let updated = c["lastMessageAt"].as_str().and_then(unix_seconds).unwrap_or(created);
-            let harness = c["config"]["harness"].as_str();
             let opt = |v: Option<&str>| v.filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
             // Its title, else what it last said, else the shipping app's word.
             let title = c["title"]
@@ -454,7 +563,7 @@ impl Sessions {
                 .filter(|t| !t.trim().is_empty())
                 .or(c["lastMessagePreview"].as_str().filter(|t| !t.trim().is_empty()))
                 .unwrap_or("New side chat");
-            let row = Value::record([
+            let value = Value::record([
                 ("id", Value::from(id)),
                 ("parent", Value::from(parent)),
                 ("title", Value::from(title)),
@@ -464,38 +573,47 @@ impl Sessions {
                 ("created", Value::from(created as f64)),
                 ("harness", opt(harness)),
                 ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
-                    // An agent from the ACP registry: its icon, as listed.
-                    (
-                        "agent_icon",
-                        harness.and_then(crate::agents::registry_icon).map_or(Value::Nil, |i| Value::from(i.as_str())),
-                    ),
+                // An agent from the ACP registry: its icon, as listed.
+                ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
             ]);
+            let row = (updated as f64, value.clone());
+            rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, unseen: unseen(c), with, value });
             match children.iter_mut().find(|(p, _)| p == parent) {
                 Some((_, list)) => list.push(row),
                 None => children.push((parent.to_owned(), vec![row])),
             }
         }
         // (Newest first, as the lanes card orders them.)
-        let newest = |v: &Value| v.field("updated").and_then(Value::as_f64).unwrap_or(0.);
         for (_, list) in &mut children {
-            list.sort_by(|a, b| newest(b).total_cmp(&newest(a)));
+            list.sort_by(|a, b| b.0.total_cmp(&a.0));
         }
         let side_chats = |id: &str| children.iter().find(|(p, _)| p == id).map_or(0, |(_, l)| l.len());
         // A top-level chat as scripts see it (side chats and a voice call's
         // orchestrator are another's).
-        let row = |c: &Json| -> Option<Value> {
+        let mut row = |c: &Json| -> Option<Value> {
                 let id = c["id"].as_str()?;
                 if id.starts_with(ORCHESTRATOR) || !c["parentChatId"].is_null() {
                     return None;
                 }
-                let created = c["createdAt"].as_str().and_then(unix_seconds).unwrap_or(0);
-                let updated = c["lastMessageAt"].as_str().and_then(unix_seconds).unwrap_or(created);
                 let harness = c["config"]["harness"].as_str();
-                let opt = |v: Option<&str>| v.filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
                 // A project that isn't known (deleted, or not yet synced)
                 // leaves the chat among those with none.
                 let project = c["spaceId"].as_str().filter(|s| known_spaces.contains(s));
-                Some(Value::record([
+                let with = RowWith {
+                    status: status_from(rows.get(id).map_or_else(|| unseen(c), |row| row.unseen), live.get(id)),
+                    running_subagents: live.get(id).map_or(0, |l| l.subagents),
+                    side_chats: side_chats(id),
+                    working_side_chats: working_children.get(id).copied().unwrap_or(0),
+                    known_project: project.is_some(),
+                    agent_icon: harness.and_then(crate::agents::registry_icon),
+                };
+                if let Some(row) = rows.get(id).filter(|row| row.with == with) {
+                    return Some(row.value.clone());
+                }
+                let created = c["createdAt"].as_str().and_then(unix_seconds).unwrap_or(0);
+                let updated = c["lastMessageAt"].as_str().and_then(unix_seconds).unwrap_or(created);
+                let opt = |v: Option<&str>| v.filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
+                let value = Value::record([
                     ("id", Value::from(id)),
                     ("title", Value::from(chat_title(c["title"].as_str()))),
                     ("project", opt(project)),
@@ -506,34 +624,31 @@ impl Sessions {
                     // stamped it (`sourceContext`): what its pull request is
                     // looked up by, as the shipping app's sidebar does.
                     ("source_branch", opt(c["sourceContext"]["branch"].as_str())),
-                    ("status", status(c, live.get(id)).map_or(Value::Nil, Value::from)),
+                    ("status", with.status.map_or(Value::Nil, Value::from)),
                     ("updated", Value::from(updated as f64)),
                     ("created", Value::from(created as f64)),
                     ("harness", opt(harness)),
                     ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                     // An agent from the ACP registry: its icon, as listed.
-                    (
-                        "agent_icon",
-                        harness.and_then(crate::agents::registry_icon).map_or(Value::Nil, |i| Value::from(i.as_str())),
-                    ),
+                    ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
                     ("model", opt(c["config"]["model"].as_str())),
                     // (Its harness's own id for it: the menu's Copy.)
                     ("harness_session", opt(c["harnessSessionId"].as_str())),
                     // Its subagents streaming now (the sidebar's pill), and
                     // its side chats: how many, how many working.
-                    ("running_subagents", Value::from(live.get(id).map_or(0, |l| l.subagents) as f64)),
-                    ("side_chats", Value::from(side_chats(id) as f64)),
-                    ("working_side_chats", Value::from(working_children.get(id).copied().unwrap_or(0) as f64)),
-                ]))
+                    ("running_subagents", Value::from(with.running_subagents as f64)),
+                    ("side_chats", Value::from(with.side_chats as f64)),
+                    ("working_side_chats", Value::from(with.working_side_chats as f64)),
+                ]);
+                let unseen = unseen(c);
+                rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, unseen, with, value: value.clone() });
+                Some(value)
         };
-        let chats: Vec<Value> = all.iter().filter(|c| !archived(c)).filter_map(row).collect();
+        let chats: Vec<Value> = all.iter().filter(|c| !archived(c)).filter_map(&mut row).collect();
         // Archived, the most recently moved first (Settings → Archived).
         let mut gone: Vec<&Json> = all.iter().filter(archived).collect();
-        let moved = |c: &Json| {
-            c["lastMessageAt"].as_str().or(c["createdAt"].as_str()).and_then(unix_seconds).unwrap_or(0)
-        };
-        gone.sort_by_key(|c| std::cmp::Reverse(moved(c)));
-        let archived: Vec<Value> = gone.into_iter().filter_map(row).collect();
+        gone.sort_by_cached_key(|c| std::cmp::Reverse(moved(c)));
+        let archived: Vec<Value> = gone.into_iter().filter_map(&mut row).collect();
         let places = self.expected.borrow();
         let ids = |list: &[String]| Value::List(list.iter().map(|id| Value::from(id.as_str())).collect());
         let sections: Vec<Value> = places
@@ -556,7 +671,9 @@ impl Sessions {
             ("chats", Value::List(chats.into())),
             (
                 "children",
-                Value::record(children.iter().map(|(parent, list)| (parent.as_str(), Value::List(list.clone().into())))),
+                Value::record(children.iter().map(|(parent, list)| {
+                    (parent.as_str(), Value::List(list.iter().map(|(_, row)| row.clone()).collect()))
+                })),
             ),
             ("archived", Value::List(archived.into())),
             (
@@ -919,15 +1036,13 @@ fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
 
 /// The sidebar's state for a chat (proto's `chat_indicator`): working,
 /// waiting on you, failed or finished since you last looked; else none.
+#[cfg(test)]
 fn status(chat: &Json, live: Option<&Live>) -> Option<&'static str> {
-    let unseen = match (
-        chat["lastMessageAt"].as_str().and_then(unix_seconds),
-        chat["lastSeenAt"].as_str().and_then(unix_seconds),
-    ) {
-        (Some(message), Some(seen)) => message > seen,
-        (Some(_), None) => true,
-        _ => false,
-    };
+    status_from(unseen(chat), live)
+}
+
+/// `status`, knowing whether the chat said anything since it was last seen.
+fn status_from(unseen: bool, live: Option<&Live>) -> Option<&'static str> {
     match live.map(|l| l.status.as_str()) {
         Some("working") => Some("working"),
         Some("awaitingInput") => Some("input"),
@@ -1391,6 +1506,52 @@ mod tests {
         assert_eq!(p.field("side_chats").and_then(|n| n.as_f64()), Some(2.));
         assert_eq!(p.field("working_side_chats").and_then(|n| n.as_f64()), Some(1.));
         assert_eq!(p.field("running_subagents").and_then(|n| n.as_f64()), Some(2.));
+    }
+
+    #[test]
+    fn a_chat_s_row_is_built_again_only_as_it_changes() {
+        let s = with_children("2099-01-01T00:00:00Z");
+        let same = |a: &zgx_script::Value, b: &zgx_script::Value| match (a, b) {
+            (zgx_script::Value::Map(a), zgx_script::Value::Map(b)) => std::rc::Rc::ptr_eq(a, b),
+            _ => false,
+        };
+        let first = s.value();
+        let again = s.value();
+        assert!(same(chat(&first, "p"), chat(&again, "p")));
+        // Another chat's change: this one's row stands, that one's doesn't.
+        let mut chats = s.chats.borrow().clone();
+        chats[1]["title"] = serde_json::json!("Renamed");
+        s.heard(super::Slot::Chats, chats.clone());
+        let after = s.value();
+        assert!(same(chat(&first, "p"), chat(&after, "p")));
+        let kid = |v: &zgx_script::Value, at: usize| v.field("children").unwrap().field("p").unwrap().list()[at].clone();
+        assert_eq!(kid(&after, 1).field("title").map(crate::auth::text).as_deref(), Some("Renamed"));
+        assert!(same(&kid(&first, 0), &kid(&after, 0)));
+        // Its live state's change shows, whatever its entry.
+        s.heard(
+            super::Slot::Live,
+            serde_json::json!([{ "chatId": "p", "status": "awaitingInput", "updatedAt": "2099-01-01T00:00:00Z" }]),
+        );
+        let waiting = s.value();
+        assert!(!same(chat(&first, "p"), chat(&waiting, "p")));
+        assert_eq!(chat(&waiting, "p").field("status").map(crate::auth::text).as_deref(), Some("input"));
+        assert_eq!(chat(&waiting, "p").field("working_side_chats").and_then(|n| n.as_f64()), Some(0.));
+        // Gone from the list: gone from what's kept.
+        chats.as_array_mut().unwrap().remove(2);
+        s.heard(super::Slot::Chats, chats);
+        assert!(!s.rows.borrow().contains_key("b"));
+    }
+
+    #[test]
+    fn an_update_that_changes_nothing_publishes_nothing() {
+        let s = with_children("2099-01-01T00:00:00Z");
+        let _ = s.value();
+        s.due.set(None);
+        let chats = s.chats.borrow().clone();
+        s.heard.set(true);
+        s.heard(super::Slot::Chats, chats);
+        // (`publish` would have asked to look again at the live state going stale.)
+        assert_eq!(s.due.get(), None);
     }
 
     #[test]
