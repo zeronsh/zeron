@@ -471,6 +471,8 @@ function M.setup()
 				-- Frosted, its fill (Zeron's `input_glass_bg`); a theme
 				-- without its own, the well's.
 				glass = "{zeron.field.bg}",
+				-- Under the pointer: it lifts, as Zeron's (settings/widgets.rs).
+				glass_hover = "{zeron.field.hover}",
 				-- Its type at each size, and a multi-line field's line.
 				line = 20,
 			},

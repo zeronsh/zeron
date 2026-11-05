@@ -14,12 +14,18 @@ function M.setup()
 	-- panel tint and row wash, in every theme and template, rather than
 	-- zgx's (a saturated highlight). Their rows and panel keep zgx's shape.
 	-- The app's own editors draw ds/editor_menu.
-	ui.theme.tokens {
-		menu = {
-			bg = "{zeron.menu.tint}",
-			hover = "{hover}",
-		},
-	}
+	-- (Their glass as the menus' own, ds/glass `menu`: the tint where a
+	-- popup's glass shows through, solid where it can't, or opaque.)
+	local material = require("@self/material")
+	ui.effect(function()
+		local through = material.menus_see_through()
+		ui.theme.tokens {
+			menu = {
+				bg = if through then "{zeron.menu.tint}" else "{zeron.menu.solid}",
+				hover = "{hover}",
+			},
+		}
+	end)
 	ui.theme.tokens {
 		zeron = {
 			-- Half-steps of the spacing scale (space.1 to 8: 4, 8, 12, 16, 24,

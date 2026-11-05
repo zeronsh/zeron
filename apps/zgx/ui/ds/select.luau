@@ -115,7 +115,7 @@ return ui.component(function(props: Props): Node
 			return open:get()
 		end,
 		bg = function()
-			return if hovered:get() or open:get() then "$zeron.field.hover" elseif material.see_through() then "$zeron.field.glass" else "$zeron.field.bg"
+			return if material.see_through() then (if hovered:get() or open:get() then "$zeron.field.glass_hover" else "$zeron.field.glass") elseif hovered:get() or open:get() then "$zeron.field.hover" else "$zeron.field.bg"
 		end,
 		border_color = function()
 			if invalid() then

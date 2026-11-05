@@ -60,15 +60,15 @@
 		// pointer and in a window not focused; the title bar's wash under
 		// the pointer, 0.7 of it pressed; close red (#e81123), white ink,
 		// both at 0.8 pressed.
-		"caption.ink": "{text.primary}",
-		"caption.ink.hover": "{text.primary}",
-		"caption.ink.inactive": "{text.primary}",
+		"caption.text": "{text.primary}",
+		"caption.text.hover": "{text.primary}",
+		"caption.text.inactive": "{text.primary}",
 		"caption.hover": "{zeron.bar.hover}",
 		"caption.pressed": "#1a1a1a0b",
 		"caption.close": "#e81123",
 		"caption.close.pressed": "#e81123cc",
-		"caption.close.ink": "#ffffff",
-		"caption.close.ink.pressed": "#ffffffcc",
+		"caption.close.text": "#ffffff",
+		"caption.close.text.pressed": "#ffffffcc",
 		// What dims the window under a dialog: light (a dark dim turns a
 		// pale window muddy).
 		"backdrop": "#0000002e",
@@ -212,7 +212,7 @@
 			// A field: whiter than the window (as the composer is), its edge a
 			// cool hairline that firms under the pointer. Not a grey well:
 			// grey on pale glass reads as disabled.
-			"field": { "bg": "#ffffff99", "glass": "#ffffff59", "hover": "#ffffffcc", "edge": "#0000001f", "edge_hover": "#00000038" },
+			"field": { "bg": "#ffffff99", "glass": "#ffffff59", "glass_hover": "#ffffffcc", "hover": "#ffffffcc", "edge": "#0000001f", "edge_hover": "#00000038" },
 			"check": { "bg": "#ffffffcc", "edge": "#00000038" },
 			// Tones: deep steps (600, 700 for the warm ones, which wash out
 			// lighter), so each reads as ink on white; their washes the 500s,

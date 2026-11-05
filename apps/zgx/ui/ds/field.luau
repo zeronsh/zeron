@@ -206,7 +206,7 @@ function M.frame(props: FrameProps): Node
 			if joined() then
 				return "$zeron.menu.solid"
 			end
-			return if hovered:get() and not focused:get() then "$zeron.field.hover" elseif material.see_through() then "$zeron.field.glass" else "$zeron.field.bg"
+			return if material.see_through() then (if hovered:get() and not focused:get() then "$zeron.field.glass_hover" else "$zeron.field.glass") elseif hovered:get() and not focused:get() then "$zeron.field.hover" else "$zeron.field.bg"
 		end,
 		border_color = function()
 			if invalid() then
