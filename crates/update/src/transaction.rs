@@ -449,7 +449,27 @@ fn free_bytes(path: &Path) -> std::io::Result<u64> {
         }
         Ok(stats.f_bavail as u64 * stats.f_frsize as u64)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut available = 0u64;
+        // SAFETY: `wide` is NUL-terminated; the out-pointer is valid and the
+        // others may be null.
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut available,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(available)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Err(std::io::Error::other("not supported on this platform"))
@@ -1537,7 +1557,7 @@ mod tests {
         let dir = data_dir_with_stores();
         let mut files: Vec<String> = store_files(dir.path())
             .iter()
-            .map(|file| file.display().to_string())
+            .map(|file| file.display().to_string().replace('\\', "/"))
             .collect();
         files.sort();
         assert_eq!(
