@@ -2429,6 +2429,33 @@
       "on_device": "On {device}",
       "from_github": "From GitHub",
       "add_cloud_project": "Add project"
+    },
+    "updates": {
+      "available": "Update available",
+      "button": "{n, plural, one {# update} other {# updates}}",
+      "check_again": "Check again",
+      "downloading": "Downloading…",
+      "failed": "Update failed",
+      "failed_named": "Couldn't update {name}",
+      "installing": "Installing…",
+      "offline": "Offline",
+      "preparing": "Preparing…",
+      "ready": "{version} is ready. Restart to finish",
+      "restart": "Restart",
+      "retry": "Retry update",
+      "stops_chats": "{n, plural, one {Stops # running chat} other {Stops # running chats}}",
+      "this_device": "This device",
+      "title": "Updates",
+      "update": "Update",
+      "update_all": "Update all",
+      "update_anyway": "Update anyway",
+      "update_there": "{versions} · update from that device",
+      "updated": "Updated",
+      "updated_to": "Updated to {version}",
+      "verifying": "Verifying…",
+      "version": "Version {version} available",
+      "view_steps": "View steps",
+      "waiting": "Waiting for the current run"
     }
   },
   "onboarding": {

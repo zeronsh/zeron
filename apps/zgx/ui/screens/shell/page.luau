@@ -22,6 +22,7 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
+local updates = require("@app/screens/shell/updates")
 local splits = require("@app/screens/shell/split")
 local session_tabs = require("@app/screens/shell/session_tabs")
 local lanes = require("@app/screens/chat/lanes")
@@ -1697,9 +1698,26 @@ return function(props: Props): Node
 			-- (Clear of the panel toggle, and of Expand while the panel's open.)
 			right = function(): number
 				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right()
-				return if shown:get() then toggle + EXPAND + 8 else toggle
+				local right = if shown:get() then toggle + EXPAND + 8 else toggle
+				-- (And of what there is to update.)
+				local button = updates.width()
+				return if button > 0 then right + button + 8 else right
 			end,
 		},
+		-- What there is to update, beside the panel toggle (and Expand, with the
+		-- panel open): nothing with nothing to say.
+		ui.show(updates.shown, ui.div {
+			absolute = true,
+			right = function(): number
+				local toggle = 24 + 8 + ds.TitleBar.actions_right()
+				return ui.raw(if shown:get() then toggle + EXPAND + 8 else toggle, "off the panel toggle")
+			end,
+			top = function(): number
+				return ds.TitleBar.middle() - 14
+			end,
+			pointer_events = "auto",
+			updates.Button {},
+		}),
 		-- Expand: the panel over the session's chat, and back, on the top bar beside
 		-- the panel toggle, as far off it as Back is off the sidebar's toggle.
 		ui.show(function(): boolean

@@ -77,7 +77,7 @@ use crate::engine::{self, rpc::Watch};
 const STALE_SECS: i64 = 45;
 /// A device whose presence beat is older than this is offline (the shipping
 /// app's `device_online`).
-const ONLINE_SECS: i64 = 70;
+pub(crate) const ONLINE_SECS: i64 = 70;
 /// The id prefix of a voice call's hidden orchestrator chat.
 const ORCHESTRATOR: &str = "voice-orchestrator-";
 
@@ -864,7 +864,7 @@ impl Sessions {
 
 /// A device row of Cloud's: the logical Cloud device or a session's machine
 /// (`zeron_proto::is_cloud_device` and the Cloud capabilities).
-fn is_cloud(d: &Json) -> bool {
+pub(crate) fn is_cloud(d: &Json) -> bool {
     let id = d["id"].as_str().unwrap_or_default();
     let platform = d["platform"].as_str().unwrap_or_default();
     platform == "cloud"
@@ -1270,13 +1270,13 @@ pub(crate) fn new_id() -> String {
     format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
-fn now_seconds() -> i64 {
+pub(crate) fn now_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 /// An RFC 3339 time as Unix seconds ("2026-10-31T21:27:23.486Z", or with an
 /// offset).
-fn unix_seconds(stamp: &str) -> Option<i64> {
+pub(crate) fn unix_seconds(stamp: &str) -> Option<i64> {
     let (date, time) = stamp.split_once('T')?;
     let mut date = date.split('-').map(|p| p.parse::<i64>().ok());
     let (y, m, d) = (date.next()??, date.next()??, date.next()??);
