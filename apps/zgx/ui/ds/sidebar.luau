@@ -3376,7 +3376,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						end)
 					end,
 				})),
-				ui.text {
+				FadeText {
 					function(): string
 						return sec_now().name
 					end,
