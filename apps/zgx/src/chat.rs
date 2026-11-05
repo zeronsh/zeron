@@ -4050,7 +4050,53 @@ fn stamp(at: i64) -> Option<String> {
     ))
 }
 
-#[cfg(not(unix))]
+/// The same on Windows, through the C runtime's `_localtime64_s` (its
+/// `struct tm` has nine fields: no offset or zone name).
+#[cfg(windows)]
+fn stamp(at: i64) -> Option<String> {
+    #[repr(C)]
+    struct Tm {
+        sec: i32,
+        min: i32,
+        hour: i32,
+        mday: i32,
+        mon: i32,
+        year: i32,
+        wday: i32,
+        yday: i32,
+        isdst: i32,
+    }
+    unsafe extern "C" {
+        fn _localtime64_s(out: *mut Tm, time: *const i64) -> i32;
+    }
+    if at <= 0 {
+        return None;
+    }
+    let mut tm = std::mem::MaybeUninit::<Tm>::zeroed();
+    // SAFETY: `_localtime64_s` writes the broken-down local time into the
+    // caller's struct (the UCRT's `struct tm`, laid out as above) and reads
+    // only `at`; 0 is success.
+    let tm = unsafe {
+        if _localtime64_s(tm.as_mut_ptr(), &at) != 0 {
+            return None;
+        }
+        tm.assume_init()
+    };
+    let hour = match tm.hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month = MONTHS.get(tm.mon as usize).copied().unwrap_or("Jan");
+    Some(format!(
+        "{month} {}, {hour}:{:02} {}",
+        tm.mday,
+        tm.min,
+        if tm.hour < 12 { "AM" } else { "PM" }
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn stamp(_at: i64) -> Option<String> {
     None
 }

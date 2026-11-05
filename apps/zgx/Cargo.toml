@@ -150,8 +150,19 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd8af4f19
 # Windows' Transparency effects (src/transparency.rs), read and watched in
 # the registry, until zgx reports them (zgx-asks/windows-transparency); a
 # visual's thread CPU time (src/visuals.rs).
+# `webview2`: on Windows, `ui.webview` (the panel's browser tabs) as
+# WebView2 pages in the window's DirectComposition tree. Without it they are
+# placeholders ("Web view · <url>"). Needs the WebView2 runtime, which
+# Windows 11 has.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading"] }
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd8af4f190c2ba6e939aa8ce688e5d09", features = ["webview2"] }
+# The terminal bridge's console (src/terminal.rs): raw mode, its size; Alt
+# held at launch (src/plugins/preview.rs); the screens' sizes
+# (src/settings.rs); upstream's registry and thread times; and the window
+# minimized (src/video_wallpaper.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+# Background videos (src/video_wallpaper.rs): Media Foundation.
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
@@ -163,6 +174,12 @@ accesskit_consumer = { git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd
 accesskit_atspi_common = { git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd8af4f190c2ba6e939aa8ce688e5d09" }
 accesskit_unix = { git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd8af4f190c2ba6e939aa8ce688e5d09" }
 accesskit_windows = { git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd8af4f190c2ba6e939aa8ce688e5d09" }
+
+# zgx's terminal, with block elements and box drawing drawn to the cell
+# (patches/zgx-terminal/src/paint.rs): zgx's own renderer drew them from the
+# font, gapped, where Ghostty (macOS only) draws them whole.
+[patch."https://github.com/zeronsh/zgx"]
+zgx-terminal = { path = "patches/zgx-terminal" }
 
 # zgx is slow unoptimized (its own setting): optimize dependencies, keep
 # this crate quick to build.

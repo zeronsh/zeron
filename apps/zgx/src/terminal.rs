@@ -240,8 +240,34 @@ fn await_claim(claim: &std::path::Path, wait: Duration) -> Result<String, String
 const GONE: &str = "gone";
 
 /// A word for `/bin/sh -c`, quoted.
+#[cfg(not(windows))]
 fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// A word for a Windows command line (zgx's terminal hands the line to
+/// `CreateProcessW` as it is, and the bridge reads it back by the C
+/// runtime's rules): in double quotes, a quote inside escaped, and the
+/// backslashes before a quote, or before the closing one, doubled.
+#[cfg(windows)]
+fn quote(word: &str) -> String {
+    let mut out = String::from('"');
+    let mut slashes = 0;
+    for c in word.chars() {
+        match c {
+            '\\' => {
+                slashes += 1;
+                continue;
+            }
+            '"' => out.extend(std::iter::repeat_n('\\', slashes * 2 + 1)),
+            _ => out.extend(std::iter::repeat_n('\\', slashes)),
+        }
+        slashes = 0;
+        out.push(c);
+    }
+    out.extend(std::iter::repeat_n('\\', slashes * 2));
+    out.push('"');
+    out
 }
 
 /// The bridge's command line for terminal `arg.id` (on `device`, another
@@ -344,7 +370,24 @@ fn window_size() -> Option<(u16, u16)> {
         (libc::ioctl(0, libc::TIOCGWINSZ, &mut size) == 0 && size.ws_col > 0).then_some((size.ws_col, size.ws_row))
     }
 }
-#[cfg(not(unix))]
+/// The terminal's size as zgx gave this process's console (ConPTY's): its
+/// window, in cells.
+#[cfg(windows)]
+fn window_size() -> Option<(u16, u16)> {
+    use windows_sys::Win32::System::Console::{CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: the process's own stdout handle, and a zeroed struct for the
+    // call to fill.
+    unsafe {
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) == 0 {
+            return None;
+        }
+        let window = info.srWindow;
+        let (cols, rows) = (window.Right - window.Left + 1, window.Bottom - window.Top + 1);
+        (cols > 0 && rows > 0).then_some((cols as u16, rows as u16))
+    }
+}
+#[cfg(not(any(unix, windows)))]
 fn window_size() -> Option<(u16, u16)> {
     None
 }
@@ -449,6 +492,67 @@ impl Drop for Raw {
     }
 }
 
+/// Its console in raw mode, as the pseudoterminal is on unix: keys go on as
+/// they're pressed, as the VT sequences a terminal sends (arrows; Ctrl+C as
+/// ^C, not a signal), unechoed; what comes back is UTF-8 with VT sequences,
+/// drawn as it is. Put back as the bridge ends.
+#[cfg(windows)]
+struct Raw(Option<(u32, u32, u32)>);
+#[cfg(windows)]
+impl Raw {
+    fn new() -> Self {
+        use windows_sys::Win32::System::Console::{
+            DISABLE_NEWLINE_AUTO_RETURN, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleOutputCP, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            SetConsoleMode, SetConsoleOutputCP,
+        };
+        // SAFETY: the process's own console handles, and modes read from them.
+        unsafe {
+            let (input, output) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE));
+            let (mut was_in, mut was_out) = (0, 0);
+            if GetConsoleMode(input, &mut was_in) == 0 || GetConsoleMode(output, &mut was_out) == 0 {
+                return Raw(None);
+            }
+            let was_cp = GetConsoleOutputCP();
+            SetConsoleMode(input, (was_in & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT);
+            SetConsoleMode(output, was_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN);
+            SetConsoleOutputCP(65001);
+            Raw(Some((was_in, was_out, was_cp)))
+        }
+    }
+}
+#[cfg(windows)]
+impl Drop for Raw {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode, SetConsoleOutputCP};
+        if let Some((was_in, was_out, was_cp)) = self.0 {
+            // SAFETY: restores what GetConsoleMode and GetConsoleOutputCP gave.
+            unsafe {
+                SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), was_in);
+                SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), was_out);
+                SetConsoleOutputCP(was_cp);
+            }
+        }
+    }
+}
+
+/// Where the shell's bytes go: stdout, as they are. (On Windows, Rust's
+/// stdout on a console writes UTF-16 and refuses a chunk that ends inside a
+/// character; the console's handle written to directly takes the bytes,
+/// UTF-8 by `Raw`.)
+#[cfg(windows)]
+fn out() -> std::mem::ManuallyDrop<std::fs::File> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: the process's stdout handle, never closed: the File is kept
+    // from dropping it.
+    std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(GetStdHandle(STD_OUTPUT_HANDLE)) })
+}
+#[cfg(not(windows))]
+fn out() -> std::io::Stdout {
+    std::io::stdout()
+}
+
 /// Sends a call. On a socket that doesn't block, what doesn't go at once
 /// waits in tungstenite's buffer (`rpc::would_block`) for the socket to
 /// have room.
@@ -517,7 +621,7 @@ pub fn bridge(args: &[String]) -> i32 {
     };
     // (A device given is another's: the app only passes it then.)
     let mut device = args.device.clone();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let _raw = Raw::new();
     let mut size = None;
     // A new one: opened here, at the size zgx gave this pseudoterminal, so
@@ -587,7 +691,7 @@ pub fn bridge(args: &[String]) -> i32 {
         });
         rx
     };
-    let mut stdout = std::io::stdout();
+    let mut stdout = out();
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut typed: Vec<Vec<u8>> = Vec::new();
     let mut look_at_size = true;
@@ -617,6 +721,13 @@ pub fn bridge(args: &[String]) -> i32 {
                 // Its terminal closed (the tab): done.
                 Err(mpsc::TryRecvError::Disconnected) => return 0,
             }
+        }
+        // All that's waiting, as one write: the engine may answer separate
+        // writes in any order, and the console hands keys over one by one
+        // (a pseudoterminal's read takes all there is).
+        if typed.len() > 1 {
+            let all = typed.concat();
+            typed = vec![all];
         }
         for bytes in typed.drain(..) {
             let mut p = Map::new();
@@ -747,7 +858,14 @@ mod tests {
 
     #[test]
     fn quotes_and_parses_the_bridge_line() {
+        #[cfg(not(windows))]
         assert_eq!(quote("a b'c"), "'a b'\\''c'");
+        #[cfg(windows)]
+        {
+            assert_eq!(quote(r"C:\Program Files\z.exe"), r#""C:\Program Files\z.exe""#);
+            assert_eq!(quote(r#"{"chatId":"c1"}"#), r#""{\"chatId\":\"c1\"}""#);
+            assert_eq!(quote(r"C:\dir\"), r#""C:\dir\\""#);
+        }
         let args: Vec<String> = ["--port", "27897", "--data", "/tmp/d", "--terminal", "t1", "--device", "dev"]
             .iter()
             .map(|s| s.to_string())
