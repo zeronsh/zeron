@@ -1045,7 +1045,7 @@ local function Transcript(props: Props): Node
 			if not c then
 				return
 			end
-			local m = messages:peek()[c.row]
+			local m = messages:at(c.row)
 			local row = if m then rows[m.id] else nil
 			if row and row.outer:peek() then
 				return
@@ -1666,7 +1666,7 @@ local function Transcript(props: Props): Node
 			key = "id",
 			row = row,
 			row_text = function(i: number): string
-				local m = messages:peek()[i]
+				local m = messages:at(i)
 				return if m then m.text else ""
 			end,
 			offset = offset,
