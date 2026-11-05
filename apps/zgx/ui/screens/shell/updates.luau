@@ -63,7 +63,27 @@ end)
 -- itself and a release is there for it.
 local function zeron_here(): any?
 	local a: any = about:get()
-	if not a or a.self_updating ~= true or a.held ~= nil then
+	if not a then
+		return nil
+	end
+	-- Another device updated this Mac: the new version's on disk, and this
+	-- window only has to reopen on it.
+	if a.moved_on_to then
+		return {
+			id = "here:zeron",
+			device = "",
+			device_name = "",
+			here = true,
+			connected = true,
+			kind = "zeron",
+			installed = a.app_version,
+			latest = a.moved_on_to,
+			phase = "ready",
+			active = false,
+			action = "restart",
+		}
+	end
+	if a.self_updating ~= true or a.held ~= nil then
 		return nil
 	end
 	local flow = a.flow or "idle"
@@ -210,7 +230,7 @@ local function line_of(r: any): string
 	if p == "failed" then
 		return r.message or locale.s("shell.updates.failed")
 	elseif p == "waiting" then
-		return locale.s("shell.updates.waiting")
+		return r.message or locale.s("shell.updates.waiting")
 	elseif p == "preparing" then
 		return locale.s("shell.updates.preparing")
 	elseif p == "downloading" then

@@ -148,3 +148,28 @@ test("a device that says it can't update from here says why, and offers what to 
 	expect(app:has('"It was started by hand"')).to_be(true)
 	expect(app:has('role:button "Copy command · Zeron"')).to_be(true)
 end)
+
+test("an update waiting says why in the engine's words, or its own", function()
+	local waiting = row("metal", "Codex", "codex", "cancel")
+	waiting.phase = "waiting"
+	waiting.active = true
+	waiting.message = "Waiting for running chats to finish."
+	local plain = row("metal", "Claude Code", "claude-code", "cancel")
+	plain.phase = "waiting"
+	plain.active = true
+	local app = open({ waiting, plain })
+	app:click("role:button ~\"update\"")
+	app:frames(20)
+	expect(app:has('"Waiting for running chats to finish."')).to_be(true)
+	expect(app:has('"Waiting for the current run"')).to_be(true)
+end)
+
+test("a Mac another device updated offers to reopen on the new version", function()
+	local app = mount("updates_fixture.luau")
+	app:resize(900, 700)
+	app:set_state("about", { app_version = "0.2.0", moved_on_to = "0.3.0", flow = "idle" })
+	app:frames(10)
+	app:click("#updates-button")
+	app:frames(20)
+	expect(app:has('role:button "Restart · Zeron"')).to_be(true)
+end)
