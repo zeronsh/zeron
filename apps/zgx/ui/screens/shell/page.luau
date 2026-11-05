@@ -650,9 +650,11 @@ return function(props: Props): Node
 	-- The width it would take, its tree docked: as last split (opening, a
 	-- neighbour opening or closing) or dragged. Kept across launches.
 	local files_w = ui.persist("shell_files_width", FILES_W)
-	-- Whether a width was chosen (its edge dragged, or keyed): from then on
-	-- it opens at that width, as Zeron's does (its `right_pane_width`), the
-	-- fit narrowing it only as it must. Until then each opening splits.
+	-- Whether a width was chosen (its edge dragged, or keyed) since it was
+	-- last opened or closed: until its toggle, it holds that width (another
+	-- chat's panel, a relaunch), the fit narrowing it only as it must. Its
+	-- toggle forgets it, as Zeron's does: it opens at its share again, and
+	-- keeps to its share as the window is resized.
 	local chosen = ui.persist("shell_panel_width_chosen", false)
 	local from_x, from_w, resizing = 0, 0, false
 	-- Its edge being dragged: whether its tree was docked at the press (kept
@@ -663,6 +665,9 @@ return function(props: Props): Node
 	local drag_held = ui.use_state(nil :: { w: number }?)
 	-- The pointer over its edge (its hairline stronger, as the sidebar's).
 	local edge_over = ui.use_state(false)
+	-- Whether a step (opening, closing, expanding, a column beside it going
+	-- or coming) is under way: its edge is out of reach until it lands.
+	local stepping = ui.use_state(false)
 	-- (Open for this session, and the window has room for it: hidden for
 	-- room, it stays open, and comes back as the window widens.)
 	-- (A plugin's page has a panel of its own too: its plugin's tabs.)
@@ -692,13 +697,14 @@ return function(props: Props): Node
 			drag_held:set(nil)
 		end
 	end)
-	-- Its part beside the tree as it stands. A window resize moves it only
-	-- when it must: narrowing, the chat gives up its room first, down to
-	-- its least, and then this; widening, while the chat is at its least,
-	-- this takes the room back first, up to what it would take, then the
-	-- chat grows. A column the fit hides gives its room to the chat; one it
-	-- shows takes the chat's, and this only gives way if it must. Nothing
-	-- jumps as a column goes or comes.
+	-- Its part beside the tree as it stands. A window resize shares its
+	-- change between the chat and this equally, as Zeron's does, so a panel
+	-- at its share stays at half of the room (each keeping its least; a
+	-- column the fit hides or shows is shared out too). Its width dragged
+	-- since its toggle, it holds instead, moving only when it must:
+	-- narrowing, the chat gives up its room first, down to its least, and
+	-- then this; widening, while the chat is at its least, this takes the
+	-- room back first, up to what it would take, then the chat grows.
 	-- The tree's room inside `files_w`: a session's panel keeps it for its
 	-- tree (docked, or floating with the panel narrowed by it); a plugin's
 	-- page has no tree, so its panel is the whole width. (It took TREE off
@@ -727,9 +733,24 @@ return function(props: Props): Node
 		end
 		local allowed = fit.panel_room(vw, side, tree, floor)
 		local r = right_w:peek()
+		-- (Its share of a window `v` wide beside a sidebar `sd` wide.)
+		local function share(v: number, sd: number): number
+			return fit.content_split(math.max(v - sd - reserve(), 0), floor)
+		end
 		if pref ~= was.pref then
 			-- Split or dragged: what it would take, as far as there's room.
 			r = math.min(pref, allowed)
+		elseif not chosen:peek() and floor <= fit.CHAT_PANEL_MIN and floor == was.floor and vw ~= was.vw then
+			-- At its share: the change shared out, at once (the window's edge is
+			-- under the hand). What it would take moves with it, so a sidebar
+			-- coming or going gives it back what it gave.
+			local by = share(vw, side) - share(was.vw, was.side)
+			r = math.min(r + by, allowed)
+			local moved_pref = math.max(pref + by, 0)
+			if moved_pref ~= pref then
+				alloc.pref = moved_pref
+				files_w:set(reserve() + moved_pref)
+			end
 		elseif r > allowed then
 			-- No room left for the chat's least: it gives way. (Beside a split, as
 			-- below: all the window's narrowing, the panes keeping theirs.)
@@ -769,30 +790,58 @@ return function(props: Props): Node
 		end
 	end)
 	-- Its share, as Zeron's: its tree's allowance and half of what the
-	-- sidebar and the tree leave the chat and it, as it opens. A dragged
-	-- edge holds until then. (Not as the sidebar opens or closes, as Zeron
+	-- sidebar and the tree leave the chat and it. Beside a split, its least:
+	-- the room is the panes'. (Dragged wider there, it stays so until it
+	-- closes; the width chosen is kept for a chat alone.)
+	local function resplit()
+		local vw = fit.viewport:peek()
+		if vw <= 0 then
+			return
+		end
+		local r = math.max(fit.RIGHT_PANE_MIN - tree_part(), 0)
+		local floor = fit.page_floor:peek()
+		if floor <= fit.CHAT_PANEL_MIN then
+			local side, keep = sidebar_settled(), reserve()
+			local part = fit.content_split(math.max(vw - side - keep, 0), floor)
+			files_w:set(keep + part)
+			r = math.min(part, fit.panel_room(vw, side, tree_part(), floor))
+		end
+		if r ~= right_w:peek() then
+			right_w:set(r)
+		end
+	end
+	-- (Whose panel shows: the session's, a plugin page's; none on a new
+	-- chat. Another one is the route moving, not the person opening or
+	-- closing this one, and the panel lands at once, as it is there.)
+	local function owner(peek: boolean): string
+		local c: any = if peek then route.chat:peek() else route.chat:get()
+		if c.name == "plugin" then
+			return `page:{c.plugin or ""}/{c.page or ""}`
+		end
+		return if c.name == "session" then `chat:{c.session or ""}` else c.name or ""
+	end
+	-- It opens at its share, unless a width was chosen since its toggle
+	-- (its edge dragged, then another chat's panel shown, or the fit hiding
+	-- it for room and bringing it back). Its toggle, opening or closing it,
+	-- forgets that width. (Not as the sidebar opens or closes, as Zeron
 	-- does: halving it then squeezed a panel the chat had room beside, its
 	-- tree going to float. It gives way only as it must, above, and comes
 	-- back as the sidebar goes.)
-	local split = { on = shown:peek() }
+	local split = { on = shown:peek(), open = props.files:peek(), owner = owner(true) }
 	ui.effect(function()
 		local on = shown:get()
+		local open, who = props.files:get(), owner(false)
 		local changed = on ~= split.on
-		split = { on = on }
+		local toggled = open ~= split.open and who == split.owner
+		split = { on = on, open = open, owner = who }
+		if toggled and chosen:peek() then
+			chosen:set(false)
+		end
 		local vw = fit.viewport:peek()
 		if changed and on and not shell_view.expanded:peek() and vw > 0 then
 			local side = sidebar_settled()
-			if fit.page_floor:peek() > fit.CHAT_PANEL_MIN then
-				-- Beside a split it opens at its least: the room is the panes'.
-				-- (Dragged wider, it stays so until it closes; the width chosen
-				-- is kept for a chat alone.)
-				local r = math.max(fit.RIGHT_PANE_MIN - tree_part(), 0)
-				if r ~= right_w:peek() then
-					right_w:set(r)
-				end
-			elseif not chosen:peek() then
-				local keep = reserve()
-				files_w:set(keep + fit.content_split(math.max(vw - side - keep, 0), fit.page_floor:peek()))
+			if fit.page_floor:peek() > fit.CHAT_PANEL_MIN or not chosen:peek() then
+				resplit()
 			else
 				-- (The width chosen, as far as there's room: not what it had
 				-- given way to before it closed.)
@@ -975,6 +1024,7 @@ return function(props: Props): Node
 			params.onComplete = function()
 				if steps == this then
 					easing = nil
+					stepping:set(false)
 					holding:set(false)
 					-- (The page given back: its own width again, the one it was
 					-- held at.)
@@ -994,6 +1044,9 @@ return function(props: Props): Node
 		end
 		if goal:peek() ~= base then
 			goal:set(base)
+		end
+		if stepping:peek() ~= (easing ~= nil) then
+			stepping:set(easing ~= nil)
 		end
 		open_w:set(base + off:peek())
 	end)
@@ -1135,6 +1188,10 @@ return function(props: Props): Node
 			bottom = ui.raw(WINDOW_EDGE, "the window's edge"),
 			w = function(): number
 				return if expanded() then 0 else panel_edge_inside + gap_before:get()
+			end,
+			-- (Out of reach while the panel moves.)
+			pointer_events = function(): string
+				return if stepping:get() then "none" else "auto"
 			end,
 			cursor = "col_resize",
 			label = ui.t("shell.page.resize_files"),

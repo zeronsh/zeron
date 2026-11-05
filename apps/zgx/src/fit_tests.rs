@@ -125,9 +125,8 @@ fn a_resize_walk_shows_the_columns_zerons_policy_shows() {
             faults.push(format!("{w}: the sidebar is {side}, Zeron's {} and the window's edge", want.sidebar_limit));
         }
         if want.right {
-            // (Its width is the person's call, not the window's: a resize
-            // moves it only as it must, the chat keeping its least; see
-            // `a_window_resize_moves_everything_one_way`.)
+            // (Its width at its share, the chat keeping its least; see
+            // `a_window_resize_keeps_the_chat_and_the_panel_at_half_each`.)
             let side = if want.sidebar { want.sidebar_limit } else { 0.0 };
             if w - side - panel < CHAT_PANEL_MIN - 0.5 {
                 faults.push(format!("{w}: the panel ({panel}) leaves the chat {} (its least is {CHAT_PANEL_MIN})", w - side - panel));
@@ -296,14 +295,25 @@ fn x_of(app: &mut TestApp, selector: &str) -> Option<(f32, f32)> {
 /// its 261 in its ≈191 ms.
 const EASE_STEP: f32 = 57.0;
 
-/// A window resized continuously moves everything in it one way, with the
-/// window: the panel's edge, its first tab, the file's header and tree and
-/// text, the chat, the sidebar's width; and what stands at the panel's
-/// right (the file's "…") keeps its distance from the window's right edge.
-/// Slow and fast, narrowing and widening, across where Zeron's fit hides or
-/// shows a column (those frames alone step, as the column goes or comes).
+/// Zeron's share of `available` for the panel (shell/panel_layout.rs
+/// `content_split`): half, each side keeping its least.
+fn content_split(available: f32) -> f32 {
+    (available / 2.).max(RIGHT_PANE_MIN).min((available - CHAT_PANEL_MIN).max(RIGHT_PANE_MIN))
+}
+
+/// A window resized continuously keeps the chat and the panel at half each,
+/// as Zeron's does (`observe_viewport_width`), at once: the change shared
+/// between them, each keeping its least. Everything in it moves one way,
+/// with the window: the panel's edge, its first tab, the file's header and
+/// tree and text, the chat, the sidebar's width; and what stands at the
+/// panel's right (the file's "…") keeps its distance from the window's
+/// right edge. Slow and fast, narrowing and widening, across where Zeron's
+/// fit hides or shows a column (those frames alone step, as the column goes
+/// or comes, the panel easing to its new share). (This was the chat taking
+/// the whole change, the panel moving only at the chat's least; Gaël asked
+/// for Zeron's balance back.)
 #[test]
-fn a_window_resize_moves_everything_one_way() {
+fn a_window_resize_keeps_the_chat_and_the_panel_at_half_each() {
     let mut app = mount();
     app.ui.scene.borrow_mut().resize(1600., 800.);
     app.frames(30);
@@ -357,9 +367,7 @@ fn a_window_resize_moves_everything_one_way() {
                     for (i, (a, b)) in lxs.iter().zip(&xs).enumerate() {
                         if let (Some(a), Some(b)) = (a, b) {
                             // (No more than the window's own step, the file. A
-                            // sidebar coming back with the chat at its least
-                            // moves it, the panel giving way, within the ease
-                            // above.)
+                            // sidebar coming back moves it, within the ease above.)
                             let file = i == 3 || i == 4;
                             if file && !easing && (b - a).abs() > dw.abs() + 1. {
                                 faults.push(format!("step {step}, {lw} → {w}: the file ({}) moved {a} → {b}", parts[i]));
@@ -375,10 +383,22 @@ fn a_window_resize_moves_everything_one_way() {
                     if (side - lside).abs() > most || (!easing && (side - lside) * dw < -0.25) {
                         faults.push(format!("step {step}, {lw} → {w}: the sidebar {lside} → {side}"));
                     }
+                    // (Not at the panel's least, where its docked tree leaves the
+                    // file narrower than its head's controls, which run past it: as
+                    // its edge dragged there does.)
+                    let roomy = app.bounds("#shell-files").width >= RIGHT_PANE_MIN + 20.;
                     if let (Some(a), Some(b)) = (lmore, more)
+                        && roomy
                         && (b - a).abs() > 0.25
                     {
                         faults.push(format!("step {step}, {lw} → {w}: the file's … moved from the window's right, {a} → {b}"));
+                    }
+                    // At rest between the fit's changes, the panel at its
+                    // share of what the sidebar leaves.
+                    let panel = app.bounds("#shell-files").width;
+                    let room = w - if side > 0.5 { side - SIDEBAR_EDGE } else { 0. };
+                    if !easing && fit(w).1 && (panel - content_split(room)).abs() > 1. {
+                        faults.push(format!("step {step}, at {w}: the panel is {panel}, its share {}", content_split(room)));
                     }
                 }
                 last = Some((w, xs, side, more));
@@ -507,11 +527,13 @@ fn the_panel_opening_never_closes_the_sidebar_for_its_tree() {
     assert!(1150. - side_after - panel >= CHAT_PANEL_MIN - 0.5, "the chat has {}", 1150. - side_after - panel);
 }
 
-/// A panel width you chose (its edge dragged) is the width it opens at
-/// again, as Zeron's `right_pane_width` is: closed and opened, it comes back
-/// there, not at the split a fresh panel takes.
+/// A panel width you chose (its edge dragged) holds only until the panel's
+/// next toggle, as Zeron's `right_pane_width` does: the window resized, it
+/// stays where it was dragged; closed and opened again, it comes back at its
+/// share. And while it's opening, its edge is out of reach: a drag there does
+/// nothing (Zeron's handle is gone while the panel moves).
 #[test]
-fn the_panel_reopens_at_the_width_its_edge_was_dragged_to() {
+fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
     let mut app = mount();
     app.ui.scene.borrow_mut().resize(1500., 800.);
     app.frames(30);
@@ -519,17 +541,28 @@ fn the_panel_reopens_at_the_width_its_edge_was_dragged_to() {
     app.frames(20);
     app.click("#titlebar >> role:button \"Panel\"");
     app.frames(60);
+    let side = app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
     let split = app.bounds("#shell-files").width;
+    assert!((split - content_split(1500. - side)).abs() < 0.5, "it opens at its share: {split}");
     drag(&mut app, "\"Resize files\"", 140.);
     app.frames(60);
     let dragged = app.bounds("#shell-files").width;
     assert!((dragged - split).abs() > 60., "the drag moved it: {split} → {dragged}");
+    app.ui.scene.borrow_mut().resize(1400., 800.);
+    app.frames(30);
+    let held = app.bounds("#shell-files").width;
+    assert!((held - dragged).abs() < 0.5, "the window resized, it holds where it was dragged: {held}, was {dragged}");
     for _ in 0..2 {
         app.click("#titlebar >> role:button \"Panel\"");
         app.frames(60);
+        app.ui.input.forget_clicks();
         app.click("#titlebar >> role:button \"Panel\"");
+        // (Mid-way, its edge pressed and dragged: nothing.)
+        app.frames(4);
+        drag(&mut app, "\"Resize files\"", 120.);
         app.frames(60);
         let reopened = app.bounds("#shell-files").width;
-        assert!((reopened - dragged).abs() < 0.5, "reopened at {reopened}, was dragged to {dragged} (a fresh split is {split})");
+        let share = content_split(1400. - side);
+        assert!((reopened - share).abs() < 0.5, "reopened at {reopened}, its share is {share} (dragged to {dragged})");
     }
 }
