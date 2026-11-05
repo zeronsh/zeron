@@ -231,6 +231,7 @@ icon_assets![
     (HERMES_MARK, "hermes-mark"),
     (FX_MARK, "fx-mark"),
     (PI_MARK, "pi-mark"),
+    (OMP_MARK, "omp-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     // GitHub's mark (Octicons `mark-github`, MIT) for the Cloud page's
     // GitHub connection.

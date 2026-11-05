@@ -27,6 +27,8 @@ if (process.argv[2] === 'server') {
       }
       const tool = tools.zeron_whoami;
       assert.equal(tool.parameters.type,'object');
+      // Oh My Pi hides extension tools behind discovery unless they are essential.
+      assert.equal(tool.loadMode,'essential');
       const result = await tool.execute('call',{});
       assert.equal(result.content[0].text,chat);
       await assert.rejects(tool.execute('call',{mode:'error'}), new RegExp(chat));
