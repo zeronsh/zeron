@@ -75,8 +75,11 @@ LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
 ZGX_BIN="${ZGX_BETA_ZGX_BIN:-}"
 if [[ -z "$ZGX_BIN" ]]; then
   target_dir="${ZGX_TARGET_DIR:-$ROOT/apps/zgx/target}"
-  ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
-    --features beta --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$target_dir"
+  [[ "$target_dir" == /* ]] || target_dir="$PWD/$target_dir"
+  # (From its folder: cargo reads .cargo/config.toml by where it runs, not by
+  # the manifest, and the build's flags are there.)
+  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
+    --features beta --target-dir "$target_dir")
   ZGX_BIN="$target_dir/release/zeron-zgx"
 fi
 # Only a beta build of this version may go in: the updater stages it by

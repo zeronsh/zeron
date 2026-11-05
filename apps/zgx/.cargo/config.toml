@@ -2,3 +2,9 @@
 # zgx sets this in its own workspace, and an app built elsewhere repeats it.
 [env]
 LUAU_CXXFLAGS = "-DNDEBUG"
+# mimalloc's pages at this Mac's own page size, not its default 64 KiB. A long
+# session frees most of what it allocated, and what survives is scattered: a
+# page goes back to the system only when all of it is free, so a page a quarter
+# of the size holds a quarter as much memory for each survivor. (On an M5 Max,
+# the same long session: 259 MB dirty at rest with 64 KiB pages, 188 MB with these.)
+CFLAGS_aarch64_apple_darwin = "-DMI_ARENA_SLICE_SHIFT=14"
