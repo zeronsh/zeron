@@ -193,13 +193,32 @@ local function suffix(target: string): (string | false, number?, number?, number
 	return before, n, nil, nil
 end
 
--- `path` inside `root`: its relative rest, or nil.
+-- A Windows path (`C:\a\b.rs`, `C:/a/b.rs`, `src\b.rs`) with forward
+-- slashes, as the rest of the rules read paths; `drive` when it starts at
+-- one (an absolute path). Anything else as it is.
+local function slashed(path: string): (string, boolean)
+	local drive = string.match(path, "^%a:[\\/]") ~= nil
+	if drive or string.find(path, "\\", 1, true) then
+		return (string.gsub(path, "\\", "/")), drive
+	end
+	return path, false
+end
+
+-- Whether a path starts at a drive (`C:/…`), as Windows' absolute ones do.
+local function on_drive(path: string): boolean
+	return string.match(path, "^%a:/") ~= nil
+end
+
+-- `path` inside `root`: its relative rest, or nil. (A drive's paths compare
+-- without case, as Windows' do.)
 local function inside(path: string, root: string?): string?
 	if not root or root == "" then
 		return nil
 	end
-	local r = string.gsub(root, "/+$", "")
-	if string.sub(path, 1, #r + 1) ~= r .. "/" then
+	local r = string.gsub((slashed(root)), "/+$", "")
+	local head = string.sub(path, 1, #r + 1)
+	local same = if on_drive(r) then string.lower(head) == string.lower(r .. "/") else head == r .. "/"
+	if not same then
 		return nil
 	end
 	local rest = string.sub(path, #r + 2)
@@ -226,10 +245,13 @@ function M.resolve(target: string, root: string?): Resolved?
 		if string.sub(rest, 1, 1) ~= "/" or string.find(rest, "?", 1, true) then
 			return nil
 		end
-		raw = rest
+		-- `file:///C:/…`: the drive's path.
+		raw = if string.match(rest, "^/%a:/") then string.sub(rest, 2) else rest
 	elseif string.find(target, "://", 1, true) or string.sub(target, 1, 7) == "mailto:" then
 		return nil
 	end
+	-- Windows' paths read as the others are, `/` between their parts.
+	raw = slashed(raw)
 	local p1, line1, column1, end1 = fragment(raw)
 	if not p1 then
 		return nil
@@ -244,7 +266,7 @@ function M.resolve(target: string, root: string?): Resolved?
 	end
 	local line, column = line1 or line2, column1 or column2
 	local end_line = if line1 then end1 else end2
-	if string.sub(path, 1, 1) == "/" then
+	if string.sub(path, 1, 1) == "/" or on_drive(path) then
 		if #path == 1 or string.sub(path, 1, 2) == "//" or string.sub(path, -1) == "/" or (not file_url and not string.find(file_name(path), ".", 1, true)) then
 			return nil
 		end

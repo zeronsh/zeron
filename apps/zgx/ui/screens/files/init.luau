@@ -97,7 +97,7 @@ local function where_of(project: any, session: any): Where?
 	local pv: any = control.value(project)
 	local root = target.root
 	local name: string = (if type(pv) == "table" then pv.name :: string? else nil)
-		or (if root then string.match(root, "[^/]+$") else nil)
+		or (if root then paths.base_name(root) else nil)
 		or ui.t("files.name_fallback"):get()
 	-- (One folder, one tree: sessions in the same folder share it.)
 	local key = `{target.device or "here"}:{root or target.chat or target.space}`
