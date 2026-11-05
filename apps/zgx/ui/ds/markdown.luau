@@ -1276,15 +1276,56 @@ function blocks(list: { MarkdownBlock }, ink: string?, ctx: Ctx?): { Node }
 	return out
 end
 
--- A windowed text's blocks' heights, as last laid out, by the text's key
--- and the block's place in it: a reply scrolled back holds each block at
--- the height it had, not a guess.
--- (Kept in keyed state, a key at a time: a reload keeps them, so a view
--- made again lays out exactly as it was.)
-local HEIGHTS = ui.state("markdown_window_heights", {} :: { [string]: number })
--- Whether each run was built (near the view) when last judged: a reload
--- builds the same runs, so nothing moves.
-local NEAR = ui.state("markdown_window_near", {} :: { [string]: boolean })
+-- What windowed texts keep by a text's key and a run's place in it: plain tables
+-- here, read and written a key at a time, as each run is judged and laid out while
+-- a chat scrolls. (A keyed state would copy every text's on each write, and make all
+-- of them a table again on the next read.) Keyed state carries them across a reload
+-- alone. The oldest half goes as they fill, so a long day's chats don't add up.
+local KEPT_MOST = 8192
+local function kept<T>(key: string): { get: (string) -> T?, set: (string, T) -> () }
+	local carried = ui.state(key, {} :: { [string]: T })
+	local now: { [string]: T } = table.clone(carried:peek())
+	local older: { [string]: T } = {}
+	local count = 0
+	for _ in now do
+		count += 1
+	end
+	local function set(k: string, value: T)
+		if now[k] == nil then
+			if count >= KEPT_MOST then
+				now, older, count = {}, now, 0
+			end
+			count += 1
+		end
+		now[k] = value
+	end
+	ui.on_cleanup(function()
+		local all = table.clone(older)
+		for k, value in now do
+			all[k] = value
+		end
+		carried:set(all)
+	end)
+	return {
+		get = function(k: string): T?
+			local value = now[k]
+			if value == nil then
+				value = older[k]
+				if value ~= nil then
+					set(k, value)
+				end
+			end
+			return value
+		end,
+		set = set,
+	}
+end
+-- A windowed text's blocks' heights, as last laid out: a reply scrolled back holds
+-- each block at the height it had, not a guess.
+local HEIGHTS = kept("markdown_window_heights") :: { get: (string) -> number?, set: (string, number) -> () }
+-- Whether each run was built (near the view) when last judged: a reload builds the
+-- same runs, so nothing moves.
+local NEAR = kept("markdown_window_near") :: { get: (string) -> boolean?, set: (string, boolean) -> () }
 -- How far past the view a windowed block is built ahead of coming in.
 local OVERSCAN = 600
 -- How many blocks a windowed run holds (a long reply away from the view
@@ -1516,7 +1557,8 @@ return function(props: Props): Node
 		local function last(): boolean
 			return after() == 0
 		end
-		local near = ui.use_state(if NEAR:peek()[k] ~= nil then NEAR:peek()[k] else after() < 1)
+		local was_near = NEAR.get(k)
+		local near = ui.use_state(if was_near ~= nil then was_near else after() < 1)
 		local function guess(): number
 			local h = 0
 			for _, b in run:peek() do
@@ -1524,7 +1566,7 @@ return function(props: Props): Node
 			end
 			return h
 		end
-		local held = ui.use_state(HEIGHTS:peek()[k] or guess())
+		local held = ui.use_state(HEIGHTS.get(k) or guess())
 		local r = ui.ref()
 		-- Built again after being held: its first layout may come in at
 		-- another height than it was held at (the width changed meanwhile).
@@ -1550,8 +1592,8 @@ return function(props: Props): Node
 			local shows = (live ~= nil and live() and last())
 				or holds
 				or (y < top + (view.height :: number) + OVERSCAN and y + (el.height :: number) > top - OVERSCAN)
-			if NEAR:peek()[k] ~= shows then
-				NEAR:set_key(k, shows)
+			if NEAR.get(k) ~= shows then
+				NEAR.set(k, shows)
 			end
 			if near:peek() ~= shows then
 				returning = shows
@@ -1574,9 +1616,9 @@ return function(props: Props): Node
 				local was = held:peek()
 				local back = returning
 				returning = false
-				local kept = HEIGHTS:peek()[k]
-				if kept == nil or math.abs(size.h - kept) >= 0.5 then
-					HEIGHTS:set_key(k, size.h)
+				local last_height = HEIGHTS.get(k)
+				if last_height == nil or math.abs(size.h - last_height) >= 0.5 then
+					HEIGHTS.set(k, size.h)
 				end
 				if math.abs(size.h - was) < 0.5 then
 					return
@@ -1690,7 +1732,7 @@ return function(props: Props): Node
 						if below and at >= target then
 							local more = false
 							for later = at + 1, count do
-								if NEAR:peek()[`{(window :: any).key}:{later}`] ~= false then
+								if NEAR.get(`{(window :: any).key}:{later}`) ~= false then
 									more = true
 									break
 								end

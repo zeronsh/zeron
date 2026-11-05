@@ -105,11 +105,73 @@ struct Chats {
     let_go_turn: Cell<u64>,
 }
 
+/// A transcript's entry. A settled one, built into its row and older than
+/// the newest few, keeps only its id and a sum of what it was: its row says
+/// all it says, and the engine has it if it's wanted again.
+struct Entry {
+    id: Rc<str>,
+    json: Option<Json>,
+    /// `sum_of` its json, once that's gone.
+    sum: u64,
+}
+
+impl Entry {
+    fn new(json: Json) -> Self {
+        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0 }
+    }
+
+    /// What it is now, to tell it from another copy of it.
+    fn sum(&self) -> u64 {
+        self.json.as_ref().map_or(self.sum, sum_of)
+    }
+}
+
+/// `entry["field"]`: as the engine sent it; nil for one settled.
+impl std::ops::Index<&str> for Entry {
+    type Output = Json;
+    fn index(&self, field: &str) -> &Json {
+        self.json.as_ref().map_or(&Json::Null, |json| &json[field])
+    }
+}
+
+/// How many of a chat's newest entries keep what the engine sent: what a turn
+/// still changes, and what its question and draft are read from.
+const WHOLE_TAIL: usize = 32;
+
+/// A sum of a JSON value, the same for equal values (an object's keys are
+/// sorted: this workspace's serde_json has no `preserve_order`).
+fn sum_of(json: &Json) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn feed(json: &Json, hasher: &mut std::hash::DefaultHasher) {
+        match json {
+            Json::Null => 0u8.hash(hasher),
+            Json::Bool(b) => b.hash(hasher),
+            Json::Number(n) => n.to_string().hash(hasher),
+            Json::String(s) => s.hash(hasher),
+            Json::Array(items) => {
+                items.len().hash(hasher);
+                items.iter().for_each(|item| feed(item, hasher));
+            }
+            Json::Object(fields) => {
+                fields.len().hash(hasher);
+                for (key, value) in fields {
+                    key.hash(hasher);
+                    feed(value, hasher);
+                }
+            }
+        }
+    }
+    let mut hasher = std::hash::DefaultHasher::new();
+    feed(json, &mut hasher);
+    hasher.finish()
+}
+
 /// What a view's chat had read and built, as it let it go.
 struct LetGo {
     id: String,
-    entries: Vec<Json>,
-    built: HashMap<String, Option<Value>>,
+    entries: Vec<Entry>,
+    older_todo: Option<(usize, Json)>,
+    built: HashMap<Rc<str>, Option<Value>>,
     built_model: Option<Option<String>>,
     context: Option<f64>,
     context_usage: (Option<f64>, Option<f64>),
@@ -216,8 +278,11 @@ impl Open {
 #[derive(Default)]
 struct Open {
     id: String,
-    /// The transcript's entries, as the engine's doc has them.
-    entries: Vec<Json>,
+    /// The transcript's entries, as the engine's doc has them (`Entry`).
+    entries: Vec<Entry>,
+    /// The plan as the newest settled entry holding one left it, and where
+    /// that entry stands: the entries are gone, the plan still shows.
+    older_todo: Option<(usize, Json)>,
     /// A reset has come (the newest entries, at least).
     heard: bool,
     context: Option<f64>,
@@ -242,8 +307,13 @@ struct Open {
     /// the entries a frame changed, and hands the rest over as the same
     /// values, so the script's copy (reconciled by id) does no work for
     /// them.
-    built: HashMap<String, Option<Value>>,
+    built: HashMap<Rc<str>, Option<Value>>,
     built_model: Option<Option<String>>,
+    /// The chat's model changed while settled entries' rows carry the last
+    /// one's name: its whole copy is asked for again to build them from.
+    model_moved: bool,
+    /// Its whole copy, when it comes, builds every row again (`model_moved`).
+    rebuild: bool,
     /// Opened with the rows another view had (`LetGo`), which the engine's
     /// first frames, its newest entries, mustn't replace.
     has_whole: bool,
@@ -551,7 +621,7 @@ impl Chats {
             // The open chat's own transcript says it at once.
             let open = self.views().iter().find_map(|v| {
                 let open = v.open.borrow();
-                open.as_ref().filter(|o| o.id == id && o.heard).map(|o| ask_kind(&o.entries))
+                open.as_ref().filter(|o| o.id == id && o.heard).map(|o| ask_kind(o.entries.iter().rev().filter_map(|e| e.json.as_ref())))
             });
             if let Some(kind) = open {
                 self.asks.borrow_mut().insert(id, kind);
@@ -567,7 +637,7 @@ impl Chats {
                 move |item| {
                     let Some(me) = weak.upgrade() else { return };
                     let Some(entries) = item["reset"].as_array() else { return };
-                    let kind = ask_kind(entries);
+                    let kind = ask_kind(entries.iter().rev());
                     me.asks.borrow_mut().insert(chat.clone(), kind);
                     // Seen: let it go (dropped once this callback returns).
                     let done = me.ask_looks.borrow_mut().remove(&chat);
@@ -601,8 +671,8 @@ impl Chats {
     /// view that's about to open it.
     fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
         let Some(old) = old.filter(|o| o.heard) else { return };
-        let Open { id, entries, built, built_model, context, context_usage, .. } = old;
-        *self.let_go.borrow_mut() = Some(LetGo { id, entries, built, built_model, context, context_usage });
+        let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
+        *self.let_go.borrow_mut() = Some(LetGo { id, entries, older_todo, built, built_model, context, context_usage });
         let turn = self.let_go_turn.get() + 1;
         self.let_go_turn.set(turn);
         let me = self.clone();
@@ -625,6 +695,7 @@ impl Chats {
         Some(Open {
             id: held.id,
             entries: held.entries,
+            older_todo: held.older_todo,
             heard: true,
             context: held.context,
             context_usage: held.context_usage,
@@ -1116,7 +1187,7 @@ impl View {
                 return;
             }
             match reply.ok().as_ref().and_then(snapshot_frame) {
-                Some(frame) => view.heard_frame(&frame),
+                Some(frame) => view.heard_frame(frame),
                 // (Not uploaded, or not readable: its live doc.)
                 None => {
                     view.snapshot.set(false);
@@ -1149,7 +1220,7 @@ impl View {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
                 {
-                    view.heard_frame(&item);
+                    view.heard_frame(item);
                 }
             },
         );
@@ -1178,7 +1249,7 @@ impl View {
         self.subscribe();
     }
 
-    fn heard_frame(self: &Rc<Self>, frame: &Json) {
+    fn heard_frame(self: &Rc<Self>, mut frame: Json) {
         let applied = {
             let mut slot = self.open.borrow_mut();
             let Some(open) = slot.as_mut() else { return };
@@ -1194,14 +1265,18 @@ impl View {
                     return;
                 }
                 open.has_whole = false;
+                if std::mem::take(&mut open.rebuild) {
+                    open.built.clear();
+                }
             }
             let before = frame.get("reset").map(|_| std::mem::take(&mut open.entries));
-            let result = apply(&mut open.entries, frame);
+            let result = apply(&mut open.entries, &mut frame);
             // What it changed, to build again: on a reset, the entries that
             // differ from what this view had, unless another view of this
             // chat has them built; else the ones it touched.
             if let Some(before) = before {
                 keep_unchanged(&mut open.built, &before, &open.entries);
+                open.older_todo = None;
                 self.share_built(open);
             } else if result.is_err() {
                 open.built.clear();
@@ -1222,7 +1297,7 @@ impl View {
             }
             if result.is_ok() {
                 open.heard = true;
-                let ids: Vec<&str> = open.entries.iter().filter_map(|e| e["id"].as_str()).collect();
+                let ids: Vec<&str> = open.entries.iter().map(|e| &*e.id).collect();
                 open.pending.retain(|p| !ids.contains(&p.id.as_str()));
             }
             result
@@ -1231,7 +1306,7 @@ impl View {
             Ok(Change::Quiet) => {}
             Ok(Change::Words) => self.publish_draft(),
             Ok(Change::Rows) => {
-                if self.long_to_build(frame) {
+                if self.long_to_build(&frame) {
                     self.build_in_steps();
                 } else if !self.open.borrow().as_ref().is_some_and(|o| o.stepping) {
                     self.publish_messages();
@@ -1283,7 +1358,7 @@ impl View {
                             ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
                             ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
                         ]),
-                        None => draft_value(id, &entry_text(e)),
+                        None => draft_value(id, &e.json.as_ref().map(entry_text).unwrap_or_default()),
                     }
                 }
                 _ => draft_value("", ""),
@@ -1302,7 +1377,7 @@ impl View {
         let slot = self.open.borrow();
         let Some(open) = slot.as_ref() else { return false };
         !open.stepping
-            && open.entries.iter().filter(|e| e["id"].as_str().is_some_and(|id| !open.built.contains_key(id))).count()
+            && open.entries.iter().filter(|e| !e.id.is_empty() && !open.built.contains_key(&e.id)).count()
                 > BUILT_AT_ONCE
     }
 
@@ -1361,14 +1436,18 @@ impl View {
         }
         let (model, device) = build_context(open, &chats);
         let open_id = open.id.clone();
-        let Open { entries, built, .. } = open;
+        let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
+        let Open { entries, older_todo, built, .. } = open;
         let started = std::time::Instant::now();
-        for entry in entries.iter().rev() {
-            let Some(id) = entry["id"].as_str() else { continue };
-            if built.contains_key(id) {
+        for (at, entry) in entries.iter_mut().enumerate().rev() {
+            if entry.id.is_empty() || built.contains_key(&entry.id) {
                 continue;
             }
-            built.insert(id.to_owned(), built_entry(entry, &open_id, device.as_deref(), model.as_deref()));
+            let Some(json) = &entry.json else { continue };
+            built.insert(entry.id.clone(), built_entry(json, &open_id, device.as_deref(), model.as_deref()));
+            if at < whole_from {
+                settle(entry, at, older_todo);
+            }
             if started.elapsed() >= BUILD_SLICE {
                 return true;
             }
@@ -1387,19 +1466,28 @@ impl View {
             }
             let (model, device) = build_context(open, &chats);
             let open_id = open.id.clone();
-            let Open { entries, built, .. } = open;
-            let mut list: Vec<Value> = entries
-                .iter()
-                .filter_map(|e| {
-                    let Some(id) = e["id"].as_str() else {
-                        return message(e, model.as_deref());
-                    };
-                    built
-                        .entry(id.to_owned())
-                        .or_insert_with(|| built_entry(e, &open_id, device.as_deref(), model.as_deref()))
-                        .clone()
-                })
-                .collect();
+            let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
+            let Open { entries, older_todo, built, .. } = open;
+            let mut list: Vec<Value> = Vec::with_capacity(entries.len());
+            for (at, e) in entries.iter_mut().enumerate() {
+                if e.id.is_empty() {
+                    list.extend(e.json.as_ref().and_then(|json| message(json, model.as_deref())));
+                    continue;
+                }
+                let row = match (built.get(&e.id), &e.json) {
+                    (Some(row), _) => row.clone(),
+                    (None, Some(json)) => {
+                        let row = built_entry(json, &open_id, device.as_deref(), model.as_deref());
+                        built.insert(e.id.clone(), row.clone());
+                        row
+                    }
+                    (None, None) => None,
+                };
+                list.extend(row);
+                if at < whole_from && e.json.is_some() {
+                    settle(e, at, older_todo);
+                }
+            }
             let open = &*open;
             // The newest prompt, while its reply hasn't begun: sending,
             // then working, as the shipping app's working trailer says
@@ -1434,6 +1522,24 @@ impl View {
         self.subagents.set(subagents_of(&list));
         self.messages.set(Value::List(list.into()));
         self.publish_draft();
+        self.after_model_moved();
+    }
+
+    /// The whole copy asked for again, if the model moved (`Open::model_moved`):
+    /// what shows stays until it has all come.
+    fn after_model_moved(self: &View) {
+        let Some(me) = CHATS.with(Rc::clone).views().into_iter().find(|v| std::ptr::eq(&**v, self)) else { return };
+        let moved = me.open.borrow_mut().as_mut().is_some_and(|open| {
+            let moved = std::mem::take(&mut open.model_moved);
+            if moved && !me.snapshot.get() {
+                open.has_whole = true;
+                open.rebuild = true;
+            }
+            moved
+        });
+        if moved && !me.snapshot.get() {
+            me.resubscribe();
+        }
     }
 
     fn publish_session(&self) {
@@ -1677,7 +1783,7 @@ impl View {
         let questions = {
             let open = self.open.borrow();
             let open = open.as_ref().filter(|o| o.id == id).ok_or("missing")?;
-            asked(&open.entries)
+            asked(open.entries.iter().rev().filter_map(|e| e.json.as_ref()))
                 .filter(|p| p["requestId"].as_str() == Some(&request))
                 .map(|p| p["questions"].as_array().cloned().unwrap_or_default())
                 .ok_or("missing")?
@@ -2477,7 +2583,13 @@ fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<Stri
     let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
     let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, m).unwrap_or_else(|| m.to_owned()));
     if open.built_model.as_ref() != Some(&model) {
-        open.built.clear();
+        // (Settled entries are the engine's now: the rows show the last name
+        // until its copy comes, `model_moved`, and are built again from that.)
+        if open.entries.iter().all(|e| e.json.is_some()) {
+            open.built.clear();
+        } else {
+            open.model_moved = true;
+        }
         open.built_model = Some(model.clone());
     }
     (model, chats.target(&chat))
@@ -2485,26 +2597,121 @@ fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<Stri
 
 /// An entry as its row reads it.
 fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
-    match with_host(entry, doc, device) {
+    let mut row = match with_host(entry, doc, device) {
         Some(entry) => message(&entry, model),
         None => message(entry, model),
+    };
+    // (One still being written is built again with its next change.)
+    if entry["status"].as_str() != Some("streaming")
+        && let Some(row) = &mut row
+    {
+        share_parts(row);
+    }
+    row
+}
+
+/// The newest plan in these entries, newest first.
+fn latest_todo<'a>(newest_first: impl Iterator<Item = &'a Json>) -> Option<&'a Json> {
+    newest_first
+        .flat_map(|e| e["parts"].as_array().into_iter().flatten().rev())
+        .find(|p| p["kind"].as_str() == Some("tool") && p["call"]["kind"].as_str() == Some("todo"))
+}
+
+/// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
+fn settle(entry: &mut Entry, at: usize, older_todo: &mut Option<(usize, Json)>) {
+    let Some(json) = entry.json.take() else { return };
+    entry.sum = sum_of(&json);
+    if older_todo.as_ref().is_none_or(|(place, _)| *place < at)
+        && let Some(part) = latest_todo(std::iter::once(&json))
+    {
+        *older_todo = Some((at, part.clone()));
     }
 }
 
+/// A row's own repeats, one each: a reply holds its tools in `tools`, in
+/// `blocks` and in `compact`, its words in `text`, `copy` and a block, and
+/// every record its keys. Only one of each stays, shared.
+fn share_parts(row: &mut Value) {
+    use std::collections::HashSet;
+    /// A short word is kept for every row, while there are few of them.
+    const COMMON_LEN: usize = 16;
+    const COMMON_MOST: usize = 4096;
+    thread_local! {
+        static COMMON: RefCell<HashSet<Rc<str>>> = RefCell::default();
+    }
+    #[derive(Default)]
+    struct Seen {
+        words: HashSet<Rc<str>>,
+        records: HashMap<Rc<str>, Value>,
+    }
+    fn word(text: &mut Rc<str>, own: &mut HashSet<Rc<str>>) {
+        if text.len() <= COMMON_LEN {
+            let shared = COMMON.with_borrow_mut(|common| {
+                if let Some(known) = common.get(&**text) {
+                    return Some(known.clone());
+                }
+                (common.len() < COMMON_MOST).then(|| {
+                    common.insert(text.clone());
+                    text.clone()
+                })
+            });
+            if let Some(shared) = shared {
+                *text = shared;
+                return;
+            }
+        }
+        match own.get(&**text) {
+            Some(known) => *text = known.clone(),
+            None => {
+                own.insert(text.clone());
+            }
+        }
+    }
+    fn walk(value: &mut Value, seen: &mut Seen) {
+        match value {
+            Value::Str(text) => word(text, &mut seen.words),
+            Value::List(items) => {
+                if let Some(items) = Rc::get_mut(items) {
+                    items.iter_mut().for_each(|item| walk(item, seen));
+                }
+            }
+            Value::Map(fields) => {
+                if let Some(fields) = Rc::get_mut(fields) {
+                    for (key, field) in fields.iter_mut() {
+                        word(key, &mut seen.words);
+                        walk(field, seen);
+                    }
+                }
+                // (A record with an id, as a tool is: its one copy.)
+                let Some(Value::Str(id)) = value.field("id").cloned() else { return };
+                match seen.records.get(&id) {
+                    Some(known) if *known == *value => *value = known.clone(),
+                    Some(_) => {}
+                    None => {
+                        seen.records.insert(id, value.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(row, &mut Seen::default());
+}
+
 /// Entries by their ids.
-fn by_id(entries: &[Json]) -> HashMap<&str, &Json> {
-    entries.iter().filter_map(|e| Some((e["id"].as_str()?, e))).collect()
+fn by_id(entries: &[Entry]) -> HashMap<&str, &Entry> {
+    entries.iter().map(|e| (&*e.id, e)).collect()
 }
 
 /// `built` less what a reset changed: only the entries it has as they were.
-fn keep_unchanged(built: &mut HashMap<String, Option<Value>>, before: &[Json], now: &[Json]) {
+fn keep_unchanged(built: &mut HashMap<Rc<str>, Option<Value>>, before: &[Entry], now: &[Entry]) {
     if built.is_empty() {
         return;
     }
     let (before, now) = (by_id(before), by_id(now));
     built.retain(|id, _| {
-        let id = id.as_str();
-        before.get(id).is_some_and(|was| now.get(id) == Some(was))
+        let id: &str = id;
+        before.get(id).zip(now.get(id)).is_some_and(|(was, is)| was.sum() == is.sum())
     });
 }
 
@@ -2512,8 +2719,8 @@ fn keep_unchanged(built: &mut HashMap<String, Option<Value>>, before: &[Json], n
 /// entries that are the same. (Built for another model's name: none.)
 fn reuse_built(
     open: &mut Open,
-    entries: &[Json],
-    built: &HashMap<String, Option<Value>>,
+    entries: &[Entry],
+    built: &HashMap<Rc<str>, Option<Value>>,
     built_model: &Option<Option<String>>,
 ) {
     if built_model.is_none() || (open.built_model.is_some() && open.built_model != *built_model) {
@@ -2522,49 +2729,57 @@ fn reuse_built(
     open.built_model = built_model.clone();
     let theirs = by_id(entries);
     for entry in &open.entries {
-        let Some(id) = entry["id"].as_str() else { continue };
-        if !open.built.contains_key(id)
-            && theirs.get(id) == Some(&entry)
-            && let Some(value) = built.get(id)
+        if !entry.id.is_empty()
+            && !open.built.contains_key(&entry.id)
+            && let Some(value) = built.get(&entry.id)
+            && theirs.get(&*entry.id).is_some_and(|their| their.sum() == entry.sum())
         {
-            open.built.insert(id.to_owned(), value.clone());
+            open.built.insert(entry.id.clone(), value.clone());
         }
     }
 }
 
 /// A frame applied to `entries` (crates/doc/src/transcript_delta.rs's
 /// `apply_transcript_frame`); `Err` when the copy is out of step.
-fn apply(entries: &mut Vec<Json>, frame: &Json) -> Result<Change, ()> {
-    if let Some(reset) = frame.get("reset") {
-        *entries = reset.as_array().cloned().unwrap_or_default();
+fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
+    if let Some(reset) = frame.get_mut("reset") {
+        // (Taken, not copied: a long chat's whole transcript, twice over.)
+        *entries = match reset.take() {
+            Json::Array(list) => list.into_iter().map(Entry::new).collect(),
+            _ => Vec::new(),
+        };
         return Ok(Change::Rows);
     }
+    let frame = &*frame;
     let mut rows = false;
     let mut words_changed = false;
     for id in frame["remove"].as_array().into_iter().flatten() {
         let before = entries.len();
-        entries.retain(|e| e["id"] != *id);
+        entries.retain(|e| id.as_str() != Some(&*e.id));
         rows |= entries.len() != before;
     }
     for up in frame["upsert"].as_array().into_iter().flatten() {
         let entry = &up["entry"];
-        entries.retain(|e| e["id"] != entry["id"]);
+        let id = entry["id"].as_str().unwrap_or_default();
+        entries.retain(|e| &*e.id != id);
         let at = match up["after"].as_str() {
             None => 0,
             Some(after) => entries
                 .iter()
-                .position(|e| e["id"].as_str() == Some(after))
+                .position(|e| &*e.id == after)
                 .map(|i| i + 1)
                 .ok_or(())?,
         };
-        entries.insert(at, entry.clone());
+        entries.insert(at, Entry::new(entry.clone()));
         rows = true;
     }
     for add in frame["append"].as_array().into_iter().flatten() {
         let entry = entries
             .iter_mut()
-            .find(|e| e["id"] == add["entry"])
+            .find(|e| add["entry"].as_str() == Some(&*e.id))
             .ok_or(())?;
+        // (A settled entry growing again: its whole copy is the engine's.)
+        let entry = entry.json.as_mut().ok_or(())?;
         let streaming = entry["status"].as_str() == Some("streaming");
         let part = entry["parts"]
             .as_array_mut()
@@ -3479,8 +3694,8 @@ fn base(path: &str) -> String {
 }
 
 /// The question the agent waits on: the last reply's unresolved input.
-fn asked(entries: &[Json]) -> Option<&Json> {
-    let last = entries.iter().rev().find(|e| e["role"].as_str() == Some("assistant"))?;
+fn asked<'a>(mut newest_first: impl Iterator<Item = &'a Json>) -> Option<&'a Json> {
+    let last = newest_first.find(|e| e["role"].as_str() == Some("assistant"))?;
     last["parts"]
         .as_array()?
         .iter()
@@ -3490,8 +3705,8 @@ fn asked(entries: &[Json]) -> Option<&Json> {
 
 /// What a waiting chat asks, from its latest entries: an approval, else a
 /// question (also when the ask isn't among them).
-fn ask_kind(entries: &[Json]) -> &'static str {
-    match asked(entries).and_then(|p| p["questions"].as_array()) {
+fn ask_kind<'a>(newest_first: impl Iterator<Item = &'a Json>) -> &'static str {
+    match asked(newest_first).and_then(|p| p["questions"].as_array()) {
         Some(questions) if is_approval(questions) => "approval",
         _ => "question",
     }
@@ -3594,7 +3809,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let fast = fast_in(&config["modelOptions"]);
     let options = options_value(&config["modelOptions"]);
     let answered = if open.answering.is_some() { open.answers.len() } else { 0 };
-    let ask = asked(&open.entries).and_then(|p| ask_value(p, answered)).unwrap_or(Value::Nil);
+    let ask = asked(open.entries.iter().rev().filter_map(|e| e.json.as_ref())).and_then(|p| ask_value(p, answered)).unwrap_or(Value::Nil);
     let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
     let live = chats.running(&open.id);
     let tasks = background_tasks(&session);
@@ -3638,7 +3853,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),
         ("ask", ask),
         ("queue", Value::List(queue.into())),
-        ("todos", todos(&open.entries)),
+        ("todos", todos(open)),
         ("tasks", Value::List(tasks.into())),
     ];
     if let Some(branch) = chat["branch"].as_str() {
@@ -3682,12 +3897,9 @@ fn background_tasks(session: &Json) -> Vec<Value> {
 }
 
 /// The plan: the latest todo list the agent wrote.
-fn todos(entries: &[Json]) -> Value {
-    let latest = entries
-        .iter()
-        .rev()
-        .flat_map(|e| e["parts"].as_array().into_iter().flatten().rev())
-        .find(|p| p["kind"].as_str() == Some("tool") && p["call"]["kind"].as_str() == Some("todo"));
+fn todos(open: &Open) -> Value {
+    let latest = latest_todo(open.entries.iter().rev().filter_map(|e| e.json.as_ref()))
+        .or(open.older_todo.as_ref().map(|(_, part)| part));
     let Some(part) = latest else {
         return Value::List(Rc::from([]));
     };
@@ -3916,19 +4128,29 @@ fn base64(bytes: &[u8]) -> String {
 mod tests {
     #[test]
     fn a_reset_keeps_what_it_left_as_it_was() {
-        let built_of = |ids: &[&str]| -> std::collections::HashMap<String, Option<zgx_script::Value>> {
-            ids.iter().map(|id| ((*id).to_owned(), None)).collect()
+        let built_of = |ids: &[&str]| -> std::collections::HashMap<Rc<str>, Option<zgx_script::Value>> {
+            ids.iter().map(|id| (Rc::from(*id), None)).collect()
         };
-        let before = vec![
+        let mut before: Vec<super::Entry> = [
             serde_json::json!({ "id": "a", "text": "same" }),
             serde_json::json!({ "id": "b", "text": "was" }),
             serde_json::json!({ "id": "gone", "text": "left" }),
-        ];
-        let now = vec![
+        ]
+        .into_iter()
+        .map(super::Entry::new)
+        .collect();
+        // (Settled: told from its sum alone.)
+        let mut no_plan = None;
+        super::settle(&mut before[0], 0, &mut no_plan);
+        assert!(before[0].json.is_none());
+        let now: Vec<super::Entry> = [
             serde_json::json!({ "id": "a", "text": "same" }),
             serde_json::json!({ "id": "b", "text": "now" }),
             serde_json::json!({ "id": "new", "text": "came" }),
-        ];
+        ]
+        .into_iter()
+        .map(super::Entry::new)
+        .collect();
         let mut built = built_of(&["a", "b", "gone"]);
         super::keep_unchanged(&mut built, &before, &now);
         assert!(built.contains_key("a"));
@@ -3938,21 +4160,73 @@ mod tests {
     }
 
     #[test]
+    fn a_settled_entry_keeps_its_plan_and_grows_only_from_a_whole_copy() {
+        let plan = |text: &str| {
+            serde_json::json!({ "id": text, "role": "assistant", "parts": [
+                { "id": "p", "kind": "tool", "call": { "kind": "todo", "items": [{ "text": text, "status": "pending" }] } },
+            ] })
+        };
+        let mut older = None;
+        let (mut first, mut second) = (super::Entry::new(plan("first")), super::Entry::new(plan("second")));
+        // (Newest first, as a long chat's rows are built, and the other way.)
+        super::settle(&mut second, 1, &mut older);
+        super::settle(&mut first, 0, &mut older);
+        assert_eq!(older.as_ref().unwrap().1["call"]["items"][0]["text"], "second");
+        let open = super::Open { entries: vec![first, second], older_todo: older, ..super::Open::default() };
+        assert_eq!(super::todos(&open).list()[0].field("text"), Some(&Value::from("second")));
+        // Words for an entry whose copy is gone: out of step, so a reset comes.
+        let mut entries = open.entries;
+        let mut words = serde_json::json!({ "append": [{ "entry": "first", "part": "p", "text": "x", "len": 1 }] });
+        assert!(super::apply(&mut entries, &mut words).is_err());
+    }
+
+    #[test]
+    fn a_row_holds_each_of_its_repeats_once() {
+        let tool = || Value::record([("id", Value::from("t1")), ("kind", Value::from("exec")), ("call", Value::from("cargo build"))]);
+        let words = "the same words";
+        let mut row = Value::record([
+            ("text", Value::from(words)),
+            ("copy", Value::from(words)),
+            ("tools", Value::List(Rc::from([tool()]))),
+            ("blocks", Value::List(Rc::from([Value::record([("kind", Value::from("group")), ("tools", Value::List(Rc::from([tool()])))])]))),
+        ]);
+        let before = row.clone();
+        // (Built just now: nothing else holds its parts.)
+        drop(before.clone());
+        let same = row == before;
+        drop(before);
+        super::share_parts(&mut row);
+        assert!(same);
+        let tools = row.field("tools").unwrap().list();
+        let grouped = row.field("blocks").unwrap().list()[0].field("tools").unwrap().list();
+        let (Value::Map(one), Value::Map(two)) = (&tools[0], &grouped[0]) else { panic!("records") };
+        assert!(Rc::ptr_eq(one, two), "one copy of a tool");
+        let (Some(Value::Str(text)), Some(Value::Str(copy))) = (row.field("text"), row.field("copy")) else { panic!("words") };
+        assert!(Rc::ptr_eq(text, copy), "one copy of its words");
+    }
+
+    #[test]
     fn another_views_rows_are_taken_only_as_they_are_here() {
-        let entries = vec![
+        let entries: Vec<super::Entry> = [
             serde_json::json!({ "id": "a", "text": "same" }),
             serde_json::json!({ "id": "b", "text": "theirs" }),
-        ];
+        ]
+        .into_iter()
+        .map(super::Entry::new)
+        .collect();
         let mut open = super::Open {
             id: "chat".into(),
-            entries: vec![
+            entries: [
                 serde_json::json!({ "id": "a", "text": "same" }),
                 serde_json::json!({ "id": "b", "text": "mine" }),
-            ],
+            ]
+            .into_iter()
+            .map(super::Entry::new)
+            .collect(),
             ..super::Open::default()
         };
-        let theirs: std::collections::HashMap<String, Option<zgx_script::Value>> =
-            [("a".to_owned(), None), ("b".to_owned(), None)].into_iter().collect();
+        let theirs: std::collections::HashMap<Rc<str>, Option<zgx_script::Value>> =
+            [(Rc::from("a"), None), (Rc::from("b"), None)].into_iter().collect();
         // (Built for another model's name: none of it.)
         open.built_model = Some(Some("mine".into()));
         super::reuse_built(&mut open, &entries, &theirs, &Some(Some("theirs".into())));
@@ -4383,7 +4657,7 @@ mod tests {
     #[test]
     fn appends_change_only_what_shows() {
         let mut entries = Vec::new();
-        let reset = json!({ "reset": [
+        let mut reset = json!({ "reset": [
             { "id": "a", "role": "assistant", "status": "streaming", "parts": [
                 { "kind": "tool", "id": "k", "text": "out" },
                 { "kind": "reasoning", "id": "r", "text": "" },
@@ -4391,38 +4665,38 @@ mod tests {
             ] },
             { "id": "b", "role": "assistant", "status": "complete", "parts": [{ "kind": "text", "id": "t", "text": "Done" }] },
         ] });
-        apply(&mut entries, &reset).unwrap();
+        apply(&mut entries, &mut reset).unwrap();
         let frame = |entry: &str, part: &str, text: &str, len: usize| {
             json!({ "upsert": [], "remove": [], "append": [{ "entry": entry, "part": part, "text": text, "len": len }], "count": 2 })
         };
         // More of a tool's output: nothing shows it.
-        assert!(matches!(apply(&mut entries, &frame("a", "k", "put", 6)), Ok(Change::Quiet)));
+        assert!(matches!(apply(&mut entries, &mut frame("a", "k", "put", 6)), Ok(Change::Quiet)));
         assert_eq!(entries[0]["parts"][0]["text"], "output");
         // Thinking's first words make its row; more of them don't.
-        assert!(matches!(apply(&mut entries, &frame("a", "r", "Hmm", 3)), Ok(Change::Rows)));
-        assert!(matches!(apply(&mut entries, &frame("a", "r", "…", 6)), Ok(Change::Quiet)));
+        assert!(matches!(apply(&mut entries, &mut frame("a", "r", "Hmm", 3)), Ok(Change::Rows)));
+        assert!(matches!(apply(&mut entries, &mut frame("a", "r", "…", 6)), Ok(Change::Quiet)));
         // Words of the reply being written: the draft; of a finished one,
         // its row.
-        assert!(matches!(apply(&mut entries, &frame("a", "t", " there", 8)), Ok(Change::Words)));
-        assert!(matches!(apply(&mut entries, &frame("b", "t", "!", 5)), Ok(Change::Rows)));
+        assert!(matches!(apply(&mut entries, &mut frame("a", "t", " there", 8)), Ok(Change::Words)));
+        assert!(matches!(apply(&mut entries, &mut frame("b", "t", "!", 5)), Ok(Change::Rows)));
         // Out of step (a length that doesn't match): resubscribe.
-        assert!(apply(&mut entries, &frame("a", "t", "x", 99)).is_err());
+        assert!(apply(&mut entries, &mut frame("a", "t", "x", 99)).is_err());
     }
 
     #[test]
     fn a_frame_grows_a_reply_by_its_words_alone() {
         let mut entries = Vec::new();
-        let reset = json!({ "reset": [
+        let mut reset = json!({ "reset": [
             { "id": "u", "role": "user", "parts": [{ "kind": "text", "id": "t0", "text": "hi" }] },
             { "id": "a", "role": "assistant", "status": "streaming", "parts": [{ "kind": "text", "id": "t0", "text": "Hel" }] },
         ] });
-        assert!(matches!(apply(&mut entries, &reset), Ok(Change::Rows)));
-        let words = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "lo", "len": 5 }], "count": 2 });
-        assert!(matches!(apply(&mut entries, &words), Ok(Change::Words)));
-        assert_eq!(entry_text(&entries[1]), "Hello");
+        assert!(matches!(apply(&mut entries, &mut reset), Ok(Change::Rows)));
+        let mut words = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "lo", "len": 5 }], "count": 2 });
+        assert!(matches!(apply(&mut entries, &mut words), Ok(Change::Words)));
+        assert_eq!(entry_text(entries[1].json.as_ref().unwrap()), "Hello");
         // Out of step: a length that doesn't add up.
-        let wrong = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "!", "len": 9 }], "count": 2 });
-        assert!(apply(&mut entries, &wrong).is_err());
+        let mut wrong = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "!", "len": 9 }], "count": 2 });
+        assert!(apply(&mut entries, &mut wrong).is_err());
     }
 
     #[test]
@@ -4645,9 +4919,9 @@ mod tests {
 
     #[test]
     fn an_upsert_lands_after_its_anchor() {
-        let mut entries = vec![json!({ "id": "a" }), json!({ "id": "c" })];
-        let frame = json!({ "upsert": [{ "after": "a", "entry": { "id": "b" } }], "remove": [], "append": [], "count": 3 });
-        assert!(matches!(apply(&mut entries, &frame), Ok(Change::Rows)));
+        let mut entries = vec![Entry::new(json!({ "id": "a" })), Entry::new(json!({ "id": "c" }))];
+        let mut frame = json!({ "upsert": [{ "after": "a", "entry": { "id": "b" } }], "remove": [], "append": [], "count": 3 });
+        assert!(matches!(apply(&mut entries, &mut frame), Ok(Change::Rows)));
         let ids: Vec<_> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["a", "b", "c"]);
     }

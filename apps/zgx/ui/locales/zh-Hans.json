@@ -1078,7 +1078,6 @@
         "description": "在所有位置模糊显示，方便共享屏幕。点按即可查看。",
         "terms": "屏幕共享 录屏 模糊 马赛克 隐私 遮盖 screen sharing recording blur blurred mosaic private censor redact"
       },
-      "links": "链接",
       "links_in": {
         "external": "默认浏览器。",
         "tab": "对话旁边的浏览器标签页。"
@@ -1086,11 +1085,6 @@
       "open_links": {
         "label": "打开链接的位置",
         "terms": "网页 链接 网址 浏览器 标签页 面板 外部 web link url browser tab panel zeron external"
-      },
-      "pull_requests": {
-        "label": "打开拉取请求的位置",
-        "terms": "拉取请求 徽标 看板 浏览器 pr pull request badges board browser github",
-        "native": "在 Zeron 中查看，显示在对话或拉取请求看板旁边。"
       },
       "thread_naming": {
         "label": "对话命名",
@@ -1130,10 +1124,6 @@
       "send_with": {
         "enter": "Enter",
         "mod_enter": "{key}"
-      },
-      "pull_requests": {
-        "native": "拉取请求视图",
-        "browser": "App 内浏览器"
       }
     },
     "search": {
