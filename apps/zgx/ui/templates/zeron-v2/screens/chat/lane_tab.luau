@@ -168,10 +168,17 @@ local function composer(chat: string, view: any, name: string): Node
 			checkout = "local",
 			branch = row.branch,
 		}
-		project:set(place.project)
-		device:set(place.device)
+		-- (Started elsewhere, the panel home's group "+": that project or
+		-- device instead, its branch the project's own. The seed stays the
+		-- parent's, so the send carries the place.)
+		local at = lanes.starts:peek()[chat]
+		local start_project = if at and at.project then at.project elseif at and at.device and at.device ~= place.device then nil else place.project
+		local start_device = if at and at.device then at.device else place.device
+		local moved = start_project ~= place.project or start_device ~= place.device
+		project:set(start_project)
+		device:set(start_device)
 		checkout:set(place.checkout)
-		branch:set(place.branch)
+		branch:set(if moved then nil else place.branch)
 		seed:set(place)
 	end)
 	local where = Where.bind {
@@ -461,6 +468,14 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,
+		-- (A split's pane: the keys stay with this chat, in the window's composer.)
+		on_jump = if split
+			then function()
+				ui.after(0, function()
+					Shared.focus:add(1)
+				end)
+			end
+			else nil,
 		pictures = pictures,
 		sent_pictures = sent_pictures,
 		on_open_subagent = function(sub: any)

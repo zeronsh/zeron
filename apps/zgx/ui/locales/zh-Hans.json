@@ -2864,6 +2864,10 @@
       "subagents": "子代理",
       "open_side": "打开侧边对话 {title}",
       "open_subagent": "打开子代理 {title}",
+      "working_first": "进行中的优先",
+      "mark_all_read": "将已完成的全部标为已读",
+      "new_side_in": "在 {name} 中新建侧边对话",
+      "new_side_on": "在 {name} 上新建侧边对话",
       "editor": {
         "add_title": "添加操作",
         "edit_title": "编辑操作",

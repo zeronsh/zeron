@@ -98,7 +98,31 @@ struct Chats {
     /// `chat.catalog` is then its catalog, as the shipping app's pickers
     /// read their run device's (`list_harnesses(device)`).
     remote: RefCell<Option<Remote>>,
+    /// The chat a view has just let go of, kept a moment: a chat on its own
+    /// that becomes a split is opened again at once, in its pane, and has
+    /// what it had rather than reading and building it all again.
+    let_go: RefCell<Option<LetGo>>,
+    let_go_turn: Cell<u64>,
 }
+
+/// What a view's chat had read and built, as it let it go.
+struct LetGo {
+    id: String,
+    entries: Vec<Json>,
+    built: HashMap<String, Option<Value>>,
+    built_model: Option<Option<String>>,
+    context: Option<f64>,
+    context_usage: (Option<f64>, Option<f64>),
+}
+
+/// How long a chat let go of is kept for another view to take it.
+const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How many entries a reset may leave to build at once; more go in slices.
+const BUILT_AT_ONCE: usize = 300;
+/// A slice of building, and the rest after it, so frames get the thread.
+const BUILD_SLICE: std::time::Duration = std::time::Duration::from_millis(3);
+const BUILD_REST: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Another device's catalog, read through the engine (`targetDeviceId`).
 struct Remote {
@@ -220,6 +244,14 @@ struct Open {
     /// them.
     built: HashMap<String, Option<Value>>,
     built_model: Option<Option<String>>,
+    /// Opened with the rows another view had (`LetGo`), which the engine's
+    /// first frames, its newest entries, mustn't replace.
+    has_whole: bool,
+    /// Building a reset's entries a slice at a time (`build_in_steps`): what
+    /// shows stays as it is until that's done.
+    stepping: bool,
+    /// This view is the one doing it (another view of the chat waits).
+    builds: bool,
 }
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
@@ -563,6 +595,44 @@ impl Chats {
 
     fn views(&self) -> Vec<Rc<View>> {
         self.views.borrow().iter().filter_map(Weak::upgrade).collect()
+    }
+
+    /// Keeps what a view's chat had for a moment (`LET_GO_KEPT`), for another
+    /// view that's about to open it.
+    fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
+        let Some(old) = old.filter(|o| o.heard) else { return };
+        let Open { id, entries, built, built_model, context, context_usage, .. } = old;
+        *self.let_go.borrow_mut() = Some(LetGo { id, entries, built, built_model, context, context_usage });
+        let turn = self.let_go_turn.get() + 1;
+        self.let_go_turn.set(turn);
+        let me = self.clone();
+        engine::get().spawn(async move {
+            zgx::timer::sleep(LET_GO_KEPT).await;
+            if me.let_go_turn.get() == turn {
+                me.let_go.borrow_mut().take();
+            }
+        });
+    }
+
+    /// What a view let go of just now, if it was this chat: an `Open` that
+    /// has its rows.
+    fn take_let_go(&self, id: &str) -> Option<Open> {
+        let mut slot = self.let_go.borrow_mut();
+        if slot.as_ref()?.id != id {
+            return None;
+        }
+        let held = slot.take()?;
+        Some(Open {
+            id: held.id,
+            entries: held.entries,
+            heard: true,
+            context: held.context,
+            context_usage: held.context_usage,
+            built: held.built,
+            built_model: held.built_model,
+            has_whole: true,
+            ..Open::default()
+        })
     }
 
     fn publish_views(&self) {
@@ -996,11 +1066,21 @@ impl View {
         if same {
             return;
         }
+        let chats = CHATS.with(Rc::clone);
+        let was_snapshot = self.snapshot.replace(false);
         self.generation.set(self.generation.get() + 1);
-        self.snapshot.set(false);
-        *self.open.borrow_mut() = id.map(|id| Open { id, ..Open::default() });
-        self.messages.set(Value::List(Rc::from([])));
-        self.subagents.set(Value::List(Rc::from([])));
+        let next = id.map(|id| chats.take_let_go(&id).unwrap_or(Open { id, ..Open::default() }));
+        let has_rows = next.as_ref().is_some_and(|o| o.heard);
+        let old = self.open.replace(next);
+        if !was_snapshot {
+            chats.keep_let_go(old);
+        }
+        if has_rows {
+            self.publish_messages();
+        } else {
+            self.messages.set(Value::List(Rc::from([])));
+            self.subagents.set(Value::List(Rc::from([])));
+        }
         self.draft.set(draft_value("", ""));
         self.subscribe();
         self.publish_session();
@@ -1107,10 +1187,23 @@ impl View {
                 open.context = tokens.zip(window).filter(|(_, w)| *w > 0.).map(|(t, w)| (t / w).min(1.));
                 open.context_usage = (tokens, window);
             }
+            // (Opened with all its rows: not down to the newest few, until
+            // the engine's whole copy comes.)
+            if open.has_whole {
+                if frame.get("reset").is_none() || frame["historyPending"].as_bool() == Some(true) {
+                    return;
+                }
+                open.has_whole = false;
+            }
+            let before = frame.get("reset").map(|_| std::mem::take(&mut open.entries));
             let result = apply(&mut open.entries, frame);
-            // What it changed, to build again: every entry on a reset;
-            // else the ones it touched.
-            if frame.get("reset").is_some() || result.is_err() {
+            // What it changed, to build again: on a reset, the entries that
+            // differ from what this view had, unless another view of this
+            // chat has them built; else the ones it touched.
+            if let Some(before) = before {
+                keep_unchanged(&mut open.built, &before, &open.entries);
+                self.share_built(open);
+            } else if result.is_err() {
                 open.built.clear();
             } else {
                 for key in ["upsert", "append"] {
@@ -1138,10 +1231,34 @@ impl View {
             Ok(Change::Quiet) => {}
             Ok(Change::Words) => self.publish_draft(),
             Ok(Change::Rows) => {
-                self.publish_messages();
+                if self.long_to_build(frame) {
+                    self.build_in_steps();
+                } else if !self.open.borrow().as_ref().is_some_and(|o| o.stepping) {
+                    self.publish_messages();
+                }
                 self.publish_session();
             }
             Err(()) => self.resubscribe(),
+        }
+    }
+
+    /// What another view of this chat has built, for the entries here that
+    /// are the same there: a chat in a split is watched by its pane and, when
+    /// focused, by the window too.
+    fn share_built(&self, open: &mut Open) {
+        let chats = CHATS.with(Rc::clone);
+        let let_go = chats.let_go.borrow();
+        if let Some(held) = let_go.as_ref().filter(|h| h.id == open.id) {
+            reuse_built(open, &held.entries, &held.built, &held.built_model);
+        }
+        for view in chats.views() {
+            if std::ptr::eq(&*view, self) {
+                continue;
+            }
+            let Ok(other) = view.open.try_borrow() else { continue };
+            if let Some(other) = other.as_ref().filter(|o| o.id == open.id) {
+                reuse_built(open, &other.entries, &other.built, &other.built_model);
+            }
         }
     }
 
@@ -1175,24 +1292,100 @@ impl View {
         self.draft.set(value);
     }
 
+    /// Whether a reset left so much to build that it goes a little at a time
+    /// (`build_in_steps`): the newest entries already show from the frame
+    /// before it, and a long chat's whole history would hold up the window.
+    fn long_to_build(&self, frame: &Json) -> bool {
+        if frame.get("reset").is_none() || frame["historyPending"].as_bool() == Some(true) {
+            return false;
+        }
+        let slot = self.open.borrow();
+        let Some(open) = slot.as_ref() else { return false };
+        !open.stepping
+            && open.entries.iter().filter(|e| e["id"].as_str().is_some_and(|id| !open.built.contains_key(id))).count()
+                > BUILT_AT_ONCE
+    }
+
+    /// Builds this chat's entries a slice at a time between frames, newest
+    /// first, then publishes them. Another view of the chat that's building
+    /// them is waited for, and what it built taken.
+    fn build_in_steps(self: &Rc<Self>) {
+        let waits = self.sibling_building();
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.stepping = true;
+            open.builds = !waits;
+        }
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        engine::get().spawn(async move {
+            loop {
+                zgx::timer::sleep(BUILD_REST).await;
+                let Some(view) = weak.upgrade() else { return };
+                if view.generation.get() != generation {
+                    return;
+                }
+                if view.step() {
+                    continue;
+                }
+                if let Some(open) = view.open.borrow_mut().as_mut() {
+                    open.stepping = false;
+                    open.builds = false;
+                }
+                view.publish_messages();
+                view.publish_session();
+                return;
+            }
+        });
+    }
+
+    /// Another view of this chat, building it now.
+    fn sibling_building(&self) -> bool {
+        let Some(id) = self.open_id() else { return false };
+        CHATS.with(Rc::clone).views().iter().any(|view| {
+            !std::ptr::eq(&**view, self)
+                && view.open.try_borrow().is_ok_and(|o| o.as_ref().is_some_and(|o| o.id == id && o.builds))
+        })
+    }
+
+    /// One slice of `build_in_steps`: whether there's more.
+    fn step(&self) -> bool {
+        if self.sibling_building() {
+            return true;
+        }
+        let chats = CHATS.with(Rc::clone);
+        let mut slot = self.open.borrow_mut();
+        let Some(open) = slot.as_mut() else { return false };
+        if !open.builds {
+            open.builds = true;
+            self.share_built(open);
+        }
+        let (model, device) = build_context(open, &chats);
+        let open_id = open.id.clone();
+        let Open { entries, built, .. } = open;
+        let started = std::time::Instant::now();
+        for entry in entries.iter().rev() {
+            let Some(id) = entry["id"].as_str() else { continue };
+            if built.contains_key(id) {
+                continue;
+            }
+            built.insert(id.to_owned(), built_entry(entry, &open_id, device.as_deref(), model.as_deref()));
+            if started.elapsed() >= BUILD_SLICE {
+                return true;
+            }
+        }
+        false
+    }
+
     fn publish_messages(&self) {
         let chats = CHATS.with(Rc::clone);
         let list = {
             let mut slot = self.open.borrow_mut();
             let Some(open) = slot.as_mut() else { return };
-            let chat = chats.chat(&open.id).unwrap_or(Json::Null);
-            let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
-            let model = chat["config"]["model"].as_str().map(|m| {
-                chats.label_of(&harness, m).unwrap_or_else(|| m.to_owned())
-            });
-            // (Another model's name: every reply names it again.)
-            if open.built_model.as_ref() != Some(&model) {
-                open.built.clear();
-                open.built_model = Some(model.clone());
+            // (Being built a slice at a time: it publishes when that's done.)
+            if open.stepping {
+                return;
             }
-            // (Where a reply's visuals are read from: the chat's host, when
-            // it isn't this device.)
-            let device = chats.target(&chat);
+            let (model, device) = build_context(open, &chats);
             let open_id = open.id.clone();
             let Open { entries, built, .. } = open;
             let mut list: Vec<Value> = entries
@@ -1203,10 +1396,7 @@ impl View {
                     };
                     built
                         .entry(id.to_owned())
-                        .or_insert_with(|| match with_host(e, &open_id, device.as_deref()) {
-                            Some(e) => message(&e, model.as_deref()),
-                            None => message(e, model.as_deref()),
-                        })
+                        .or_insert_with(|| built_entry(e, &open_id, device.as_deref(), model.as_deref()))
                         .clone()
                 })
                 .collect();
@@ -2279,6 +2469,69 @@ enum Change {
     Rows,
 }
 
+/// The model's name a chat's replies carry, building them again if it's
+/// another now, and the device its visuals are read from (the chat's host,
+/// when it isn't this one).
+fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<String>) {
+    let chat = chats.chat(&open.id).unwrap_or(Json::Null);
+    let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
+    let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, m).unwrap_or_else(|| m.to_owned()));
+    if open.built_model.as_ref() != Some(&model) {
+        open.built.clear();
+        open.built_model = Some(model.clone());
+    }
+    (model, chats.target(&chat))
+}
+
+/// An entry as its row reads it.
+fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
+    match with_host(entry, doc, device) {
+        Some(entry) => message(&entry, model),
+        None => message(entry, model),
+    }
+}
+
+/// Entries by their ids.
+fn by_id(entries: &[Json]) -> HashMap<&str, &Json> {
+    entries.iter().filter_map(|e| Some((e["id"].as_str()?, e))).collect()
+}
+
+/// `built` less what a reset changed: only the entries it has as they were.
+fn keep_unchanged(built: &mut HashMap<String, Option<Value>>, before: &[Json], now: &[Json]) {
+    if built.is_empty() {
+        return;
+    }
+    let (before, now) = (by_id(before), by_id(now));
+    built.retain(|id, _| {
+        let id = id.as_str();
+        before.get(id).is_some_and(|was| now.get(id) == Some(was))
+    });
+}
+
+/// Into `open.built`, the values built from `entries` for those of its own
+/// entries that are the same. (Built for another model's name: none.)
+fn reuse_built(
+    open: &mut Open,
+    entries: &[Json],
+    built: &HashMap<String, Option<Value>>,
+    built_model: &Option<Option<String>>,
+) {
+    if built_model.is_none() || (open.built_model.is_some() && open.built_model != *built_model) {
+        return;
+    }
+    open.built_model = built_model.clone();
+    let theirs = by_id(entries);
+    for entry in &open.entries {
+        let Some(id) = entry["id"].as_str() else { continue };
+        if !open.built.contains_key(id)
+            && theirs.get(id) == Some(&entry)
+            && let Some(value) = built.get(id)
+        {
+            open.built.insert(id.to_owned(), value.clone());
+        }
+    }
+}
+
 /// A frame applied to `entries` (crates/doc/src/transcript_delta.rs's
 /// `apply_transcript_frame`); `Err` when the copy is out of step.
 fn apply(entries: &mut Vec<Json>, frame: &Json) -> Result<Change, ()> {
@@ -2604,8 +2857,12 @@ fn reply_copy_text(entry: &Json) -> String {
 /// others, nor thinking with them. A group is open while the reply streams
 /// and it is the reply's tail.
 fn blocks(entry: &Json) -> Value {
-    let parts = entry["parts"].as_array().cloned().unwrap_or_default();
-    let streaming = entry["status"].as_str() == Some("streaming");
+    let parts: Vec<&Json> = entry["parts"].as_array().into_iter().flatten().collect();
+    blocks_of(&parts, entry["status"].as_str() == Some("streaming"))
+}
+
+/// The blocks of these parts of a reply (`streaming`: still being written).
+fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
     let last_ix = parts.len().saturating_sub(1);
     let mut out: Vec<Value> = Vec::new();
     // The group being gathered: its parts, and the last one's index.
@@ -2637,14 +2894,14 @@ fn blocks(entry: &Json) -> Value {
     // generated image), gathered into one block: a display call that worked
     // between them doesn't part them; anything else does.
     let mut pictures: Vec<&Json> = Vec::new();
-    for (ix, part) in parts.iter().enumerate() {
+    for (ix, &part) in parts.iter().enumerate() {
         let kind = part["kind"].as_str();
         if kind == Some("image") {
             flush(&mut out, &mut group, group_last);
             pictures.push(part);
             continue;
         }
-        if display_tool(part) && display_failed_block(part, &parts[ix + 1..]).is_none() {
+        if display_tool(part) && display_failed_block(part, parts[ix + 1..].iter().copied()).is_none() {
             continue;
         }
         out.extend(images_block(&mut pictures));
@@ -2653,7 +2910,7 @@ fn blocks(entry: &Json) -> Value {
             // alone: no row, in no group or count. Failed, a quiet line at
             // its place says so (unless a later call of it showed).
             Some("tool") if display_tool(part) => {
-                if let Some(failed) = display_failed_block(part, &parts[ix + 1..]) {
+                if let Some(failed) = display_failed_block(part, parts[ix + 1..].iter().copied()) {
                     flush(&mut out, &mut group, group_last);
                     out.push(failed);
                 }
@@ -2740,10 +2997,8 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
     if tools.is_empty() {
         return None;
     }
-    let mut work_entry = entry.clone();
-    work_entry["parts"] = Json::Array(
-        parts.iter().enumerate().filter(|(ix, p)| is_work(*ix, p)).map(|(_, p)| p.clone()).collect(),
-    );
+    let work_parts: Vec<&Json> =
+        parts.iter().enumerate().filter(|(ix, p)| is_work(*ix, p)).map(|(_, p)| p).collect();
     let worked = (!streaming)
         .then(|| entry["durationMs"].as_f64())
         .flatten()
@@ -2759,7 +3014,7 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
         ("summary", Value::from(line.as_str())),
         ("live", Value::Bool(streaming)),
         ("tools", Value::List(tools.iter().filter_map(|p| tool(p)).collect::<Vec<_>>().into())),
-        ("blocks", blocks(&work_entry)),
+        ("blocks", blocks_of(&work_parts, streaming)),
     ]);
     let mut out: Vec<Value> = Vec::new();
     let mut placed = false;
@@ -2842,12 +3097,12 @@ fn display_name(part: &Json) -> Option<&str> {
 /// (its output, or nothing yet, shows), and for one a later call of the
 /// same tool in the reply (`later`, its parts after this one) got past:
 /// the agent tried again and it showed, so the stumble isn't worth a line.
-fn display_failed_block(part: &Json, later: &[Json]) -> Option<Value> {
+fn display_failed_block<'a>(part: &Json, later: impl IntoIterator<Item = &'a Json>) -> Option<Value> {
     let name = display_name(part)?;
     if part["isError"].as_bool() != Some(true) {
         return None;
     }
-    if later.iter().any(|p| display_name(p) == Some(name) && p["isError"].as_bool() != Some(true)) {
+    if later.into_iter().any(|p| display_name(p) == Some(name) && p["isError"].as_bool() != Some(true)) {
         return None;
     }
     let why = part["output"].as_str().map(str::trim).unwrap_or_default();
@@ -3613,6 +3868,56 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reset_keeps_what_it_left_as_it_was() {
+        let built_of = |ids: &[&str]| -> std::collections::HashMap<String, Option<zgx_script::Value>> {
+            ids.iter().map(|id| ((*id).to_owned(), None)).collect()
+        };
+        let before = vec![
+            serde_json::json!({ "id": "a", "text": "same" }),
+            serde_json::json!({ "id": "b", "text": "was" }),
+            serde_json::json!({ "id": "gone", "text": "left" }),
+        ];
+        let now = vec![
+            serde_json::json!({ "id": "a", "text": "same" }),
+            serde_json::json!({ "id": "b", "text": "now" }),
+            serde_json::json!({ "id": "new", "text": "came" }),
+        ];
+        let mut built = built_of(&["a", "b", "gone"]);
+        super::keep_unchanged(&mut built, &before, &now);
+        assert!(built.contains_key("a"));
+        assert!(!built.contains_key("b"), "changed");
+        assert!(!built.contains_key("gone"), "left the transcript");
+        assert!(!built.contains_key("new"), "never built");
+    }
+
+    #[test]
+    fn another_views_rows_are_taken_only_as_they_are_here() {
+        let entries = vec![
+            serde_json::json!({ "id": "a", "text": "same" }),
+            serde_json::json!({ "id": "b", "text": "theirs" }),
+        ];
+        let mut open = super::Open {
+            id: "chat".into(),
+            entries: vec![
+                serde_json::json!({ "id": "a", "text": "same" }),
+                serde_json::json!({ "id": "b", "text": "mine" }),
+            ],
+            ..super::Open::default()
+        };
+        let theirs: std::collections::HashMap<String, Option<zgx_script::Value>> =
+            [("a".to_owned(), None), ("b".to_owned(), None)].into_iter().collect();
+        // (Built for another model's name: none of it.)
+        open.built_model = Some(Some("mine".into()));
+        super::reuse_built(&mut open, &entries, &theirs, &Some(Some("theirs".into())));
+        assert!(open.built.is_empty());
+        open.built_model = None;
+        super::reuse_built(&mut open, &entries, &theirs, &Some(Some("theirs".into())));
+        assert!(open.built.contains_key("a"));
+        assert!(!open.built.contains_key("b"));
+        assert_eq!(open.built_model, Some(Some("theirs".into())));
+    }
+
 
     #[test]
     fn a_sent_pick_shows_its_page_over_its_number_and_words() {
