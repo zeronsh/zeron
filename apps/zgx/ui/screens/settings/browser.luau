@@ -166,11 +166,10 @@ function M.view(): Node
 				gap = "$space.2",
 				pt = "$space.2",
 				ui.row {
-					w_full = true,
-					-- (The words on the rows' edge; Reset all's ink on the
-					-- controls' edge, past its own padding.)
-					pl = ds.Settings.inset(),
-					pr = ds.Settings.inset(SNUG),
+					-- (The words on the column's edge, the cards'; Reset all's
+					-- ink on its other edge, past its own padding: stretched
+					-- across, not w_full, so the margin widens it.)
+					mr = ui.raw(-SNUG, "the ghost's own padding"),
 					items = "center",
 					ds.SectionTitle {
 						function(): string

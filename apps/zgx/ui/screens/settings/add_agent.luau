@@ -479,7 +479,6 @@ function M.agent_page(id: string, nav: Nav): Node
 				w_full = true,
 				gap = "$space.2",
 				items = "start",
-				px = ds.Settings.inset(),
 				color = "$text.tertiary",
 				ds.Icon { name = "shield-check", size = 14, mt = 2 },
 				ui.text {

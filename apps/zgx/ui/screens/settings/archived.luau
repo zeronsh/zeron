@@ -389,9 +389,8 @@ function M.view(): Node
 			local n = #all()
 			return if n == 0 then locale.s("settings.archived.description_none") else locale.s("settings.archived.description", { n = n })
 		end,
-		trail = delete_all_button(),
-		-- (At the top right, on the title's line, as Plugins' is.)
-		trail_top = true,
+		-- (On the title's line, as Plugins' choice of device is.)
+		actions = delete_all_button(),
 		ui.show(
 			function(): boolean
 				return #all() == 0
@@ -427,7 +426,6 @@ function M.view(): Node
 			ui.row {
 				id = "archived-none-match",
 				w_full = true,
-				px = ds.Settings.inset(),
 				ds.Hint {
 					function(): string
 						return locale.s("settings.archived.none_match", { q = string.match(query:get(), "^%s*(.-)%s*$") or "" })

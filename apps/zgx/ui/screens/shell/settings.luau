@@ -448,7 +448,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 						return ds.page.gutter(page_w:get())
 					end,
 					pt = ds.page.top,
-					pb = "$space.8",
+					pb = ds.page.bottom,
 					items = "center",
 					ui.presence(function(): string
 						local id = route.current:get().page

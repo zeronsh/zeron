@@ -279,9 +279,9 @@ test("Profile, too narrow for two columns, centres the card over groups at the p
 	-- Over the groups, and on their middle.
 	expect(cy < gy).to_be(true)
 	expect(math.abs((cx + cw / 2) - (gx + gw / 2)) <= 1).to_be(true)
-	-- The groups take the page's measure: the title sits on the rows' text,
-	-- 17 in from the card's edge (16 from a row's box, inside the card's 1).
-	expect(tx - gx).to_be(16)
+	-- The groups take the page's measure: the title sits on the card's
+	-- edge (a point out from a row's box, inside the card's 1).
+	expect(tx - gx).to_be(-1)
 	expect(gw > 400).to_be(true)
 	-- Wide again, the card stands beside them.
 	app:resize(1200, 900)

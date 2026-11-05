@@ -227,7 +227,6 @@ local function day_block(day: Day, _i: number, now: State<any>): Node
 		gap = "$space.2",
 		ui.row {
 			w_full = true,
-			px = ds.Settings.inset(),
 			ds.SectionTitle {
 				function(): string
 					return (now:get() :: Day).name

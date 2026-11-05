@@ -31,6 +31,10 @@ export type Props = {
 	-- still runs the whole width: labels on a card's words, the rule on its
 	-- edges (Settings.Catalog).
 	inset: any?,
+	-- Underline tabs whose labels stand on the words' edge (a page's, under
+	-- its title): no room either side of a label, the bar exactly under it,
+	-- the labels as far apart as they were.
+	flush: boolean?,
 	on_change: ((value: any) -> ())?,
 }
 
@@ -41,6 +45,7 @@ return function(props: Props): Node
 	local look: Look = props.look or "underline"
 	local size = props.size or "md"
 	local pill = look == "pill"
+	local flush = props.flush == true and not pill
 	local H = if pill then (if size == "sm" then 26 else 30) else (if size == "sm" then 32 else 36)
 	local refs: { any } = {}
 	local tabs: { Node } = {}
@@ -100,7 +105,7 @@ return function(props: Props): Node
 				disabled = o.disabled,
 				cursor = if o.disabled then nil else "pointer",
 				h = H,
-				px = if pill then "$space.3" else "$space.1",
+				px = if pill then "$space.3" elseif flush then 0 else "$space.1",
 				gap = "$zeron.space.tight",
 				items = "center",
 				shrink = 0,
@@ -128,8 +133,9 @@ return function(props: Props): Node
 		return refs[i].width or 0
 	end
 	-- The gap between tabs, in points for the indicator's sums (the
-	-- row's own gap, zeron.space.hair or space.4).
-	local GAP = if pill then 2 else 16
+	-- row's own gap, zeron.space.hair, space.4, or flush space.5: a tab's
+	-- side room each side added back).
+	local GAP = if pill then 2 elseif flush then 24 else 16
 	local function measured(): boolean
 		for i in refs do
 			if width(i) <= 0 then
@@ -175,7 +181,7 @@ return function(props: Props): Node
 		role = "tablist",
 		label = props.label,
 		relative = true,
-		gap = if pill then "$zeron.space.hair" else "$space.4",
+		gap = if pill then "$zeron.space.hair" elseif flush then "$space.5" else "$space.4",
 		items = "center",
 		shrink = 0,
 		ui.show(measured, indicator),

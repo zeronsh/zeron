@@ -209,9 +209,9 @@ end
 -- and `$space.4` once the page is under `NARROW` wide (`w` its own width as
 -- laid out, 0 not yet: wide; or whether it's narrow); its first words
 -- `TOP` under the card's top, where a transcript's first message stands;
--- and `WIDE`, the column a page of rows (a board) holds together in, wider
--- than one that reads (`zeron.settings.measure`). (Standard steps, not
--- tokens of Zeron's own: a template's own tokens don't lose them.)
+-- and `WIDE`, a page's column when it must be wider than one that reads
+-- (`zeron.settings.measure`): ds/page's `width = "wide"`. (Standard steps,
+-- not tokens of Zeron's own: a template's own tokens don't lose them.)
 M.NARROW = 640
 M.WIDE = 960
 M.TOP = "$space.4"

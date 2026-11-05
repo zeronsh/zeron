@@ -113,6 +113,8 @@ ui/
     tokens.luau      app tokens (zeron.*), declared in standard tokens; loads themes
     themes/          zeron-dark.json, zeron-light.json (restyle in place as saved)
     text.luau        type styles × tones (ui.variants)
+    page.luau        every page in the page's card (Settings', a catalog's,
+                     a plugin's): one title, column, top and edge (ds.Page)
     button.luau      primary / secondary / ghost / accent × sm / md / lg
     surface.luau     plain / raised / sunken / overlay; interactive; selected
     mark.luau        a harness mark on its tile

@@ -46,6 +46,7 @@ local banner = require("@self/banner")
 local dialog = require("@self/dialog")
 local progress = require("@self/progress")
 local layout = require("@self/layout")
+local page = require("@self/page")
 local toolbar = require("@self/toolbar")
 local comment = require("@self/comment")
 local inline_block = require("@self/inline_block")
@@ -145,7 +146,11 @@ return {
 	Breadcrumbs = layout.Breadcrumbs,
 	KeyValue = layout.KeyValue,
 	-- A page's gutters in its card, as wide as it is: `ds.page.gutter(w)`.
-	page = { gutter = layout.gutter, narrow = layout.narrow, top = layout.TOP },
+	page = { gutter = layout.gutter, narrow = layout.narrow, top = layout.TOP, bottom = page.BOTTOM },
+	-- A page in the page's card (ds/page): Settings', a catalog's, a
+	-- plugin's; and its room there, for a page Settings doesn't host.
+	Page = page.Page,
+	PageFrame = page.Frame,
 	SplitButton = require("@self/split_button"),
 	Toolbar = toolbar.Toolbar,
 	ToolbarGroup = toolbar.Group,
