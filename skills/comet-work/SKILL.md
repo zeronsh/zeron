@@ -56,7 +56,17 @@ Wait for exact-candidate verification and staging channel readback to succeed. T
 
 The release compatibility marker is not the stored profile or wire schema version: those remain v1. Never rewrite profiles merely to match the release marker. For a future release whose compatibility marker is unchanged, use `scaffold_runtime_deployment=unchanged`.
 
-The workflow builds Linux and both independently signed/notarized macOS identities, verifies candidate signatures, uploads immutable objects to the environment's private GCS bucket, and reads back the selected staging channels. Preserve its run URL, run ID, candidate SHA-256, source commit, channel manifests and Linux archive/raw executable checksums. Do not confuse the archive SHA-256 used for image pinning with `COMET_SHA256SUMS`' extracted executable digest.
+When `scaffold-runtime-version.txt` is unchanged since the last staging release there is no Platform step to wait for, so build and publish to the staging channels in one run (no `candidate_run_id`; the run is still an immutable candidate that production can later reuse):
+
+```sh
+gh workflow run release.yml --repo Ashler-AI/comet --ref main \
+  -f version="$version" \
+  -f release_surface=desktop-and-scaffold \
+  -f promotion_target=staging \
+  -f scaffold_runtime_deployment=unchanged
+```
+
+The workflow builds Linux and both independently signed/notarized macOS identities, each on its own runner in parallel (Crew Canary.app only with `build_canary=true`), verifies candidate signatures, uploads immutable objects to the environment's private GCS bucket, and reads back the selected staging channels. Preserve its run URL, run ID, candidate SHA-256, source commit, channel manifests and Linux archive/raw executable checksums. Do not confuse the archive SHA-256 used for image pinning with `COMET_SHA256SUMS`' extracted executable digest.
 
 Native Edge uses the separate staging-only `deploy.yml` workflow. Dispatch its reviewed source with `--ref`; `source_sha` must equal that ref's resolved full commit SHA. The workflow rejects a different SHA before checkout or dependency/cache access, and every job checks out the dispatched commit. For a candidate-only run:
 

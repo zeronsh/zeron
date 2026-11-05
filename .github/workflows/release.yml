@@ -44,6 +44,11 @@ on:
         required: false
         default: ""
         type: string
+      build_canary:
+        description: "Also build the signed Crew Canary.app (retired; never part of a candidate or publication)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -198,8 +203,8 @@ jobs:
       COMET_RELEASE_VERSION: ${{ needs.version.outputs.version }}
       SOURCE_DATE_EPOCH: ${{ needs.version.outputs.source_epoch }}
       COMET_DEFAULT_ENVIRONMENT: production
-      # Promotion channels all reuse this production-identity bundle. The separate
-      # standalone staging packaging step overrides both environment selectors.
+      # Promotion channels all reuse this production-identity bundle. The
+      # standalone Crew Staging.app is the separate `macos-staging` job.
       COMET_PACKAGE_ENVIRONMENT: production
       COMET_MACOS_SIGNING: distribution
       # Public release trust root, independent of notarization credentials.
@@ -299,10 +304,45 @@ jobs:
             target/package/comet-*.tar.gz
             target/package/SHA256SUMS
           if-no-files-found: error
+      - &remove-signing-credentials
+        name: Remove temporary signing credentials
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "${CODESIGN_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$CODESIGN_KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/crew-signing.p12"
+
+  # The standalone Crew Staging.app builds on its own runner, in parallel with
+  # the production-identity bundle: each is a full release build (~17 min, most
+  # of it the thin-LTO link) plus notarization, and they used to run back to
+  # back in one job (~40 min on the critical path).
+  macos-staging:
+    if: ${{ inputs.candidate_run_id == '' }}
+    needs: version
+    runs-on: macos-15
+    env:
+      COMET_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      SOURCE_DATE_EPOCH: ${{ needs.version.outputs.source_epoch }}
+      COMET_DEFAULT_ENVIRONMENT: staging
+      COMET_PACKAGE_ENVIRONMENT: staging
+      COMET_MACOS_SIGNING: distribution
+      COMET_MACOS_SIGNING_TEAM_ID: ${{ vars.MACOS_SIGNING_TEAM_ID }}
+      CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+      NOTARYTOOL_KEYCHAIN_PROFILE: crew-distribution
+    steps:
+      - uses: actions/checkout@v4
+      - *require-apple-silicon
+      - *import-signing-credentials
+      - *rust-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # package-macos.sh builds the staging flavour in its own target dir.
+          workspaces: ". -> target/staging"
+      - *apple-ticket-transport
       - name: Package standalone Crew Staging.app
-        env:
-          COMET_DEFAULT_ENVIRONMENT: staging
-          COMET_PACKAGE_ENVIRONMENT: staging
         run: scripts/package-macos.sh
       - name: Record standalone staging artifact checksums
         run: |
@@ -316,23 +356,15 @@ jobs:
             target/package/staging/comet-staging-*-app.tar.gz
             target/package/staging/SHA256SUMS
           if-no-files-found: error
-      - &remove-signing-credentials
-        name: Remove temporary signing credentials
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -f "${CODESIGN_KEYCHAIN:-}" ]]; then
-            security delete-keychain "$CODESIGN_KEYCHAIN"
-          fi
-          rm -f "$RUNNER_TEMP/crew-signing.p12"
+      - *remove-signing-credentials
 
   # Signed, notarized Crew Canary.app for installing over local Canary builds.
   # It is never part of the release candidate or any publication. Developer ID
   # keeps one stable code identity, so macOS privacy grants (Screen Recording,
   # Accessibility) survive Canary updates; ad-hoc builds lose them every rebuild.
+  # Canary is retired, so it only builds when explicitly requested.
   macos-canary:
-    if: ${{ inputs.candidate_run_id == '' }}
+    if: ${{ inputs.candidate_run_id == '' && inputs.build_canary }}
     needs: version
     runs-on: macos-15
     env:
@@ -377,15 +409,17 @@ jobs:
         (
           inputs.candidate_run_id != '' &&
           needs.macos.result == 'skipped' &&
+          needs['macos-staging'].result == 'skipped' &&
           needs.linux.result == 'skipped'
         ) ||
         (
           inputs.candidate_run_id == '' &&
           needs.macos.result == 'success' &&
+          needs['macos-staging'].result == 'success' &&
           (needs.linux.result == 'success' || needs.linux.result == 'skipped')
         )
       )
-    needs: [version, linux, macos]
+    needs: [version, linux, macos, macos-staging]
     runs-on: ubuntu-24.04
     outputs:
       digest: ${{ steps.candidate.outputs.digest || steps.reuse.outputs.digest }}
