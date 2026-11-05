@@ -19,7 +19,8 @@ The shared scheme is **Crew Staging**, bundle ID **ai.ashler.crew.staging**,
 signing team **825LYXGJR6**, version **1.0**. A same-bundle upgrade retains its
 sandbox and default team/bundle Keychain access group, but is **not authorized
 for a legacy installation under the current fresh-only/no-migration rollout**:
-sign-in automatically imports retained `CometDocs` (see below). Legacy has no
+sign-in leaves retained `CometDocs` untouched and opens a fresh native profile
+(see below). Legacy has no
 explicit app-group entitlement; none is invented. The upstream LiveActivity
 extension uses `ai.ashler.crew.staging.LiveActivity` and needs an authorizing team
 distribution profile, which may be an existing matching wildcard profile because
@@ -143,18 +144,21 @@ results are not release evidence for this build.
 
 ## Legacy iOS native migration
 
-The implementation below is retained, not activated by fresh-only authorization.
-`Zeron/App/AppModel.swift`'s `signIn(account:)` checks for `CometDocs` and calls
-`crewPrepareLegacyBackup` before starting the client, including restored sign-in.
-There is no supported skip-import switch. A legacy same-bundle installation
-therefore cannot satisfy no-migration without a reviewed code change or separate
-migration authorization; deleting/renaming its store or clearing Keychain is not
-a workaround. Keep its sandbox, identities, pending work and cache untouched.
-Only an actually fresh app container with no legacy source can use this path
-without import, with independent human sign-in after matched canonical services
-are ready. A new simulator can provide isolated evidence; it does not prove an
-existing physical-device or TestFlight upgrade safe. Credential import, `-signedout`
-and demo/dev authentication are not fresh authenticated staging acceptance.
+The importer below is retained but **not called**: under the fresh-only rollout,
+`Zeron/App/AppModel.swift`'s `signIn(account:)` opens a new native profile and
+leaves `CometDocs` untouched. (It used to call `crewPrepareLegacyBackup` on every
+sign-in; the importer holds the whole cache in memory, so phones updated in place
+were killed at their memory limit right after login, before the import or the
+credential save completed.) Sessions re-sync from their hosts; phone-only legacy
+state (queued intents/outcomes, pending images, history of hosts that are gone)
+stays in `CometDocs` but is not shown. Deleting/renaming that store or clearing
+Keychain is still not a workaround: keep its sandbox, identities, pending work and
+cache untouched. Once a native profile exists, `crewPrepareLegacyBackup` refuses to
+import into it ("refusing to overwrite live state"), so any later authorized
+migration of such a phone needs a merge path, and a memory-bounded importer.
+A new simulator can provide isolated evidence; it does not prove an existing
+physical-device or TestFlight upgrade safe. Credential import, `-signedout` and
+demo/dev authentication are not fresh authenticated staging acceptance.
 
 Same-bundle upgrades also keep the legacy SwiftUI app's persisted scene session,
 whose configuration names SwiftUI's `AppSceneDelegate`. UIKit restores it without
@@ -165,9 +169,10 @@ the scene connects; a link that cold-launches such an install is lost on that
 launch. Fresh installs can't show this: reproduce by installing a SwiftUI-lifecycle
 app with the same bundle id first, then the native build over it.
 
-Same-bundle upgrades retain `Application Support/CometDocs`. After online
-Scaffold identity verification, before constructing `CoreClient` or starting any
-writer, `crewPrepareLegacyBackup` imports the matching scoped cache into
+Same-bundle upgrades retain `Application Support/CometDocs`. When called (an
+authorized migration, not sign-in), after online Scaffold identity verification and
+before constructing `CoreClient` or starting any writer, `crewPrepareLegacyBackup`
+imports the matching scoped cache into
 `Application Support/profiles/scaffold/<verified-profile-key>`. The legacy
 frontend/transport is not linked or run. Foreign scopes fail closed, originals
 remain untouched, and a matching receipt makes reopening idempotent.
@@ -448,8 +453,9 @@ Apple signing is no longer the blocker. The recovery owner's finalization
 attempt 2 completed, but native/Edge activation remains held pending the exact
 ordinary successor compatibility/full baseline and matched release gates.
 Do not distribute this same-bundle upgrade to legacy installations under fresh-only
-scope, even after canonical Edge becomes compatible: sign-in auto-migration is
-still unauthorized. Apple delivery does not block independent desktop/backend
+scope, even after canonical Edge becomes compatible: such installs open a fresh
+native profile without their `CometDocs` (sign-in no longer migrates), and their
+migration is still unauthorized. Apple delivery does not block independent desktop/backend
 readiness; it is not evidence that those surfaces are activated or accepted.
 
 `testflight.yml` accepts exact `reviewed_sha` and this explicit `build_number`.

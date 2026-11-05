@@ -18,7 +18,7 @@ final class CrewMigrationViewController: UIViewController {
         view.backgroundColor = Palette.background
         status.isEditable = false
         status.font = UIFont.preferredFont(forTextStyle: .body)
-        status.text = "Crew Staging checks the existing CometDocs cache after verifying your account and before opening live sync. Originals and legacy Keychain entries are never deleted. Pending work is retained, never blindly replayed.\n\nNo legacy cache was migrated for this profile."
+        status.text = "Sign-in does not import the legacy CometDocs cache; your sessions sync from their hosts. The cache and legacy Keychain entries stay on this phone untouched.\n\nNo legacy cache was migrated for this profile."
         status.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(status)
         NSLayoutConstraint.activate([

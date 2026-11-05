@@ -311,19 +311,11 @@ final class AppModel {
         if let client { PushNotifications.shared.signingOut(client: client) }
         client?.shutdown()
         client = nil
-        let generation = authGeneration
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let legacy = support.appendingPathComponent("CometDocs", isDirectory: true)
-        if FileManager.default.fileExists(atPath: legacy.path) {
-            let config = CoreConfig(edgeUrl: Self.edgeURL,
-                                    dataDir: Self.profilesDir.appendingPathComponent(account.profileKey, isDirectory: true).path,
-                                    deviceId: Self.deviceId, deviceName: UIDevice.current.name, platform: "ios",
-                                    appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0")
-            _ = try await crewPrepareLegacyBackup(config: config, credentials: account.credentials, sourcePath: legacy.path)
-        }
-        guard generation == authGeneration, client == nil else {
-            throw CoreError.Auth(message: "Sign-in changed while preserving the old profile. No live client was opened.")
-        }
+        // The legacy app's `CometDocs` cache stays untouched and is not
+        // imported: this rollout is fresh-only, and the importer holds the
+        // whole cache in memory, so phones updated in place were killed at
+        // their memory limit right after sign-in. Sessions re-sync from their
+        // hosts. `crewPrepareLegacyBackup` remains for an authorized migration.
         profileKey = account.profileKey
         AccountProfile(name: account.name, email: account.email, orgName: account.projectScope).save()
         guard start(account.credentials) else {
