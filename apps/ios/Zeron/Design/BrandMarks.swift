@@ -1,10 +1,15 @@
 // Harness brand marks — the exact SVG path data the desktop bundles
 // (crates/ui/assets/icons/{claude,openai,cursor}-mark.svg), rendered natively
-// via a small SVG path-data parser → SwiftUI Path. Marks tint with the
+// via a small SVG path-data parser → CoreGraphics CGPath. Marks tint with the
 // foreground style like any glyph; Claude keeps its brand orange (#D97757) at
 // call sites, matching the desktop convention.
+//
+// This file deliberately uses CoreGraphics rather than SwiftUI: the app is a
+// UIKit-lifecycle app, and merely linking SwiftUI lets it install its own
+// scene delegate, whose state-restoration path crashes ("Missing AppGraph")
+// on an app with no SwiftUI App graph. CGPath keeps SwiftUI out of the app.
 
-import SwiftUI
+import CoreGraphics
 import UIKit
 
 enum BrandMark {
@@ -88,19 +93,18 @@ enum BrandMark {
     }
 }
 
-/// A `Shape` that renders SVG path data scaled to fit its rect (aspect-fit,
-/// centered) — the SwiftUI analogue of gpui's tinted `svg()` element.
-struct BrandMarkShape: Shape {
-    let mark: BrandMark
-
-    func path(in rect: CGRect) -> Path {
-        let base = SVGPathParser.path(from: mark.pathData)
-        let box = mark.viewBox
+extension BrandMark {
+    /// The mark's SVG path as a `CGPath` scaled to fit `rect` (aspect-fit,
+    /// centered) — the native analogue of gpui's tinted `svg()` element.
+    func cgPath(in rect: CGRect) -> CGPath {
+        let base = SVGPathParser.path(from: pathData)
+        let box = viewBox
         let scale = min(rect.width / box.width, rect.height / box.height)
         let dx = rect.minX + (rect.width - box.width * scale) / 2
         let dy = rect.minY + (rect.height - box.height * scale) / 2
-        return base.applying(CGAffineTransform(scaleX: scale, y: scale)
-            .concatenating(CGAffineTransform(translationX: dx, y: dy)))
+        var transform = CGAffineTransform(scaleX: scale, y: scale)
+            .concatenating(CGAffineTransform(translationX: dx, y: dy))
+        return base.copy(using: &transform) ?? base
     }
 }
 
@@ -109,8 +113,8 @@ struct BrandMarkShape: Shape {
 /// Minimal SVG 1.1 path grammar: M/L/H/V/C/S/Q/T/A/Z, absolute + relative.
 /// Arcs convert via the standard endpoint→center parameterization.
 enum SVGPathParser {
-    static func path(from data: String) -> Path {
-        var path = Path()
+    static func path(from data: String) -> CGPath {
+        let path = CGMutablePath()
         var scanner = Tokenizer(data)
         var current = CGPoint.zero
         var start = CGPoint.zero
@@ -196,7 +200,7 @@ enum SVGPathParser {
                       let sweep = scanner.flag(),
                       let x = scanner.number(), let y = scanner.number() else { return path }
                 let end = pt(x, y)
-                addArc(&path, from: current, to: end, rx: rx, ry: ry,
+                addArc(path, from: current, to: end, rx: rx, ry: ry,
                        rotationDeg: rot, largeArc: largeArc, sweep: sweep)
                 current = end
                 lastCubicControl = nil; lastQuadControl = nil
@@ -229,7 +233,7 @@ enum SVGPathParser {
     }
 
     /// Endpoint→center arc conversion (SVG 1.1 F.6), emitted as cubic segments.
-    private static func addArc(_ path: inout Path, from p0: CGPoint, to p1: CGPoint,
+    private static func addArc(_ path: CGMutablePath, from p0: CGPoint, to p1: CGPoint,
                                rx rxIn: CGFloat, ry ryIn: CGFloat,
                                rotationDeg: CGFloat, largeArc: Bool, sweep: Bool) {
         var rx = abs(rxIn), ry = abs(ryIn)
@@ -389,7 +393,7 @@ enum BrandMarks {
         if let hit = cache[key] { return hit }
         let mark = BrandMark.forHarness(harness)
         let rect = CGRect(x: 0, y: 0, width: side, height: side)
-        let path = BrandMarkShape(mark: mark).path(in: rect).cgPath
+        let path = mark.cgPath(in: rect)
         let tint = BrandMark.brandTint(for: harness)
         let image = UIGraphicsImageRenderer(size: rect.size).image { ctx in
             ctx.cgContext.addPath(path)
