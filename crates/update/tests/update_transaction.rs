@@ -450,7 +450,8 @@ mod versioned {
     #[test]
     fn a_second_start_during_a_trial_leaves_the_trial_alone() {
         let rig = Rig::new("hang");
-        let id = rig.request(Rig::service(), 3);
+        // Long enough that a slow machine's second start still lands inside it.
+        let id = rig.request(Rig::service(), 8);
         std::thread::scope(|scope| {
             let trial = scope.spawn(|| rig.start(None));
             let waited = Instant::now();
