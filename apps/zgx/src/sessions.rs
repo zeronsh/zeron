@@ -362,6 +362,25 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.action("sessions.places", move |wanted| a.want(places_of_value(&wanted)));
 }
 
+/// The other devices online now, as the sidebar judges it (a Cloud one's no
+/// place to look at ahead of time).
+pub(crate) fn other_devices_online() -> Vec<String> {
+    let now = now_seconds();
+    SESSIONS.with(|s| {
+        let here = s.here.borrow().clone();
+        s.devices
+            .borrow()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|d| !is_cloud(d))
+            .filter(|d| d["lastSeenAt"].as_str().and_then(unix_seconds).is_some_and(|at| now - at <= ONLINE_SECS))
+            .filter_map(|d| d["id"].as_str().map(str::to_owned))
+            .filter(|id| Some(id.as_str()) != here.as_deref())
+            .collect()
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Slot {
     Chats,

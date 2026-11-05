@@ -376,6 +376,9 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		harnesses = function(): { any }
 			return store.catalog:get().harnesses
 		end,
+		models_loading = function(): boolean
+			return store.catalog:get().complete ~= true
+		end,
 		models = function(): { any }
 			return store.catalog:get().models
 		end,

@@ -73,6 +73,8 @@ export type Props = {
 	-- The choices made of the model's options (option id to choice id; one
 	-- left out is at its default), changed as they're picked.
 	options: State<{ [string]: string }>?,
+	-- Its catalog is still on its way (a device's first look).
+	loading: (() -> boolean)?,
 	-- The agents and their models: lists, or states or functions of them
 	-- (a catalog that arrives or changes, followed in place: the tabs and
 	-- rows come and go, the picker stays).
@@ -681,6 +683,13 @@ return ui.component(function(props: Props): Node
 
 	return Dropdown {
 		fold = props.fold,
+		-- (Only with nothing to show yet: a catalog being looked at again keeps
+		-- what it knows.)
+		loading = if props.loading
+			then function(): boolean
+				return (props.loading :: () -> boolean)() and current() == nil
+			end
+			else nil,
 		value = props.model,
 		items = items :: any,
 		tone = props.tone or "chip",

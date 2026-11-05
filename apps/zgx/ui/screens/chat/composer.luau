@@ -954,6 +954,9 @@ local function Composer(): Node
 			harnesses = function(): { ds.Harness }
 				return store.catalog:get().harnesses
 			end,
+			models_loading = function(): boolean
+				return store.catalog:get().complete ~= true
+			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
 			end,

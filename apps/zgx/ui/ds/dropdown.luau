@@ -22,6 +22,7 @@ local Text = require("@self/text")
 local Tile = require("@self/tile")
 local ascii = require("@self/ascii")
 local Menu = require("@self/menu")
+local Skeleton = require("@self/skeleton")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local EditorMenu = require("@self/editor_menu")
@@ -126,6 +127,9 @@ export type Props = {
 	-- (`on_choose` hears it: the caller folds it again); `on_escape` takes
 	-- Escape first (true: handled, the panel stays).
 	expanded: (() -> boolean)?,
+	-- What it lists is still on its way: its chosen item's name and its rows
+	-- hold their shape rather than saying there's nothing.
+	loading: (() -> boolean)?,
 	on_expand: (() -> ())?,
 	keep_open: boolean?,
 	on_choose: ((value: string) -> ())?,
@@ -536,6 +540,7 @@ return ui.component(function(props: Props): Node
 		return math.min(VIEW, math.max(EMPTY_H, list_h(#items())))
 	end
 	local was_folded: boolean? = nil
+	local back_on_chosen: () -> () = function() end
 	if props.expanded then
 		ui.effect(function()
 			local list = shown:get()
@@ -584,6 +589,18 @@ return ui.component(function(props: Props): Node
 			end
 			was_folded = now
 		end)
+		-- An offset set before the rows are laid out is clamped to the top by the
+		-- list, and said again unchanged it's no news to it: the chosen row is
+		-- out of the window, and the panel's head is blank. So once the rows have
+		-- their height, it's said again, a hair different (well under a point).
+		local hair = false
+		back_on_chosen = function()
+			local i = index_of(value:peek())
+			if folded() and i then
+				hair = not hair
+				offset:set(on_row(i) + (if hair then 0.01 else 0))
+			end
+		end
 		-- Folded, the window stays on the chosen row: whatever else moves it
 		-- (a wheel over it, the list clamping an offset set before it had its
 		-- rows) is put back. Put back a
@@ -753,6 +770,9 @@ return ui.component(function(props: Props): Node
 		}
 	else
 		label_node = FadeText { chosen, roll = true, rolls = rolls, color = TRIGGER[tone].label }
+	end
+	if props.loading then
+		label_node = ui.show(props.loading, Skeleton.Bar { w = ui.raw(64, "about a model's name"), h = 10 }, label_node)
 	end
 	-- Opening: the search cleared, on the chosen item, in view. (Open
 	-- already, it stays as it is: asked again, by its shortcut or its
@@ -1157,7 +1177,19 @@ return ui.component(function(props: Props): Node
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0
+						return #shown:get() == 0 and props.loading ~= nil and props.loading()
+					end, ui.column {
+						w_full = true,
+						gap = "$zeron.list.gap",
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+					})
+				)
+				table.insert(
+					items,
+					ui.show(function()
+						return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
 					end, ui.column {
 						w_full = true,
 						-- (Opened out, the list's whole window: its message in
@@ -1247,6 +1279,7 @@ return ui.component(function(props: Props): Node
 								if math.abs(size.h - content_h:peek()) >= 0.5 then
 									content_h:set(size.h)
 								end
+								back_on_chosen()
 							end,
 							table.unpack(items),
 						},
