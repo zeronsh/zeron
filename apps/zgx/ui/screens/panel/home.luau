@@ -1280,11 +1280,13 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: at its top, across the card (its rows from the
-	-- card's left, their letters at its right, as the shipping app's), so a
-	-- part opening or closing grows it downward and nothing above moves.
-	-- Taller than the panel, it scrolls.
+	-- Where it stands: across the card from its left (its rows from the
+	-- card's left, their letters at its right, as the shipping app's), and
+	-- in the middle of the panel's height. What it's in is at least as tall
+	-- as the scroll's window (measured) and centres it, so taller than the
+	-- panel it starts at the top and scrolls, nothing pushed out of reach.
 	local view = ui.ref()
+	local room = ui.use_state(0)
 	return ui.scroll {
 		ref = view,
 		id = "panel-empty",
@@ -1301,12 +1303,25 @@ M.Page = ui.component(function(props: Props): Node
 		-- (What plugins' rows on it read: the session, and the letters it
 		-- passes on.)
 		provide = { session = sid, panel_key = passed },
+		on_resize = function(size: { w: number, h: number })
+			if room:peek() ~= size.h then
+				room:set(size.h)
+			end
+		end,
 		ui.column {
 			w_full = true,
-			px = "$space.4",
-			pb = "$space.6",
-			gap = "$space.5",
-			table.unpack(parts),
+			min_h = function(): number
+				return room:get()
+			end,
+			justify = "center",
+			ui.column {
+				id = "panel-home-block",
+				w_full = true,
+				px = "$space.4",
+				py = "$space.6",
+				gap = "$space.5",
+				table.unpack(parts),
+			},
 		},
 	}
 end)
