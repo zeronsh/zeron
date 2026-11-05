@@ -21,6 +21,8 @@
 --   local pictures = ReplyImages.for_session(function() return store.session:get() end)
 --   Transcript { pictures = pictures, … }
 
+local paths = require("@app/screens/chat/picture_paths")
+
 local M = {}
 
 -- (`path`: where it is on the chat's device; `here`: whether that's this
@@ -57,39 +59,9 @@ M.read = function(target: { chat: string, device: string? }, path: string): any
 	return ui.call("files.chat_image", { target = target, path = path })
 end
 
--- `http:`, `file:`, `data:`, `javascript:`…; a drive letter (`C:\`) is not one.
-local function has_scheme(src: string): boolean
-	local scheme = string.match(src, "^([%a][%w%+%-%.]*):")
-	return scheme ~= nil and #scheme > 1
-end
-
-local RASTER = { png = true, jpg = true, jpeg = true, webp = true, gif = true }
-
 -- The path of a picture a reply names, in a chat whose folder is `cwd`, or
--- nil when it isn't one to draw.
-function M.path(src: string, cwd: string?): string?
-	src = string.match(src, "^%s*(.-)%s*$") or ""
-	if src == "" or string.sub(src, 1, 1) == "~" or has_scheme(src) then
-		return nil
-	end
-	-- (Network and device paths: `//host/x`, `\\host\x`, `\\.\x`.)
-	if string.sub(src, 1, 2) == "//" or string.sub(src, 1, 2) == "\\\\" then
-		return nil
-	end
-	local ext = string.lower(string.match(src, "%.([%w]+)$") or "")
-	if not RASTER[ext] then
-		return nil
-	end
-	if string.sub(src, 1, 1) == "/" then
-		return src
-	end
-	-- Relative: in the chat's folder, which must be a path of its own.
-	if not cwd or string.sub(cwd, 1, 1) ~= "/" then
-		return nil
-	end
-	local rel = string.gsub(src, "^%./", "")
-	return (string.gsub(cwd, "/+$", "")) .. "/" .. rel
-end
+-- nil when it isn't one to draw (screens/chat/picture_paths).
+M.path = paths.picture
 
 local function key_of(s: Session, path: string): string
 	return `{s.device or "here"}|{s.id}|{path}`
