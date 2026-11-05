@@ -24,17 +24,17 @@ local M = {}
 -- The bar's tab height and its tile, as a session's tab (shell/session_tabs).
 -- The gap between circles is cut out of the one behind, not painted: what's
 -- under the button shows through it, whatever the button's state or the theme.
-local BUTTON_H, TILE, GAP_CUT = 28, 24, 2.5
+local BUTTON_H, TILE, GAP_CUT = 28, 20, 2.5
 -- How far along each circle stands: enough of the one behind shows to know it.
-local STEP = 18
+local STEP = 15
 -- A circle's mark: a little right of its middle on those behind, to sit in the
 -- middle of what shows of them.
-local MARK_SIDE, MARK_NUDGE = 13, 2
+local MARK_SIDE, MARK_NUDGE = 11, 2
 local MOST = 3
 local GLYPH = 16
 -- The button's insets: its circles as far in as they are from its top, its
 -- glyph clear of its end.
-local INSET_L, INSET_R, GAP = 2, 6, 5
+local INSET_L, INSET_R, GAP = 4, 6, 5
 local WIDTH, MARK, ACTION_H = 340, 28, 26
 local MOST_ROWS_H = 340
 
