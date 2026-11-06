@@ -17,6 +17,8 @@
 //!   pixel readback tests and diagnostics snapshots use.
 //! - [`permission`] — the `imgui.windows` grant every host action passes
 //!   through, and the sentence a refused plugin gets.
+//! - [`frame`] — the frame pump: one script-driven frame per shown window,
+//!   the per-callback CPU budget, and the errors that keep the plugin loaded.
 //!
 //! The frame is split the way the window and script layers need it:
 //! [`runtime::WindowContext::prepare`] copies a finished frame off the
@@ -32,6 +34,7 @@
 
 #![allow(dead_code)]
 
+pub mod frame;
 pub mod luau;
 pub mod permission;
 pub mod render;

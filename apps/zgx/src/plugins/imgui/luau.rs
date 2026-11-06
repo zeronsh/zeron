@@ -13,18 +13,25 @@
 //! A refusal never creates a window and never takes the plugin down; that is
 //! the plugin author's fix, not a crash.
 //!
-//! The frame pump and the widget ops are a later layer: they call
-//! [`Windows`] directly for frames and add their ops here.
+//! The frame pump's widget ops are here too: the pump opens a frame and asks
+//! the plugin for it through `plugin.<id>.calls`; the plugin's SDK draws with
+//! [`Windows`] through `text` and `button`, and closes the frame with
+//! `plugin.<id>.imgui_end`. A widget the host refuses is reported once,
+//! naming the widget, and handed back to the plugin as an error at its own
+//! line.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use zgx_script::{ScriptHost, Value};
+use zgx_script::{ScriptHost, Shared, Value};
 
 use crate::plugins::{Item, imgui::permission};
 
+use super::frame::FrameCalls;
 use super::window::{CloseReason, WindowSpec, Windows, size_argument};
 
-/// The ops this layer answers. The pump adds its own beside these.
+/// The ops this layer answers. The pump's own (`render`, `frame_end`) and
+/// the widgets sit beside the window controls.
 const WINDOW_OPS: &[&str] = &[
     "show",
     "hide",
@@ -37,13 +44,23 @@ const WINDOW_OPS: &[&str] = &[
     "is_open",
     "state",
     "invalidate",
+    "render",
 ];
+
+/// The widgets a plugin may draw, applied to the open frame synchronously.
+const WIDGET_OPS: &[&str] = &["text", "button"];
+
+/// Ends the frame the render callback was given.
+const FRAME_END: &str = "frame_end";
 
 /// What the host keeps of one plugin's windows, as the action closes over it.
 pub struct ImGuiWindows {
     windows: Rc<Windows>,
     plugin: String,
     item: Rc<dyn Fn() -> Option<Item>>,
+    /// Told each refusal of a widget call, naming the widget and what was
+    /// wrong: the app reports it once per distinct sentence.
+    refused: Rc<dyn Fn(&str)>,
 }
 
 impl ImGuiWindows {
@@ -51,11 +68,13 @@ impl ImGuiWindows {
         windows: Rc<Windows>,
         plugin: impl Into<String>,
         item: Rc<dyn Fn() -> Option<Item>>,
+        refused: impl Fn(&str) + 'static,
     ) -> Rc<Self> {
         Rc::new(Self {
             windows,
             plugin: plugin.into(),
             item,
+            refused: Rc::new(refused),
         })
     }
 }
@@ -71,16 +90,44 @@ pub fn serve(
     windows: Rc<Windows>,
     item: Rc<dyn Fn() -> Option<Item>>,
     closed: impl Fn(&str) + 'static,
+    frames: Option<FrameCalls>,
+    refused: impl Fn(&str) + 'static,
 ) {
     windows.listen(id, closed);
+    if let Some(frames) = frames {
+        windows.listen_calls(id, frames);
+    }
     let name = format!("plugin.{id}.imgui");
     // The VM layer: a plugin not granted `imgui.windows` cannot even bind,
     // invoke or call this action.
     permission::expose_action(host, name.clone());
     let plugin = id.to_string();
-    host.function(name, move |arg| {
-        let action = ImGuiWindows::new(windows.clone(), plugin.clone(), item.clone());
-        action.call(&arg)
+    let refusal = Rc::new(refused);
+    host.function(name, {
+        let windows = windows.clone();
+        let (item, refused) = (item.clone(), refusal.clone());
+        move |arg| {
+            let action = ImGuiWindows::new(windows.clone(), plugin.clone(), item.clone(), {
+                let refused = refused.clone();
+                move |sentence: &str| refused(sentence)
+            });
+            action.call(&arg)
+        }
+    });
+    // The end-of-frame action, behind the same capability: it closes the
+    // frame the pump opened and tells it what the render callback raised.
+    let end = format!("plugin.{id}.imgui_end");
+    permission::expose_action(host, end.clone());
+    host.action(end, {
+        let plugin = id.to_string();
+        let (windows, item, refused) = (windows.clone(), item.clone(), refusal.clone());
+        move |arg: Value| {
+            let action = ImGuiWindows::new(windows.clone(), plugin.clone(), item.clone(), {
+                let refused = refused.clone();
+                move |sentence: &str| refused(sentence)
+            });
+            let _ = action.frame_end(&arg);
+        }
     });
 }
 
@@ -92,9 +139,15 @@ impl ImGuiWindows {
         if op == "open_window" {
             return self.open_window(arg);
         }
+        if WIDGET_OPS.contains(&op.as_str()) {
+            return self.widget(&op, arg);
+        }
+        if op == FRAME_END {
+            return self.frame_end(arg);
+        }
         if !WINDOW_OPS.contains(&op.as_str()) {
             return failed(&format!(
-                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, set_title, set_size, close, is_open and state."
+                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, set_title, set_size, close, is_open and state; a render callback has text and button."
             ));
         }
         if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {
@@ -138,6 +191,13 @@ impl ImGuiWindows {
                 window.request_frame();
                 Value::record([("ok", Value::Bool(true))])
             }
+            // The plugin has an on_render: from now on the pump asks this
+            // window for frames while it is shown.
+            "render" => {
+                let on = arg.field("on").is_none_or(Value::truthy);
+                window.set_renderable(on);
+                Value::record([("ok", Value::Bool(true))])
+            }
             "state" => {
                 let (width, height) = window.size();
                 Value::record([
@@ -176,6 +236,69 @@ impl ImGuiWindows {
         }
     }
 
+    /// Applies one widget call from the plugin's render callback to the open
+    /// frame. The refusal reaches the plugin as `ui.text` raising at its
+    /// line; nothing is drawn and nothing crashes.
+    /// A widget call the host turned down: reported once, naming the widget,
+    /// and handed back to the plugin to raise at its own line.
+    fn refuse(&self, error: String) -> Value {
+        (self.refused)(&error);
+        failed(&error)
+    }
+
+    fn widget(&self, op: &str, arg: &Value) -> Value {
+        if let Err(error) = permission::allowed(self.item().as_ref(), "draw in its plugin windows")
+        {
+            return self.refuse(error);
+        }
+        let Some(id) = text(arg, "window") else {
+            return self.refuse(format!("ui.{op} needs the window it belongs to"));
+        };
+        let Some(seq) = number(arg, "seq") else {
+            return self.refuse(format!("ui.{op} needs the frame it belongs to"));
+        };
+        let Some(window) = self.windows.window(&self.plugin, &id) else {
+            return self.refuse(format!(
+                "ui.{op} was called after window \"{id}\" was closed. Its ui does nothing once the window is gone."
+            ));
+        };
+        match window.widget(op, seq as u64, arg) {
+            Ok(answer) => answer,
+            Err(error) => self.refuse(error),
+        }
+    }
+
+    /// Ends the frame the render callback was given, painting it or throwing
+    /// it away with the reason. The pump reports what comes of it.
+    fn frame_end(&self, arg: &Value) -> Value {
+        if let Err(error) = permission::allowed(self.item().as_ref(), "draw in its plugin windows")
+        {
+            return failed(&error);
+        }
+        let Some(id) = text(arg, "window") else {
+            return failed("zeron.imgui.frame_end needs the window it belongs to");
+        };
+        let Some(seq) = number(arg, "seq") else {
+            return failed("zeron.imgui.frame_end needs the frame it ends");
+        };
+        let Some(window) = self.windows.window(&self.plugin, &id) else {
+            return failed(&format!(
+                "zeron.imgui.frame_end was called for window \"{id}\", which is closed."
+            ));
+        };
+        let error = text(arg, "error").filter(|error| !error.is_empty());
+        // A failure the widget ops caused (drawn outside the frame, or after
+        // the window closed), rather than the plugin's own error: the frame
+        // is dropped either way, but a refusal never takes the plugin down.
+        let refused = arg.field("refused").is_some_and(Value::truthy);
+        match window.end_frame(seq as u64, error, refused) {
+            Ok(()) => Value::record([("ok", Value::Bool(true))]),
+            // No frame of that seq is open here (it already ended, or this
+            // is another window's frame): said plainly rather than dropped.
+            Err(error) => failed(&error),
+        }
+    }
+
     fn item(&self) -> Option<Item> {
         (self.item)()
     }
@@ -194,6 +317,14 @@ fn failed(error: &str) -> Value {
     Value::record([("ok", Value::Bool(false)), ("error", Value::from(error))])
 }
 
+/// A field that is a number, if it is.
+fn number(value: &Value, field: &str) -> Option<f64> {
+    match value.field(field) {
+        Some(Value::Num(number)) => Some(*number),
+        _ => None,
+    }
+}
+
 /// A field that is text, if it is.
 fn text(value: &Value, field: &str) -> Option<String> {
     match value.field(field) {
@@ -205,3 +336,64 @@ fn text(value: &Value, field: &str) -> Option<String> {
 /// The close reason a plugin's own `close` and the OS chrome use, for the
 /// pump to share.
 pub const PLUGIN_CLOSED: CloseReason = CloseReason::Closed;
+
+/// The frame calls of a dev plugin.
+///
+/// A dev plugin has no bridge: its calls live in the plugin's own
+/// `plugin.<id>.calls` state, so the pump owns a list here and publishes it
+/// the way the bridge does. `failed` goes to the app's log, which is what a
+/// fixture run reads.
+pub fn dev_calls(host: &ScriptHost, id: &str) -> FrameCalls {
+    let shared: Shared = host.shared(
+        &format!("plugin.{id}.calls"),
+        crate::plugins::vlist(Vec::new()),
+    );
+    let list: Rc<RefCell<Vec<(String, Value)>>> = Rc::default();
+    // The queue is published with no borrow held: setting it runs the
+    // plugin's effects, which may read the queue again.
+    let publish = {
+        let list = list.clone();
+        let shared = shared.clone();
+        move || {
+            let value = {
+                let items = list.borrow();
+                crate::plugins::vlist(items.iter().map(|(_, call)| call.clone()).collect())
+            };
+            shared.set(value);
+        }
+    };
+    let push = {
+        let list = list.clone();
+        let publish = publish.clone();
+        move |call: String, kind: &'static str, fields: Vec<(&'static str, Value)>| {
+            let mut record = vec![
+                ("id", Value::from(call.as_str())),
+                ("kind", Value::from(kind)),
+            ];
+            record.extend(fields);
+            list.borrow_mut().push((call, Value::record(record)));
+            publish();
+        }
+    };
+    let take = {
+        let list = list.clone();
+        move |call: &str| {
+            let removed = {
+                let mut items = list.borrow_mut();
+                let before = items.len();
+                items.retain(|(id, _)| id != call);
+                items.len() != before
+            };
+            if removed {
+                publish();
+            }
+        }
+    };
+    let failed = {
+        let plugin = id.to_string();
+        move |error: &str| {
+            eprintln!("zeron-zgx: dev plugin {plugin}: a window's first frame failed: {error}");
+        }
+    };
+    FrameCalls::new(push, take, failed)
+}

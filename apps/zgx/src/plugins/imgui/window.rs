@@ -28,8 +28,11 @@ use zgx_desktop::{Tabbing, Titlebar, WindowBounds, WindowFactory, WindowHandle, 
 use zgx_gpu::viewport::{Viewport, ViewportFrame};
 use zgx_script::Value;
 
+use super::frame::{FrameCalls, FrameReport, FrameState, FrameWindow};
 use super::render::ImguiViewport;
+use super::runtime::FrameSpec;
 use super::runtime::WindowContext as ImGuiContext;
+use dear_imgui_rs::Ui;
 
 /// What a plugin hears when one of its windows closes: the window id it
 /// named, once per window.
@@ -540,6 +543,14 @@ pub struct PluginWindow {
     /// another window can take its turn; dropped when the window closes,
     /// which frees its font atlas and everything it owned.
     context: RefCell<Option<ImGuiContext>>,
+    /// The frame pump's bookkeeping for this window: the live frame, what it
+    /// has drawn, and why it last failed.
+    frames: FrameState,
+    /// Whether the plugin registered an `on_render`: only then is a frame
+    /// worth asking for.
+    renderable: Cell<bool>,
+    /// Device pixels per logical point, as the app last reported it.
+    scale: Cell<f64>,
     /// What to tell the plugin when the window closes (the bridge pushes an
     /// `imgui.close` call into the plugin's queue).
     notify: Option<CloseListener>,
@@ -620,6 +631,38 @@ impl PluginWindow {
             .map_or(0, ImGuiContext::frames)
     }
 
+    /// What the frame pump has done with this window: frames painted, errors,
+    /// the last frame's CPU time.
+    pub fn frame_report(&self) -> FrameReport {
+        self.frames.report()
+    }
+
+    /// Marks that the plugin registered an `on_render`, so the pump asks for
+    /// frames. A registered callback draws what is already there at once.
+    pub fn set_renderable(&self, on: bool) {
+        self.renderable.set(on);
+        if on {
+            self.request_frame();
+        }
+    }
+
+    /// Whether the pump should ask this window for a frame now: it is shown,
+    /// the plugin draws it, and no frame is in flight.
+    pub fn wants_frame(&self) -> bool {
+        self.frame_wants()
+    }
+
+    /// Applies one widget call from the plugin's render callback.
+    pub fn widget(&self, op: &str, seq: u64, arg: &Value) -> Result<Value, String> {
+        self.frame_widget(op, seq, arg)
+    }
+
+    /// Ends the frame the render callback finished (or failed). `refused` says
+    /// the failure was a widget call the host said no to.
+    pub fn end_frame(&self, seq: u64, error: Option<String>, refused: bool) -> Result<(), String> {
+        self.frame_script_end(seq, error, refused)
+    }
+
     pub fn show(&self) -> Result<(), String> {
         self.state.show()?;
         self.handle.set_visible(true);
@@ -692,6 +735,84 @@ impl PluginWindow {
     pub(crate) fn finish_close(&self) {
         self.state.begin_close();
         self.context.borrow_mut().take();
+    }
+}
+
+/// A window as the frame pump sees it: the host's half of `frame::FrameWindow`.
+impl FrameWindow for PluginWindow {
+    fn frame_plugin(&self) -> &str {
+        &self.key.plugin
+    }
+
+    fn frame_id(&self) -> &str {
+        &self.key.id
+    }
+
+    fn frame_open(&self) -> bool {
+        self.is_open()
+    }
+
+    fn frame_shown(&self) -> bool {
+        self.is_shown()
+    }
+
+    fn frame_renderable(&self) -> bool {
+        self.renderable.get()
+    }
+
+    fn frame_size(&self) -> (f64, f64) {
+        self.state.size()
+    }
+
+    fn frame_scale(&self) -> f64 {
+        self.scale.get()
+    }
+
+    fn frame_target(&self) -> Option<(u32, u32)> {
+        self.painter.borrow().last_target_size()
+    }
+
+    fn frame_build(
+        &self,
+        spec: FrameSpec,
+        draw: impl FnOnce(*const Ui),
+    ) -> Result<super::render::PreparedFrame, String> {
+        // The view asks for the atlas on its first frame and after a device
+        // rebuild; the context copies it whenever it changed as well.
+        let want_atlas = self
+            .painter
+            .borrow()
+            .renderer()
+            .is_none_or(|renderer| renderer.needs_atlas());
+        self.with_context(|context| {
+            context.build_frame(spec, want_atlas, |ui| {
+                // SAFETY: `build_frame` keeps the context alive and its frame
+                // open for exactly this closure, on this thread.
+                let root = unsafe { &*ui };
+                // The plugin draws into one window filling the client area:
+                // its widgets land in the plugin's window, never Zeron's.
+                super::frame::root_window(root, &spec, || draw(ui));
+            })
+        })
+        .ok_or_else(|| {
+            format!(
+                "Window \"{}\" of plugin \"{}\" is closed.",
+                self.key.id, self.key.plugin
+            )
+        })?
+        .map_err(|error| error.to_string())
+    }
+
+    fn frame_deliver(&self, frame: super::render::PreparedFrame) {
+        self.set_prepared(frame);
+    }
+
+    fn frame_close(&self) {
+        let _ = self.close();
+    }
+
+    fn frame_state(&self) -> &FrameState {
+        &self.frames
     }
 }
 
@@ -779,6 +900,16 @@ pub struct Windows {
     open: Rc<RefCell<std::collections::BTreeMap<String, Rc<PluginWindow>>>>,
     /// What to tell each plugin when one of its windows closes.
     listeners: RefCell<std::collections::HashMap<String, CloseListener>>,
+    /// How to ask each plugin for a frame (its own call queue), set when its
+    /// actions are served.
+    calls: RefCell<std::collections::HashMap<String, FrameCalls>>,
+    /// Where the pump's round robin resumes: one window a tick, so several
+    /// plugin windows can never add up to a stalled main window.
+    pump_cursor: Cell<usize>,
+    /// Whether the pump task is running already.
+    pumping: Cell<bool>,
+    /// The window's UI thread, where the pump and the plugin's scripts run.
+    tasks: zgx_desktop::TaskSpawner,
 }
 
 impl Windows {
@@ -790,6 +921,10 @@ impl Windows {
             bounds: cx.window_info.bounds.clone(),
             open: Rc::default(),
             listeners: RefCell::default(),
+            calls: RefCell::default(),
+            pump_cursor: Cell::new(0),
+            pumping: Cell::new(false),
+            tasks: cx.tasks.clone(),
         })
     }
 
@@ -815,6 +950,68 @@ impl Windows {
         self.listeners
             .borrow_mut()
             .insert(plugin.to_string(), Rc::new(handler));
+    }
+
+    /// Where the frame pump asks `plugin` for a frame. Set when the plugin's
+    /// actions are served; a plugin with none (a dev fixture without the
+    /// SDK) simply never has a frame asked for.
+    pub fn listen_calls(&self, plugin: &str, calls: FrameCalls) {
+        self.calls.borrow_mut().insert(plugin.to_string(), calls);
+    }
+
+    /// Starts the pump: one window a tick, sixteen milliseconds apart while
+    /// any plugin window is shown, a slow beat when none is, so an app with
+    /// no plugin windows does no per-frame work.
+    ///
+    /// The task holds the registry weakly: it stops when the app's window
+    /// context goes away.
+    pub fn start_pump(self: &Rc<Self>) {
+        if self.pumping.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let tasks = self.tasks.clone();
+        tasks.spawn(async move {
+            loop {
+                let Some(windows) = weak.upgrade() else {
+                    return;
+                };
+                let shown = windows.pump();
+                drop(windows);
+                let wait = if shown { 16 } else { 120 };
+                zgx::timer::sleep(std::time::Duration::from_millis(wait)).await;
+            }
+        });
+    }
+
+    /// Asks one shown window for a frame, in round-robin order. Returns
+    /// whether any window is waiting for one, which decides the next tick's
+    /// pace.
+    pub fn pump(&self) -> bool {
+        let waiting: Vec<Rc<PluginWindow>> = self
+            .open
+            .borrow()
+            .values()
+            .filter(|window| window.wants_frame())
+            .cloned()
+            .collect();
+        if waiting.is_empty() {
+            self.pump_cursor.set(0);
+            return false;
+        }
+        let at = self.pump_cursor.get() % waiting.len();
+        self.pump_cursor.set((at + 1) % waiting.len());
+        let window = &waiting[at];
+        let calls = self.calls.borrow().get(window.key.plugin.as_str()).cloned();
+        if let Some(calls) = calls {
+            super::frame::run(window.as_ref(), &calls);
+        }
+        true
+    }
+
+    /// Every open window, for diagnostics and tests.
+    pub fn all(&self) -> Vec<Rc<PluginWindow>> {
+        self.open.borrow().values().cloned().collect()
     }
 
     /// Opens `spec` as `plugin`'s window.
@@ -871,6 +1068,9 @@ impl Windows {
             view,
             painter,
             context: RefCell::new(Some(context)),
+            frames: FrameState::new(),
+            renderable: Cell::new(false),
+            scale: Cell::new(self.scale()),
             notify: self.listeners.borrow().get(plugin).cloned(),
         });
         *slot.borrow_mut() = Some(record.clone());

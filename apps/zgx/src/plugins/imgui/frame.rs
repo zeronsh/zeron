@@ -1,0 +1,697 @@
+//! The frame pump: one script-driven Dear ImGui frame per shown window.
+//!
+//! Dear ImGui is immediate mode, but Rust cannot call a Luau closure. The
+//! host therefore opens a frame, asks the plugin to run its `on_render` over
+//! the plugin's own call queue (`plugin.<id>.calls`), and closes the frame
+//! when the script says it is done:
+//!
+//! ```text
+//! pump tick
+//!   ├─ begin: activate the window's context, set io, open the frame and
+//!   │         the full-window ImGui window the plugin draws into
+//!   ├─ push { kind = "imgui.frame", window, seq, budget }
+//!   │    └─ the SDK runs on_render(ui)
+//!   │         └─ ui.text / ui.button → plugin.<id>.imgui { op, window, seq }
+//!   │              (applied to the open frame, synchronously)
+//!   │         └─ plugin.<id>.imgui_end { window, seq, ok, error? }
+//!   └─ finish: render_legacy(), copy the draw data, hand it to the
+//!              window's GPU view, which invalidates so zgx paints it
+//! ```
+//!
+//! The paint phase (a `ViewportFrame`) replays the copy and never touches the
+//! context, so a slow script cannot stall presentation.
+//!
+//! ## What is enforced here
+//!
+//! * Only shown windows ask for frames: a hidden or minimised window gets no
+//!   request, runs no callback and draws none ([`FrameState::wants_frame`],
+//!   and the same check at the top of [`run`]).
+//! * One frame in flight per window, and one frame per pump tick, so several
+//!   plugin windows cannot add up to a stalled main window.
+//! * A callback that spends more than [`BUDGET`] is aborted: its frame
+//!   is thrown away, the last good frame keeps painting, and the reason is
+//!   recorded and logged.
+//! * A widget call with no live frame — or one made with another window's
+//!   `ui`, or after the window closed — fails with a sentence naming the
+//!   widget instead of touching Dear ImGui.
+//!
+//! ## Errors and the plugin
+//!
+//! An error inside `on_render` is recorded and the plugin stays loaded; three
+//! consecutive failures close the window (the plugin keeps running). The
+//! exception is the window's **first** frame: a window that cannot draw once
+//! is a window that never becomes visible, so the plugin is reported as
+//! broken with the error text and its windows go (VAL-LIFE-012). A refused
+//! widget is the one failure that never does that: it is the plugin's own
+//! drawing mistake, said where the call was made, and the frame is simply
+//! dropped ([`FrameEnd::refused`]).
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use dear_imgui_rs::{Condition, Ui, WindowFlags};
+use zgx_script::Value;
+
+use super::render::PreparedFrame;
+use super::runtime::FrameSpec;
+
+/// The one ImGui window each frame fills: the plugin's drawing surface. It is
+/// named with a `##` id so the plugin's own labels are never confused with it.
+pub const ROOT_WINDOW: &str = "##zeron-plugin-window";
+
+/// Chrome the plugin's own OS window already provides, and no scrolling: a
+/// plugin's window is its window, not one inside it.
+const ROOT_FLAGS: WindowFlags = WindowFlags::NO_TITLE_BAR
+    .union(WindowFlags::NO_RESIZE)
+    .union(WindowFlags::NO_MOVE)
+    .union(WindowFlags::NO_COLLAPSE)
+    .union(WindowFlags::NO_SAVED_SETTINGS)
+    .union(WindowFlags::NO_SCROLLBAR)
+    .union(WindowFlags::NO_SCROLL_WITH_MOUSE);
+
+/// Runs `draw` inside the full-window ImGui window a plugin's widgets land in,
+/// so a widget called at the top of `on_render` draws in the plugin's own
+/// window and nowhere else.
+pub fn root_window(ui: &Ui, spec: &FrameSpec, draw: impl FnOnce()) {
+    ui.window(ROOT_WINDOW)
+        .position([0.0, 0.0], Condition::Always)
+        .size(spec.display_size, Condition::Always)
+        .flags(ROOT_FLAGS)
+        .build(draw);
+}
+
+/// The most time one plugin's render callback may spend in a frame.
+///
+/// It is measured as elapsed time on the UI thread, which is where the
+/// callback runs and what the app's responsiveness is spent from. (The
+/// framework's CPU clock on Windows advances a scheduler tick at a time, so
+/// it cannot see an 8 ms callback at all.) The SDK watches the same figure
+/// from the script side, so a callback that keeps calling widgets stops
+/// before the host has to abort it.
+pub const BUDGET: Duration = Duration::from_millis(8);
+
+/// The same budget as the number the plugin sees.
+pub const BUDGET_MS: f64 = 8.0;
+
+/// The most widget calls one frame may make (the canonical queued-operation
+/// cap; the per-plugin counters are `quotas-and-budgets`' subject).
+pub const MAX_OPS: u32 = 4096;
+
+/// How many failed frames in a row close the window. The plugin stays on:
+/// its windows are its own, and a bug in one must not take the plugin down.
+pub const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+
+/// What one window's frames have done, for diagnostics and tests.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FrameReport {
+    /// Frames begun.
+    pub seq: u64,
+    /// Frames that were finished and handed to the GPU view.
+    pub frames: u64,
+    /// Frames that failed, of any kind.
+    pub errors: u64,
+    pub consecutive_errors: u32,
+    pub last_error: Option<String>,
+    /// The first frame's error, when the window never drew once.
+    pub first_error: Option<String>,
+    /// How long the last frame's callback took, in milliseconds.
+    pub last_ms: f64,
+    /// Whether a frame is open right now.
+    pub live: bool,
+}
+
+/// How a frame ended, as the pump reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameEnd {
+    pub seq: u64,
+    /// Whether the frame was kept and handed to the GPU view.
+    pub painted: bool,
+    /// Why it was not, when it was not.
+    pub error: Option<String>,
+    /// Whether this was the window's first frame.
+    pub first: bool,
+    /// Whether the callback died on a widget call the host refused (drawn
+    /// outside a live frame, or after the window closed), rather than on
+    /// the plugin's own error. A refusal is the plugin's drawing mistake:
+    /// it never takes the plugin down.
+    pub refused: bool,
+    pub consecutive_errors: u32,
+    /// Time the callback spent, in milliseconds.
+    pub ms: f64,
+}
+
+/// A window the pump can build frames for.
+///
+/// Implemented by the live [`PluginWindow`](super::window::PluginWindow), and
+/// by tests with a context and no native window, so the whole protocol —
+/// begin, widget calls, end, budget, errors — is exercised without a desktop.
+pub trait FrameWindow {
+    fn frame_plugin(&self) -> &str;
+    fn frame_id(&self) -> &str;
+    /// The window is still open (a closed window's `ui` errors).
+    fn frame_open(&self) -> bool;
+    /// The window is shown: open, visible and not minimized.
+    fn frame_shown(&self) -> bool;
+    /// The plugin registered an `on_render`, so a frame is worth asking for.
+    fn frame_renderable(&self) -> bool;
+    /// The window's client size in logical points.
+    fn frame_size(&self) -> (f64, f64);
+    /// Device pixels per logical point.
+    fn frame_scale(&self) -> f64;
+    /// The size in device pixels the last painted frame had, when known.
+    fn frame_target(&self) -> Option<(u32, u32)>;
+    /// Builds one frame: opens it, runs `draw` inside the full-window ImGui
+    /// window the plugin draws into, then ends and copies it.
+    fn frame_build(
+        &self,
+        spec: FrameSpec,
+        draw: impl FnOnce(*const Ui),
+    ) -> Result<PreparedFrame, String>;
+    /// Hands a finished frame to the GPU view, which invalidates so it paints.
+    fn frame_deliver(&self, frame: PreparedFrame);
+    /// The window is beyond saving; close it (the plugin stays loaded).
+    fn frame_close(&self);
+    /// This window's frame bookkeeping.
+    fn frame_state(&self) -> &FrameState;
+
+    /// Whether a pump tick should ask this window for a frame.
+    fn frame_wants(&self) -> bool
+    where
+        Self: Sized,
+    {
+        self.frame_state().wants_frame(self)
+    }
+
+    fn frame_prepare(&self) -> Result<(u64, FrameSpec), String>
+    where
+        Self: Sized,
+    {
+        self.frame_state().prepare(self)
+    }
+
+    fn frame_set_ui(&self, ui: *const Ui)
+    where
+        Self: Sized,
+    {
+        self.frame_state().set_ui(ui)
+    }
+
+    fn frame_script_end(&self, seq: u64, error: Option<String>, refused: bool) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        self.frame_state().script_end(seq, error, refused)
+    }
+
+    fn frame_conclude(&self, prepared: Result<PreparedFrame, String>) -> FrameEnd
+    where
+        Self: Sized,
+    {
+        self.frame_state().conclude(self, prepared)
+    }
+
+    fn frame_take_end(&self) -> Option<FrameEnd> {
+        self.frame_state().take_end()
+    }
+
+    fn frame_widget(&self, op: &str, seq: u64, arg: &Value) -> Result<Value, String>
+    where
+        Self: Sized,
+    {
+        self.frame_state().widget(self, op, seq, arg)
+    }
+}
+
+/// One frame in flight: what the widgets are drawn into and what it has cost.
+struct LiveFrame {
+    seq: u64,
+    /// The frame's `Ui`, owned by the context. Valid while the frame is open,
+    /// on this thread only; [`FrameState`] never lets it outlive the frame.
+    ui: *const Ui,
+    started_wall: Instant,
+    ops: u32,
+    /// Set when the script side reports the callback overran its budget.
+    over_budget: bool,
+    /// Whether the script closed the frame (`imgui_end`).
+    finished: bool,
+    /// What the script's `on_render` raised, if it did.
+    error: Option<String>,
+    /// Whether that was a widget call the host refused.
+    refused: bool,
+}
+
+/// One window's frame bookkeeping: the live frame, the counters and the last
+/// failure.
+#[derive(Default)]
+pub struct FrameState {
+    seq: Cell<u64>,
+    live: RefCell<Option<LiveFrame>>,
+    frames: Cell<u64>,
+    errors: Cell<u64>,
+    consecutive: Cell<u32>,
+    last_error: RefCell<Option<String>>,
+    first_error: RefCell<Option<String>>,
+    last_ms: Cell<f64>,
+    last_started: Cell<Option<Instant>>,
+    /// The end of the last finished frame, for the pump to report.
+    pending: RefCell<Option<FrameEnd>>,
+}
+
+impl FrameState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether a pump tick should ask this window for a frame.
+    pub fn wants_frame(&self, window: &impl FrameWindow) -> bool {
+        window.frame_shown()
+            && window.frame_renderable()
+            && window.frame_open()
+            && self.live.borrow().is_none()
+    }
+
+    /// Frames finished and painted so far.
+    pub fn frames(&self) -> u64 {
+        self.frames.get()
+    }
+
+    pub fn report(&self) -> FrameReport {
+        FrameReport {
+            seq: self.seq.get(),
+            frames: self.frames.get(),
+            errors: self.errors.get(),
+            consecutive_errors: self.consecutive.get(),
+            last_error: self.last_error.borrow().clone(),
+            first_error: self.first_error.borrow().clone(),
+            last_ms: self.last_ms.get(),
+            live: self.live.borrow().is_some(),
+        }
+    }
+
+    /// Starts the window's next frame: takes the next sequence number and
+    /// works out the frame spec. The frame itself is opened by
+    /// [`FrameWindow::frame_build`], which records its `Ui` with [`set_ui`].
+    ///
+    /// [`set_ui`]: FrameState::set_ui
+    pub fn prepare(&self, window: &impl FrameWindow) -> Result<(u64, FrameSpec), String> {
+        if !window.frame_open() || !window.frame_shown() {
+            return Err(format!(
+                "Window \"{}\" of plugin \"{}\" is not drawing.",
+                window.frame_id(),
+                window.frame_plugin()
+            ));
+        }
+        if self.live.borrow().is_some() {
+            return Err(format!(
+                "Window \"{}\" already has a frame in flight.",
+                window.frame_id()
+            ));
+        }
+        let now = Instant::now();
+        let delta = self.last_started.get().map_or(1.0 / 60.0, |last| {
+            now.saturating_duration_since(last)
+                .as_secs_f32()
+                .clamp(0.0, 0.25)
+        });
+        let (width, height) = window.frame_size();
+        let scale = window.frame_scale().max(0.5);
+        let target = window.frame_target().unwrap_or_else(|| {
+            (
+                (width * scale).round().max(1.0) as u32,
+                (height * scale).round().max(1.0) as u32,
+            )
+        });
+        let spec = FrameSpec {
+            display_size: [width as f32, height as f32],
+            framebuffer_scale: scale as f32,
+            target_size: target,
+            delta_time: delta,
+        };
+        let seq = self.seq.get() + 1;
+        self.seq.set(seq);
+        self.last_started.set(Some(now));
+        self.pending.borrow_mut().take();
+        *self.live.borrow_mut() = Some(LiveFrame {
+            seq,
+            ui: std::ptr::null(),
+            started_wall: now,
+            ops: 0,
+            over_budget: false,
+            finished: false,
+            error: None,
+            refused: false,
+        });
+        Ok((seq, spec))
+    }
+
+    /// Records the frame's `Ui`, once the context has opened the frame.
+    pub fn set_ui(&self, ui: *const Ui) {
+        if let Some(frame) = self.live.borrow_mut().as_mut() {
+            frame.ui = ui;
+        }
+    }
+
+    /// The script's `imgui_end`: the callback finished (or failed).
+    ///
+    /// `refused` says the failure was a widget call the host said no to, not
+    /// the plugin's own error: the frame is dropped either way, but only the
+    /// plugin's own error on a window's first frame ends the window's run.
+    pub fn script_end(&self, seq: u64, error: Option<String>, refused: bool) -> Result<(), String> {
+        let mut live = self.live.borrow_mut();
+        let Some(frame) = live.as_mut() else {
+            return Err("No frame is open to end.".to_string());
+        };
+        if frame.seq != seq {
+            return Err(format!("Frame {seq} cannot end frame {}.", frame.seq));
+        }
+        frame.finished = true;
+        frame.refused = refused;
+        frame.error = error;
+        Ok(())
+    }
+
+    /// Applies one widget call to the open frame.
+    ///
+    /// The refusal names the widget and what went wrong, because it reaches a
+    /// plugin author through `ui.text` raising at their line.
+    pub fn widget(
+        &self,
+        window: &impl FrameWindow,
+        op: &str,
+        seq: u64,
+        arg: &Value,
+    ) -> Result<Value, String> {
+        let mut live = self.live.borrow_mut();
+        let Some(frame) = live.as_mut() else {
+            return Err(format!(
+                "ui.{op} was called outside window \"{}\"'s render callback. Draw with the ui passed to that window's on_render, inside the callback.",
+                window.frame_id()
+            ));
+        };
+        if frame.seq != seq {
+            return Err(format!(
+                "ui.{op} was called from another window's render callback. A ui belongs to window \"{}\" and works only inside its own on_render.",
+                window.frame_id()
+            ));
+        }
+        if !window.frame_open() {
+            return Err(format!(
+                "ui.{op} was called after window \"{}\" was closed. Its ui does nothing once the window is gone.",
+                window.frame_id()
+            ));
+        }
+        if frame.ui.is_null() {
+            return Err(format!(
+                "ui.{op} was called before window \"{}\" began drawing.",
+                window.frame_id()
+            ));
+        }
+        frame.ops += 1;
+        if frame.ops > MAX_OPS {
+            return Err(format!(
+                "ui.{op} was the {}th widget this frame; a frame may draw {MAX_OPS} at most.",
+                frame.ops
+            ));
+        }
+        if frame.over_budget || frame.started_wall.elapsed() > BUDGET {
+            frame.over_budget = true;
+            return Err(budget_sentence(window.frame_id()));
+        }
+        // SAFETY: `ui` points into the context the window owns, the frame is
+        // still open (only `conclude` closes it), and every call here is on
+        // the UI thread inside the same turn that opened it.
+        let ui = unsafe { &*frame.ui };
+        match op {
+            "text" => {
+                let text = string_arg(arg, "text", op)?;
+                ui.text(text.as_str());
+                let min = ui.item_rect_min();
+                let max = ui.item_rect_max();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("min", point(min)),
+                    ("max", point(max)),
+                ]))
+            }
+            "button" => {
+                let label = string_arg(arg, "label", op)?;
+                let clicked = ui.button(label.as_str());
+                let min = ui.item_rect_min();
+                let max = ui.item_rect_max();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::Bool(clicked)),
+                    ("min", point(min)),
+                    ("max", point(max)),
+                ]))
+            }
+            _ => Err(format!("zeron.imgui has no widget \"{op}\".")),
+        }
+    }
+
+    /// Ends the frame the pump opened: paints it when it is clean, throws it
+    /// away with the reason when it is not, and records the outcome.
+    pub fn conclude(
+        &self,
+        window: &impl FrameWindow,
+        prepared: Result<PreparedFrame, String>,
+    ) -> FrameEnd {
+        let Some(frame) = self.live.borrow_mut().take() else {
+            let end = FrameEnd {
+                seq: self.seq.get(),
+                painted: false,
+                error: Some("No frame was in flight.".to_string()),
+                first: false,
+                refused: false,
+                consecutive_errors: self.consecutive.get(),
+                ms: 0.0,
+            };
+            *self.pending.borrow_mut() = Some(end.clone());
+            return end;
+        };
+        let seq = frame.seq;
+        let ms = frame.started_wall.elapsed().as_secs_f64().max(0.0) * 1000.0;
+        let first = self.frames.get() == 0;
+        let refused = frame.refused;
+        let failure = if frame.over_budget || frame.started_wall.elapsed() > BUDGET {
+            Some(budget_sentence(window.frame_id()))
+        } else if !frame.finished {
+            Some("The render callback ended without finishing its frame.".to_string())
+        } else {
+            frame.error
+        };
+        let end = match failure {
+            // A widget the host refused is the plugin's own drawing mistake:
+            // already said where it happened, and it keeps the plugin loaded.
+            Some(error) if refused => self.record_refusal(&error, first, ms),
+            Some(error) => self.record_failure(&error, first, ms),
+            None => match prepared {
+                Ok(prepared) => {
+                    window.frame_deliver(prepared);
+                    self.frames.set(self.frames.get() + 1);
+                    self.consecutive.set(0);
+                    self.last_ms.set(ms);
+                    FrameEnd {
+                        seq,
+                        painted: true,
+                        error: None,
+                        first,
+                        refused: false,
+                        consecutive_errors: 0,
+                        ms,
+                    }
+                }
+                Err(error) => self.record_failure(&error, first, ms),
+            },
+        };
+        *self.pending.borrow_mut() = Some(end.clone());
+        end
+    }
+
+    /// The end recorded by the last [`conclude`](Self::conclude), once.
+    pub fn take_end(&self) -> Option<FrameEnd> {
+        self.pending.borrow_mut().take()
+    }
+
+    fn record_failure(&self, error: &str, first: bool, ms: f64) -> FrameEnd {
+        self.errors.set(self.errors.get() + 1);
+        self.consecutive.set(self.consecutive.get() + 1);
+        *self.last_error.borrow_mut() = Some(error.to_string());
+        if first {
+            let mut first_error = self.first_error.borrow_mut();
+            if first_error.is_none() {
+                *first_error = Some(error.to_string());
+            }
+        }
+        self.last_ms.set(ms);
+        FrameEnd {
+            seq: self.seq.get(),
+            painted: false,
+            error: Some(error.to_string()),
+            first,
+            refused: false,
+            consecutive_errors: self.consecutive.get(),
+            ms,
+        }
+    }
+
+    /// A frame a widget call the host refused brought down: counted and
+    /// recorded, but it neither paints, nor counts toward the failed frames
+    /// in a row that close a window, nor ends a window's run on its first
+    /// frame. Redrawing without the bad call is the plugin author's fix.
+    fn record_refusal(&self, error: &str, first: bool, ms: f64) -> FrameEnd {
+        self.errors.set(self.errors.get() + 1);
+        *self.last_error.borrow_mut() = Some(error.to_string());
+        if first {
+            let mut first_error = self.first_error.borrow_mut();
+            if first_error.is_none() {
+                *first_error = Some(error.to_string());
+            }
+        }
+        self.last_ms.set(ms);
+        FrameEnd {
+            seq: self.seq.get(),
+            painted: false,
+            error: Some(error.to_string()),
+            first,
+            refused: true,
+            consecutive_errors: self.consecutive.get(),
+            ms,
+        }
+    }
+}
+
+/// Queues one call for a plugin: its id, its kind, and its fields.
+pub type PushCall = dyn Fn(String, &'static str, Vec<(&'static str, Value)>);
+
+/// How the pump hands a plugin one frame request, and takes it back.
+///
+/// The bridge's own queue is the production path; a dev plugin gets one made
+/// over its `plugin.<id>.calls` shared state, so the same pump serves both.
+#[derive(Clone)]
+pub struct FrameCalls {
+    push: Rc<PushCall>,
+    take: Rc<dyn Fn(&str)>,
+    failed: Rc<dyn Fn(&str)>,
+}
+
+impl FrameCalls {
+    pub fn new(
+        push: impl Fn(String, &'static str, Vec<(&'static str, Value)>) + 'static,
+        take: impl Fn(&str) + 'static,
+        failed: impl Fn(&str) + 'static,
+    ) -> Self {
+        Self {
+            push: Rc::new(push),
+            take: Rc::new(take),
+            failed: Rc::new(failed),
+        }
+    }
+
+    /// Queues a call for the plugin. What the plugin does with it runs before
+    /// this returns (the SDK drains the queue synchronously).
+    pub fn push(&self, id: String, kind: &'static str, fields: Vec<(&'static str, Value)>) {
+        (self.push)(id, kind, fields);
+    }
+
+    /// Drops a call the plugin never answered (or already did).
+    pub fn take(&self, id: &str) {
+        (self.take)(id)
+    }
+
+    /// Reports a plugin that could not draw its window's first frame.
+    pub fn failed(&self, error: &str) {
+        (self.failed)(error)
+    }
+}
+
+/// Runs one frame of one window: begin, push the request, end, report.
+///
+/// The plugin's `on_render` runs inside [`FrameCalls::push`], on this stack,
+/// while the frame is open; by the time it returns the frame has been painted
+/// or aborted. A callback that never answers its `imgui_end` (an error outside
+/// the SDK's guard) has its frame aborted with a sentence saying so.
+pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
+    if !window.frame_open() || !window.frame_shown() || !window.frame_renderable() {
+        return None;
+    }
+    let (seq, spec) = match window.frame_prepare() {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!(
+                "zeron-zgx: plugin {}: window \"{}\": {error}",
+                window.frame_plugin(),
+                window.frame_id()
+            );
+            return None;
+        }
+    };
+    let call = format!("imgui-frame-{}-{seq}", window.frame_id());
+    let built = window.frame_build(spec, |ui| {
+        window.frame_set_ui(ui);
+        calls.push(
+            call.clone(),
+            "imgui.frame",
+            vec![
+                ("window", Value::from(window.frame_id())),
+                ("seq", Value::from(seq as f64)),
+                ("budget", Value::from(BUDGET_MS)),
+            ],
+        );
+    });
+    let end = window.frame_conclude(built);
+    calls.take(&call);
+    if let Some(error) = &end.error {
+        if end.refused {
+            // Said where the call was made (the widget op reports each
+            // refusal naming its widget), so the pump only records it.
+        } else if end.first {
+            // A window that cannot draw its first frame is reported broken,
+            // with the error text, and taken away (VAL-LIFE-012).
+            calls.failed(error);
+        } else {
+            eprintln!(
+                "zeron-zgx: plugin {}: window \"{}\": {error}",
+                window.frame_plugin(),
+                window.frame_id()
+            );
+            if end.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                eprintln!(
+                    "zeron-zgx: plugin {}: closing window \"{}\" after {} failed frames",
+                    window.frame_plugin(),
+                    window.frame_id(),
+                    end.consecutive_errors
+                );
+                window.frame_close();
+            }
+        }
+    }
+    Some(end)
+}
+
+/// The sentence a plugin gets for an overrun callback.
+pub fn budget_sentence(window: &str) -> String {
+    format!(
+        "Window \"{window}\"'s render callback took too long: a frame may spend {BUDGET_MS:.0} ms of CPU. Draw less, or do the work outside on_render."
+    )
+}
+
+fn string_arg(arg: &Value, field: &str, op: &str) -> Result<String, String> {
+    match arg.field(field) {
+        Some(Value::Str(text)) => Ok(text.to_string()),
+        Some(_) => Err(format!(
+            "ui.{op} needs {field} to be text, like ui.{op}(\"Hello\")."
+        )),
+        None => Err(format!(
+            "ui.{op} needs {field} to draw, like ui.{op}(\"Hello\")."
+        )),
+    }
+}
+
+fn point(at: [f32; 2]) -> Value {
+    Value::record([
+        ("x", Value::from(f64::from(at[0]))),
+        ("y", Value::from(f64::from(at[1]))),
+    ])
+}

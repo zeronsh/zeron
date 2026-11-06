@@ -117,7 +117,7 @@
 -- are never reachable, whatever the selector: signing in, allowing plugins,
 -- plugin and template settings.
 
-type Call = { id: string, kind: string, tool: string?, item: string?, args: any, chat: string? }
+type Call = { id: string, kind: string, tool: string?, item: string?, args: any, chat: string?, window: string?, seq: number? }
 type Message = { seq: number, from: { id: string, name: string }, data: any, at: number }
 type Tool = { name: string, run: (args: any, call: { chat: string? }) -> any }
 type Item = { kind: string, id: string, label: string, run: (context: any) -> () }
@@ -921,7 +921,25 @@ return function(id: string): any
 		return { placements = out }
 	end
 
+	-- The native ImGui windows' two call kinds, made where the module is
+	-- (below, beside the rest of `zeron.imgui`).
+	local imgui_frame: ((any) -> ())?
+	local imgui_closed: ((string) -> ())?
+
 	local function run(call: Call)
+		if call.kind == "imgui.frame" then
+			if imgui_frame then
+				imgui_frame(call)
+			end
+			return
+		end
+		if call.kind == "imgui.close" then
+			if imgui_closed then
+				imgui_closed(call.window or "")
+			end
+			answer(call, true, nil)
+			return
+		end
 		if call.kind == "where" then
 			answer(call, true, where())
 			return
@@ -1212,6 +1230,223 @@ return function(id: string): any
 	function M.toast(text: string)
 		ui.invoke(`{prefix}.toast`, text)
 	end
+
+	-- ------------------------------------------------------------------
+	-- Native Dear ImGui windows ("imgui.windows")
+	--
+	-- A real operating-system window of your own, drawn from Luau:
+	--
+	--   local w = zeron.imgui.open_window {
+	--     id = "inspector", title = "Inspector", size = { width = 720, height = 480 },
+	--   }
+	--   w:on_render(function(ui)
+	--     ui.text("Hello from Luau!")
+	--     if ui.button("Refresh") then print("Refreshing…") end
+	--   end)
+	--
+	-- The callback runs once for every frame the window is shown, and never
+	-- while it is hidden or minimized. Widgets draw into the frame being
+	-- built and answer at once: `ui.button` is true on the frame the button
+	-- is released, never on the press. Drawing outside the callback, with
+	-- another window's `ui`, or after the window closed raises an error
+	-- naming the widget; the plugin stays loaded.
+	--
+	-- A frame may spend 8 ms of CPU: a callback that overruns is stopped and
+	-- its frame thrown away, so one window can never freeze the app.
+	local imgui = {}
+	-- The window open under each id, and every handle made for it: a handle
+	-- kept from before a close stays inert (its methods raise) while a fresh
+	-- open_window for the same id hands out a new one.
+	local imgui_live: { [string]: any } = {}
+	local imgui_made: { [string]: { any } } = {}
+	local imgui_budget = 0.008
+	-- The frame being run, if one is (one at a time): where a widget the host
+	-- refuses records its sentence.
+	local imgui_refusal: { [string]: any }? = nil
+
+	local function imgui_ask(fields: { [string]: any }): any
+		local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, fields)
+		if not ok then
+			error(tostring(answer), 3)
+		end
+		if type(answer) ~= "table" or answer.ok ~= true then
+			local why = if type(answer) == "table" then answer.error else nil
+			error(why or "zeron.imgui couldn't answer", 3)
+		end
+		return answer
+	end
+
+	-- What `on_render` is handed: `text` and `button`, each a synchronous
+	-- call into the frame the host has open for this window. A refusal is
+	-- recorded in the frame's own marker (`imgui_refusal`), so `imgui_frame`
+	-- can tell the host the callback died on a widget the host turned down
+	-- rather than on an error of the plugin's own — even when the call was
+	-- made with a `ui` kept from another window's frame.
+	local function imgui_ui(window: string, seq: number): any
+		local started = os.clock()
+		local view = {}
+		local function call(op: string, fields: { [string]: any }): any
+			if os.clock() - started > imgui_budget then
+				error(`window "{window}"'s render callback took too long: a frame may spend 8 ms of CPU`, 3)
+			end
+			fields.op = op
+			fields.window = window
+			fields.seq = seq
+			local ok, answer = pcall(imgui_ask, fields)
+			if not ok then
+				if imgui_refusal then
+					imgui_refusal.sentence = tostring(answer)
+				end
+				error(answer, 0)
+			end
+			return answer
+		end
+		function view.text(value: any)
+			call("text", { text = tostring(value) })
+		end
+		function view.button(label: any): boolean
+			local answer = call("button", { label = tostring(label) })
+			return answer.value == true
+		end
+		return view
+	end
+
+	local function imgui_handle(window: string): any
+		local handle: any = { __id = window, __closed = false }
+		local function live()
+			if handle.__closed then
+				error(`Window "{window}" is closed. Open it again with zeron.imgui.open_window.`, 3)
+			end
+		end
+		-- The callback that draws the window, once per shown frame.
+		function handle.on_render(_self: any, fn: (any) -> ())
+			live()
+			handle.__render = fn
+			imgui_ask({ op = "render", window = window, on = true })
+		end
+		-- Told when the window closes: your close(), the OS close button, or
+		-- Zeron taking the plugin away. Runs exactly once per close.
+		function handle.on_close(_self: any, fn: () -> ())
+			live()
+			handle.__close = fn
+		end
+		function handle.close(_self: any)
+			if handle.__closed then
+				return
+			end
+			imgui_ask({ op = "close", window = window })
+		end
+		function handle.is_open(_self: any): boolean
+			if handle.__closed then
+				return false
+			end
+			local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, { op = "is_open", window = window })
+			return ok and type(answer) == "table" and answer.open == true
+		end
+		function handle.state(_self: any): any
+			if handle.__closed then
+				return { open = false, shown = false, minimized = false, frames = 0 }
+			end
+			local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, { op = "state", window = window })
+			return if ok and type(answer) == "table" then answer else { open = false }
+		end
+		function handle.show(_self: any)
+			live()
+			imgui_ask({ op = "show", window = window })
+		end
+		function handle.hide(_self: any)
+			live()
+			imgui_ask({ op = "hide", window = window })
+		end
+		function handle.focus(_self: any)
+			live()
+			imgui_ask({ op = "focus", window = window })
+		end
+		function handle.minimize(_self: any)
+			live()
+			imgui_ask({ op = "minimize", window = window })
+		end
+		function handle.restore(_self: any)
+			live()
+			imgui_ask({ op = "restore", window = window })
+		end
+		function handle.set_title(_self: any, title: string)
+			live()
+			imgui_ask({ op = "set_title", window = window, title = tostring(title) })
+		end
+		function handle.set_size(_self: any, size: { width: number, height: number })
+			live()
+			imgui_ask({ op = "set_size", window = window, size = size })
+		end
+		local handles = imgui_made[window]
+		if not handles then
+			handles = {}
+			imgui_made[window] = handles
+		end
+		table.insert(handles, handle)
+		return handle
+	end
+
+	function imgui.open_window(options: { [string]: any }): any
+		local request = table.clone(options or {})
+		request.op = "open_window"
+		local answer = imgui_ask(request)
+		local window = tostring(answer.id or request.id)
+		local handle = imgui_handle(window)
+		imgui_live[window] = handle
+		return handle
+	end
+
+	function imgui.is_open(window: string): boolean
+		local handle = imgui_live[window]
+		return handle ~= nil and handle.is_open(handle)
+	end
+
+	-- The host pushed a frame request: run the window's on_render against the
+	-- open frame, then close it, telling the host why when it raised.
+	imgui_frame = function(call: any)
+		local window = tostring(call.window or "")
+		local handle = imgui_live[window]
+		local ok, why = true, nil
+		local refused = {}
+		imgui_refusal = refused
+		if handle and handle.__render and not handle.__closed then
+			ok, why = pcall(handle.__render, imgui_ui(window, tonumber(call.seq) or 0))
+		end
+		imgui_refusal = nil
+		ui.invoke(`{prefix}.imgui_end`, {
+			window = window,
+			seq = tonumber(call.seq) or 0,
+			ok = ok,
+			error = if ok then ui.null else tostring(why),
+			-- The callback died on a widget call the host refused, not on an
+			-- error of the plugin's own.
+			refused = refused.sentence ~= nil,
+		})
+	end
+
+	-- A window went away: every handle for it is inert from now on, and the
+	-- current one's on_close runs, once.
+	imgui_closed = function(window: string)
+		local handle = imgui_live[window]
+		local handles = imgui_made[window]
+		imgui_live[window] = nil
+		imgui_made[window] = nil
+		for _, h in handles or {} do
+			h.__closed = true
+		end
+		if handle then
+			handle.__closed = true
+			if handle.__close then
+				local ok, why = pcall(handle.__close, window)
+				if not ok then
+					print(`{id}: on_close for window "{window}" failed: {why}`)
+				end
+			end
+		end
+	end
+
+	M.imgui = imgui
 
 	made[id] = M
 	return M

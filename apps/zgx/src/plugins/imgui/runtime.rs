@@ -255,23 +255,44 @@ impl WindowContext {
         want_atlas: bool,
         build: impl FnOnce(&Ui),
     ) -> Result<PreparedFrame, ImGuiHostError> {
-        // The closure cannot borrow `self` (it is called through it), so the
-        // atlas bookkeeping travels in and out by value.
+        self.build_frame(spec, want_atlas, |ui| {
+            // SAFETY: `build_frame` keeps the context alive and its frame
+            // open for exactly this closure, on this thread.
+            build(unsafe { &*ui })
+        })
+    }
+
+    /// Builds one whole frame: activates the context, sets the frame's size
+    /// and delta time, opens the frame, runs `draw` while it is open, then
+    /// ends it, copies its draw data and suspends the context again.
+    ///
+    /// `draw` gets the frame's [`Ui`] as a pointer rather than a borrow: the
+    /// live path runs the plugin's script from inside this closure, and the
+    /// script's widget calls come back into the same open frame through that
+    /// pointer while this borrow of the context stands. Nothing outside this
+    /// call may hold the pointer.
+    pub fn build_frame(
+        &mut self,
+        spec: FrameSpec,
+        want_atlas: bool,
+        draw: impl FnOnce(*const Ui),
+    ) -> Result<PreparedFrame, ImGuiHostError> {
+        self.activate()?;
         let last_size = self.atlas_size;
         let created = self.atlas_created;
-        let (prepared, atlas_size, atlas_created) = self.with_active(move |context| {
+        let built = self.with_active(move |context| {
             let io = context.io_mut();
             io.set_display_size(spec.display_size);
             io.set_display_framebuffer_scale([spec.framebuffer_scale; 2]);
             io.set_delta_time(spec.delta_time);
-            {
-                let ui = context.frame();
-                build(ui);
-            }
+            let token = context
+                .try_begin_frame()
+                .map_err(|error| ImGuiHostError::context(error.to_string()))?;
+            draw(token.ui() as *const Ui);
             // `render_legacy` ends the frame and hands back its draw data;
             // the copy is what later phases need, so it is dropped at once.
             let prepared = {
-                let frame = context.render_legacy();
+                let frame = token.render_legacy();
                 PreparedFrame::capture(&frame, spec.target_size)
             };
             // Legacy renderer mode, claimed for the read: the lease is
@@ -286,8 +307,12 @@ impl WindowContext {
                 atlas_created = true;
                 prepared = prepared.with_atlas(Some(image));
             }
-            (prepared, atlas_size, atlas_created)
-        })?;
+            Ok::<_, ImGuiHostError>((prepared, atlas_size, atlas_created))
+        });
+        // Always leave the context suspended for the next window's turn,
+        // even when the frame failed.
+        let _ = self.suspend();
+        let (prepared, atlas_size, atlas_created) = built??;
         self.atlas_size = atlas_size;
         self.atlas_created = atlas_created;
         self.frames += 1;

@@ -531,6 +531,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     *bridge.me.borrow_mut() = Rc::downgrade(&bridge);
     BRIDGE.with(|b| *b.borrow_mut() = Rc::downgrade(&bridge));
     bridge.actions();
+    // The plugin windows' own frames: one window a tick while any is shown.
+    bridge.imgui.start_pump();
 
     // Each plugin's records, as what they're made of changes.
     let weak = Rc::downgrade(&bridge);
@@ -908,6 +910,13 @@ pub fn dev_plugins(host: &ScriptHost, cx: Option<&mut WindowContext>) {
                 move |window| {
                     eprintln!("zeron-zgx: dev plugin {plugin}: window {window} closed");
                 },
+                Some(imgui::luau::dev_calls(host, &id)),
+                {
+                    let said = id.clone();
+                    move |sentence| {
+                        eprintln!("zeron-zgx: dev plugin {said}: {sentence}");
+                    }
+                },
             );
         }
         locales::publish(host, &id, &dir);
@@ -937,6 +946,10 @@ pub fn dev_plugins(host: &ScriptHost, cx: Option<&mut WindowContext>) {
         dev_service(host, &id);
         eprintln!("zeron-zgx: dev plugin {id} from {}", dir.display());
         plugins.extend(item.plugin());
+    }
+    // Their windows draw: one frame a tick while any is shown.
+    if let Some(windows) = &imgui {
+        windows.start_pump();
     }
     plugin_network.set(hosts);
     host.set_plugins(plugins);
@@ -1839,6 +1852,24 @@ impl Bridge {
         self.publish_page();
     }
 
+    /// A plugin drew with a `ui` no window of its own has open (outside a
+    /// render callback, in another window's, or after the window closed):
+    /// said once per distinct sentence in the log and on its row in
+    /// Settings → Plugins. The plugin stays loaded: its next frame may be
+    /// clean, and the fix is in its own drawing code.
+    fn widget_refused(&self, plugin: &str, sentence: &str) {
+        let Some(item) = self.item(plugin) else { return };
+        let words = format!("{}: {}", item.name(), recovery::first_line(sentence));
+        let mut problems = self.problems.borrow_mut();
+        if problems.get(plugin).is_some_and(|(hash, said)| hash == item.hash() && *said == words) {
+            return;
+        }
+        eprintln!("zeron-zgx: plugin {plugin}: {words}");
+        problems.insert(plugin.to_string(), (item.hash().to_string(), words));
+        drop(problems);
+        self.publish_page();
+    }
+
     /// Something for the app to do (screens/plugins runs each once).
     fn request(&self, kind: &str, title: &str, value: Value) {
         let seq = self.request_seq.get() + 1;
@@ -2368,7 +2399,7 @@ impl Bridge {
                 Rc::new(move || me.upgrade().and_then(|b| b.item(&plugin)))
             };
             let closed = {
-                let (me, plugin) = (me, plugin.clone());
+                let (me, plugin) = (me.clone(), plugin.clone());
                 move |window: &str| {
                     if let Some(b) = me.upgrade() {
                         b.push_call(
@@ -2380,7 +2411,55 @@ impl Bridge {
                     }
                 }
             };
-            imgui::luau::serve(&self.host, id, self.imgui.clone(), item, closed);
+            // The frame pump's way in and out: a frame request goes through
+            // the same queue, and a window that cannot draw its first frame
+            // is reported as a broken plugin, with the script's own words.
+            let frames = {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                let take = {
+                    let (me, plugin) = (me.clone(), plugin.clone());
+                    move |call: &str| {
+                        if let Some(b) = me.upgrade() {
+                            b.take_call(&plugin, call);
+                        }
+                    }
+                };
+                let failed = {
+                    let (me, plugin) = (me.clone(), plugin.clone());
+                    move |error: &str| {
+                        if let Some(b) = me.upgrade() {
+                            b.plugin_failed(&plugin, error);
+                        }
+                    }
+                };
+                let push = move |call: String, kind: &'static str, fields: Vec<(&'static str, Value)>| {
+                    if let Some(b) = me.upgrade() {
+                        b.push_call(&plugin, call, kind, fields);
+                    }
+                };
+                imgui::frame::FrameCalls::new(push, take, failed)
+            };
+            // A widget call the host refused (drawn outside a live frame,
+            // or after the window closed): one line in the log and one on
+            // the plugin's row, said once per distinct sentence, and the
+            // plugin stays loaded.
+            let refused = {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                move |sentence: &str| {
+                    if let Some(b) = me.upgrade() {
+                        b.widget_refused(&plugin, sentence);
+                    }
+                }
+            };
+            imgui::luau::serve(
+                &self.host,
+                id,
+                self.imgui.clone(),
+                item,
+                closed,
+                Some(frames),
+                refused,
+            );
         }
     }
 

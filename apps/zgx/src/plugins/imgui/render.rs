@@ -975,6 +975,10 @@ pub struct ImguiViewport {
     prepared: Option<PreparedFrame>,
     clear: wgpu::Color,
     error: Option<RenderError>,
+    /// The target size of the last frame painted, in device pixels. The
+    /// update phase builds the next frame for it, so content lands on the
+    /// window's pixels even at a display scale the app did not predict.
+    target: Option<(u32, u32)>,
     /// Frames this view has drawn. zgx calls `render` only while the window
     /// showing it does (a hidden or minimized window draws none), so this is
     /// the window's own render lifecycle, and a hidden window's count stays
@@ -989,8 +993,14 @@ impl ImguiViewport {
             prepared: None,
             clear: DEFAULT_CLEAR,
             error: None,
+            target: None,
             frames: 0,
         }
+    }
+
+    /// The size in device pixels of the last painted frame, if any.
+    pub fn last_target_size(&self) -> Option<(u32, u32)> {
+        self.target
     }
 
     /// Frames drawn so far (see the field).
@@ -1035,6 +1045,7 @@ impl Default for ImguiViewport {
 impl Viewport for ImguiViewport {
     fn render(&mut self, frame: &mut ViewportFrame<'_>) {
         self.frames += 1;
+        self.target = Some(frame.size);
         let target = RenderTarget {
             view: frame.target,
             format: frame.format,
