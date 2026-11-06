@@ -5582,8 +5582,11 @@ esac
 mod winget_tests {
     use super::*;
 
+    // (Windows paths: only Windows reads them as paths.)
+    #[cfg(windows)]
     const PACKAGE: &str = r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe";
 
+    #[cfg(windows)]
     #[test]
     fn a_winget_package_is_known_by_its_folder() {
         assert!(in_winget_package(Path::new(PACKAGE), OPENCODE_WINGET_ID));
