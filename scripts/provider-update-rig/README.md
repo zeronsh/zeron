@@ -2,7 +2,7 @@
 
 Proves that updating an agent CLI from Zeron updates it through whatever
 installed it (npm, pnpm, bun, Homebrew, WinGet, Scoop, the CLI's own
-updaterâ€¦), on a throwaway engine that can't touch anything real.
+updater…), on a throwaway engine that can't touch anything real.
 
 Each run starts the real `zeron-engine` binary with:
 
@@ -10,8 +10,10 @@ Each run starts the real `zeron-engine` binary with:
 - a fake `HOME` and XDG dirs inside the run's folder,
 - a Finder-like `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin` plus the sandbox's
   node), and `ZERON_NO_LOGIN_SHELL=1`, so it can't borrow the shell's PATH,
-- every provider disabled except the one under test,
-- that provider pointed at a sandboxed install (`PI_EXECUTABLE=â€¦` and so on).
+- every provider disabled except the one under test, and pinned to a path
+  that doesn't exist (discovery also searches `/usr/local/bin`, and the engine
+  checks every provider as it starts, before the rig can disable any),
+- that provider pointed at a sandboxed install (`PI_EXECUTABLE=…` and so on).
 
 It then runs `CheckHarnessUpdates`, then `ApplyHarnessUpdate` while watching
 `WatchHarnessUpdates`, printing each phase with a timestamp, and finally
@@ -34,8 +36,9 @@ cargo build --manifest-path scripts/provider-update-rig/rigclient/Cargo.toml
 
 ## macOS and Linux
 
-Needs `node` and `bun` on PATH (they're copied, never modified) and network
-access to registry.npmjs.org and cursor.com.
+Needs `node`, `npm` and `bun` on PATH (`node` and `bun` are copied, nothing is
+modified) and network access to registry.npmjs.org and cursor.com. The rig's
+own promises are tested by `python3 scripts/provider-update-rig/rig_test.py`.
 
 ```sh
 export RIG_DIR=$(mktemp -d)/rig
@@ -55,11 +58,11 @@ minutes per engine. Results on macOS (Apple silicon, 2026-11-06):
 | Scenario | What it is | before | after |
 |---|---|---|---|
 | `npm_nvm` | Pi installed by an nvm Node's npm; no nvm on PATH | updated 1.4.0â†’1.5.0 in 4.2 s | updated in 5.1 s |
-| `pnpm_global` | Pi from `pnpm add -g`; no `PNPM_HOME` in the engine's env | **failed in 0.5 s**: "Run pnpm setupâ€¦" | updated in 3.1 s |
+| `pnpm_global` | Pi from `pnpm add -g`; no `PNPM_HOME` in the engine's env | **failed in 0.5 s**: "Run pnpm setup…" | updated in 3.1 s |
 | `bun_global` | Pi from `bun add -g` | **failed**: bun wrote a second copy to `~/.cache/.bun` (it follows `XDG_CACHE_HOME`), the launcher stayed on 1.4.0 | updated in 1.5 s |
 | `hermes_channel` | Hermes on a release channel (fake, real `--check` wording) | **check failed**: "no recognizable verdict" | updated in 0.06 s |
 | `grok_fails` | updater touches its install, then fails (fake) | failed, then a second view opened and **the error was gone in 0.12 s** (back to "available") | failed; still "failed" with its reason after a second view opened |
-| `grok_prompt` | updater asks `[y/N]` and waits (fake) | **stuck "installing"** (it would have waited 30 minutes) | failed in 10.0 s: grok stopped to ask "â€¦Replace it? [y/N]" |
+| `grok_prompt` | updater asks `[y/N]` and waits (fake) | **stuck "installing"** (it would have waited 30 minutes) | failed in 10.0 s: grok stopped to ask "…Replace it? [y/N]" |
 | `cursor_native` | cursor-agent two releases behind (fake updater, real release feed) | "manual-action-required", no update offered | offered 2026.11.05, updated in 0.25 s |
 
 ### Linux only (personal-metal)
@@ -83,12 +86,41 @@ minutes per engine. Results on macOS (Apple silicon, 2026-11-06):
    ```
    Expect `canApply=False` and `manual=sudo apt install --only-upgrade git`
    (or `sudo dnf upgrade git` / `sudo pacman -S git`). The `before` engine
-   says `canApply=True` (it would have run the CLI's own updater).
+   says `canApply=True` and `failed`: `git` has no `update`, like a CLI whose
+   distribution stripped its updater.
 4. If Linuxbrew is installed and has any formula with a `bin/` (for
    example `jq`), check it read-only: start the `after` engine as in the
    rig, with `GROK_EXECUTABLE=/home/linuxbrew/.linuxbrew/bin/jq`, and run
-   `CheckHarnessUpdates`. Expect no "manages â€¦, not â€¦" error (the brew
+   `CheckHarnessUpdates`. Expect no "manages …, not …" error (the brew
    owns its prefix). Don't apply.
+
+On a shared machine, run every rig command inside a read-only root, so a
+mistake can't reach anything real and `pkill` sees only the rig's processes:
+
+```sh
+bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --bind "$R" "$R" \
+  --unshare-pid --die-with-parent --new-session <command>
+```
+
+### Results on Linux (personal-metal, Ubuntu, 2026-11-06)
+
+`before` is `zeron/zgx` 48a0dcbc, `after` this branch. Both ran in that read-only
+root, and `after` is the build with the system-package fix. Times are to the
+APPLY RESULT.
+
+| Scenario | before | after |
+|---|---|---|
+| Unit tests | n/a | `harness_updates` 83 pass, `cmd_shim` 6 pass. On the pushed branch 2 failed on Linux: one read this machine's real `/usr/local/bin/codex`, one expected `/usr/bin/pi` to update itself |
+| `npm_nvm` | updated 1.4.0→1.5.0 in 4.6 s | updated in 4.8 s |
+| `pnpm_global` (`~/.local/share/pnpm`) | **failed in 1.1 s**: "Run pnpm setup…" | updated in 2.7 s |
+| `bun_global` | **failed in 1.2 s**: "verification returned 1.4.0", 1.5.0 written to `~/.cache/.bun` (as on macOS) | updated in 1.0 s, no second copy |
+| `hermes_channel` | **check failed**: "no recognizable verdict" | updated to 0.20.1 in 0.01 s |
+| `grok_fails` | failed, then "checking", "available": the error gone when a second view opened | failed; still "failed" with its reason in a second view |
+| `grok_prompt` | **stuck "installing"** for the whole 45 s watch | failed in 10.0 s: grok stopped to ask "…Replace it? [y/N]" |
+| `cursor_native` | "manual-action-required", no update offered | offered 2026.11.05-86047df, updated in 0.02 s |
+| `system_git` | `canApply=True`, failed: "/usr/bin/git exited with exit status: 1: update-ref" | `canApply=False`, `sudo apt install --only-upgrade git`. On the pushed branch: failed, with no command |
+
+Linuxbrew isn't installed there, so step 4 didn't run.
 
 ## Windows (WING-PC)
 
@@ -111,7 +143,7 @@ $rig = "$env:TEMP\zeron-rig"; $row = "scripts\provider-update-rig\windows-row.ps
 Notes on running by hand, if you don't use the script:
 
 - Windows PowerShell 5.1 drops the `"` inside arguments to a native program,
-  so `& $c call â€¦ "{`"harness`":â€¦}"` reaches rigclient as `{harness:â€¦}` and
+  so `& $c call … "{`"harness`":…}"` reaches rigclient as `{harness:…}` and
   it panics ("key must be a string"). Escape them as `\"`.
 - With `$ErrorActionPreference = "Stop"`, anything rigclient writes to stderr
   stops the script, so use `Continue`.
@@ -150,7 +182,7 @@ Expect `before`: `canApply=false`, manual "Update Codex with its original
 installer or package manager". Expect `after`: `available`, `canApply=true`,
 then updated to the newest release. The engine doesn't log the command, but
 npm does: `$rig\runs\after-w1\home\AppData\Local\npm-cache\_logs\*-debug-0.log`
-shows `argv "install" "--global" "--prefix" "<$rig\npm-codex>" â€¦` and the
+shows `argv "install" "--global" "--prefix" "<$rig\npm-codex>" …` and the
 `node`/`npm-cli.js` it ran. Codex is large: on a slow line the install takes
 minutes, hence `-Seconds 600`.
 
@@ -184,8 +216,8 @@ $look = 'Start-Sleep 4; "PINGS@4s: " + ((Get-Process ping -EA 0).Id -join ","); 
 & $row -Label after -Row w3 -Target grok -Launcher "$rig\grok\grok.cmd" -Seconds 25 -AfterApply $look
 ```
 
-Expect `after`: Failed at about 10 s with "grok stopped to ask â€œAn existing
-install was found. Replace it? [y/N]â€, and nobody can answer it here", with a
+Expect `after`: Failed at about 10 s with "grok stopped to ask “An existing
+install was found. Replace it? [y/N]”, and nobody can answer it here", with a
 `ping` at 4 s and none at 16 s. Expect `before`: Installing until you stop it,
 the `ping` still running, and an engine that doesn't stop on `StopEngine`.
 
@@ -279,13 +311,13 @@ the error gone.
 ### Results on Windows (WING-PC, Windows 11 26200, 2026-11-06)
 
 `before` is `zeron/zgx` c6891da0, `after` this branch. W4 and W5 `after`
-ran with the Scoop and WinGet fixes, W1â€“W3 and W6 before them (those paths
+ran with the Scoop and WinGet fixes, W1–W3 and W6 before them (those paths
 didn't change).
 
 | Row | before | after |
 |---|---|---|
 | W0 | n/a | 40 + 6 pass. On the pushed branch one failed on a machine without npm on PATH (fixed: the test brings its own npm) |
-| W1 Codex, npm | `canApply=false`, "Update Codex with its original installerâ€¦"; still 0.165.0 | 0.165.0â†’0.167.0 by `npm install --global --prefix <$rig\npm-codex>` with the rig's own npm, in 378 s |
+| W1 Codex, npm | `canApply=false`, "Update Codex with its original installer…"; still 0.165.0 | 0.165.0→0.167.0 by `npm install --global --prefix <$rig\npm-codex>` with the rig's own npm, in 378 s |
 | W2 Pi, npm | `pi update --self` failed in 2.8 s; no copy moved (1.4.0) | 1.4.0â†’1.5.0 at that prefix, in 233 s |
 | W3 prompt | stuck "installing" past 60 s, `ping` alive at 56 s, `StopEngine` ignored | failed at 10.2 s with grok's question; `ping` gone by 16 s with the engine still up |
 | W4 Claude, WinGet | `canApply=false`, `winget upgrade Anthropic.ClaudeCode`, latest 2.1.319 (vendor) | `canApply=true`, latest 2.1.317 (WinGet's) |

@@ -22,6 +22,10 @@ PI = "@earendil-works/pi-coding-agent"
 PI_OLD = "1.4.0"
 ALL = ["claude-code", "codex", "cursor", "devin", "grok", "hermes", "pi", "opencode",
        "antigravity", "muse", "fx"]
+PINS = {"claude-code": "CLAUDE_CODE_EXECUTABLE", "codex": "CODEX_EXECUTABLE", "cursor": "CURSOR_SDK_SHIM_EXECUTABLE",
+        "devin": "DEVIN_EXECUTABLE", "grok": "GROK_EXECUTABLE", "hermes": "HERMES_EXECUTABLE", "pi": "PI_EXECUTABLE",
+        "opencode": "OPENCODE_EXECUTABLE", "antigravity": "ANTIGRAVITY_ACP_EXECUTABLE", "muse": "MUSE_EXECUTABLE",
+        "fx": "FX_EXECUTABLE"}
 
 
 def free_port():
@@ -54,9 +58,14 @@ def npm_nvm(home):
     return "pi", {"PI_EXECUTABLE": f"{prefix}/bin/pi"}, f"{prefix}/bin/pi", 240, {}
 
 
+def pnpm_home_under(platform=sys.platform):
+    """Where `pnpm setup` puts PNPM_HOME on this system, under HOME."""
+    return "Library/pnpm" if platform == "darwin" else ".local/share/pnpm"
+
+
 def pnpm_global(home):
     """Pi installed with `pnpm add -g` (PNPM_HOME set in the user's shell only)."""
-    pnpm_home = os.path.join(home, "Library/pnpm")
+    pnpm_home = os.path.join(home, pnpm_home_under())
     os.makedirs(pnpm_home)
     env = {"HOME": home, "PNPM_HOME": pnpm_home, "PATH": f"{pnpm_home}:{SYSNODE}:{GUI_PATH}"}
     run([PNPM, "add", "-g", f"{PI}@{PI_OLD}"], env)
@@ -145,7 +154,7 @@ esac
 def system_git(home):
     """Linux: a CLI the distribution's package manager owns. `git` stands in
     (its `version` answers like Grok's); nothing is applied, only checked."""
-    return "grok", {"GROK_EXECUTABLE": "/usr/bin/git"}, "/usr/bin/git", 3, {}
+    return "grok", {"GROK_EXECUTABLE": "/usr/bin/git"}, "/usr/bin/git", 3, {"check_only": True}
 
 
 SCENARIOS = {f.__name__: f for f in [npm_nvm, pnpm_global, bun_global, hermes_channel,
@@ -155,6 +164,24 @@ SCENARIOS = {f.__name__: f for f in [npm_nvm, pnpm_global, bun_global, hermes_ch
 def client(*args, timeout=None):
     r = subprocess.run([CLIENT, *args], capture_output=True, text=True, timeout=timeout)
     return r.stdout.strip() + (("\n" + r.stderr.strip()) if r.returncode else "")
+
+
+def engine_env(home, data, port, path, harness, extra_env, root):
+    """The engine's whole environment. Every provider but the target is pinned
+    to a path that doesn't exist: discovery also searches fixed places such as
+    /usr/local/bin, and the engine checks every provider as it starts, before
+    the rig can disable any. A target with no pin of its own (cursor_native) is
+    found by discovery under the fake HOME."""
+    pins = {var: os.path.join(root, "not-installed", h) for h, var in PINS.items() if h != harness}
+    return {
+        "HOME": home, "PATH": path, "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "ZERON_DATA_DIR": data, "ZERON_IPC_PORT": str(port), "ZERON_NO_LOGIN_SHELL": "1",
+        "ZERON_WORKOS_CLIENT_ID": "", "ZERON_EDGE_URL": "http://127.0.0.1:1",
+        "ZERON_DISABLE_NOTIFICATIONS": "1", "ZERON_AUTO_UPDATE": "0",
+        "XDG_CONFIG_HOME": f"{home}/.config", "XDG_DATA_HOME": f"{home}/.local/share",
+        "XDG_CACHE_HOME": f"{home}/.cache", "RUST_LOG": "warn",
+        **pins, **extra_env,
+    }
 
 
 def scenario(engine, label, name):
@@ -167,15 +194,7 @@ def scenario(engine, label, name):
     print(f"\n=== {label} :: {name} ({harness}) — setup {time.time()-t0:.1f}s")
     port = free_port()
     path = ":".join(p for p in [extra.get("PATH_EXTRA"), SYSNODE, GUI_PATH] if p)
-    env = {
-        "HOME": home, "PATH": path, "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
-        "ZERON_DATA_DIR": data, "ZERON_IPC_PORT": str(port), "ZERON_NO_LOGIN_SHELL": "1",
-        "ZERON_WORKOS_CLIENT_ID": "", "ZERON_EDGE_URL": "http://127.0.0.1:1",
-        "ZERON_DISABLE_NOTIFICATIONS": "1", "ZERON_AUTO_UPDATE": "0",
-        "XDG_CONFIG_HOME": f"{home}/.config", "XDG_DATA_HOME": f"{home}/.local/share",
-        "XDG_CACHE_HOME": f"{home}/.cache", "RUST_LOG": "warn",
-        **extra_env,
-    }
+    env = engine_env(home, data, port, path, harness, extra_env, root)
     log = open(os.path.join(root, "engine.log"), "w")
     proc = subprocess.Popen([engine], env=env, cwd=root, stdout=log, stderr=log, start_new_session=True)
     try:
@@ -192,6 +211,10 @@ def scenario(engine, label, name):
                   f"error={(row.get('error') or {}).get('message')} manual={row.get('manualCommand')}")
         except Exception:
             print(f"check ({time.time()-t:.1f}s): {out}")
+        if extra.get("check_only"):
+            print("status after the check:")
+            print(client("watch", str(port), data, "WatchHarnessUpdates", "{}", "1", harness))
+            return
         print(f"apply (watching {secs}s):")
         print(client("applywatch", str(port), data, harness, str(secs)))
         if extra.get("view_after"):
@@ -215,20 +238,16 @@ def scenario(engine, label, name):
 
 
 def setup():
-    """Copies of node+npm (from the `node` on PATH) and bun, and pnpm installed
-    with that npm, all under RIG_DIR/tools. Reads the real tools, writes only there."""
+    """Copies of node and bun from PATH, plus npm and pnpm from the registry,
+    all under RIG_DIR/tools. Reads the real tools, writes only there."""
     node = shutil.which("node")
+    npm = shutil.which("npm")
     bun = shutil.which("bun")
-    if not node or not bun:
-        raise SystemExit("needs node and bun on PATH to copy from")
-    real_prefix = os.path.dirname(os.path.dirname(os.path.realpath(node)))
+    if not node or not npm or not bun:
+        raise SystemExit("needs node, npm and bun on PATH to copy from")
     shutil.rmtree(os.path.join(S, "tools"), ignore_errors=True)
     os.makedirs(os.path.join(NODE_T, "bin"))
-    os.makedirs(os.path.join(NODE_T, "lib/node_modules"))
     shutil.copy2(os.path.realpath(node), os.path.join(NODE_T, "bin/node"))
-    shutil.copytree(os.path.join(real_prefix, "lib/node_modules/npm"),
-                    os.path.join(NODE_T, "lib/node_modules/npm"), symlinks=True)
-    os.symlink("../lib/node_modules/npm/bin/npm-cli.js", os.path.join(NODE_T, "bin/npm"))
     os.makedirs(SYSNODE)
     shutil.copy2(os.path.realpath(node), os.path.join(SYSNODE, "node"))
     os.makedirs(os.path.dirname(BUN))
@@ -236,6 +255,17 @@ def setup():
     home = os.path.join(S, "toolhome")
     os.makedirs(home, exist_ok=True)
     env = {"HOME": home, "PATH": f"{NODE_T}/bin:/usr/bin:/bin", "npm_config_cache": f"{home}/.npm"}
+    # npm itself comes from the registry, not a copy: a distribution's npm needs
+    # modules kept elsewhere on the system (Ubuntu: /usr/share/nodejs).
+    run([npm, "install", "-g", "npm@10", "--prefix", NODE_T, "--no-audit", "--no-fund"], env)
+    # npm hands its built-in config to the npm it installs, and a distribution's
+    # says prefix=/usr/local. Global installs must land beside this node.
+    builtin = os.path.join(NODE_T, "lib/node_modules/npm/npmrc")
+    if os.path.exists(builtin):
+        os.remove(builtin)
+    prefix = run([f"{NODE_T}/bin/npm", "config", "get", "prefix"], env)
+    if os.path.realpath(prefix) != os.path.realpath(NODE_T):
+        raise SystemExit(f"the rig's npm installs into {prefix}, not {NODE_T}")
     run([f"{NODE_T}/bin/npm", "install", "-g", "pnpm@10", "--prefix", os.path.join(S, "tools/pnpm"),
          "--no-audit", "--no-fund"], env)
     print("tools ready under", os.path.join(S, "tools"))
