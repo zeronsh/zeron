@@ -1,3 +1,4 @@
+mod dev_close_tests;
 mod frame_tests;
 mod hello_tests;
 mod input_tests;

@@ -397,3 +397,45 @@ pub fn dev_calls(host: &ScriptHost, id: &str) -> FrameCalls {
     };
     FrameCalls::new(push, take, failed)
 }
+
+/// The close of a dev plugin's window, as its `on_close` hears it.
+///
+/// A dev plugin has no bridge, so this is the installed path's
+/// `{ kind = "imgui.close", window }` pushed through the same
+/// `plugin.<id>.calls` queue the frame pump uses ([`dev_calls`]): the SDK's
+/// effect loop runs the plugin's `on_close` at once and marks every handle
+/// for that window closed, exactly as it does for an installed plugin.
+///
+/// The SDK answers a call synchronously, so the entry is dropped again
+/// before this returns: the queue does not grow over a session, and a
+/// window id reused after a reopen is a fresh call rather than one the SDK
+/// believes it has already run.
+fn dev_close(calls: FrameCalls) -> impl Fn(&str) + 'static {
+    move |window: &str| {
+        let call = format!("imgui-close-{window}");
+        calls.push(
+            call.clone(),
+            "imgui.close",
+            vec![("window", Value::from(window))],
+        );
+        calls.take(&call);
+    }
+}
+
+/// What `serve` takes for a dev plugin: the queue its frames and its
+/// closes go through, and the close handler that queues them.
+///
+/// One [`dev_calls`] serves both, so a closed window is the same channel
+/// as a frame — the dev plugin's own `plugin.<id>.calls` — rather than the
+/// stderr line it used to be alone (which stays, for a native probe to
+/// read).
+pub fn dev_listen(host: &ScriptHost, id: &str) -> (FrameCalls, impl Fn(&str) + 'static) {
+    let calls = dev_calls(host, id);
+    let closed = dev_close(calls.clone());
+    let plugin = id.to_string();
+    let handler = move |window: &str| {
+        eprintln!("zeron-zgx: dev plugin {plugin}: window {window} closed");
+        closed(window);
+    };
+    (calls, handler)
+}

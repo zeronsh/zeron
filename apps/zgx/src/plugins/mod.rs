@@ -901,16 +901,17 @@ pub fn dev_plugins(host: &ScriptHost, cx: Option<&mut WindowContext>) {
         // bridge uses: a dev plugin asking only for `windows` is refused.
         if let Some(windows) = &imgui {
             let listing = item.clone();
-            let plugin = id.clone();
+            // Its calls are the plugin's own `plugin.<id>.calls` state: a
+            // dev plugin has no bridge to push into, so a frame and a
+            // closed window go through the one channel the SDK drains.
+            let (calls, closed) = imgui::luau::dev_listen(host, &id);
             imgui::luau::serve(
                 host,
                 &id,
                 windows.clone(),
                 Rc::new(move || Some(listing.clone())),
-                move |window| {
-                    eprintln!("zeron-zgx: dev plugin {plugin}: window {window} closed");
-                },
-                Some(imgui::luau::dev_calls(host, &id)),
+                closed,
+                Some(calls),
                 {
                     let said = id.clone();
                     move |sentence| {

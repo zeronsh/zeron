@@ -971,7 +971,7 @@ impl Windows {
 
     /// Where a plugin's closed-window calls go. One per plugin, set when
     /// the plugin's actions are served; a plugin that never set one is told
-    /// nothing (a dev plugin, or a script that has no `on_close`).
+    /// nothing (a script that has no `on_close`).
     pub fn listen(&self, plugin: &str, handler: impl Fn(&str) + 'static) {
         self.listeners
             .borrow_mut()
