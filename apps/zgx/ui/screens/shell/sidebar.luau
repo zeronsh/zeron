@@ -31,6 +31,7 @@ local boundary = require("@app/screens/shell/boundary")
 local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
+local activity = require("@app/screens/shell/activity")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -513,11 +514,17 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		if only and not only.statuses[status or "idle"] then
 			continue
 		end
+		-- (The Activity view's: which shelf it's on, and its place; asleep, its
+		-- corner says when it wakes. Off, none of it.)
+		local on_shelf = activity.shelf(c.id, status)
+		local rank = if activity.on:get() then activity.rank(c, on_shelf) else nil
 		table.insert(group.sessions, kept({
 			id = c.id,
 			title = c.title,
 			status = status :: any,
-			time = c.updated,
+			time = if on_shelf == "asleep" then activity.wakes_in(c.id) or c.updated else c.updated,
+			shelf = on_shelf,
+			rank = rank,
 			created = c.created,
 			agent = c.agent :: any,
 			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
@@ -1104,6 +1111,31 @@ local function menu(id: string): { any }?
 		end,
 	})
 	local side = is_side(id)
+	-- The Activity view's Sleep (its times, each saying when), or, asleep,
+	-- Wake.
+	local sleep: any = false
+	if activity.on:peek() and not side then
+		if activity.asleep(id) then
+			sleep = {
+				label = locale.s("shell.activity.wake"),
+				icon = "sun",
+				on_select = function()
+					activity.wake(id)
+				end,
+			}
+		else
+			local times: { any } = {}
+			for _, p in activity.presets() do
+				table.insert(times, {
+					label = locale.s("shell.activity.sleep.choice", { name = p.label, when = p.detail }),
+					on_select = function()
+						activity.sleep(id, p.wake_at)
+					end,
+				})
+			end
+			sleep = { label = locale.s("shell.activity.sleep.title"), icon = "moon", submenu = times }
+		end
+	end
 	local entries = {
 		{
 			label = locale.s("common.rename"),
@@ -1127,7 +1159,9 @@ local function menu(id: string): { any }?
 			icon = "copy",
 			submenu = copies,
 		},
-		if side then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
+		-- (Activity lists no sections: nothing to move into.)
+		if side or activity.on:peek() then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
+		sleep,
 		{ separator = true },
 		{
 			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
@@ -1438,6 +1472,10 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end,
 		on_archive = M.archive,
 		archived = shelf,
+		activity = activity.on,
+		on_activity_settings = function()
+			route.settings("activity")
+		end,
 		on_unarchive = function(id: string)
 			sessions.unarchive(id)
 		end,

@@ -490,13 +490,18 @@
         "keep_active": "折叠时显示活跃会话",
         "devices_first": "设备优先",
         "projects_first": "项目优先",
-        "empty_projects": "空项目"
+        "empty_projects": "空项目",
+        "activity": "动态",
+        "activity_settings": "动态设置…"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
       "show_less": "显示更少",
       "empty_projects_word": "空项目",
-      "empty_projects": "{n, plural, other {# 个空项目}}"
+      "empty_projects": "{n, plural, other {# 个空项目}}",
+      "activity": "动态",
+      "working": "进行中",
+      "asleep": "已休眠"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -2137,6 +2142,35 @@
       "yesterday": "昨天",
       "empty_title": "还没有历史记录",
       "off": "“保留历史记录”已关闭，访问的页面不会被保留。"
+    },
+    "activity": {
+      "title": "动态",
+      "terms": "动态 收件箱 侧边栏 进行中 休眠 稍后 归档 自动归档 闲置",
+      "description": "把需要你处理的会话放在一个列表里，最新的在最上面。进行中、休眠和已归档的会话收起在列表末尾。",
+      "view": {
+        "label": "动态侧边栏",
+        "description": "以动态方式显示侧边栏，而不是按项目或设备分组。也可以在侧边栏的 … 菜单中开启。",
+        "terms": "收件箱 视图 侧边栏 模式"
+      },
+      "list_section": "动态",
+      "working": {
+        "label": "将进行中的会话收进“进行中”",
+        "description": "代理运行时，会话移入“进行中”；停止或需要你时，回到列表顶部。",
+        "terms": "运行 代理 分组"
+      },
+      "sleep": {
+        "label": "休眠",
+        "description": "右键点击会话并选择“休眠”，它会进入“已休眠”直到你选的时间。如果它向你提问、需要批准或失败，会提前唤醒并回到顶部。",
+        "terms": "稍后 提醒 唤醒"
+      },
+      "archive_section": "归档",
+      "archive_after": {
+        "label": "归档闲置会话",
+        "description": "在这段时间内没有新动态的会话会移入“已归档”。已置顶、进行中、休眠以及等待你处理的会话不受影响。",
+        "terms": "自动 归档 闲置 旧 清理",
+        "never": "从不",
+        "days": "{n, plural, other {# 天后}}"
+      }
     }
   },
   "common": {
@@ -2490,6 +2524,18 @@
       "skipped_body": "有更新的版本时会再次显示",
       "undo": "撤销",
       "skip_hint": "有新版本之前不再显示"
+    },
+    "activity": {
+      "wake": "唤醒",
+      "sleep": {
+        "title": "休眠",
+        "choice": "{name} · {when}",
+        "in_hour": "1 小时后",
+        "in_hours": "3 小时后",
+        "evening": "今晚",
+        "tomorrow": "明天",
+        "next_week": "下周"
+      }
     }
   },
   "onboarding": {
