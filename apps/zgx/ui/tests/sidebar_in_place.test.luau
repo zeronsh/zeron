@@ -92,3 +92,44 @@ test("the open list's headers stay as their sessions come and go", function()
 	expect(`Atlas @{node(app, "#wide", "button", "Atlas")}`).to_be(`Atlas @{atlas}`)
 	expect(`Borealis @{node(app, "#wide", "button", "Borealis")}`).to_be(`Borealis @{borealis}`)
 end)
+
+-- A folded section says how many it holds on one line down the sidebar, a
+-- section of yours (its "…" stands a step further out than words do) as
+-- Pinned and Projects do.
+test("every folded section's count ends on the same line", function()
+	local app = mount("sidebar_fixture.luau")
+	app:resize(900, 700)
+	settle(app)
+	app:set_state("test_sidebar_places", places({ "a2" }, { { id = "s1", name = "Later", sessions = { "b2" } } }))
+	settle(app)
+	local scope = "#wide"
+	for _, title in { "Pinned", "Later", "Projects" } do
+		app:click(`{scope} >> "{title}"`)
+		settle(app)
+	end
+	-- The pointer away: under it, a section of yours shows its "…" instead.
+	app:hover("#rail")
+	settle(app)
+	local ends: { number } = {}
+	for line in app:tree(scope):gmatch("[^\n]+") do
+		local x, w = line:match('text "%d+" (%-?[%d%.]+),%-?[%d%.]+ ([%d%.]+)x')
+		if x and w then
+			table.insert(ends, tonumber(x) + tonumber(w))
+		end
+	end
+	expect(#ends).to_be(3)
+	expect(ends[1]).to_be(ends[2])
+	expect(ends[2]).to_be(ends[3])
+	-- And their names start on one line, each row as tall.
+	local starts: { [string]: number } = {}
+	for line in app:tree(scope):gmatch("[^\n]+") do
+		for _, title in { "Pinned", "Later", "Projects" } do
+			local x = line:match(`text "{title}" (%-?[%d%.]+),`)
+			if x then
+				starts[title] = tonumber(x) :: number
+			end
+		end
+	end
+	expect(starts.Later).to_be(starts.Pinned)
+	expect(starts.Later).to_be(starts.Projects)
+end)
