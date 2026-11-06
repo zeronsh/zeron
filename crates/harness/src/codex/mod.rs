@@ -723,12 +723,6 @@ impl Harness for CodexHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
-    /// A steer during an open command: `turn/interrupt` stops the turn's
-    /// foreground command; commands still running past it are kept as
-    /// background terminals, and the app-server stays up.
-    fn steer_stops_tool(&self) -> bool {
-        true
-    }
     /// Supervised asks before what codex does not know to be safe, and
     /// auto-accept edits before stepping outside the workspace sandbox.
     fn access_modes(&self) -> &[AccessMode] {
@@ -3061,6 +3055,14 @@ use crate::{Signal, send_signal, shutdown_child};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex takes a steer mid-command in its own turn, so a steer must not
+    /// interrupt: a backgrounded command's call stays open for the rest of
+    /// its turn, and the stop would abort a turn that was only writing.
+    #[test]
+    fn a_steer_stays_in_the_turn() {
+        assert!(!CodexHarness::new().steer_stops_tool());
+    }
 
     #[test]
     fn shown_commands_drop_the_login_shell() {
