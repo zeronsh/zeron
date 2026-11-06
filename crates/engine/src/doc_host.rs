@@ -5374,9 +5374,17 @@ impl DocHost {
                         self.arm_attachment_wait(handle);
                         return; // preserve order; UploadCommit / the wait timer re-kick
                     }
+                    // In-flight claim, as for an execute: between the mark and
+                    // the outcome, a racing drain's dead-command sweep would
+                    // otherwise take this for a crash and write its own reason.
+                    if !lock(&self.inner.executing).insert(entry.id.clone()) {
+                        skipped.insert(entry.id.clone());
+                        continue;
+                    }
                     if let Err(err) = self.inner.store.mark_processed(&entry.id) {
                         tracing::error!(chat = %handle.chat_id, error = %err,
                             "processed-ledger write failed; halting drain");
+                        lock(&self.inner.executing).remove(&entry.id);
                         return;
                     }
                     tracing::warn!(chat = %handle.chat_id, command = %entry.id,
@@ -5388,6 +5396,7 @@ impl DocHost {
                         SessionCommandStatus::Rejected,
                         Some("attachments never arrived"),
                     );
+                    lock(&self.inner.executing).remove(&entry.id);
                     continue;
                 }
             }
