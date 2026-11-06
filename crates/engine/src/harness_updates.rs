@@ -3531,9 +3531,18 @@ async fn run_command_output_watched(
         .env("NO_COLOR", "1")
         .env("CLAUDE_CODE_ENTRYPOINT", "zeron");
     for (key, value) in NONINTERACTIVE_ENV.iter().chain(env) {
-        command.env(*key, *value);
+        if *key != "PATH" {
+            command.env(*key, *value);
+        }
     }
-    zeron_harness::compose_child_path(&mut command, executable);
+    // A `PATH` entry in `env` goes ahead of the composed PATH rather than
+    // replacing it (pnpm refuses to install unless its global bin is there).
+    let ahead: Vec<PathBuf> = env
+        .iter()
+        .filter(|(key, _)| *key == "PATH")
+        .flat_map(|(_, value)| std::env::split_paths(value).collect::<Vec<_>>())
+        .collect();
+    zeron_harness::compose_child_path_ahead(&mut command, executable, &ahead);
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command
@@ -3625,10 +3634,12 @@ async fn run_command_output_watched(
         );
         // The full output is in the log; the reason is almost always its
         // last line (npm's, brew's and the vendors' updaters all end there).
+        let how = match output.status.code() {
+            Some(code) => format!("failed (exit code {code})"),
+            None => "was stopped by a signal".to_owned(),
+        };
         return Err(format!(
-            "{} exited with {}{}",
-            executable.display(),
-            output.status,
+            "{name} {how}{}",
             failure_summary(detail)
                 .map(|line| format!(": {line}"))
                 .unwrap_or_default()
@@ -3697,11 +3708,24 @@ async fn read_tail_watched(
 /// The last line of `output` that says something (not blank, not a bare
 /// progress or box-drawing line), capped for a one-line status.
 fn failure_summary(output: &str) -> Option<String> {
-    let line = output
-        .lines()
-        .map(str::trim)
-        .rev()
-        .find(|line| line.chars().any(char::is_alphanumeric))?;
+    // Where to read more, not what went wrong.
+    const BOILERPLATE: &[&str] = &[
+        "for help, run",
+        "a complete log of this run can be found in",
+        "run with --verbose",
+        "run `brew",
+        "please report",
+    ];
+    let meaningful = |line: &&str| {
+        line.chars().any(char::is_alphanumeric) && {
+            let lower = line.to_ascii_lowercase();
+            !BOILERPLATE.iter().any(|noise| lower.contains(noise))
+        }
+    };
+    let lines = || output.lines().map(str::trim).rev();
+    let line = lines()
+        .find(meaningful)
+        .or_else(|| lines().find(|line| line.chars().any(char::is_alphanumeric)))?;
     Some(first_chars(line, 300).into_owned())
 }
 
@@ -6393,6 +6417,8 @@ esac
             Some(std::fs::canonicalize(&pnpm_home).unwrap())
         );
         assert_eq!(env("npm_config_confirm_modules_purge").as_deref(), Some("false"));
+        // pnpm refuses unless its global bin is on PATH, too.
+        assert_eq!(env("PATH"), env("PNPM_HOME"));
 
         let bun_bin = home.path().join("tools/bun/bin");
         std::fs::create_dir_all(&bun_bin).unwrap();
@@ -6409,6 +6435,41 @@ esac
             update.env,
             [("BUN_INSTALL".to_string(), home.path().join("tools/bun").to_string_lossy().into_owned())]
         );
+    }
+
+    /// A failure's line is what went wrong, not where to read more.
+    #[test]
+    fn a_failure_says_what_went_wrong_not_where_to_read_more() {
+        assert_eq!(
+            super::failure_summary(
+                "ERROR  The configured global bin directory \"/x\" is not in PATH\nFor help, run: pnpm help add\n"
+            )
+            .as_deref(),
+            Some("ERROR  The configured global bin directory \"/x\" is not in PATH")
+        );
+        assert_eq!(
+            super::failure_summary(
+                "npm error code EACCES\nnpm error path /usr/lib/node_modules\nnpm error A complete log of this run can be found in: /h/.npm/_logs/x.log\n"
+            )
+            .as_deref(),
+            Some("npm error path /usr/lib/node_modules")
+        );
+        assert_eq!(super::failure_summary("For help, run: x").as_deref(), Some("For help, run: x"));
+    }
+
+    /// An updater's PATH entry goes ahead of the child's PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_owners_path_entry_goes_first() {
+        let output = super::run_command_output_env(
+            std::path::Path::new("/bin/sh"),
+            &["-c", "echo \"$PATH\""],
+            Duration::from_secs(10),
+            &[("PATH", "/owner/bin")],
+        )
+        .await
+        .unwrap();
+        assert!(output.starts_with("/owner/bin:"), "{output}");
     }
 
     /// Scoop's apps are known by their folder, and what's on offer is what
@@ -6680,7 +6741,7 @@ mod winget_tests {
         let show = "Found opencode [SST.opencode]\r\nVersion: 1.4.2\r\nPublisher: SST\r\n";
         assert_eq!(parse_winget_show(show).as_deref(), Some("1.4.2"));
         assert_eq!(parse_winget_show("Gefunden opencode\nVersion: unbekannt\n"), None);
-        let error = winget_failure("SST.opencode", "winget exited with exit code: -1978335189: No available upgrade found.".into());
+        let error = winget_failure("SST.opencode", "winget failed (exit code -1978335189): No available upgrade found.".into());
         assert!(error.contains("WinGet has no newer SST.opencode"), "{error}");
         assert_eq!(winget_failure("x", "other".into()), "other");
     }
