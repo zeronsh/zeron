@@ -245,6 +245,7 @@ mod delegation_tests {
                 page.native_subagents = Loadable::Ready(NativeSubagentSettings {
                     switchable: vec![HarnessId::ClaudeCode],
                     off: Vec::new(),
+                    zeron_tools_off: Vec::new(),
                 });
                 assert!(shown(page, HarnessId::ClaudeCode, cx));
                 assert!(!shown(page, HarnessId::Codex, cx));

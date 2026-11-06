@@ -111,6 +111,9 @@ struct HarnessPrefsFile {
     /// Harnesses the user turned native subagents off for: their runs
     /// delegate through side chats only.
     native_subagents_off: Vec<HarnessId>,
+    /// Harnesses the user turned Zeron's own tools off for: their runs
+    /// launch without the `zeron mcp` server.
+    zeron_tools_off: Vec<HarnessId>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -127,7 +130,8 @@ pub struct TitleSettings {
     pub model: Option<String>,
 }
 
-/// Per-device native subagent preferences (Settings → Providers).
+/// Per-device delegation preferences (Settings → Providers): native
+/// subagents and Zeron's own tools.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NativeSubagentSettings {
@@ -135,6 +139,9 @@ pub struct NativeSubagentSettings {
     pub switchable: Vec<HarnessId>,
     /// The ones turned off: their runs delegate through side chats only.
     pub off: Vec<HarnessId>,
+    /// Harnesses whose runs launch without Zeron's tools. An engine that
+    /// predates the setting omits it: every run has them.
+    pub zeron_tools_off: Vec<HarnessId>,
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -629,13 +636,41 @@ impl HarnessRegistry {
 
     pub fn native_subagent_settings(&self) -> NativeSubagentSettings {
         let registered: Vec<HarnessId> = self.order().iter().copied().collect();
+        let prefs = self.prefs();
         NativeSubagentSettings {
             switchable: registered
                 .into_iter()
                 .filter(|id| zeron_harness::switches_native_subagents(*id))
                 .collect(),
-            off: self.prefs().native_subagents_off.clone(),
+            off: prefs.native_subagents_off.clone(),
+            zeron_tools_off: prefs.zeron_tools_off.clone(),
         }
+    }
+
+    /// Whether runs of `id` get Zeron's own MCP server (side chats, visuals,
+    /// …). Off only by the user's choice; a run without it keeps the
+    /// provider's own subagents, since side-chat delegation rides that server.
+    pub fn zeron_tools(&self, id: HarnessId) -> bool {
+        !self.prefs().zeron_tools_off.contains(&id)
+    }
+
+    /// Turn Zeron's tools on or off for `id` and persist. Like native
+    /// subagents, each chat picks the change up at its next turn once its
+    /// background work is done.
+    pub fn set_zeron_tools(&self, id: HarnessId, on: bool) -> Result<(), String> {
+        if !self.order().contains(&id) {
+            return Err(format!("{id:?} isn't registered on this device"));
+        }
+        {
+            let mut prefs = self.prefs();
+            match (on, prefs.zeron_tools_off.contains(&id)) {
+                (true, true) => prefs.zeron_tools_off.retain(|h| *h != id),
+                (false, false) => prefs.zeron_tools_off.push(id),
+                _ => return Ok(()),
+            }
+        }
+        self.persist_prefs();
+        Ok(())
     }
 
     /// Turn `id`'s native subagents on or off and persist. Each chat picks
@@ -724,10 +759,14 @@ impl HarnessRegistry {
         self.order().retain(|h| *h != id);
         let changed = {
             let mut prefs = self.prefs();
-            let before = prefs.disabled.len() + prefs.native_subagents_off.len();
+            let count = |p: &HarnessPrefsFile| {
+                p.disabled.len() + p.native_subagents_off.len() + p.zeron_tools_off.len()
+            };
+            let before = count(&prefs);
             prefs.disabled.retain(|h| *h != id);
             prefs.native_subagents_off.retain(|h| *h != id);
-            before != prefs.disabled.len() + prefs.native_subagents_off.len()
+            prefs.zeron_tools_off.retain(|h| *h != id);
+            before != count(&prefs)
         };
         if changed {
             self.persist_prefs();
@@ -1666,6 +1705,42 @@ mod tests {
         // Only a driver that can launch without them ever runs without them.
         *reloaded.prefs() = serde_json::from_str(r#"{"nativeSubagentsOff":["opencode"]}"#).unwrap();
         assert!(reloaded.native_subagents(HarnessId::Opencode));
+    }
+
+    #[test]
+    fn zeron_tools_switch_off_per_harness_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        assert!(registry.zeron_tools(HarnessId::ClaudeCode));
+        assert!(
+            registry
+                .native_subagent_settings()
+                .zeron_tools_off
+                .is_empty()
+        );
+        // Only an agent this device runs has runs to launch without them.
+        assert!(registry.set_zeron_tools(HarnessId::Cursor, false).is_err());
+
+        registry.set_zeron_tools(HarnessId::Codex, false).unwrap();
+        registry.set_zeron_tools(HarnessId::Codex, false).unwrap();
+        assert!(!registry.zeron_tools(HarnessId::Codex));
+        assert!(registry.zeron_tools(HarnessId::ClaudeCode));
+
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(
+            reloaded.native_subagent_settings().zeron_tools_off,
+            vec![HarnessId::Codex]
+        );
+        reloaded
+            .set_zeron_tools(HarnessId::Codex, true)
+            .unwrap_err();
+        test_slot(&reloaded, HarnessId::Codex, true);
+        reloaded.set_zeron_tools(HarnessId::Codex, true).unwrap();
+        assert!(reloaded.zeron_tools(HarnessId::Codex));
     }
 }
 

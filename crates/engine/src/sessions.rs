@@ -212,6 +212,9 @@ struct RunHandle {
     /// server, so with no IPC port served ([`Inner::zeron_mcp`] returns
     /// `None`) the provider keeps its subagents.
     side_chats_only: bool,
+    /// Launched with Zeron's own MCP server (Settings → Providers): flipped
+    /// since, the parked session is replaced the same way.
+    zeron_tools: bool,
 }
 
 /// Which CLI binary a run of `harness` launches now: its real path, size and
@@ -846,6 +849,7 @@ impl SessionsEngine {
                 h.binary.clone(),
                 h.runtime_config.harness.clone(),
                 h.side_chats_only,
+                h.zeron_tools,
             )
         });
         if let Some((
@@ -860,6 +864,7 @@ impl SessionsEngine {
             binary,
             live_harness,
             side_chats_only,
+            zeron_tools,
         )) = routed
         {
             if idle {
@@ -872,15 +877,15 @@ impl SessionsEngine {
                 };
             }
             // A parked session started with another account (Cloud), from a
-            // CLI binary since updated, or with native subagents since
-            // switched: replace it.
+            // CLI binary since updated, or with native subagents or Zeron's
+            // tools since switched: replace it.
             let route = if self
                 .credential_changed(chat_id, harness_id, credential.as_deref())
                 .await
                 || self
                     .binary_changed(chat_id, harness_id, live_harness, binary.as_deref())
                     .await
-                || self.native_subagents_changed(chat_id, harness_id, side_chats_only)
+                || self.native_subagents_changed(chat_id, harness_id, side_chats_only, zeron_tools)
             {
                 None
             } else {
@@ -1037,6 +1042,7 @@ impl SessionsEngine {
                 .flatten()
         };
         let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
+        let zeron_tools = self.inner.registry.zeron_tools(harness_id);
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1189,6 +1195,7 @@ impl SessionsEngine {
                 credential,
                 binary,
                 side_chats_only,
+                zeron_tools,
             },
         );
         drop(runs);
@@ -1240,6 +1247,7 @@ impl SessionsEngine {
             },
             turn,
             side_chats_only,
+            zeron_tools,
         ));
         Ok(run_id)
     }
@@ -1303,23 +1311,25 @@ impl SessionsEngine {
     }
 
     /// Whether a session parked between turns launched with native subagents
-    /// otherwise than a run would launch now (Settings → Providers). Same
-    /// guards as [`Self::credential_changed`].
+    /// or Zeron's tools otherwise than a run would launch now (Settings →
+    /// Providers). Same guards as [`Self::credential_changed`].
     fn native_subagents_changed(
         &self,
         chat_id: &str,
         harness_id: HarnessId,
         started_side_chats_only: bool,
+        started_zeron_tools: bool,
     ) -> bool {
         let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
-        if started_side_chats_only == side_chats_only
+        let zeron_tools = self.inner.registry.zeron_tools(harness_id);
+        if (started_side_chats_only == side_chats_only && started_zeron_tools == zeron_tools)
             || self.turn_in_flight(chat_id)
             || self.holds_background_work(chat_id)
         {
             return false;
         }
         tracing::info!(chat = %chat_id, harness = ?harness_id,
-            "native subagents switched; replacing the parked session");
+            "delegation settings switched; replacing the parked session");
         true
     }
 
@@ -2461,9 +2471,11 @@ impl Inner {
     /// subagents (Settings → Providers), delegating through side chats
     /// instead. Never for a chat that has a parent: delegation is one level
     /// deep, so a side chat can't create chats and keeps its provider's own.
-    /// Nor while its parent is unknown here (its run outran its row).
+    /// Nor while its parent is unknown here (its run outran its row), nor
+    /// with Zeron's tools off: side chats ride them, so it keeps its own.
     fn side_chats_only(&self, chat_id: &str, harness_id: HarnessId) -> bool {
         !self.registry.native_subagents(harness_id)
+            && self.registry.zeron_tools(harness_id)
             && self.workspace().is_none_or(|ws| {
                 !ws.parent_unknown(chat_id)
                     && !ws
@@ -3815,6 +3827,7 @@ async fn drive_run(
     resume_state: RunResumeState,
     turn: TurnControl,
     side_chats_only: bool,
+    zeron_tools: bool,
 ) {
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
@@ -3834,8 +3847,9 @@ async fn drive_run(
         ..request.clone()
     });
     // The host stamps its own MCP server onto every run it drives, so the
-    // agent can spawn and talk to side chats through the engine it runs in.
-    if request.mcp.is_none() {
+    // agent can spawn and talk to side chats through the engine it runs in —
+    // unless the person turned Zeron's tools off for this provider.
+    if request.mcp.is_none() && zeron_tools {
         request.mcp = inner.zeron_mcp(&chat_id, side_chats_only, harness.wakes_on_background());
     }
     // Plugins' native MCP servers come from this host's own allowed plugins,
