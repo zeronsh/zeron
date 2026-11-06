@@ -16,8 +16,9 @@
 //! otherwise one checkout change would relabel every chat sharing that folder.
 //!
 //! Only chats with an open viewer (plus a short linger after closing) are
-//! tracked. Closed chats get no watcher, capture, or repair scan, regardless
-//! of archive state. Opening a chat starts a fresh capture.
+//! tracked: a transcript, a file tree, or another device's Changes pane. Closed
+//! chats get no watcher, capture, or repair scan, regardless of archive state.
+//! Opening a chat starts a fresh capture.
 //!
 //! Fast recursive watches on the process-wide [`FsWatchHub`] (one watcher thread
 //! for every checkout; debounced [`WATCH_DEBOUNCE`]) are backed by a slow
@@ -77,6 +78,9 @@ const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 /// flicking between chats must not tear down and rebuild (full capture) its
 /// checkout every time.
 const INTEREST_LINGER: Duration = Duration::from_secs(30);
+/// How long one checkout's capture keeps the others waiting. A slow or stuck
+/// checkout must not stop the diffs of every other chat that's open.
+const CAPTURE_GATE_HOLD: Duration = Duration::from_secs(10);
 /// Max subdirectories a checkout may have before we skip its live recursive
 /// watch (one OS watch per dir; past this the watcher thread's own bookkeeping
 /// costs more than instant diffs are worth). A normal source tree is well
@@ -409,9 +413,10 @@ impl CheckoutDiffSync {
     }
 
     /// Keep `chat_id` tracked while the returned guard lives, whether archived
-    /// or not. The engine holds one guard per open transcript or Git-status
-    /// stream. Released interest lingers [`INTEREST_LINGER`] to avoid rebuilding
-    /// watchers and rescanning when someone briefly switches chats.
+    /// or not. The engine holds one guard per open transcript, Git-status or
+    /// chat-naming diff stream. Released interest lingers [`INTEREST_LINGER`] to
+    /// avoid rebuilding watchers and rescanning when someone briefly switches
+    /// chats.
     pub fn retain_chat(&self, chat_id: &str) -> ChatInterest {
         let first = {
             let mut interest = lock(&self.inner.interest);
@@ -430,6 +435,28 @@ impl CheckoutDiffSync {
             inner: Arc::downgrade(&self.inner),
             chat_id: chat_id.to_string(),
         }
+    }
+
+    /// Keep the checkout at `root` tracked for a viewer with no chat of its own
+    /// (a project's file tree). Checkouts are tracked through their chats, so
+    /// this holds those here at the moment; a checkout without one has nothing
+    /// to scan for, as ever.
+    pub(crate) fn retain_checkout(&self, root: &Path) -> Vec<ChatInterest> {
+        let Ok(root) = std::fs::canonicalize(root) else {
+            return Vec::new();
+        };
+        let chats = self.inner.workspace.watch_chats().borrow().clone();
+        chats
+            .iter()
+            .filter(|chat| chat.device_id == self.inner.device_id && !chat.archived)
+            .filter(|chat| {
+                chat.cwd
+                    .as_deref()
+                    .and_then(|cwd| std::fs::canonicalize(cwd).ok())
+                    .is_some_and(|cwd| cwd.starts_with(&root))
+            })
+            .map(|chat| self.retain_chat(&chat.id))
+            .collect()
     }
 
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
@@ -884,11 +911,31 @@ async fn entry_task(
 // Snapshot + publish
 // ---------------------------------------------------------------------------
 
+/// Run `capture` once the gate is free, letting it go after `hold`: the capture
+/// goes on, and the next checkout's starts beside it.
+async fn gated<T>(
+    gate: &tokio::sync::Mutex<()>,
+    hold: Duration,
+    capture: impl Future<Output = T>,
+) -> T {
+    let held = gate.lock().await;
+    let mut capture = std::pin::pin!(capture);
+    tokio::select! {
+        out = &mut capture => out,
+        _ = tokio::time::sleep(hold) => {
+            drop(held);
+            capture.await
+        }
+    }
+}
+
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
-    let snapshot = {
-        let _gate = inner.capture_gate.lock().await;
-        capture_diff(&inner.repos, &entry.identity.root).await
-    };
+    let snapshot = gated(
+        &inner.capture_gate,
+        CAPTURE_GATE_HOLD,
+        capture_diff(&inner.repos, &entry.identity.root),
+    )
+    .await;
     let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
         Err(err) => {
@@ -2107,6 +2154,49 @@ mod watch_budget_tests {
         CheckoutIdentity, MAX_WATCH_DIRS, exceeds_watch_budget, has_non_utf8_status_path,
         is_checkout_change, path_batches, watch_targets,
     };
+
+    /// Captures take turns, but a stuck one can't keep the rest of the open
+    /// chats from their diffs.
+    #[tokio::test]
+    async fn the_capture_gate_takes_turns_and_lets_go_of_a_stuck_capture() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let first = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                super::gated(&gate, Duration::from_secs(600), async {
+                    released.await.unwrap();
+                })
+                .await;
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            super::gated(&gate, Duration::from_secs(600), async {}),
+        )
+        .await
+        .expect_err("the gate is taken");
+        release.send(()).unwrap();
+        first.await.unwrap();
+        super::gated(&gate, Duration::from_secs(600), async {}).await;
+
+        let stuck = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                super::gated(&gate, Duration::from_millis(50), std::future::pending::<()>()).await;
+            }
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            super::gated(&gate, Duration::from_secs(600), async {}),
+        )
+        .await
+        .expect("the next capture runs beside the stuck one");
+        stuck.abort();
+    }
 
     /// End to end through a real watcher: opening a file under a watched
     /// checkout raises access events on Linux, and before the filter each one
