@@ -63,7 +63,11 @@ content sits directly on the chat with no cards or boxed panels, text uses the i
 and type scale, and colors are theme tokens that work on frosted glass or opaque, light or dark. \
 The reader sees the visual above that reply, so don't announce or restate it. To show the \
 reader an image file (a screenshot, a rendered PNG), call `show_image` with its path; don't \
-draw images through `show_visual`.";
+draw images through `show_visual`.\n\
+\n\
+Before ending a turn while a background command you started is still running and you'll carry on \
+once it ends (tests, a build), call `wait_on_background` with its task id, so the person sees the \
+chat waiting rather than finished. Not for anything you leave running (a dev server, a watcher).";
 
 /// Appended to [`INSTRUCTIONS`] when the host launched the agent without its
 /// own subagent tools ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).

@@ -269,6 +269,27 @@ fn catalog() -> Vec<ToolDef> {
             "required": ["path"]
         }),
     });
+    tools.push(ToolDef {
+        name: WAIT_ON_BACKGROUND,
+        description: WAIT_ON_BACKGROUND_DESCRIPTION,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "task_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "The background tasks' ids, as your tools reported them."
+                },
+                "waiting": {
+                    "type": "boolean",
+                    "description": "false takes the marks back. Default true."
+                }
+            },
+            "required": ["task_ids"]
+        }),
+    });
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
     tools
@@ -280,6 +301,20 @@ const SHOW_VISUAL: &str = "show_visual";
 
 /// Shows an image file in the CALLING chat; offered like `show_visual`.
 const SHOW_IMAGE: &str = "show_image";
+
+/// Says what the CALLING chat's agent waits on after its turn; offered like
+/// `show_visual`.
+const WAIT_ON_BACKGROUND: &str = "wait_on_background";
+
+const WAIT_ON_BACKGROUND_DESCRIPTION: &str = "\
+Say that you'll wait on background work you started, so this chat reads as waiting (not finished) \
+after your turn ends, until that work ends and you're woken to carry on. Pass the ids your tools \
+gave the background tasks (a background command says the id it runs under). Use it for work you'll \
+come back to: a test run, a build, a long check. Never for something you leave running on purpose \
+(a dev server, a file watcher): nothing is coming, and the chat would look busy. Background agents \
+you started are waited on already. `waiting: false` takes a mark back. It doesn't stop or change \
+the work. Refused where your runtime doesn't wake you when background work ends: wait for the work \
+inside your turn instead.";
 
 const SHOW_IMAGE_DESCRIPTION: &str = "\
 Show an image file (a screenshot, a rendered chart or diagram, a photo) inline in this chat, above \
@@ -520,6 +555,13 @@ struct ShowImageArgs {
 }
 
 #[derive(Deserialize)]
+struct WaitOnBackgroundArgs {
+    task_ids: Vec<String>,
+    #[serde(default)]
+    waiting: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct ShowVisualArgs {
     script: String,
     title: String,
@@ -754,7 +796,9 @@ impl Tools {
         let in_chat = self.zeron.origin().chat_id.is_some();
         catalog()
             .into_iter()
-            .filter(|tool| in_chat || ![SHOW_VISUAL, SHOW_IMAGE].contains(&tool.name))
+            .filter(|tool| {
+                in_chat || ![SHOW_VISUAL, SHOW_IMAGE, WAIT_ON_BACKGROUND].contains(&tool.name)
+            })
             .collect()
     }
 
@@ -784,6 +828,7 @@ impl Tools {
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
+            WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
             plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
             plugins::LIST_PLUGINS => return self.list_plugins().await,
             plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
@@ -1484,6 +1529,36 @@ impl Tools {
         }))
     }
 
+    async fn wait_on_background(&self, args: WaitOnBackgroundArgs) -> anyhow::Result<Value> {
+        let chat_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("wait_on_background only works from an agent Zeron launched in a chat")?;
+        let waiting = args.waiting.unwrap_or(true);
+        let marked = self
+            .zeron
+            .call(
+                zeron_rpc::methods::AWAIT_BACKGROUND,
+                json!({ "chatId": chat_id, "taskIds": args.task_ids, "waiting": waiting }),
+            )
+            .await?;
+        let none_matched = marked["matched"].as_array().is_none_or(Vec::is_empty);
+        let message = if none_matched {
+            "None of those are running background tasks of yours now (they may have ended): nothing is waited on."
+        } else if waiting {
+            "This chat reads as waiting on that work after your turn, until it ends and you're woken."
+        } else {
+            "No longer waited on."
+        };
+        Ok(json!({
+            "matched": marked["matched"],
+            "unmatched": marked["unmatched"],
+            "message": message,
+        }))
+    }
+
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let command_id = self
@@ -2038,6 +2113,7 @@ mod tests {
         let world = Arc::new(World::default());
         let outside = tools(world.clone(), Origin::default());
         assert!(!outside.has("show_image"));
+        assert!(!outside.has("wait_on_background"), "a wait is a chat's agent's to say");
         assert!(
             outside
                 .call("show_image", json!({ "path": path }))
@@ -2054,6 +2130,7 @@ mod tests {
             },
         );
         assert!(inside.has("show_image"));
+        assert!(inside.has("wait_on_background"));
         let shown = inside
             .call("show_image", json!({ "path": path }))
             .await

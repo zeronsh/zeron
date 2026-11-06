@@ -631,6 +631,15 @@ impl Zeron {
                     SessionStatus::Errored if advanced || saw_working => {
                         return Ok((TurnOutcome::Errored, Some(session)));
                     }
+                    // Its turn ended into a wait on background work that will
+                    // wake its agent: it isn't done yet, and its finish is
+                    // marked when the wait is over.
+                    SessionStatus::Idle
+                        if zeron_proto::view::waiting(Some(&session), chrono::Utc::now()).is_some() =>
+                    {
+                        saw_working = true;
+                        last = Some(session);
+                    }
                     SessionStatus::Idle => {
                         if session
                             .last_turn_outcome
@@ -823,6 +832,56 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_turn_ending_into_a_wait_is_not_its_finish() {
+        use futures::StreamExt;
+        struct Service(Vec<Session>);
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Service {
+            async fn handle(&self, _: &str, _: Value) -> Result<zeron_rpc::RpcReply, RpcError> {
+                let frames: Vec<Value> = self.0.iter().map(|s| json!([s])).collect();
+                Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::iter(frames).chain(futures::stream::pending()).boxed(),
+                ))
+            }
+        }
+        let now = Utc::now();
+        let row = |status: &str, completed: Option<&str>, waiting: bool| -> Session {
+            let mut v = json!({
+                "chatId": "chat", "deviceId": "dev", "status": status, "updatedAt": now,
+                "lastCompletedTurn": completed,
+            });
+            if waiting {
+                v["waiting"] = json!({ "since": now, "on": [{ "id": "bn1", "kind": "process", "label": "cargo test" }] });
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        let baseline = row("idle", Some("t0"), false);
+        // Working, then its turn ends into a wait: still going.
+        let rpc = zeron_rpc::memory_client(Arc::new(Service(vec![
+            row("working", Some("t0"), false),
+            row("idle", Some("t0"), true),
+        ])));
+        let client = Zeron::with_client(rpc, Origin::default());
+        let (outcome, _) = client
+            .wait_for_turn(&chat("chat", None), Some(&baseline), true, Duration::from_millis(80))
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::TimedOut);
+        // The wait over, its finish marked: completed.
+        let rpc = zeron_rpc::memory_client(Arc::new(Service(vec![
+            row("working", Some("t0"), false),
+            row("idle", Some("t0"), true),
+            row("idle", Some("t1"), false),
+        ])));
+        let client = Zeron::with_client(rpc, Origin::default());
+        let (outcome, _) = client
+            .wait_for_turn(&chat("chat", None), Some(&baseline), true, Duration::from_millis(80))
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::Completed);
     }
 
     #[tokio::test]
