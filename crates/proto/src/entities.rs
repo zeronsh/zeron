@@ -332,8 +332,10 @@ pub struct Chat {
     pub child_kind: Option<ChildKind>,
     /// Put to sleep by the person until a time (the Activity sidebar's
     /// Asleep): synced, so every device shows it asleep, and the engine that
-    /// hosts the chat wakes it early when it asks for the person. Read it
-    /// through [`Chat::sleep_state`]. Missing on older peers.
+    /// hosts the chat wakes it early the moment it starts asking for the
+    /// person or fails (an ask already open when it was put to sleep is no
+    /// such moment). Read it through [`Chat::sleep_state`]. Missing on older
+    /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
 }
@@ -346,11 +348,6 @@ pub struct ChatSleep {
     pub until: DateTime<Utc>,
     /// When it was put to sleep.
     pub at: DateTime<Utc>,
-    /// It was already waiting on the person then (a question or an
-    /// approval open): that one doesn't wake it, the next does. Cleared by
-    /// the hosting engine once that ask is answered.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub held: bool,
     /// Woken early (it asked for the person, or failed): when. Its time
     /// passing needs no write; [`Chat::sleep_state`] reads that from `until`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

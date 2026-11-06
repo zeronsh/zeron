@@ -74,6 +74,14 @@ impl EngineRpc {
         let Caller::Agent { chat } = zeron_rpc::caller() else {
             return Ok(params);
         };
+        // What an agent waits on is its own chat's to say, whatever it sends.
+        if method == methods::AWAIT_BACKGROUND {
+            let Some(chat) = chat else {
+                return Err(refused("Only an agent running in a Zeron chat waits on its work"));
+            };
+            params["chatId"] = json!(chat);
+            return Ok(params);
+        }
         if !matches!(method, methods::MUTATE | methods::QUEUE_MESSAGE | methods::QUEUE_COMMAND) {
             return Ok(params);
         }

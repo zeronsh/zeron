@@ -487,7 +487,7 @@ mod gate_tests {
         let hour = chrono::Duration::hours(1);
         let mut chat = chat_at(now - hour * 3, Some(now - hour * 3));
         assert_eq!(chat.sleep_state(now), SleepState::Awake);
-        chat.sleep = Some(ChatSleep { until: now + hour, at: now - hour, held: false, woke_at: None });
+        chat.sleep = Some(ChatSleep { until: now + hour, at: now - hour, woke_at: None });
         assert_eq!(chat.sleep_state(now), SleepState::Asleep { until: now + hour });
         // Its time passed: woke then, until it's seen.
         assert_eq!(chat.sleep_state(now + hour * 2), SleepState::Woke { at: now + hour });

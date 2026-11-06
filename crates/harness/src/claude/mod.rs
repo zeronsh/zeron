@@ -1273,6 +1273,11 @@ async fn run_session(session: Session) {
     // A message of ours (or a background wake) began a turn that has not
     // reported its end: the CLI dying now leaves it to us to end it.
     let mut turn_open = true;
+    // The CLI re-invokes the model on its own when a background task ends
+    // (live-verified 2.1.319: `task_notification`, the roster drained, a
+    // fresh `init` 0.1 s later, the wake turn's own `result`), so what the
+    // agent waits on can be shown as a wait.
+    turn.set_wakes_on_background(true);
     // A resumed session the CLI turns out to have no conversation for is
     // relaunched fresh, once (see [`no_conversation`]).
     let mut restore_fallback = launched.resume.is_some();
@@ -1470,10 +1475,17 @@ async fn run_session(session: Session) {
                         match system.subtype.as_str() {
                             "background_tasks_changed" => {
                                 turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
+                                turn.set_background_agents(background::agents(system.tasks.as_deref()));
                             }
                             // The first, or a background wake's: either way a
-                            // turn is running.
-                            "init" => turn_open = true,
+                            // turn is running. One starting with no turn of
+                            // ours open is the CLI's own wake.
+                            "init" => {
+                                if !turn_open {
+                                    turn.note_wake();
+                                }
+                                turn_open = true;
+                            }
                             _ => {}
                         }
                     }

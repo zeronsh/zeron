@@ -1340,16 +1340,14 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// A chat put to sleep until `until` (`None`: woken, its sleep cleared),
-    /// `held` when an ask was already open on it. Each field is its own last
-    /// write, so a sleep set on one device and an early wake on another both
-    /// land. `false` when no such row.
+    /// A chat put to sleep until `until` (`None`: woken, its sleep cleared).
+    /// Each field is its own last write, so a sleep set on one device and an
+    /// early wake on another both land. `false` when no such row.
     pub fn set_chat_sleep(
         &mut self,
         chat_id: &str,
         until: Option<DateTime<Utc>>,
         at: DateTime<Utc>,
-        held: bool,
     ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
@@ -1361,7 +1359,6 @@ impl RegistryDoc {
             fields([
                 ("sleepUntil", json!(until.map(|t| t.timestamp_millis()))),
                 ("sleptAt", json!(until.map(|_| at.timestamp_millis()))),
-                ("sleepHeld", json!(until.is_some() && held)),
                 ("sleepWokeAt", Value::Null),
             ]),
         );
@@ -1383,25 +1380,8 @@ impl RegistryDoc {
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([
-                ("sleepWokeAt", json!(at.timestamp_millis())),
-                ("sleepHeld", json!(false)),
-            ]),
+            fields([("sleepWokeAt", json!(at.timestamp_millis()))]),
         );
-        Ok(true)
-    }
-
-    /// The ask a chat was put to sleep on has been answered: the next one
-    /// wakes it. `false` when there was nothing held.
-    pub fn release_chat_sleep_hold(&mut self, chat_id: &str) -> Result<bool, DocError> {
-        if !self
-            .chat(chat_id)?
-            .and_then(|c| c.sleep)
-            .is_some_and(|s| s.held && s.woke_at.is_none())
-        {
-            return Ok(false);
-        }
-        self.write(KIND_CHATS, chat_id, OpKind::Update, fields([("sleepHeld", json!(false))]));
         Ok(true)
     }
 

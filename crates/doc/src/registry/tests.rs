@@ -2482,13 +2482,11 @@ fn a_chat_sleeps_wakes_once_and_clears() {
     ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
     assert!(!ws.wake_chat("chat-1", ts(2_000)).unwrap(), "nothing to wake");
 
-    assert!(ws.set_chat_sleep("chat-1", Some(ts(9_000)), ts(1_000), true).unwrap());
+    assert!(ws.set_chat_sleep("chat-1", Some(ts(9_000)), ts(1_000)).unwrap());
     let sleep = ws.chat("chat-1").unwrap().unwrap().sleep;
-    assert_eq!(sleep, Some(ChatSleep { until: ts(9_000), at: ts(1_000), held: true, woke_at: None }));
+    assert_eq!(sleep, Some(ChatSleep { until: ts(9_000), at: ts(1_000), woke_at: None }));
 
-    // The held ask answered, then a new one wakes it, once.
-    assert!(ws.release_chat_sleep_hold("chat-1").unwrap());
-    assert!(!ws.release_chat_sleep_hold("chat-1").unwrap());
+    // Woken early, once.
     assert!(ws.wake_chat("chat-1", ts(3_000)).unwrap());
     assert!(!ws.wake_chat("chat-1", ts(4_000)).unwrap(), "the first wake is the one shown");
     let woke = ws.chat("chat-1").unwrap().unwrap();
@@ -2496,11 +2494,11 @@ fn a_chat_sleeps_wakes_once_and_clears() {
     assert_eq!(woke.sleep_state(ts(3_500)), SleepState::Woke { at: ts(3_000) });
 
     // Put to sleep again: a fresh sleep, the old wake gone. Cleared: awake.
-    assert!(ws.set_chat_sleep("chat-1", Some(ts(20_000)), ts(5_000), false).unwrap());
+    assert!(ws.set_chat_sleep("chat-1", Some(ts(20_000)), ts(5_000)).unwrap());
     assert_eq!(ws.chat("chat-1").unwrap().unwrap().sleep.unwrap().woke_at, None);
-    assert!(ws.set_chat_sleep("chat-1", None, ts(6_000), false).unwrap());
+    assert!(ws.set_chat_sleep("chat-1", None, ts(6_000)).unwrap());
     assert_eq!(ws.chat("chat-1").unwrap().unwrap().sleep, None);
-    assert!(!ws.set_chat_sleep("missing", Some(ts(9_000)), ts(1_000), false).unwrap());
+    assert!(!ws.set_chat_sleep("missing", Some(ts(9_000)), ts(1_000)).unwrap());
 }
 
 #[test]
@@ -2511,7 +2509,7 @@ fn a_sleep_set_on_one_device_and_a_wake_on_its_host_both_land() {
     let mut server = HashMap::new();
     let mut seq = 0;
     server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
-    assert!(viewer.set_chat_sleep("chat-1", Some(ts(90_000)), ts(1_000), false).unwrap());
+    assert!(viewer.set_chat_sleep("chat-1", Some(ts(90_000)), ts(1_000)).unwrap());
     server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
     assert_eq!(host.chat("chat-1").unwrap().unwrap().sleep.unwrap().until, ts(90_000));
     // (Later than the sleep, as a wake always is: the same millisecond

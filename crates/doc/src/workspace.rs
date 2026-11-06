@@ -765,14 +765,11 @@ pub(crate) struct RawChat {
     child_kind: Option<zeron_proto::ChildKind>,
     /// Its sleep, a field apiece so each is its own last write
     /// ([`crate::RegistryDoc::set_chat_sleep`]): until (ms; none, awake),
-    /// when it was put to sleep, whether an open ask was held, and when it
-    /// woke early.
+    /// when it was put to sleep, and when it woke early.
     #[serde(default)]
     sleep_until: Option<i64>,
     #[serde(default)]
     slept_at: Option<i64>,
-    #[serde(default)]
-    sleep_held: Option<bool>,
     #[serde(default)]
     sleep_woke_at: Option<i64>,
 }
@@ -821,7 +818,6 @@ impl From<RawChat> for Chat {
             sleep: raw.sleep_until.map(|until| zeron_proto::ChatSleep {
                 until: dt(until),
                 at: dt(raw.slept_at.unwrap_or(until)),
-                held: raw.sleep_held.unwrap_or(false),
                 woke_at: raw.sleep_woke_at.map(dt),
             }),
         }

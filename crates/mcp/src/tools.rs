@@ -1289,6 +1289,7 @@ impl Tools {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
+                sleep: None,
             };
             let sent = self
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
@@ -2254,6 +2255,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            waiting: None,
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools
