@@ -137,6 +137,18 @@ local PLUGINS: { [string]: any } = {
 			settings_changed = false,
 		},
 	},
+	-- A native window of its own: Dear ImGui, not zgx's declarative windows.
+	imgui = {
+		id = "imgui",
+		name = "Inspector",
+		version = "0.1.0",
+		hash = "imgui-1",
+		status = "pending",
+		author = { kind = "unknown" },
+		permissions = { "imgui.windows" },
+		allowed = {},
+		ask = { "imgui.windows" },
+	},
 	-- Asking for everything: more than the window holds.
 	long = {
 		id = "long",
@@ -145,9 +157,9 @@ local PLUGINS: { [string]: any } = {
 		hash = "long-1",
 		status = "pending",
 		author = { kind = "unknown" },
-		permissions = { "ui.add", "ui.change", "profile.read", "sessions.read", "messages.read", "account.email", "files.read", "panel.tabs", "pages.add", "github", "github.write", "notifications", "links.open", "navigate", "compose", "network", "clipboard", "files", "web", "windows", "tools", "devices", "service", "commands", "native" },
+		permissions = { "ui.add", "ui.change", "profile.read", "sessions.read", "messages.read", "account.email", "files.read", "panel.tabs", "pages.add", "github", "github.write", "notifications", "links.open", "navigate", "compose", "network", "clipboard", "files", "web", "windows", "imgui.windows", "tools", "devices", "service", "commands", "native" },
 		allowed = {},
-		ask = { "ui.add", "ui.change", "profile.read", "sessions.read", "messages.read", "account.email", "files.read", "panel.tabs", "pages.add", "github", "github.write", "notifications", "links.open", "navigate", "compose", "network", "clipboard", "files", "web", "windows", "tools", "devices", "service", "commands", "native" },
+		ask = { "ui.add", "ui.change", "profile.read", "sessions.read", "messages.read", "account.email", "files.read", "panel.tabs", "pages.add", "github", "github.write", "notifications", "links.open", "navigate", "compose", "network", "clipboard", "files", "web", "windows", "imgui.windows", "tools", "devices", "service", "commands", "native" },
 		ui = { change = { "#shell" } },
 		commands = { "git" },
 		tools = { { name = "a", description = "First." } },
@@ -197,6 +209,7 @@ ui.command {
 ui.command { id = "wide", title = "Show Composer kit", run = function() show("wide") end }
 ui.command { id = "grown", title = "Show Gh helper, grown", run = function() show("grown") end }
 ui.command { id = "long", title = "Show Everything", run = function() show("long") end }
+ui.command { id = "imgui", title = "Show Inspector, with native windows", run = function() show("imgui") end }
 ui.command { id = "sync_devbox", title = "Show Checkout sync, on Devbox", run = function() show("sync", "Devbox") end }
 ui.command {
 	id = "tamper",

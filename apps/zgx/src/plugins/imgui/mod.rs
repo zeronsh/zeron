@@ -15,6 +15,8 @@
 //!   that survive frame to frame.
 //! - [`snapshot::OffscreenTarget`] — rendering without a window, and the
 //!   pixel readback tests and diagnostics snapshots use.
+//! - [`permission`] — the `imgui.windows` grant every host action passes
+//!   through, and the sentence a refused plugin gets.
 //!
 //! The frame is split the way the window and script layers need it:
 //! [`runtime::WindowContext::prepare`] copies a finished frame off the
@@ -29,6 +31,7 @@
 //! every part of it, and the next milestone wires it to a window.
 #![allow(dead_code)]
 
+pub mod permission;
 pub mod render;
 pub mod runtime;
 pub mod snapshot;

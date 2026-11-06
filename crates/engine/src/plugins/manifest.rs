@@ -33,6 +33,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "files",
     "web",
     "windows",
+    // Native Dear ImGui windows of its own (`zeron.imgui`), apart from
+    // zgx's declarative windows above: one never buys the other.
+    "imgui.windows",
     "tools",
     "devices",
     "native",
@@ -604,6 +607,17 @@ mod tests {
         assert_eq!(manifest.description, "");
         assert!(manifest.permissions.is_empty());
         assert!(manifest.signature.is_none());
+    }
+
+    /// Native ImGui windows are a permission of their own: a manifest asking
+    /// for them is known (not broken), and asking for zgx's "windows"
+    /// doesn't ask for them.
+    #[test]
+    fn plugins_manifest_knows_native_imgui_windows() {
+        let manifest = Manifest::from_value(with("permissions", serde_json::json!(["imgui.windows"]))).unwrap();
+        assert!(manifest.asks("imgui.windows"));
+        assert!(!manifest.asks("windows"));
+        assert_eq!(problem(with("permissions", serde_json::json!(["imgui.windows"]))), None);
     }
 
     #[test]

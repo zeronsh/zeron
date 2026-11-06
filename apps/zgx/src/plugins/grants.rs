@@ -15,6 +15,12 @@ use zgx_script::Capability;
 /// before or after an element asks it.
 pub const UI_ADD: &str = "zeron.ui.add";
 
+/// The capability the native ImGui host's actions take ("imgui.windows"):
+/// the SDK's `zeron.imgui` table and every `plugin.<id>.imgui*` action.
+/// Never what "windows" gives (zgx's declarative windows,
+/// `Capability::Windows`): a plugin allowed one is not allowed the other.
+pub const IMGUI_WINDOWS: &str = "zeron.imgui.windows";
+
 /// Adding into a slot whose place gives what only "files.read" reads:
 /// a plugin allowed both "ui.add" and "files.read".
 pub const UI_ADD_FILES: &str = "zeron.ui.add.files";
@@ -255,6 +261,9 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "files" => out.push(Capability::Files),
             "web" => out.push(Capability::Web),
             "windows" => out.push(Capability::Windows),
+            // Its own native Dear ImGui windows, which only this opens:
+            // "windows" stays zgx's declarative windows alone.
+            "imgui.windows" => out.push(named(IMGUI_WINDOWS)),
             // The engine's: tools reach agents through Zeron's MCP server,
             // a native server runs beside agents.
             "tools" | "native" => {}
@@ -296,6 +305,23 @@ mod tests {
                 Capability::Fetch,
             ]
         );
+    }
+
+    /// A plugin allowed "windows" reaches zgx's declarative windows alone;
+    /// one allowed "imgui.windows" reaches the native ImGui host alone.
+    #[test]
+    fn native_imgui_windows_are_not_declarative_windows() {
+        let imgui = capabilities("x", &s(&["imgui.windows"]), &[], &[]);
+        assert_eq!(imgui, vec![own("x"), Capability::Named(IMGUI_WINDOWS.into())]);
+        assert!(!imgui.contains(&Capability::Windows), "\"imgui.windows\" isn't zgx's \"windows\"");
+
+        let declarative = capabilities("x", &s(&["windows"]), &[], &[]);
+        assert_eq!(declarative, vec![own("x"), Capability::Windows]);
+        assert!(!declarative.contains(&Capability::Named(IMGUI_WINDOWS.into())), "\"windows\" doesn't open ImGui windows");
+
+        // Asking for both gives both, and each alone gives only its own.
+        let both = capabilities("x", &s(&["windows", "imgui.windows"]), &[], &[]);
+        assert!(both.contains(&Capability::Windows) && both.contains(&Capability::Named(IMGUI_WINDOWS.into())));
     }
 
     #[test]

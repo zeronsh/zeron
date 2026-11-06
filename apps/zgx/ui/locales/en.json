@@ -3128,6 +3128,10 @@
         "windows": {
           "title": "Open windows of its own"
         },
+        "imgui_windows": {
+          "title": "Create native application windows",
+          "detail": "It draws its own Dear ImGui interface in them, outside Zeron's window."
+        },
         "tools": {
           "title": "Give your agents tools"
         },

@@ -299,6 +299,10 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "global", "plugins.words.permission.web.title")
 	elseif permission == "windows" then
 		return line(false, "monitor", "plugins.words.permission.windows.title")
+	elseif permission == "imgui.windows" then
+		-- Native application windows of its own, drawn with Dear ImGui:
+		-- not zgx's declarative windows (the line above).
+		return line(false, "monitor", "plugins.words.permission.imgui_windows.title", "plugins.words.permission.imgui_windows.detail")
 	elseif permission == "tools" then
 		-- Each tool by name, with what it tells your agents (their words
 		-- reach every agent's list of tools).

@@ -3128,6 +3128,10 @@
         "windows": {
           "title": "打开自己的窗口"
         },
+        "imgui_windows": {
+          "title": "创建原生应用窗口",
+          "detail": "它在这些窗口中绘制自己的 Dear ImGui 界面，位于 Zeron 窗口之外。"
+        },
         "tools": {
           "title": "为你的智能体提供工具"
         },
