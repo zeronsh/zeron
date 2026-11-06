@@ -91,9 +91,12 @@ anywhere in the class.** With this, `edge/src/session-doc/` (the TS schema mirro
 the wasm bundling alias eventually die with s2.
 
 **Storage** (DO SQLite):
-- `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT UNIQUE, bytes BLOB)` —
+- `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT, bytes BLOB)` —
   opaque Loro update blobs. Per-row cap 1 MB (post-strip updates are KB-scale;
-  oversized rows are rejected at the header, matching today's discipline).
+  oversized rows are rejected at the header, matching today's discipline). A push
+  writes only this row (one billed row; two in rooms created while `batch_id` was
+  indexed). The head is derived from the rows and the floor; the stored head copy
+  and per-device push counts flush with the alarm, at most every five minutes.
 - checkpoint blob via `blobs.ts` chunking + `meta`: `owner`, `seqFloor`,
   `checkpointFrontier BLOB` (opaque, client-written), `checkpointSize`,
   `checkpointSeq`, `tailDirty`.

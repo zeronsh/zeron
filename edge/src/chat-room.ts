@@ -22,6 +22,7 @@ import {
   CHECKPOINT_BLOB,
   commitCheckpoint,
   ensureChatLog,
+  flushHeadSeq,
   FRONTIER_BLOB,
   getMeta,
   headSeq,
@@ -52,6 +53,10 @@ const PRESENCE_TTL_MS = 30_000;
 const QUOTA_WINDOW_MS = 60_000;
 const QUOTA_MAX_PUSHES = 300;
 const QUOTA_MAX_BYTES = 8 * 1024 * 1024;
+/** How long per-push bookkeeping (the stored head copy, the per-device push
+ * counts) may lag. Writing them per push made up 2 of a push's 5 billed rows;
+ * an active room now pays a few rows every five minutes instead. */
+const BOOKKEEPING_FLUSH_MS = 5 * 60_000;
 
 interface SocketState {
   userId: string;
@@ -82,6 +87,12 @@ export class ChatRoom implements DurableObject {
   private readonly presence = new Map<string, number>();
   /** device → rolling push quota window. Memory-only. */
   private readonly quotas = new Map<string, QuotaWindow>();
+  /** device → push counts not yet in `meta.pushOutcomes`. /stats merges them.
+   * Eviction can lose the counts since the last flush; they're diagnostics. */
+  private readonly unflushedOutcomes = new Map<string, PushOutcome>();
+  /** When the bookkeeping flush is due; undefined = nothing to flush. The alarm
+   * it arms is durable, so losing this field to eviction loses no flush. */
+  private flushAt?: number;
   private wakeFlight?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -322,10 +333,7 @@ export class ChatRoom implements DurableObject {
         presence: Object.fromEntries(this.presence),
         // The ONLY per-device attribution surface — kept from the 2026-08-05
         // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-          string,
-          PushOutcome
-        >,
+        pushOutcomes: this.mergedOutcomes(),
         lastBackupSeq: Number(getMeta(sql, "backupSeq") ?? "0")
       });
     }
@@ -338,6 +346,8 @@ export class ChatRoom implements DurableObject {
       sql.exec("DELETE FROM meta");
       sql.exec("DELETE FROM blobs");
       sql.exec("DELETE FROM chat_wake");
+      this.unflushedOutcomes.clear();
+      this.flushAt = undefined;
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "chat room reset");
@@ -390,7 +400,7 @@ export class ChatRoom implements DurableObject {
   }
 
   async webSocketClose(): Promise<void> {
-    /* nothing buffered; rows are written synchronously on push */
+    /* nothing to save: rows are written synchronously on push */
   }
 
   async webSocketError(): Promise<void> {
@@ -531,21 +541,46 @@ export class ChatRoom implements DurableObject {
   }
 
   private recordPush(device: string, ok: boolean): void {
-    const sql = this.ctx.storage.sql;
     const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-      string,
-      PushOutcome
-    >;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
+    const entry = this.unflushedOutcomes.get(key) ?? { ok: 0, rejected: 0, lastOkAt: 0 };
     if (ok) {
       entry.ok += 1;
       entry.lastOkAt = Date.now();
     } else {
       entry.rejected += 1;
     }
-    outcomes[key] = entry;
-    setMeta(sql, "pushOutcomes", JSON.stringify(outcomes));
+    this.unflushedOutcomes.set(key, entry);
+    // An accepted row already armed the flush in its own transaction.
+    if (!ok && this.flushAt === undefined) {
+      this.flushAt = Date.now() + BOOKKEEPING_FLUSH_MS;
+      this.ctx.waitUntil(this.ctx.storage.transaction(async () => { await this.scheduleAlarm(); }));
+    }
+  }
+
+  /** Stored push counts plus the ones still in memory. */
+  private mergedOutcomes(): Record<string, PushOutcome> {
+    const outcomes = JSON.parse(getMeta(this.ctx.storage.sql, "pushOutcomes") ?? "{}") as Record<
+      string,
+      PushOutcome
+    >;
+    for (const [key, delta] of this.unflushedOutcomes) {
+      const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
+      entry.ok += delta.ok;
+      entry.rejected += delta.rejected;
+      entry.lastOkAt = Math.max(entry.lastOkAt, delta.lastOkAt);
+      outcomes[key] = entry;
+    }
+    return outcomes;
+  }
+
+  private flushBookkeeping(): void {
+    const sql = this.ctx.storage.sql;
+    flushHeadSeq(sql);
+    if (this.unflushedOutcomes.size > 0) {
+      setMeta(sql, "pushOutcomes", JSON.stringify(this.mergedOutcomes()));
+      this.unflushedOutcomes.clear();
+    }
+    this.flushAt = undefined;
   }
 
   /** SQL rows, wake receipt, and alarm are one SQLite storage transaction.
@@ -555,7 +590,13 @@ export class ChatRoom implements DurableObject {
     const outcome = await this.ctx.storage.transaction(async () => {
       const result = appendRow(sql, device, batch, payload, Date.now());
       if (!result.ok) return result;
-      if (!result.dup) this.backupDirty();
+      if (!result.dup) {
+        this.backupDirty();
+        // Rollback gate: a release that reads the stored head must find it
+        // current in every room before it runs (see env.ts).
+        if (this.env.CHAT_ROOM_WRITE_THROUGH === "1") flushHeadSeq(sql);
+        this.flushAt ??= Date.now() + BOOKKEEPING_FLUSH_MS;
+      }
       // Host output must not feed a wake loop. Legacy senders without a
       // hint keep their separate nudge path; hints are authenticated routing,
       // never permission to execute (the host still validates its document).
@@ -569,6 +610,9 @@ export class ChatRoom implements DurableObject {
 
   private backupDirty(): void {
     const sql = this.ctx.storage.sql;
+    // Marked once per backup cycle: the flag only clears together with the
+    // deadline, so a room with both is already dirty.
+    if (getMeta(sql, "backupDirty") === "1" && getMeta(sql, "backupDue")) return;
     setMeta(sql, "backupDirty", "1");
     if (!getMeta(sql, "backupDue")) setMeta(sql, "backupDue", String(Date.now() + DAY_MS));
   }
@@ -587,7 +631,7 @@ export class ChatRoom implements DurableObject {
     const wake = pendingChatWake(sql);
     const backup = getMeta(sql, "backupDirty") === "1"
       ? Number(getMeta(sql, "backupDue") ?? Date.now() + DAY_MS) : Infinity;
-    const next = Math.min(wake?.next_at ?? Infinity, backup);
+    const next = Math.min(wake?.next_at ?? Infinity, backup, this.flushAt ?? Infinity);
     if (!Number.isFinite(next)) return;
     const existing = await this.ctx.storage.getAlarm();
     if (existing === null || next < existing) await this.ctx.storage.setAlarm(next);
@@ -632,9 +676,11 @@ export class ChatRoom implements DurableObject {
     });
   }
 
-  /** Wake retry + nightly backup share the DO's single durable alarm. */
+  /** Wake retry, bookkeeping flush and nightly backup share the DO's single
+   * durable alarm. */
   async alarm(): Promise<void> {
     try {
+      this.flushBookkeeping();
       const wake = pendingChatWake(this.ctx.storage.sql);
       if (wake && wake.next_at <= Date.now()) await this.flushWake();
       const due = Number(getMeta(this.ctx.storage.sql, "backupDue") ?? "0");
