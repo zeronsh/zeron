@@ -442,6 +442,8 @@ struct PersistentHarness {
     id: HarnessId,
     /// Per launch: whether its Zeron server was side-chats-only.
     side_chats_only: Arc<Mutex<Vec<bool>>>,
+    /// Per launch: whether it carried Zeron's server at all.
+    zeron_tools: Arc<Mutex<Vec<bool>>>,
 }
 
 #[async_trait]
@@ -476,6 +478,7 @@ impl Harness for PersistentHarness {
                 .as_ref()
                 .is_some_and(|mcp| mcp.side_chats_only()),
         );
+        self.zeron_tools.lock().unwrap().push(request.mcp.is_some());
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(32);
         let mut steering = controls.steering;
         let harness = self.id;
@@ -545,6 +548,7 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
         runs_started: runs_started.clone(),
         id: HarnessId::Mock,
         side_chats_only: Default::default(),
+        zeron_tools: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
@@ -610,6 +614,7 @@ async fn a_switched_credential_replaces_the_parked_session() {
         runs_started: runs_started.clone(),
         id: HarnessId::Mock,
         side_chats_only: Default::default(),
+        zeron_tools: Default::default(),
     }));
     registry.set_run_environment(Arc::new(SwitchableCredential(credential.clone())));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
@@ -661,6 +666,7 @@ async fn switched_native_subagents_replace_the_parked_session() {
         runs_started: runs_started.clone(),
         id: HarnessId::ClaudeCode,
         side_chats_only: side_chats_only.clone(),
+        zeron_tools: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
         .expect("engine core assembles");
@@ -700,6 +706,67 @@ async fn switched_native_subagents_replace_the_parked_session() {
     core.shutdown().await;
 }
 
+/// Turning a provider's Zeron tools off (Settings → Providers) between turns
+/// replaces the parked child with one launched without Zeron's MCP server.
+/// Side chats ride that server, so with native subagents also off the
+/// successor keeps its provider's own instead of being told to delegate.
+#[tokio::test]
+async fn switched_zeron_tools_replace_the_parked_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let side_chats_only = Arc::new(Mutex::new(Vec::new()));
+    let zeron_tools = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::ClaudeCode,
+        side_chats_only: side_chats_only.clone(),
+        zeron_tools: zeron_tools.clone(),
+    }));
+    let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
+        .expect("engine core assembles");
+    // A served IPC port: runs carry Zeron's own MCP server.
+    core.sessions.set_ipc_port(27699);
+    pre_title(&core);
+    registry
+        .set_native_subagents(HarnessId::ClaudeCode, false)
+        .unwrap();
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+
+    registry
+        .set_zeron_tools(HarnessId::ClaudeCode, false)
+        .unwrap();
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn after the switch",
+    )
+    .await;
+    queue_run(&core, "third", "/tmp", "msg-user-3");
+    wait_for(
+        || complete_assistant_count(&core) == 3,
+        "third turn on the warm child",
+    )
+    .await;
+    assert_eq!(
+        *runs_started.lock().unwrap(),
+        2,
+        "a switched setting starts a new child, an unchanged one keeps it"
+    );
+    assert_eq!(*zeron_tools.lock().unwrap(), [true, false]);
+    assert_eq!(*side_chats_only.lock().unwrap(), [true, false]);
+    core.shutdown().await;
+}
+
 /// A side chat keeps its provider's own subagents whatever the setting, so
 /// switching them off doesn't replace its parked child either.
 #[tokio::test]
@@ -715,6 +782,7 @@ async fn a_parked_side_chat_stays_warm_when_native_subagents_switch() {
         runs_started: runs_started.clone(),
         id: HarnessId::ClaudeCode,
         side_chats_only: side_chats_only.clone(),
+        zeron_tools: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
         .expect("engine core assembles");
