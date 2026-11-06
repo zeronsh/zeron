@@ -185,5 +185,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+[build-dependencies]
+# The Windows exe's icon (build.rs): the taskbar's, Explorer's, and the one
+# zgx gives its windows (zgx-desktop `window_chrome`, the exe's first icon).
+embed-resource = "3.0.11"
+
 [dev-dependencies]
 tempfile = "3"
