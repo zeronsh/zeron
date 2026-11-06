@@ -166,6 +166,14 @@ function M.window_theme(): { [string]: any }?
 			(out :: any)[k] = v
 		end
 	end
+	-- And its muted text where the window is solid (ds/material).
+	local solid = material.solid_theme()
+	if solid then
+		out = out or {}
+		for k, v in solid do
+			(out :: any)[k] = v
+		end
+	end
 	return out
 end
 
