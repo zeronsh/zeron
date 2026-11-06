@@ -43,7 +43,21 @@ export interface SandboxCapabilities {
   readonly ttlRequired: boolean;
   /** Largest TTL the provider accepts; null = unbounded. */
   readonly maxTtlSeconds: number | null;
+  /** How long a stopped sandbox's disk is kept. A resume starts the clock
+   * again from the next stop. Absent = kept for good. */
+  readonly stoppedRetentionMs?: number;
 }
+
+/**
+ * A failure a retry can't fix, in terms the control plane can act on. Only
+ * the provider module knows how its own errors spell these.
+ */
+export type SandboxFailure =
+  /** The disk doesn't fit the machine size asked for. `neededGiB` when the
+   * provider said how much it takes. */
+  | { readonly kind: "disk_too_small"; readonly neededGiB?: number }
+  /** The provider deleted the stopped sandbox's disk. */
+  | { readonly kind: "data_expired" };
 
 export interface CreateSandbox {
   /** Same key + same request = same sandbox. */
@@ -60,6 +74,13 @@ export interface CreateSandbox {
 export interface SandboxInfo {
   readonly state: SandboxState;
   readonly error?: string;
+  /** Why it can't come back, when that is a failure a retry can't fix. */
+  readonly failure?: SandboxFailure;
+  /** Unix ms of its last stop, by any cause. */
+  readonly stoppedAt?: number;
+  /** False while a resumed disk is still being copied in (a disk reading then
+   * under-reports); absent when the provider doesn't restore lazily. */
+  readonly hydrated?: boolean;
 }
 
 export interface ExecResult {
@@ -107,7 +128,12 @@ export interface SandboxProvider {
   /** Snapshot + stop. Never discards data: a provider that cannot save the
    * disk must refuse (a retryable/conflict error), not force. */
   stop(sandboxId: string): Promise<void>;
-  resume(sandboxId: string, options: { readonly ttlSeconds: number | null }): Promise<void>;
+  /** `machine`: come back on that size (omitted = the size it had). A failure
+   * a retry can't fix throws a `SandboxError` carrying `failure`. */
+  resume(
+    sandboxId: string,
+    options: { readonly ttlSeconds: number | null; readonly machine?: SandboxMachine }
+  ): Promise<void>;
   /** Irreversible. */
   delete(sandboxId: string): Promise<{ readonly operationId?: string }>;
   extendTtl(sandboxId: string, ttlSeconds: number | null): Promise<void>;
@@ -128,7 +154,9 @@ export class SandboxError extends Error {
     readonly providerCode: string,
     readonly provider: string,
     /** For `config`: the action the provider refused. */
-    readonly action?: SandboxAction
+    readonly action?: SandboxAction,
+    /** When this is a failure a retry can't fix. */
+    readonly failure?: SandboxFailure
   ) {
     super(message);
     this.name = "SandboxError";

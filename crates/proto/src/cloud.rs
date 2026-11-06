@@ -94,6 +94,64 @@ pub enum CloudState {
     Deleting,
     /// Last lifecycle step failed; see `error` / `failed_action`.
     Error,
+    /// The provider deleted the stopped machine's disk. The transcript is safe;
+    /// `CloudSessionRetry` starts a fresh machine on the same repo and branch.
+    #[serde(rename = "data_expired")]
+    DataExpired,
+    /// A state this build doesn't know yet (a newer edge).
+    #[serde(other)]
+    Unknown,
+}
+
+/// One machine size a user can pick (`CloudStatus::machines`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudMachine {
+    /// What `CloudSetMachine` and `CloudSessionWake` take.
+    pub id: String,
+    pub name: String,
+    pub vcpu: u32,
+    #[serde(rename = "memoryGB")]
+    pub memory_gb: u32,
+    /// What a machine of this size holds: the limit a wake is refused against.
+    #[serde(rename = "diskGiB")]
+    pub disk_gib: f64,
+    /// Credits it spends relative to the default size.
+    pub credit_multiplier: f64,
+}
+
+/// How full a session machine's disk is, against what its size holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CloudDiskLevel {
+    #[default]
+    Ok,
+    Warn,
+    Critical,
+    /// A level this build doesn't know yet (a newer edge).
+    #[serde(other)]
+    Unknown,
+}
+
+/// A session machine's disk (`CloudSession::disk`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDisk {
+    #[serde(rename = "usedGiB")]
+    pub used_gib: f64,
+    #[serde(rename = "capacityGiB")]
+    pub capacity_gib: f64,
+    pub level: CloudDiskLevel,
+}
+
+/// A wake the provider refused for good until the user picks a bigger size.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWakeBlocked {
+    /// `disk_too_small`.
+    pub reason: String,
+    #[serde(rename = "neededGiB")]
+    pub needed_gib: f64,
 }
 
 /// `CloudStatus` / `CloudEnable` / `CloudDelete` reply: the account.
@@ -129,10 +187,16 @@ pub struct CloudStatus {
     /// or wake at zero or below. `None` from an edge that predates credits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<f64>,
+    /// Every machine size a user can pick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<CloudMachine>,
+    /// The account's default size: what new sessions start on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// One Cloud session: a top-level chat run on Cloud and its sandbox.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSession {
     pub chat_id: String,
@@ -153,10 +217,22 @@ pub struct CloudSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<i64>,
     pub created_at: i64,
+    /// The size it is on, or will come back on when picked asleep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// Omitted until its engine first reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<CloudDisk>,
+    /// Waiting for the user to pick a size its disk fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_blocked: Option<CloudWakeBlocked>,
+    /// Unix ms the provider deletes its disk, while it sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
 }
 
 /// `CloudSessions` reply.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSessions {
     #[serde(default)]
@@ -493,6 +569,11 @@ mod tests {
 
     #[test]
     fn status_defaults_tolerate_missing_fields() {
+        // What an edge adds later never fails the list it's in.
+        let unknown: CloudState = serde_json::from_str(r#""hibernating""#).unwrap();
+        assert_eq!(unknown, CloudState::Unknown);
+        let expired: CloudState = serde_json::from_str(r#""data_expired""#).unwrap();
+        assert_eq!(expired, CloudState::DataExpired);
         let status: CloudStatus = serde_json::from_str(r#"{"state":"sleeping"}"#).unwrap();
         assert_eq!(status.state, CloudState::Sleeping);
         assert!(!status.available);

@@ -80,10 +80,11 @@ catalog restricted to Codex + Claude Code, so opening a composer never wakes a s
 3. **Sleep.** After `CLOUD_IDLE_MINUTES` without activity (no turn running, no one doing anything on it)
    the session's sandbox is stopped. Archiving a chat lets it sleep.
 4. **Wake.** A send to the chat nudges its host device; a nudge to a sleeping session device
-   wakes it, and the queued command runs once the engine reconnects. Merely viewing a sleeping
-   chat (or its sidebar row) does not wake it: client dials to a sleeping session device get
-   the ordinary offline answer, and the UI offers an explicit Wake for files, terminals and
-   diffs.
+   wakes it, and the queued command runs once the engine reconnects. A send also recovers a
+   session in `error` that still has a sandbox, unless the failure is one a retry can't fix
+   ("Machine sizes"). Merely viewing a sleeping chat (or its sidebar row) does not wake it:
+   client dials to a sleeping session device get the ordinary offline answer, and the UI offers
+   an explicit Wake for files, terminals and diffs.
 5. **Delete.** Deleting the chat (or Cloud) runs the DeleteWorkflow: revoke the
    session device, stop, capture final usage, delete the sandbox. The transcript stays.
 
@@ -220,11 +221,11 @@ stopped. A refused stop is retried (the provider bills nothing while a stop is r
 never forced.
 - *Quiesce* (headless IPC `QuiesceForSleep`): the engine starts no new work from here on, so a
   send arriving now waits in its chat for the woken machine instead of starting a turn the stop
-  would kill (the engine marks a command handled before running it, so a killed turn is never
-  retried). A turn in flight or a message already waiting makes it exit 75: the sleep is
-  declined and the session stays `ready` (idle sleep retries a full idle window later). A
-  quiesce the stop never follows lifts itself after 3 minutes. An engine that can't answer
-  (gone, or older than the handshake) doesn't block the sleep.
+  would cut off ("A killed turn"). A turn in flight or a message already waiting makes it exit
+  75: the sleep is declined and the session stays `ready` (idle sleep retries a full idle window
+  later). A quiesce the stop never follows lifts itself after 3 minutes. An engine that can't
+  answer (gone, or older than the handshake) doesn't block the sleep. Accepted, the engine clears
+  rebuildable caches before it answers ("Disk").
 - *Stop the engine*: Boat reports a sandbox stopped once its disk snapshot is taken while the
   machine may run on a moment; an engine still connected then acknowledged a send's nudge and
   wrote changes the snapshot never saw. Stopped first, it has drained to disk and its device
@@ -242,7 +243,8 @@ A registry it can't read skips the pass; it never deletes on doubt. The finished
 registry: no device lists it, and the dial gate (`WorkspaceHost::peer_liveness`) reads a deleted
 device as dark, so nothing dials it again.
 
-Idle policy: the runner posts `POST /runner/heartbeat {activeRuns, clients}` every 60 s, where
+Idle policy: the runner posts `POST /runner/heartbeat {activeRuns, clients, backgroundRuns,
+waitingRuns, diskUsedBytes, diskTotalBytes}` every 60 s, where
 `clients` counts interactive relay requests it served since the previous heartbeat — sends, terminal
 input, file writes, actions — never requests that only look (lists, reads, searches, watches, status:
 `runner::passive`), and never open links or streams, so an app merely displaying a Cloud chat
@@ -250,6 +252,119 @@ doesn't keep its machine awake.
 The DO alarm puts the device to sleep after `CLOUD_IDLE_MINUTES` (default 10) without activity.
 When the provider requires auto-stop (Boat trial: ≤2 h), the DO re-extends the TTL while runs
 are active, and a provider-initiated stop is detected and recorded as sleep.
+
+### Machine sizes
+
+The sizes live in one place, `MACHINES` in `edge/src/cloud/policy.ts`, and clients read them from
+`CloudStatus.machines`. `diskGiB` is what a size *holds*, the limit a resume is refused against;
+never what `df` reports.
+
+| Size | vCPU | Memory | Holds | Credits | Source |
+| --- | --- | --- | --- | --- | --- |
+| `small` | 2 | 4 GB | 51 GiB | 0.5× | Boat's table (rounded down) |
+| `default` | 4 | 8 GB | 51 GiB | 1× | Boat's table (rounded down) |
+| `large` | 8 | 16 GB | 111.8 GiB | 2× | Boat's refusal text (its table says 111) |
+| `xlarge` | 16 | 32 GB | 251 GiB | 5.56× (50/9) | Boat's table (rounded down) |
+
+A session's size starts as the account's default (`PUT /cloud/{org}/machine`, or the operator's
+`POST /admin/cloud/machine`, whichever came last, over `CLOUD_MACHINE`), and only a wake changes
+it: a provider changes size only on a resume, so a sandbox already up is stopped first. A size is
+always the user's call, and never a machine's: runner bearers can't pick one.
+
+**A wake refused for want of disk.** The provider module turns its refusal into a typed
+`SandboxFailure` (`disk_too_small`, with `neededGiB` when it gave a figure); nothing above
+`providers/boat.ts` reads Boat's wording. It is never retried, and never upsized on its own, since
+credits change. The session reads `error` with `wakeBlocked: {reason: "disk_too_small", neededGiB}`
+and a send leaves it alone. A wake on a size smaller than `neededGiB` is refused up front
+(`409 machine_too_small`, with `machine`, `neededGiB` and `capacityGiB`); a bigger one clears the
+block. A refused *shrink* leaves the machine stopped and wakeable on its own size: the session reads
+`sleeping`, with `wakeBlocked` saying what the smaller size couldn't take.
+
+**Metering across a resize.** Credits come from the provider's billable seconds, which carry the
+multiplier of the size that was running, so nothing here splits a stretch by size. The sandbox row
+records the size it is on, which is what the live estimate between meter reads spends at, and a
+resize schedules a reconcile. A day's `sandboxType` shows its last size.
+
+### Disk
+
+The heartbeat reports the machine's disk as `df` reads it. The edge judges the used figure against
+what the size holds, `warn` from 80% and `critical` from 90%, so a machine warns before it can no
+longer fit its size. The heartbeat's reply carries `diskCapacityGiB` for the engine's cleanup.
+
+**Lazy hydration.** A resumed disk copies its files in on demand, so `df` under-reads until that's
+done (seen: 26 GiB right after a resume Boat said needed 118.9). The edge therefore keeps a
+high-water mark: a higher reading always counts; a lower one counts only once the disk is all
+there. From a wake on, `diskHydrating` holds it. A lower reading asks the provider at most every 5
+minutes (`SandboxInfo.hydrated`, Boat's `hydrated`), and the flag clears on `true`, or on a provider
+that doesn't say. A refused resume's `neededGiB` also raises the mark, since it's the provider's own
+figure.
+
+**Pre-sleep cleanup** (`crates/engine/src/cloud_disk.rs`), once quiesce has accepted the sleep,
+budgeted 25 s of the 60 the edge gives it. It deletes from an allow-list: always
+`target/*/incremental`; then, only while the disk is still over the warning level and asking again
+before each, `target/*/deps` and named package-manager download caches in the home directory. A
+`target` counts only if Cargo marked it as its own (`.rustc_info.json` and a `CACHEDIR.TAG` with
+Cargo's signature) and git tracks nothing in it, which also rules out anything outside a repository.
+Symlinks are never followed. A cache is renamed before it is deleted, so running out of time leaves
+nothing half-emptied for a build to trust, and the next sleep finishes it. It touches no login
+(`~/.claude`, where a parked Claude child may hold `.oauth_refresh.lock`), and kills no process. A
+failure is logged, and the sleep goes on. Right after a wake the disk reads low, so only the
+always-safe first tier runs.
+
+### Data expiry
+
+A provider may delete a stopped sandbox's disk (Boat: 14 days after it stopped, reported as
+`dataExpiredAt`; `SandboxCapabilities.stoppedRetentionMs`). `CloudSession.expiresAt` says when,
+while it sleeps.
+
+**A scheduled resume and stop keeps it.** A resume restarts the provider's clock, so a machine 12
+days into its sleep comes up on its own size and goes straight back to sleep (`refreshing`,
+ledger `refresh`). Its idle age doesn't change, a send meanwhile keeps it up, a failed attempt goes
+back to sleep unseen, and it retries hourly. It never evicts anyone: it waits for a free slot. It's
+skipped for a session blocked on disk (the user must pick a size, and `expiresAt` says by when) and
+at zero credits.
+
+Cost: machine seconds only, about a minute per machine per 12 days. That's $0.0006 on `default` and
+$0.0033 on `xlarge`, billed to the user as usual (about 1 credit on `default`, 6 on `xlarge`). A
+resume counts as a start, but starts are a rate limit (200 a day on Boat's $20 plan) before they are
+a charge. The alternative, a saved snapshot, is $0.056 a day past the included count ($1.68 for 30
+days, 10 included per $20 of plan), and restoring one means a new sandbox and re-enrollment.
+
+**When it's gone anyway** (no credits, a user who didn't act, or the provider's refusal
+`snapshot_data_expired`), the session reads `data_expired`. A send or a wake starts nothing: an
+empty machine must be asked for. `POST …/retry {machine?}` starts a fresh one: the same session
+device, chat, repository and base branch, a new sandbox and a newly enrolled key. The clone checks
+out the session's branch from `origin` if it was pushed, so only unpushed work is lost. The
+transcript lives in the chat's room, regardless.
+
+### A killed turn
+
+The engine marks a command handled before running it, so the command plane never runs it twice.
+What follows a machine dying mid-turn is a resume or a clear failure, never silence:
+
+- **Consumed, never resolved** (killed between the ledger write and the outcome): the drain's dead
+  command sweep rejects it, and the sender sees "Not delivered".
+- **Running, journal open** (the usual case): boot recovery (`SessionsEngine::recover_stale`) stamps
+  the streaming reply and re-dispatches the turn, resuming the provider's session, if it is under
+  12 hours old and has revivals left.
+- **Running, but it can't resume** (stale, out of revivals, nothing to run it with): the note goes
+  on the reply. A kill before the reply reached disk leaves no reply to stamp, so the note gets an
+  entry of its own, as does a revival that fails to start.
+- **A disk older than the room** (a machine that died can return to its last snapshot): recovery
+  sees no open journal. Once the room has caught up, a reply still streaming from this device with
+  no run behind it, or a `Run` marked applied that this disk's ledger has never seen, gets a note
+  (`DocHost::settle_rolled_back_turn`, Cloud machines only). A message still pending just runs.
+- **Nobody around to boot it**: a machine that goes silent with a turn in flight would stay stuck
+  until the next send. When idle sleep finds it dark (no heartbeat for 3 minutes, and it last
+  reported work), the edge stops it and wakes it straight back, so boot recovery runs. A machine the
+  provider lost ends in `error`.
+
+### Engine updates on Cloud
+
+A Cloud machine runs a *system* unit, `zeron-cloud.service`, not the user unit installs elsewhere
+use. `zeron_update::service_unit()` knows it from `ZERON_DEVICE_PLATFORM=cloud` (written by the
+installer on every machine, so existing ones need no reinstall), and `ServiceScope::of(unit)` picks
+the manager: `sudo -n systemctl` to act, plain `systemctl` to read.
 
 ### Portability
 
@@ -263,7 +378,8 @@ purely by `ZERON_*` env) is provider-neutral. Sandbox references are stored as
 `{provider, sandboxId}`, so a user can hold sandboxes on two providers during a migration and
 billing stays exact.
 
-A provider must guarantee: idempotent create, a disk that persists across stop/resume,
+Optional for a provider: `resume` on another size, `failure` on a refusal a retry can't fix,
+`stoppedRetentionMs`, and `SandboxInfo.{stoppedAt, hydrated}`. A provider must guarantee: idempotent create, a disk that persists across stop/resume,
 enabled systemd units restarting on resume, per-sandbox env visible to exec, and usage readable
 until deletion. Moving users needs no migration step: new sessions start on the new provider,
 existing ones keep theirs until deleted; transcripts live in sync rooms and repositories on
@@ -537,17 +653,20 @@ the bearer's `org_id`.
 
 | Route | Bearer | Body → reply |
 | --- | --- | --- |
-| `GET /cloud/{orgId}` | user | → `CloudStatus` (account) |
+| `GET /cloud/{orgId}` | user | → `CloudStatus` (account), with `machines: [{id, name, vcpu, memoryGB, diskGiB, creditMultiplier}]` and `machine` (the default) |
 | `POST /cloud/{orgId}/enable` | user | `{}` → `CloudStatus` (instant; mints the logical device id) |
 | `DELETE /cloud/{orgId}` | user | → `CloudStatus` (`deleting` → `off`; deletes every session sandbox after capturing usage) |
-| `GET /cloud/{orgId}/sessions` | user | → `{sessions: CloudSession[]}` |
+| `GET /cloud/{orgId}/sessions` | user | → `{sessions: CloudSession[]}`, each with `machine`, and when known `disk: {usedGiB, capacityGiB, level}`, `wakeBlocked: {reason, neededGiB}`, `expiresAt` (Unix ms) |
 | `POST /cloud/{orgId}/sessions` | user | `{chatId, spaceId, repo {fullName, cloneUrl, defaultBranch}, branch?}` → `CloudSession` (idempotent per chat; starts provisioning) |
-| `POST /cloud/{orgId}/sessions/{chatId}/wake` · `/sleep` | user | → `CloudSession` |
+| `PUT /cloud/{orgId}/machine` | user | `{machine}` → `CloudStatus` (the size new sessions start on) |
+| `POST /cloud/{orgId}/sessions/{chatId}/wake` | user | `{machine?, wake?}` → `CloudSession`. `wake: false` only records the size for its next wake. `409`: `machine_too_small` {`machine`, `neededGiB`, `capacityGiB`}, `machine_awake`, `data_expired` |
+| `POST /cloud/{orgId}/sessions/{chatId}/sleep` | user | → `CloudSession` |
+| `POST /cloud/{orgId}/sessions/{chatId}/retry` | user | `{machine?}` → `CloudSession`: a failed lifecycle again; a fresh machine once `data_expired` |
 | `DELETE /cloud/{orgId}/sessions/{chatId}` | user | → `CloudSession` (`deleting` → removed) |
 | `GET /vault/{orgId}/github/repos?q=` | user | → `{repos: GithubRepo[]}` (the vault calls GitHub) |
 | `POST /runner/enroll` | none | `{orgId, userId, deviceId, code, publicKey}` → `{ok: true}` |
 | `POST /runner/token` | none | `{orgId, userId, deviceId, ts, sig}` → `{accessToken, expiresAt}` |
-| `POST /runner/heartbeat` | runner | `{activeRuns, clients}` → `{ok: true}` (per session device) |
+| `POST /runner/heartbeat` | runner | `{activeRuns, clients, backgroundRuns?, waitingRuns?, diskUsedBytes?, diskTotalBytes?}` → `{ok: true, diskCapacityGiB?}` (per session device) |
 | `GET /vault/{orgId}` | user | → `VaultStatusView` |
 | `PUT /vault/{orgId}/credentials/{provider}` | user | `PutCredentialRequest` → `VaultStatusView` |
 | `PATCH /vault/{orgId}/credentials/{provider}` | user | `{authorizedDevices}` → `VaultStatusView` |

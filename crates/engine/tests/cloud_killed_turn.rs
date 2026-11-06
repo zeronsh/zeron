@@ -314,8 +314,15 @@ async fn a_recent_kill_resumes_the_turn() {
         "the killed turn to run again",
     )
     .await;
-    assert_eq!(requests.lock().unwrap()[0].resume.as_deref(), Some("hs-killed"));
-    assert!(error_notes(&core).iter().any(|note| note.contains("resuming")));
+    assert_eq!(
+        requests.lock().unwrap()[0].resume.as_deref(),
+        Some("hs-killed")
+    );
+    assert!(
+        error_notes(&core)
+            .iter()
+            .any(|note| note.contains("resuming"))
+    );
     core.shutdown().await;
 }
 
@@ -337,7 +344,9 @@ async fn a_kill_found_days_later_with_no_reply_says_so_instead_of_stopping_silen
     // A machine that died and was only woken days later, whose reply never
     // reached its disk: too stale to resume, and nothing to stamp.
     let now = now_ms();
-    let disk = Disk::new().user_message("m1", now - 3 * DAY_MS).open_journal();
+    let disk = Disk::new()
+        .user_message("m1", now - 3 * DAY_MS)
+        .open_journal();
     let (core, requests) = disk.boot();
     settle().await;
     assert!(requests.lock().unwrap().is_empty(), "too stale to resume");
@@ -372,7 +381,9 @@ async fn a_kill_past_its_revivals_with_no_reply_says_so() {
 #[tokio::test]
 async fn a_reboot_says_it_only_once() {
     let now = now_ms();
-    let disk = Disk::new().user_message("m1", now - 3 * DAY_MS).open_journal();
+    let disk = Disk::new()
+        .user_message("m1", now - 3 * DAY_MS)
+        .open_journal();
     let (core, _) = disk.boot();
     settle().await;
     core.shutdown().await;
@@ -440,7 +451,11 @@ async fn a_reply_streaming_with_no_journal_is_settled_on_a_cloud_machine() {
         .run_command("c1", "m1", SessionCommandStatus::Applied);
     let (core, requests) = disk.boot();
     core.doc_host.open(CHAT).unwrap();
-    wait_for(|| !error_notes(&core).is_empty(), "the lost turn to be noted").await;
+    wait_for(
+        || !error_notes(&core).is_empty(),
+        "the lost turn to be noted",
+    )
+    .await;
     assert!(requests.lock().unwrap().is_empty());
     let reply = entries(&core).into_iter().find(|e| e.id == "a1").unwrap();
     assert_eq!(reply.status, Some(MessageStatus::Aborted));
@@ -452,12 +467,18 @@ async fn a_reply_streaming_with_no_journal_is_settled_on_a_cloud_machine() {
 async fn a_delivered_message_this_disk_never_ran_is_noted() {
     on_a_cloud_machine();
     let now = now_ms();
-    let disk = Disk::new()
-        .user_message("m1", now - 60_000)
-        .run_command("c1", "m1", SessionCommandStatus::Applied);
+    let disk = Disk::new().user_message("m1", now - 60_000).run_command(
+        "c1",
+        "m1",
+        SessionCommandStatus::Applied,
+    );
     let (core, _) = disk.boot();
     core.doc_host.open(CHAT).unwrap();
-    wait_for(|| !error_notes(&core).is_empty(), "the lost turn to be noted").await;
+    wait_for(
+        || !error_notes(&core).is_empty(),
+        "the lost turn to be noted",
+    )
+    .await;
     assert_eq!(entries(&core).last().unwrap().role, MessageRole::Assistant);
     core.shutdown().await;
 }
@@ -485,9 +506,11 @@ async fn a_message_still_pending_just_runs() {
     let now = now_ms();
     // Rolled back past the moment it ran: this disk's ledger hasn't seen it, so
     // the drain runs it, once. The rollback is what makes this a retry.
-    let disk = Disk::new()
-        .user_message("m1", now - 60_000)
-        .run_command("c1", "m1", SessionCommandStatus::Pending);
+    let disk = Disk::new().user_message("m1", now - 60_000).run_command(
+        "c1",
+        "m1",
+        SessionCommandStatus::Pending,
+    );
     let (core, requests) = disk.boot();
     core.doc_host.open(CHAT).unwrap();
     wait_for(|| !requests.lock().unwrap().is_empty(), "it to run").await;

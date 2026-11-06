@@ -25,6 +25,9 @@ import {
   type ListedSandbox,
   type SandboxAction,
   type SandboxErrorKind,
+  type SandboxFailure,
+  type SandboxInfo,
+  type SandboxMachine,
   type SandboxProvider,
   type SandboxState,
   type SandboxUsage
@@ -97,6 +100,29 @@ export const boatErrorKind = (status: number, code: string): SandboxErrorKind =>
   return "fatal";
 };
 
+/** "This Sandbox needs 118.3 GiB of disk but the largest 'large' machine holds
+ * 111.8 GiB. Resume or fork it as a bigger type (--type)." */
+const DISK_NEEDED_RE = /needs\s+(\d+(?:\.\d+)?)\s*GiB\s+of\s+disk/i;
+/** healthReason/error on an expired sandbox: "This sandbox's data was deleted
+ * 14 days after it stopped. …" */
+const DATA_DELETED_RE = /data was deleted/i;
+
+/**
+ * A Boat error (or a sandbox's own `error`/`healthReason`) as a failure a
+ * retry can't fix, or undefined. `type_too_small` is the documented code for a
+ * refused shrink; the message with the figure is what Boat answers on a resume
+ * that doesn't fit, whatever its code.
+ */
+export const boatFailure = (code: string | undefined, message: string | null | undefined): SandboxFailure | undefined => {
+  if (code === "snapshot_data_expired" || (message && DATA_DELETED_RE.test(message))) return { kind: "data_expired" };
+  const needed = message ? DISK_NEEDED_RE.exec(message) : null;
+  if (needed) {
+    const neededGiB = Number(needed[1]);
+    return Number.isFinite(neededGiB) ? { kind: "disk_too_small", neededGiB } : { kind: "disk_too_small" };
+  }
+  return code === "type_too_small" ? { kind: "disk_too_small" } : undefined;
+};
+
 const boatErrorMessage = (code: string, message: string, action?: string): string => {
   if (code === "api_key_action_forbidden") return `the Boat API key lacks ${action ?? "a required action"}`;
   if (code === "unauthorized") return "the Boat API key was rejected";
@@ -119,7 +145,18 @@ interface BoatSandbox {
   type?: string;
   error?: string | null;
   createdAt?: string | null;
+  /** When Boat deleted its data; null while the data is kept. */
+  dataExpiredAt?: string | null;
+  /** When it last stopped, by any cause; null while it isn't stopped. */
+  stoppedAt?: string | null;
+  healthReason?: string | null;
+  /** True once every file of its snapshot is on its disk. */
+  hydrated?: boolean | null;
 }
+
+/** Boat's published rule: a stopped sandbox's disk is kept for 14 days, and "a
+ * resume starts the 14 days again from the next stop" (docs.boat.dev). */
+const STOPPED_RETENTION_MS = 14 * 24 * 60 * 60_000;
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
@@ -132,7 +169,7 @@ export class BoatProvider implements SandboxProvider {
   readonly name = PROVIDER;
   // Boat's own cap; a trial account additionally requires auto-stop ≤ 7200 s
   // (CLOUD_TTL_SECONDS), which Boat reports as `trial_auto_stop_required`.
-  readonly capabilities = { ttlRequired: false, maxTtlSeconds: 2_592_000 };
+  readonly capabilities = { ttlRequired: false, maxTtlSeconds: 2_592_000, stoppedRetentionMs: STOPPED_RETENTION_MS };
   private readonly base: string;
   private readonly apiKey: string;
   private readonly doFetch: BoatFetch;
@@ -184,7 +221,11 @@ export class BoatProvider implements SandboxProvider {
       // Boat's explicit hint wins for the transient/terminal split.
       if (hinted === true) kind = "retryable";
       else if (hinted === false && kind === "retryable") kind = "conflict";
-      throw new SandboxError(kind, boatErrorMessage(code, message, action), code, PROVIDER, action ? ACTIONS[action] : undefined);
+      // Never retried, whatever else the reply hints: the same request gets
+      // the same answer.
+      const failure = boatFailure(code, message);
+      if (failure) kind = "conflict";
+      throw new SandboxError(kind, boatErrorMessage(code, message, action), code, PROVIDER, action ? ACTIONS[action] : undefined, failure);
     }
     if (parsed === undefined) {
       throw new SandboxError("retryable", "Boat returned a non-JSON reply", "invalid_json_response", PROVIDER);
@@ -223,11 +264,21 @@ export class BoatProvider implements SandboxProvider {
     return createdAt === undefined ? { sandboxId: sandbox.id } : { sandboxId: sandbox.id, createdAt };
   }
 
-  async get(sandboxId: string) {
+  async get(sandboxId: string): Promise<SandboxInfo> {
     try {
       const sandbox = BoatProvider.sandboxOf(await this.request("GET", this.path(sandboxId)));
       const state = boatState(sandbox.state);
-      return sandbox.error && state === "error" ? { state, error: sandbox.error } : { state };
+      const failure: SandboxFailure | undefined = sandbox.dataExpiredAt
+        ? { kind: "data_expired" }
+        : (boatFailure(undefined, sandbox.error) ?? boatFailure(undefined, sandbox.healthReason));
+      const stoppedAt = parseTime(sandbox.stoppedAt);
+      return {
+        state,
+        ...(sandbox.error && state === "error" ? { error: sandbox.error } : {}),
+        ...(failure ? { failure } : {}),
+        ...(stoppedAt === undefined ? {} : { stoppedAt }),
+        ...(typeof sandbox.hydrated === "boolean" ? { hydrated: sandbox.hydrated } : {})
+      };
     } catch (e) {
       if (e instanceof SandboxError && e.kind === "notFound") return { state: "deleted" as const };
       throw e;
@@ -240,8 +291,11 @@ export class BoatProvider implements SandboxProvider {
     await this.request("POST", this.path(sandboxId, "/stop"), {});
   }
 
-  async resume(sandboxId: string, options: { ttlSeconds: number | null }): Promise<void> {
-    await this.request("POST", this.path(sandboxId, "/resume"), { ttlSeconds: options.ttlSeconds });
+  async resume(sandboxId: string, options: { ttlSeconds: number | null; machine?: SandboxMachine }): Promise<void> {
+    await this.request("POST", this.path(sandboxId, "/resume"), {
+      ...(options.machine ? { type: options.machine } : {}),
+      ttlSeconds: options.ttlSeconds
+    });
   }
 
   async delete(sandboxId: string): Promise<{ operationId?: string }> {

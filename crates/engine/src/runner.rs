@@ -20,8 +20,9 @@
 //!   `zeron-runner-token\n{orgId}\n{userId}\n{deviceId}\n{ts}` — driven by
 //!   [`crate::Auth`]'s runner mode, so every room/relay/RPC bearer consumer
 //!   works unchanged.
-//! - **Heartbeat**: `POST {edge}/runner/heartbeat {activeRuns, clients}` every
-//!   60 s, feeding the CloudAccount DO's per-session idle sleep.
+//! - **Heartbeat**: `POST {edge}/runner/heartbeat {activeRuns, clients, …}`
+//!   every 60 s, feeding the CloudAccount DO's per-session idle sleep and disk
+//!   levels ([`crate::cloud_disk`]).
 //! - **Session**: every Cloud session runs in its own sandbox, provisioned with
 //!   `ZERON_CLOUD_{ACCOUNT,CHAT,REPO,PATH,BRANCH}` (persisted to
 //!   `cloud-session.json` for restarts). At boot it clones the project's
@@ -271,15 +272,22 @@ async fn prepare_checkout_with(
         true,
     );
     let branch = session.session_branch();
+    // A fresh machine for a chat that already ran (its old disk expired): what
+    // the session pushed comes back. A first boot has no such branch.
+    let pushed = pushed_session_branch(path, &branch).await;
     let branch_step = begin_step(
         "branch",
         format!("Checking out {branch}"),
-        Some(format!("git checkout -B {branch}")),
+        Some(match &pushed {
+            Some(pushed) => format!("git checkout -B {branch} {pushed}"),
+            None => format!("git checkout -B {branch}"),
+        }),
     );
     let checkout = tokio::process::Command::new("git")
         .arg("-C")
         .arg(path)
         .args(["checkout", "-B", &branch])
+        .args(pushed.as_deref())
         .kill_on_drop(true)
         .output()
         .await;
@@ -304,6 +312,22 @@ async fn prepare_checkout_with(
     }
     tracing::info!(repo, path = %path.display(), branch, "runner: session checkout ready");
     Ok(())
+}
+
+/// `origin/{branch}`, when the session pushed that branch before this clone.
+async fn pushed_session_branch(path: &Path, branch: &str) -> Option<String> {
+    let remote = format!("origin/{branch}");
+    let found = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/remotes/{remote}"))
+        .kill_on_drop(true)
+        .output()
+        .await;
+    found
+        .is_ok_and(|out| out.status.success())
+        .then_some(remote)
 }
 
 /// One setup step of this boot (live: `running` until it finishes).
@@ -974,7 +998,23 @@ struct HeartbeatBody {
     clients: usize,
     background_runs: usize,
     waiting_runs: usize,
+    /// Older edges ignore these. The edge judges `used` against what the
+    /// machine's size holds, not `total`, which also counts the OS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_used_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_total_bytes: Option<u64>,
 }
+
+/// The edge's answer: what this machine's size holds, when it says.
+#[derive(Debug, Default, Deserialize)]
+struct HeartbeatReply {
+    #[serde(default, rename = "diskCapacityGiB")]
+    disk_capacity_gib: Option<f64>,
+}
+
+/// Reads the disk for the heartbeat; `None` on a platform or path it can't.
+pub type DiskReader = Arc<dyn Fn() -> Option<crate::cloud_disk::DiskUsage> + Send + Sync>;
 
 /// What this machine's runs are doing, as the heartbeat reports it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1079,8 +1119,9 @@ pub fn passive(method: &str) -> bool {
         || method == zeron_rpc::methods::SET_VIEWPORT_FOCUS
 }
 
-/// Post `{activeRuns, clients, backgroundRuns, waitingRuns}` to
-/// `{edge}/runner/heartbeat` every `every` (first beat immediately).
+/// Post `{activeRuns, clients, backgroundRuns, waitingRuns, diskUsedBytes,
+/// diskTotalBytes}` to `{edge}/runner/heartbeat` every `every` (first beat
+/// immediately).
 ///
 /// - `activeRuns`: chats with a turn in flight right now; `waitingRuns`, the
 ///   ones among them parked on a question.
@@ -1097,6 +1138,7 @@ pub fn spawn_heartbeat(
     edge_url: &str,
     tokens: Arc<dyn zeron_rpc::TokenSource>,
     active_runs: ActiveRuns,
+    disk: DiskReader,
     activity: RelayActivity,
     every: Duration,
 ) -> tokio::task::JoinHandle<()> {
@@ -1115,7 +1157,10 @@ pub fn spawn_heartbeat(
                 }
             };
             let runs = active_runs();
+            let usage = disk();
             let body = HeartbeatBody {
+                disk_used_bytes: usage.map(|usage| usage.used_bytes),
+                disk_total_bytes: usage.map(|usage| usage.total_bytes),
                 active_runs: runs.active,
                 clients: activity.take(),
                 background_runs: runs.background,
@@ -1123,6 +1168,11 @@ pub fn spawn_heartbeat(
             };
             match http.post(&url).bearer_auth(token).json(&body).send().await {
                 Ok(res) if res.status().is_success() => {
+                    if let Ok(reply) = res.json::<HeartbeatReply>().await
+                        && let Some(capacity) = reply.disk_capacity_gib
+                    {
+                        crate::cloud_disk::set_capacity_gib(capacity);
+                    }
                     tracing::debug!(
                         active_runs = body.active_runs,
                         clients = body.clients,
@@ -1426,6 +1476,17 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path.join("notes.txt")).unwrap(),
             "work in progress"
+        );
+        // A fresh machine picks up what the session pushed; a first boot has
+        // nothing to pick up.
+        assert_eq!(pushed_session_branch(&path, "zeron/cloud-abcdef0123").await, None);
+        git(&origin, &["branch", "zeron/cloud-abcdef0123"]);
+        git(&path, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            pushed_session_branch(&path, "zeron/cloud-abcdef0123")
+                .await
+                .as_deref(),
+            Some("origin/zeron/cloud-abcdef0123")
         );
         // An unreachable repository fails clearly and leaves nothing behind.
         let broken = CloudSession {

@@ -276,6 +276,71 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `PUT /cloud/{orgId}/machine`: the size new sessions start on.
+    pub async fn set_machine(&self, machine: &str) -> Result<CloudStatus, EngineError> {
+        self.target()?
+            .call::<CloudStatus>(
+                reqwest::Method::PUT,
+                &["cloud", "machine"],
+                &[],
+                Some(serde_json::json!({ "machine": machine })),
+                "Set the Cloud machine size",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/wake {machine?, wake?}`.
+    pub async fn wake_session(
+        &self,
+        chat_id: &str,
+        machine: Option<&str>,
+        wake: Option<bool>,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        let mut body = serde_json::Map::new();
+        if let Some(machine) = machine {
+            body.insert("machine".into(), machine.into());
+        }
+        if let Some(wake) = wake {
+            body.insert("wake".into(), wake.into());
+        }
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "wake"],
+                &[],
+                Some(serde_json::Value::Object(body)),
+                SessionAction::Wake.verb(),
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/retry {machine?}`: a failed
+    /// lifecycle again, or a fresh machine once its data expired.
+    pub async fn retry_session(
+        &self,
+        chat_id: &str,
+        machine: Option<&str>,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        let body = match machine {
+            Some(machine) => serde_json::json!({ "machine": machine }),
+            None => serde_json::json!({}),
+        };
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "retry"],
+                &[],
+                Some(body),
+                "Start a fresh Cloud machine",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
     /// `POST /cloud/{orgId}/sessions/{chatId}/{wake|sleep}`.
     pub async fn session_action(
         &self,
@@ -779,8 +844,10 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::BILLING_CHECKOUT
             | methods::BILLING_PORTAL
             | methods::CLOUD_SESSIONS
+            | methods::CLOUD_SET_MACHINE
             | methods::CLOUD_SESSION_WAKE
             | methods::CLOUD_SESSION_SLEEP
+            | methods::CLOUD_SESSION_RETRY
             | methods::CLOUD_SESSION_DELETE
             | methods::VAULT_STATUS
             | methods::VAULT_CONNECT_CODEX
@@ -792,6 +859,21 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::GITHUB_CONNECT_START
             | methods::GITHUB_CONNECT_POLL
     )
+}
+
+#[derive(Deserialize)]
+struct MachineParams {
+    machine: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WakeParams {
+    chat_id: String,
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    wake: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -895,11 +977,24 @@ pub(crate) async fn dispatch(
         methods::CLOUD_ENABLE => RpcReply::value(&cloud.enable().await.map_err(failed)?),
         methods::CLOUD_DELETE => RpcReply::value(&cloud.delete().await.map_err(failed)?),
         methods::CLOUD_SESSIONS => RpcReply::value(&cloud.sessions().await.map_err(failed)?),
+        methods::CLOUD_SET_MACHINE => {
+            let p: MachineParams = params(raw)?;
+            RpcReply::value(&cloud.set_machine(&p.machine).await.map_err(failed)?)
+        }
         methods::CLOUD_SESSION_WAKE => {
-            let p: ChatParams = params(raw)?;
+            let p: WakeParams = params(raw)?;
             RpcReply::value(
                 &cloud
-                    .session_action(&p.chat_id, SessionAction::Wake)
+                    .wake_session(&p.chat_id, p.machine.as_deref(), p.wake)
+                    .await
+                    .map_err(failed)?,
+            )
+        }
+        methods::CLOUD_SESSION_RETRY => {
+            let p: WakeParams = params(raw)?;
+            RpcReply::value(
+                &cloud
+                    .retry_session(&p.chat_id, p.machine.as_deref())
                     .await
                     .map_err(failed)?,
             )
@@ -1515,6 +1610,24 @@ mod tests {
             busy.to_string(),
             "All 5 of your Cloud sessions that may run at once are busy."
         );
+        // The size picked rides the wake, and only then.
+        let _ = client.wake_session("chat-1", Some("xlarge"), None).await;
+        let _ = client.wake_session("chat-1", Some("large"), Some(false)).await;
+        let _ = client.retry_session("chat-1", Some("large")).await;
+        let _ = client.set_machine("small").await;
+        let sent: Vec<(String, serde_json::Value)> = edge
+            .requests()
+            .into_iter()
+            .rev()
+            .take(4)
+            .map(|r| (r.target.clone(), r.body.clone()))
+            .collect();
+        assert_eq!(sent[3].1, serde_json::json!({ "machine": "xlarge" }));
+        assert_eq!(sent[2].1, serde_json::json!({ "machine": "large", "wake": false }));
+        assert!(sent[1].0.ends_with("/sessions/chat-1/retry"), "{}", sent[1].0);
+        assert_eq!(sent[1].1, serde_json::json!({ "machine": "large" }));
+        assert!(sent[0].0.ends_with("/machine"), "{}", sent[0].0);
+        assert_eq!(sent[0].1, serde_json::json!({ "machine": "small" }));
         // A malformed chat id never reaches the edge.
         assert!(
             client

@@ -16,7 +16,10 @@
  *   DELETE /cloud/{orgId}/projects/{spaceId}       remove a project + its sessions (user)
  *   GET    /cloud/{orgId}/sessions                 sessions (user)
  *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId}: a machine for a new chat (user)
- *   POST   /cloud/{orgId}/sessions/{chatId}/wake|sleep|retry (user)
+ *   PUT    /cloud/{orgId}/machine                  {machine}: the default for new sessions (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/wake   {machine?, wake?}: wake, or pick its size asleep (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/retry  {machine?}: retry; a fresh machine once its data expired (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/sleep  (user)
  *   DELETE /cloud/{orgId}/sessions/{chatId}        delete that session's machine (user)
  *   POST   /runner/enroll                  pre-bearer: one-time code → key
  *   POST   /runner/token                   pre-bearer: signed ts → runner JWT
@@ -31,13 +34,14 @@ import type { Verified } from "../auth";
 import type { Env } from "../env";
 import { json, jsonError, readJsonBody } from "../http";
 import type { CloudResult, RepoInput } from "./cloud-account";
+import type { SandboxMachine } from "./sandbox-provider";
 import { isEdgeOrigin } from "./install-script";
 import { DAY_MS, dayKey, isDayKey } from "./metering";
 import { CLOUD_MODELS } from "./models";
 
 /** The longest range a usage read covers. */
 const MAX_USAGE_DAYS = 366;
-import { CLOUD_DEVICE_PREFIX, cloudAccountName } from "./policy";
+import { CLOUD_DEVICE_PREFIX, MACHINES, cloudAccountName, machineName, parseMachine } from "./policy";
 import { MAX_PACKS, billingAvailable, parseEvent, planById, verifySignature, type StripeEnv } from "./stripe";
 import { sandboxProvider, type ProviderEnv } from "./providers";
 
@@ -69,7 +73,7 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const unavailable = () => jsonError(503, "unavailable", "Cloud is not available on this server.");
 
 const reply = <T>(result: CloudResult<T>): Response =>
-  result.ok ? json(result.value) : jsonError(result.status, result.error, result.message);
+  result.ok ? json(result.value) : json({ ...result.details, error: result.error, message: result.message }, result.status);
 
 const accountStub = (ns: NonNullable<Env["CLOUD_ACCOUNTS"]>, orgId: string, userId: string) =>
   ns.get(ns.idFromName(cloudAccountName(orgId, userId)));
@@ -209,6 +213,19 @@ export const handleRunnerPublicRoute = async (
 const count = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_COUNT ? value : undefined;
 
+const byteCount = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+/** An optional `{machine}` body: no body at all is fine, a size it doesn't
+ * name isn't. */
+const machineOfBody = (body: unknown): { readonly machine?: SandboxMachine } | "bad" => {
+  if (!isObject(body) || body.machine === undefined) return {};
+  const machine = machineName(body.machine);
+  return machine ? { machine } : "bad";
+};
+
+const BAD_MACHINE = `Expected machine: ${MACHINES.map((m) => m.id).join(" | ")}.`;
+
 /** `/cloud/*` (user bearer) and `/runner/heartbeat` (runner bearer). */
 export const handleCloudRoute = async (
   request: Request,
@@ -234,9 +251,16 @@ export const handleCloudRoute = async (
     // and runs waiting on an answer; older ones send neither.
     const backgroundRuns = count(body.backgroundRuns) ?? 0;
     const waitingRuns = Math.min(count(body.waitingRuns) ?? 0, activeRuns);
+    const diskUsedBytes = byteCount(body.diskUsedBytes);
     const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
     return rpc(() =>
-      accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, { activeRuns, clients, backgroundRuns, waitingRuns })
+      accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, {
+        activeRuns,
+        clients,
+        backgroundRuns,
+        waitingRuns,
+        ...(diskUsedBytes === undefined ? {} : { diskUsedBytes })
+      })
     );
   }
 
@@ -267,7 +291,9 @@ export const handleCloudRoute = async (
   if (rest.length === 0 && request.method === "GET") {
     // An unconfigured deployment still answers status, so the UI can hide
     // the enable button instead of erroring.
-    if (!ns) return json({ state: "off", awakeSessions: 0, maxAwakeSessions: 0, available: false });
+    if (!ns) {
+      return json({ state: "off", awakeSessions: 0, maxAwakeSessions: 0, available: false, machines: MACHINES, machine: parseMachine(undefined) });
+    }
     const available = cloudAvailable(env);
     return rpc(async () => {
       const status = await accountStub(ns, orgId, auth.userId).status(caller);
@@ -346,6 +372,12 @@ export const handleCloudRoute = async (
     if (!cloudAvailable(env)) return unavailable();
     return rpc(() => stub.enable(caller));
   }
+  if (rest.length === 1 && rest[0] === "machine" && request.method === "PUT") {
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    const machine = isObject(body) ? machineName(body.machine) : undefined;
+    if (!machine) return jsonError(400, "bad_request", BAD_MACHINE);
+    return rpc(() => stub.setDefaultMachine(caller, machine));
+  }
 
   if (rest[0] === "sessions") {
     if (rest.length === 1 && request.method === "GET") return rpc(async () => stub.listSessions(caller));
@@ -383,11 +415,19 @@ export const handleCloudRoute = async (
     if (!chatId || !ID_RE.test(chatId)) return jsonError(404, "not_found", "Not found.");
     if (rest.length === 2 && request.method === "DELETE") return rpc(() => stub.deleteSession(caller, chatId));
     if (rest.length === 3 && request.method === "POST") {
-      if (rest[2] === "wake") return rpc(() => stub.wakeSession(caller, chatId));
+      if (rest[2] === "wake") {
+        const body = await readJsonBody(request, MAX_RUNNER_BODY);
+        const picked = machineOfBody(body);
+        if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
+        const options = { ...picked, ...(isObject(body) && body.wake === false ? { wake: false } : {}) };
+        return rpc(() => stub.wakeSession(caller, chatId, options));
+      }
       if (rest[2] === "sleep") return rpc(() => stub.sleepSession(caller, chatId));
       if (rest[2] === "retry") {
         if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
-        return rpc(() => stub.retrySession(caller, chatId, edgeUrl));
+        const picked = machineOfBody(await readJsonBody(request, MAX_RUNNER_BODY));
+        if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
+        return rpc(() => stub.retrySession(caller, chatId, edgeUrl, picked.machine));
       }
     }
   }
@@ -411,7 +451,9 @@ export const autoWakeCloudDevice = (
   env: Pick<Env, "CLOUD_ACCOUNTS" | "CLOUD_ACCESS" | "AUTH_MODE">,
   ctx: Pick<ExecutionContext, "waitUntil">,
   auth: Verified,
-  deviceId: string
+  deviceId: string,
+  /** Where a machine that never finished provisioning reports, if it retries. */
+  edgeUrl?: string
 ): void => {
   const ns = env.CLOUD_ACCOUNTS;
   if (!ns || !auth.orgId || !deviceId.startsWith(CLOUD_DEVICE_PREFIX)) return;
@@ -424,7 +466,7 @@ export const autoWakeCloudDevice = (
       : { orgId: auth.orgId, userId: auth.userId };
   ctx.waitUntil(
     accountStub(ns, caller.orgId, caller.userId)
-      .autoWake(caller, deviceId)
+      .autoWake(caller, deviceId, edgeUrl)
       .then(() => undefined)
       .catch((e: unknown) => console.warn("cloud auto-wake failed", String(e)))
   );

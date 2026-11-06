@@ -42,6 +42,7 @@ pub mod chat2_host;
 mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
+pub mod cloud_disk;
 pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
@@ -748,7 +749,12 @@ impl RpcService for HeadlessRpc {
         if method == methods::QUIESCE_FOR_SLEEP {
             // Local IPC only (never relayed): a Cloud sleep's last check.
             return RpcReply::value(&match self.doc_host.quiesce_for_sleep().await {
-                Ok(()) => serde_json::json!({ "quiesced": true }),
+                Ok(()) => {
+                    // Asleep it can't make room: leave it fitting its size.
+                    // Bounded, and never in the sleep's way.
+                    cloud_disk::pre_sleep_cleanup().await;
+                    serde_json::json!({ "quiesced": true })
+                }
                 Err(busy) => serde_json::json!({ "quiesced": false, "busy": busy }),
             });
         }
@@ -1045,6 +1051,7 @@ impl Engine {
                 identity.edge_url(),
                 tokens,
                 Arc::new(move || sessions.run_counts()),
+                Arc::new(cloud_disk::machine_usage),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
             );

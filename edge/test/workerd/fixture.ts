@@ -157,7 +157,7 @@ export default {
         return dialDeviceRoom(env, auth, request, url, deviceId);
       }
       if (parts[2] === "nudge" && request.method === "POST") {
-        autoWakeCloudDevice(env, ctx, auth, deviceId);
+        autoWakeCloudDevice(env, ctx, auth, deviceId, env.CLOUD_EDGE_URL ?? url.origin);
         return forward(env.DEVICE_ROOMS, room, request, auth, "/nudge", "");
       }
       if (parts[2] === "status") return forward(env.DEVICE_ROOMS, room, request, auth, "/status", "");

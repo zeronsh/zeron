@@ -688,6 +688,12 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
             waiting: 1,
             background: 1,
         }),
+        Arc::new(|| {
+            Some(zeron_engine::cloud_disk::DiskUsage {
+                used_bytes: 1024,
+                total_bytes: 4096,
+            })
+        }),
         activity.clone(),
         Duration::from_millis(50),
     );
@@ -702,12 +708,12 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
     let beats = rig.edge.requests("/runner/heartbeat");
     assert_eq!(
         beats[0].body,
-        json!({"activeRuns": 2, "clients": 3, "backgroundRuns": 1, "waitingRuns": 1})
+        json!({"activeRuns": 2, "clients": 3, "backgroundRuns": 1, "waitingRuns": 1, "diskUsedBytes": 1024, "diskTotalBytes": 4096})
     );
     // Drained by the delivered beat: an idle open link reports nothing.
     assert_eq!(
         beats[1].body,
-        json!({"activeRuns": 2, "clients": 0, "backgroundRuns": 1, "waitingRuns": 1})
+        json!({"activeRuns": 2, "clients": 0, "backgroundRuns": 1, "waitingRuns": 1, "diskUsedBytes": 1024, "diskTotalBytes": 4096})
     );
     assert!(beats[0].bearer.as_deref().is_some_and(|b| b.contains('.')));
 }

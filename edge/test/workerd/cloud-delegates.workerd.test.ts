@@ -38,6 +38,18 @@ const readyChild = async (u: TestUser, runner: string, parent: string) => {
 };
 
 const rand = () => crypto.randomUUID().slice(0, 8);
+
+describe("a machine and machine sizes", () => {
+  it("can wake its delegate, but never chooses the size it wakes on", async () => {
+    const u: TestUser = { ...newUser("dg"), orgId: "org1" };
+    const main = await readySession(u);
+    const bearer = `Bearer ${await runnerToken(u, main.deviceId, main.key)}`;
+    const child = await readyChild(u, bearer, main.chatId);
+    const sized = await call("POST", `/cloud/${u.orgId}/sessions/${child.chatId}/wake`, bearer, { machine: "xlarge" });
+    expect(sized.status).toBe(403);
+    expect((await call("POST", `/cloud/${u.orgId}/sessions/${child.chatId}/wake`, bearer, {})).status).toBe(200);
+  });
+});
 let clock = 0;
 const upsert = (kind: string, id: string, set: Op["set"], device: string): Op => ({
   kind,

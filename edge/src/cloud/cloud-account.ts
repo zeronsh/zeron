@@ -69,6 +69,8 @@ import {
   planReconcile,
   recordSandbox,
   recordUsageFailure,
+  sandboxType,
+  setSandboxType,
   sizeMultiplier,
   summarizeMonth,
   upsertUsage,
@@ -82,8 +84,14 @@ import {
 import {
   AWAKE_STATES,
   HEARTBEAT_STALE_MS,
+  MACHINES,
+  diskLevel,
   idleDecision,
+  machineName,
+  machineSpec,
   newCloudDeviceId,
+  parseMachine,
+  refreshDueAt,
   parseIdleMs,
   parseMaxAwake,
   parseTtlSeconds,
@@ -92,6 +100,8 @@ import {
   tokenTimestampCheck,
   workflowInstanceId,
   type CloudState,
+  type DiskLevel,
+  type MachineSpec,
   type WorkflowKind
 } from "./policy";
 import { activeProviderName, sandboxProvider } from "./providers";
@@ -109,7 +119,7 @@ import {
   type StripeEnv,
   type SubscriptionState
 } from "./stripe";
-import { SandboxError, effectiveTtl, type SandboxMachine, type SandboxUsage } from "./sandbox-provider";
+import { SandboxError, effectiveTtl, type SandboxFailure, type SandboxMachine, type SandboxUsage } from "./sandbox-provider";
 
 export interface CloudCaller {
   readonly orgId: string;
@@ -142,6 +152,10 @@ export interface CloudStatusView {
   /** Credits left (a minute of a small machine each); sessions don't start
    * or wake at zero or below. */
   readonly credits: number;
+  /** Every machine size a user can pick (policy.ts). */
+  readonly machines: readonly MachineSpec[];
+  /** The account's default: what new sessions start on. */
+  readonly machine: SandboxMachine;
 }
 
 /** Subscription statuses that still grant the plan (a failed renewal stays
@@ -190,11 +204,28 @@ export interface CloudSessionView {
   readonly lastActiveAt?: number;
   readonly createdAt: number;
   readonly sandbox?: { readonly provider: string; readonly id: string };
+  /** The size it is on, or will come back on when it was picked asleep. */
+  readonly machine: SandboxMachine;
+  /** Omitted until its engine first reports. `usedGiB` holds its high-water
+   * mark while a resumed disk is still copying in (design doc, "Disk"). */
+  readonly disk?: { readonly usedGiB: number; readonly capacityGiB: number; readonly level: DiskLevel };
+  /** Its disk doesn't fit: it waits for the user to pick a bigger size. */
+  readonly wakeBlocked?: { readonly reason: "disk_too_small"; readonly neededGiB: number };
+  /** Unix ms the provider deletes its disk, while it sleeps (a refresh pushes
+   * this out; past it with `state: "data_expired"` it is gone). */
+  readonly expiresAt?: number;
 }
 
 export type CloudResult<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly status: number; readonly error: string; readonly message: string };
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly error: string;
+      readonly message: string;
+      /** Typed fields beside `{error, message}` on the wire. */
+      readonly details?: Readonly<Record<string, string | number>>;
+    };
 
 /** The repository a session sandbox clones. */
 export interface SessionProject {
@@ -236,6 +267,8 @@ export interface LifecycleParams {
   /** Sleep only: stop even a busy machine (out of credits). An idle sleep
    * leaves a busy one running. */
   readonly force?: boolean;
+  /** Wake only: come back on this size. */
+  readonly machine?: SandboxMachine;
 }
 
 export interface EnrollRequest extends CloudCaller {
@@ -257,6 +290,8 @@ export interface Heartbeat {
   readonly backgroundRuns?: number;
   /** Of `activeRuns`, those waiting on an answer rather than working. */
   readonly waitingRuns?: number;
+  /** Its disk's used bytes, as the machine reads them. */
+  readonly diskUsedBytes?: number;
 }
 
 /** The GitHub repository a new session runs on (its project's origin). */
@@ -305,8 +340,9 @@ interface AccountRecord {
   retiredDeviceIds?: string[];
   /** The last reconcile that read awake machines' meters (any kind). */
   lastReconcileAt?: number;
-  /** Operator-set machine size for this account's new sessions
-   * (`POST /admin/cloud/machine`), over `CLOUD_MACHINE`. */
+  /** The size this account's new sessions start on, over `CLOUD_MACHINE`:
+   * the user's pick (`PUT /cloud/{org}/machine`) or an operator's
+   * (`POST /admin/cloud/machine`), whichever came last. */
   machine?: SandboxMachine;
   /** Operator-set caps for this account (`POST /admin/cloud/limits`), over
    * `CLOUD_MAX_AWAKE` / `CLOUD_MAX_SESSIONS`. */
@@ -370,6 +406,27 @@ interface SessionRecord {
    * machine nobody can reach must not stay billed until someone retries. */
   deleteAttempts?: number;
   deleteRetryAt?: number;
+  /** The size its sandbox is on. Absent on sessions that predate choosing:
+   * read `sandboxes`, which recorded it at create. */
+  machine?: SandboxMachine;
+  /** Picked while it sleeps: the next resume moves it there. */
+  pendingMachine?: SandboxMachine;
+  /** A resume was refused for want of disk. Never retried on its own and
+   * never upsized on its own: credits change, so the user picks. */
+  wakeBlocked?: { reason: "disk_too_small"; neededGiB: number };
+  /** The disk's high-water mark and when it was last raised or settled. */
+  disk?: { usedGiB: number; at: number };
+  /** Resumed, and its disk may still be copying in: a lower reading means
+   * nothing yet. Cleared once the provider says it is all there. */
+  diskHydrating?: boolean;
+  lastHydrationProbeAt?: number;
+  /** Unix ms of its last stop: the provider's retention clock. */
+  stoppedAt?: number;
+  /** The next look at its retention clock (`checkExpiry`). */
+  expiryCheckAt?: number;
+  /** This wake only keeps the disk from expiring: it goes back to sleep as
+   * soon as it is up, unless someone turns up meanwhile. */
+  refreshing?: boolean;
 }
 
 const ACCOUNT_KEY = "account";
@@ -392,6 +449,17 @@ const REGISTRY_WRITER = "cloud-edge";
 /** Mirrors `zeron_proto::CLOUD_SESSION_CAPABILITY` (a session machine's device). */
 const CLOUD_SESSION_CAPABILITY = "cloud-session";
 const SWEEP_RETRY_MS = 5 * 60_000;
+const GIB = 1024 ** 3;
+/** How often a lower disk reading asks whether the disk is all there yet. */
+const HYDRATION_PROBE_MS = 5 * 60_000;
+/** Back-off of a retention check that couldn't refresh a machine. */
+const EXPIRY_RETRY_MS = 60 * 60_000;
+/** No room among the awake machines: soon, since it only needs a minute. */
+const EXPIRY_NO_ROOM_MS = 15 * 60_000;
+/** Refreshes started by one alarm pass, so a large account spreads out. */
+const REFRESHES_PER_PASS = 2;
+const DATA_EXPIRED_MESSAGE =
+  "This machine's files were deleted after it slept for too long. The chat is safe; start a fresh machine to carry on.";
 const FULL_NAME_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 /** Where a session machine checks its repository out (one per machine;
  * `CLOUD_PROJECTS_ROOT` overrides it for a local stack). */
@@ -404,12 +472,20 @@ const freshAccount = (generation: number, caller?: CloudCaller): AccountRecord =
   ...(caller ? { orgId: caller.orgId, userId: caller.userId } : {})
 });
 
-const fail = <T>(status: number, error: string, message: string): CloudResult<T> => ({
+const fail = <T>(
+  status: number,
+  error: string,
+  message: string,
+  details?: Readonly<Record<string, string | number>>
+): CloudResult<T> => ({
   ok: false,
   status,
   error,
-  message
+  message,
+  ...(details ? { details } : {})
 });
+
+const roundGiB = (value: number): number => Math.round(value * 10) / 10;
 
 const explain = (e: unknown): string =>
   e instanceof SandboxError ? `${e.provider} ${e.providerCode}: ${e.message}` : String(e);
@@ -468,6 +544,7 @@ export class CloudAccount extends DurableObject<Env> {
       if (s.state === "ready" && s.idleCheckAt !== undefined) due.push(s.idleCheckAt);
       if (s.deleteRetryAt !== undefined) due.push(s.deleteRetryAt);
       if (s.state === "deleting") due.push((s.deletingSince ?? 0) + DELETE_STUCK_MS);
+      if (this.awaitingExpiry(s) && s.expiryCheckAt !== undefined) due.push(s.expiryCheckAt);
     }
     // While any machine exists, it is checked against its chat.
     if (this.sessions.size > 0) {
@@ -546,8 +623,55 @@ export class CloudAccount extends DurableObject<Env> {
       awakeSessions: this.awakeCount(),
       maxAwakeSessions: this.maxAwake(),
       available: true,
-      credits: Math.floor(this.balance() * 100) / 100
+      credits: Math.floor(this.balance() * 100) / 100,
+      machines: MACHINES,
+      machine: this.defaultMachine()
     };
+  }
+
+  private defaultMachine(): SandboxMachine {
+    return this.acct.machine ?? parseMachine(this.env.CLOUD_MACHINE);
+  }
+
+  /** The size `s`'s sandbox is on. */
+  private currentMachine(s: SessionRecord): SandboxMachine {
+    if (s.machine) return s.machine;
+    const recorded =
+      s.provider && s.sandboxId && this.acct.orgId
+        ? machineName(sandboxType(this.sql(), { provider: s.provider, sandboxId: s.sandboxId }))
+        : undefined;
+    return recorded ?? this.defaultMachine();
+  }
+
+  /** What clients see: the size it will come back on. */
+  private shownMachine(s: SessionRecord): SandboxMachine {
+    return s.pendingMachine ?? this.currentMachine(s);
+  }
+
+  /** The disk doesn't fit the size it would come back on. */
+  private blockedOnDisk(s: SessionRecord, machine = this.shownMachine(s)): boolean {
+    return s.wakeBlocked !== undefined && (machineSpec(machine)?.diskGiB ?? 0) < s.wakeBlocked.neededGiB;
+  }
+
+  private retentionMs(s: SessionRecord): number | undefined {
+    return this.providerOf(s)?.capabilities.stoppedRetentionMs;
+  }
+
+  /** Stopped, so its retention clock is running. */
+  private awaitingExpiry(s: SessionRecord): boolean {
+    return (s.state === "sleeping" || s.state === "error") && Boolean(s.sandboxId) && !s.pendingDelete;
+  }
+
+  private expiresAt(s: SessionRecord): number | undefined {
+    if (s.stoppedAt === undefined || !(this.awaitingExpiry(s) || s.state === "data_expired")) return undefined;
+    const retention = this.retentionMs(s);
+    return retention === undefined ? undefined : s.stoppedAt + retention;
+  }
+
+  private diskView(s: SessionRecord): CloudSessionView["disk"] {
+    const capacityGiB = machineSpec(this.shownMachine(s))?.diskGiB;
+    if (!s.disk || capacityGiB === undefined) return undefined;
+    return { usedGiB: roundGiB(s.disk.usedGiB), capacityGiB, level: diskLevel(s.disk.usedGiB, capacityGiB) };
   }
 
   /** Credits left: granted minus used, less awake machines' time since their
@@ -562,7 +686,8 @@ export class CloudAccount extends DurableObject<Env> {
       const since = Math.max(s.awakeSince ?? now, this.acct.lastReconcileAt ?? 0);
       // A bigger machine spends credits faster: estimate with its size.
       sizes ??= new Map(listSandboxes(this.sql()).map((row) => [row.sandboxId, row.type]));
-      const type = s.sandboxId ? sizes.get(s.sandboxId) : this.acct.machine;
+      // Its live size: a resize moved it off what it was created on.
+      const type = s.machine ?? (s.sandboxId ? sizes.get(s.sandboxId) : this.acct.machine);
       unmetered += (Math.max(0, now - since) / 1000) * sizeMultiplier(type);
     }
     return credits.monthly + credits.extra - unmetered / this.perCredit();
@@ -584,6 +709,8 @@ export class CloudAccount extends DurableObject<Env> {
   }
 
   private sessionView(s: SessionRecord): CloudSessionView {
+    const disk = this.diskView(s);
+    const expiresAt = this.expiresAt(s);
     return {
       chatId: s.chatId,
       deviceId: s.deviceId,
@@ -595,7 +722,11 @@ export class CloudAccount extends DurableObject<Env> {
       ...(s.state === "error" && s.failedAction ? { failedAction: s.failedAction } : {}),
       ...(s.lastActiveAt ? { lastActiveAt: s.lastActiveAt } : {}),
       createdAt: s.createdAt,
-      ...(s.provider && s.sandboxId ? { sandbox: { provider: s.provider, id: s.sandboxId } } : {})
+      ...(s.provider && s.sandboxId ? { sandbox: { provider: s.provider, id: s.sandboxId } } : {}),
+      machine: this.shownMachine(s),
+      ...(disk ? { disk } : {}),
+      ...(s.wakeBlocked ? { wakeBlocked: { reason: s.wakeBlocked.reason, neededGiB: s.wakeBlocked.neededGiB } } : {}),
+      ...(expiresAt === undefined ? {} : { expiresAt })
     };
   }
 
@@ -710,6 +841,9 @@ export class CloudAccount extends DurableObject<Env> {
     s.state = "ready";
     s.error = undefined;
     s.failedAction = undefined;
+    s.wakeBlocked = undefined;
+    s.stoppedAt = undefined;
+    s.expiryCheckAt = undefined;
     s.lastActiveAt = now;
     s.idleCheckAt = now + this.idleMs();
     this.ledger("ready", s);
@@ -763,6 +897,15 @@ export class CloudAccount extends DurableObject<Env> {
 
   status(caller: CloudCaller): CloudResult<CloudStatusView> {
     if (this.acct.orgId !== undefined && !this.matches(caller)) return fail(403, "forbidden", "Not your Cloud.");
+    return this.okAccount();
+  }
+
+  /** `PUT /cloud/{org}/machine`: the size this user's new sessions start on.
+   * Sessions that already have a machine keep theirs. */
+  async setDefaultMachine(caller: CloudCaller, machine: SandboxMachine): Promise<CloudResult<CloudStatusView>> {
+    if (!this.bind(caller)) return fail(403, "forbidden", "Not your Cloud.");
+    this.acct.machine = machine;
+    await this.saveAccount();
     return this.okAccount();
   }
 
@@ -1232,6 +1375,7 @@ export class CloudAccount extends DurableObject<Env> {
     this.register();
     const { deviceId, sandboxId } = s;
     const provider = s.provider ?? activeProviderName(this.env);
+    const machine = s.pendingMachine ?? s.machine ?? this.acct.machine;
     return this.startWorkflow<ProvisionParams>(s, "provision", (generation) => ({
       orgId: caller.orgId,
       userId: caller.userId,
@@ -1244,7 +1388,8 @@ export class CloudAccount extends DurableObject<Env> {
       edgeUrl,
       project: { cloneUrl: project.cloneUrl, path: project.path, defaultBranch: s.baseBranch ?? project.defaultBranch },
       ...(sandboxId ? { sandboxId } : {}),
-      ...(this.acct.machine ? { machine: this.acct.machine } : {})
+      // A retried session keeps its own size; a new one takes the account's.
+      ...(machine ? { machine } : {})
     }));
   }
 
@@ -1266,10 +1411,19 @@ export class CloudAccount extends DurableObject<Env> {
     s.awaitingOnline = true;
     s.pendingWake = false;
     s.error = undefined;
+    // It fits the size it's coming back on, or it wouldn't have got here.
+    s.wakeBlocked = undefined;
+    s.diskHydrating = true;
     s.lastTtlExtendAt = Date.now(); // resume sets the TTL afresh
     this.ledger("wake", s);
     this.scheduleReconcile();
-    return this.startWorkflow<LifecycleParams>(s, "wake", (generation) => ({ ...params, generation }));
+    const machine = s.pendingMachine && s.pendingMachine !== this.currentMachine(s) ? s.pendingMachine : undefined;
+    s.pendingMachine = machine;
+    return this.startWorkflow<LifecycleParams>(s, "wake", (generation) => ({
+      ...params,
+      generation,
+      ...(machine ? { machine } : {})
+    }));
   }
 
   private async beginSleep(s: SessionRecord, reason: string, force = false): Promise<CloudResult<CloudSessionView>> {
@@ -1296,10 +1450,57 @@ export class CloudAccount extends DurableObject<Env> {
     return s;
   }
 
-  async wakeSession(caller: CloudCaller, chatId: string): Promise<CloudResult<CloudSessionView>> {
+  /**
+   * `POST …/wake {machine?, wake?}`: bring it up, on `machine` when one is
+   * given; `wake: false` only records the size for the next wake. A size its
+   * disk doesn't fit is refused here with a typed 409 before anything starts,
+   * as is any wake on the size that was just refused.
+   */
+  async wakeSession(
+    caller: CloudCaller,
+    chatId: string,
+    options: { readonly machine?: SandboxMachine; readonly wake?: boolean } = {}
+  ): Promise<CloudResult<CloudSessionView>> {
     const s = this.session(caller, chatId);
     if ("ok" in s) return s;
+    const { machine } = options;
+    // A size changes what the user pays: never a machine's call.
+    if (machine && caller.deviceId !== undefined) {
+      return fail(403, "forbidden", "A Cloud machine can't choose a machine size.");
+    }
     if (s.pendingDelete || s.state === "deleting") return this.okSession(s);
+    if (s.state === "data_expired") return fail(409, "data_expired", DATA_EXPIRED_MESSAGE);
+    const target = machine ?? this.shownMachine(s);
+    if (this.blockedOnDisk(s, target)) {
+      const capacityGiB = machineSpec(target)?.diskGiB ?? 0;
+      const neededGiB = s.wakeBlocked!.neededGiB;
+      return fail(409, "machine_too_small", `This machine needs ${neededGiB} GiB of disk; a ${target} machine holds ${capacityGiB} GiB.`, {
+        machine: target,
+        neededGiB,
+        capacityGiB
+      });
+    }
+    if (machine && machine !== this.currentMachine(s) && AWAKE_STATES.has(s.state)) {
+      return fail(409, "machine_awake", "A machine changes size while it sleeps. Put it to sleep first.");
+    }
+    if (machine) {
+      s.pendingMachine = machine === this.currentMachine(s) ? undefined : machine;
+      // No longer blocked on the old size: it clears on the wake, or here if
+      // this only records the size.
+      if (options.wake === false && s.wakeBlocked) {
+        // A refused resume left it stopped, so it simply sleeps again.
+        s.wakeBlocked = undefined;
+        if (s.state === "error") {
+          s.state = "sleeping";
+          s.error = undefined;
+          s.failedAction = undefined;
+        }
+      }
+      await this.saveSession(s);
+    }
+    if (options.wake === false) return this.okSession(s);
+    // Someone wants it: a refresh in flight doesn't put it back to sleep.
+    s.refreshing = false;
     if (s.state === "sleeping" || (s.state === "error" && s.runnerKey)) return this.beginWake(s);
     if (s.state === "error" && !s.runnerKey && this.acct.state === "ready") {
       // Provisioning never finished: retry it on the sandbox it already made.
@@ -1313,11 +1514,55 @@ export class CloudAccount extends DurableObject<Env> {
   }
 
   /** Retry a failed provision with the edge origin of the request. */
-  async retrySession(caller: CloudCaller, chatId: string, edgeUrl: string): Promise<CloudResult<CloudSessionView>> {
+  async retrySession(caller: CloudCaller, chatId: string, edgeUrl: string, machine?: SandboxMachine): Promise<CloudResult<CloudSessionView>> {
     const s = this.session(caller, chatId);
     if ("ok" in s) return s;
+    if (s.state === "data_expired") {
+      if (caller.deviceId !== undefined) return fail(403, "forbidden", "A Cloud machine can't start a fresh machine.");
+      return this.beginFresh(caller, s, edgeUrl, machine);
+    }
     if (s.state === "error" && !s.runnerKey && !s.pendingDelete) return this.beginProvision(caller, s, edgeUrl);
-    return this.wakeSession(caller, chatId);
+    return this.wakeSession(caller, chatId, machine ? { machine } : {});
+  }
+
+  /**
+   * The provider deleted this machine's disk: a new machine on the same chat,
+   * repository and branch. Same session device, so the chat keeps its host and
+   * its queued messages; the engine enrolls a new key (a fresh disk has none)
+   * and clones, and work it pushed to the session's branch comes back with it.
+   * The dead sandbox is dropped, best effort: its meter stopped long ago.
+   */
+  private async beginFresh(
+    caller: CloudCaller,
+    s: SessionRecord,
+    edgeUrl: string,
+    machine?: SandboxMachine
+  ): Promise<CloudResult<CloudSessionView>> {
+    if (this.balance() <= 0) return this.outOfCredits();
+    if (!(await this.makeRoomFor(s.chatId))) return this.tooManyAwake();
+    if (s.state !== "data_expired") return this.okSession(s); // raced
+    const provider = this.providerOf(s);
+    const { sandboxId } = s;
+    if (sandboxId && s.provider) {
+      markSandboxDeleted(this.sql(), { provider: s.provider, sandboxId }, Date.now());
+      this.ledger("delete", s, { detail: "its data had expired; starting a fresh machine" });
+      if (provider) {
+        this.ctx.waitUntil(
+          provider.delete(sandboxId).catch((e: unknown) => console.warn("cloud: dropping an expired sandbox failed", sandboxId, explain(e)))
+        );
+      }
+    }
+    s.pendingMachine = machine ?? this.currentMachine(s);
+    s.sandboxId = undefined;
+    s.provider = activeProviderName(this.env);
+    s.machine = undefined;
+    s.disk = undefined;
+    s.diskHydrating = false;
+    s.stoppedAt = undefined;
+    s.expiryCheckAt = undefined;
+    s.state = "provisioning";
+    s.error = undefined;
+    return this.beginProvision(caller, s, edgeUrl);
   }
 
   async sleepSession(caller: CloudCaller, chatId: string): Promise<CloudResult<CloudSessionView>> {
@@ -1415,21 +1660,31 @@ export class CloudAccount extends DurableObject<Env> {
    * `/device/{deviceId}/nudge` from the user (a send to a sleeping session):
    * wake that session's machine. Viewing never wakes — only sends do. Also
    * catches a sandbox the provider auto-stopped behind our back (trial TTL):
-   * ready-but-silent gets one cheap state probe per minute.
+   * ready-but-silent gets one cheap state probe per minute. A session in
+   * `error` is recovered too: a send is the user asking for it, and a machine
+   * that merely failed to sleep or wake once mustn't need a trip to Settings.
    */
-  async autoWake(caller: CloudCaller, deviceId: string): Promise<boolean> {
+  async autoWake(caller: CloudCaller, deviceId: string, edgeUrl?: string): Promise<boolean> {
     const chatId = this.byDevice.get(deviceId);
     const s = chatId ? this.sessions.get(chatId) : undefined;
     if (!s || !this.matches(caller) || s.pendingDelete || s.state === "deleting") return false;
     // A machine wakes only the sessions it started (its delegates).
     if (caller.deviceId !== undefined && s.parentChatId !== this.byDevice.get(caller.deviceId)) return false;
-    return this.wake(s);
+    return this.wake(s, edgeUrl);
   }
 
   /** Bring `s`'s machine back: from sleep, after a stop in progress, or when
    * the provider stopped it behind our back (auto-stop). */
-  private async wake(s: SessionRecord): Promise<boolean> {
+  private async wake(s: SessionRecord, edgeUrl = this.env.CLOUD_EDGE_URL): Promise<boolean> {
+    s.refreshing = false; // someone wants it: it stays up
+    if (this.blockedOnDisk(s)) return false; // the user picks a size; a retry gets the same answer
     if (s.state === "sleeping") return (await this.beginWake(s)).ok;
+    if (s.state === "error") {
+      if (s.runnerKey) return (await this.beginWake(s)).ok;
+      // It never finished provisioning: on the sandbox it made, if any.
+      const caller = this.systemCaller();
+      return caller && edgeUrl ? (await this.beginProvision(caller, s, edgeUrl)).ok : false;
+    }
     if (s.state === "stopping") {
       if (!s.pendingWake) {
         s.pendingWake = true;
@@ -1450,6 +1705,7 @@ export class CloudAccount extends DurableObject<Env> {
       if (sandbox.state !== "stopped" || s.state !== "ready") return false;
       s.state = "sleeping";
       s.awakeSince = undefined;
+      this.noteStopped(s, sandbox.stoppedAt ?? now);
       this.ledger("stop", s, { detail: "stopped by the provider (auto-stop)" });
       this.scheduleReconcile();
       return (await this.beginWake(s)).ok;
@@ -1557,7 +1813,10 @@ export class CloudAccount extends DurableObject<Env> {
   }
 
   /** `POST /runner/heartbeat` (runner bearer, already verified). */
-  async heartbeat(runner: CloudCaller & { deviceId: string }, beat: Heartbeat): Promise<CloudResult<{ ok: true }>> {
+  async heartbeat(
+    runner: CloudCaller & { deviceId: string },
+    beat: Heartbeat
+  ): Promise<CloudResult<{ ok: true; diskCapacityGiB?: number }>> {
     const s = this.sessionByDevice(runner.deviceId);
     if (!s || !s.runnerKey || !this.matches(runner)) {
       return fail(403, "revoked", "This Cloud device is not enrolled.");
@@ -1580,6 +1839,7 @@ export class CloudAccount extends DurableObject<Env> {
     s.lastHeartbeatAt = now;
     if (busy || changed) s.lastActiveAt = now;
     this.markAlive(s, now);
+    if (beat.diskUsedBytes !== undefined) this.noteDisk(s, beat.diskUsedBytes / GIB, now);
     if (s.state === "ready") s.idleCheckAt = (s.lastActiveAt ?? now) + this.idleMs();
     const provider = this.providerOf(s);
     const ttlSeconds = provider ? effectiveTtl(provider.capabilities, parseTtlSeconds(this.env.CLOUD_TTL_SECONDS)) : null;
@@ -1606,7 +1866,141 @@ export class CloudAccount extends DurableObject<Env> {
         await this.wake(parent).catch((e: unknown) => console.warn("cloud parent wake failed", explain(e)));
       }
     }
-    return { ok: true, value: { ok: true } };
+    // What its pre-sleep cleanup measures itself against: what this size holds.
+    const diskCapacityGiB = machineSpec(this.currentMachine(s))?.diskGiB;
+    return { ok: true, value: { ok: true, ...(diskCapacityGiB === undefined ? {} : { diskCapacityGiB }) } };
+  }
+
+  /**
+   * A machine's disk reading, kept as a high-water mark. A resumed disk copies
+   * its files in lazily, so `df` under-reads until that's done (seen: 26 GiB
+   * right after a resume Boat said needed 118.9): a higher reading always
+   * counts, a lower one only once the provider says every file is there.
+   */
+  private noteDisk(s: SessionRecord, usedGiB: number, now: number): void {
+    if (!s.disk || usedGiB >= s.disk.usedGiB || !s.diskHydrating) {
+      s.disk = { usedGiB, at: now };
+      return;
+    }
+    if (now - (s.lastHydrationProbeAt ?? 0) < HYDRATION_PROBE_MS) return;
+    s.lastHydrationProbeAt = now;
+    const provider = this.providerOf(s);
+    const sandboxId = s.sandboxId;
+    if (!provider || !sandboxId) return;
+    this.ctx.waitUntil(
+      provider
+        .get(sandboxId)
+        .then(async (info) => {
+          // A provider that doesn't say restores nothing lazily.
+          if (info.hydrated === false || this.sessions.get(s.chatId) !== s || s.sandboxId !== sandboxId) return;
+          s.diskHydrating = false;
+          await this.saveSession(s);
+        })
+        .catch((e: unknown) => console.warn("cloud: reading a machine's hydration failed", explain(e)))
+    );
+  }
+
+  /** The retention clock starts: `at` is when the sandbox stopped. */
+  private noteStopped(s: SessionRecord, at: number): void {
+    s.stoppedAt = at;
+    const retention = this.retentionMs(s);
+    s.expiryCheckAt = retention === undefined ? undefined : refreshDueAt(at, retention);
+  }
+
+  private markDataExpired(s: SessionRecord): void {
+    s.state = "data_expired";
+    s.error = DATA_EXPIRED_MESSAGE;
+    s.failedAction = undefined;
+    s.refreshing = false;
+    s.pendingWake = false;
+    s.awaitingOnline = false;
+    s.awakeSince = undefined;
+    s.wakeBlocked = undefined;
+    s.expiryCheckAt = undefined;
+    this.ledger("error", s, { detail: "its data expired" });
+  }
+
+  /**
+   * A sleeping machine's retention clock. A resume restarts it, for the machine
+   * seconds that takes, so a machine due for one comes up and goes straight back
+   * to sleep. Skipped while refreshing can't work (no credits, or a disk that
+   * doesn't fit its size: the user's to fix, and `expiresAt` says by when).
+   * Returns whether it started a refresh.
+   */
+  private async checkExpiry(s: SessionRecord, now: number): Promise<boolean> {
+    const provider = this.providerOf(s);
+    const retention = this.retentionMs(s);
+    if (!provider || retention === undefined || !s.sandboxId) {
+      s.expiryCheckAt = undefined;
+      return false;
+    }
+    let info;
+    try {
+      info = await provider.get(s.sandboxId);
+    } catch (e) {
+      console.warn("cloud: reading a sleeping machine failed", explain(e));
+      s.expiryCheckAt = now + EXPIRY_RETRY_MS;
+      return false;
+    }
+    if (!this.awaitingExpiry(s)) return false; // it woke meanwhile
+    if (info.failure?.kind === "data_expired") {
+      this.markDataExpired(s);
+      return false;
+    }
+    // Running, or in an error of its own: no clock to refresh yet.
+    if (info.state !== "stopped") {
+      s.expiryCheckAt = now + EXPIRY_RETRY_MS;
+      return false;
+    }
+    // The provider's clock wins; a session that predates ours has only this.
+    s.stoppedAt = info.stoppedAt ?? s.stoppedAt ?? s.lastActiveAt ?? now;
+    const due = refreshDueAt(s.stoppedAt, retention);
+    if (now < due) {
+      s.expiryCheckAt = due;
+      return false;
+    }
+    // No engine ever enrolled (a failed provision) has nothing worth keeping,
+    // and a wake would wait out its full timeout for an engine that isn't there.
+    if (!s.runnerKey || this.blockedOnDisk(s) || this.balance(now) <= 0) {
+      s.expiryCheckAt = now + EXPIRY_RETRY_MS;
+      return false;
+    }
+    // Never evicts anyone: a refresh waits for a free slot.
+    if (this.awakeCount() >= this.maxAwake()) {
+      s.expiryCheckAt = now + EXPIRY_NO_ROOM_MS;
+      return false;
+    }
+    s.refreshing = true;
+    s.expiryCheckAt = now + EXPIRY_RETRY_MS;
+    this.ledger("refresh", s, { detail: `stopped ${new Date(s.stoppedAt).toISOString()}` });
+    const started = await this.beginWake(s);
+    if (!started.ok) s.refreshing = false;
+    return started.ok;
+  }
+
+  /** A refresh failed: back to sleep if the machine is up, and try again. */
+  private async settleFailedRefresh(s: SessionRecord, message: string): Promise<void> {
+    const now = Date.now();
+    s.refreshing = false;
+    s.awaitingOnline = false;
+    s.expiryCheckAt = now + EXPIRY_RETRY_MS;
+    this.ledger("error", s, { detail: `refresh failed: ${message}` });
+    const provider = this.providerOf(s);
+    if (provider && s.sandboxId) {
+      try {
+        if ((await provider.get(s.sandboxId)).state === "stopped") {
+          s.state = "sleeping";
+          s.awakeSince = undefined;
+          s.error = undefined;
+          s.failedAction = undefined;
+          return;
+        }
+      } catch (e) {
+        console.warn("cloud: reading a machine after a failed refresh failed", explain(e));
+      }
+    }
+    // Possibly up and billing, with nobody who asked for it.
+    await this.beginSleep(s, "a refresh failed", true);
   }
 
   async alarm(): Promise<void> {
@@ -1626,11 +2020,33 @@ export class CloudAccount extends DurableObject<Env> {
         activeRuns: s.activeRuns + (s.backgroundRuns ?? 0),
         clients: s.clients
       });
-      if (decision.sleep) await this.beginSleep(s, "idle");
-      else {
+      if (decision.sleep) {
+        // It went dark with a turn in flight (the machine died, or its engine
+        // hung): nobody may send again for days, and the turn is stuck until
+        // something boots it. Sleep it and bring it straight back, so its
+        // engine's boot recovery resumes the turn or says why it can't.
+        const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS;
+        const working = s.activeRuns - (s.waitingRuns ?? 0) > 0 || (s.backgroundRuns ?? 0) > 0;
+        const sleeping = await this.beginSleep(s, dark && working ? "went dark during a turn; recovering it" : "idle");
+        if (dark && working && sleeping.ok) {
+          s.pendingWake = true;
+          await this.saveSession(s);
+        }
+      } else {
         s.idleCheckAt = decision.checkAt;
         await this.saveSession(s);
       }
+    }
+    let refreshes = 0;
+    for (const s of [...this.sessions.values()]) {
+      if (!this.awaitingExpiry(s) || now < (s.expiryCheckAt ?? 0)) continue;
+      if (refreshes >= REFRESHES_PER_PASS) {
+        s.expiryCheckAt = now + EXPIRY_NO_ROOM_MS;
+        await this.saveSession(s);
+        continue;
+      }
+      if (await this.checkExpiry(s, now)) refreshes++;
+      await this.saveSession(s);
     }
     if (this.acct.sweepDevicesAt !== undefined && now >= this.acct.sweepDevicesAt) {
       await this.sweepStaleDevices();
@@ -1947,6 +2363,8 @@ export class CloudAccount extends DurableObject<Env> {
     if (!s) return false;
     s.provider = provider;
     s.sandboxId = sandboxId;
+    s.machine = machineName(type);
+    s.pendingMachine = undefined;
     recordSandbox(this.sql(), { provider, sandboxId, type, createdAt, chatId });
     this.ledger("create", s, { type });
     this.scheduleReconcile();
@@ -1969,10 +2387,73 @@ export class CloudAccount extends DurableObject<Env> {
     const s = this.current(chatId, generation);
     if (!s) return false;
     if (s.state === "provisioning" || s.state === "starting") {
+      const before = s.lastActiveAt;
       this.markReady(s, Date.now());
+      if (s.refreshing) {
+        // The clock restarts at this stop. It wasn't used: its idle age holds.
+        s.refreshing = false;
+        if (before !== undefined) s.lastActiveAt = before;
+        await this.beginSleep(s, "refreshed its stored data");
+      }
       await this.saveSession(s);
       await this.saveAccount();
     }
+    return true;
+  }
+
+  /** WakeWorkflow: the sandbox came back on `machine`, its new size. */
+  async wfResumedOn(chatId: string, generation: number, machine: SandboxMachine): Promise<boolean> {
+    const s = this.current(chatId, generation);
+    if (!s) return false;
+    s.machine = machine;
+    if (s.pendingMachine === machine) s.pendingMachine = undefined;
+    if (s.provider && s.sandboxId) setSandboxType(this.sql(), { provider: s.provider, sandboxId: s.sandboxId }, machine);
+    this.ledger("resize", s, { type: machine });
+    // Read the meter across the change, so the estimate starts from it.
+    this.scheduleReconcile();
+    await this.saveSession(s);
+    await this.saveAccount();
+    return true;
+  }
+
+  /**
+   * WakeWorkflow: the provider refused the resume in a way a retry can't fix.
+   * The sandbox stays exactly as it was, stopped, on its old size. A refused
+   * shrink leaves it wakeable as it is; a disk too big for the size it is on
+   * waits for the user to pick a bigger one (credits change, so never on its
+   * own).
+   */
+  async wfWakeRefused(chatId: string, generation: number, failure: SandboxFailure): Promise<boolean> {
+    const s = this.current(chatId, generation);
+    if (!s) return false;
+    if (failure.kind === "data_expired") {
+      this.markDataExpired(s);
+    } else {
+      const asked = s.pendingMachine ?? this.currentMachine(s);
+      const askedHolds = machineSpec(asked)?.diskGiB ?? 0;
+      // A refusal without a figure still says it doesn't fit what was asked.
+      const neededGiB = failure.neededGiB ?? roundGiB(Math.max(s.disk?.usedGiB ?? 0, askedHolds + 0.1));
+      s.wakeBlocked = { reason: "disk_too_small", neededGiB };
+      s.pendingMachine = undefined;
+      s.refreshing = false;
+      s.awaitingOnline = false;
+      s.awakeSince = undefined;
+      s.disk = { usedGiB: Math.max(s.disk?.usedGiB ?? 0, neededGiB), at: Date.now() };
+      this.ledger("error", s, { detail: `refused: its disk needs ${neededGiB} GiB; ${asked} holds ${askedHolds}` });
+      if (this.blockedOnDisk(s)) {
+        s.state = "error";
+        s.failedAction = "wake";
+        s.error = `This machine needs ${neededGiB} GiB of disk, more than a ${asked} machine holds. Pick a bigger size to wake it.`;
+      } else {
+        s.state = "sleeping";
+        s.error = undefined;
+        s.failedAction = undefined;
+      }
+      s.expiryCheckAt = Date.now() + EXPIRY_RETRY_MS;
+    }
+    this.scheduleReconcile();
+    await this.saveSession(s);
+    await this.saveAccount();
     return true;
   }
 
@@ -2004,6 +2485,10 @@ export class CloudAccount extends DurableObject<Env> {
     s.activeRuns = 0;
     s.clients = 0;
     s.idleCheckAt = undefined;
+    // A machine that never came up (a sleep from `error`) didn't stop just now:
+    // its clock stands, and the provider's reading settles it.
+    if (s.stoppedAt === undefined) this.noteStopped(s, Date.now());
+    else s.expiryCheckAt = Date.now();
     this.ledger("stop", s);
     this.scheduleReconcile();
     // Asleep first, persisted: a wake that's refused (out of credits, too
@@ -2096,6 +2581,13 @@ export class CloudAccount extends DurableObject<Env> {
     const s = this.current(chatId, generation);
     if (!s) return false;
     const kind = s.workflow?.kind;
+    if (s.refreshing && kind === "wake") {
+      // Nobody asked for this wake, so nobody should see it fail.
+      await this.settleFailedRefresh(s, message);
+      await this.saveSession(s);
+      await this.saveAccount();
+      return true;
+    }
     if (kind === "delete") this.noteDeleteFailure(s);
     s.state = "error";
     s.error = message;
