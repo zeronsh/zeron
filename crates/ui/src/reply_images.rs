@@ -17,9 +17,7 @@ use std::sync::Arc;
 
 use gpui::{SharedString, div, prelude::*, px};
 
-use crate::attachments::{
-    AttachmentKey, AttachmentSnapshot, CachedAttachmentImage, attachment_snapshot_for,
-};
+use crate::attachments::{AttachmentKey, AttachmentSnapshot, CachedAttachmentImage, DrawnImages};
 use crate::theme::Theme;
 
 /// Reply image reads in flight at once, per transcript.
@@ -116,15 +114,21 @@ impl ReplyImages {
         }
     }
 
-    /// How `![…](source)` in `row` draws in the open chat, asking for a read
-    /// unless it's loaded. `None` keeps the ordinary rendering: so does a
-    /// failed image while its retries (on the shared backoff) run behind it.
-    pub(crate) fn lookup(&mut self, source: &str, row: SharedString) -> Option<ReplyImage> {
+    /// How `![…](source)` in `row` draws in the open chat (into `drawn`),
+    /// asking for a read unless it's loaded. `None` keeps the ordinary
+    /// rendering: so does a failed image while its retries (on the shared
+    /// backoff) run behind it.
+    pub(crate) fn lookup(
+        &mut self,
+        source: &str,
+        row: SharedString,
+        drawn: &DrawnImages,
+    ) -> Option<ReplyImage> {
         let chat = self.chat.as_ref()?;
         let (path, mime) = markdown_image(source, chat.cwd.as_deref())?;
         let key = AttachmentKey::chat_image(&chat.host, &chat.id, &path, mime);
         self.rows.entry(key.clone()).or_default().insert(row);
-        let snapshot = attachment_snapshot_for(&key);
+        let snapshot = drawn.snapshot(&key);
         let first_read =
             matches!(snapshot, AttachmentSnapshot::Loading) && !self.failed.contains(&key);
         let request = ReplyImageRequest {
@@ -272,32 +276,39 @@ mod tests {
             host: "host".into(),
         };
         let mut images = ReplyImages::default();
+        let drawn = DrawnImages::default();
         assert!(
-            images.lookup("a.png", "row".into()).is_none(),
+            images.lookup("a.png", "row".into(), &drawn).is_none(),
             "no chat open"
         );
         images.show(Some(chat("one")));
         assert!(matches!(
-            images.lookup("a.png", "row-1".into()),
+            images.lookup("a.png", "row-1".into(), &drawn),
             Some(ReplyImage::Loading)
         ));
-        assert!(images.lookup("https://x/a.png", "row-1".into()).is_none());
+        assert!(
+            images
+                .lookup("https://x/a.png", "row-1".into(), &drawn)
+                .is_none()
+        );
         let [one] = &images.take_wanted()[..] else {
             panic!("one read asked for");
         };
         assert_eq!(one.path, "/reply-images-test/a.png");
         assert_eq!((one.chat_id.as_str(), one.host.as_str()), ("one", "host"));
+        // Drawn while it loads, so the read keeps it once it lands.
+        assert!(drawn.holds(&one.key));
         // A failed image keeps its link, even while a retry is under way.
         assert_eq!(
             images.finish(&one.key, false),
             vec![SharedString::from("row-1")]
         );
-        assert!(images.lookup("a.png", "row-1".into()).is_none());
+        assert!(images.lookup("a.png", "row-1".into(), &drawn).is_none());
         assert_eq!(images.take_wanted().len(), 1, "retries are still asked for");
         // The same path in another chat is another image.
         images.show(Some(chat("two")));
         assert!(images.finish(&one.key, false).is_empty());
-        assert!(images.lookup("a.png", "row-2".into()).is_some());
+        assert!(images.lookup("a.png", "row-2".into(), &drawn).is_some());
         let [two] = &images.take_wanted()[..] else {
             panic!("one read asked for");
         };

@@ -11,8 +11,10 @@
 //! `(deviceId, path)`, seeded locally after a send so own bubbles never
 //! round-trip).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -895,8 +897,10 @@ fn retry_delay(attempts: u32) -> Duration {
 }
 
 /// Retained encoded bytes plus estimated CPU/GPU pixels for normalized PNGs.
-/// Generated images are always evictable and individually fit this budget.
-/// Legacy user attachments retain their existing protection behavior.
+/// Generated images individually fit this budget and are evictable once no
+/// view draws them ([`DrawnImages`]); the images on screen together may
+/// exceed it. Legacy user attachments retain their existing protection
+/// behavior.
 const IMAGE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// Validation policy is part of identity, including in-flight loads and errors.
@@ -940,9 +944,97 @@ struct ImageCache {
     /// Evicted images awaiting `flush_evicted` (freeing needs `&mut App`,
     /// which eviction sites — async load completions — don't always have).
     pending_free: Vec<Arc<Image>>,
+    /// What each view drew in its latest render pass ([`DrawnImages`]):
+    /// what is on screen, never evicted.
+    drawn: HashMap<u64, HashSet<AttachmentKey>>,
 }
 
 impl ImageCache {
+    /// What a render pass sees for `source`; a loaded image counts as used.
+    fn snapshot(&mut self, source: &AttachmentKey) -> AttachmentSnapshot {
+        self.tick += 1;
+        let tick = self.tick;
+        match self.map.get_mut(source) {
+            Some(CacheEntry::Loaded {
+                image, last_used, ..
+            }) => {
+                *last_used = tick;
+                AttachmentSnapshot::Loaded(image.clone())
+            }
+            Some(CacheEntry::Error { attempts, at }) => AttachmentSnapshot::Error {
+                retry_in: retry_delay(attempts.saturating_sub(1)).saturating_sub(at.elapsed()),
+            },
+            Some(CacheEntry::Loading { .. }) => AttachmentSnapshot::Loading,
+            None => {
+                // Queued-send alias: the host materializes `pending://{id}/{name}`
+                // at `{uploads}/{id8}-{name}` and rewrites the persisted ref to
+                // that ABSOLUTE path — one the sender can't know up front (it's
+                // the host's disk). The id8 basename prefix IS derivable though,
+                // so the send seeds the bytes under an alias and this fallback
+                // resolves the rewritten ref instantly instead of blanking the
+                // thumbnail into a skeleton while the bytes round-trip
+                // (2026-08-19 "photo disappears after it finishes sending").
+                if let Some(image) = source
+                    .raster_mime
+                    .is_none()
+                    .then(|| upload_alias_id8(&source.path))
+                    .flatten()
+                    .and_then(|id8| match self.map.get(&alias_key(&source.device, &id8)) {
+                        Some(CacheEntry::Loaded { image, .. }) => Some(image.clone()),
+                        _ => None,
+                    })
+                {
+                    self.insert_loaded(key(&source.device, &source.path), image.clone());
+                    return AttachmentSnapshot::Loaded(image);
+                }
+                AttachmentSnapshot::Loading
+            }
+        }
+    }
+
+    /// Claim the load for `source` (see [`begin_load_for`]).
+    fn claim(&mut self, source: &AttachmentKey) -> bool {
+        match self.map.entry(source.clone()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(CacheEntry::Loading { attempts: 0 });
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => match o.get() {
+                CacheEntry::Error { attempts, at }
+                    if at.elapsed() >= retry_delay(attempts.saturating_sub(1)) =>
+                {
+                    let attempts = *attempts;
+                    o.insert(CacheEntry::Loading { attempts });
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// `view` starts a render pass: what it drew in the last one may be off
+    /// screen now.
+    fn begin_pass(&mut self, view: u64) {
+        if let Some(drawn) = self.drawn.get_mut(&view) {
+            drawn.clear();
+        }
+    }
+
+    /// [`Self::snapshot`] for an image `view` draws in this pass, loaded or
+    /// with its placeholder while it loads: either way it is on screen, so a
+    /// read landing for it is kept too.
+    fn draw(&mut self, view: u64, source: &AttachmentKey) -> AttachmentSnapshot {
+        let drawn = self.drawn.entry(view).or_default();
+        if !drawn.contains(source) {
+            drawn.insert(source.clone());
+        }
+        self.snapshot(source)
+    }
+
+    fn is_drawn(&self, key: &AttachmentKey) -> bool {
+        self.drawn.values().any(|drawn| drawn.contains(key))
+    }
+
     fn insert_loaded(&mut self, key: AttachmentKey, image: CachedAttachmentImage) {
         // Generated rasters are normalized to PNG; account for their decoded
         // CPU/GPU copies as well as encoded bytes in the existing cache budget.
@@ -975,7 +1067,9 @@ impl ImageCache {
         }
         let shielded = protected().lock().unwrap().clone();
         // Separate budgets prevent protected legacy attachments from repeatedly
-        // evicting visible generated previews, or vice versa.
+        // evicting visible generated previews, or vice versa. Images a view
+        // draws are never taken: when they don't fit together, evicting one
+        // reloaded it, and its landing evicted the next — forever.
         while (if generated {
             self.generated_bytes
         } else {
@@ -988,6 +1082,7 @@ impl ImageCache {
                 .filter(|(k, _)| {
                     **k != key
                         && k.raster_mime.is_some() == generated
+                        && !self.is_drawn(k)
                         && (k.raster_mime.is_some()
                             || !shielded.contains(&(k.device.clone(), k.path.clone())))
                 })
@@ -1039,47 +1134,58 @@ pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
 }
 
 pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnapshot {
-    let (device_id, path) = (source.device.as_str(), source.path.as_str());
-    let mut cache = cache().lock().unwrap();
-    let tick = {
-        cache.tick += 1;
-        cache.tick
-    };
-    match cache.map.get_mut(source) {
-        Some(CacheEntry::Loaded {
-            image, last_used, ..
-        }) => {
-            *last_used = tick;
-            AttachmentSnapshot::Loaded(image.clone())
+    cache().lock().unwrap().snapshot(source)
+}
+
+/// What one view (a transcript) draws from the cache, pass by pass: until
+/// its next render pass begins, nothing it drew is evicted. The images on
+/// screen together may exceed the budget; only images off screen are bounded
+/// by it, as with tool previews (`tool_images.rs`). Evicting visible images
+/// reloaded four screenshots on screen in a loop (each ~22 MB as a 2048 px
+/// preview; the budget holds three), every landed read evicting another. A
+/// settled transcript reuses its scene without rendering, so what it drew
+/// stays drawn until it renders again. Clones share the record; dropping the
+/// last one forgets it.
+#[derive(Clone, Default)]
+pub(crate) struct DrawnImages(Rc<ViewId>);
+
+struct ViewId(u64);
+
+impl Default for ViewId {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Drop for ViewId {
+    fn drop(&mut self) {
+        if let Ok(mut cache) = cache().lock() {
+            cache.drawn.remove(&self.0);
         }
-        Some(CacheEntry::Error { attempts, at }) => AttachmentSnapshot::Error {
-            retry_in: retry_delay(attempts.saturating_sub(1)).saturating_sub(at.elapsed()),
-        },
-        Some(CacheEntry::Loading { .. }) => AttachmentSnapshot::Loading,
-        None => {
-            // Queued-send alias: the host materializes `pending://{id}/{name}`
-            // at `{uploads}/{id8}-{name}` and rewrites the persisted ref to
-            // that ABSOLUTE path — one the sender can't know up front (it's
-            // the host's disk). The id8 basename prefix IS derivable though,
-            // so the send seeds the bytes under an alias and this fallback
-            // resolves the rewritten ref instantly instead of blanking the
-            // thumbnail into a skeleton while the bytes round-trip
-            // (2026-08-19 "photo disappears after it finishes sending").
-            if let Some(image) = source
-                .raster_mime
-                .is_none()
-                .then(|| upload_alias_id8(path))
-                .flatten()
-                .and_then(|id8| match cache.map.get(&alias_key(device_id, &id8)) {
-                    Some(CacheEntry::Loaded { image, .. }) => Some(image.clone()),
-                    _ => None,
-                })
-            {
-                cache.insert_loaded(key(device_id, path), image.clone());
-                return AttachmentSnapshot::Loaded(image);
-            }
-            AttachmentSnapshot::Loading
-        }
+    }
+}
+
+impl DrawnImages {
+    /// A render pass begins: what the last one drew may be off screen now.
+    pub(crate) fn begin_pass(&self) {
+        cache().lock().unwrap().begin_pass(self.0.0);
+    }
+
+    /// [`attachment_snapshot_for`] for an image this pass draws (or holds the
+    /// place of while it loads).
+    pub(crate) fn snapshot(&self, source: &AttachmentKey) -> AttachmentSnapshot {
+        cache().lock().unwrap().draw(self.0.0, source)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn holds(&self, source: &AttachmentKey) -> bool {
+        cache()
+            .lock()
+            .unwrap()
+            .drawn
+            .get(&self.0.0)
+            .is_some_and(|drawn| drawn.contains(source))
     }
 }
 
@@ -1126,24 +1232,7 @@ pub fn begin_load(device_id: &str, path: &str) -> bool {
 }
 
 pub(crate) fn begin_load_for(source: &AttachmentKey) -> bool {
-    let mut cache = cache().lock().unwrap();
-    let entry = cache.map.entry(source.clone());
-    match entry {
-        std::collections::hash_map::Entry::Vacant(v) => {
-            v.insert(CacheEntry::Loading { attempts: 0 });
-            true
-        }
-        std::collections::hash_map::Entry::Occupied(mut o) => match o.get() {
-            CacheEntry::Error { attempts, at }
-                if at.elapsed() >= retry_delay(attempts.saturating_sub(1)) =>
-            {
-                let attempts = *attempts;
-                o.insert(CacheEntry::Loading { attempts });
-                true
-            }
-            _ => false,
-        },
-    }
+    cache().lock().unwrap().claim(source)
 }
 
 /// A cancelled view/task must release its claim so reopening can retry it.
@@ -1768,6 +1857,96 @@ mod generated_image_tests {
             "/99.png",
             Some("image/png")
         )));
+    }
+
+    /// Cache accounting reads only the IHDR: no pixels are allocated.
+    fn preview(width: u32, height: u32) -> CachedAttachmentImage {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        CachedAttachmentImage {
+            name: "shot.png".into(),
+            image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+        }
+    }
+
+    /// One render pass of `view` over the images `on_screen`, then the reads
+    /// it started landing before the next pass. Returns how many it started.
+    fn pass(cache: &mut ImageCache, view: u64, on_screen: &[AttachmentKey]) -> usize {
+        cache.begin_pass(view);
+        let claimed: Vec<_> = on_screen
+            .iter()
+            .filter(|key| {
+                !matches!(cache.draw(view, key), AttachmentSnapshot::Loaded(_)) && cache.claim(key)
+            })
+            .cloned()
+            .collect();
+        for key in &claimed {
+            // A 3120×2054 screenshot's 2048 px preview: ~22 MB, three per budget.
+            cache.insert_loaded(key.clone(), preview(2048, 1348));
+        }
+        cache.pending_free.clear();
+        claimed.len()
+    }
+
+    #[test]
+    fn images_on_screen_together_are_read_once_however_large() {
+        let shots: Vec<_> = (0..6)
+            .map(|i| {
+                AttachmentKey::new(
+                    "screens",
+                    &format!("/uploads/shot{i}-image.png"),
+                    Some("image/png"),
+                )
+            })
+            .collect();
+        let mut cache = ImageCache::default();
+        // A reply's six screenshots, four on screen: they don't fit the
+        // budget together, and none evicts another.
+        let reads: usize = (0..8).map(|_| pass(&mut cache, 1, &shots[..4])).sum();
+        assert_eq!(reads, 4, "each image on screen is read once");
+        assert!(cache.generated_bytes > IMAGE_CACHE_BUDGET_BYTES);
+        // Scrolled on: the two left behind make room, oldest first.
+        let reads: usize = (0..8).map(|_| pass(&mut cache, 1, &shots[2..])).sum();
+        assert_eq!(reads, 2);
+        assert!(!cache.map.contains_key(&shots[0]) && !cache.map.contains_key(&shots[1]));
+        // What another view shows stays while this one shows something else.
+        let reads: usize = (0..8)
+            .map(|_| pass(&mut cache, 2, &shots[..1]) + pass(&mut cache, 1, &shots[1..2]))
+            .sum();
+        assert_eq!(reads, 2);
+        assert!(cache.map.contains_key(&shots[0]) && cache.map.contains_key(&shots[1]));
+        // Nothing drawn any more: the next read brings the cache back within
+        // its budget.
+        cache.begin_pass(1);
+        cache.begin_pass(2);
+        cache.insert_loaded(
+            AttachmentKey::new("screens", "/uploads/next-image.png", Some("image/png")),
+            preview(2048, 1348),
+        );
+        assert!(cache.generated_bytes <= IMAGE_CACHE_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn a_view_holds_what_it_drew_until_its_next_pass() {
+        let key = AttachmentKey::new(
+            "drawn-images-owner",
+            "/uploads/held-image.png",
+            Some("image/png"),
+        );
+        let (one, two) = (DrawnImages::default(), DrawnImages::default());
+        assert!(matches!(one.snapshot(&key), AttachmentSnapshot::Loading));
+        assert!(one.holds(&key) && !two.holds(&key));
+        let shared = one.clone();
+        one.begin_pass();
+        assert!(!shared.holds(&key), "clones share one record");
+        two.snapshot(&key);
+        assert!(cache().lock().unwrap().is_drawn(&key));
+        drop(two);
+        assert!(
+            !cache().lock().unwrap().is_drawn(&key),
+            "a dropped view holds nothing"
+        );
     }
 
     #[test]

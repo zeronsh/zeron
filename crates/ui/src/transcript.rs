@@ -3515,6 +3515,9 @@ pub struct Transcript {
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
+    /// The cached images this transcript's latest render pass drew (rows and
+    /// reply Markdown alike): none of them is evicted before the next pass.
+    drawn_images: crate::attachments::DrawnImages,
     /// Local images replies name in Markdown: the open chat, the reads its
     /// rows ask for while laying out, and the rows each image shows in.
     reply_images: Rc<RefCell<crate::reply_images::ReplyImages>>,
@@ -3826,6 +3829,7 @@ impl Transcript {
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
             attachment_loads: HashMap::new(),
+            drawn_images: Default::default(),
             reply_images: Rc::default(),
             reply_image_loads: HashMap::new(),
             visuals: HashMap::new(),
@@ -5893,12 +5897,11 @@ impl Transcript {
         expected_raster_mime: Option<&str>,
         cx: &mut Context<Self>,
     ) -> crate::attachments::AttachmentSnapshot {
-        use crate::attachments::{
-            AttachmentKey, AttachmentSnapshot, attachment_snapshot_for, begin_load_for,
-        };
+        use crate::attachments::{AttachmentKey, AttachmentSnapshot, begin_load_for};
         for dev in device_ids {
-            if let AttachmentSnapshot::Loaded(image) =
-                attachment_snapshot_for(&AttachmentKey::new(dev, path, expected_raster_mime))
+            if let AttachmentSnapshot::Loaded(image) = self
+                .drawn_images
+                .snapshot(&AttachmentKey::new(dev, path, expected_raster_mime))
             {
                 return AttachmentSnapshot::Loaded(image);
             }
@@ -5914,7 +5917,10 @@ impl Transcript {
                     cx,
                 );
             }
-            match attachment_snapshot_for(&AttachmentKey::new(dev, path, expected_raster_mime)) {
+            match self
+                .drawn_images
+                .snapshot(&AttachmentKey::new(dev, path, expected_raster_mime))
+            {
                 AttachmentSnapshot::Loaded(image) => return AttachmentSnapshot::Loaded(image),
                 AttachmentSnapshot::Loading => {
                     // Generated assets try the owner first, falling back only
@@ -6927,6 +6933,7 @@ impl Transcript {
         self.reply_images.borrow_mut().show(self.reply_chat(cx));
         let cache = self.diagrams.clone();
         let images = self.reply_images.clone();
+        let drawn = self.drawn_images.clone();
         let owner = cx.weak_entity();
         let viewer = owner.clone();
         let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
@@ -6934,7 +6941,7 @@ impl Transcript {
                 use crate::reply_images::{ReplyImage, frame, sized};
                 // `{row}-image-{block}-{run}`: the row to remeasure on landing.
                 let row = SharedString::from(id.rsplit_once("-image-")?.0.to_owned());
-                let element = match images.borrow_mut().lookup(&image.source, row)? {
+                let element = match images.borrow_mut().lookup(&image.source, row, &drawn)? {
                     ReplyImage::Loaded(loaded, request) => {
                         let (open, menu) = (viewer.clone(), viewer.clone());
                         sized(frame(id), &loaded.image, theme)
@@ -11247,6 +11254,8 @@ impl Render for Transcript {
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
+        // The rows this pass lays out draw their images again.
+        self.drawn_images.begin_pass();
         let compact_mode = crate::settings::transcript_compact_mode(cx);
         if self.compact_mode != compact_mode {
             self.compact_mode = compact_mode;
@@ -13638,6 +13647,70 @@ mod tests {
                 assert!(this.protected_attachment_keys(cx).is_empty());
                 this.refresh_protected_attachments(cx);
             });
+        });
+    }
+
+    /// What a render pass draws stays pinned in the image cache until the
+    /// next pass, which pins only what it draws in turn.
+    #[gpui::test]
+    fn render_passes_hold_the_images_they_draw(cx: &mut gpui::TestAppContext) {
+        use crate::attachments::{AttachmentKey, store_loaded_for};
+        struct Root(Entity<Transcript>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        let shown = "/fixture/drawn-pass/shown-image.png";
+        let key = AttachmentKey::new("dev", shown, Some("image/png"));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(64, 48)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        store_loaded_for(
+            &key,
+            "shown.png".into(),
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                png.into_inner(),
+            )),
+        );
+        let image = MessagePart::Image {
+            id: "i:shown".into(),
+            path: shown.into(),
+            name: "shown.png".into(),
+            mime_type: "image/png".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let show = |parts: Vec<MessagePart>, cx: &mut gpui::VisualTestContext| {
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![assistant("reply", MessageStatus::Complete, parts)];
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| {
+                this.rail_enabled = false;
+                this.sync(cx);
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear());
+        };
+        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
+        show(vec![text_part("t", "Here it is."), image.clone()], cx);
+        transcript.read_with(cx, |this, _| {
+            assert!(this.drawn_images.holds(&key), "the row drew the image");
+        });
+        show(vec![text_part("t", "Nothing to see.")], cx);
+        transcript.read_with(cx, |this, _| {
+            assert!(!this.drawn_images.holds(&key), "no row draws it now");
         });
     }
 

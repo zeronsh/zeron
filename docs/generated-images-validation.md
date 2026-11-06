@@ -14,7 +14,10 @@ same bounded preview; the original file remains on the host. Generated cache
 entries and in-flight loads are keyed by device, path and declared MIME policy,
 separately from generic attachments and upload aliases. Their LRU budget is
 64 MiB including encoded bytes and estimated CPU/GPU copies, independent of
-the legacy attachment budget. Generated history is never shielded from eviction.
+the legacy attachment budget. Generated history is never shielded from
+eviction, but what a transcript's latest render pass drew is: the images on
+screen together may exceed the budget (a 2048 px screenshot preview is ~22 MB,
+so it holds three), and evicting one of them reloaded them in a loop.
 The lightbox is shared with user
 attachments. Media bytes stay on the host; an offline host shows an unavailable
 placeholder and uses the existing 2–15 second retry ladder.
