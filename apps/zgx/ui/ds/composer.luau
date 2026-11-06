@@ -2362,20 +2362,30 @@ return ui.component(function(props: Props): Node
 		ui.column {
 			w_full = true,
 			shrink = 0,
-			overflow = "hidden",
-			rounded = "$zeron.composer.radius",
-			border = 1,
-			border_over = true,
-			border_color = "$zeron.composer.edge",
-			bg = function()
-				return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-			end,
-			backdrop_blur = function()
-				return if material.see_through() then 16 else 0
-			end,
-			shadow = function()
-				return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
-			end,
+			relative = true,
+			-- (The glass is a layer behind what's in it, not this column's own:
+			-- a backdrop blur on the column took in its children too, blurring
+			-- the draft and its controls.)
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				rounded = "$zeron.composer.radius",
+				border = 1,
+				border_color = "$zeron.composer.edge",
+				bg = function()
+					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+				end,
+				backdrop_blur = function()
+					return if material.see_through() then 16 else 0
+				end,
+				shadow = function()
+					return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
+				end,
+			},
 			trays,
 			ui.popover(m.popover(surface)),
 		},
