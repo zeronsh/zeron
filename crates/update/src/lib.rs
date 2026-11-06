@@ -48,9 +48,15 @@ pub mod transaction;
 pub use channel::Channel;
 pub use transaction::{UpdateReport, UpdateState};
 
-/// The version compiled into this binary (the workspace version).
+/// The version compiled into this binary: the workspace's, or a beta's
+/// (`ZERON_ENGINE_VERSION=0.2.137-beta.3` at build time). Betas of one release
+/// share a workspace version, and a running engine only knows a bundle replaced
+/// it by this being older than the bundle's.
 pub const fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    match option_env!("ZERON_ENGINE_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 static APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -2806,6 +2812,23 @@ mod tests {
         assert_eq!(restarts.get(), 1);
         superseded.poll_installed("0.2.2", "0.2.0", || true, restart);
         assert_eq!(restarts.get(), 2);
+    }
+
+    #[test]
+    fn an_engine_restarts_into_the_next_beta_and_the_stable_it_becomes() {
+        let attempts = |installed: &str, running: &str| {
+            let restarts = std::cell::Cell::new(0);
+            SupersededRestart::default().poll_installed(installed, running, || true, || {
+                restarts.set(restarts.get() + 1);
+                Ok(())
+            });
+            restarts.get()
+        };
+        assert_eq!(attempts("0.2.137-beta.19", "0.2.137-beta.18"), 1);
+        assert_eq!(attempts("0.2.137", "0.2.137-beta.19"), 1);
+        assert_eq!(attempts("0.2.137-beta.18", "0.2.137-beta.18"), 0);
+        // (What a numeric version on both would miss.)
+        assert_eq!(attempts("0.2.137", "0.2.137"), 0);
     }
 
     #[test]
