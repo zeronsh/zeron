@@ -35,6 +35,22 @@ function M.glass_theme(): { [string]: any }?
 	return if thicker then { background = thicker } else nil
 end
 
+-- What a theme wears where nothing shows through, for one whose glass tones
+-- would all but vanish on its solid window (`zeron.solid`): the page's card
+-- and its edge, and muted text. Nil over glass, and for a theme that doesn't
+-- name its own.
+function M.solid_theme(): { [string]: any }?
+	if M.see_through() or ui.theme.get("zeron.solid.card") == nil then
+		return nil
+	end
+	return {
+		["zeron.inset.bg"] = "$zeron.solid.card",
+		["zeron.inset.edge"] = "$zeron.solid.edge",
+		["text.secondary"] = "$zeron.solid.secondary",
+		["text.tertiary"] = "$zeron.solid.tertiary",
+	}
+end
+
 -- Windows' Transparency effects off (zgx reports macOS's alone, as
 -- `ui.prefers.reduced_transparency`). (Shared with plugins, which borrow
 -- the design system, to read; a host that doesn't share it, none.)

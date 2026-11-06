@@ -1817,15 +1817,21 @@ return ui.component(function(props: Props): Node
 		shadow = function()
 			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
 		end,
-		on_file_hover = function(inside: boolean)
-			dropping:set(inside)
-		end,
-		on_file_drop = function(files: { any })
-			dropping:set(false)
-			if props.on_files then
-				props.on_files(files)
+		-- (Neither `on_files` nor its overlay: files are what's around it to
+		-- take, the drop going on up to it.)
+		on_file_hover = if props.on_files or props.drop_overlay ~= false
+			then function(inside: boolean)
+				dropping:set(inside)
 			end
-		end,
+			else nil,
+		on_file_drop = if props.on_files or props.drop_overlay ~= false
+			then function(files: { any })
+				dropping:set(false)
+				if props.on_files then
+					props.on_files(files)
+				end
+			end
+			else nil,
 		-- A press anywhere but a control goes to the draft.
 		ui.div {
 			absolute = true,

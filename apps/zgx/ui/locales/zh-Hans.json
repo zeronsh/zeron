@@ -2447,12 +2447,9 @@
       "not_applied_body": "它以相同版本重新启动了。你可以通过更新按钮重试。",
       "offline": "离线",
       "on_that_device": "请在该设备上更新",
-      "plan_agents": "{n, plural, other {更新 # 个智能体。每个都会等当前运行结束}}",
+      "plan_agents": "智能体会等正在运行的任务完成",
       "plan_chats": "{n, plural, other {将停止 # 个运行中的聊天。重新启动后会继续}}",
       "plan_here": "为此设备下载 Zeron，然后请你重新启动",
-      "plan_skip": "跳过 {device} 上的 {name}：{why}",
-      "plan_skips_more": "{n, plural, other {还有 # 项}}",
-      "plan_zerons": "{n, plural, other {更新另外 # 台设备上的 Zeron}}",
       "preparing": "正在准备…",
       "ready": "{version} 已就绪。重新启动以完成",
       "restart": "重新启动",
@@ -2469,7 +2466,17 @@
       "verifying": "正在验证…",
       "version": "版本 {version} 可用",
       "view_steps": "查看步骤",
-      "waiting": "正在等待当前运行结束"
+      "waiting": "正在等待当前运行结束",
+      "all_title": "全部更新？",
+      "all_count": "{n, plural, other {# 项更新}}",
+      "all_count_devices": "{devices} 台设备上的 {n, plural, other {# 项更新}}",
+      "not_included": "不包括",
+      "skip": "跳过",
+      "skip_all": "全部跳过",
+      "skipped": "{n, plural, other {已跳过 # 项更新}}",
+      "skipped_body": "有更新的版本时会再次显示",
+      "undo": "撤销",
+      "skip_hint": "有新版本之前不再显示"
     }
   },
   "onboarding": {

@@ -35,9 +35,39 @@ use crate::engine::{self, rpc::{Rpc, Watch}};
 /// How long a Zeron being updated stays so without word from it: its engine
 /// restarts, and says its new version once it's back.
 const ZERON_UPDATE_PATIENCE: Duration = Duration::from_secs(180);
+/// How long one that said it took the update stays so while it says nothing
+/// more: its engine may take 10 minutes and a minute per GB of databases to
+/// try the new version before it settles.
+const ZERON_TRIAL_PATIENCE: Duration = Duration::from_secs(30 * 60);
 const RETRY_MOST_SECS: u64 = 30;
 /// A Zeron asked to update that hasn't come back on a new version.
 const NOT_APPLIED: &str = "It didn't come back on the new version";
+/// One whose new version failed, when it doesn't say why.
+const WENT_BACK: &str = "The new version didn't start, so it went back";
+/// One that never got as far as the new version, when it doesn't say why.
+const DIDNT_UPDATE: &str = "It couldn't update";
+
+/// The latest update asked of a Zeron, as `UpdateStatus` reports it. (From
+/// an engine too old to report, nothing: its version is all there is to go by.)
+#[derive(Clone, PartialEq)]
+struct Report {
+    id: String,
+    from: String,
+    state: String,
+    reason: Option<String>,
+}
+
+impl Report {
+    fn of(item: &Json) -> Option<Report> {
+        let report = &item["update"];
+        Some(Report {
+            id: report["id"].as_str()?.to_owned(),
+            from: report["fromVersion"].as_str().unwrap_or_default().to_owned(),
+            state: report["state"].as_str().unwrap_or_default().to_owned(),
+            reason: report["reason"].as_str().filter(|r| !r.trim().is_empty()).map(Into::into),
+        })
+    }
+}
 
 /// Zeron on another device, as `UpdateStatus` says.
 #[derive(Clone, Default, PartialEq)]
@@ -50,6 +80,7 @@ struct Zeron {
     can_apply: Option<bool>,
     why_not: Option<String>,
     manual_command: Option<String>,
+    report: Option<Report>,
 }
 
 #[derive(Default)]
@@ -61,9 +92,13 @@ struct Device {
     online: bool,
     connected: bool,
     statuses: Vec<HarnessUpdateStatus>,
+    /// Why an agent's update waits, in the engine's words, by harness.
+    wait_reasons: BTreeMap<String, String>,
     zeron: Option<Zeron>,
     /// The version it was on as its Zeron was asked to update.
     updating_from: Option<String>,
+    /// The update its Zeron said it took, to hear how that one went.
+    update_id: Option<String>,
     /// Why its Zeron didn't update.
     zeron_error: Option<String>,
     retries: u64,
@@ -195,9 +230,11 @@ impl Updates {
                 self.addressed(id, json!({})),
                 move |item| {
                     let Some(me) = weak.upgrade() else { return };
+                    let wait_reasons = wait_reasons_of(&item);
                     let Ok(statuses) = serde_json::from_value::<Vec<HarnessUpdateStatus>>(item) else { return };
                     if let Some(d) = me.devices.borrow_mut().get_mut(&device) {
                         d.statuses = statuses;
+                        d.wait_reasons = wait_reasons;
                         d.connected = true;
                         d.retries = 0;
                     }
@@ -212,12 +249,24 @@ impl Updates {
         }
         // (This Mac's Zeron is the app's own: `about`.)
         if self.here.borrow().as_deref() != Some(id) {
+            // (Its stream ends as its engine restarts to update: watched again
+            // from then on, or the new version would never be heard.)
             let (weak, device) = (Rc::downgrade(self), id.to_owned());
-            watches.push(rpc.watch("UpdateStatus", self.addressed(id, json!({})), move |item| {
-                if let Some(me) = weak.upgrade() {
-                    me.heard_zeron(&device, &item);
-                }
-            }));
+            let (ended, gone) = (weak.clone(), device.clone());
+            watches.push(rpc.watch_ending(
+                "UpdateStatus",
+                self.addressed(id, json!({})),
+                move |item| {
+                    if let Some(me) = weak.upgrade() {
+                        me.heard_zeron(&device, &item);
+                    }
+                },
+                move |why| {
+                    if let Some(me) = ended.upgrade() {
+                        me.ended(&gone, connection, &why);
+                    }
+                },
+            ));
         }
         if let Some(d) = self.devices.borrow_mut().get_mut(id) {
             d.watches = watches;
@@ -251,20 +300,19 @@ impl Updates {
     fn heard_zeron(&self, id: &str, item: &Json) {
         let usable = item["held"].is_null() && !item["switch"].as_bool().unwrap_or(false);
         let zeron = Zeron {
-            current: item["currentVersion"].as_str().unwrap_or_default().to_owned(),
+            // (A beta's app, which isn't its engine: `currentVersion` is the engine's.)
+            current: item["appVersion"].as_str().or(item["currentVersion"].as_str()).unwrap_or_default().to_owned(),
             latest: item["latestVersion"].as_str().map(Into::into),
             available: usable && item["updateAvailable"].as_bool().unwrap_or(false),
             can_apply: item["canApplyRemotely"].as_bool(),
             why_not: item["cannotApplyReason"].as_str().map(Into::into),
             manual_command: item["manualCommand"].as_str().map(Into::into),
+            report: Report::of(item),
         };
         if let Some(d) = self.devices.borrow_mut().get_mut(id) {
-            if d.updating_from.as_deref().is_some_and(|from| from != zeron.current) {
-                d.updating_from = None;
-                d.zeron_error = None;
-            }
             d.zeron = Some(zeron);
             d.connected = true;
+            d.settle();
         }
         self.publish();
     }
@@ -297,21 +345,37 @@ impl Updates {
         };
         self.publish();
         let params = self.addressed(&device, json!({}));
-        if let Err(error) = engine::get().call("ApplyUpdate", params).await {
-            let error = error.to_string();
-            eprintln!("zeron-zgx: updates: Zeron on {device}: {error}");
-            if let Some(d) = self.devices.borrow_mut().get_mut(&device) {
-                d.updating_from = None;
-                d.zeron_error = Some(error.clone());
+        let answer = match engine::get().call("ApplyUpdate", params).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                let error = error.to_string();
+                eprintln!("zeron-zgx: updates: Zeron on {device}: {error}");
+                if let Some(d) = self.devices.borrow_mut().get_mut(&device) {
+                    d.updating_from = None;
+                    d.update_id = None;
+                    d.zeron_error = Some(error.clone());
+                }
+                self.publish();
+                return Err(error);
             }
-            self.publish();
-            return Err(error);
+        };
+        if let Some(d) = self.devices.borrow_mut().get_mut(&device) {
+            if let Some(id) = answer["updateId"].as_str() {
+                d.update_id = Some(id.to_owned());
+            }
+            // (How it went may have come first.)
+            d.settle();
         }
+        self.publish();
         // (Its engine restarts now: the new version comes as it's back. One
         // that never comes shows its update again.)
         let me = self.clone();
         engine::get().spawn(async move {
             zgx::timer::sleep(ZERON_UPDATE_PATIENCE).await;
+            let tracked = me.devices.borrow().get(&device).is_some_and(|d| d.update_id.is_some());
+            if tracked {
+                zgx::timer::sleep(ZERON_TRIAL_PATIENCE.saturating_sub(ZERON_UPDATE_PATIENCE)).await;
+            }
             let late = me
                 .devices
                 .borrow_mut()
@@ -319,6 +383,7 @@ impl Updates {
                 .filter(|d| d.updating_from.as_deref() == Some(from.as_str()))
                 .map(|d| {
                     d.updating_from = None;
+                    d.update_id = None;
                     d.zeron_error = Some(NOT_APPLIED.into());
                 })
                 .is_some();
@@ -355,6 +420,56 @@ impl Updates {
         }
         Value::record([("rows", Value::List(rows.into()))])
     }
+}
+
+impl Device {
+    /// What's known now of the update its Zeron was asked for. An engine that
+    /// reports says how it went, as reconnecting doesn't; an older one is
+    /// done once its version moves.
+    fn settle(&mut self) {
+        let Some(zeron) = &self.zeron else { return };
+        let report = zeron.report.as_ref();
+        // Under way, though not asked here or its answer never came (the app
+        // restarted, or the engine went before replying).
+        if self.update_id.is_none()
+            && let Some(report) = report.filter(|r| r.state == "inProgress")
+        {
+            self.update_id = Some(report.id.clone());
+            self.updating_from.get_or_insert_with(|| report.from.clone());
+            self.zeron_error = None;
+        }
+        let Some(id) = &self.update_id else {
+            if self.updating_from.as_deref().is_some_and(|from| from != zeron.current) {
+                self.updating_from = None;
+                self.zeron_error = None;
+            }
+            return;
+        };
+        let Some(report) = report.filter(|r| &r.id == id) else { return };
+        let error = match report.state.as_str() {
+            "updated" => None,
+            "rolledBack" => Some(report.reason.clone().unwrap_or_else(|| WENT_BACK.into())),
+            "failed" => Some(report.reason.clone().unwrap_or_else(|| DIDNT_UPDATE.into())),
+            // Under way, or a state this app doesn't know yet.
+            _ => return,
+        };
+        self.updating_from = None;
+        self.update_id = None;
+        self.zeron_error = error;
+    }
+}
+
+/// Why agents' updates wait, by harness, from `WatchHarnessUpdates`. (Absent
+/// from older engines, whose rows keep their own word.)
+fn wait_reasons_of(item: &Json) -> BTreeMap<String, String> {
+    item.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|status| {
+            let reason = status["waitReason"].as_str().filter(|r| !r.trim().is_empty())?;
+            Some((status["harness"].as_str()?.to_owned(), reason.to_owned()))
+        })
+        .collect()
 }
 
 fn method_of(action: &str) -> Option<&'static str> {
@@ -441,7 +556,8 @@ fn agent_row(id: &str, d: &Device, here: bool, status: &HarnessUpdateStatus) -> 
     if let Some(v) = &status.latest_version {
         fields.push(("latest", Value::from(v.as_str())));
     }
-    if let Some(message) = message_of(status) {
+    let waiting = (status.phase == Phase::WaitingForIdle).then(|| d.wait_reasons.get(&harness).cloned()).flatten();
+    if let Some(message) = waiting.or_else(|| message_of(status)) {
         fields.push(("message", Value::from(message.as_str())));
     }
     if let Some(action) = action_of(status) {
@@ -588,5 +704,124 @@ mod tests {
         assert!(!updates.devices.borrow()["m"].zeron.as_ref().unwrap().available);
         updates.heard_zeron("m", &json!({ "currentVersion": "1", "latestVersion": "2", "updateAvailable": true }));
         assert!(updates.devices.borrow()["m"].zeron.as_ref().unwrap().available);
+    }
+
+    fn asked(from: &str) -> Updates {
+        let updates = Updates::default();
+        let device = Device {
+            name: "metal".into(),
+            online: true,
+            connected: true,
+            updating_from: Some(from.into()),
+            update_id: Some("u1".into()),
+            ..Device::default()
+        };
+        updates.devices.borrow_mut().insert("m".into(), device);
+        updates
+    }
+
+    fn heard(updates: &Updates, current: &str, id: &str, state: &str, reason: Option<&str>) {
+        updates.heard_zeron(
+            "m",
+            &json!({ "currentVersion": current, "latestVersion": "2",
+                     "update": { "id": id, "fromVersion": "1", "targetVersion": "2", "state": state, "reason": reason } }),
+        );
+    }
+
+    #[test]
+    fn a_zeron_s_update_ends_as_its_engine_says_not_as_it_reconnects() {
+        let updates = asked("1");
+        let device = |f: &dyn Fn(&Device)| f(&updates.devices.borrow()["m"]);
+        // An older update's word says nothing of this one.
+        heard(&updates, "1", "older", "rolledBack", Some("old news"));
+        device(&|d| assert!(d.updating_from.is_some() && d.zeron_error.is_none()));
+        // Back from a restart, on the new version, but still on trial.
+        heard(&updates, "2", "u1", "inProgress", None);
+        device(&|d| assert!(d.updating_from.is_some()));
+        // A state this app doesn't know yet changes nothing.
+        heard(&updates, "2", "u1", "someNewState", None);
+        device(&|d| assert!(d.updating_from.is_some()));
+        heard(&updates, "2", "u1", "updated", None);
+        device(&|d| assert!(d.updating_from.is_none() && d.update_id.is_none() && d.zeron_error.is_none()));
+    }
+
+    #[test]
+    fn a_zeron_that_went_back_says_so_and_offers_it_again() {
+        let updates = asked("1");
+        heard(&updates, "1", "u1", "rolledBack", Some("The new version crashed"));
+        {
+            let devices = updates.devices.borrow();
+            assert_eq!(devices["m"].zeron_error.as_deref(), Some("The new version crashed"));
+            assert!(devices["m"].updating_from.is_none());
+        }
+        let mut devices = updates.devices.borrow_mut();
+        let d = devices.get_mut("m").unwrap();
+        d.zeron.as_mut().unwrap().can_apply = Some(true);
+        let row = zeron_row("m", d).unwrap();
+        assert_eq!(row.field("phase").map(text).as_deref(), Some("failed"));
+        assert_eq!(row.field("action").map(text).as_deref(), Some("retry"));
+        assert_eq!(row.field("message").map(text).as_deref(), Some("The new version crashed"));
+        drop(devices);
+        // Without a reason, plain words.
+        let updates = asked("1");
+        heard(&updates, "1", "u1", "failed", None);
+        assert_eq!(updates.devices.borrow()["m"].zeron_error.as_deref(), Some(DIDNT_UPDATE));
+    }
+
+    #[test]
+    fn an_update_under_way_is_picked_up_after_a_restart_of_this_app() {
+        let updates = Updates::default();
+        updates.devices.borrow_mut().insert("m".into(), Device::default());
+        heard(&updates, "1", "u9", "inProgress", None);
+        {
+            let devices = updates.devices.borrow();
+            assert_eq!(devices["m"].update_id.as_deref(), Some("u9"));
+            assert_eq!(devices["m"].updating_from.as_deref(), Some("1"));
+        }
+        heard(&updates, "1", "u9", "rolledBack", None);
+        assert_eq!(updates.devices.borrow()["m"].zeron_error.as_deref(), Some(WENT_BACK));
+        // An update settled long ago, heard fresh, isn't news.
+        let updates = Updates::default();
+        updates.devices.borrow_mut().insert("m".into(), Device::default());
+        heard(&updates, "1", "u0", "rolledBack", Some("old news"));
+        assert!(updates.devices.borrow()["m"].zeron_error.is_none());
+    }
+
+    #[test]
+    fn an_engine_too_old_to_report_is_done_when_its_version_moves() {
+        let updates = asked("1");
+        updates.devices.borrow_mut().get_mut("m").unwrap().update_id = None;
+        updates.heard_zeron("m", &json!({ "currentVersion": "1" }));
+        assert!(updates.devices.borrow()["m"].updating_from.is_some());
+        updates.heard_zeron("m", &json!({ "currentVersion": "2" }));
+        assert!(updates.devices.borrow()["m"].updating_from.is_none());
+    }
+
+    #[test]
+    fn a_beta_s_zeron_goes_by_its_app_version_not_its_engine_s() {
+        let updates = Updates::default();
+        updates.devices.borrow_mut().insert("m".into(), Device::default());
+        updates.heard_zeron("m", &json!({ "currentVersion": "0.2.136", "appVersion": "0.2.137-beta.17" }));
+        assert_eq!(updates.devices.borrow()["m"].zeron.as_ref().unwrap().current, "0.2.137-beta.17");
+        updates.heard_zeron("m", &json!({ "currentVersion": "0.2.136" }));
+        assert_eq!(updates.devices.borrow()["m"].zeron.as_ref().unwrap().current, "0.2.136");
+    }
+
+    #[test]
+    fn an_agent_waiting_says_why_in_the_engine_s_words() {
+        let item = json!([{ "harness": "codex", "phase": "waitingForIdle",
+                            "waitReason": "Waiting for running chats to finish." },
+                          { "harness": "grok", "phase": "available" }]);
+        let reasons = wait_reasons_of(&item);
+        assert_eq!(reasons.get("codex").map(String::as_str), Some("Waiting for running chats to finish."));
+        assert_eq!(reasons.len(), 1);
+        let mut d = Device { name: "metal".into(), wait_reasons: reasons, ..Device::default() };
+        let mut waiting = status("available", true);
+        waiting.phase = Phase::WaitingForIdle;
+        assert_eq!(agent_row("m", &d, false, &waiting).field("message").map(text).as_deref(),
+                   Some("Waiting for running chats to finish."));
+        // An older engine's: none, so the row keeps its own word.
+        d.wait_reasons.clear();
+        assert!(agent_row("m", &d, false, &waiting).field("message").is_none());
     }
 }

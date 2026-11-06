@@ -92,7 +92,16 @@
 		"control.height": 32,
 
 		"zeron": {
-			"window": "#f6f6f7",
+			"window": "#eeeef0",
+			// Where nothing shows through: the page a white card on that
+			// window, its edge a hairline you can see, and muted text about
+			// 7:1 and 4.5:1, where glass's tones fall under 3:1.
+			"solid": {
+				"card": "#ffffff",
+				"edge": "#00000024",
+				"secondary": "alpha({text.primary}, 0.74)",
+				"tertiary": "alpha({text.primary}, 0.62)"
+			},
 			// The title bar's controls' wash, shipping's (theme.rs
 			// `element_hover` hsla(0, 0, 0.10, 0.06), `element_active` 0.10),
 			// and its glyph solid: the secondary (0.64) over the window.

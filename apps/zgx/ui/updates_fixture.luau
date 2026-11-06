@@ -10,4 +10,5 @@ return ui.column {
 	items = "end",
 	p = "$space.3",
 	ui.show(Updates.shown, Updates.Button {}),
+	require("@ds/toast").Host {},
 }

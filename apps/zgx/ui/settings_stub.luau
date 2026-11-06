@@ -560,6 +560,8 @@ ui.command {
 			window = t["zeron.window"],
 			sans = t["font.sans"],
 			mono = t["font.mono"],
+			secondary = t["text.secondary"],
+			tertiary = t["text.tertiary"],
 		})
 	end,
 }
