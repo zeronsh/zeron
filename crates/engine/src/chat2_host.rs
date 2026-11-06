@@ -284,6 +284,18 @@ impl ChatDocSink for EngineChatSink {
                     return RelayImport::Unreadable;
                 }
             }
+            // Nobody else may be able to give this back: the room didn't store it,
+            // and the host may be gone by the time this device restarts.
+            if doc.doc().oplog_vv() != before {
+                match self.store.journal_chat_inbox(&self.chat_id, bytes) {
+                    Ok(ordinal) => {
+                        if let Some(handle) = self.handle.upgrade() {
+                            handle.note_journaled(ordinal);
+                        }
+                    }
+                    Err(err) => tracing::warn!(chat = %self.chat_id, %err, "chat relay: journal write failed"),
+                }
+            }
             // No row seq here: the save covers the content at the same cursor.
             self.persistence.dirty(false);
             // A host that's storing must store this too, or its next row parks on

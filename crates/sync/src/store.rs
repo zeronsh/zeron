@@ -74,6 +74,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // Updates that came by relay, until a saved snapshot holds them. Nothing on
+    // the edge can give these back to a device that crashes before saving.
+    "CREATE TABLE chat_inbox (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id TEXT NOT NULL,
+        bytes BLOB NOT NULL
+     ) STRICT;
+     CREATE INDEX chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -219,6 +227,50 @@ impl DocsStore {
         Ok(stmt
             .query_map(params![doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?)
+    }
+
+    /// Keep an update that arrived by relay until a saved snapshot covers it.
+    /// Returns its position, for [`Self::retire_chat_inbox`].
+    pub fn journal_chat_inbox(&self, doc_id: &str, bytes: &[u8]) -> Result<i64, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO chat_inbox(doc_id,bytes) VALUES (?1,?2)",
+                params![doc_id, bytes],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// What a crash left unsaved, oldest first, with the newest position.
+    pub fn pending_chat_inbox(&self, doc_id: &str) -> Result<(Vec<Vec<u8>>, i64), StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut stmt =
+                conn.prepare("SELECT ordinal,bytes FROM chat_inbox WHERE doc_id=?1 ORDER BY ordinal")?;
+            let rows = stmt.query_map(params![doc_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut updates = Vec::new();
+            let mut newest = 0;
+            for row in rows {
+                let (ordinal, bytes) = row?;
+                newest = ordinal;
+                updates.push(bytes);
+            }
+            Ok((updates, newest))
+        })
+    }
+
+    /// A saved snapshot holds everything up to `through`.
+    pub fn retire_chat_inbox(&self, doc_id: &str, through: i64) -> Result<(), StoreError> {
+        store_blocking(|| {
+            self.conn().execute(
+                "DELETE FROM chat_inbox WHERE doc_id=?1 AND ordinal<=?2",
+                params![doc_id, through],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn acknowledge_chat_update(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {

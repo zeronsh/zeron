@@ -1744,6 +1744,14 @@ impl DocHost {
                     .import(&bytes)
                     .map_err(|e| EngineError::Other(e.to_string()))?;
             }
+            // The same for what a crash left unsaved of what came by relay. A row
+            // this build can't read is skipped, as a stored row would be.
+            let (received, _) = self.inner.store.pending_chat_inbox(chat_id)?;
+            for bytes in received {
+                if let Err(err) = doc.doc().import(&bytes) {
+                    tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a kept update");
+                }
+            }
         }
         let doc = Arc::new(doc);
         let persistence = (room_gen >= 2 && !deferred_adoption).then(|| {
@@ -2527,8 +2535,9 @@ impl DocHost {
                             *client_slot = Some(client);
                         }
                         tracing::info!(chat = %chat, "chat2 client admitted (catch-up pending)");
-                        if let Some(state) = relay_state.clone() {
-                            host.spawn_relay_maintenance(&handle, state, cancel.clone());
+                        match relay_state.clone() {
+                            Some(state) => host.spawn_relay_maintenance(&handle, state, cancel.clone()),
+                            None => host.spawn_rollback_heal(&handle, cancel.clone()),
                         }
                         // A missed event, failed POST or actor restart must not
                         // forget rejected operations. Any author can checkpoint
@@ -3154,9 +3163,11 @@ impl DocHost {
             None => return,
         };
         let chat_id = handle.chat_id.clone();
+        // A checkpoint can be all the room holds. A doc that hasn't caught up may
+        // have less than what it would replace.
         if relay_era
             && let Some(state) = &relay_state
-            && !state.checkpoint_may_run()
+            && (!state.checkpoint_may_run() || !state.caught_up())
         {
             return;
         }
@@ -3178,6 +3189,7 @@ impl DocHost {
         let mode_epoch = relay_state.as_ref().map_or(0, |state| state.mode_epoch());
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
+        let relay_host = self.clone();
         let reset = ResetFlag(in_flight);
         self.spawn_worker(async move {
             let _reset = reset;
@@ -3202,11 +3214,12 @@ impl DocHost {
                 return;
             };
             let url = format!(
-                "{}/chat2/{}/checkpoint?seqCovered={}{}",
+                "{}/chat2/{}/checkpoint?seqCovered={}{}{}",
                 edge.url.trim_end_matches('/'),
                 chat_id,
                 seq_covered,
-                if at_floor { "&atFloor=1" } else { "" }
+                if at_floor { "&atFloor=1" } else { "" },
+                if reason == relay::HEAL_REASON { "&heal=1" } else { "" }
             );
             let Ok(_permit) = zeron_sync::budget::shared().http(zeron_sync::budget::Priority::Background).await else {
                 return;
@@ -3232,6 +3245,9 @@ impl DocHost {
                     {
                         state.checkpoint_landed(version, reason, mode_epoch);
                     }
+                    if relay_state.is_none() && reason == relay::HEAL_REASON {
+                        relay_host.finish_rollback_heal(&chat_id);
+                    }
                     for batch_id in &covered_rejections {
                         if let Err(err) = publication_store.acknowledge_chat_update(&chat_id,batch_id) {
                             tracing::warn!(%err, "chat2: checkpoint obligation retirement failed; will retry");
@@ -3246,10 +3262,12 @@ impl DocHost {
                     }
                 }
                 Ok(res) => {
-                    tracing::warn!(chat = %chat_id, status = res.status().as_u16(),
-                        "chat2 checkpoint rejected");
+                    let status = res.status().as_u16();
+                    let body = res.text().await.unwrap_or_default();
+                    tracing::warn!(chat = %chat_id, status, %body, "chat2 checkpoint rejected");
                     if let Some(state) = &relay_state {
                         state.checkpoint_failed();
+                        state.checkpoint_refused(status, &body, weak_note.upgrade().as_deref());
                     }
                 }
                 Err(err) => {
@@ -3353,7 +3371,7 @@ impl DocHost {
         if handle.messages_tx.receiver_count() > 0 || handle.queue_tx.receiver_count() > 0 {
             return true;
         }
-        if !handle.relay_lets_socket_close() {
+        if !handle.relay_lets_socket_close() || handle.relay_has_links() {
             return true;
         }
         // The handle itself holds one doc ref; more means a live writer.

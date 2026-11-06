@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -116,6 +116,9 @@ struct Counters {
     queue_reads_done: AtomicU64,
     /// When a peer's frame last arrived, in ms since this task began.
     last_inbound_ms: AtomicU64,
+    /// What the next hello tells the room.
+    knows_relay_gen: AtomicBool,
+    relaying: AtomicBool,
     started: Option<std::time::Instant>,
 }
 
@@ -190,6 +193,19 @@ impl RelayHandle {
 
     pub fn set_policy(&self, policy: RelayPolicy) {
         let _ = self.tx.send(Input::Policy(policy));
+    }
+
+    /// What this device knows about the chat, for the next hello.
+    pub fn set_hello(&self, knows_relay_gen: bool, relaying: bool) {
+        self.counters.knows_relay_gen.store(knows_relay_gen, Relaxed);
+        self.counters.relaying.store(relaying, Relaxed);
+    }
+
+    pub(crate) fn hello(&self) -> (Option<u8>, Option<u8>) {
+        (
+            self.counters.knows_relay_gen.load(Relaxed).then_some(3),
+            self.counters.relaying.load(Relaxed).then_some(1),
+        )
     }
 
     /// Which peer to ask first when several have what this device lacks.
@@ -367,6 +383,12 @@ impl Driver {
                 self.links.remove(&peer);
                 self.counters.links.store(self.links.len() as u64, Relaxed);
                 let _ = self.events.send(RelayEvent::LinksChanged);
+                // A round over that link won't finish. Waiting out its stall would
+                // turn a dead link into a minute's delay.
+                if self.round.as_ref().is_some_and(|r| r.peer == peer) {
+                    self.round = None;
+                    self.want = Some((peer, now));
+                }
                 // Frames that went down the dead link were kept off the room.
                 self.announce(true);
             }
@@ -378,7 +400,14 @@ impl Driver {
                 self.exporting.remove(&to);
                 self.exported(to, bytes);
             }
-            Input::Policy(policy) => self.policy = policy,
+            Input::Policy(policy) => {
+                // Now the host: what's queued was read without confirming it.
+                let became_host = policy.confirm_queue && !self.policy.confirm_queue;
+                self.policy = policy;
+                if became_host && self.room_open() {
+                    self.read_queue_again();
+                }
+            }
             Input::Host(host) => self.host = host,
             Input::ReadQueue => self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[])),
             Input::AskPeers => {
@@ -552,7 +581,12 @@ impl Driver {
     }
 
     fn exported(&mut self, to: String, bytes: Option<Vec<u8>>) {
-        let bytes = bytes.unwrap_or_default();
+        // Nothing to export from: this task outlived its doc. "Empty" would read
+        // as "you have everything".
+        let Some(bytes) = bytes else {
+            self.direct(&to, frame_type::SYNC_DATA, json!({ "xfer": "", "offset": 0, "total": 0, "gone": true, "noDoc": true }), &[]);
+            return;
+        };
         if bytes.len() <= SYNC_FRAGMENT {
             let total = bytes.len();
             self.direct(&to, frame_type::SYNC_DATA, json!({ "xfer": "", "offset": 0, "total": total }), &bytes);
@@ -592,9 +626,21 @@ impl Driver {
         let gone = frame.header["gone"].as_bool() == Some(true);
         let in_round = self.round.as_ref().is_some_and(|r| r.peer == from);
         if gone {
+            // A link to a task with no doc is no use to anyone: drop it, so the
+            // ask goes through the room to wherever that device's chat is now.
+            let no_doc = frame.header["noDoc"].as_bool() == Some(true);
+            if no_doc && self.links.remove(&from).is_some() {
+                self.counters.links.store(self.links.len() as u64, Relaxed);
+                let _ = self.events.send(RelayEvent::LinksChanged);
+            }
             if in_round {
                 self.round = None;
-                self.want = Some((from, now));
+                if no_doc {
+                    self.stalls += 1;
+                }
+                if self.stalls < MAX_STALLS {
+                    self.want = Some((from, now + if no_doc { GAP_GRACE } else { Duration::ZERO }));
+                }
             }
             return;
         }
@@ -645,7 +691,7 @@ impl Driver {
         let version = self.sink.relay_version().unwrap_or_default();
         self.fruitless = if version == round.version { self.fruitless + 1 } else { 0 };
         if std::mem::take(&mut self.parked_queue) {
-            self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[]));
+            self.read_queue_again();
         }
         if self.fruitless >= MAX_FRUITLESS_ROUNDS {
             return;
@@ -664,6 +710,13 @@ impl Driver {
         if let Some(peer) = pick {
             self.want_soon(peer, now);
         }
+    }
+
+    /// A queue read this task decided on. Counted, or its answer would look like
+    /// the answer to a read still under way.
+    fn read_queue_again(&mut self) {
+        self.counters.queue_reads_asked.fetch_add(1, Relaxed);
+        self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[]));
     }
 
     fn confirm_saved(&mut self) {

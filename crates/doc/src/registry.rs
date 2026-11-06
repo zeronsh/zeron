@@ -1391,6 +1391,43 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// The chat's activity times, and nothing else on its row.
+    pub fn set_chat_activity(
+        &mut self,
+        chat_id: &str,
+        last_message_at: Option<i64>,
+        created_at: Option<i64>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        let mut set = BTreeMap::new();
+        if let Some(ms) = last_message_at {
+            set.insert("lastMessageAt".to_string(), json!(ms));
+        }
+        if let Some(ms) = created_at {
+            set.insert("createdAt".to_string(), json!(ms));
+        }
+        if !set.is_empty() {
+            self.write(KIND_CHATS, chat_id, OpKind::Update, set);
+        }
+        Ok(true)
+    }
+
+    /// Re-home a chat, and nothing else on its row.
+    pub fn set_chat_host(&mut self, chat_id: &str, device_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("deviceId", json!(device_id))]),
+        );
+        Ok(true)
+    }
+
     /// Flip the chat's sync room generation (docs/chat2-sync.md M2). The
     /// host calls this in the same breath as seeding the chat2 checkpoint;
     /// LWW per-field like every registry write, so the flip is per-chat and

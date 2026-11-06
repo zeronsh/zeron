@@ -33,8 +33,11 @@ import {
   setMeta
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME, RELAY_FRAME_TYPES } from "./chat-frames";
-import { drainQueueIntoRows, enqueueRow, ensureRelayQueue, hasRelayQueue, markDelivered, queueLength, queueRows } from "./chat-relay";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import {
+  decodeVersion, drainQueueIntoRows, enqueueRow, ensureRelayQueue, hasRelayQueue, markDelivered,
+  markDeliveredByOthers, queueLength, queueRows, versionIncludes
+} from "./chat-relay";
+import { AUTH_ORG_HEADER, AUTH_USER_HEADER, type Env } from "./env";
 import {
   ensureChatWakes, finishChatWake, MAX_WAKE_ATTEMPTS, PERMANENT_WAKE_REJECTIONS,
   pendingChatWake, queueChatWake, retryChatWake, validWakeRoute
@@ -72,6 +75,9 @@ const LEGACY_READ_TTL_MS = 2 * 60_000;
 const MAX_DELIVERED_IDS = 100;
 /** How often an arriving reader may wake a host that isn't in the room. */
 const HOST_WAKE_MIN_MS = 60_000;
+/** How long a room trusts the registry's answer about who hosts its chat. */
+const HOST_LOOKUP_TTL_MS = 30_000;
+const RELAY_DIRTY = "relayDirty";
 
 interface SocketState {
   userId: string;
@@ -82,6 +88,8 @@ interface SocketState {
   hostDevice?: string;
   /** This socket's hello asked for the relay layer, and the layer is on. */
   relay?: boolean;
+  /** The caller's org, to find the chat's registry. Only with the layer on. */
+  orgId?: string;
 }
 
 interface PushOutcome {
@@ -118,8 +126,12 @@ export class ChatRoom implements DurableObject {
   private legacyReadAt = 0;
   private legacySignaledAt = 0;
   private hostWokenAt = 0;
+  /** `relayDirty` is known to be set: skip even the read. */
+  private relayDirtyMarked = false;
   /** Layer off: whether to look for a queue left from when it was on. */
   private staleQueueChecked = false;
+  /** Who the registry last said hosts this chat. */
+  private hostLookup?: { device: string; at: number };
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -157,6 +169,8 @@ export class ChatRoom implements DurableObject {
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = { userId, device, chatId, hostDevice };
+      const orgId = request.headers.get(AUTH_ORG_HEADER);
+      if (orgId && this.relayEnabled()) state.orgId = orgId;
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
@@ -181,12 +195,18 @@ export class ChatRoom implements DurableObject {
       const body = new Uint8Array(await request.arrayBuffer());
       if (body.byteLength > MAX_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
       // A relay-era checkpoint prunes nothing, whatever floor the host last saw.
-      const atFloor = this.relayEnabled() && url.searchParams.get("atFloor") === "1";
+      const relayEra = url.searchParams.get("atFloor") === "1";
+      const atFloor = this.relayEnabled() && relayEra;
+      // It can also be all that's stored, so it may not go backwards.
+      if (relayEra && !this.checkpointMovesForward(frontier)) return json({ error: "stale" }, 409);
       const covered = atFloor ? seqFloor(sql) : seqCovered;
       const outcome = commitCheckpoint(sql, this.blobs, covered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
       await this.markBackupDirty();
-      if (atFloor) this.resyncLegacySockets();
+      // A heal covers everything relayed so far: what the queue held back can be
+      // stored now, without leaving a row that no checkpoint can fill.
+      if (relayEra && url.searchParams.get("heal") === "1") this.healed();
+      else if (atFloor) this.resyncLegacySockets();
       return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
     }
 
@@ -364,7 +384,9 @@ export class ChatRoom implements DurableObject {
       this.sweepPresence();
       return json({
         ...logStats(sql),
-        ...(this.relayEnabled() ? { relayQueue: queueLength(this.relaySql()) } : {}),
+        ...(this.relayEnabled()
+          ? { relayQueue: queueLength(this.relaySql()), relayDirty: this.relayDirty() }
+          : {}),
         connectedSockets: this.ctx.getWebSockets().length,
         presence: Object.fromEntries(this.presence),
         // The ONLY per-device attribution surface — kept from the 2026-08-05
@@ -445,7 +467,7 @@ export class ChatRoom implements DurableObject {
         this.handleQueueReq(ws, state);
         return;
       case FRAME.delivered:
-        this.handleDelivered(state, frame.header);
+        await this.handleDelivered(state, frame.header);
         return;
       default:
         send(ws, FRAME.error, { code: "bad_frame", message: `unexpected type ${frame.type}` });
@@ -469,13 +491,15 @@ export class ChatRoom implements DurableObject {
     state.relay = layer && header.relay === 1;
     if (!state.relay) delete state.relay;
     ws.serializeAttachment(state);
+    if (state.relay && header.relaying === 1) this.markRelayDirty();
     if (layer && !state.relay) {
       this.drainQueueForLegacy();
       this.signalLegacyPeer(state.device);
     } else if (!layer) {
       this.drainStaleQueue();
     }
-    if (layer) this.wakeAbsentHost(state);
+    // Only for a chat in the relay era: a stored chat's readers need no host.
+    if (layer && (header.gen === 3 || this.relayDirty())) this.wakeAbsentHost(state);
     const sql = this.ctx.storage.sql;
     const stats = logStats(sql);
     const frontier = this.blobs.get(FRONTIER_BLOB) ?? new Uint8Array(0);
@@ -492,7 +516,13 @@ export class ChatRoom implements DurableObject {
         checkpointSize: stats.checkpointSize,
         rowCount: stats.rowCount,
         rowBytes: stats.rowBytes,
-        ...(state.relay ? { relay: 1, legacyPeers: this.legacyPeerCount() } : {})
+        ...(state.relay
+          ? {
+              relay: 1,
+              legacyPeers: this.legacyPeerCount(),
+              ...(this.relayDirty() ? { relayDirty: 1 } : {})
+            }
+          : {})
       },
       frontier
     );
@@ -562,27 +592,72 @@ export class ChatRoom implements DurableObject {
     );
   }
 
+  /** Ops may have been relayed that no checkpoint holds: a stored row can depend
+   * on them, and a reader without the layer has no way to fill that gap. It would
+   * redial and download the checkpoint forever. Set by a relaying host, cleared by
+   * its heal. */
+  private relayDirty(): boolean {
+    return getMeta(this.ctx.storage.sql, RELAY_DIRTY) === "1";
+  }
+
+  private markRelayDirty(): void {
+    if (this.relayDirtyMarked) return;
+    this.relayDirtyMarked = true;
+    if (!this.relayDirty()) setMeta(this.ctx.storage.sql, RELAY_DIRTY, "1");
+  }
+
+  /** The host has stored a checkpoint exported after it stopped relaying. */
+  private healed(): void {
+    this.relayDirtyMarked = false;
+    this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = ?", RELAY_DIRTY);
+    if (this.relayEnabled()) {
+      if (this.legacyPeerCount() > 0) this.drainQueueForLegacy();
+    } else {
+      this.staleQueueChecked = false;
+      this.drainStaleQueue();
+    }
+    this.resyncLegacySockets();
+  }
+
+  /** A relay-era checkpoint may not replace the room's copy with less. An empty
+   * doc never can; versions are compared where both can be read. */
+  private checkpointMovesForward(frontier: Uint8Array): boolean {
+    const held = this.blobs.get(FRONTIER_BLOB);
+    if (!held || held.byteLength === 0) return true;
+    const next = decodeVersion(frontier);
+    if (frontier.byteLength === 0 || next?.size === 0) return false;
+    const previous = decodeVersion(held);
+    return !next || !previous || versionIncludes(next, previous);
+  }
+
   /** A reader that can't use the queue is here: what's queued goes where it can
-   * read it, and where a host on an older build can too. */
+   * read it, and where a host on an older build can too. Not while ops are out
+   * there that no checkpoint holds: the row would park on that reader for good.
+   * It waits for the host's heal, which the reader's arrival has asked for. */
   private drainQueueForLegacy(): void {
+    if (this.relayDirty()) return;
     const sql = this.relaySql();
     this.storeDrained(drainQueueIntoRows(sql, Date.now()));
   }
 
   /** The layer was turned off with rows still queued: nothing can read the queue
    * now, and those senders have retired their outboxes. Costs one schema read per
-   * object lifetime. A room that never had the layer does nothing else. */
+   * object lifetime. A room that never had the layer does nothing else. Waits for
+   * the heal, like the drain above. */
   private drainStaleQueue(): void {
     if (this.relayEnabled() || this.staleQueueChecked) return;
     this.staleQueueChecked = true;
     const sql = this.ctx.storage.sql;
-    if (!hasRelayQueue(sql)) return;
+    if (!hasRelayQueue(sql) || this.relayDirty()) return;
     this.storeDrained(drainQueueIntoRows(sql, Date.now()));
     sql.exec("DROP TABLE relay_queue");
+    this.relayQueueReady = false;
   }
 
   private storeDrained(rows: ReturnType<typeof drainQueueIntoRows>): void {
     if (rows.length === 0) return;
+    // Rollback gate: a release that reads the stored head must find it current.
+    if (this.env.CHAT_ROOM_WRITE_THROUGH === "1") flushHeadSeq(this.ctx.storage.sql);
     this.flushAt ??= Date.now() + BOOKKEEPING_FLUSH_MS;
     this.ctx.waitUntil(this.markBackupDirty());
     for (const socket of this.ctx.getWebSockets()) {
@@ -635,6 +710,7 @@ export class ChatRoom implements DurableObject {
       return;
     }
     if (!this.admitRelay(state.device, payload.byteLength)) return;
+    if (type === FRAME.relay) this.markRelayDirty();
     const { to, skip, ...rest } = header;
     const forwarded = { ...rest, device: state.device };
     if (type === FRAME.syncReq || type === FRAME.syncData) {
@@ -708,6 +784,8 @@ export class ChatRoom implements DurableObject {
       for (const peer of this.relaySockets(ws)) {
         send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
       }
+      // A socket without the layer never hears relay frames: it reads rows.
+      if (this.hasLegacySocket()) this.drainQueueForLegacy();
     }
     send(ws, FRAME.queued, { batchId, dup: outcome.dup });
   }
@@ -725,12 +803,58 @@ export class ChatRoom implements DurableObject {
     send(ws, FRAME.queueDone, { count });
   }
 
-  private handleDelivered(state: SocketState, header: Record<string, unknown>): void {
+  private hasLegacySocket(): boolean {
+    return this.ctx.getWebSockets().some(socket => {
+      const peer = socket.deserializeAttachment() as SocketState | null;
+      return peer?.ready === true && !peer.relay;
+    });
+  }
+
+  /** Only the chat's host may retire a queue row: anyone else who has saved it
+   * may be gone when the host needs it. The registry is the authority, not a
+   * device's own idea of who hosts. No answer keeps the row: it's redelivered. */
+  private async handleDelivered(state: SocketState, header: Record<string, unknown>): Promise<void> {
     if (!state.ready || !state.relay || !Array.isArray(header.batchIds)) return;
     const ids = header.batchIds
       .filter((id): id is string => typeof id === "string")
       .slice(0, MAX_DELIVERED_IDS);
-    markDelivered(this.relaySql(), state.device, ids);
+    if (!state.orgId) {
+      markDeliveredByOthers(this.relaySql(), state.device, ids);
+      return;
+    }
+    const host = await this.chatHost(state);
+    if (host === undefined) return;
+    if (host === null) {
+      markDeliveredByOthers(this.relaySql(), state.device, ids);
+    } else if (host === state.device) {
+      markDelivered(this.relaySql(), ids);
+    } else {
+      console.warn("chat relay: delivered from a device that doesn't host this chat", state.device);
+    }
+  }
+
+  /** The registry's answer: a device, null if it has no such chat row yet, or
+   * undefined if it couldn't be asked. */
+  private async chatHost(state: SocketState): Promise<string | null | undefined> {
+    const now = Date.now();
+    if (this.hostLookup && this.hostLookup.device === state.device && now - this.hostLookup.at < HOST_LOOKUP_TTL_MS) {
+      return this.hostLookup.device;
+    }
+    try {
+      const room = this.env.REGISTRY_ROOMS.get(
+        this.env.REGISTRY_ROOMS.idFromName(`reg1/${state.orgId}/${state.userId}`)
+      );
+      const reply = await room.fetch(`https://registry/chat-host?chat=${encodeURIComponent(state.chatId ?? "")}`, {
+        headers: { [AUTH_USER_HEADER]: state.userId }
+      });
+      if (!reply.ok) return undefined;
+      const { deviceId } = (await reply.json()) as { deviceId?: string | null };
+      if (typeof deviceId === "string") this.hostLookup = { device: deviceId, at: now };
+      return deviceId ?? null;
+    } catch (error) {
+      console.warn("chat relay: registry unavailable", String(error));
+      return undefined;
+    }
   }
 
   private handleRowsReq(ws: WebSocket, state: SocketState, header: Record<string, unknown>): void {

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { decodeFrame, encodeFrame, FRAME, type Frame } from "../../src/chat-frames";
 import { logStats } from "../../src/chat-log";
 import { pendingChatWake } from "../../src/chat-wakes";
-import { AUTH_USER_HEADER } from "../../src/env";
+import { AUTH_ORG_HEADER, AUTH_USER_HEADER } from "../../src/env";
 
 /** The relay layer's server half (docs/design/relay-layer.md), and proof that
  * with it off a room behaves exactly as it did. */
@@ -19,10 +19,18 @@ const enableRelay = (name: string) =>
     target.env = { ...target.env, CHAT_RELAY_LAYER: "1" };
   });
 
-const connect = async (name: string, device: string, opts: { relay?: boolean; host?: string } = {}) => {
+const connect = async (
+  name: string,
+  device: string,
+  opts: { relay?: boolean; host?: string; gen?: number; relaying?: boolean; org?: string } = {}
+) => {
   const hint = opts.host ? `&hostDevice=${opts.host}` : "";
   const response = await room(name).fetch(`https://chat/ws?device=${device}&chatId=${name}${hint}`, {
-    headers: { [AUTH_USER_HEADER]: user, upgrade: "websocket" }
+    headers: {
+      [AUTH_USER_HEADER]: user,
+      upgrade: "websocket",
+      ...(opts.org ? { [AUTH_ORG_HEADER]: opts.org } : {})
+    }
   });
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
@@ -49,7 +57,13 @@ const connect = async (name: string, device: string, opts: { relay?: boolean; ho
     const frame = encodeFrame(type, header, payload);
     socket.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer);
   };
-  sendFrame(FRAME.hello, { cursor: 0, device, ...(opts.relay ? { relay: 1 } : {}) });
+  sendFrame(FRAME.hello, {
+    cursor: 0,
+    device,
+    ...(opts.relay ? { relay: 1 } : {}),
+    ...(opts.gen ? { gen: opts.gen } : {}),
+    ...(opts.relaying ? { relaying: 1 } : {})
+  });
   const state = await nextOf(FRAME.state);
   /** A probe's answer proves the DO handled everything sent before it. */
   const settled = async () => {
@@ -135,7 +149,7 @@ describe("relay frames", () => {
     for (const client of [host, viewer, old]) client.socket.close();
   });
 
-  it("a relay frame writes no SQLite rows at all", async () => {
+  it("relay frames write nothing but one mark that the room has relayed", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);
     const host = await connect(name, "host", { relay: true });
@@ -153,7 +167,7 @@ describe("relay frames", () => {
     for (let i = 0; i < 200; i++) host.sendFrame(FRAME.relay, {}, bytes(i % 255, 2048));
     for (let i = 0; i < 200; i++) await viewer.nextOf(FRAME.relay);
     await host.settled();
-    expect(cursors.reduce((sum, cursor) => sum + cursor.rowsWritten, 0)).toBe(0);
+    expect(cursors.reduce((sum, cursor) => sum + cursor.rowsWritten, 0)).toBeLessThanOrEqual(2);
     host.socket.close();
     viewer.socket.close();
   });
@@ -306,6 +320,8 @@ describe("offline queue", () => {
     const old = await connect(name, "old");
     old.sendFrame(FRAME.push, { batchId: "stored" }, bytes(8));
     await old.nextOf(FRAME.ack);
+    old.socket.close();
+    await laptop.settled();
     const phone = await connect(name, "phone", { relay: true });
     phone.sendFrame(FRAME.enqueue, { batchId: "queued" }, bytes(9));
     await phone.nextOf(FRAME.queued);
@@ -314,7 +330,7 @@ describe("offline queue", () => {
     const stats = await runInDurableObject(room(name), (_instance, state) => logStats(state.storage.sql));
     expect(stats).toMatchObject({ headSeq: 1, rowCount: 1 });
     expect(await queueCount(name)).toBe(0);
-    for (const client of [laptop, old, phone]) client.socket.close();
+    for (const client of [laptop, phone]) client.socket.close();
   });
 });
 
@@ -396,12 +412,12 @@ describe("nobody is left waiting on a host that isn't there", () => {
   it("a reader arriving with the host away wakes it, once", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);
-    const reader = await connect(name, "reader", { relay: true, host: "laptop" });
+    const reader = await connect(name, "reader", { relay: true, host: "laptop", gen: 3 });
     await expect.poll(() => wakeFor(name)).toBe("laptop");
     await runInDurableObject(room(name), (_instance, state) => {
       state.storage.sql.exec("DELETE FROM chat_wake");
     });
-    const second = await connect(name, "second", { relay: true, host: "laptop" });
+    const second = await connect(name, "second", { relay: true, host: "laptop", gen: 3 });
     await second.settled();
     expect(await wakeFor(name)).toBeUndefined();
     reader.socket.close();
@@ -411,9 +427,23 @@ describe("nobody is left waiting on a host that isn't there", () => {
   it("an old client arriving wakes it too, so it can heal", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);
+    const host = await connect(name, "laptop", { relay: true, relaying: true });
+    host.socket.close();
+    await host.settled().catch(() => {});
     const old = await connect(name, "old", { host: "laptop" });
     await expect.poll(() => wakeFor(name)).toBe("laptop");
     old.socket.close();
+  });
+
+  it("the edge flag alone wakes nobody: a stored chat's readers need no host", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const old = await connect(name, "old", { host: "laptop" });
+    const reader = await connect(name, "reader", { relay: true, host: "laptop", gen: 2 });
+    await reader.settled();
+    expect(await wakeFor(name)).toBeUndefined();
+    old.socket.close();
+    reader.socket.close();
   });
 
   it("no wake when the host is already here", async () => {
@@ -559,3 +589,178 @@ describe("relay-era checkpoints", () => {
     host.socket.close();
   });
 });
+
+describe("a stored row can't be left depending on ops no checkpoint holds", () => {
+  const rowCount = (name: string) =>
+    runInDurableObject(room(name), (_instance, state) => logStats(state.storage.sql).rowCount);
+  const checkpoint = (name: string, query: string, frontier = "AQ==") =>
+    room(name).fetch(`https://chat/checkpoint?seqCovered=0&atFloor=1${query}`, {
+      method: "POST",
+      headers: { [AUTH_USER_HEADER]: user, "x-chat2-frontier": frontier },
+      body: bytes(7, 64)
+    });
+
+  /** A host that relayed, a viewer's message queued on top, the host gone. */
+  const relayedThenQueued = async (name: string) => {
+    const host = await connect(name, "laptop", { relay: true, relaying: true });
+    const viewer = await connect(name, "viewer", { relay: true, host: "laptop", gen: 3 });
+    host.sendFrame(FRAME.relay, {}, bytes(1));
+    await viewer.nextOf(FRAME.relay);
+    viewer.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(2));
+    await viewer.nextOf(FRAME.queued);
+    host.socket.close();
+    await viewer.settled();
+    return viewer;
+  };
+
+  it("an old client's hello holds the queue while the host hasn't healed", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    const old = await connect(name, "old", { host: "laptop" });
+    await old.settled();
+    expect(await rowCount(name)).toBe(0);
+    expect(await queueCount(name)).toBe(1);
+    expect(old.frames.find(frame => frame.type === FRAME.row)).toBeUndefined();
+    viewer.socket.close();
+    old.socket.close();
+  });
+
+  it("an HTTP read by an old client holds it too", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    const read = await room(name).fetch(`https://chat/rows?after=0&device=old&chatId=${name}`, {
+      headers: { [AUTH_USER_HEADER]: user }
+    });
+    await read.arrayBuffer();
+    expect(await rowCount(name)).toBe(0);
+    expect(await queueCount(name)).toBe(1);
+    viewer.socket.close();
+  });
+
+  it("the heal stores what was held and makes old sockets rejoin", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    const old = await connect(name, "old", { host: "laptop" });
+    await old.settled();
+    const closed = new Promise<number>(resolve => old.socket.addEventListener("close", e => resolve(e.code)));
+    const healed = await checkpoint(name, "&heal=1");
+    await healed.arrayBuffer();
+    expect(healed.status).toBe(200);
+    expect(await rowCount(name)).toBe(1);
+    expect(await queueCount(name)).toBe(0);
+    expect(await closed).toBe(1012);
+    viewer.socket.close();
+  });
+
+  it("a checkpoint that isn't a heal doesn't release it", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    const old = await connect(name, "old", { host: "laptop" });
+    await old.settled();
+    await (await checkpoint(name, "")).arrayBuffer();
+    expect(await rowCount(name)).toBe(0);
+    expect(await queueCount(name)).toBe(1);
+    viewer.socket.close();
+    old.socket.close();
+  });
+
+  it("with the edge flag off the stale queue waits for the heal too", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    viewer.socket.close();
+    await runInDurableObject(room(name), instance => {
+      const target = instance as unknown as { env: Record<string, unknown>; staleQueueChecked: boolean };
+      target.env = { ...target.env, CHAT_RELAY_LAYER: "" };
+      target.staleQueueChecked = false;
+    });
+    const old = await connect(name, "old", { host: "laptop" });
+    await old.settled();
+    const held = await runInDurableObject(room(name), (_instance, state) => ({
+      rows: logStats(state.storage.sql).rowCount,
+      queue: [...state.storage.sql.exec("SELECT COUNT(*) AS n FROM relay_queue")][0]?.n
+    }));
+    expect(held).toEqual({ rows: 0, queue: 1 });
+    await (await checkpoint(name, "&heal=1")).arrayBuffer();
+    expect(await rowCount(name)).toBe(1);
+    old.socket.close();
+  });
+
+  it("a room that never relayed still stores for an old reader at once", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await connect(name, "viewer", { relay: true });
+    viewer.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(2));
+    await viewer.nextOf(FRAME.queued);
+    const old = await connect(name, "old");
+    await old.settled();
+    expect(await rowCount(name)).toBe(1);
+    expect(await queueCount(name)).toBe(0);
+    viewer.socket.close();
+    old.socket.close();
+  });
+});
+
+describe("only the chat's host can retire a queue row", () => {
+  const org = "org_1";
+  const hostedBy = async (chat: string, device: string) => {
+    const registry = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(`reg1/${org}/${user}`));
+    await runInDurableObject(registry, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO rows (kind, id, seq, deleted, del_hlc, fields, clocks) VALUES ('chats', ?, 1, 0, NULL, ?, '{}') ON CONFLICT(kind, id) DO UPDATE SET fields = excluded.fields",
+        chat,
+        JSON.stringify({ deviceId: device })
+      );
+    });
+  };
+
+  it("a stale host's confirmation keeps the row for the new host", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    await hostedBy(name, "new-host");
+    const stale = await connect(name, "old-host", { relay: true, org });
+    const sender = await connect(name, "sender", { relay: true, org });
+    sender.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(2));
+    await sender.nextOf(FRAME.queued);
+    stale.sendFrame(FRAME.delivered, { batchIds: ["m1"] });
+    await stale.settled();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(await queueCount(name)).toBe(1);
+    const fresh = await connect(name, "new-host", { relay: true, org });
+    fresh.sendFrame(FRAME.delivered, { batchIds: ["m1"] });
+    await expect.poll(() => queueCount(name)).toBe(0);
+    for (const client of [stale, sender, fresh]) client.socket.close();
+  });
+
+  it("the host can retire a row it wrote before it hosted the chat", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    await hostedBy(name, "new-host");
+    const author = await connect(name, "new-host", { relay: true, org });
+    author.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(2));
+    await author.nextOf(FRAME.queued);
+    author.sendFrame(FRAME.delivered, { batchIds: ["m1"] });
+    await expect.poll(() => queueCount(name)).toBe(0);
+    author.socket.close();
+  });
+
+  it("the host moving is noticed within the lookup's lifetime for anyone else", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    await hostedBy(name, "first");
+    const first = await connect(name, "first", { relay: true, org });
+    const sender = await connect(name, "sender", { relay: true, org });
+    sender.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(2));
+    await sender.nextOf(FRAME.queued);
+    await hostedBy(name, "second");
+    const second = await connect(name, "second", { relay: true, org });
+    second.sendFrame(FRAME.delivered, { batchIds: ["m1"] });
+    await expect.poll(() => queueCount(name)).toBe(0);
+    for (const client of [first, sender, second]) client.socket.close();
+  });
+});
+

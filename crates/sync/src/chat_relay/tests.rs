@@ -845,3 +845,102 @@ async fn a_queue_row_this_build_cant_read_is_never_confirmed() {
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(room.queue_len(), 1, "kept: a newer build may read it");
 }
+
+/// What an accepted link's task holds after its host evicts the chat's handle:
+/// `EngineChatSink` keeps a Weak doc, and `connect_from` runs the link with a
+/// token nothing cancels, so the old Driver lives on behind a dead doc.
+struct EvictedDocSink;
+impl ChatDocSink for EvictedDocSink {
+    fn apply_row(&self, _: &[u8], _: u64) -> RowImportOutcome {
+        RowImportOutcome::Applied
+    }
+    fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn contains_frontier(&self, _: &[u8]) -> bool {
+        true
+    }
+    fn advance_cursor(&self, _: u64) {}
+    fn relay_version(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn relay_export(&self, _: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    fn relay_import(&self, _: &[u8], _: bool) -> RelayImport {
+        RelayImport::Applied
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_link_to_an_evicted_handle_doesnt_block_catch_up() {
+    let room = Room::default();
+    let zombie = RelayHandle::spawn("host", Arc::new(EvictedDocSink), RelayPolicy { confirm_queue: true });
+    let viewer = Device::viewer("viewer");
+    let (one, two) = tokio::io::duplex(1024 * 1024);
+    tokio::spawn(run_link(one, "viewer".into(), zombie.clone(), CancellationToken::new()));
+    tokio::spawn(run_link(two, "host".into(), viewer.relay.clone(), CancellationToken::new()));
+    until("the link", || viewer.relay.stats().links == 1).await;
+    // The host reopens the chat: a new handle, a new Driver, the same device.
+    let host = Device::host("host");
+    let _sockets = (room.join("viewer", &viewer.relay), room.join("host", &host.relay));
+    room.0.lock().unwrap().drop_relay = 1;
+    host.stream("lost relay frame ");
+    converged(&[&host, &viewer]).await;
+}
+
+/// A round started over a link that goes silent ends when the link is declared
+/// dead, not when the round stalls a minute later.
+#[tokio::test(start_paused = true)]
+async fn a_silent_link_recovers_in_about_ten_seconds() {
+    let room = Room::default();
+    let host = Device::host("host");
+    let viewer = Device::viewer("viewer");
+    let _sockets = (room.join("host", &host.relay), room.join("viewer", &viewer.relay));
+    // A silent path, seen from the viewer: the round goes down it and vanishes.
+    let (near, far) = tokio::io::duplex(1024 * 1024);
+    tokio::spawn(run_link(near, "host".into(), viewer.relay.clone(), CancellationToken::new()));
+    let _hold_open = far;
+    until("the link", || viewer.relay.stats().links == 1).await;
+    let started = tokio::time::Instant::now();
+    room.0.lock().unwrap().drop_relay = 1;
+    host.stream("after the link went quiet ");
+    converged(&[&host, &viewer]).await;
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(15), "took {took:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn becoming_the_host_reads_the_queue_again_and_confirms_it() {
+    let room = Room::default();
+    let device = Device::viewer("new-host");
+    let _socket = room.join("new-host", &device.relay);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let author = LoroDoc::new();
+    author.get_text("t").insert(0, "queued").unwrap();
+    author.commit();
+    room.enqueue("phone", "m1", author.export(loro::ExportMode::all_updates()).unwrap());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(room.queue_len(), 1, "it doesn't host the chat yet");
+    device.relay.set_policy(RelayPolicy { confirm_queue: true });
+    until("the queue to empty", || room.queue_len() == 0).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_the_task_decided_on_is_counted() {
+    let host = Device::host("host");
+    let (tx, mut rx) = mpsc::channel(16);
+    host.relay.room_up(tx);
+    let _ = rx.recv().await.unwrap();
+    host.relay.room_frame(wire::WireFrame {
+        kind: frame_type::QUEUE_DONE,
+        header: json!({ "count": 0 }),
+        payload: Vec::new(),
+    });
+    until("the first answer", || host.relay.queue_settled()).await;
+    host.relay.set_policy(RelayPolicy { confirm_queue: false });
+    host.relay.set_policy(RelayPolicy { confirm_queue: true });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!host.relay.queue_settled(), "the read it just asked for isn't answered");
+}
+

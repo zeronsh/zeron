@@ -61,13 +61,56 @@ export function* queueRows(sql: SqlStorage): Generator<QueueRow> {
   }
 }
 
-/** Delete rows the host has saved. Named by batch id, never by position, so a
- * late or repeated `delivered` can't delete a newer row. A device can't confirm
- * its own message: that would drop it with the host never having seen it. */
-export const markDelivered = (sql: SqlStorage, device: string, batchIds: string[]): void => {
+/** Delete rows the chat's host has saved. Named by batch id, never by position,
+ * so a late or repeated `delivered` can't delete a newer row. The caller has
+ * checked that this device hosts the chat. */
+export const markDelivered = (sql: SqlStorage, batchIds: string[]): void => {
+  for (const batchId of batchIds) {
+    sql.exec("DELETE FROM relay_queue WHERE batch_id = ?", batchId);
+  }
+};
+
+/** With no registry to ask, the one thing still knowable: a device can't confirm
+ * its own message, which would drop it with the host never having seen it. */
+export const markDeliveredByOthers = (sql: SqlStorage, device: string, batchIds: string[]): void => {
   for (const batchId of batchIds) {
     sql.exec("DELETE FROM relay_queue WHERE batch_id = ? AND device != ?", batchId, device);
   }
+};
+
+/** A Loro version vector as `VersionVector::encode` writes it (a postcard map of
+ * peer id to counter), or null if it isn't one. Read only to compare versions:
+ * the room still never parses an update. */
+export const decodeVersion = (bytes: Uint8Array): Map<bigint, number> | null => {
+  let at = 0;
+  const varint = (): bigint | null => {
+    let value = 0n;
+    for (let shift = 0n; shift < 70n; shift += 7n) {
+      if (at >= bytes.byteLength) return null;
+      const byte = bytes[at++]!;
+      value |= BigInt(byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) return value;
+    }
+    return null;
+  };
+  const count = varint();
+  if (count === null || count > 1_000_000n) return null;
+  const version = new Map<bigint, number>();
+  for (let i = 0n; i < count; i++) {
+    const peer = varint();
+    const raw = varint();
+    if (peer === null || raw === null) return null;
+    version.set(peer, Number((raw >> 1n) ^ -(raw & 1n)));
+  }
+  return at === bytes.byteLength ? version : null;
+};
+
+/** `next` holds everything `previous` does. */
+export const versionIncludes = (next: Map<bigint, number>, previous: Map<bigint, number>): boolean => {
+  for (const [peer, counter] of previous) {
+    if ((next.get(peer) ?? 0) < counter) return false;
+  }
+  return true;
 };
 
 /** Whether this room ever held a queue. */

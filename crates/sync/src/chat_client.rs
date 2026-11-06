@@ -353,8 +353,11 @@ struct Shared {
     /// and nobody redials: the row is read again once a peer has filled the gap.
     relay_parked: bool,
     /// A parked row first gets the ordinary repair, one checkpoint read: it may be
-    /// an old cursor's gap, which a checkpoint does fill.
-    relay_checkpoint_tried: bool,
+    /// an old cursor's gap, which a checkpoint does fill. Reading the same checkpoint
+    /// again can't do better, with or without the layer.
+    parked_checkpoint_tried: bool,
+    /// The checkpoint that read was of, to notice a newer one.
+    room_frontier: Vec<u8>,
 }
 
 // Retry failed writes before network admission. Do not reinsert already-ACKed
@@ -446,15 +449,15 @@ fn apply_remote_row(
     match outcome {
         RowImportOutcome::Applied => shared.cursor = shared.cursor.max(cursor),
         RowImportOutcome::PendingDependencies
-            if shared.relay_session
-                && (shared.relay_checkpoint_tried
-                    || shared.server.is_none_or(|server| server.checkpoint_size == 0)) =>
+            if shared.parked_checkpoint_tried
+                || (shared.relay_session
+                    && shared.server.is_none_or(|server| server.checkpoint_size == 0)) =>
         {
             shared.relay_parked = true;
-            tracing::info!(seq, cursor = shared.cursor, "chat2: row waits on relayed history");
+            tracing::info!(seq, cursor = shared.cursor, "chat2: row waits on history no checkpoint holds");
         }
         RowImportOutcome::PendingDependencies => {
-            shared.relay_checkpoint_tried |= shared.relay_session;
+            shared.parked_checkpoint_tried = true;
             shared.needs_checkpoint = true;
             shared.causal_gap_generation = shared.causal_gap_generation.wrapping_add(1);
             tracing::warn!(
@@ -538,6 +541,8 @@ struct Flags {
     socketless: std::sync::atomic::AtomicBool,
     /// Pushes go to the room's offline queue instead of its row log.
     queue_pushes: std::sync::atomic::AtomicBool,
+    /// The room says ops were relayed that no checkpoint holds.
+    room_relay_dirty: std::sync::atomic::AtomicBool,
 }
 
 /// Dials that must fail, with HTTPS working, before this counts as a network
@@ -767,6 +772,12 @@ impl ChatClient {
             ROOM_NO_LAYER => Some(false),
             _ => None,
         }
+    }
+
+    /// The room remembers relaying that no checkpoint has healed, whatever this
+    /// device's chat row says about the generation.
+    pub fn room_relay_dirty(&self) -> bool {
+        self.flags.room_relay_dirty.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Sockets don't work on this network, though HTTPS does.
@@ -1196,12 +1207,15 @@ impl Actor {
             shared.rows_req_outstanding = false;
         }
         let cursor = lock(&self.shared).cursor;
+        let (gen_hint, relaying_hint) = self.relay.as_ref().map_or((None, None), |relay| relay.hello());
         let hello = wire::encode(
             frame_type::HELLO,
             &wire::HelloHeader {
                 cursor,
                 device: &self.device_id,
                 relay: self.relay.is_some().then_some(1),
+                room_gen: gen_hint,
+                relaying: relaying_hint,
             },
             &[],
         );
@@ -1239,6 +1253,18 @@ impl Actor {
         }
         self.flags.failed_dials.store(0, Relaxed);
         self.flags.socketless.store(false, Relaxed);
+        {
+            // A checkpoint the parked row hasn't tried yet may fill its gap.
+            let mut shared = lock(&self.shared);
+            if shared.room_frontier != state_frame.payload {
+                shared.room_frontier = state_frame.payload.to_vec();
+                shared.parked_checkpoint_tried = false;
+            }
+        }
+        self.flags.room_relay_dirty.store(
+            state_frame.header["relayDirty"].as_u64() == Some(1),
+            std::sync::atomic::Ordering::Release,
+        );
         // The room's answer, not ours, decides the layer: a room without it
         // leaves this session on stored rows.
         let mut relay_out: Option<mpsc::Receiver<Vec<u8>>> = None;

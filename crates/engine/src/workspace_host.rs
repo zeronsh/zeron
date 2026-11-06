@@ -755,6 +755,20 @@ impl WorkspaceHost {
                 device.last_seen_at = Some(seen);
             }
         }
+        // A client on a build without the layer that writes no device row, such
+        // as a shipped phone. The registry room saw it, whatever the rows say.
+        for client in zeron_sync::registry::legacy_clients().unwrap_or_default() {
+            devices.push(Device {
+                id: client.device,
+                name: String::new(),
+                platform: String::new(),
+                last_seen_at: chrono::DateTime::from_timestamp_millis(client.seen_at),
+                created_at: None,
+                version: None,
+                cursor_sdk_version: None,
+                capabilities: Vec::new(),
+            });
+        }
         Ok(devices)
     }
 
@@ -1363,31 +1377,16 @@ impl WorkspaceHost {
         last_message_at: Option<i64>,
         created_at: Option<i64>,
     ) -> Result<bool, EngineError> {
-        let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
-            return Ok(false);
-        };
-        if let Some(ms) = last_message_at {
-            chat.last_message_at = chrono::DateTime::<Utc>::from_timestamp_millis(ms);
-        }
-        if let Some(ms) = created_at
-            && let Some(at) = chrono::DateTime::<Utc>::from_timestamp_millis(ms)
-        {
-            chat.created_at = at;
-        }
-        self.mutate(|doc| doc.upsert_chat(&chat))?;
-        Ok(true)
+        // Only these fields: a whole-row write would put this device's copy of
+        // the rest back with a newer clock, the generation included.
+        Ok(self.mutate(|doc| doc.set_chat_activity(chat_id, last_message_at, created_at))?)
     }
 
     /// Re-home a chat to another device (tooling/seeds; a future device
     /// migration flow will drive this). Returns false when the chat doesn't
     /// exist.
     pub fn set_chat_host(&self, chat_id: &str, device_id: &str) -> Result<bool, EngineError> {
-        let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
-            return Ok(false);
-        };
-        chat.device_id = device_id.to_string();
-        self.mutate(|doc| doc.upsert_chat(&chat))?;
-        Ok(true)
+        Ok(self.mutate(|doc| doc.set_chat_host(chat_id, device_id))?)
     }
 
     /// Upsert a chat row copied verbatim from another profile (local→synced
@@ -1953,6 +1952,9 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
             u.query_pairs_mut()
                 .append_pair("since", &since.to_string())
                 .append_pair("beat", "1");
+            if zeron_sync::registry::relay_capable() {
+                u.query_pairs_mut().append_pair("relay", "1");
+            }
             let mut req = client.get(u);
             if let Some(token) = token {
                 req = req.bearer_auth(token);

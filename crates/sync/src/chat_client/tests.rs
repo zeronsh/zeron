@@ -2723,3 +2723,68 @@ async fn without_the_layer_a_parked_row_takes_the_checkpoint_path_as_before() {
     assert_eq!(client.stats().cursor, 1);
     assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1, "the checkpoint was read");
 }
+
+/// A row that depends on ops that were only ever relayed: no checkpoint fills it.
+#[derive(Default)]
+struct ForeverParked {
+    checkpoints: std::sync::atomic::AtomicU64,
+}
+impl ChatDocSink for ForeverParked {
+    fn apply_row(&self, _: &[u8], _: u64) -> RowImportOutcome {
+        RowImportOutcome::PendingDependencies
+    }
+    fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
+        self.checkpoints.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn contains_frontier(&self, _: &[u8]) -> bool {
+        true
+    }
+    fn advance_cursor(&self, _: u64) {}
+}
+
+struct RoomWithParkedRow {
+    dials: Arc<std::sync::atomic::AtomicU64>,
+}
+impl BinConnector for RoomWithParkedRow {
+    fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+        self.dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (pipe, mut end) = pipe_pair();
+        tokio::spawn(async move {
+            let state = serde_json::json!({"headSeq": 6, "seqFloor": 5,
+                "checkpointSeq": 5, "checkpointSize": 16_000_000, "rowCount": 1, "rowBytes": 10});
+            let _ = expect_kind(&mut end, frame_type::HELLO).await;
+            send(&end, frame_type::STATE, state, b"frontier").await;
+            let _ = expect_kind(&mut end, frame_type::ROWS_REQ).await;
+            send(&end, frame_type::ROW,
+                serde_json::json!({"seq": 6, "device": "viewer", "batchId": "drained"}), b"row").await;
+            send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 6}), &[]).await;
+            while end.rx.recv().await.is_some() {}
+        });
+        Box::pin(async move { Ok(pipe) })
+    }
+}
+
+/// A parked row that reading the checkpoint doesn't fill: over ten idle minutes
+/// the client stays quiet instead of redialling and downloading it again.
+#[tokio::test(start_paused = true)]
+async fn old_reader_with_the_host_away_stays_quiet() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let sink = Arc::new(ForeverParked::default());
+    let dials = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (fetch, fetches) = fetcher(b"the same stale checkpoint");
+    let client = ChatClient::connect_with_tuned(
+        Arc::new(RoomWithParkedRow { dials: dials.clone() }),
+        sink.clone(),
+        fetch,
+        "old-phone",
+        5,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    let (d, f) = (dials.load(Relaxed), fetches.load(Relaxed));
+    client.shutdown().await;
+    assert!(d <= 3 && f <= 2, "dials={d} fetches={f}");
+}

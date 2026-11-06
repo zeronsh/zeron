@@ -97,6 +97,13 @@ pub struct HelloHeader<'a> {
     /// `Some(1)` asks for the relay layer. Absent, the frame is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay: Option<u8>,
+    /// `Some(3)`: this device knows the chat is on generation 3, so a host that's
+    /// away is worth waking.
+    #[serde(rename = "gen", skip_serializing_if = "Option::is_none")]
+    pub room_gen: Option<u8>,
+    /// `Some(1)`: this device is the chat's host and is relaying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relaying: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]

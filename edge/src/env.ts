@@ -146,6 +146,9 @@ export const apnsConfig = (env: Env) =>
  * the caller's JWT. DOs trust it blindly — they are only reachable through
  * the Worker (design §2: "DO never sees an unauthenticated frame"). */
 export const AUTH_USER_HEADER = "x-zeron-auth-user";
+/** Worker-controlled, like the user header: the caller's org, for a chat room
+ * that has to ask the registry who hosts its chat. */
+export const AUTH_ORG_HEADER = "x-zeron-auth-org";
 
 /** Header the Worker stamps on requests forwarded into workspace-doc rooms
  * (`ws/{orgId}`). Membership (JWT org claim == orgId) is enforced at the

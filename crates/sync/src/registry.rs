@@ -80,6 +80,39 @@ pub enum RegistryEvent {
     Presence,
 }
 
+// ── who can't follow the relay layer ────────────────────────────────────────
+
+/// A client the registry room has seen without the relay layer: a shipped phone
+/// writes no device row, so this is how a chat's host learns of it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyClient {
+    pub device: String,
+    /// Epoch ms.
+    pub seen_at: i64,
+}
+
+static RELAY_CAPABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LEGACY_CLIENTS: Mutex<Option<Vec<LegacyClient>>> = Mutex::new(None);
+
+/// This process runs the relay layer: say so to the registry room.
+pub fn announce_relay_layer() {
+    RELAY_CAPABLE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn relay_capable() -> bool {
+    RELAY_CAPABLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The room's list of clients without the layer. `None`: no answer yet.
+pub fn legacy_clients() -> Option<Vec<LegacyClient>> {
+    lock(&LEGACY_CLIENTS).clone()
+}
+
+fn note_legacy_clients(devices: Vec<LegacyClient>) {
+    *lock(&LEGACY_CLIENTS) = Some(devices);
+}
+
 // ── wire frames (JSON text; mirror edge/src/registry-room.ts) ───────────────
 
 #[derive(Serialize)]
@@ -88,6 +121,10 @@ enum ClientFrame<'a> {
     Hello {
         cursor: Option<u64>,
         device: &'a str,
+        /// `Some(1)`: this client runs the chat relay layer. Absent on every client
+        /// that doesn't, which is how the room learns of them.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        relay: Option<u8>,
     },
     Push {
         batch: &'a str,
@@ -110,6 +147,12 @@ enum ServerFrame {
         rows: Vec<RegistryRow>,
         #[serde(default)]
         presence: HashMap<String, i64>,
+        #[serde(rename = "legacyDevices", default)]
+        legacy_devices: Option<Vec<LegacyClient>>,
+    },
+    /// Clients the room has seen without the relay layer changed.
+    Legacy {
+        devices: Vec<LegacyClient>,
     },
     Rows {
         seq: u64,
@@ -672,6 +715,7 @@ impl Actor {
         let hello = serde_json::to_string(&ClientFrame::Hello {
             cursor,
             device: &self.device_id,
+            relay: relay_capable().then_some(1),
         })
         .expect("hello serializes");
         if pipe.tx.send(hello).await.is_err() {
@@ -699,11 +743,15 @@ impl Actor {
             gc_floor,
             rows,
             presence,
+            legacy_devices,
         })) = state
         else {
             tracing::warn!("registry: no state frame within deadline");
             return SessionEnd::Reconnect;
         };
+        if let Some(devices) = legacy_devices {
+            note_legacy_clients(devices);
+        }
         {
             let mut doc = lock(&self.doc);
             let outcome = doc.apply_state(seq, full, gc_floor, rows);
@@ -892,9 +940,14 @@ impl Actor {
                         rows: Vec<RegistryRow>,
                         #[serde(default)]
                         presence: HashMap<String, i64>,
+                        #[serde(default)]
+                        legacy_devices: Option<Vec<LegacyClient>>,
                     }
                     match serde_json::from_str::<PullBody>(&body) {
                         Ok(pull) => {
+                            if let Some(devices) = pull.legacy_devices {
+                                note_legacy_clients(devices);
+                            }
                             let mut d = lock(&doc);
                             d.apply_state(pull.seq, pull.full, pull.gc_floor, pull.rows);
                             drop(d);
@@ -964,6 +1017,7 @@ impl Actor {
                 self.stats.last_ack_ms.store(epoch_ms(), Relaxed);
                 let _ = self.events.send(RegistryEvent::Applied);
             }
+            ServerFrame::Legacy { devices } => note_legacy_clients(devices),
             ServerFrame::Presence { device, at } => {
                 lock(&self.presence).insert(device, (at, tokio::time::Instant::now()));
                 let _ = self.events.send(RegistryEvent::Presence);
@@ -977,6 +1031,7 @@ impl Actor {
                 gc_floor,
                 rows,
                 presence,
+                ..
             } => {
                 // Servers only send state as a hello answer, but applying a
                 // late duplicate is harmless and simpler than special-casing.

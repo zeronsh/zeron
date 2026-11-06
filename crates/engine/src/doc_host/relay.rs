@@ -42,11 +42,22 @@ const LINGER_AFTER_PEER: Duration = Duration::from_secs(15);
 /// Direct link attempts, from a chat on screen to its host.
 const LINK_RETRY_MIN: Duration = Duration::from_secs(15);
 const LINK_RETRY_MAX: Duration = Duration::from_secs(300);
+/// A snapshot past this stays on stored rows, or goes back to them. The room takes
+/// checkpoints up to 32 MiB (`MAX_CHECKPOINT_BYTES`), and a chat over that can't
+/// heal, can't bring an old reader up to date and can't let a Cloud machine sleep.
+/// The gap is the room to grow while the heal lands.
+const RELAY_SNAPSHOT_LIMIT: usize = 24 * 1024 * 1024;
 
 /// The engine-wide flag.
 pub fn relay_layer_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ZERON_RELAY_LAYER").as_deref() == Ok("1"))
+    *ENABLED.get_or_init(|| {
+        let on = std::env::var("ZERON_RELAY_LAYER").as_deref() == Ok("1");
+        if on {
+            zeron_sync::registry::announce_relay_layer();
+        }
+        on
+    })
 }
 
 #[derive(Default)]
@@ -59,6 +70,14 @@ struct CheckpointBackoff {
 struct Unretired {
     ids: Vec<String>,
     settled: usize,
+}
+
+/// How far the kept copies of relayed updates are covered by a saved snapshot.
+#[derive(Default)]
+struct Journal {
+    newest: i64,
+    /// Listed for at least one maintenance tick.
+    settled: i64,
 }
 
 /// One open chat's relay state. Exists only with the flag on.
@@ -88,6 +107,23 @@ pub(crate) struct ChatRelayState {
     /// The version the room's checkpoint last reached, and when.
     checkpointed: Mutex<Option<(loro::VersionVector, Instant)>>,
     link: Mutex<Option<CancellationToken>>,
+    /// This process has seen its doc catch up with the room. Before that, its
+    /// export may hold less than the checkpoint it would replace.
+    caught_up: AtomicBool,
+    /// This process has relayed this chat.
+    relayed_here: AtomicBool,
+    /// The room refused a checkpoint as too big, and it would again.
+    too_large: AtomicBool,
+    /// Ends the links this host accepted, when the chat's handle goes away. A link
+    /// holds its own reference to the relay task, which has no doc after that.
+    accepted: CancellationToken,
+    journal: Mutex<Journal>,
+}
+
+impl Drop for ChatRelayState {
+    fn drop(&mut self) {
+        self.accepted.cancel();
+    }
 }
 
 impl ChatRelayState {
@@ -106,11 +142,50 @@ impl ChatRelayState {
             commits: AtomicU64::new(0),
             checkpointed: Mutex::new(None),
             link: Mutex::new(None),
+            caught_up: AtomicBool::new(false),
+            relayed_here: AtomicBool::new(false),
+            too_large: AtomicBool::new(false),
+            accepted: CancellationToken::new(),
+            journal: Mutex::new(Journal::default()),
         })
     }
 
     pub(super) fn relaying(&self) -> bool {
         self.relaying.load(Ordering::Acquire)
+    }
+
+    pub(super) fn caught_up(&self) -> bool {
+        self.caught_up.load(Ordering::Acquire)
+    }
+
+    /// The room refused a checkpoint. Too big won't change by retrying. Stale means
+    /// the room holds something this doc doesn't: read it before posting again.
+    pub(super) fn checkpoint_refused(&self, status: u16, body: &str, handle: Option<&ChatDocHandle>) {
+        if status == 413 {
+            self.too_large.store(true, Ordering::Release);
+        } else if status == 409 && body.contains("stale") {
+            self.caught_up.store(false, Ordering::Release);
+            if let Some(handle) = handle
+                && let Some(client) = &*lock(&handle.chat2)
+            {
+                client.redial();
+            }
+        }
+    }
+
+    /// Positions of kept updates a saved snapshot now covers. As with
+    /// [`Self::retirable`], "saved" only covers those listed a tick ago.
+    fn retirable_journal(&self, saved: bool) -> Option<i64> {
+        let mut journal = lock(&self.journal);
+        let through = (saved && journal.settled > 0).then_some(journal.settled);
+        if through.is_some() {
+            journal.settled = 0;
+        }
+        if journal.settled == 0 && journal.newest > 0 {
+            journal.settled = journal.newest;
+            journal.newest = 0;
+        }
+        through
     }
 
     /// Ids safe to retire from the outbox now. A commit reaches this list before
@@ -200,12 +275,27 @@ impl ChatDocHandle {
         let Some(state) = lock(&self.relay).clone() else {
             return true;
         };
+        if state.too_large.load(Ordering::Acquire) {
+            return !state.relay.recently_active(LINGER_AFTER_PEER);
+        }
         if state.relay.recently_active(LINGER_AFTER_PEER) || state.heal_owed.load(Ordering::Acquire) {
             return false;
         }
         !(state.relaying()
             && crate::runner::session().is_some()
             && !state.checkpoint_covers(&self.doc.doc().oplog_vv()))
+    }
+
+    /// Another device has a link to this chat open. The link's relay task is this
+    /// handle's: evicting it would leave that device talking to a task with no doc.
+    pub(super) fn relay_has_links(&self) -> bool {
+        lock(&self.relay).as_ref().is_some_and(|state| state.relay.stats().links > 0)
+    }
+
+    pub(crate) fn note_journaled(&self, ordinal: i64) {
+        if let Some(state) = &*lock(&self.relay) {
+            lock(&state.journal).newest = ordinal;
+        }
     }
 }
 
@@ -221,7 +311,14 @@ impl DocHost {
     ) -> Option<Arc<ChatRelayState>> {
         let handle = handle.upgrade()?;
         let state = lock(&handle.relay)
-            .get_or_insert_with(|| ChatRelayState::new(RelayHandle::spawn(device, sink, RelayPolicy::default())))
+            .get_or_insert_with(|| {
+                let state = ChatRelayState::new(RelayHandle::spawn(device, sink, RelayPolicy::default()));
+                // Replayed when this handle opened: covered by its next save.
+                if let Ok((_, newest)) = self.inner.store.pending_chat_inbox(&handle.chat_id) {
+                    lock(&state.journal).newest = newest;
+                }
+                state
+            })
             .clone();
         self.refresh_relay_mode(&handle, &state);
         Some(state)
@@ -271,6 +368,18 @@ impl DocHost {
                                 tracing::warn!(%err, "chat relay: outbox retirement failed");
                             }
                         }
+                        if let Some(through) = state.retirable_journal(saved)
+                            && let Err(err) = host.inner.store.retire_chat_inbox(&handle.chat_id, through)
+                        {
+                            tracing::warn!(%err, "chat relay: journal retirement failed");
+                        }
+                        if !state.caught_up()
+                            && lock(&handle.chat2)
+                                .as_ref()
+                                .is_some_and(|client| client.caught_up() && client.stats().server_known)
+                        {
+                            state.caught_up.store(true, Ordering::Release);
+                        }
 
                         if state.heal_owed.load(Ordering::Acquire) {
                             host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
@@ -313,9 +422,10 @@ impl DocHost {
         let Ok(Some(chat)) = workspace.chat(chat_id) else {
             return;
         };
-        let (answer, socketless) = lock(&handle.chat2)
-            .as_ref()
-            .map_or((None, false), |client| (client.relay_answer(), client.socketless()));
+        let (answer, socketless, room_dirty) = lock(&handle.chat2).as_ref().map_or(
+            (None, false, false),
+            |client| (client.relay_answer(), client.socketless(), client.room_relay_dirty()),
+        );
         // Only a room that answered can say it has no relay, and between sessions
         // the last answer stands: a host offline for a day shouldn't owe the edge a
         // day of stored rows when it returns. A network with HTTPS and no sockets
@@ -333,13 +443,22 @@ impl DocHost {
             .as_deref()
             .and_then(|parent| workspace.chat(parent).ok().flatten())
             .map(|parent| parent.device_id);
-        let allowed = workspace.read_devices_seen().is_ok_and(|devices| {
-            relay_allowed(&devices, &chat.device_id, parent_host.as_deref(), chrono::Utc::now())
-        });
+        // A chat close to the room's checkpoint limit can't keep the promise that a
+        // checkpoint can always bring a reader up to date.
+        let small_enough = handle
+            .persistence
+            .as_ref()
+            .is_none_or(|saved| saved.snapshot_bytes() <= RELAY_SNAPSHOT_LIMIT);
+        let allowed = small_enough
+            && workspace.read_devices_seen().is_ok_and(|devices| {
+                relay_allowed(&devices, &chat.device_id, parent_host.as_deref(), chrono::Utc::now())
+            });
+        // The registry's list of clients without the layer has been heard.
+        let legacy_known = zeron_sync::registry::legacy_clients().is_some();
 
         // Moving on: only a room that has just said yes, and only once every
         // device can follow.
-        if is_host && generation == STORED_ROOM_GEN && allowed && answer == Some(true) {
+        if is_host && generation == STORED_ROOM_GEN && allowed && legacy_known && answer == Some(true) {
             match workspace.set_chat_room_gen(chat_id, RELAY_ROOM_GEN) {
                 Ok(_) => {
                     tracing::info!(chat = %chat_id, "chat relay: moved to generation 3");
@@ -360,10 +479,15 @@ impl DocHost {
         if state.relaying.swap(relaying, Ordering::AcqRel) && !relaying {
             state.mode_epoch.fetch_add(1, Ordering::AcqRel);
         }
+        state.relay.set_hello(generation >= RELAY_ROOM_GEN, relaying);
         if relaying {
+            state.relayed_here.store(true, Ordering::Release);
             state.healed.store(false, Ordering::Release);
             state.heal_owed.store(false, Ordering::Release);
-        } else if is_host && generation >= RELAY_ROOM_GEN && !state.healed.load(Ordering::Acquire) {
+        } else if is_host
+            && (generation >= RELAY_ROOM_GEN || room_dirty || state.relayed_here.load(Ordering::Acquire))
+            && !state.healed.load(Ordering::Acquire)
+        {
             tracing::info!(chat = %chat_id, "chat relay: storing; a checkpoint is owed");
             state.heal_owed.store(true, Ordering::Release);
             self.spawn_chat2_checkpoint(handle, HEAL_REASON);
@@ -426,6 +550,12 @@ impl DocHost {
             let Some(state) = lock(&handle.relay).clone().filter(|s| s.relaying()) else {
                 continue;
             };
+            // Over the room's limit: no checkpoint will ever land, and refusing to
+            // sleep would only keep the machine billing.
+            if state.too_large.load(Ordering::Acquire) {
+                tracing::warn!(chat = %handle.chat_id, "chat relay: sleeping with a chat too big to checkpoint");
+                continue;
+            }
             let deadline = Instant::now() + SLEEP_CHECKPOINT_WAIT;
             while !state.checkpoint_covers(&handle.doc.doc().oplog_vv()) {
                 if Instant::now() >= deadline {
@@ -476,6 +606,52 @@ impl DocHost {
             }
             *lock(&state.link) = None;
         });
+    }
+
+    /// This build has the layer turned off and hosts a chat a build with it on left
+    /// on generation 3. Rows it stores next would depend on what was only relayed,
+    /// so it owes the same checkpoint any host that stops relaying does, then moves
+    /// the chat back. Only reachable for such a chat: an account that never ran the
+    /// layer has none.
+    pub(super) fn spawn_rollback_heal(&self, handle: &Arc<ChatDocHandle>, cancel: CancellationToken) {
+        let owed = |host: &DocHost, chat: &str| {
+            host.workspace().is_some_and(|workspace| {
+                workspace.is_host(chat)
+                    && matches!(workspace.chat(chat), Ok(Some(row)) if row.room_gen.unwrap_or(1) >= RELAY_ROOM_GEN)
+            })
+        };
+        if !owed(self, &handle.chat_id) {
+            return;
+        }
+        let host = self.clone();
+        let weak = Arc::downgrade(handle);
+        self.spawn_sync_worker(cancel, async move {
+            let mut wait = CHECKPOINT_RETRY_MIN;
+            loop {
+                tokio::time::sleep(wait).await;
+                let Some(handle) = weak.upgrade() else { return };
+                if !owed(&host, &handle.chat_id) {
+                    return;
+                }
+                let ready = lock(&handle.chat2)
+                    .as_ref()
+                    .is_some_and(|client| client.caught_up() && client.stats().server_known);
+                if ready {
+                    tracing::info!(chat = %handle.chat_id, "chat relay: layer off; healing a generation 3 chat");
+                    host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
+                    wait = (wait * 2).min(CHECKPOINT_RETRY_MAX);
+                }
+            }
+        });
+    }
+
+    pub(super) fn finish_rollback_heal(&self, chat: &str) {
+        if let Some(workspace) = self.workspace() {
+            match workspace.set_chat_room_gen(chat, STORED_ROOM_GEN) {
+                Ok(_) => tracing::info!(chat = %chat, "chat relay: layer off; moved back to generation 2"),
+                Err(err) => tracing::warn!(chat = %chat, %err, "chat relay: generation write failed"),
+            }
+        }
     }
 
     /// Keep the service that opens direct links. Only with the flag on.
@@ -549,8 +725,9 @@ impl zeron_preview::mux::Connector for ChatLinkService {
         let state = host.accept_chat_link(chat)?;
         let (ours, theirs) = tokio::io::duplex(256 * 1024);
         let relay = state.relay.clone();
+        let stop = state.accepted.child_token();
         host.spawn_worker(async move {
-            run_link(ours, peer, relay, CancellationToken::new()).await;
+            run_link(ours, peer, relay, stop).await;
         });
         Ok(Box::new(theirs))
     }
@@ -603,6 +780,143 @@ mod tests {
         ];
         let ids: Vec<String> = state.uploadable(pending).into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec!["stored".to_string(), "from-before-a-crash".to_string()]);
+    }
+
+    #[test]
+    fn the_journal_retires_only_what_a_later_save_covers() {
+        let state = runtime_state();
+        lock(&state.journal).newest = 7;
+        assert_eq!(state.retirable_journal(true), None, "listed this tick: a save now may not cover it");
+        lock(&state.journal).newest = 9;
+        assert_eq!(state.retirable_journal(false), None, "not saved yet");
+        assert_eq!(state.retirable_journal(true), Some(7));
+        assert_eq!(state.retirable_journal(false), None, "9 is listed now");
+        assert_eq!(state.retirable_journal(true), Some(9));
+        assert_eq!(state.retirable_journal(true), None);
+    }
+
+    fn runtime_state() -> Arc<ChatRelayState> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let state = state();
+        std::mem::forget(runtime);
+        state
+    }
+
+    #[tokio::test]
+    async fn accepted_links_end_with_the_chats_handle() {
+        let state = state();
+        let link = state.accepted.child_token();
+        assert!(!link.is_cancelled());
+        drop(state);
+        assert!(link.is_cancelled());
+    }
+
+    /// Answers every checkpoint POST and counts them.
+    async fn edge_counting_checkpoints() -> (String, Arc<AtomicU64>) {
+        let posts = Arc::new(AtomicU64::new(0));
+        let counted = posts.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let counted = counted.clone();
+                tokio::spawn(async move {
+                    let mut buffer = vec![0; 256 * 1024];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    if head.starts_with("POST") && head.contains("/checkpoint") {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let body = "{\"ok\":true}";
+                    let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (url, posts)
+    }
+
+    fn host_on(url: &str, dir: &std::path::Path) -> (DocHost, Arc<zeron_sync::DocsStore>) {
+        let store = Arc::new(zeron_sync::DocsStore::open(dir).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            crate::doc_host::DocHostConfig {
+                device_id: "host".into(),
+                default_harness: zeron_proto::HarnessId::Mock,
+                edge: Some(crate::doc_host::EdgeConfig::with_static_token(url, "test")),
+            },
+        );
+        (host, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_checkpoint_waits_until_this_process_has_caught_up() {
+        let (url, posts) = edge_counting_checkpoints().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _store) = host_on(&url, dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let state = state();
+        *lock(&handle.relay) = Some(state.clone());
+        for reason in [HEAL_REASON, "relay-cloud", "relay-sleep"] {
+            host.spawn_chat2_checkpoint(&handle, reason);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(posts.load(Ordering::SeqCst), 0, "a doc this empty could replace everything");
+        state.caught_up.store(true, Ordering::Release);
+        host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while posts.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_came_by_relay_survives_a_crash_before_the_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            crate::doc_host::DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: zeron_proto::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let workspace = crate::workspace_host::WorkspaceHost::open(
+            store.clone(),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "viewer".into(),
+                device_name: "viewer".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        workspace.create_chat("chat", None, Some("host"), None, None).unwrap();
+        let mut row = workspace.chat("chat").unwrap().unwrap();
+        row.room_gen = Some(RELAY_ROOM_GEN);
+        workspace.import_chat_row(&row).unwrap();
+        host.set_workspace(workspace);
+
+        // Bytes that only ever arrived by relay: kept, never saved in a snapshot.
+        let remote = loro::LoroDoc::new();
+        remote.get_text("relayed").insert(0, "kept").unwrap();
+        remote.commit();
+        let update = remote.export(loro::ExportMode::all_updates()).unwrap();
+        store.journal_chat_inbox("chat", &update).unwrap();
+
+        let handle = host.open_local("chat").unwrap();
+        assert_eq!(handle.doc.doc().get_text("relayed").to_string(), "kept");
+        let (_, newest) = store.pending_chat_inbox("chat").unwrap();
+        store.retire_chat_inbox("chat", newest).unwrap();
+        assert!(store.pending_chat_inbox("chat").unwrap().0.is_empty());
     }
 
     #[test]
