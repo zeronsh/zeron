@@ -389,8 +389,14 @@ What follows a machine dying mid-turn is a resume or a clear failure, never sile
 
 A Cloud machine runs a *system* unit, `zeron-cloud.service`, not the user unit installs elsewhere
 use. `zeron_update::service_unit()` knows it from `ZERON_DEVICE_PLATFORM=cloud` (written by the
-installer on every machine, so existing ones need no reinstall), and `ServiceScope::of(unit)` picks
-the manager: `sudo -n systemctl` to act, plain `systemctl` to read.
+installer on every machine), and `ServiceScope::of(unit)` picks the manager: `sudo -n systemctl` to
+act, plain `systemctl` to read.
+
+That only helps an engine new enough to have it. One older than this logs "update available" and
+stays where it is (seen on 0.2.114), so a machine provisioned earlier keeps its engine, and everything
+that needs a newer one, until something installs it. `zeron update` works from there: it installs and
+switches `current`, its restart fails (it looks for the user unit), and the next start runs the new
+version.
 
 On a Cloud machine nothing restarts the engine for an update in the first two minutes after boot:
 `runner::settled_after_boot` holds both the auto-update and the restart into a newer installed
