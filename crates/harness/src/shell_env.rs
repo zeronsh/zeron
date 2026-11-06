@@ -9,8 +9,12 @@
 //! an interactive login shell, have it print its environment between markers,
 //! and keep the PATH it reports. If `codex`/`claude` runs in their terminal,
 //! it resolves here too. A few other variables the rc files commonly own
-//! (corporate CA bundles, the SSH agent socket, the locale) are kept as well
-//! and handed to agent children that lack them ([`child_env_defaults`]).
+//! (corporate CA bundles, the SSH agent socket, the locale, the proxy
+//! configuration) are kept as well and handed to agent children that lack
+//! them ([`child_env_defaults`]). The proxy variables travel as one
+//! all-or-nothing group, both spellings together: they are only supplied
+//! when neither this process nor the driver has any proxy of its own, and
+//! their values (which may embed credentials) are never logged.
 //!
 //! The snapshot is captured once per process (cached, including a negative
 //! result) and is defensive about hostile shell init:
@@ -36,6 +40,8 @@ use std::sync::OnceLock;
 /// the SSH agent for git over SSH, the locale, and mise's record of the PATH
 /// entries it added (it must travel with the shell's PATH, or `mise x` can
 /// rebuild PATH behind a same-named wrapper that then re-runs itself).
+/// The proxy variables ([`PROXY_VARS`]) are captured too, but applied as one
+/// group — never mixed item by item into an existing proxy configuration.
 #[cfg_attr(not(unix), allow(dead_code))]
 const CAPTURED_VARS: [&str; 9] = [
     "SSL_CERT_FILE",
@@ -50,6 +56,26 @@ const CAPTURED_VARS: [&str; 9] = [
 ];
 
 const LOCALE_VARS: [&str; 3] = ["LANG", "LC_ALL", "LC_CTYPE"];
+
+/// Proxy configuration, both spellings: tools disagree on case (curl reads
+/// lower case first, Go and Java upper case), so the whole set is captured
+/// from the login shell and then applied — or omitted — together. Values may
+/// embed user:password credentials, so they are never logged.
+const PROXY_VARS: [&str; 8] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+/// Whether `key` is one of [`PROXY_VARS`].
+pub(crate) fn is_proxy_var(key: &OsStr) -> bool {
+    PROXY_VARS.iter().any(|name| key == OsStr::new(name))
+}
 
 #[derive(Debug, Default)]
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -92,9 +118,10 @@ pub(crate) fn user_path() -> Option<OsString> {
 }
 
 /// Variables an agent child should get because our own environment lacks
-/// them: the login shell's values for [`CAPTURED_VARS`], and on macOS a UTF-8
-/// `LC_CTYPE` when a Dock launch left no locale at all (Node and Python
-/// otherwise fall back to ASCII for file names and output).
+/// them: the login shell's values for [`CAPTURED_VARS`], the proxy group
+/// ([`PROXY_VARS`]) only when our environment has no proxy at all, and on
+/// macOS a UTF-8 `LC_CTYPE` when a Dock launch left no locale at all (Node
+/// and Python otherwise fall back to ASCII for file names and output).
 pub(crate) fn child_env_defaults() -> Vec<(OsString, OsString)> {
     let captured = snapshot().map(|s| s.vars.as_slice()).unwrap_or_default();
     defaults_for(
@@ -109,9 +136,17 @@ fn defaults_for(
     present: impl Fn(&OsStr) -> bool,
     macos: bool,
 ) -> Vec<(OsString, OsString)> {
+    // The proxy variables are one configuration, not independent settings:
+    // when this process already carries any of them (a proxied terminal
+    // launch, an explicit choice), none are taken from the login shell —
+    // mixing two half-sets would route some tools through the proxy and
+    // bypass it for others.
+    let have_proxy = PROXY_VARS.iter().any(|key| present(OsStr::new(key)));
     let mut defaults: Vec<(OsString, OsString)> = captured
         .iter()
-        .filter(|(key, value)| !value.is_empty() && !present(key))
+        .filter(|(key, value)| {
+            !value.is_empty() && !present(key) && !(have_proxy && is_proxy_var(key))
+        })
         .cloned()
         .collect();
     let has_locale =
@@ -137,7 +172,7 @@ pub fn prewarm() {
 
 #[cfg(unix)]
 mod unix {
-    use super::{CAPTURED_VARS, Snapshot};
+    use super::{CAPTURED_VARS, PROXY_VARS, Snapshot};
     use std::ffi::OsString;
     use std::io::Read;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -401,10 +436,10 @@ mod unix {
         (!trimmed.is_empty()).then(|| OsString::from_vec(trimmed.to_vec()))
     }
 
-    /// Extract PATH and [`CAPTURED_VARS`] from the `env` dump between the
-    /// LAST begin marker and the first end marker after it (rc noise printed
-    /// before our command — or a marker echoed by init itself — lands before
-    /// the real one). No PATH means the attempt failed.
+    /// Extract PATH, [`CAPTURED_VARS`] and [`PROXY_VARS`] from the `env` dump
+    /// between the LAST begin marker and the first end marker after it (rc
+    /// noise printed before our command — or a marker echoed by init itself —
+    /// lands before the real one). No PATH means the attempt failed.
     fn parse_snapshot(output: &[u8]) -> Option<Snapshot> {
         let begin = rfind_subslice(output, BEGIN_MARKER.as_bytes())?;
         let after = &output[begin + BEGIN_MARKER.len()..];
@@ -423,7 +458,10 @@ mod unix {
                 snapshot
                     .path
                     .get_or_insert_with(|| OsString::from_vec(value.to_vec()));
-            } else if CAPTURED_VARS.iter().any(|name| name.as_bytes() == key)
+            } else if CAPTURED_VARS
+                .iter()
+                .chain(PROXY_VARS.iter())
+                .any(|name| name.as_bytes() == key)
                 && !snapshot.vars.iter().any(|(k, _)| k.as_bytes() == key)
             {
                 snapshot.vars.push((
@@ -478,10 +516,11 @@ exit 1
         }
 
         #[test]
-        fn captures_tls_ssh_and_locale_variables_but_nothing_else() {
+        fn captures_tls_ssh_locale_and_proxy_variables_but_nothing_else() {
             let output = format!(
                 "{BEGIN_MARKER}\nPATH=/bin\nSSL_CERT_FILE=/etc/corp.pem\nNODE_EXTRA_CA_CERTS=/etc/corp.pem\n\
-                 SSH_AUTH_SOCK=/tmp/agent.sock\nLANG=de_DE.UTF-8\nSECRET_TOKEN=nope\nSSL_CERT_DIR=\n{END_MARKER}\n"
+                 SSH_AUTH_SOCK=/tmp/agent.sock\nLANG=de_DE.UTF-8\nHTTPS_PROXY=http://proxy.example:8080\n\
+                 https_proxy=http://proxy.example:8080\nNO_PROXY=localhost,127.0.0.1\nhttp_proxy=\nSECRET_TOKEN=nope\nSSL_CERT_DIR=\n{END_MARKER}\n"
             );
             let snapshot = parse_snapshot(output.as_bytes()).unwrap();
             let keys: Vec<_> = snapshot
@@ -496,6 +535,10 @@ exit 1
                     "NODE_EXTRA_CA_CERTS=/etc/corp.pem",
                     "SSH_AUTH_SOCK=/tmp/agent.sock",
                     "LANG=de_DE.UTF-8",
+                    // Both spellings are captured; empty values are not.
+                    "HTTPS_PROXY=http://proxy.example:8080",
+                    "https_proxy=http://proxy.example:8080",
+                    "NO_PROXY=localhost,127.0.0.1",
                 ]
             );
             // Without a PATH the attempt failed, whatever else it printed.
@@ -631,5 +674,45 @@ mod tests {
         );
         assert!(defaults_for(&[], |key| key == "LC_ALL", true).is_empty());
         assert!(defaults_for(&[], |_| false, false).is_empty());
+    }
+
+    #[test]
+    fn captured_proxy_variables_apply_as_one_group() {
+        let captured = pairs(&[
+            ("SSL_CERT_FILE", "/etc/corp.pem"),
+            ("HTTPS_PROXY", "http://proxy.example:8080"),
+            ("https_proxy", "http://proxy.example:8080"),
+            ("no_proxy", "localhost,127.0.0.1"),
+        ]);
+        // No proxy of our own: the whole captured group is supplied.
+        assert_eq!(
+            defaults_for(&captured, |key| key == "SSL_CERT_FILE", false),
+            pairs(&[
+                ("HTTPS_PROXY", "http://proxy.example:8080"),
+                ("https_proxy", "http://proxy.example:8080"),
+                ("no_proxy", "localhost,127.0.0.1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn any_own_proxy_variable_suppresses_the_whole_group() {
+        let captured = pairs(&[
+            ("SSL_CERT_FILE", "/etc/corp.pem"),
+            ("HTTPS_PROXY", "http://proxy.example:8080"),
+            ("https_proxy", "http://proxy.example:8080"),
+            ("no_proxy", "localhost,127.0.0.1"),
+        ]);
+        // Even a lone NO_PROXY means the environment was configured on
+        // purpose: no proxy variable is taken from the login shell, while
+        // non-proxy defaults flow as before.
+        assert_eq!(
+            defaults_for(&captured, |key| key == "NO_PROXY", false),
+            pairs(&[("SSL_CERT_FILE", "/etc/corp.pem")])
+        );
+        assert_eq!(
+            defaults_for(&captured, |key| key == "all_proxy", false),
+            pairs(&[("SSL_CERT_FILE", "/etc/corp.pem")])
+        );
     }
 }
