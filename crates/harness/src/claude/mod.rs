@@ -804,6 +804,12 @@ impl Harness for ClaudeHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    /// A steer during an open tool call: the `interrupt` control request
+    /// stops the foreground call (a running Bash is killed) and the CLI keeps
+    /// its background shells and agents (`perTaskStopAffordance`).
+    fn steer_stops_tool(&self) -> bool {
+        true
+    }
     /// Same launch arguments, cwd and access. The CLI ignores the sandbox
     /// level, and option spellings that launch the same flags are the same
     /// runtime; supervised and full access without `auto_approve` launch

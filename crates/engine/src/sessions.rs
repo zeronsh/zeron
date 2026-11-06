@@ -161,6 +161,16 @@ struct RunHandle {
     /// stopping a turn when the driver [`Harness::stops_turn_in_place`].
     turn: TurnControl,
     stops_turn_in_place: bool,
+    /// An explicit steer arriving while a tool call is open stops the turn
+    /// in place first ([`Harness::steer_stops_tool`]).
+    steer_stops_tool: bool,
+    /// Tool calls of the turn in flight that have not returned yet (a
+    /// command running, a wait), kept by the run task.
+    open_tools: Arc<std::sync::atomic::AtomicUsize>,
+    /// A steer is stopping this turn ([`SessionsEngine::steer_now`]): the
+    /// steers the stop cancels go to `redeliver` instead of being dropped.
+    redeliver_on_stop: Arc<std::sync::atomic::AtomicBool>,
+    redeliver: Arc<Mutex<Vec<RoutedSteer>>>,
     /// The harness stream is open. Before that there is no runtime to keep:
     /// a stop tears the pending start down instead.
     started: Arc<std::sync::atomic::AtomicBool>,
@@ -1133,6 +1143,12 @@ impl SessionsEngine {
                 steer_tx,
                 interrupt_token,
                 stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
+                steer_stops_tool: harness.supports_steering()
+                    && harness.stops_turn_in_place()
+                    && harness.steer_stops_tool(),
+                open_tools: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                redeliver_on_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                redeliver: Arc::new(Mutex::new(Vec::new())),
                 turn: turn.clone(),
                 started: started.clone(),
                 cancel: cancel_tx,
@@ -1417,6 +1433,103 @@ impl SessionsEngine {
         }
         self.inner.note_message(chat_id, prompt);
         Ok(SteerOutcome::Accepted)
+    }
+
+    /// Whether a steer for the chat would stop its turn first: a tool call
+    /// is open (a command running, a wait) in a live turn whose runtime
+    /// stops turns in place and opted in ([`Harness::steer_stops_tool`]).
+    /// Never while the agent waits on a question: answering it is the way
+    /// on.
+    pub fn steer_stops_tool(&self, chat_id: &str) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.turn_in_flight(chat_id) {
+            return false;
+        }
+        lock(&self.inner.runs).get(chat_id).is_some_and(|h| {
+            h.steer_stops_tool
+                && h.steerable
+                && h.started.load(Acquire)
+                && !h.retiring.load(Acquire)
+                && h.open_tools.load(Acquire) > 0
+                && lock(&h.pending_inputs).is_empty()
+        })
+    }
+
+    /// An explicit steer, read by the agent at once. While a tool call is
+    /// open ([`Self::steer_stops_tool`]) the turn is stopped in place first:
+    /// the foreground call ends, the runtime and its background work (shells,
+    /// terminals, agents) stay, and the prompt starts the next turn in that
+    /// same runtime. Steers sent earlier that the stop cancelled go first,
+    /// under their own ids. Otherwise, or when the stop doesn't settle, it
+    /// is an ordinary steer ([`Self::steer_at`]), read at the next step
+    /// boundary. Nothing here tears a runtime down.
+    pub(crate) async fn steer_now(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        message_id: Option<String>,
+        issued_at: i64,
+    ) -> Result<SteerOutcome, EngineError> {
+        if self.steer_stops_tool(chat_id) && self.stop_turn_keeping_runtime(chat_id).await {
+            let earlier = lock(&self.inner.runs)
+                .get(chat_id)
+                .map(|h| std::mem::take(&mut *lock(&h.redeliver)))
+                .unwrap_or_default();
+            for steer in earlier {
+                let outcome = self
+                    .steer_at(chat_id, &steer.prompt, Some(steer.message_id), now_ms())
+                    .await?;
+                if outcome != SteerOutcome::Accepted {
+                    tracing::warn!(chat = %chat_id, ?outcome, "an earlier steer didn't go again after the stop");
+                }
+            }
+        }
+        self.steer_at(chat_id, prompt, message_id, issued_at).await
+    }
+
+    /// End the in-flight turn in place for a steer, keeping the runtime and
+    /// its background work. Unlike [`Self::stop_turn`] it never falls back
+    /// to tearing the runtime down: false when the run can't stop in place
+    /// or the stop doesn't settle, and the steer then waits its turn.
+    async fn stop_turn_keeping_runtime(&self, chat_id: &str) -> bool {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        const STOP_SETTLE: std::time::Duration = std::time::Duration::from_secs(15);
+        let target = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|h| {
+                h.stops_turn_in_place && h.started.load(Acquire) && !h.retiring.load(Acquire)
+            })
+            .map(|h| {
+                (
+                    h.run_id.clone(),
+                    h.turn.clone(),
+                    h.redeliver_on_stop.clone(),
+                )
+            });
+        let Some((run_id, turn, redeliver_on_stop)) = target else {
+            return false;
+        };
+        if !self.turn_in_flight(chat_id) {
+            return false;
+        }
+        // The stopped turn is replaced, not crashed: never revived.
+        self.note_user_stop(chat_id);
+        redeliver_on_stop.store(true, Release);
+        turn.stop_turn();
+        let deadline = tokio::time::Instant::now() + STOP_SETTLE;
+        while tokio::time::Instant::now() < deadline {
+            if !self.is_live(chat_id, &run_id) {
+                return false;
+            }
+            if !self.turn_in_flight(chat_id) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Not settled: a late stop clears its steers as any stop does.
+        redeliver_on_stop.swap(false, AcqRel);
+        tracing::warn!(chat = %chat_id, "a steer's turn stop did not settle; it waits for the turn");
+        false
     }
 
     /// A Stop acting now cancels these messages, sent before it but still
@@ -3618,6 +3731,19 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The turn's tool calls still running, published for a steer to read
+    // ([`SessionsEngine::steer_now`]).
+    let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // (A call that returned stays closed: drivers refresh a call in place.)
+    let mut closed_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let open_count = lock(&inner.runs)
+        .get(&chat_id)
+        .filter(|h| h.run_id == run_id)
+        .map(|h| h.open_tools.clone())
+        .unwrap_or_default();
+    let publish_open = |open: &std::collections::HashSet<String>| {
+        open_count.store(open.len(), std::sync::atomic::Ordering::Release);
+    };
     let mut seen_images = std::collections::HashSet::new();
     for entry in doc_ref.read_entries().unwrap_or_default() {
         for part in entry.parts {
@@ -4679,6 +4805,29 @@ async fn drive_run(
             }
             _ => {}
         }
+        match &event {
+            AgentEvent::ToolCall { id, .. }
+                if id != zeron_proto::LIVE_PLAN_TOOL_ID && !closed_tools.contains(id) =>
+            {
+                if open_tools.insert(id.clone()) {
+                    publish_open(&open_tools);
+                }
+            }
+            AgentEvent::ToolResult { id, .. } => {
+                closed_tools.insert(id.clone());
+                if open_tools.remove(id) {
+                    publish_open(&open_tools);
+                }
+            }
+            AgentEvent::Done { .. } => {
+                closed_tools.clear();
+                if !open_tools.is_empty() {
+                    open_tools.clear();
+                    publish_open(&open_tools);
+                }
+            }
+            _ => {}
+        }
 
         // Startup-crash retry: a run that dies before ever starting (errored
         // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
@@ -4972,13 +5121,25 @@ async fn drive_run(
             // Working forever.
             let stopped_in_place =
                 *status == DoneStatus::Interrupted && stops_turn_in_place && !interrupted;
+            // A steer that stopped the turn to be read at once
+            // (`SessionsEngine::steer_now`) takes them to deliver again
+            // ahead of itself: they were sent first, and still go.
             if stopped_in_place
-                && let Some(ledger) = lock(&inner.runs)
+                && let Some((ledger, redeliver_on_stop, redeliver)) = lock(&inner.runs)
                     .get(&chat_id)
                     .filter(|h| h.run_id == run_id)
-                    .map(|h| h.routed_steers.clone())
+                    .map(|h| {
+                        (
+                            h.routed_steers.clone(),
+                            h.redeliver_on_stop.clone(),
+                            h.redeliver.clone(),
+                        )
+                    })
             {
-                lock(&ledger).clear();
+                let cancelled: Vec<RoutedSteer> = lock(&ledger).drain(..).collect();
+                if redeliver_on_stop.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    lock(&redeliver).extend(cancelled);
+                }
             }
             // An accepted steer awaiting its boundary owns the continuation:
             // the previous Done is an internal handoff, not a completion ping.

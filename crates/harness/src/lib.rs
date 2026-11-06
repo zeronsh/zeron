@@ -253,6 +253,15 @@ pub trait Harness: Send + Sync {
     fn stops_turn_in_place(&self) -> bool {
         false
     }
+    /// Whether an explicit steer that arrives while a tool call is open (a
+    /// command running, a wait) stops that call's turn in place so the
+    /// agent reads the steer at once, rather than at the next step boundary
+    /// once the call returns. Only for drivers whose in-place stop
+    /// ([`Self::stops_turn_in_place`]) ends the foreground call and keeps
+    /// the runtime's background work (shells, terminals, agents) running.
+    fn steer_stops_tool(&self) -> bool {
+        false
+    }
     /// Whether a live runtime started for `live` can take `next` as its
     /// next prompt. Only a difference that changes how the runtime was
     /// launched needs a fresh one — replacing a runtime kills its background
