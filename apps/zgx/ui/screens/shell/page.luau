@@ -997,6 +997,9 @@ return function(props: Props): Node
 			if boundary.load("@app/screens/panel")
 				then boundary.screen(boundary.named("shell.boundary.screen.panel"), "@app/screens/panel", function(panel): Node
 					return panel.Panel {
+						visible = function(): boolean
+							return shown:get()
+						end,
 						project = route.project,
 						session = route.session,
 						page = route.page,

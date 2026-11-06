@@ -174,6 +174,16 @@ function M.setup()
 					-- A tray's body never grows past this; past it, it scrolls.
 					body = 216,
 				},
+				-- The deck: the trays as the composer's own top (ds/composer_dock).
+				-- Its header's inset from the frame, and its tabs' height: capsules
+				-- concentric with the frame (26 less its edge and 10 is 15, a 30
+				-- capsule's), the header as tall as the pill's own line. The thumb
+				-- under the open tab: the menus' selected wash, as ⌘K's scopes.
+				deck = {
+					inset = 10,
+					tab = 30,
+					thumb = "{zeron.menu.selected}",
+				},
 				-- A question's option (ds/composer_ask): its row, its corner, the
 				-- number cap at its start; chosen, a ring (never a fill).
 				-- (Its corner and its number cap's are made below, concentric
