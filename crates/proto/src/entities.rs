@@ -420,25 +420,57 @@ impl Chat {
 impl Chat {
     /// True when the chat has activity the user hasn't seen on any device.
     pub fn unseen(&self) -> bool {
+        self.seen_marks().unseen()
+    }
+
+    /// What its display status reads from the chat itself.
+    pub fn seen_marks(&self) -> SeenMarks {
+        SeenMarks {
+            last_message_at: self.last_message_at,
+            last_seen_at: self.last_seen_at,
+        }
+    }
+
+    /// Its sleep at `now` ([`ChatSleep::state`]). Pure.
+    pub fn sleep_state(&self, now: DateTime<Utc>) -> SleepState {
+        self.sleep
+            .as_ref()
+            .map_or(SleepState::Awake, |sleep| sleep.state(self.last_seen_at, now))
+    }
+}
+
+/// What a chat's display status reads from the chat itself: when it last
+/// said something, and when it was last seen. A viewport that holds chats
+/// as raw rows reads these two and derives the status as every other does
+/// ([`crate::view::display_status_from`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeenMarks {
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+impl SeenMarks {
+    /// It said something since it was last seen.
+    pub fn unseen(&self) -> bool {
         match (self.last_message_at, self.last_seen_at) {
             (Some(msg), Some(seen)) => msg > seen,
             (Some(_), None) => true,
             (None, _) => false,
         }
     }
+}
 
-    /// Its sleep at `now`: asleep until its time unless woken early; once
-    /// woken, "woke" until the chat is seen after it woke. Pure.
-    pub fn sleep_state(&self, now: DateTime<Utc>) -> SleepState {
-        let Some(sleep) = &self.sleep else {
-            return SleepState::Awake;
-        };
-        let woke = match sleep.woke_at {
+impl ChatSleep {
+    /// Where its chat stands at `now`, last seen at `last_seen_at`: asleep
+    /// until its time unless woken early; once woken, "woke" until the chat
+    /// is seen after it woke. Pure.
+    pub fn state(&self, last_seen_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> SleepState {
+        let woke = match self.woke_at {
             Some(at) => at,
-            None if sleep.until > now => return SleepState::Asleep { until: sleep.until },
-            None => sleep.until,
+            None if self.until > now => return SleepState::Asleep { until: self.until },
+            None => self.until,
         };
-        if self.last_seen_at.is_some_and(|seen| seen >= woke) {
+        if last_seen_at.is_some_and(|seen| seen >= woke) {
             SleepState::Awake
         } else {
             SleepState::Woke { at: woke }
@@ -466,11 +498,11 @@ pub enum ChatIndicator {
 /// Derive display status from fresh evidence. Use `view::display_status` at
 /// presentation boundaries; it handles stale activity without inventing success.
 pub fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
-    chat_indicator_inner(chat, live, true)
+    indicator_from(chat.seen_marks(), live, true)
 }
 
-pub(crate) fn chat_indicator_inner(
-    chat: &Chat,
+pub(crate) fn indicator_from(
+    chat: SeenMarks,
     live: Option<&Session>,
     terminal_activity: bool,
 ) -> ChatIndicator {

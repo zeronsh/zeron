@@ -6357,6 +6357,7 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "block",
+ "chrono",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "fontdb",
@@ -6374,6 +6375,7 @@ dependencies = [
  "png 0.18.1",
  "resvg",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "similar",

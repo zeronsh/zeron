@@ -142,11 +142,21 @@ fn without_stale_wait<'a>(
 /// [`effective_indicator`] and [`waiting`]; the derivation itself is
 /// [`crate::chat_indicator`].
 pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
+    display_status_from(chat.seen_marks(), session, now)
+}
+
+/// [`display_status`] from a chat's [`crate::SeenMarks`] alone, for a viewport
+/// that holds chats as raw rows. The same rule, not a copy of it.
+pub fn display_status_from(
+    chat: crate::SeenMarks,
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+) -> ChatIndicator {
     if session.is_some_and(|s| session_stale(s, now)) {
         return ChatIndicator::Idle;
     }
     let session = without_stale_wait(session, now);
-    crate::chat_indicator(chat, session.as_deref())
+    crate::entities::indicator_from(chat, session.as_deref(), true)
 }
 
 /// Same seen/outcome rules, restricted to native work for composer controls.
@@ -164,7 +174,7 @@ pub fn native_display_status(
         return ChatIndicator::Idle;
     }
     let session = without_stale_wait(session, now);
-    crate::entities::chat_indicator_inner(chat, session.as_deref(), false)
+    crate::entities::indicator_from(chat.seen_marks(), session.as_deref(), false)
 }
 
 /// Includes terminal-only results, which do not append an assistant message.
