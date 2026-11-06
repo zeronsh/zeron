@@ -37,7 +37,8 @@
 //! count to check against; byte lengths), `WatchSessions` and `WatchChats`
 //! (whole lists), `WatchQueue`; runs, interrupts and answers through
 //! `QueueCommand`; config through `Mutate setChatConfig`; uploads through
-//! `UploadChunk` / `UploadCommit`. `ZERON_ZGX_MOCK=1` offers the engine's
+//! `UploadChunk` / `UploadCommit` (for a chat on a Cloud machine, staged here
+//! and sent by the engine through the edge's store: `WatchHeldSends`). `ZERON_ZGX_MOCK=1` offers the engine's
 //! mock agent, for trying a turn without a paid one.
 
 use std::{
@@ -74,6 +75,9 @@ thread_local! {
 /// the agents and their models.
 #[derive(Default)]
 struct Chats {
+    /// The engine's outbox (`WatchHeldSends`): sends waiting for their files
+    /// to reach the edge's store.
+    held: RefCell<Vec<Json>>,
     chats: RefCell<HashMap<String, Json>>,
     chats_heard: Cell<bool>,
     sessions: RefCell<HashMap<String, Json>>,
@@ -419,6 +423,12 @@ struct Pending {
     retry: Option<Json>,
     /// When it was sent, as its hover strip says.
     at: Option<String>,
+    /// In the engine's outbox: the engine says how it stands, and retries it.
+    held: bool,
+    /// Becomes a queue row when it leaves the outbox, and shows there.
+    row: bool,
+    /// The files the engine delivers for it, for a run sent again.
+    transfers: Vec<Json>,
 }
 
 impl Pending {
@@ -772,6 +782,16 @@ impl Chats {
             *me.chats.borrow_mut() = by_field(item, "id");
             me.chats_heard.set(true);
             me.publish_views();
+        }));
+        let weak = Rc::downgrade(self);
+        // (An engine without an outbox ends this at once, and nothing's held.)
+        watches.push(rpc.watch("WatchHeldSends", json!({}), move |item| {
+            let Some(me) = weak.upgrade() else { return };
+            let held = item.as_array().cloned().unwrap_or_default();
+            *me.held.borrow_mut() = held.clone();
+            for view in me.views() {
+                view.follow_held(&held);
+            }
         }));
         *self.watches.borrow_mut() = watches;
         *self.rpc.borrow_mut() = Some(rpc.clone());
@@ -1393,6 +1413,8 @@ impl View {
         }
         self.draft.set(draft_value("", ""));
         self.subscribe();
+        let held = chats.held.borrow().clone();
+        self.follow_held(&held);
         self.publish_messages();
         self.publish_session();
         if let Some(id) = self.open_id() {
@@ -1877,6 +1899,9 @@ impl View {
             waiting: "sending",
             retry: None,
             at: stamp(now_seconds()),
+            held: false,
+            row: false,
+            transfers: Vec::new(),
         });
         self.publish_messages();
         // What it carries, uploaded to the chat's host.
@@ -1885,6 +1910,9 @@ impl View {
         // (Each file here, by what it was sent as: an Appshot's context names
         // its picture by the path the agent has.)
         let mut sent_as: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // (Asked once, when there's a file to send: `store_takes_files`.)
+        let mut through_store = None;
+        let mut transfers: Vec<Json> = Vec::new();
         for a in req.field("attachments").map(Value::list).unwrap_or_default() {
             let path = a.field("path").map(text).unwrap_or_default();
             let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
@@ -1900,7 +1928,23 @@ impl View {
                 paths.push(path);
                 continue;
             }
-            match upload(&path, &name, target.as_deref()).await {
+            let store = match through_store {
+                Some(store) => store,
+                None => {
+                    let store = goes_through_store(target.as_deref()).await;
+                    through_store = Some(store);
+                    store
+                }
+            };
+            let uploaded = if store {
+                stage(&path, &name).await.map(|(reference, transfer)| {
+                    transfers.push(transfer);
+                    reference
+                })
+            } else {
+                upload(&path, &name, target.as_deref()).await
+            };
+            match uploaded {
                 Ok(at) => {
                     sent_as.insert(path.clone(), at.clone());
                     paths.push(at)
@@ -1941,6 +1985,9 @@ impl View {
             let mut params = json!({ "chatId": id, "text": words, "holdForTurnEnd": true });
             if !paths.is_empty() {
                 params["attachments"] = json!(paths);
+            }
+            if !transfers.is_empty() {
+                params["transfers"] = json!(transfers);
             }
             return engine::get()
                 .call("QueueMessage", params)
@@ -2000,9 +2047,14 @@ impl View {
             });
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
-        let sent = command(&id, run.clone()).await;
+        let sent = command_with(&id, run.clone(), &transfers).await;
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
+            if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
+                && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
+            {
+                p.transfers = transfers;
+            }
             self.mark_failed(&id, &message_id, Some(run));
         } else if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
@@ -2023,6 +2075,67 @@ impl View {
         }
         self.publish_messages();
         sent
+    }
+
+    /// The engine's outbox changed. What's in it shows as a prompt however it
+    /// was sent, even from before a restart: sending, or failed with a retry.
+    /// What left it is in the chat now, or (a row) in the queue, which shows it.
+    fn follow_held(&self, held: &[Json]) {
+        let mut changed = false;
+        {
+            let mut pending = self.pending.borrow_mut();
+            let message_of = |send: &Json| send["messageId"].as_str().map(str::to_owned);
+            let still_held =
+                |id: &str| held.iter().any(|send| send["messageId"].as_str() == Some(id));
+            pending.retain(|_, prompts| {
+                prompts.retain_mut(|p| {
+                    if !p.held || still_held(&p.id) {
+                        return true;
+                    }
+                    changed = true;
+                    p.held = false;
+                    p.waiting = "sending";
+                    !p.row
+                });
+                !prompts.is_empty()
+            });
+            for send in held {
+                let (Some(chat), Some(message)) = (send["chatId"].as_str(), message_of(send)) else {
+                    continue;
+                };
+                let waiting = if send["failure"].is_string() { "failed" } else { "sending" };
+                let row = send["queueRow"].as_bool() == Some(true);
+                let prompts = pending.entry(chat.to_owned()).or_default();
+                match prompts.iter_mut().find(|p| p.id == message) {
+                    Some(p) => {
+                        changed |= !p.held || p.waiting != waiting;
+                        p.held = true;
+                        p.row = row;
+                        p.waiting = waiting;
+                        p.retry = None;
+                    }
+                    None => {
+                        let (words, paths) =
+                            split_attachments(send["prompt"].as_str().unwrap_or_default());
+                        prompts.push(Pending {
+                            id: message,
+                            words,
+                            paths,
+                            waiting,
+                            retry: None,
+                            at: stamp(send["createdAt"].as_i64().unwrap_or(0) / 1000),
+                            held: true,
+                            row,
+                            transfers: Vec::new(),
+                        });
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.publish_messages();
+        }
     }
 
     /// A pending prompt that didn't go: failed, with the command that sends
@@ -2054,14 +2167,22 @@ impl View {
         if self.open_id().as_deref() != Some(&id) {
             return Err("missing");
         }
-        let run = {
+        let (run, transfers, held) = {
             let mut pending = self.pending.borrow_mut();
             let prompts = pending.get_mut(&id).ok_or("missing")?;
             let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
-            p.retry.clone()
+            (p.retry.clone(), p.transfers.clone(), p.held)
         };
         self.publish_messages();
+        // In the engine's outbox: the engine has what it takes to send it.
+        if held {
+            return engine::get()
+                .call("RetryDelivery", json!({ "chatId": id }))
+                .await
+                .map(|_| ())
+                .map_err(|e| engine::outcome(&e));
+        }
         let Some(run) = run else {
             // It never got as far as a run (an upload failed): the composer
             // has the words; the row goes.
@@ -2069,7 +2190,7 @@ impl View {
             self.publish_messages();
             return Err("failed");
         };
-        let sent = command(&id, run.clone()).await;
+        let sent = command_with(&id, run.clone(), &transfers).await;
         if sent.is_err() {
             self.mark_failed(&id, &message_id, Some(run));
         }
@@ -2353,8 +2474,17 @@ async fn stop_task(args: Value) -> Result<Value, Outcome> {
 }
 
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
+    command_with(chat, command, &[]).await
+}
+
+/// [`command`], with the files the engine delivers for it.
+async fn command_with(chat: &str, command: Json, transfers: &[Json]) -> Result<(), Outcome> {
+    let mut params = json!({ "chatId": chat, "command": command });
+    if !transfers.is_empty() {
+        params["transfers"] = json!(transfers);
+    }
     engine::get()
-        .call("QueueCommand", json!({ "chatId": chat, "command": command }))
+        .call("QueueCommand", params)
         .await
         .map(|_| ())
         .map_err(|e| {
@@ -2378,7 +2508,65 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
+/// An engine that holds a Cloud chat's message until its files are in the edge's
+/// store (crates/proto `capabilities::ATTACHMENT_STORE_V1`).
+const ATTACHMENT_STORE_V1: &str = "attachment-store-v1";
+
+/// Whether a chat's files go through the edge's store: its machine may be
+/// asleep, so they can't wait on reaching it. Any other chat, or an engine
+/// that doesn't know the store, uploads straight to the host.
+fn store_takes_files(target: Option<&str>, capabilities: &Json) -> bool {
+    target.is_some_and(|device| zeron_proto::is_cloud_device(device, ""))
+        && capabilities
+            .as_array()
+            .is_some_and(|list| list.iter().any(|c| c.as_str() == Some(ATTACHMENT_STORE_V1)))
+}
+
+async fn goes_through_store(target: Option<&str>) -> bool {
+    if !target.is_some_and(|device| zeron_proto::is_cloud_device(device, "")) {
+        return false;
+    }
+    match engine::get().call("EngineInfo", json!({})).await {
+        Ok(info) => store_takes_files(target, &info["capabilities"]),
+        Err(_) => false,
+    }
+}
+
+/// A file's name as a chat names it: no folders.
+fn base_name(name: &str) -> &str {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(name)
+}
+
+/// How a run names a file the engine delivers, and what tells it to.
+fn stored_file(upload_id: &str, name: &str) -> (String, Json) {
+    let file_name = base_name(name);
+    (
+        format!("pending://{upload_id}/{file_name}"),
+        json!({ "uploadId": upload_id, "fileName": file_name }),
+    )
+}
+
+/// A file committed to this device's engine, which takes it on from there:
+/// how the prompt names it, and what the send tells the engine to deliver.
+async fn stage(path: &str, name: &str) -> Result<(String, Json), Outcome> {
+    let upload_id = new_id();
+    upload_as(&upload_id, path, name, None).await?;
+    Ok(stored_file(&upload_id, name))
+}
+
 async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, Outcome> {
+    upload_as(&new_id(), path, name, target).await
+}
+
+async fn upload_as(
+    upload_id: &str,
+    path: &str,
+    name: &str,
+    target: Option<&str>,
+) -> Result<String, Outcome> {
     // Read and encoded off the window's thread, and no larger than the cap.
     let owned = path.to_owned();
     let encoded = off_thread(move || -> Result<String, Outcome> {
@@ -2394,7 +2582,6 @@ async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, 
     })
     .await
     .ok_or("failed")??;
-    let upload_id = new_id();
     let routed = |mut p: Json| {
         if let Some(t) = target {
             p["targetDeviceId"] = json!(t);
@@ -2415,10 +2602,7 @@ async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, 
         seq += 1;
         at = end;
     }
-    let file_name = std::path::Path::new(name)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(name);
+    let file_name = base_name(name);
     let committed = engine::get()
         .call("UploadCommit", routed(json!({ "uploadId": upload_id, "fileName": file_name })))
         .await
