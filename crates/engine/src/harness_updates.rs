@@ -1932,9 +1932,19 @@ impl HarnessUpdateCoordinator {
                 Err(error) => Err(error),
             },
             UpdatePlan::Scoop(app) => match self.begin_install(harness, &cancel) {
-                Ok(()) => run_command_output(&app.scoop, &["update", &app.app], UPDATE_TIMEOUT)
+                Ok(()) => {
+                    // Scoop finds its root by `SCOOP` (else `~\scoop`): a root
+                    // anywhere else is only that Scoop's when it's told.
+                    let root = app.root.to_string_lossy();
+                    run_command_output_env(
+                        &app.scoop,
+                        &["update", &app.app],
+                        UPDATE_TIMEOUT,
+                        &[("SCOOP", root.as_ref())],
+                    )
                     .await
-                    .map(drop),
+                    .map(drop)
+                }
                 Err(error) => Err(error),
             },
             UpdatePlan::AntigravityArchive => {
