@@ -1449,6 +1449,12 @@ impl HarnessUpdateCoordinator {
         if self.settle_if_unmonitored(harness) {
             return Ok(());
         }
+        // A system package is its package manager's, whatever its own check
+        // says (distributions often strip that updater), so the row says who.
+        let latest = match latest {
+            Err(_) if !can_apply && system_package_path(&executable) => Ok(UpdateCheck::Manual),
+            latest => latest,
+        };
         let (latest, available) = match latest {
             Ok(UpdateCheck::Version(version)) => {
                 let dismissed = lock(&self.inner.prefs)
@@ -5562,9 +5568,11 @@ esac
         assert!(super::can_apply_update(HarnessId::ClaudeCode, npm));
         assert_eq!(super::claude_cask_channel(npm), None);
         assert_eq!(super::claude_package_manager_command(npm), None);
+        // Outside the system's own folders: on Linux, /usr/bin is left to the
+        // package manager (a_system_package_is_left_to_the_system_package_manager).
         assert!(super::can_apply_update(
             HarnessId::Pi,
-            std::path::Path::new("/usr/bin/pi")
+            std::path::Path::new("/opt/agents/bin/pi")
         ));
     }
 
@@ -6671,6 +6679,28 @@ esac
             let path = std::path::Path::new("/usr/bin/agent-cli");
             assert!(!super::can_apply_update(harness, path), "{harness:?}");
         }
+    }
+
+    /// Distributions often strip a CLI's own updater. That says nothing about
+    /// the package, so the row still says who updates it. `git` stands in:
+    /// it answers `version` like Grok, and has no `update`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_system_package_whose_own_check_fails_still_says_who_updates_it() {
+        let git = std::path::PathBuf::from("/usr/bin/git");
+        if !git.is_file() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(git, HarnessId::Grok)));
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let status = coordinator.status(HarnessId::Grok);
+        assert_eq!(status.phase, HarnessUpdatePhase::ManualActionRequired);
+        assert_eq!(status.error, None);
+        assert!(!status.can_apply);
+        assert!(status.manual_command.is_some());
     }
 
     /// A tap's formula is upgraded by its full name, and only Homebrew's own

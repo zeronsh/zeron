@@ -451,7 +451,9 @@ mod tests {
         );
         // A vendor's native install isn't package-managed.
         assert_eq!(owner("/home/u/.local/bin/claude"), None);
-        assert_eq!(owner("/usr/local/bin/codex"), None);
+        // Nothing real can answer here: this box's own /usr/local/bin/codex
+        // may well be an npm install.
+        assert_eq!(owner("/usr/local/bin/zeron-test-no-such-cli"), None);
     }
 
     #[cfg(unix)]
