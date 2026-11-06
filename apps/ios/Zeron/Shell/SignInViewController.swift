@@ -67,7 +67,7 @@ final class SignInViewController: UIViewController {
         mark.contentMode = .scaleAspectFit
         mark.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            mark.widthAnchor.constraint(equalToConstant: 46),
+            mark.widthAnchor.constraint(equalToConstant: 53),
             mark.heightAnchor.constraint(equalToConstant: 53),
         ])
         let title = UILabel()

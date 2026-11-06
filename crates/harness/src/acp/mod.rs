@@ -874,7 +874,7 @@ pub fn prune_superseded_antigravity_installs() {
 }
 
 #[cfg(unix)]
-fn running_command_lines() -> Option<Vec<String>> {
+pub(crate) fn running_command_lines() -> Option<Vec<String>> {
     let output = std::process::Command::new("/bin/ps")
         .args(["-axww", "-o", "command="])
         .stdin(std::process::Stdio::null())
@@ -892,7 +892,7 @@ fn running_command_lines() -> Option<Vec<String>> {
 
 /// the image path of every process this user can inspect.
 #[cfg(windows)]
-fn running_command_lines() -> Option<Vec<String>> {
+pub(crate) fn running_command_lines() -> Option<Vec<String>> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -939,7 +939,7 @@ fn running_command_lines() -> Option<Vec<String>> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn running_command_lines() -> Option<Vec<String>> {
+pub(crate) fn running_command_lines() -> Option<Vec<String>> {
     None
 }
 
