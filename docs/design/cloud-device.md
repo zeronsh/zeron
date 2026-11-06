@@ -216,7 +216,9 @@ Linux release from `{edge}/releases/`, writes `~/.zeron/env` (0600) from the per
 `systemctl start --no-block zeron-cloud` (Boat holds a command until the machine can run it,
 so this races the machine's own start of its enabled units), polling the state every 250 ms,
 then easing off (no Workflow sleep: those cost whole seconds). A resume during a stop is taken
-(it keeps the machine); a refused one falls back to the slow poll. Then
+(it keeps the machine); a refused one falls back to the slow poll. A wake onto another size stops
+the machine first, so that never applies to it. A resume refused for good comes back typed, as
+"A wake refused for want of disk" says. Then
 `waitForEvent("online", 90 s)` (the runner's first token after resume); on timeout it runs one
 idempotent `sudo systemctl restart zeron-cloud` and waits 5 more minutes before failing. None of
 this gates the queued message: the engine drains it as soon as it joins its room, so the

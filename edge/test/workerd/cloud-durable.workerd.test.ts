@@ -5,6 +5,7 @@
  */
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { START_ENGINE_COMMAND } from "../../src/cloud/install-script";
 import { listLedger, listSandboxes } from "../../src/cloud/metering";
 import { cloudAccountName } from "../../src/cloud/policy";
 import {
@@ -409,6 +410,8 @@ describe("a sleeping machine's data expiry", () => {
     expect(again.lastActiveAt).toBe(lastActive.lastActiveAt);
     const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
     expect(ledger.some((e) => e.event === "refresh" && e.sandboxId === s.sandboxId)).toBe(true);
+    // Nobody was waiting on it: it must not read as a wake.
+    expect(ledger.some((e) => e.event === "wake_timing")).toBe(false);
   });
 
   it("stays up when someone sends during a refresh", async () => {
@@ -646,6 +649,29 @@ describe("a machine that goes dark during a turn", () => {
     await waitForSession(u, s.chatId, "starting");
     const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
     expect(ledger.some((e) => e.detail === "went dark during a turn; recovering it")).toBe(true);
+  });
+
+  it("starts its engine as any wake does, and its timeline shows no send behind it", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    await beat(u, s, { activeRuns: 1 });
+    await boatControl("__set", { sandboxId: s.sandboxId, state: "archived" });
+    await goDark(u, s.chatId);
+    await runDurableObjectAlarm(accountStub(u));
+    await expect
+      .poll(async () => {
+        const calls = (await boatState()).calls.filter((c) => c.sandboxId === s.sandboxId);
+        const resume = calls.map((c) => c.path.endsWith("/resume")).lastIndexOf(true);
+        return resume >= 0 && calls.slice(resume).some((c) => c.body?.command === START_ENGINE_COMMAND);
+      })
+      .toBe(true);
+    await runnerToken(u, s.deviceId, s.key);
+    await waitForSession(u, s.chatId, "ready");
+    const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
+    const timing = JSON.parse(ledger.findLast((e) => e.event === "wake_timing")!.detail!) as { at: Record<string, number> };
+    expect(timing.at.resumed).toBeGreaterThanOrEqual(0);
+    expect(timing.at.online).toBeGreaterThanOrEqual(0);
+    expect(timing.at).not.toHaveProperty("sent");
   });
 
   it("just sleeps when it had nothing running", async () => {

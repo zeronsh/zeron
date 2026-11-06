@@ -515,8 +515,10 @@ pub const PLATFORM_ENV: &str = "ZERON_DEVICE_PLATFORM";
 /// How often a runner reports activity to its CloudDevice DO.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// How long after boot a Cloud machine keeps out of the way of the message that
-/// woke it: no engine update applies, no agent CLI is checked (a check can start
-/// an install, which holds the run back until it ends).
+/// woke it: no engine update applies and no restart into a newer installed one
+/// (the restart cuts off what's waiting, and a trial then holds all new work until
+/// it's proven), and no agent CLI is checked (a check can start an install, which
+/// holds the run back until it ends).
 pub const CLOUD_BOOT_SETTLE: Duration = Duration::from_secs(120);
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);

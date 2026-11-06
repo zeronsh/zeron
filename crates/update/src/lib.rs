@@ -1821,10 +1821,7 @@ impl Updater {
         tokio::select! {
             _ = shutdown.wait_for(|stop| *stop) => {}
             _ = async {
-                tokio::select! {
-                    _ = tokio::time::sleep(initial_delay) => {}
-                    _ = wakes.changed() => {}
-                }
+                wait_out_initial_delay(&mut wakes, &self.forced, initial_delay).await;
                 let mut schedule = Schedule::default();
                 let mut superseded = SupersededRestart::default();
                 loop {
@@ -2237,6 +2234,27 @@ struct Schedule {
     failures: usize,
 }
 
+/// The first check waits out `delay`. Only a forced check cuts it short: a poke
+/// asks whether one is due, and `restart_when_superseded` pokes during every
+/// installed engine's boot, which is what the delay is there to stay out of.
+async fn wait_out_initial_delay(
+    wakes: &mut watch::Receiver<u64>,
+    forced: &AtomicBool,
+    delay: Duration,
+) {
+    let forced_check = async {
+        while !forced.load(Ordering::SeqCst) {
+            if wakes.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {}
+        _ = forced_check => {}
+    }
+}
+
 impl Schedule {
     fn due(&self, now: SystemTime) -> bool {
         match self.next_due {
@@ -2354,6 +2372,38 @@ mod tests {
     }
 
     /// Cloud runs a system unit of its own; every other install a user one.
+    #[tokio::test]
+    async fn only_a_forced_check_cuts_the_first_checks_delay_short() {
+        let (tx, mut rx) = watch::channel(0u64);
+        let forced = AtomicBool::new(false);
+
+        // A poke (an installed engine's boot does this) doesn't end the wait.
+        tx.send_modify(|epoch| *epoch += 1);
+        let delay = Duration::from_millis(150);
+        let started = std::time::Instant::now();
+        wait_out_initial_delay(&mut rx, &forced, delay).await;
+        assert!(started.elapsed() >= delay, "a poke ended it after {:?}", started.elapsed());
+
+        // A forced check does, even one that landed before the wait began.
+        forced.store(true, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        wait_out_initial_delay(&mut rx, &forced, Duration::from_secs(30)).await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // And one arriving during it.
+        forced.store(false, Ordering::SeqCst);
+        let forcing = std::sync::Arc::new(AtomicBool::new(false));
+        let waiter = forcing.clone();
+        let task = tokio::spawn(async move {
+            let mut rx = rx;
+            wait_out_initial_delay(&mut rx, &waiter, Duration::from_secs(30)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        forcing.store(true, Ordering::SeqCst);
+        tx.send_modify(|epoch| *epoch += 1);
+        tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+    }
+
     #[test]
     fn a_cloud_machine_restarts_its_own_system_unit() {
         let cloud = resolve_service_unit(None, Some("cloud"));
