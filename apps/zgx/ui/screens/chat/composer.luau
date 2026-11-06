@@ -18,9 +18,6 @@
 local ds = require("@ds")
 local motion = require("@ds/motion")
 local T = require("@ds/transcript")
-local Quote = require("@ds/quote")
-local Comments = require("@app/screens/chat/comments")
-local Annotation = require("@ds/annotation")
 local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
@@ -37,6 +34,7 @@ local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
+local Carried = require("@app/screens/chat/carried")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
@@ -456,42 +454,6 @@ local function Composer(): Node
 		end
 	end)
 
-	-- What a sent message shows of what it carries.
-	local function shown_attachments(list: { any }, quotes: { Quote.Quote }?, picks: { { [string]: any } }?, comments: { Comments.Comment }?): { any }
-		local out = {}
-		for _, a in list do
-			table.insert(out, {
-				kind = if a.kind == "image" then "image" else "file",
-				name = a.name,
-				src = if a.kind == "image" then a.path else nil,
-			})
-		end
-		-- And each passage it carries, as a chip (as the host's copy shows
-		-- them: chat.rs `split_quotes`).
-		for _, q in quotes or {} do
-			table.insert(out, { kind = "file", icon = "cursor", name = Quote.where(q), meta = Quote.excerpt(q.text) })
-		end
-		-- And each element picked on a page (chat.rs `split_annotations`).
-		for _, chip in Annotation.shown(picks or {}) do
-			table.insert(out, chip)
-		end
-		-- And its review comments, one chip (chat.rs `comments_chip`).
-		local said = comments or {}
-		if #said > 0 then
-			local places: { string } = {}
-			for _, c in said do
-				table.insert(places, Comments.place(c))
-			end
-			table.insert(out, {
-				kind = "file",
-				icon = "chat-round-line",
-				name = ui.t("chat.composer.comments", { n = #said }):get(),
-				meta = table.concat(places, ", "),
-			})
-		end
-		return out
-	end
-
 	-- What `@` offers: the files of where it works (the session's folder,
 	-- or a new chat's project), searched as the mention is typed. (`/` and
 	-- `$` offer nothing yet.)
@@ -677,41 +639,11 @@ local function Composer(): Node
 			return
 		end
 		local typed, carried = shared.take()
-		local attachments = {}
-		-- Passages attached from the conversation: a block after the words
-		-- (Quote.with_quotes), each with who said it and when.
-		local quotes: { Quote.Quote } = {}
-		-- Elements picked on a page in the panel's browser: each a token
-		-- after the words (Annotation.with_annotations), which the engine
-		-- expands for the agent.
-		local picks: { { [string]: any } } = {}
-		-- Review comments left on files: a block after the words
-		-- (screens/chat/comments), each its file and line.
-		local comments: { Comments.Comment } = {}
-		for _, item in carried do
-			if item.kind == "comment" then
-				table.insert(comments, { file = item.file, line = item.line, body = item.body, to = item.to, side = item.side, snippet = item.snippet })
-			elseif item.path then
-				-- (A project's file: on the session's computer already.)
-				-- (An Appshot goes as its picture; what it shows of the app, below.)
-				table.insert(attachments, { kind = if item.kind == "appshot" then "image" else item.kind, path = item.path, name = item.name, rel = item.rel, on_host = item.on_host })
-			elseif item.kind == "annotation" and item.quote then
-				table.insert(quotes, { text = item.quote, who = item.name, from = item.from })
-			elseif item.kind == "annotation" and item.annotation then
-				table.insert(picks, item)
-			elseif item.kind == "text" and item.text then
-				-- A pasted text carried as a chip: its words go in the text.
-				typed = typed .. "\n\n" .. item.text
-			elseif item.kind == "chat" and item.chat then
-				-- Another chat mentioned (a session dropped from the sidebar):
-				-- its link in the words, the engine's to read out to the agent.
-				local link = shared.chat_link(item.name, item.chat)
-				typed = if typed ~= "" then `{typed} {link}` elseif text ~= "" then `{text} {link}` else link
-			end
-		end
+		local pack = Carried.pack(carried, typed, text)
+		local attachments = pack.attachments
 		-- (Each command or skill picked: its canonical reference.)
-		local words = Invocations.encode(if typed ~= "" then typed else text)
-		local text_out = Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, quotes), picks), comments)
+		local words = Invocations.encode(if pack.typed ~= "" then pack.typed else text)
+		local text_out = Carried.text(words, pack)
 		local id = session_id:peek()
 		own_notice:set(nil)
 		if id then
@@ -771,7 +703,7 @@ local function Composer(): Node
 						id = mid,
 						role = "user",
 						text = words,
-						attachments = shown_attachments(attachments, quotes, picks, comments),
+						attachments = Carried.shown(pack),
 						-- On its way from this moment: the line under it
 						-- says so at once.
 						waiting = "sending",
