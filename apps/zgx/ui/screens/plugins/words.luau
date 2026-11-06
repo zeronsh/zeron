@@ -142,19 +142,28 @@ local function literal(list: { any }?, most: number?): { string }?
 	return if #out > 0 then out else nil
 end
 
--- Programs by name, those in `anything` (the host's rating; all of them
--- when it gave none) saying they can do anything you can.
-local function programs_said(names: { any }?, anything: any): { list: { string }, anything: boolean }
+-- Programs by name, as the host rates them: one in `full` (a shell or an
+-- interpreter) says it's full control of the computer, one in `anything`
+-- (all of them when it gave no rating) that it can do anything you can, the
+-- rest (git and gh, what's contained) by name alone.
+local function programs_said(names: { any }?, anything: any, full: any): { list: { string }, anything: boolean, full: boolean, plain: boolean }
 	local list: { string } = {}
-	local any = false
+	local said = { list = list, anything = false, full = false, plain = false }
 	for _, n in names or {} do
 		if type(n) == "string" then
-			local all = type(anything) ~= "table" or table.find(anything, n) ~= nil
-			any = any or all
-			table.insert(list, if all then s("plugins.words.can_anything", { name = n }) else n)
+			if type(full) == "table" and table.find(full, n) ~= nil then
+				said.full = true
+				table.insert(list, s("plugins.words.full_control", { name = n }))
+			elseif type(anything) ~= "table" or table.find(anything, n) ~= nil then
+				said.anything = true
+				table.insert(list, s("plugins.words.can_anything", { name = n }))
+			else
+				said.plain = true
+				table.insert(list, n)
+			end
 		end
 	end
-	return { list = list, anything = any }
+	return said
 end
 
 -- Hosts as written ("*": any site), those in `near` (on this device or
@@ -314,23 +323,32 @@ function M.permission(item: any, permission: string): Line
 		)
 	elseif permission == "commands" then
 		-- The programs its manifest names, as you: what they can do, it can.
-		-- Each by name; one that can do anything you can (a shell, git,
-		-- an interpreter, any not known to be contained) says so.
+		-- Each by name; a shell or an interpreter says it's full control, one
+		-- that can do anything you can (any not known to be contained) says
+		-- so, and git and gh are said as what they do.
 		local names = {}
 		for _, c in item.commands or {} do
 			table.insert(names, c)
 		end
 		local on = (item :: any).on_device
-		local said = programs_said(names, item.commands_anything)
+		local said = programs_said(names, item.commands_anything, item.commands_full_control)
+		-- (Only programs that can do anything: "These" is all of them. With
+		-- full control or one of git's kind among them, each row says its own.)
+		local detail = "plugins.words.permission.commands.detail"
+		if said.full or (said.anything and said.plain) then
+			detail = "plugins.words.permission.commands.detail_each"
+		elseif said.anything then
+			detail = "plugins.words.permission.commands.detail_anything"
+		end
 		return line(
 			true,
 			"terminal",
 			if type(on) == "string" then "plugins.words.permission.commands.title_on" else "plugins.words.permission.commands.title",
-			if said.anything then "plugins.words.permission.commands.detail_anything" else "plugins.words.permission.commands.detail",
+			detail,
 			function()
 				return { list = if #names > 0 then table.concat(names, ", ") else s("plugins.words.programs"), device = on }
 			end,
-			{ literal = if said.anything then said.list else nil }
+			{ literal = if said.full or said.anything then said.list else nil }
 		)
 	elseif permission == "native" then
 		local on = (item :: any).on_device
@@ -360,7 +378,7 @@ function M.diff(item: any): { Line }
 		return type(list) == "table" and #list > 0
 	end
 	if some(d.added_commands) then
-		table.insert(out, line(true, "terminal", "plugins.words.diff.commands", nil, nil, { literal = programs_said(d.added_commands, d.commands_anything).list }))
+		table.insert(out, line(true, "terminal", "plugins.words.diff.commands", nil, nil, { literal = programs_said(d.added_commands, d.commands_anything, d.commands_full_control).list }))
 	end
 	if type(d.mcp_changed) == "table" then
 		local after = d.mcp_changed.after

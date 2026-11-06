@@ -40,7 +40,7 @@ test("a picture sent from here to another device shows from its file on the way,
 	app:set_state("test_sent_reads", "")
 	app:set_state("test_sent_pending", "sending")
 	app:frames(20)
-	-- (This Mac's file: the chat's device never had it, so nothing is read.)
+	-- (This computer's file: the chat's device never had it, so nothing is read.)
 	expect(#reads(app)).to_be(0)
 	app:click('"Open paste.png"')
 	app:frames(60)

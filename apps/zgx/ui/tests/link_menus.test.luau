@@ -178,7 +178,7 @@ test("external links bypass an internal opener, including pull requests", functi
 	expect(app:error()).to_be(nil)
 end)
 
-test("a file link: Open, Reveal in Finder on this Mac, Copy path", function()
+test("a file link: Open, Reveal in Finder on this computer, Copy path", function()
 	local app = setup()
 	menu(app, 'role:link "the parser"')
 	expect(shows(app, "Open")).to_be(true)

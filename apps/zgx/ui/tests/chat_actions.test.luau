@@ -330,6 +330,9 @@ test("a model's name rolls into place: the chip eases once, and nothing moves as
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	open(app, "s2")
+	-- (Picked in its panel: a change from elsewhere is there at once.)
+	app:click('role:button "Model"')
+	app:frames(30)
 	local before = chip(app)
 	app:set_state("chat_model", "opus")
 	local widths: { number } = {}

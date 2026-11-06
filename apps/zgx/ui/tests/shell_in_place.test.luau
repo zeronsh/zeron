@@ -179,9 +179,9 @@ test("choosing a session moves the route; back and forward move the choice", fun
 	expect(app:state("shell_route_path")).to_be("/settings/profile")
 end)
 
-test("the files toggle shows on a session's page only", function()
+test("the files toggle shows on a session's page and a new chat's", function()
 	local app = open()
-	expect(app:has('#titlebar >> role:button "Panel"')).to_be(false)
+	expect(app:has('#titlebar >> role:button "Panel"')).to_be(true)
 	app:click(`{SIDE} >> role:button "Fix the build"`)
 	app:frames(10)
 	expect(app:has('#titlebar >> role:button "Panel"')).to_be(true)
@@ -306,18 +306,18 @@ test("settings pages list under their groups' headings, a search over them", fun
 	expect(app:has("#settings-nav >> #settings-search")).to_be(true)
 	-- In order: a group's heading over its pages.
 	local personal, profile = top_of(app, "#settings-nav", "Personal"), top_of(app, "#settings-nav", "Profile")
-	local devices, mac = top_of(app, "#settings-nav", "Devices"), top_of(app, "#settings-nav", "This Mac")
+	local devices, mac = top_of(app, "#settings-nav", "Devices"), top_of(app, "#settings-nav", "This computer")
 	expect(personal < profile and profile < devices and devices < mac).to_be(true)
 	-- The field under Back, over the pages.
 	expect(top_of(app, "#settings-nav", "Back to chats") < top_of(app, "#settings-nav", "Search settings")).to_be(true)
 	expect(top_of(app, "#settings-nav", "Search settings") < personal).to_be(true)
-	app:click('#settings-nav >> "This Mac"')
+	app:click('#settings-nav >> "This computer"')
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/settings/devices")
 	-- Something typed: the pages are put away, Back and the field stay.
 	app:command("settings_typed")
 	app:frames(20)
-	expect(app:has('#settings-nav >> "This Mac"')).to_be(false)
+	expect(app:has('#settings-nav >> "This computer"')).to_be(false)
 	expect(app:has('#settings-nav >> "Back to chats"')).to_be(true)
 	expect(app:has("#settings-nav >> #settings-search")).to_be(true)
 end)
@@ -424,9 +424,10 @@ test("settings is a page of its own, and the chats come back as they were", func
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/settings/general")
 	expect(app:has("#shell-settings")).to_be(true)
-	-- (The chats stay, out of sight and out of the way: kept as they are.)
-	local chats = (app:tree("#shell-chats"):match("[^\n]+")) :: string
-	expect(chats).to_contain(" hidden")
+	-- (The chats stay, out of sight and out of the way, kept as they are; the top bar
+	-- is still there.)
+	expect((app:tree("#shell-sidebar"):match("[^\n]+")) :: string).to_contain(" hidden")
+	expect((app:tree("#shell-page"):match("[^\n]+")) :: string).to_contain(" hidden")
 	expect(app:has('#settings-nav >> "Back to chats"')).to_be(true)
 	-- Its pages take one step of the history between them.
 	app:click('#settings-nav >> "Archived"')
@@ -439,7 +440,7 @@ test("settings is a page of its own, and the chats come back as they were", func
 	app:frames(30)
 	expect(app:state("shell_route_path")).to_be("/session/a1")
 	expect(app:has("#shell-settings")).to_be(false)
-	expect((app:tree("#shell-chats"):match("[^\n]+")) :: string).never.to_contain(" hidden")
+	expect((app:tree("#shell-page"):match("[^\n]+")) :: string).never.to_contain(" hidden")
 	expect(app:state("shell_selected")).to_be("a1")
 	expect(open_panel(app, "a1")).to_be(true)
 	expect(app:has('#titlebar >> role:button "Panel"')).to_be(true)
@@ -516,13 +517,12 @@ test("the title bar's strip moves the window everywhere but its controls", funct
 	-- it, beside it) and the card's own head, edge to edge across the
 	-- window.
 	bare("#sidebar-drag")
-	bare("#page-drag")
+	-- (The window's strip runs under the tabs along the top bar.)
+	expect(app:has("#shell-drag")).to_be(true)
 	local sx, sw = span(app, "#sidebar-drag")
 	local gx, gw = span(app, "#shell-drag")
-	local px, pw = span(app, "#page-drag")
-	expect(`{sx} to {(sx :: number) + (sw :: number)}`).to_be(`0 to {gx}`)
+	expect((sx :: number) + (sw :: number)).to_be(gx)
 	expect((gx :: number) + (gw :: number)).to_be(1200)
-	expect((px :: number) > (gx :: number) and (px :: number) + (pw :: number) < 1200).to_be(true)
 	-- A new chat's composer, risen over the page, leaves it bare too.
 	expect(app:state("shell_route_path")).to_be("/")
 	-- Over a session's files.
@@ -531,7 +531,6 @@ test("the title bar's strip moves the window everywhere but its controls", funct
 	app:click('#titlebar >> role:button "Panel"')
 	app:frames(40)
 	bare("#panel-strip")
-	bare("#page-drag")
 	-- The bar's controls keep their presses (over the strip).
 	app:click('#titlebar >> role:button "Panel"')
 	app:frames(20)
@@ -542,16 +541,14 @@ test("the title bar's strip moves the window everywhere but its controls", funct
 	-- Collapsed: the page's strip runs from the window's edge.
 	app:click('#titlebar >> role:button "Toggle sidebar"')
 	app:frames(40)
-	bare("#page-drag")
-	local cx = span(app, "#page-drag")
+	local cx = span(app, "#shell-drag")
 	expect(cx).to_be(0)
 	app:click('#titlebar >> role:button "Toggle sidebar"')
 	app:frames(40)
-	-- Settings: its list's strip and its page's.
+	-- Settings, under the top bar: its strip is the bar's.
 	app:command("shell.settings")
 	app:frames(20)
-	bare("#settings-nav-drag")
-	bare("#settings-drag")
+	expect(app:has("#shell-drag")).to_be(true)
 end)
 
 test("each session owns its panel, open or closed; a new chat shows none; the width is one", function()
@@ -591,11 +588,11 @@ test("each session owns its panel, open or closed; a new chat shows none; the wi
 	app:frames(40)
 	expect(open_panel(app, "b1")).to_be(false)
 	expect(open_panel(app, "a1")).to_be(true)
-	-- A new chat shows none, and its toggle isn't there.
+	-- A new chat has its own, closed, and its toggle is there.
 	app:click(`{SIDE} >> role:button "New chat"`)
 	app:frames(40)
 	expect(shown()).to_be(false)
-	expect(app:has('#titlebar >> role:button "Panel"')).to_be(false)
+	expect(app:has('#titlebar >> role:button "Panel"')).to_be(true)
 	-- Settings over A keeps A's open under it.
 	app:click(`{SIDE} >> role:button "Fix the build"`)
 	app:frames(40)
@@ -662,9 +659,8 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 	app:frames(20)
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
-	-- (A session's page is a card, the window's gap round it; a new chat's,
-	-- with the sidebar gone, the whole window, its wallpaper to the edges.)
-	local GAP = 4
+	-- (A page is a card, the window's edge round it, a new chat's too.)
+	local EDGE = 5
 	local function alone(when: string, page_w: number)
 		expect(app:has("#shell-rail")).to_be(false)
 		local _, _, sw = rect(app, SIDE)
@@ -672,15 +668,11 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 		local _, _, pw = rect(app, "#shell-page")
 		expect(`{when}: page {pw}`).to_be(`{when}: page {page_w}`)
 	end
-	alone("a session", 1200 - 2 * GAP)
-	-- Its title in the strip, clear of the bar's controls.
-	local tx = rect(app, "#page-title")
-	local fx, _, fw = rect(app, '#titlebar >> role:button "Forward"')
-	expect(tx >= fx + fw).to_be(true)
+	alone("a session", 1200 - 2 * EDGE)
 	-- A new chat, and back: still nothing in the sidebar's place.
 	app:command("shell.new_chat")
 	app:frames(40)
-	alone("a new chat", 1200)
+	alone("a new chat", 1200 - 2 * EDGE)
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
 	local _, _, open_w = rect(app, SIDE)

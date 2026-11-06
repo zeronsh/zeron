@@ -374,24 +374,32 @@ pub struct Laid {
 /// (`.active`, a template made or removed), the active template's files and
 /// folders, and Zeron's own `ui/` (a save while developing).
 ///
-/// Each watch is a descriptor of its own, so `ui/` (over a thousand files,
-/// most of them art) is watched by its folders, which hear a file made,
-/// removed or saved by replacing it, plus its scripts and themes, the files
-/// saved in place. The gallery's and the tests' folders aren't the app's
-/// and aren't watched.
+/// `ui/` (over a thousand files, most of them art) is watched by its
+/// folders, which hear a file made, removed or saved by replacing it, plus
+/// its scripts and themes, the files saved in place. The gallery's and the
+/// tests' folders aren't the app's and aren't watched.
 pub fn watched(templates: &Path, ui: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut files_ = vec![templates.join(ACTIVE)];
     let mut dirs = vec![templates.to_path_buf()];
     let id = active(templates);
     let edited_in_place = |rel: &str| rel.ends_with(".luau") || rel.ends_with(".json") || rel == ".luaurc";
-    files_.extend(files(ui, |rel| synced(rel) && edited_in_place(rel)).into_values());
-    folders(ui, &mut dirs, synced);
+    // (A bundle's interface doesn't change while it runs: it's read again at
+    // the next launch.)
+    if !in_app_bundle(ui) {
+        files_.extend(files(ui, |rel| synced(rel) && edited_in_place(rel)).into_values());
+        folders(ui, &mut dirs, synced);
+    }
     if id != BUILTIN {
         let dir = templates.join(&id);
         files_.extend(files(&dir, |_| true).into_values());
         folders(&dir, &mut dirs, |_| true);
     }
     (files_, dirs)
+}
+
+/// Whether `ui` is what a macOS app bundle shipped.
+fn in_app_bundle(ui: &Path) -> bool {
+    ui.ends_with("Contents/Resources/ui")
 }
 
 /// `root` and every folder under it that `keep` keeps (by its path from
@@ -839,5 +847,24 @@ mod tests {
         std::fs::create_dir_all(t.join("airy")).unwrap();
         assert_eq!(new_id(&t, "Airy"), "airy-2");
         assert_eq!(list[3].zeron_version, "0.2.9");
+    }
+
+    #[test]
+    fn a_bundle_s_interface_isn_t_watched_file_by_file() {
+        let root = dir("watched-bundle");
+        let templates = root.join("templates");
+        let ui = root.join("Zeron.app/Contents/Resources/ui");
+        write(&ui, "app.luau", "return 1");
+        write(&ui, "screens/shell/page.luau", "return 2");
+        std::fs::create_dir_all(&templates).unwrap();
+        let (files_, dirs) = watched(&templates, &ui);
+        assert_eq!(files_, vec![templates.join(ACTIVE)]);
+        assert_eq!(dirs, vec![templates.clone()]);
+        // A source tree, which is edited as it runs, still is.
+        let source = root.join("apps/zgx/ui");
+        write(&source, "app.luau", "return 1");
+        let (files_, dirs) = watched(&templates, &source);
+        assert!(files_.contains(&source.join("app.luau")));
+        assert!(dirs.contains(&source));
     }
 }

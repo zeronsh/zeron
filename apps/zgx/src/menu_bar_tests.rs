@@ -343,6 +343,25 @@ fn two_plugins_with_one_key_the_first_keeps_it() {
     assert!(notice.starts_with("Its ⇧⌘Y for “Go too” is already First's"), "{notice}");
 }
 
+/// R27: a shortcut that's a key alone, from a function: the command stays,
+/// without it, and its row says why (written plainly, it fails as it loads:
+/// `loading_tests`).
+#[test]
+fn a_key_alone_from_a_function_is_dropped_and_said() {
+    let dir = scratch("bare");
+    let desktop = Desktop::new();
+    let bar = desktop.bar();
+    let keys = plugin(&dir, "keys", r#"ui.command { id = "go", title = "Go", menu = "Keys", key = function() return "k" end, run = function() end }"#);
+    let mut w = shell(&bar, vec![keys]);
+    assert_eq!(w.reach(&desktop, "k"), None);
+    assert!(w.app.host.run_command("keys/go"), "it still runs (from the menu bar)");
+    let lost = dropped(&w);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].why, crate::menu_bar::Why::NoModifier);
+    let notice = crate::plugins::shortcut_notice(&lost, |id| id.to_string());
+    assert!(notice.starts_with("Its K for “Go” has no ⌘, ⌃ or ⌥"), "{notice}");
+}
+
 /// A plugin's commands loaded, reloaded and unloaded: never twice, never a
 /// refused bar, and gone with it.
 #[test]

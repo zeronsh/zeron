@@ -398,7 +398,9 @@ fn ensure(c: &str, unders: &[String], min: f64) -> String {
 /// `ds/palettes.tokens` moves them: text on every surface (4.5:1, the
 /// faintest 3:1), fills on the window (3:1) and each tone's words on every
 /// surface (4.5:1), code's colours on the window and a card (4.5:1, comments
-/// and punctuation 3:1), and a chart's colours on the window (3:1).
+/// and punctuation 3:1), a chart's colours on the window (3:1), and the
+/// terminal's sixteen ANSI colours on every surface (4.5:1; 3:1 the two that
+/// are the background's own shade).
 pub fn legibility(palette: &Palette, scheme: &str) -> Vec<Fix> {
     let dark = scheme != "light";
     let hex = |c: Color| c.to_string();
@@ -435,6 +437,13 @@ pub fn legibility(palette: &Palette, scheme: &str) -> Vec<Fix> {
         for (name, i) in [("teal", 7), ("amber", 4), ("rose", 2), ("violet", 6), ("lime", 3), ("sky", 5)] {
             let c = ansi[if dark { i + 8 } else { i } - 1];
             fix(&format!("zeron.visual.series.{name}"), &hex(c), &window, 3.0);
+        }
+        // The terminal's sixteen, on the window's surfaces as its inks: 3:1
+        // the two that are the background's own shade (black and bright
+        // black on dark, white and bright white on light), else 4.5:1.
+        for (n, c) in ansi.iter().enumerate() {
+            let dim = if dark { n == 0 || n == 8 } else { n == 7 || n == 15 };
+            fix(&format!("terminal.ansi.{n}"), &hex(*c), &surfaces, if dim { 3.0 } else { 4.5 });
         }
     }
     fixes

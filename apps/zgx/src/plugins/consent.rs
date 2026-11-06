@@ -146,18 +146,25 @@ fn bounded(item: &Json) -> Json {
     };
     tools(&mut item["tools"]);
     // How far each program and place it names reaches, as the engine
-    // rates them (zeron-plugin-guard): a program that can do anything you
-    // can, a host on this device or your network.
-    let anything = |list: &Json| -> Json {
-        json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|c| zeron_plugin_guard::commands::risk(c) == zeron_plugin_guard::commands::Risk::Anything).collect::<Vec<_>>())
+    // rates them (zeron-plugin-guard): a shell or interpreter, which is full
+    // control of the computer; another program that can do anything you can
+    // (git and gh are said as what they do: the runner holds them to rules of
+    // their own); a host on this device or your network.
+    use zeron_plugin_guard::commands::{Risk, full_control, held_to_its_own_rules, risk};
+    let programs = |list: &Json, keep: &dyn Fn(&str) -> bool| -> Json {
+        json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|c| keep(c)).collect::<Vec<_>>())
     };
+    let anything = |list: &Json| programs(list, &|c| risk(c) == Risk::Anything && !full_control(c) && !held_to_its_own_rules(c));
+    let full = |list: &Json| programs(list, &|c| full_control(c));
     let local = |list: &Json| -> Json {
         json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|h| *h != "*" && zeron_plugin_guard::net::risky(h)).collect::<Vec<_>>())
     };
     item["commands_anything"] = anything(&item["commands"]);
+    item["commands_full_control"] = full(&item["commands"]);
     item["network_local"] = local(&item["network_hosts"]);
     if let Some(diff) = item.get_mut("digest_diff") {
         diff["commands_anything"] = anything(&diff["added_commands"]);
+        diff["commands_full_control"] = full(&diff["added_commands"]);
         diff["network_local"] = local(&diff["network_added"]);
         tools(&mut diff["tools_added"]);
         for tool in diff["tools_changed"].as_array_mut().into_iter().flatten() {
@@ -229,14 +236,19 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
     let host = ScriptHost::new(&cx.ui.runtime, crate::ui_dir().join("consent.luau")).app_id(crate::APP_ID);
     host.window_chrome(cx.window_info.titlebar_area.clone(), cx.window_info.controls.clone());
     host.window_zoom(&cx.ui);
+    crate::transparency::install(cx, &host);
     let shared = host.shared("consent", shown(bridge, &id.borrow(), &on.borrow(), false, None));
     see(&seen, bridge, &id.borrow(), &on.borrow());
     *slot.borrow_mut() = Some(shared.clone());
-    host.action("appearance", |value| {
-        crate::set_appearance(match value {
-            Value::Bool(dark) => Some(dark),
-            _ => None,
-        })
+    let window = cx.window.clone();
+    host.action("appearance", move |value| {
+        crate::set_appearance(
+            &window,
+            match value {
+                Value::Bool(dark) => Some(dark),
+                _ => None,
+            },
+        )
     });
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
@@ -380,6 +392,20 @@ mod tests {
         assert_eq!(shown["digest_diff"]["tools_added"][0]["description"].as_str().unwrap().chars().count(), WORDS);
         assert_eq!(bounded(&json!({ "version": "0.3.0-beta.1" }))["version"], "0.3.0-beta.1");
         assert_eq!(plain(&"n".repeat(200), NAME).chars().count(), NAME);
+    }
+
+    /// A shell or interpreter is rated full control, git and gh neither that
+    /// nor anything, and another program as ever; what was added since too.
+    #[test]
+    fn the_sheet_is_told_how_far_each_program_reaches() {
+        let shown = bounded(&json!({
+            "commands": ["python3", "sh", "git", "gh", "rg", "jq"],
+            "digest_diff": { "added_commands": ["node", "git", "rg"] },
+        }));
+        assert_eq!(shown["commands_full_control"], json!(["python3", "sh"]));
+        assert_eq!(shown["commands_anything"], json!(["rg"]));
+        assert_eq!(shown["digest_diff"]["commands_full_control"], json!(["node"]));
+        assert_eq!(shown["digest_diff"]["commands_anything"], json!(["rg"]));
     }
 
     /// R27: Allow is taken only for the sheet shown, once it has shown a

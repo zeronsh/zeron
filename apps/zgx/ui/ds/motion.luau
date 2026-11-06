@@ -113,6 +113,14 @@ function M.duration(distance: number): number
 	return M.BASE * scale
 end
 
+-- The panel's width going to `to`, for `anime.animate`: most of the way at once,
+-- then settling, so it answers as soon as it's asked. (At once, with motion reduced.)
+M.PANEL_MS = 280
+M.PANEL_EASE = "cubicBezier(.22, 1, .36, 1)"
+function M.panel(to: number): TableParams
+	return { value = to, duration = M.ms(M.PANEL_MS), ease = M.PANEL_EASE }
+end
+
 -- A column's width from `from` to `to`, for `anime.animate` (its `value`
 -- the width it goes to): at once, with motion reduced.
 function M.column(from: number, to: number): TableParams

@@ -37,6 +37,7 @@ local Mark = require("@self/mark")
 local status = require("@self/status")
 local FadeText = require("@self/fade_text")
 local island = require("@self/island")
+local TitleBar = require("@self/title_bar")
 local Tile = require("@self/tile")
 local Surface = require("@self/surface")
 local Avatar = require("@self/avatar")
@@ -83,8 +84,9 @@ export type PullRequest = { number: number, state: ("open" | "merged" | "closed"
 -- Grouped by project first, those are listed after the rest, folded into
 -- one row of their own ("21 empty projects"), closed until it's opened;
 -- `details.empty_projects` off, not listed at all. A project with none at
--- all, just added, isn't: a new chat starts in it.)
-export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, sessions: { Session } }
+-- all, just added, isn't: a new chat starts in it. `unused` says so, and it's
+-- listed with the rest, until `details.empty_projects` is off.)
+export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, unused: boolean?, sessions: { Session } }
 -- You: your name, and an id your avatar is drawn from.
 export type User = { id: string?, name: string, avatar: string? }
 -- How its sessions are grouped (Zeron's Organize), as a key: its levels
@@ -1649,6 +1651,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- A project's with none but archived sessions (its `empty`), at the
 		-- top level: listed in the empty projects' fold.
 		empty: boolean?,
+		-- A project's that has never had a session (its `unused`), at the top
+		-- level: listed with the rest, unless the empty projects are off.
+		unused: boolean?,
 	}
 	-- How long ago a session moved, in seconds (its `time`: a time, or as
 	-- it reads: "now", "5m", "3h", "1d", "2w"), for the most recent first.
@@ -1752,6 +1757,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						device = outer_device,
 						-- (Only at the top, and only while it holds none.)
 						empty = if subset == nil and p.empty == true and #p.sessions == 0 then true else nil,
+						unused = if subset == nil and p.unused == true and #p.sessions == 0 then true else nil,
 						shows_tile = function(): boolean
 							return details.project_icon:get()
 						end,
@@ -2612,6 +2618,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local empties: { Group } = {}
 		local show_empties = empties_shown()
 		for _, g in all_groups do
+			if g.unused and not show_empties then
+				continue
+			end
 			if not g.empty then
 				table.insert(gs, g)
 			elseif show_empties then
@@ -2806,7 +2815,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- list (whose rows all shrink together) never finds a thousand tiny
 		-- ones in view and builds them all.
 		local t = clock:peek()
-		local view = (list_view.height or 0) + 2 * SLOT
+		-- (As the list stands now, not followed: a ref's field follows its
+		-- whole box, and every frame of the sidebar's edge dragged or the
+		-- window resized would build this again, for every row.)
+		local list_now = list_view:peek()
+		local view = ((list_now and list_now.height) or 0) + 2 * SLOT
 		if view < 600 then
 			view = 600
 		end
@@ -3213,12 +3226,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					weight = "$font.weight.medium",
 				}
 			),
+			-- (On the line of every other section's count: its "…" stands a step
+			-- further out than words do.)
 			ui.show(function(): boolean
 				return not open() and not editing() and not hovered:get() and not menu_open:get()
-			end, hint(function(): string
-				local _, n = now()
-				return tostring(n)
-			end)),
+			end, ui.row {
+				shrink = 0,
+				pr = "$space.1",
+				hint(function(): string
+					local _, n = now()
+					return tostring(n)
+				end),
+			}),
 			ui.show(function(): boolean
 				return (hovered:get() or menu_open:get()) and not editing()
 			end, menu),
@@ -4208,7 +4227,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				for _, g in (groups_of(by, placed_in(p))) do
 					-- (The empty projects aren't on the rail: their fold is
 					-- the list's.)
-					if not g.empty then
+					if not g.empty and not (g.unused and not empties_shown()) then
 						table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
 					end
 				end
@@ -4821,8 +4840,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 			}
 			else ui.div {},
 		-- Its view options, at its top right: on the title bar's line when one
-		-- lies over it (its controls centred halfway down it, under its top
-		-- inset: Zeron's 38 and 4), else at its own inset. Where it stands
+		-- lies over it (`TitleBar.middle`: halfway down it under its top inset,
+		-- Zeron's 38 and 4, or the window's own buttons' line), else at its
+		-- own inset. Where it stands
 		-- open, whatever its width as it folds or comes back: its edge clips
 		-- it there, as it clips the rest, so it never slides under the title
 		-- bar's controls and the window's buttons on the way.
@@ -4832,7 +4852,11 @@ fn layer(input:LayerInput)->vec4<f32> {
 				local button = (ui.theme.get("zeron.icon_button.md") :: number?) or 24
 				return room() - PAD - button
 			end,
-			top = if props.top then (props.top + 4) / 2 - 12 else PAD,
+			top = if props.top
+				then function(): number
+					return TitleBar.middle() - 12
+				end
+				else PAD,
 			opacity = shown_wide,
 			pointer_events = function()
 				return if collapsed:get() then "none" else "auto"

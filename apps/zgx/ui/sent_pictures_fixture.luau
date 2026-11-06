@@ -23,7 +23,7 @@ local remote = ui.state("test_sent_remote", true)
 local reads = ui.state("test_sent_reads", "")
 local generation = ui.state("test_sent_generation", 1)
 -- A prompt sent from here to the chat on the other device
--- (`test_sent_pending`): "sending", this Mac's copy (`here`), its picture
+-- (`test_sent_pending`): "sending", this computer's copy (`here`), its picture
 -- the file it was sent from; "working", the chat's copy of it (the same
 -- id), its picture the upload kept there, still waiting for its reply;
 -- "landed", the chat's copy once the reply has begun.

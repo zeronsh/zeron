@@ -30,15 +30,18 @@ mod acp_registry;
 mod agents;
 mod appshots;
 mod auth;
+mod carried_settings;
 mod chat;
 mod cloud;
 mod dev;
 mod completion;
+mod desktop_blur;
 mod engine;
 mod engine_update;
 mod editor_menu;
 mod favicons;
 mod files;
+mod fonts;
 mod github;
 mod haptics;
 mod heap;
@@ -47,6 +50,7 @@ mod links;
 mod pasted;
 mod math;
 mod menu_bar;
+mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
@@ -57,6 +61,7 @@ mod settings;
 mod terminal;
 mod tool_details;
 mod themes;
+mod transparency;
 mod visuals;
 #[cfg(test)]
 mod audit_shots;
@@ -64,6 +69,8 @@ mod audit_shots;
 mod menu_tests;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod waiting_toast_tests;
 #[cfg(test)]
 mod split_tests;
 #[cfg(test)]
@@ -76,6 +83,8 @@ mod hit_tests;
 mod shortcut_tests;
 #[cfg(test)]
 mod menu_bar_tests;
+#[cfg(test)]
+mod window_buttons_tests;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]
@@ -98,6 +107,7 @@ mod fit_tests;
 mod editor_scroll_tests;
 #[cfg(test)]
 mod i18n_tests;
+mod updates;
 #[cfg(test)]
 mod visuals_tests;
 
@@ -127,7 +137,30 @@ enum Screen {
     Fixture(String),
 }
 
+/// Room for open files. An app the Finder starts is given 256, which its pictures,
+/// scripts, sockets and file watches can use up, and then nothing can be opened:
+/// no icon, no lazily loaded screen, no template. (A shell usually gives far more,
+/// so a build started from one never shows it.)
+#[cfg(unix)]
+fn raise_open_files() {
+    // macOS refuses more than this however high the hard limit reads (`OPEN_MAX`).
+    const WANTED: libc::rlim_t = 10_240;
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: `limit` is a valid rlimit for each call to read or write.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 || limit.rlim_cur >= WANTED {
+            return;
+        }
+        limit.rlim_cur = WANTED.min(limit.rlim_max);
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+            eprintln!("zeron-zgx: couldn't raise the open file limit: {}", std::io::Error::last_os_error());
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    raise_open_files();
     // A terminal tab's bridge (src/terminal.rs): this binary, run by zgx's
     // terminal, passing a shell's bytes to and from the engine.
     let argv: Vec<String> = std::env::args().collect();
@@ -232,12 +265,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     // Signed in on an earlier run: no intro, setup at once, where sign-in
-    // leads (src/auth.rs). Asking for `intro` still plays it.
+    // leads (src/auth.rs). Asking for `intro` still plays it. The first launch
+    // of this interface by someone who finished setup before is the exception:
+    // the intro, then their username and card, once.
     if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
-        screen = Screen::Onboarding;
-        // Setup finished on this Mac before: the main window.
-        if onboarded() {
-            screen = Screen::Main;
+        if welcome_due(finished_setup_before(), welcomed()) {
+            WELCOME.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            screen = Screen::Onboarding;
+            // Setup finished on this Mac before: the main window.
+            if onboarded() {
+                screen = Screen::Main;
+            }
         }
     }
 
@@ -451,14 +490,19 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // The active template laid over Zeron's own, in `<data>/templates/.live/`
     // (src/plugins/live.rs): the host's file is fixed as it's made, so it's
     // that folder's, whichever template is in use.
+    // (A beta: the sidebar as it was in the app it replaces.)
+    if cfg!(feature = "beta") {
+        let from = engine::data_dir().map(|dir| dir.join("ui-settings.json"));
+        let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
+        carried_settings::carry(from.as_deref(), state.as_deref());
+    }
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
     // The host's own toasts over it (a template in preview, a switch you
-    // didn't make, signing keys, safe mode at launch) and the menu bar
-    // where the system has none.
-    let chrome = plugins::host_bar::view(cx);
+    // didn't make, signing keys, safe mode at launch).
+    let chrome = plugins::host_bar::view(cx, host.shared("zeron.locale", "en").signal());
     // Where the app's toasts stand, over the host's (host_bar.rs `follow`).
     let floor = host.shared("toast_floor", 16.);
     let view = serve_with(cx, host, "app.luau", inspect, Some(chrome), menu_bar::Role::Bar);
@@ -477,6 +521,29 @@ fn onboarded_marker() -> Option<PathBuf> {
 
 fn onboarded() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || (cfg!(feature = "beta") && finished_in_zeron_app())
+}
+
+/// This launch welcomes someone who already had Zeron to this interface.
+static WELCOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where that welcome having been seen on this computer is remembered.
+fn welcomed_marker() -> Option<PathBuf> {
+    zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("welcomed"))
+}
+
+fn welcomed() -> bool {
+    welcomed_marker().is_some_and(|path| path.is_file())
+}
+
+/// Whether someone signed in had finished setup, here or in the Zeron app.
+fn finished_setup_before() -> bool {
+    onboarded_marker().is_some_and(|path| path.is_file()) || finished_in_zeron_app()
+}
+
+/// Whether someone signed in gets the welcome: they'd finished setup before and
+/// haven't seen it. (Mid-way through their first setup, they carry on with that.)
+fn welcome_due(finished_before: bool, welcomed: bool) -> bool {
+    finished_before && !welcomed
 }
 
 /// Whether setup was finished in the Zeron app's own interface before this
@@ -513,8 +580,27 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     host.window_zoom(&cx.ui);
     // `ui.window.size` (the lightbox fills the window with it).
     host.window_size(cx.viewport.clone());
+    // `ui.window.full_screen` and its transition (macOS's animation, going
+    // in or out, and how long it takes): the title bar's controls slide
+    // over to where the traffic lights were, in step with it.
+    {
+        let transition = cx.full_screen_transition.clone();
+        host.window_full_screen(cx.window_info.fullscreen.clone(), move || {
+            transition.get().map(|transition| match transition {
+                zgx_desktop::FullScreenTransition::Entering(duration) => (true, duration.as_secs_f64()),
+                zgx_desktop::FullScreenTransition::Leaving(duration) => (false, duration.as_secs_f64()),
+            })
+        });
+    }
+    // The platform the window is on ("macos", "linux", "windows"): what the
+    // window's own buttons are (ds/title_bar: macOS's traffic lights).
+    host.shared("platform", std::env::consts::OS);
     if let Ok(step) = std::env::var("ZERON_ZGX_STEP") {
         host.shared("onboarding.start", step.as_str());
+    }
+    // Their username and card only (`welcome_due`).
+    if WELCOME.load(std::sync::atomic::Ordering::Relaxed) {
+        host.shared("onboarding.welcome", true);
     }
     // Every page again, whatever the account and this Mac have finished.
     if std::env::var_os("ZERON_ZGX_REPLAY").is_some() {
@@ -525,19 +611,41 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if std::env::var("ZERON_ZGX_TRACE_TRANSCRIPT").is_ok_and(|v| v == "1") {
         host.shared("debug.trace_transcript", true);
     }
+    // How much the desktop blurs behind the glass (`window.blur`), for the
+    // glass's tint (ds/material).
+    desktop_blur::install(cx, &host);
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
+    // Full screen, entered or left (`ui.invoke("window.full_screen", on)`),
+    // as the green button does: macOS animates it, and `ui.window`'s
+    // full_screen and its transition say so (a fixture drives the title
+    // bar's slide with it).
+    let window = cx.window.clone();
+    host.action("window.full_screen", move |on| window.set_fullscreen(matches!(on, Value::Bool(true))));
     // Reload Zeron: the app quits and starts again, the same launch
     // (src/relaunch.rs).
     let windows = cx.windows.clone();
     host.action("app.relaunch", move |_| relaunch::ask(|| windows.quit()));
     // Setup finished: remembered, and the main window opens in its place.
     let (window, windows) = (cx.window.clone(), cx.windows.clone());
+    let left = std::cell::Cell::new(false);
     host.action("app.open_main", move |_| {
+        // (Once a window, as `app.onboard`: no second main window.)
+        if left.replace(true) {
+            return;
+        }
+        WELCOME.store(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(path) = onboarded_marker() {
             let _ = path.parent().map(std::fs::create_dir_all);
             if let Err(error) = std::fs::write(&path, b"") {
                 eprintln!("zeron-zgx: setup's end wasn't remembered: {error}");
+            }
+        }
+        // (Through setup in this interface, however they came: no welcome after.)
+        if let Some(path) = welcomed_marker() {
+            let _ = path.parent().map(std::fs::create_dir_all);
+            if let Err(error) = std::fs::write(&path, b"") {
+                eprintln!("zeron-zgx: the welcome wasn't remembered: {error}");
             }
         }
         windows.open(main_window(), move |cx| open_main(cx, false));
@@ -545,7 +653,14 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     });
     // Signed out in the main window: setup again, in its window.
     let (window, windows) = (cx.window.clone(), cx.windows.clone());
+    let left = std::cell::Cell::new(false);
     host.action("app.onboard", move |_| {
+        // (Once a window: asked again before it has closed, no second setup.)
+        if left.replace(true) {
+            return;
+        }
+        // (Whoever signs in next is someone else's first run, not this welcome.)
+        WELCOME.store(false, std::sync::atomic::Ordering::Relaxed);
         windows.open(onboarding_window(), move |cx| open(cx, "app.luau", false));
         window.close();
     });
@@ -553,6 +668,11 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // `mailto:` in the mail app: what a link's `href` opens. Anything else
     // is ignored.
     host.action("open_url", |url| {
+        // A link carries out what a preview put in it.
+        if plugins::preview::current().is_some() {
+            plugins::host_bar::links_need_keeping();
+            return;
+        }
         if let Value::Str(url) = url
             && (url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:"))
             && !url.chars().any(char::is_control)
@@ -578,23 +698,33 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         }
     });
     // `appearance(dark)`: the windows' own chrome (the traffic lights, the
-    // title bar's material) in the theme's appearance, `true` dark, `false`
-    // light, nil the system's. zgx themes the content only.
-    host.action("appearance", |value| {
-        set_appearance(match value {
-            Value::Bool(dark) => Some(dark),
-            _ => None,
-        })
+    // title bar's material; Windows' caption buttons and Mica) in the
+    // theme's appearance, `true` dark, `false` light, nil the system's. zgx
+    // themes the content only.
+    let window = cx.window.clone();
+    host.action("appearance", move |value| {
+        set_appearance(
+            &window,
+            match value {
+                Value::Bool(dark) => Some(dark),
+                _ => None,
+            },
+        )
     });
+    // Whether the system asks for no transparency (Windows' Transparency
+    // effects off): every glass solid (src/transparency.rs).
+    transparency::install(cx, &host);
     // LaTeX math laid out for `ds/math` (src/math.rs): every window.
     math::install(&host);
+    // Mermaid diagrams drawn for `ds/mermaid` (src/mermaid.rs).
+    mermaid::install(&host);
     // A slider's detents tapped under the trackpad (src/haptics.rs).
     haptics::install(&host);
     // The engine's account (src/auth.rs), this Mac's agents (src/agents.rs)
     // and GitHub for Cloud (src/github.rs): every window but the intro's.
     if entry != "intro.luau" {
         auth::install(cx, &host);
-        agents::install(cx, &host);
+        agents::install(&host);
         acp_registry::install(cx, &host);
         github::install(cx, &host);
         // Cloud and Billing (src/cloud.rs): Settings' pages, the new chat's
@@ -602,6 +732,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
+        // What there is to update, on every device (src/updates.rs).
+        updates::install(&host);
         // Adding a project, removing one (src/projects.rs).
         projects::install(&host);
         // A session's files (src/files.rs): the files pane and editor.
@@ -623,6 +755,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
+        // The installed fonts, for Settings → Appearance's font pickers
+        // (src/fonts.rs).
+        fonts::install(&host);
         // Settings → About & updates: versions and the engine's updater
         // (src/about.rs).
         about::install(cx, &host);
@@ -680,7 +815,7 @@ fn selected(ui: &Ui) -> Value {
 
 /// Every window's native appearance: dark, light, or (`None`) the system's.
 #[cfg(target_os = "macos")]
-fn set_appearance(dark: Option<bool>) {
+fn set_appearance(_window: &zgx_desktop::WindowHandle, dark: Option<bool>) {
     use objc2::{class, msg_send, runtime::AnyObject};
     use objc2_foundation::NSString;
     // SAFETY: `+[NSApplication sharedApplication]` and `+[NSAppearance
@@ -704,8 +839,15 @@ fn set_appearance(dark: Option<bool>) {
     }
 }
 
+/// The window's own chrome in the theme's appearance, or (`None`) the
+/// system's: Windows' caption buttons (zgx's, which follow the window's
+/// theme, not zgx's) and its Mica, and Linux's dark or light variant. Per
+/// window: there's no app-wide one.
 #[cfg(not(target_os = "macos"))]
-fn set_appearance(_dark: Option<bool>) {}
+fn set_appearance(window: &zgx_desktop::WindowHandle, dark: Option<bool>) {
+    use zgx::theme::Appearance;
+    window.set_theme(dark.map(|dark| if dark { Appearance::Dark } else { Appearance::Light }));
+}
 
 /// What a menu over selected text does (zgx keeps its own menu's actions from
 /// scripts): `copy_selection`, as rich text and plain; `look_up_selection`;
@@ -830,29 +972,97 @@ fn serve_with(
             }
         });
     });
-    let keep = RefCell::new(Some((host, devtools, commands)));
+    // A menu item from the command palette (`run_menu_command`), on the next
+    // turn rather than inside the script that asks.
+    let (slot, tasks) = (reloading.clone(), cx.tasks.clone());
+    host.action("app.run_menu_command", move |id| {
+        let Value::Str(id) = id else { return };
+        let slot = slot.clone();
+        tasks.spawn(async move {
+            let host = slot.borrow().clone();
+            if let Some(host) = host {
+                run_menu_command(&host, &id);
+            }
+        });
+    });
+    // The window's corner radius as it is now, for the scripts' cards to stay
+    // concentric with it (`window.corner_radius`, ui/ds/tokens.luau): on
+    // Windows 11 8, square while maximized or in full screen (Windows rounds
+    // neither), and on Windows 10 (0 from zgx). Windows' alone: macOS's cards
+    // keep their own corner, and zgx knows no other platform's (it says 0).
+    let corner = cfg!(windows).then(|| {
+        let info = &cx.window_info;
+        let (radius, fullscreen, bounds) = (info.corner_radius.clone(), info.fullscreen.clone(), info.bounds.clone());
+        let told = host.shared("window.corner_radius", Value::Nil);
+        cx.ui.runtime.effect(move || {
+            let square = fullscreen.get() || bounds.with(fills_work_area);
+            told.set(Value::from(if square { 0. } else { radius.get() }));
+        })
+    });
+    let keep = RefCell::new(Some((host, devtools, commands, corner)));
     cx.on_closed(move || {
         reloading.borrow_mut().take();
-        if let Some((host, devtools, commands)) = keep.borrow_mut().take() {
+        if let Some((host, devtools, commands, corner)) = keep.borrow_mut().take() {
             host.save();
             drop(devtools);
             drop(commands);
+            drop(corner);
         }
     });
     handle
 }
 
+/// Whether a window at `bounds` fills its monitor's work area (the screen less
+/// the taskbar): maximized, as a frameless window's client is then (winit
+/// fits it to the work area), within a pixel.
+#[cfg(windows)]
+fn fills_work_area(bounds: &zgx_desktop::WindowBounds) -> bool {
+    use windows_sys::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
+    };
+    let Some((x, y)) = bounds.position else { return false };
+    let (w, h) = (bounds.size.0 as i32, bounds.size.1 as i32);
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: the monitor nearest the window's middle (always one, by the
+    // flag), and a MONITORINFO sized as the call asks.
+    let found = unsafe { GetMonitorInfoW(MonitorFromPoint(POINT { x: x + w / 2, y: y + h / 2 }, MONITOR_DEFAULTTONEAREST), &mut info) } != 0;
+    let work = info.rcWork;
+    found && ((work.right - work.left) - w).abs() <= 1 && ((work.bottom - work.top) - h).abs() <= 1
+}
+#[cfg(not(windows))]
+fn fills_work_area(_bounds: &zgx_desktop::WindowBounds) -> bool {
+    false
+}
+
 /// The scripts' commands as the app's menu bar while this window has it
 /// (src/menu_bar.rs: one bar for the whole app, the last opened window's
 /// that has one; a sheet never takes it), and each item it shows chosen
-/// here run in this window's scripts. Keep what it returns while the window
-/// lives: dropped, the bar is the next window's again.
-fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Role) -> menu_bar::Served {
+/// here run in this window's scripts; and the bar's items listed for the
+/// command palette. Keep what it returns while the window lives: dropped,
+/// the bar is the next window's again.
+fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Role) -> (menu_bar::Served, Option<zgx::reactive::Effect>) {
     // The host's own items follow a template going in and out of preview.
     let preview = cx.ui.runtime.signal(plugins::preview::current());
     let heard = preview.clone();
     plugins::preview::on_change(move |now| {
         heard.set(now.cloned());
+    });
+    // What the menus hold, for the command palette (`app.menu_commands`):
+    // where the system draws no menu bar (Windows, Linux: zgx's drawn one
+    // isn't mounted, src/plugins/host_bar.rs) the palette is how a pointer
+    // reaches each item. The bar `menu_bar` makes of this window's commands;
+    // their shortcuts are zgx's key bindings still. (A sheet's bar is the
+    // window's under it: nothing of its own to list.)
+    let listing = (role == menu_bar::Role::Bar).then(|| {
+        let listed = host.shared("app.menu_commands", Value::List(Rc::from([])));
+        let (commands, reserved, from, preview) = (host.commands(), host.reserved_keys(), host.clone(), preview.clone());
+        cx.ui.runtime.effect(move || {
+            let commands = commands.get();
+            let reserved = reserved.get();
+            let bar = preview.with(|preview| menu_bar::Bar::of(&commands, &reserved, &from.dropped_shortcuts(), preview.as_ref()));
+            listed.set(palette_commands(&bar.menus, &commands));
+        })
     });
     let served = menu_bar::of(&cx.windows).serve(&cx.ui.runtime, host, preview, role);
     let run = host.clone();
@@ -873,7 +1083,53 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Rol
             eprintln!("zeron-zgx: menus: {} chosen, but no command of this window runs it", action.0);
         }
     });
-    served
+    (served, listing)
+}
+
+/// Every item of the menus (`bar`), in their order, for the command
+/// palette: `{ id, title, menu, key }`, `key` as the scripts wrote it where
+/// the item has its shortcut (`all`'s). Not the host's Keep: that's the
+/// preview toast's, never a script's to run.
+fn palette_commands(bar: &[zgx_desktop::AppMenu], all: &[zgx_script::Command]) -> Value {
+    fn walk(menu: &str, entries: &[zgx_desktop::AppMenuEntry], all: &[zgx_script::Command], out: &mut Vec<Value>) {
+        for entry in entries {
+            match entry {
+                zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } if action.0 != plugins::KEEP_TEMPLATE => {
+                    let key = accelerator.as_ref().and_then(|_| all.iter().find(|c| c.id == action.0)).and_then(|c| c.key.clone());
+                    let mut fields = vec![("id", Value::from(action.0.as_str())), ("title", Value::from(label.as_str())), ("menu", Value::from(menu))];
+                    if let Some(key) = key {
+                        fields.push(("key", Value::from(key.as_str())));
+                    }
+                    out.push(Value::record(fields));
+                }
+                zgx_desktop::AppMenuEntry::Submenu(sub) => walk(&sub.label, &sub.entries, all, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for menu in bar {
+        walk(&menu.label, &menu.entries, all, &mut out);
+    }
+    Value::List(out.into())
+}
+
+/// A menu item run from the command palette (`app.run_menu_command`, the
+/// id `palette_commands` gave it), on the next turn, as its menu item would:
+/// the host's way back to Zeron v3, or a script's command. A plugin's waits
+/// until a template in preview is kept, as the host's dangerous actions do.
+fn run_menu_command(host: &ScriptHost, id: &str) {
+    if id.starts_with(menu_bar::HOST_COMMANDS) {
+        if id == plugins::USE_ZERON_TEMPLATE {
+            plugins::host_command(id);
+        }
+        return;
+    }
+    if id.contains('/') && plugins::preview::current().is_some() {
+        eprintln!("zeron-zgx: {id} waits until the template in preview is kept");
+        return;
+    }
+    host.run_command(id);
 }
 
 fn intro_window() -> WindowOptions {
@@ -899,6 +1155,8 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
         glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
+        // (Windows: the caption buttons keep to the title row at any zoom.)
+        caption_height: Some(32.),
         ..Default::default()
     }
 }
@@ -990,4 +1248,16 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod welcome_tests {
+    /// Someone who'd finished setup gets it once; someone new, or mid-way through
+    /// their first setup, doesn't.
+    #[test]
+    fn the_welcome_is_for_who_had_finished_setup_and_only_once() {
+        assert!(super::welcome_due(true, false));
+        assert!(!super::welcome_due(true, true));
+        assert!(!super::welcome_due(false, false));
+    }
 }

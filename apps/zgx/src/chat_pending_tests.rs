@@ -24,6 +24,7 @@ fn pending_chat() -> (TestApp, Rc<View>, Sending) {
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
+        subagents: app.host.shared("test.subagents", Value::Nil),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
     });
@@ -65,7 +66,7 @@ fn pending_chat() -> (TestApp, Rc<View>, Sending) {
             .poll(&mut Context::from_waker(Waker::noop()))
             .is_pending()
     );
-    view.heard_frame(&json!({ "reset": [] }));
+    view.heard_frame(json!({ "reset": [] }));
     (app, view, sending)
 }
 
@@ -81,7 +82,7 @@ fn first_prompt_survives_switching_chats_before_the_engine_saves_it() {
     assert_eq!(original[0]["id"], "first-message");
 
     view.open_chat(Some("other-chat".into()));
-    view.heard_frame(&json!({ "reset": [] }));
+    view.heard_frame(json!({ "reset": [] }));
     assert_eq!(
         messages(&view),
         json!([]),
@@ -94,7 +95,7 @@ fn first_prompt_survives_switching_chats_before_the_engine_saves_it() {
         original,
         "restore the prompt before the next transcript frame"
     );
-    view.heard_frame(&json!({ "reset": [] }));
+    view.heard_frame(json!({ "reset": [] }));
     assert_eq!(
         messages(&view),
         original,
@@ -103,7 +104,7 @@ fn first_prompt_survives_switching_chats_before_the_engine_saves_it() {
 
     view.open_chat(None);
     view.open_chat(Some("new-chat".into()));
-    view.heard_frame(&json!({ "reset": [] }));
+    view.heard_frame(json!({ "reset": [] }));
     assert_eq!(
         messages(&view),
         original,
@@ -112,7 +113,7 @@ fn first_prompt_survives_switching_chats_before_the_engine_saves_it() {
 
     let saved = json!({ "id": "first-message", "role": "user", "createdAt": now_seconds() * 1000,
         "parts": [{ "id": "text", "kind": "text", "text": "Find the startup bug" }] });
-    view.heard_frame(&json!({ "reset": [saved] }));
+    view.heard_frame(json!({ "reset": [saved] }));
     assert_eq!(
         messages(&view).as_array().unwrap().len(),
         1,
@@ -120,7 +121,7 @@ fn first_prompt_survives_switching_chats_before_the_engine_saves_it() {
     );
     assert!(!view.pending.borrow().contains_key("new-chat"));
     // Once acknowledged, a later empty transcript must not resurrect it.
-    view.heard_frame(&json!({ "reset": [] }));
+    view.heard_frame(json!({ "reset": [] }));
     assert_eq!(messages(&view), json!([]));
 }
 
@@ -133,7 +134,7 @@ fn a_send_that_fails_while_away_keeps_its_prompt_and_retry() {
     assert_eq!(messages(&view), json!([]));
 
     view.open_chat(Some("new-chat".into()));
-    view.heard_frame(&json!({ "reset": [] }));
+    view.heard_frame(json!({ "reset": [] }));
     assert_eq!(messages(&view)[0]["waiting"], "failed");
     assert_eq!(view.pending.borrow()["new-chat"][0].retry, Some(run));
 
@@ -155,7 +156,7 @@ fn a_saved_first_prompt_stays_visible_after_the_sending_indicator_expires() {
     let (_app, view, _sending) = pending_chat();
     view.open_chat(Some("other-chat".into()));
     view.open_chat(Some("new-chat".into()));
-    view.heard_frame(&json!({ "reset": [{
+    view.heard_frame(json!({ "reset": [{
         "id": "first-message", "role": "user",
         "createdAt": (now_seconds() - SEND_GRACE_SECONDS as i64 - 1) * 1000,
         "parts": [{ "id": "text", "kind": "text", "text": "Find the startup bug" }]

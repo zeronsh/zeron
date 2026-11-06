@@ -52,6 +52,7 @@ pub mod template_consent;
 pub mod preview;
 pub mod host_bar;
 pub mod locales;
+pub mod network;
 pub mod plugin_menus;
 
 use std::{
@@ -134,6 +135,12 @@ impl Item {
     pub fn permissions(&self) -> Vec<String> {
         self.list(&self.json["permissions"])
     }
+    /// The hosts its requests may reach, as its manifest names them (none:
+    /// any public address). What the window's requests are held to
+    /// (`network`), and the engine's for its service.
+    pub fn network_hosts(&self) -> Vec<String> {
+        self.list(&self.json["network_hosts"])
+    }
     /// Its "ui.change" targets, as its manifest lists them.
     pub fn change(&self) -> Vec<String> {
         self.list(&self.json["ui"]["change"])
@@ -204,6 +211,8 @@ struct PrWatch {
 
 pub struct Bridge {
     host: ScriptHost,
+    /// Where each plugin's requests may go, as its manifest names them.
+    network: network::Network,
     windows: WindowFactory,
     page: Shared,
     menus: Shared,
@@ -221,7 +230,9 @@ pub struct Bridge {
     inbox: RefCell<HashMap<String, Inbox>>,
     item_menus: RefCell<BTreeMap<String, Vec<Value>>>,
     toasted: RefCell<HashMap<String, Instant>>,
-    /// Plugins whose waiting you were told of (id and what it was).
+    /// What was said once this run: a signing key's notice (`key-notice:<id>`),
+    /// and a template package whose window opened as it arrived
+    /// (`template:<name>`: no notice for it as well).
     told: RefCell<HashSet<String>>,
     /// `<data>/templates`, as the engine's data dir says (from its config).
     templates_root: Option<PathBuf>,
@@ -298,8 +309,12 @@ pub struct Bridge {
 /// What plugins may read and ask of the app, each behind its permission,
 /// and every declared hook behind "ui.add".
 pub fn expose_surface(host: &ScriptHost) {
+    // Names under `zeron` are the app's alone, whatever a plugin is called
+    // (its slots and commands are its own names anyway).
+    host.reserve_prefix("zeron");
     // Adding before or after any element, by any selector, is "ui.add"'s
-    // (replacing is "ui.change"'s, an Override of the selector as written).
+    // (replacing is "ui.change"'s, an OverrideElement of the selector as
+    // written).
     host.require_contribution_capability(Capability::Named(grants::UI_ADD.into()));
     // What a file or a reply's block is, as an element gives it: a token
     // (`tokens`), never the path or the text.
@@ -451,8 +466,13 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
 /// Plugins for the main window `cx` shows `host` in.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
+    let plugin_network = network::Network::default();
+    host.fetch_policy(plugin_network.clone());
+    // What the app's VM (a template in preview, while it is one) may reach.
+    host.guard(preview::guard);
     let bridge = Rc::new(Bridge {
         host: host.clone(),
+        network: plugin_network,
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
@@ -512,8 +532,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let weak = Rc::downgrade(&bridge);
     let effect = cx.ui.runtime.effect(move || {
         if let Some(b) = weak.upgrade() {
-            let sources = b.sources(true);
-            b.publish_records(&sources);
+            let (sources, list) = b.sources(true);
+            b.publish_records(&sources, &list);
         }
     });
     *bridge.records_effect.borrow_mut() = Some(effect);
@@ -776,6 +796,7 @@ pub(crate) fn shortcut_notice(lost: &[crate::menu_bar::Dropped], name_of: impl F
         Why::Zerons(title) => format!("Its {key} for “{}” is already Zeron's ({title}), so it's in the menu bar without one.", first.title),
         Why::Plugins(other) => format!("Its {key} for “{}” is already {}'s, so it's in the menu bar without one.", first.title, name_of(other)),
         Why::NoKey => format!("Its {key} for “{}” isn't a key a menu can show, so it's in the menu bar without one.", first.title),
+        Why::NoModifier => format!("Its {key} for “{}” has no ⌘, ⌃ or ⌥, so it would take that key from everything you type in. It's in the menu bar without one.", first.title),
     };
     match lost.len() {
         1 => {}
@@ -844,6 +865,9 @@ pub fn builtin_dir() -> PathBuf {
 pub fn dev_plugins(host: &ScriptHost) {
     let Some(dirs) = crate::dev::switch("ZERON_ZGX_DEV_PLUGINS") else { return };
     expose_surface(host);
+    let plugin_network = network::Network::default();
+    host.fetch_policy(plugin_network.clone());
+    let mut hosts = Vec::new();
     let mut plugins = Vec::new();
     for dir in std::env::split_paths(&dirs) {
         let Ok(text) = std::fs::read_to_string(dir.join("zeron-plugin.json")) else {
@@ -857,8 +881,10 @@ pub fn dev_plugins(host: &ScriptHost) {
                 "id": id, "name": manifest["name"], "status": "on", "entry": manifest["entry"],
                 "snapshot": dir, "permissions": manifest["permissions"],
                 "ui": manifest.get("ui").cloned().unwrap_or(json!({})),
+                "network_hosts": manifest["network"]["hosts"],
             }),
         };
+        hosts.push((id.clone(), item.network_hosts()));
         expose_own(host, &id);
         locales::publish(host, &id, &dir);
         // Its settings, at their defaults (a fixture sets them as it likes).
@@ -888,6 +914,7 @@ pub fn dev_plugins(host: &ScriptHost) {
         eprintln!("zeron-zgx: dev plugin {id} from {}", dir.display());
         plugins.extend(item.plugin());
     }
+    plugin_network.set(hosts);
     host.set_plugins(plugins);
 }
 
@@ -1155,15 +1182,6 @@ impl Bridge {
                 host_bar::notice(host_bar::Notice::key(notice["kind"].as_str().unwrap_or(""), notice["device"].as_str(), words));
             }
         }
-        // Each one newly waiting for you: said once.
-        for item in &list {
-            if matches!(item.status(), "pending" | "tampered") {
-                let what = format!("{}@{}", item.id(), item.json["hash"].as_str().unwrap_or(""));
-                if self.told.borrow_mut().insert(what) {
-                    self.request("waiting", item.name(), Value::from(item.id()));
-                }
-            }
-        }
         // One removed, or put back from elsewhere under the same id, starts
         // afresh: nothing it left (its queues, what it set, its saved state)
         // reaches what's installed now.
@@ -1210,7 +1228,6 @@ impl Bridge {
         self.problems.borrow_mut().remove(id);
         self.costs.borrow_mut().remove(id);
         self.failed_plugins.borrow_mut().forget(id);
-        self.told.borrow_mut().retain(|t| !t.starts_with(&format!("{id}@")));
         // (Set with no borrow held: a plugin's effects run at once.)
         for s in shared {
             s.set(vlist(Vec::new()));
@@ -1240,6 +1257,8 @@ impl Bridge {
         for plugin in &want {
             self.expose(&plugin.name);
         }
+        // Where each may reach, before anything of it runs.
+        self.network.set(items.iter().filter(|i| want.iter().any(|p| p.name == i.id())).map(|i| (i.id().to_string(), i.network_hosts())));
         // Each one's own words (`locales/`, read again: a new version brings
         // its own), for the SDK's `zeron.t`.
         for item in items.iter().filter(|i| want.iter().any(|p| p.name == i.id())) {
@@ -1277,8 +1296,8 @@ impl Bridge {
             self.publish_pages();
         }
         self.publish_page();
-        let sources = self.sources(false);
-        self.publish_records(&sources);
+        let (sources, list) = self.sources(false);
+        self.publish_records(&sources, &list);
         if *self.loaded.borrow() == want {
             return;
         }
@@ -1333,6 +1352,11 @@ impl Bridge {
     }
 
     fn blame_as(&self, error: &str, loading: bool) {
+        // A preview asking for what it can't have yet isn't broken. (One that
+        // can't load without it makes way like any, until it's kept.)
+        if !loading && preview::refused(error) {
+            return;
+        }
         let loaded = self.loaded.borrow().clone();
         if let Some(id) = recovery::blame(error, &loaded) {
             self.plugin_failed(&id, error);
@@ -1355,7 +1379,7 @@ impl Bridge {
     /// new version or an edit of it arrives.
     pub(crate) fn plugin_failed(&self, id: &str, error: &str) {
         let Some(item) = self.item(id) else { return };
-        if !self.failed_plugins.borrow_mut().fail(id, item.hash(), error) {
+        if !self.failed_plugins.borrow_mut().fail(id, item.hash(), &recovery::reason(error)) {
             return;
         }
         eprintln!("zeron-zgx: plugin {id} failed and is withdrawn: {}", recovery::first_line(error));
@@ -1488,7 +1512,23 @@ impl Bridge {
         let was = self.laid.borrow().id.clone();
         let name = template_name(root, &id);
         preview::set_template_running(id != live::BUILTIN);
+        // What a preview saved is kept with it, or goes with it; what failed
+        // only because it was one is tried again (`Bridge::blame_as`).
+        let was_previewing = preview::current();
+        let kept = trusted && was_previewing.as_ref().is_some_and(|p| p.id == id);
+        if kept {
+            self.host.keep_held_state();
+        } else if was_previewing.as_ref().is_some_and(|p| trusted || p.id != id) {
+            self.host.drop_held_state();
+        }
         preview::set((!trusted).then(|| preview::Preview { id: id.clone(), name: name.clone() }));
+        let retry = kept && {
+            let files = self.failed_files.borrow_mut().forget_under(&format!("{id}:"));
+            let whole = self.broken.borrow().why(&id).is_some();
+            self.broken.borrow_mut().forget(&id);
+            self.fallbacks.borrow_mut().remove(&id);
+            files || whole
+        };
         // A switch you didn't make here (an agent's use_template, a file
         // written by hand): said by the host, whatever the template shows.
         if was != id && !self.chose.replace(false) {
@@ -1515,12 +1555,15 @@ impl Bridge {
         }
         self.publish_templates();
         self.publish_page();
-        if changed > 0
-            && template
+        if (kept || (changed > 0 && template))
             && let Err(error) = self.host.reload()
         {
             eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
             self.blame_as(&error, true);
+        }
+        // What failed as a preview, laid down as it is now.
+        if retry {
+            self.look();
         }
     }
 
@@ -1605,13 +1648,12 @@ impl Bridge {
             list.push(Value::record(fields));
         }
         // Packages waiting for you to allow them (an agent's import_template,
-        // or one brought in here): each newly waiting said once.
-        let pending = live::pending(&root);
-        for p in &pending {
-            let (name, title) = (p["pending"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or("A template"));
-            if self.told.borrow_mut().insert(format!("template:{name}")) {
-                self.request("template_waiting", title, Value::from(name));
-            }
+        // or one brought in here). `here`: its window opened as it came, so
+        // the app gives it no notice as well (screens/plugins/waiting).
+        let mut pending = live::pending(&root);
+        for p in &mut pending {
+            let name = p["pending"].as_str().unwrap_or("").to_string();
+            p["here"] = json!(self.told.borrow().contains(&format!("template:{name}")));
         }
         templates::write_if_changed(&root.join(live::STATUS), &Json::Object(status));
         self.templates_page.set(Value::record([
@@ -1708,40 +1750,42 @@ impl Bridge {
     /// What records are made from, as the window has it: followed (`track`,
     /// from the records' effect) or only read. The open chat's messages are
     /// followed only while a plugin may read them.
-    fn sources(&self, track: bool) -> records::Sources {
+    fn sources(&self, track: bool) -> (records::Sources, Value) {
         let read = |key: &str| {
             let signal = self.host.shared(key, Value::Nil).signal();
             let value = if track { signal.get() } else { signal.with_untracked(Value::clone) };
             value_json(&value)
         };
         let messages_wanted = self.items.borrow().iter().any(|i| i.status() == "on" && records::reads_messages(&i.permissions()));
-        let messages = if messages_wanted {
-            read("chat.messages")
-        } else {
-            value_json(&self.host.shared("chat.messages", Value::Nil).signal().with_untracked(Value::clone))
-        };
-        records::Sources {
-            sessions: read("sessions"),
+        // (No plugin reading them: nothing is made of a whole transcript.)
+        let messages = if messages_wanted { read("chat.messages") } else { Json::Null };
+        // The session list itself: records are made from it directly (no text of a
+        // whole account, on the main thread, each time the list moves).
+        let signal = self.host.shared("sessions", Value::Nil).signal();
+        let all = if track { signal.get() } else { signal.with_untracked(Value::clone) };
+        let sources = records::Sources {
+            sessions: Json::Null,
             messages,
             profile: read("plugins.profile"),
             hide_emails: read("plugins.hide_emails").as_bool().unwrap_or(false),
-        }
+        };
+        (sources, all)
     }
 
     /// Each plugin's records, from `sources`, holding what it may read.
-    fn publish_records(&self, sources: &records::Sources) {
+    fn publish_records(&self, sources: &records::Sources, list: &Value) {
         let items = self.items.borrow().clone();
-        let shared: Vec<(Shared, Json)> = items
+        let shared: Vec<(Shared, Value)> = items
             .iter()
             .filter(|i| i.status() == "on")
             .filter_map(|i| {
                 let shared = self.records.borrow().get(i.id()).cloned()?;
-                Some((shared, records::records_with(&i.permissions(), &i.change(), sources)))
+                Some((shared, records::published(&i.permissions(), &i.change(), sources, list)))
             })
             .collect();
         // (Set with no borrow held: a plugin's effects run at once.)
         for (shared, value) in shared {
-            shared.set(json_value(&value));
+            shared.set(value);
         }
     }
 
@@ -2769,18 +2813,7 @@ impl Bridge {
             }
         });
         // (Each of these acts on the device it names, `device`, or this one.)
-        host.async_action("plugins.set_off", {
-            let me = me.clone();
-            move |arg| {
-                let me = me.clone();
-                async move {
-                    let (id, device) = remote::id_and_device(&arg);
-                    let off = arg.field("off").is_some_and(Value::truthy);
-                    eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
-                    call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
-                }
-            }
-        });
+        set_off_action(host, me.clone());
         host.async_action("plugins.remove", {
             let me = me.clone();
             move |arg| {
@@ -3185,6 +3218,25 @@ async fn call(method: &str, params: Json) -> Result<Json, String> {
 
 /// `call`, on `device` (none: this one). A device out of reach says
 /// "offline", and the page showing it says so too.
+#[cfg(test)]
+pub(crate) fn set_off_action_for_tests(host: &ScriptHost) {
+    set_off_action(host, Weak::new());
+}
+
+/// `plugins.set_off`: a plugin off, or back on. Never an unkept preview's.
+fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
+    host.async_action("plugins.set_off", move |arg| {
+        let me = me.clone();
+        async move {
+            preview::refuse("plugins.set_off")?;
+            let (id, device) = remote::id_and_device(&arg);
+            let off = arg.field("off").is_some_and(Value::truthy);
+            eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
+            call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
+        }
+    });
+}
+
 async fn call_on(me: &Weak<Bridge>, device: Option<String>, method: &str, params: Json) -> Result<Json, String> {
     let Some(device) = device else { return call(method, params).await };
     call(method, remote::addressed(Some(&device), params)).await.map_err(|error| {
@@ -3283,7 +3335,7 @@ mod tests {
         let p = on.plugin().unwrap();
         assert_eq!(p.name, "focus");
         assert_eq!(p.entry, PathBuf::from("/d/plugins/.loaded/focus/0123/init.luau"));
-        assert!(p.grants.contains(&Capability::Override("#sidebar-actions".into())));
+        assert!(p.grants.contains(&Capability::OverrideElement("#sidebar-actions".into())));
         for status in ["off", "pending", "tampered", "broken"] {
             let mut json = on.json.clone();
             json["status"] = json!(status);
@@ -3317,6 +3369,8 @@ mod examples_tests;
 mod hotkeys_tests;
 #[cfg(test)]
 mod markdown_tests;
+#[cfg(test)]
+mod network_tests;
 
 #[cfg(test)]
 mod menu_tests {

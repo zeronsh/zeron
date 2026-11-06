@@ -258,6 +258,18 @@ end
 -- question): with Settings' "Escape stops the agent" on, it stops the
 -- chat shown's running turn, as Zeron's does (settings.rs
 -- `escape_stops_active_agent`). True if it did.
+-- The same for a chat beside the one shown (a side chat with the keyboard).
+function M.escape_chat(id: string, running: boolean): boolean
+	if shared.let_go() then
+		return true
+	end
+	if not prefs.escape_stops:peek() or not running then
+		return false
+	end
+	M.interrupt(id)
+	return true
+end
+
 function M.escape(): boolean
 	-- Files shown carried over the chat: Escape lets go of them first.
 	if shared.let_go() then

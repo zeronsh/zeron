@@ -147,6 +147,11 @@ struct Agents {
     /// or this Mac's (none). Every call carries it as `targetDeviceId`, and
     /// the engine forwards it there, sign-ins' browser callbacks included.
     target: RefCell<Option<String>>,
+    /// Each device's accounts as a composer on it asked for them, by device
+    /// id ("": this Mac's), whichever device Settings shows
+    /// (`agents.on_device`).
+    device_accounts: RefCell<BTreeMap<String, DeviceAccounts>>,
+    device_shared: RefCell<Vec<Shared>>,
     installing: RefCell<Vec<String>>,
     logins: RefCell<HashMap<String, Login>>,
     /// Registry agents' sign-ins, by harness, once they've said.
@@ -253,11 +258,24 @@ thread_local! {
     static AGENTS: Rc<Agents> = Rc::new(Agents::new());
 }
 
-pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
+pub fn install(host: &ScriptHost) {
     let agents = AGENTS.with(Rc::clone);
     agents.shared.borrow_mut().push(host.shared("agents", agents.value()));
+    agents.device_shared.borrow_mut().push(host.shared("agents.on_device", agents.device_value()));
     ICONS_SHARED.with(|shared| shared.borrow_mut().push(host.shared("agent_icons", icons_value())));
     if agents.shared.borrow().len() == 1 {
+        // Usage moves as turns run: looked at again while the app is open.
+        let weak = Rc::downgrade(&agents);
+        engine::get().spawn(async move {
+            loop {
+                zgx::timer::sleep(DEVICE_USAGE_POLL).await;
+                let Some(agents) = weak.upgrade() else { return };
+                let keys: Vec<String> = agents.device_accounts.borrow().keys().cloned().collect();
+                for key in keys {
+                    agents.load_device(key, true);
+                }
+            }
+        });
         let weak = Rc::downgrade(&agents);
         engine::get().on_connect(move |rpc| {
             engine::get().spawn(learn_icons());
@@ -307,6 +325,17 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         a.retarget(if id.is_empty() { None } else { Some(id) });
     });
     let a = agents.clone();
+    host.action("agents.watch_device", move |key| a.watch_device(text(&key)));
+    let a = agents.clone();
+    host.action("agents.refresh_device", move |key| a.load_device(text(&key), true));
+    let a = agents.clone();
+    host.async_action("agents.switch_on", move |args| {
+        let a = a.clone();
+        let key = args.field("device").map(text).unwrap_or_default();
+        let (id, account) = harness_and_account(&args);
+        async move { a.switch_on(key, id, account).await.map_err(String::from) }
+    });
+    let a = agents.clone();
     host.action("agents.load", move |_| {
         a.wanted.set(true);
         let a = a.clone();
@@ -336,7 +365,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let a = agents.clone();
     host.async_action("agents.sign_out", move |id| {
         let a = a.clone();
-        async move { a.sign_out(text(&id)).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("agents.sign_out")?; a.sign_out(text(&id)).await.map_err(String::from) }
     });
     // The page a sign-in under way opened, again (a closed tab, a browser
     // that didn't come forward).
@@ -380,7 +409,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("agents.remove", move |args| {
         let a = a.clone();
         let (id, account) = harness_and_account(&args);
-        async move { a.account_call("ForgetAgentAccount", id, account).await.map_err(String::from) }
+        async move { crate::plugins::preview::refuse("agents.remove")?; a.account_call("ForgetAgentAccount", id, account).await.map_err(String::from) }
     });
     let a = agents.clone();
     host.async_action("agents.install", move |id| {
@@ -499,6 +528,8 @@ impl Agents {
             versions: RefCell::default(),
             update_status: RefCell::default(),
             target: RefCell::default(),
+            device_accounts: RefCell::default(),
+            device_shared: RefCell::default(),
             installing: RefCell::default(),
             logins: RefCell::default(),
             sign_ins: RefCell::default(),
@@ -858,6 +889,98 @@ impl Agents {
         }
         *self.accounts.borrow_mut() = by;
         self.publish();
+        // (The composers read the same accounts: a switch in Settings shows
+        // there too.)
+        let key = self.target.borrow().clone().unwrap_or_default();
+        self.keep_device(key, snapshot);
+    }
+
+    fn device_value(&self) -> Value {
+        let devices = self.device_accounts.borrow();
+        Value::record(devices.iter().map(|(key, device)| (key.as_str(), device_accounts_value(&device.accounts))))
+    }
+
+    fn publish_devices(&self) {
+        let value = self.device_value();
+        for shared in self.device_shared.borrow().iter() {
+            shared.set(value.clone());
+        }
+    }
+
+    fn keep_device(&self, key: String, snapshot: &Json) {
+        let Some(accounts) = snapshot["accounts"].as_array() else { return };
+        self.device_accounts.borrow_mut().entry(key).or_default().accounts = accounts.clone();
+        self.publish_devices();
+    }
+
+    /// A composer on `key`'s device: its accounts, on first sight of it.
+    fn watch_device(self: &Rc<Self>, key: String) {
+        let first = {
+            let mut devices = self.device_accounts.borrow_mut();
+            let device = devices.entry(key.clone()).or_default();
+            !std::mem::replace(&mut device.asked, true)
+        };
+        if first {
+            self.load_device(key, true);
+        }
+    }
+
+    /// `key`'s accounts again. Forced, the engine asks the provider, so not
+    /// more than `DEVICE_USAGE_MIN` apart; with nothing yet, what the engine
+    /// kept paints first.
+    fn load_device(self: &Rc<Self>, key: String, force: bool) {
+        let paint_first = {
+            let mut devices = self.device_accounts.borrow_mut();
+            let device = devices.entry(key.clone()).or_default();
+            if force {
+                if device.last_forced.is_some_and(|at| at.elapsed() < DEVICE_USAGE_MIN) {
+                    return;
+                }
+                device.last_forced = Some(Instant::now());
+            }
+            force && device.accounts.is_empty()
+        };
+        let me = self.clone();
+        engine::get().spawn(async move {
+            let target = (!key.is_empty()).then_some(key.as_str());
+            let params = |force: bool| addressed_to(target, json!({ "forceUsage": force }));
+            if paint_first && let Ok(snapshot) = engine::get().call("ListAgentAccounts", params(false)).await {
+                me.keep_device(key.clone(), &snapshot);
+            }
+            if let Ok(snapshot) = engine::get().call("ListAgentAccounts", params(force)).await {
+                me.keep_device(key.clone(), &snapshot);
+            }
+        });
+    }
+
+    /// That account in use on `key`'s device: its row at once, its login's
+    /// group (its agent, or its model provider where an agent keeps one per
+    /// provider); the engine's reply replaces them, a refusal restores them.
+    async fn switch_on(self: Rc<Self>, key: String, id: String, account: String) -> Result<Value, &'static str> {
+        let before = self.device_accounts.borrow().get(&key).map(|d| d.accounts.clone());
+        if let Some(device) = self.device_accounts.borrow_mut().get_mut(&key) {
+            mark_switched(&mut device.accounts, &id, &account);
+        }
+        self.publish_devices();
+        let target = (!key.is_empty()).then_some(key.as_str());
+        let params = addressed_to(target, json!({ "harness": id, "accountId": account }));
+        match engine::get().call("ActivateAgentAccount", params).await {
+            Ok(snapshot) => {
+                self.keep_device(key.clone(), &snapshot);
+                if self.target.borrow().as_deref().unwrap_or_default() == key {
+                    self.take_accounts(&snapshot);
+                }
+                Ok(Value::Nil)
+            }
+            Err(error) => {
+                eprintln!("zeron-zgx: agents: ActivateAgentAccount failed: {error}");
+                if let (Some(before), Some(device)) = (before, self.device_accounts.borrow_mut().get_mut(&key)) {
+                    device.accounts = before;
+                }
+                self.publish_devices();
+                Err(fail(&error))
+            }
+        }
     }
 
     fn heard_versions(&self, item: &Json) {
@@ -1375,10 +1498,7 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
                 .is_some_and(|l| l.to_ascii_lowercase().contains("week") || l.contains('7'))
         })
         .or((windows.len() > 1).then_some(1));
-    let who = account["email"]
-        .as_str()
-        .or_else(|| account["displayName"].as_str())
-        .unwrap_or("Signed in");
+    let who = account_name(account);
     // A reset that landed since the last usage probe: what it did shows (the
     // windows at 0, that reset gone) until the next probe says.
     let stale = |r: &Reset| account["usageFetchedAt"].as_i64().is_none_or(|at| at <= r.at);
@@ -1419,6 +1539,83 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
     Value::record(fields)
 }
 
+/// One device's accounts, for its composers.
+#[derive(Default)]
+struct DeviceAccounts {
+    accounts: Vec<Json>,
+    /// A composer has asked for them.
+    asked: bool,
+    last_forced: Option<Instant>,
+}
+
+/// Forced usage asks the provider: not more often than this.
+const DEVICE_USAGE_MIN: Duration = Duration::from_secs(30);
+/// How often usage is looked at again while the app is open.
+const DEVICE_USAGE_POLL: Duration = Duration::from_secs(5 * 60);
+
+/// `account` the one in use of its group: its agent, or for an agent that
+/// keeps a login per model provider, that provider; other groups keep theirs.
+fn mark_switched(accounts: &mut [Json], harness: &str, account: &str) {
+    let provider = accounts
+        .iter()
+        .find(|a| a["harness"] == harness && a["id"] == account)
+        .map(|a| a["provider"].clone());
+    let Some(provider) = provider else { return };
+    for row in accounts.iter_mut() {
+        if row["harness"] == harness && row["provider"] == provider {
+            row["active"] = Json::Bool(row["id"] == account);
+        }
+    }
+}
+
+/// A device's accounts as the composer reads them, by agent: only an agent
+/// that signs in and reports its usage. `{ id, email, plan, active,
+/// can_switch, error?, windows = { { label, used } } }`.
+fn device_accounts_value(accounts: &[Json]) -> Value {
+    let mut by: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+    for account in accounts {
+        let Some(harness) = account["harness"].as_str() else { continue };
+        let Ok(id) = serde_json::from_value::<zeron_proto::HarnessId>(account["harness"].clone()) else {
+            continue;
+        };
+        if !(zeron_proto::providers::signs_in(id) && zeron_proto::providers::reports_usage(id)) {
+            continue;
+        }
+        let windows: Vec<Value> = account["usageWindows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|w| {
+                Value::record([
+                    ("label", Value::from(w["label"].as_str().unwrap_or_default())),
+                    ("used", Value::from(w["usedFraction"].as_f64().unwrap_or(0.).clamp(0., 1.))),
+                ])
+            })
+            .collect();
+        let mut fields = vec![
+            ("id", Value::from(account["id"].as_str().unwrap_or_default())),
+            ("email", Value::from(account_name(account))),
+            ("plan", Value::from(account["planLabel"].as_str().unwrap_or(""))),
+            ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
+            (
+                "can_switch",
+                Value::Bool(account["switchable"].as_bool().unwrap_or(false) && zeron_proto::providers::switches_accounts(id)),
+            ),
+            ("windows", Value::List(windows.into())),
+        ];
+        if let Some(error) = account["usageError"].as_str() {
+            fields.push(("error", Value::from(error)));
+        }
+        by.entry(harness).or_default().push(Value::record(fields));
+    }
+    Value::record(by.into_iter().map(|(harness, rows)| (harness, Value::List(rows.into()))))
+}
+
+/// What an account goes by.
+fn account_name(account: &Json) -> &str {
+    account["email"].as_str().or_else(|| account["displayName"].as_str()).unwrap_or("Signed in")
+}
+
 /// An RFC 3339 time ("2026-11-01T15:45:00.5Z", "…+01:00") as seconds since
 /// the epoch.
 fn epoch_secs(s: &str) -> Option<i64> {
@@ -1457,6 +1654,50 @@ fn epoch_secs(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_switch_moves_only_its_own_login_group() {
+        let mut accounts = vec![
+            json!({ "id": "a", "harness": "claude-code", "provider": null, "active": true }),
+            json!({ "id": "b", "harness": "claude-code", "provider": null, "active": false }),
+            json!({ "id": "c", "harness": "codex", "provider": null, "active": true }),
+            json!({ "id": "d", "harness": "cursor", "provider": "x", "active": true }),
+            json!({ "id": "e", "harness": "cursor", "provider": "y", "active": false }),
+            json!({ "id": "f", "harness": "cursor", "provider": "y", "active": true }),
+        ];
+        mark_switched(&mut accounts, "claude-code", "b");
+        mark_switched(&mut accounts, "cursor", "e");
+        let active: Vec<&str> =
+            accounts.iter().filter(|a| a["active"] == true).map(|a| a["id"].as_str().unwrap()).collect();
+        assert_eq!(active, ["b", "c", "d", "e"]);
+        // (An account it doesn't have: nothing moves.)
+        mark_switched(&mut accounts, "claude-code", "nobody");
+        assert_eq!(accounts[1]["active"], true);
+    }
+
+    #[test]
+    fn a_device_lists_only_agents_that_sign_in_and_report_usage() {
+        let value = device_accounts_value(&[
+            json!({ "id": "a", "harness": "claude-code", "email": "a@example.test", "active": true, "switchable": true,
+                "planLabel": "Max", "usageWindows": [{ "label": "Week", "usedFraction": 1.4 }] }),
+            json!({ "id": "b", "harness": "antigravity", "active": true, "switchable": true }),
+            json!({ "id": "c", "harness": "hermes", "active": true, "switchable": true, "usageError": "no" }),
+            json!({ "id": "d", "harness": "acp.someone", "active": true }),
+        ]);
+        let Value::Map(_) = &value else { panic!("a record") };
+        let rows = value.field("claude-code").expect("claude").list().to_vec();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].field("email").map(text).as_deref(), Some("a@example.test"));
+        assert!(rows[0].field("can_switch").is_some_and(Value::truthy));
+        let windows = rows[0].field("windows").unwrap().list().to_vec();
+        assert_eq!(windows[0].field("used").and_then(Value::as_f64), Some(1.0));
+        assert!(value.field("antigravity").is_none());
+        assert!(value.field("acp.someone").is_none());
+        // Hermes rotates its own logins: listed, not switched.
+        let hermes = value.field("hermes").expect("hermes").list().to_vec();
+        assert!(!hermes[0].field("can_switch").is_some_and(Value::truthy));
+        assert_eq!(hermes[0].field("error").map(text).as_deref(), Some("no"));
+    }
 
     #[test]
     fn accounts_read_their_two_windows() {

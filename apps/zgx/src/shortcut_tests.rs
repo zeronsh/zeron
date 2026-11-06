@@ -217,8 +217,11 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// ⌘W: the panel's tab while the panel has the keyboard; else the chat's tab
+/// (a split's focused pane: split_tests), a new chat's page after the last; only
+/// with no chat, the window.
 #[test]
-fn command_w_closes_the_panels_tab_while_it_has_the_keyboard_else_the_window() {
+fn command_w_closes_the_panels_tab_then_the_chats_tab_and_only_then_the_window() {
     let mut w = mount();
     w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
     w.app.frames(20);
@@ -235,9 +238,10 @@ fn command_w_closes_the_panels_tab_while_it_has_the_keyboard_else_the_window() {
     w.app.frames(30);
     assert!(!tabs(&mut w), "⌘W in the panel's file left its tab open");
     assert!(!w.closed.get(), "⌘W in the panel closed the window too");
-    // In the composer: the panel left be, the window closes (the app with
-    // it, as Zeron's). (Its last tab closed, the panel closed with it: open
-    // again, a file viewer in it.)
+    assert_eq!(w.route(), "/session/a1", "⌘W in the panel's file closed the chat's tab");
+    // In the composer: the panel's tab left be, the chat's tab closes, and the
+    // window stays. (Its last tab closed, the panel closed with it: open again,
+    // a file viewer in it.)
     if w.app.bounds("#shell-files").width == 0. {
         w.app.click("#titlebar >> role:button \"Panel\"");
         w.app.frames(40);
@@ -247,8 +251,17 @@ fn command_w_closes_the_panels_tab_while_it_has_the_keyboard_else_the_window() {
     assert!(tabs(&mut w), "the panel has a tab again");
     focus(&mut w, Focus::Composer);
     assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+    assert!(!w.closed.get(), "⌘W in the composer closed the window, with a chat open");
+    assert_eq!(w.route(), "/", "⌘W in the composer closes the chat's tab: its last, a new chat");
+    assert!(w.app.find("#session-tabs >> role:tab \"Fix the build\"").is_none(), "the chat's tab is gone");
+    // No chat: the window.
+    assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+    assert!(w.closed.get(), "⌘W with no chat didn't close the window");
+    // The chat opened again: its panel's tab was left be.
+    w.closed.set(false);
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(40);
     assert!(tabs(&mut w), "⌘W in the composer closed the panel's tab");
-    assert!(w.closed.get(), "⌘W in the composer didn't close the window");
 }
 
 /// ⌘1–9 open the sidebar's sessions as it shows them, top to bottom

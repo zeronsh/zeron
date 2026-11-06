@@ -48,9 +48,15 @@ pub mod transaction;
 pub use channel::Channel;
 pub use transaction::{UpdateReport, UpdateState};
 
-/// The version compiled into this binary (the workspace version).
+/// The version compiled into this binary: the workspace's, or a beta's
+/// (`ZERON_ENGINE_VERSION=0.2.137-beta.3` at build time). Betas of one release
+/// share a workspace version, and a running engine only knows a bundle replaced
+/// it by this being older than the bundle's.
 pub const fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    match option_env!("ZERON_ENGINE_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 static APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -940,10 +946,12 @@ pub fn bundle_engine_version(bundle: &Path) -> Option<String> {
     plist_string(&plist, "ZeronEngineVersion").or_else(|| plist_string(&plist, "CFBundleShortVersionString"))
 }
 
-/// The app's own version in a macOS bundle (a beta's isn't its engine's).
+/// The app's own version in a macOS bundle (a beta's isn't its engine's). A
+/// beta says it in `ZeronVersion`: its short version has to stay numeric, so
+/// that alone would read `0.2.137-beta.3` as the stable `0.2.137`.
 pub fn bundle_app_version(bundle: &Path) -> Option<String> {
     let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?;
-    plist_string(&plist, "CFBundleShortVersionString")
+    plist_string(&plist, "ZeronVersion").or_else(|| plist_string(&plist, "CFBundleShortVersionString"))
 }
 
 /// A string value from an XML property list (the packaging template;
@@ -2807,6 +2815,23 @@ mod tests {
     }
 
     #[test]
+    fn an_engine_restarts_into_the_next_beta_and_the_stable_it_becomes() {
+        let attempts = |installed: &str, running: &str| {
+            let restarts = std::cell::Cell::new(0);
+            SupersededRestart::default().poll_installed(installed, running, || true, || {
+                restarts.set(restarts.get() + 1);
+                Ok(())
+            });
+            restarts.get()
+        };
+        assert_eq!(attempts("0.2.137-beta.19", "0.2.137-beta.18"), 1);
+        assert_eq!(attempts("0.2.137", "0.2.137-beta.19"), 1);
+        assert_eq!(attempts("0.2.137-beta.18", "0.2.137-beta.18"), 0);
+        // (What a numeric version on both would miss.)
+        assert_eq!(attempts("0.2.137", "0.2.137"), 0);
+    }
+
+    #[test]
     fn systemd_service_cgroup_is_recognized() {
         assert!(in_zeron_service_cgroup(
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zeron.service\n"
@@ -3110,5 +3135,28 @@ mod tests {
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
         assert!(staged.join("zeron").is_file());
+    }
+
+    #[test]
+    fn a_beta_bundle_says_its_beta_version_not_its_numeric_short_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = dir.path().join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        // As scripts/package-zgx-beta.sh writes it.
+        std::fs::write(
+            contents.join("Info.plist"),
+            "<plist><dict><key>CFBundleShortVersionString</key><string>0.2.137</string>\
+             <key>ZeronEngineVersion</key><string>0.2.136</string>\
+             <key>ZeronVersion</key><string>0.2.137-beta.16</string></dict></plist>",
+        )
+        .unwrap();
+        assert_eq!(bundle_app_version(dir.path()).as_deref(), Some("0.2.137-beta.16"));
+        // A stable bundle has no `ZeronVersion`.
+        std::fs::write(
+            contents.join("Info.plist"),
+            "<plist><dict><key>CFBundleShortVersionString</key><string>0.2.136</string></dict></plist>",
+        )
+        .unwrap();
+        assert_eq!(bundle_app_version(dir.path()).as_deref(), Some("0.2.136"));
     }
 }

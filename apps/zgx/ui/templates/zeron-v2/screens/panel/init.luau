@@ -387,7 +387,7 @@ end
 local CHIP_H = 26
 local LABEL_MAX = 140
 local SLOT = 18
-local BAND_H, BAND_PAD = 38, "$space.1"
+local BAND_H = 38
 local STRIP_START = "$space.2"
 local TOGGLE_ROOM = 34
 local STRIP_FADE = 36
@@ -596,8 +596,6 @@ end
 -- decides by its own width.
 export type Props = { project: any?, session: any?, page: any?, left: (() -> number)?, hold: (() -> number)?, on_last_closed: (() -> ())?, docked: (() -> boolean)?, [any]: any }
 
--- Where the title bar's controls end, from the window's left (ds/title_bar).
-local CONTROLS_END = ds.TitleBar.controls_end()
 local STRIP_START_PT = (ui.theme.get("space.2") :: number?) or 8
 
 M.Panel = ui.component(function(props: Props): Node
@@ -1082,7 +1080,17 @@ M.Panel = ui.component(function(props: Props): Node
 		w_full = true,
 		h = BAND_H,
 		shrink = 0,
-		pt = BAND_PAD,
+		-- (Its tabs on the title bar's line: under the bar's 4 of top pad,
+		-- or, where the window's buttons draw the line higher, above as much
+		-- room at the foot.)
+		pt = function(): any
+			local line = ds.TitleBar.middle()
+			return if line * 2 >= BAND_H then ui.raw(line * 2 - BAND_H, "the title bar's line") else 0
+		end,
+		pb = function(): any
+			local line = ds.TitleBar.middle()
+			return if line * 2 < BAND_H then ui.raw(BAND_H - line * 2, "the title bar's line") else 0
+		end,
 		-- (Clear of the title bar's controls when they stand over it; its
 		-- own start otherwise. It follows the edge as it moves, so expanding
 		-- and back glide with it.)
@@ -1091,12 +1099,14 @@ M.Panel = ui.component(function(props: Props): Node
 		pl = if left_of
 			then function(): number
 				local left = left_of() + (if hold then hold() else 0)
-				return ui.raw(math.max(STRIP_START_PT, CONTROLS_END - left), "clear of the title bar's controls, as its edge moves")
+				return ui.raw(math.max(STRIP_START_PT, ds.TitleBar.controls_end() - left), "clear of the title bar's controls, as its edge moves")
 			end
 			else STRIP_START,
 		-- (And the window's own buttons, where they stand at the right.)
 		pr = function(): number
-			return ui.raw(TOGGLE_ROOM + ds.TitleBar.window_buttons_right(), "the title bar's panel toggle, and the window's buttons, stand over the strip's end")
+			-- (TOGGLE_ROOM counts the bar's row padding, 10, which
+			-- `actions_right` gives as it is now: the window's buttons too.)
+			return ui.raw(TOGGLE_ROOM - 10 + ds.TitleBar.actions_right(), "the title bar's panel toggle, and the window's buttons, stand over the strip's end")
 		end,
 		items = "center",
 		window_drag = true,
@@ -1276,7 +1286,6 @@ M.Panel = ui.component(function(props: Props): Node
 				session = session,
 				view = tab.id,
 				initial = tab.path,
-				docked = props.docked,
 				-- (Said with the code: Tab indents there.)
 				-- (A string, read as the tab is made.)
 				escape_hint = ui.t("panel.escape_hint"):get(),

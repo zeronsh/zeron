@@ -37,6 +37,7 @@ local Mark = require("@self/mark")
 local status = require("@self/status")
 local FadeText = require("@self/fade_text")
 local island = require("@self/island")
+local TitleBar = require("@self/title_bar")
 local Tile = require("@self/tile")
 local Surface = require("@self/surface")
 local Avatar = require("@self/avatar")
@@ -92,8 +93,9 @@ export type PullRequest = { number: number, state: ("open" | "merged" | "closed"
 -- Grouped by project first, those are listed after the rest, folded into
 -- one row of their own ("21 empty projects"), closed until it's opened;
 -- `details.empty_projects` off, not listed at all. A project with none at
--- all, just added, isn't: a new chat starts in it.)
-export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, sessions: { Session } }
+-- all, just added, isn't: a new chat starts in it. `unused` says so, and it's
+-- listed with the rest, until `details.empty_projects` is off.)
+export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, unused: boolean?, sessions: { Session } }
 -- You: your name, and an id your avatar is drawn from.
 export type User = { id: string?, name: string, avatar: string? }
 -- How its sessions are grouped (Zeron's Organize), as a key: its levels
@@ -170,6 +172,7 @@ export type Props = {
 	width: State<number>?,
 	selected: State<string?>,
 	pinned: Live<{ Session }>?,
+	card: boolean?,
 	projects: Live<{ Project }>,
 	-- (A state or a function for an account that arrives or changes.)
 	user: Live<User>?,
@@ -346,11 +349,6 @@ return ui.component(function(props: Props): Node
 	local shown_w = ui.use_state(target())
 	local resizing = false
 	local dragging = ui.use_state(false)
-	-- (Its edge dragged, told to the page beside it, which holds what it
-	-- shows at one width until the drag ends: screens/shell/page. Made
-	-- here, in the app's sidebar, never at the module's top, which plugins
-	-- are lent.)
-	local edge_dragging = ui.shared("shell.edge_dragging", false)
 	local edge_over = ui.use_state(false)
 	local from_x, from_w = 0, 0
 	local easing: any = nil
@@ -1080,7 +1078,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- trunk ending at it.)
 	-- (In the sidebar's list, `list_now` and `tree_of` follow the row as it
 	-- moves between lists, the row staying itself.)
-	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
+	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, by_now: (() -> Organize)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
 	-- A row under its group's header (`tree_of`: its tree as it stands;
 	-- nil, out of any): a branch off the group's trunk (ds/session_row).
 	local function on_tree(body: Node, now_tree: () -> Tree?): Node
@@ -1274,13 +1272,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return cur().title
 			end, strong, nil)
 		)
-		if p and not SessionRow.groups_by(by, "project") then
+		-- (Its project's tile, unless the group it stands in now is its project:
+		-- a row dragged to another list keeps its node.)
+		if p then
 			title = ui.row {
 				grow = 1,
 				min_w = 0,
 				gap = "$zeron.space.tight",
 				items = "center",
-				ui.show(details.project_icon, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
+				ui.show(function(): boolean
+					local by_now = if place and place.by_now then place.by_now() else by
+					return details.project_icon:get() and not SessionRow.groups_by(by_now, "project")
+				end, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
 					local hue, src, emoji = look(p)
 					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16 }
 				end)() }),
@@ -1415,7 +1418,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			return d ~= nil and d.id == s.id
 		end
 		local list_now = (place :: Place).list_now
+		local row_ref = ui.ref()
 		return ui.div {
+			ref = row_ref,
 			w_full = true,
 			shrink = 0,
 			opacity = function(): number
@@ -1435,12 +1440,17 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				split_dragging:set(true)
 				return { session = s.id }
 			end,
+			-- The row as it stands, on the window's colour. (Nothing here eases: a drag's
+			-- preview has no clock for it.)
 			drag_preview = function()
-				local card: ContainerProps = {
-					w = room_now() - PAD * 2,
+				local r = row_ref:peek()
+				return ui.row {
+					w = if r and r.width then r.width else room_now() - PAD * 2,
 					h = session_h(cur(), by),
 					items = "start",
 					rounded = "$radius.md",
+					bg = "$background",
+					shadow = "$shadow.sm",
 					ui.div {
 						w = SLOT,
 						h = SLOT,
@@ -1454,8 +1464,6 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					},
 					line(label(cur().title)),
 				}
-				Glass.style(card, "menu")
-				return ui.row(card)
 			end,
 			on_drag_end = function()
 				split_dragging:set(false)
@@ -1667,6 +1675,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- A project's with none but archived sessions (its `empty`), at the
 		-- top level: listed in the empty projects' fold.
 		empty: boolean?,
+		-- A project's that has never had a session (its `unused`), at the top
+		-- level: listed with the rest, unless the empty projects are off.
+		unused: boolean?,
 	}
 	-- How long ago a session moved, in seconds (its `time`: a time, or as
 	-- it reads: "now", "5m", "3h", "1d", "2w"), for the most recent first.
@@ -1770,6 +1781,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						device = outer_device,
 						-- (Only at the top, and only while it holds none.)
 						empty = if subset == nil and p.empty == true and #p.sessions == 0 then true else nil,
+						unused = if subset == nil and p.unused == true and #p.sessions == 0 then true else nil,
 						shows_tile = function(): boolean
 							return details.project_icon:get()
 						end,
@@ -2630,6 +2642,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local empties: { Group } = {}
 		local show_empties = empties_shown()
 		for _, g in all_groups do
+			if g.unused and not show_empties then
+				continue
+			end
 			if not g.empty then
 				table.insert(gs, g)
 			elseif show_empties then
@@ -2824,7 +2839,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- list (whose rows all shrink together) never finds a thousand tiny
 		-- ones in view and builds them all.
 		local t = clock:peek()
-		local view = (list_view.height or 0) + 2 * SLOT
+		-- (As the list stands now, not followed: a ref's field follows its
+		-- whole box, and every frame of the sidebar's edge dragged or the
+		-- window resized would build this again, for every row.)
+		local list_now = list_view:peek()
+		local view = ((list_now and list_now.height) or 0) + 2 * SLOT
 		if view < 600 then
 			view = 600
 		end
@@ -3231,12 +3250,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					weight = "$font.weight.medium",
 				}
 			),
+			-- (On the line of every other section's count: its "…" stands a step
+			-- further out than words do.)
 			ui.show(function(): boolean
 				return not open() and not editing() and not hovered:get() and not menu_open:get()
-			end, hint(function(): string
-				local _, n = now()
-				return tostring(n)
-			end)),
+			end, ui.row {
+				shrink = 0,
+				pr = "$space.1",
+				hint(function(): string
+					local _, n = now()
+					return tostring(n)
+				end),
+			}),
 			ui.show(function(): boolean
 				return (hovered:get() or menu_open:get()) and not editing()
 			end, menu),
@@ -3864,6 +3889,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 						local now = item_of(key)
 						return if now and now.list then now.list else it.list :: string
 					end,
+					by_now = function(): Organize
+						local now = item_of(key)
+						return if now and now.by then now.by :: Organize else it.by :: Organize
+					end,
 					at = at,
 					-- Its trunk while it sits in a group that draws one.
 					tree_of = tree_at(),
@@ -4227,7 +4256,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				for _, g in (groups_of(by, placed_in(p))) do
 					-- (The empty projects aren't on the rail: their fold is
 					-- the list's.)
-					if not g.empty then
+					if not g.empty and not (g.unused and not empties_shown()) then
 						table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
 					end
 				end
@@ -4449,7 +4478,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 		-- Beside the sidebar, not over it, so what it changes shows as it's
 		-- changed: past its edge as far as the rail's flyouts are (the
 		-- trigger sits its inset in from it).
-		placement = { side = "right", align = "start", offset = PAD + 4 },
+		placement = if props.card then { side = "bottom", align = "start", offset = 4 } else { side = "right", align = "start", offset = PAD + 4 },
 		w = "$zeron.menu.width",
 		p = 0,
 		gap = 0,
@@ -4756,7 +4785,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 		h_full = true,
 		shrink = 0,
 		px = ui.raw(PAD, "its inset, counted in its rows' widths"),
-		pt = ui.raw((props.top or 0) + 4, "the title bar's strip over it, then its own inset"),
+		pt = ui.raw(if props.card then PAD else (props.top or 0) + 4, "the title bar's strip over it, then its own inset"),
 		gap = "$space.2",
 		top,
 	}
@@ -4810,11 +4839,48 @@ fn layer(input:LayerInput)->vec4<f32> {
 	if #feet > 0 then
 		table.insert(body, ui.column { w_full = true, shrink = 0, gap = "$zeron.list.gap", table.unpack(feet) })
 	end
-	return ui.column {
+	-- Its edge: dragged, it resizes (242 to 400), following the pointer at once.
+	-- (Pressed itself, so it keeps the pointer as it's dragged.) A card's reaches
+	-- across the gap beside it, which lights as it does between the panel and the
+	-- page, over the card's height; `gap`: how far past the sidebar that is.
+	local function edge_handle(gap: number, top: number, bottom: number): Node
+		return ui.div {
+			absolute = true,
+			right = ui.raw(-gap, "over the gap beside it"),
+			top = top,
+			bottom = bottom,
+			w = ui.raw(6 + gap, "a little into it, and the gap"),
+			cursor = "col_resize",
+			label = locale.t("ds.sidebar.resize"),
+			pointer_events = function()
+				return if collapsed:get() then "none" else "auto"
+			end,
+			on_hover = function(inside: boolean)
+				edge_over:set(inside)
+			end,
+			on_press = function(e)
+				from_x, from_w = e.x, wide:peek()
+				resizing = true
+				dragging:set(true)
+			end,
+			on_pointer_move = function(e)
+				if resizing then
+					wide:set(math.clamp(from_w + e.x - from_x, MIN_W, MAX_W))
+				end
+			end,
+			on_release = function()
+				resizing = false
+				dragging:set(false)
+			end,
+		}
+	end
+	local root = ui.column {
 		id = if is_island then "rail" else nil,
-		w = function(): number
-			return shown_w:get()
-		end,
+		w = if props.card
+			then "100%" :: any
+			else function(): number
+				return shown_w:get()
+			end,
 		-- Folded away, out of layout and out of reach (no row to tab to),
 		-- its scroll and folds kept for when it opens.
 		hidden = function(): boolean
@@ -4824,7 +4890,20 @@ fn layer(input:LayerInput)->vec4<f32> {
 		shrink = 0,
 		overflow = "hidden",
 		relative = true,
-		ui.column(body),
+		-- (`card`: a card of its own under the top bar, as the page's.)
+		if props.card
+			then ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = props.top or 0,
+				bottom = 5,
+				overflow = "hidden",
+				rounded = "$zeron.inset.radius",
+				bg = "$zeron.inset.bg",
+				ui.column(body),
+			}
+			else ui.column(body),
 		-- Under a title bar laid over it, its head is the window's to move it
 		-- by (a double click zooms it), as a title bar is: under its "…" and
 		-- its edge, which keep their presses.
@@ -4840,18 +4919,29 @@ fn layer(input:LayerInput)->vec4<f32> {
 			}
 			else ui.div {},
 		-- Its view options, at its top right: on the title bar's line when one
-		-- lies over it (its controls centred halfway down it, under its top
-		-- inset: Zeron's 38 and 4), else at its own inset. Where it stands
+		-- lies over it (`TitleBar.middle`: halfway down it under its top inset,
+		-- Zeron's 38 and 4, or the window's own buttons' line), else at its
+		-- own inset. Where it stands
 		-- open, whatever its width as it folds or comes back: its edge clips
 		-- it there, as it clips the rest, so it never slides under the title
 		-- bar's controls and the window's buttons on the way.
 		ui.div {
 			absolute = true,
 			left = function(): number
+				-- (A card's: on the top bar, past Back and Forward, the window's
+				-- gap before the card taken off.)
+				if props.card then
+					-- (`controls_end` holds the row's own 10 past its last control.)
+					return ui.raw(TitleBar.controls_end() - 10 + 8 - 5, "past the title bar's controls, by its group gap")
+				end
 				local button = (ui.theme.get("zeron.icon_button.md") :: number?) or 24
 				return room() - PAD - button
 			end,
-			top = if props.top then (props.top + 4) / 2 - 12 else PAD,
+			top = if props.top
+				then function(): number
+					return TitleBar.middle() - 12
+				end
+				else PAD,
 			opacity = shown_wide,
 			pointer_events = function()
 				return if collapsed:get() then "none" else "auto"
@@ -4861,53 +4951,56 @@ fn layer(input:LayerInput)->vec4<f32> {
 		-- A hairline down its right, between it and what it opens, full
 		-- height (stronger under the pointer at its edge, and as it's
 		-- dragged); collapsed, gone (the rail sits on the window as its
-		-- icons).
+		-- icons). (A card's lights the gap instead: below.)
+		if props.card
+			then nil
+			else ui.div {
+				absolute = true,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				w = 1,
+				pointer_events = "none",
+				bg = function()
+					-- (The cards beside it are its edge at rest; the
+					-- hairline shows only under the pointer and as it's dragged.)
+					return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
+				end,
+				opacity = shown_wide,
+			},
+		if props.card then nil else edge_handle(0, 0, 0),
+	}
+	if not props.card then
+		return root
+	end
+	-- (A card's root clips what it holds as it folds; its edge, in the gap beside it,
+	-- stands outside that.)
+	local gap = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+	local card_top = props.top or 0
+	return ui.div {
+		relative = true,
+		w = function(): number
+			return shown_w:get()
+		end,
+		hidden = function(): boolean
+			return collapsed:get() and shown_w:get() <= 0
+		end,
+		h_full = true,
+		shrink = 0,
+		root,
 		ui.div {
 			absolute = true,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			w = 1,
+			right = ui.raw(-gap, "the gap beside it"),
+			top = card_top,
+			bottom = 5,
+			w = gap,
+			rounded = "$radius.full",
 			pointer_events = "none",
 			bg = function()
-				-- (The cards beside it are its edge at rest; the
-				-- hairline shows only under the pointer and as it's dragged.)
 				return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
 			end,
 			opacity = shown_wide,
 		},
-		-- Its edge: dragged, it resizes (242 to 400), following the pointer at
-		-- once. (Pressed itself, so it keeps the pointer as it's dragged.)
-		ui.div {
-			absolute = true,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			w = 6,
-			cursor = "col_resize",
-			label = locale.t("ds.sidebar.resize"),
-			pointer_events = function()
-				return if collapsed:get() then "none" else "auto"
-			end,
-			on_hover = function(inside: boolean)
-				edge_over:set(inside)
-			end,
-			on_press = function(e)
-				from_x, from_w = e.x, wide:peek()
-				resizing = true
-				dragging:set(true)
-				edge_dragging:set(true)
-			end,
-			on_pointer_move = function(e)
-				if resizing then
-					wide:set(math.clamp(from_w + e.x - from_x, MIN_W, MAX_W))
-				end
-			end,
-			on_release = function()
-				resizing = false
-				dragging:set(false)
-				edge_dragging:set(false)
-			end,
-		},
+		edge_handle(gap, card_top, 5),
 	}
 end)

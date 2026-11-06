@@ -111,7 +111,7 @@ test("another device brings its projects and their branches", function()
 	settle(app)
 	expect(app:has('role:option ~"Borealis"')).to_be(true)
 	expect(app:has('role:option ~"Atlas"')).to_be(false)
-	-- And back: this Mac's, the project last used there.
+	-- And back: this computer's, the project last used there.
 	app:key("Escape")
 	settle(app)
 	pick_in(app, "Device", "MacBook Pro")
@@ -194,4 +194,34 @@ test("no project: made on the device chosen, no ref", function()
 	local calls = app:state("calls")
 	expect(calls).to_contain("made:-|mac|-|-")
 	expect(calls).to_contain("run:-|local|-")
+end)
+
+test("picking a device leaves the panel open, on to its project", function()
+	local app = mount("chat_fixture.luau")
+	home(app)
+	pick_in(app, "Device", "Build box")
+	expect(chosen(app, "Device")).to_contain("Build box")
+	-- Still there: its list gone, the rows to go on from.
+	expect(showing(app, 'role:button "Device"')).to_be(true)
+	expect(showing(app, 'role:button "Project"')).to_be(true)
+	expect(showing(app, 'role:option ~"Build box"')).to_be(false)
+	app:click('role:button "Project"')
+	settle(app)
+	expect(showing(app, 'role:button "Project"')).to_be(true)
+end)
+
+test("the device comes first: on top of the panel, and first on the chip", function()
+	local app = mount("chat_fixture.luau")
+	home(app)
+	expect(app:text("#composer-place-device[1]")).to_contain("MacBook Pro")
+	panel(app)
+	local function top(sel: string): number
+		local first = string.match(app:tree(sel), "[^\n]+") or ""
+		return tonumber(string.match(first, " %-?%d+,(%-?%d+) ")) or 0
+	end
+	expect(top('role:button "Device"') < top('role:button "Project"')).to_be(true)
+	pick_in(app, "Device", "Build box")
+	-- (Its name rolls in, a letter at a time: wait for it.)
+	app:wait('#composer-place-device >> ~"Build"', { timeout_ms = 2000 })
+	expect(string.find(app:tree("#composer-place-device[1]"), "Build", 1, true) ~= nil).to_be(true)
 end)

@@ -99,6 +99,9 @@ pub enum Why {
     Plugins(String),
     /// It isn't a key a menu can show (`cmd+é`, `cmd+?`, a misspelling).
     NoKey,
+    /// A key alone, from a state or function (zgx refuses one written
+    /// plainly): it would be taken from everything you type in.
+    NoModifier,
 }
 
 /// One window's menu bar, made to be one the platform takes.
@@ -133,6 +136,8 @@ impl Bar {
         let find = |id: &str| commands.iter().position(|c| c.id == id);
         for d in dropped.iter().filter(|d| !d.plugin.is_empty()) {
             let why = match d.holder.split_once('/') {
+                // (Nothing holds it: zgx refused it for what it is.)
+                _ if d.holder.is_empty() => Why::NoModifier,
                 Some((plugin, _)) => Why::Plugins(plugin.to_string()),
                 None => Why::Zerons(find(&d.holder).map_or_else(|| d.holder.clone(), |at| commands[at].title.clone())),
             };

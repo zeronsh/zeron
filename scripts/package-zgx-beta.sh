@@ -75,8 +75,11 @@ LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
 ZGX_BIN="${ZGX_BETA_ZGX_BIN:-}"
 if [[ -z "$ZGX_BIN" ]]; then
   target_dir="${ZGX_TARGET_DIR:-$ROOT/apps/zgx/target}"
-  ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
-    --features beta --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$target_dir"
+  [[ "$target_dir" == /* ]] || target_dir="$PWD/$target_dir"
+  # (From its folder: cargo reads .cargo/config.toml by where it runs, not by
+  # the manifest, and the build's flags are there.)
+  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
+    --features beta --target-dir "$target_dir")
   ZGX_BIN="$target_dir/release/zeron-zgx"
 fi
 # Only a beta build of this version may go in: the updater stages it by
@@ -122,16 +125,8 @@ cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
 cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.txt"
 
-# Zeron's icon, as scripts/package-macos.sh makes it.
-ICONSET="$OUT_DIR/zeron.iconset"
-rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-  retina=$((size * 2))
-  sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/zeron.icns"
-rm -rf "$ICONSET"
+# Zeron's icon, as scripts/package-macos.sh's.
+"$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"
 
 # Signed as scripts/package-macos.sh signs Zeron.app: the engine (its
 # identifier), then the bundle.
