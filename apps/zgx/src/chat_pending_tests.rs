@@ -165,3 +165,97 @@ fn a_saved_first_prompt_stays_visible_after_the_sending_indicator_expires() {
     assert!(messages(&view)[0]["waiting"].is_null());
     assert!(!view.pending.borrow().contains_key("new-chat"));
 }
+
+fn held_send(id: &str, failure: Option<&str>) -> Json {
+    json!({
+        "id": format!("send-{id}"),
+        "chatId": "other-chat",
+        "messageId": id,
+        "prompt": "look at this\n\nAttached images (local files \u{2014} open them to view):\n- pending://u1/a.png",
+        "createdAt": 1_000,
+        "failure": failure,
+    })
+}
+
+#[test]
+fn a_send_in_the_engines_outbox_shows_even_after_a_restart() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.heard_frame(json!({ "reset": [] }));
+
+    // Nothing here sent it: this window only hears of it from the engine.
+    view.follow_held(&[held_send("m1", None)]);
+    let shown = messages(&view);
+    assert_eq!(shown[0]["id"], "m1");
+    assert_eq!(shown[0]["text"], "look at this");
+    assert_eq!(shown[0]["waiting"], "sending");
+
+    // Hearing the same again adds nothing.
+    view.follow_held(&[held_send("m1", None)]);
+    assert_eq!(messages(&view).as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_failed_send_in_the_outbox_reads_failed_and_comes_back() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.heard_frame(json!({ "reset": [] }));
+    view.follow_held(&[held_send("m1", Some("the file is too large"))]);
+    assert_eq!(messages(&view)[0]["waiting"], "failed");
+    {
+        let pending = view.pending.borrow();
+        let prompt = &pending["other-chat"][0];
+        assert!(prompt.held, "the engine retries it, not a command from here");
+        assert!(prompt.retry.is_none());
+    }
+    view.follow_held(&[held_send("m1", None)]);
+    assert_eq!(messages(&view)[0]["waiting"], "sending");
+}
+
+#[test]
+fn a_send_leaving_the_outbox_waits_for_the_transcript() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.heard_frame(json!({ "reset": [] }));
+    view.follow_held(&[held_send("m1", None)]);
+    view.follow_held(&[]);
+    assert_eq!(messages(&view)[0]["waiting"], "sending", "it has only just gone out");
+    assert!(!view.pending.borrow()["other-chat"][0].held);
+    let saved = json!({ "id": "m1", "role": "user", "createdAt": now_seconds() * 1000,
+        "parts": [{ "id": "text", "kind": "text", "text": "look at this" }] });
+    view.heard_frame(json!({ "reset": [saved] }));
+    assert!(!view.pending.borrow().contains_key("other-chat"));
+}
+
+#[test]
+fn a_row_leaving_the_outbox_is_the_queues_to_show() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.heard_frame(json!({ "reset": [] }));
+    let mut row = held_send("r1", None);
+    row["queueRow"] = json!(true);
+    view.follow_held(&[row]);
+    assert_eq!(messages(&view)[0]["id"], "r1");
+    view.follow_held(&[]);
+    assert_eq!(messages(&view), json!([]));
+}
+
+#[test]
+fn only_a_cloud_chat_on_an_engine_that_knows_the_store_goes_through_it() {
+    let knows = json!(["message-queue-v1", "attachment-store-v1"]);
+    let older = json!(["message-queue-v1"]);
+    assert!(store_takes_files(Some("cloud-machine"), &knows));
+    assert!(!store_takes_files(Some("cloud-machine"), &older));
+    assert!(!store_takes_files(Some("cloud-machine"), &Json::Null));
+    assert!(!store_takes_files(Some("desktop-at-home"), &knows));
+    assert!(!store_takes_files(None, &knows));
+}
+
+#[test]
+fn a_stored_file_is_named_the_way_the_engine_resolves_it() {
+    let (reference, transfer) = stored_file("u1", "/Users/me/shots/a b.png");
+    assert_eq!(reference, "pending://u1/a b.png");
+    assert_eq!(transfer, json!({ "uploadId": "u1", "fileName": "a b.png" }));
+    let prompt = with_attachments("look", std::slice::from_ref(&reference), 1);
+    assert_eq!(split_attachments(&prompt), ("look".to_owned(), vec![reference]));
+}
