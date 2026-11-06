@@ -1,8 +1,8 @@
 # The beta (.github/workflows/zgx-beta.yml), with -BetaVersion and -BetaEngine:
 # the zgx interface (apps/zgx, its `beta` feature) as zeron.exe, and beside it
-# beta\<version>\ with its scripts, plugins and the stable release's own
-# zeron.exe as engine\zeron.exe (a Windows release has no separate engine: it
-# runs as `zeron.exe engine`). A tester keeps their engine, data and device.
+# beta\<version>\ with its scripts, plugins and the zeron.exe it's given, built
+# from the same commit, as engine\zeron.exe (a Windows release has no separate
+# engine: it runs as `zeron.exe engine`). A tester keeps their data and device.
 # No standalone .exe: this interface can't run without that folder.
 param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTTPS' }
 if ($BetaVersion -and -not (Test-Path -LiteralPath $BetaEngine -PathType Leaf)) {
-    throw "-BetaEngine: the stable release's zeron.exe"
+    throw "-BetaEngine: the engine's zeron.exe"
 }
 $root = Split-Path $PSScriptRoot -Parent
 
@@ -107,7 +107,7 @@ try {
             $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($binary))
             if ($text -match $stagingMarks) { throw "$binary carries staging's edge or sign-in client: $($Matches[0])" }
             if ($binary -eq $BetaEngine -and -not $text.Contains('Multi-device controller for coding agents')) {
-                throw 'The stable engine predates the shared command line'
+                throw 'The engine predates the shared command line'
             }
         }
         $text = $null

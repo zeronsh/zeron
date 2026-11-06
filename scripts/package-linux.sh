@@ -11,10 +11,9 @@
 #
 # The beta (.github/workflows/zgx-beta.yml), with both of these set: the zgx
 # interface (apps/zgx, its `beta` feature) as `zeron`, its scripts beside it,
-# and the stable release's own `zeron-engine`, so a tester keeps their engine,
-# data and device:
+# and the `zeron-engine` it's given, built from the same commit:
 #   BETA_VERSION=<workspace version>-beta.<n>
-#   ZGX_BETA_ENGINE=<the stable release's linux tarball for this architecture>
+#   ZGX_BETA_ENGINE=<a zeron-engine binary, or a release's linux tarball>
 
 set -euo pipefail
 
@@ -26,7 +25,7 @@ VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 BETA_VERSION="${BETA_VERSION:-}"
 if [[ -n "$BETA_VERSION" ]]; then
   [[ "$BETA_VERSION" == "$VERSION"-beta.* ]] || { echo "BETA_VERSION $BETA_VERSION isn't a beta of the workspace's $VERSION" >&2; exit 1; }
-  [[ -f "${ZGX_BETA_ENGINE:-}" ]] || { echo "ZGX_BETA_ENGINE: the stable release's linux tarball" >&2; exit 1; }
+  [[ -f "${ZGX_BETA_ENGINE:-}" ]] || { echo "ZGX_BETA_ENGINE: a zeron-engine binary, or a release's linux tarball" >&2; exit 1; }
   VERSION="$BETA_VERSION"
 fi
 OUT_DIR="$ROOT/target/package"
@@ -35,11 +34,15 @@ TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ -n "$BETA_VERSION" ]]; then
-  # The engine: the stable release's own, from its tarball.
-  UNPACK="$OUT_DIR/.stable"
-  rm -rf "$UNPACK" && mkdir -p "$UNPACK"
-  tar -xzf "$ZGX_BETA_ENGINE" -C "$UNPACK" --strip-components=1
-  ENGINE_BIN="$UNPACK/zeron-engine"
+  # The engine: the binary given, or the one in a release's tarball.
+  if [[ "$ZGX_BETA_ENGINE" == *.tar.gz ]]; then
+    UNPACK="$OUT_DIR/.stable"
+    rm -rf "$UNPACK" && mkdir -p "$UNPACK"
+    tar -xzf "$ZGX_BETA_ENGINE" -C "$UNPACK" --strip-components=1
+    ENGINE_BIN="$UNPACK/zeron-engine"
+  else
+    ENGINE_BIN="$ZGX_BETA_ENGINE"
+  fi
   [[ -x "$ENGINE_BIN" ]] || { echo "no zeron-engine in $ZGX_BETA_ENGINE" >&2; exit 1; }
   # The interface hands `zeron headless` and the engine's other subcommands to
   # this engine, as scripts/package-zgx-beta.sh requires of macOS's. (Read,

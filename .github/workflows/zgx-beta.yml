@@ -1,10 +1,11 @@
 name: zgx beta
 
 # Zeron's beta channel: the zgx interface (apps/zgx, its `beta` feature) as the
-# Zeron app itself, with the latest stable release's own engine inside, on
+# Zeron app itself, with the engine built from this same commit inside, on
 # macOS (scripts/package-zgx-beta.sh), Linux (scripts/package-linux.sh) and
-# Windows (scripts/package-windows.ps1). Testers keep Zeron's engine, data and
-# device; the app updates itself from the beta channel and goes back to
+# Windows (scripts/package-windows.ps1). The point of a beta is to test what's
+# next, the engine too. Testers keep their data and device; the app updates
+# itself from the beta channel and goes back to
 # Stable when they turn beta off (crates/update `channel`).
 #
 # Signed as release.yml signs: macOS only. Linux and Windows aren't signed.
@@ -54,6 +55,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       stable: ${{ steps.version.outputs.stable }}
+      engine: ${{ steps.version.outputs.engine }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: version (beta-v<workspace version>-beta.<n>, newer than stable)
@@ -83,6 +85,7 @@ jobs:
           {
             echo "version=$version"
             echo "stable=$stable"
+            echo "engine=$workspace"
           } >>"$GITHUB_OUTPUT"
 
   # Apple silicon only, as release.yml's macOS build.
@@ -100,17 +103,6 @@ jobs:
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: the stable release's app (its engine goes in)
-        env:
-          STABLE: ${{ needs.version.outputs.stable }}
-        run: |
-          file="zeron-$STABLE-macos-arm64-app.tar.gz"
-          curl -fsS --retry 3 -o "$RUNNER_TEMP/stable-manifest.json" https://zeron.sh/releases/manifest.json
-          sha="$(jq -r --arg f "$file" '.files[$f].sha256 // empty' "$RUNNER_TEMP/stable-manifest.json")"
-          [ -n "$sha" ] || { echo "the stable manifest has no checksum for $file"; exit 1; }
-          curl -fsS --retry 3 -o "$RUNNER_TEMP/$file" "https://zeron.sh/releases/$file"
-          echo "$sha  $RUNNER_TEMP/$file" | shasum -a 256 -c -
-          echo "STABLE_APP=$RUNNER_TEMP/$file" >>"$GITHUB_ENV"
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       # zgx's terminals are Ghostty's, built with Zig 0.16 (zgx-ghostty-sys).
@@ -122,12 +114,14 @@ jobs:
           path: ~/Library/Caches/zgx-ghostty
           key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
           restore-keys: zgx-ghostty-
-      # Only the interface is built (its workspace links the shared crates);
-      # the engine is stable's.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: zgx-beta
-          workspaces: apps/zgx -> target
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+      - name: the engine, from this commit
+        run: cargo build --release --locked -p zeron --bin zeron-engine
       - name: import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
         run: |
@@ -160,11 +154,11 @@ jobs:
         env:
           BETA_VERSION: ${{ needs.version.outputs.version }}
           CARGO_FLAGS: --locked
-        run: ZGX_BETA_ENGINE="$STABLE_APP" scripts/package-zgx-beta.sh
+        run: ZGX_BETA_ENGINE="$GITHUB_WORKSPACE/target/release/zeron-engine" scripts/package-zgx-beta.sh
       - name: inspect the bundle
         env:
           BETA_VERSION: ${{ needs.version.outputs.version }}
-          STABLE: ${{ needs.version.outputs.stable }}
+          ENGINE: ${{ needs.version.outputs.engine }}
         run: |
           app="target/package-beta/Zeron.app"
           plist="$app/Contents/Info.plist"
@@ -180,7 +174,7 @@ jobs:
             spctl --assess --type execute --verbose=2 "$app"
             xcrun stapler validate "$app"
           fi
-          test "$(plutil -extract ZeronEngineVersion raw "$plist")" = "$STABLE"
+          test "$(plutil -extract ZeronEngineVersion raw "$plist")" = "$ENGINE"
           du -sh "$app"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -203,17 +197,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: the stable release's tarball (its engine goes in)
-        env:
-          STABLE: ${{ needs.version.outputs.stable }}
-        run: |
-          file="zeron-$STABLE-linux-$(uname -m).tar.gz"
-          curl -fsS --retry 3 -o "$RUNNER_TEMP/stable-manifest.json" https://zeron.sh/releases/manifest.json
-          sha="$(jq -r --arg f "$file" '.files[$f].sha256 // empty' "$RUNNER_TEMP/stable-manifest.json")"
-          [ -n "$sha" ] || { echo "the stable manifest has no checksum for $file"; exit 1; }
-          curl -fsS --retry 3 -o "$RUNNER_TEMP/$file" "https://zeron.sh/releases/$file"
-          echo "$sha  $RUNNER_TEMP/$file" | sha256sum -c -
-          echo "STABLE_TARBALL=$RUNNER_TEMP/$file" >>"$GITHUB_ENV"
       - name: system deps (release.yml's)
         run: |
           sudo apt-get update -qq
@@ -227,22 +210,26 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: zgx-beta
-          workspaces: apps/zgx -> target
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+      - name: the engine, from this commit
+        run: cargo build --release --locked -p zeron --bin zeron-engine
       - name: package
         env:
           BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: ZGX_BETA_ENGINE="$STABLE_TARBALL" scripts/package-linux.sh
+        run: ZGX_BETA_ENGINE="$GITHUB_WORKSPACE/target/release/zeron-engine" scripts/package-linux.sh
       - name: inspect and install the tarball
         env:
           BETA_VERSION: ${{ needs.version.outputs.version }}
-          STABLE: ${{ needs.version.outputs.stable }}
+          ENGINE: ${{ needs.version.outputs.engine }}
         run: |
           home="$RUNNER_TEMP/home"
           mkdir -p "$RUNNER_TEMP/unpacked" "$home"
           tar -xzf "target/package/zeron-$BETA_VERSION-linux-$(uname -m).tar.gz" -C "$RUNNER_TEMP/unpacked"
           dir="$RUNNER_TEMP/unpacked/zeron-$BETA_VERSION-linux-$(uname -m)"
           test "$("$dir/zeron" --version)" = "zeron $BETA_VERSION"
-          test "$("$dir/zeron-engine" --version)" = "zeron-engine $STABLE"
+          test "$("$dir/zeron-engine" --version)" = "zeron-engine $ENGINE"
           test -f "$dir/ui/app.luau"
           test -d "$dir/plugins-builtin"
           test ! -e "$dir/ui/tests"
@@ -269,34 +256,36 @@ jobs:
       # The scripts ship as they are on the other platforms: no CRLF.
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: the stable release's zeron.exe (it's the engine)
-        env:
-          STABLE: ${{ needs.version.outputs.stable }}
-        run: |
-          $file = "zeron-$env:STABLE-windows-x86_64.exe"
-          $manifest = Invoke-RestMethod https://zeron.sh/releases/manifest.json
-          $sha = $manifest.files.$file.sha256
-          if (-not $sha) { throw "the stable manifest has no checksum for $file" }
-          $path = Join-Path $env:RUNNER_TEMP $file
-          Invoke-WebRequest -Uri "https://zeron.sh/releases/$file" -OutFile $path
-          if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $sha) { throw "checksum mismatch for $file" }
-          "STABLE_EXE=$path" >> $env:GITHUB_ENV
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - name: Locate Windows SDK shader compiler
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: zgx-beta
-          workspaces: apps/zgx -> target
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+      # (A Windows release has no separate engine: it runs as `zeron.exe engine`.)
+      - name: the engine, from this commit
+        run: |
+          cargo build --release --locked -p zeron
+          if ($LASTEXITCODE -ne 0) { throw 'the engine failed to build' }
+          "BETA_ENGINE=$((Resolve-Path -LiteralPath './target/release/zeron.exe').Path)" >> $env:GITHUB_ENV
       # The feed's base is the edge's: its `beta/` is the beta channel, and
       # stable's manifest and files, for going back, are beside it.
       - name: package installer and portable app
         env:
           BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: ./scripts/package-windows.ps1 -ReleasesUrl https://zeron.sh/releases -BetaVersion $env:BETA_VERSION -BetaEngine $env:STABLE_EXE
+        run: ./scripts/package-windows.ps1 -ReleasesUrl https://zeron.sh/releases -BetaVersion $env:BETA_VERSION -BetaEngine $env:BETA_ENGINE
       - name: inspect the package
         env:
           BETA_VERSION: ${{ needs.version.outputs.version }}
-          STABLE: ${{ needs.version.outputs.stable }}
+          ENGINE: ${{ needs.version.outputs.engine }}
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'unpacked'
           Expand-Archive -LiteralPath "target/package/zeron-$env:BETA_VERSION-windows-x86_64.zip" -DestinationPath $dir
@@ -304,7 +293,7 @@ jobs:
           if ($interface -ne "zeron $env:BETA_VERSION") { throw "the interface says '$interface'" }
           $beta = "$dir/beta/$env:BETA_VERSION"
           $engine = (& "$beta/engine/zeron.exe" --version | Out-String).Trim()
-          if ($engine -ne "zeron $env:STABLE") { throw "the engine says '$engine'" }
+          if ($engine -ne "zeron $env:ENGINE") { throw "the engine says '$engine'" }
           foreach ($path in @("$beta/ui/app.luau", "$beta/plugins-builtin", "$dir/zeron-update.json")) {
             if (-not (Test-Path -LiteralPath $path)) { throw "no $path in the package" }
           }
@@ -347,7 +336,7 @@ jobs:
             test -f "dist/zeron-$VERSION-$platform" \
               || { echo "missing artifact for $VERSION: $platform"; exit 1; }
           done
-          # crates/update's Manifest: the beta's version, the stable engine it
+          # crates/update's Manifest: the beta's version, the engine it
           # carries (a switch back to Stable weighs it) and its macOS floor,
           # which only macOS reads.
           manifest=$(jq -n --arg version "$VERSION" --arg engine "$ENGINE" \
@@ -378,7 +367,7 @@ jobs:
           body: |
             Zeron ${{ needs.version.outputs.version }}, a beta of the next Zeron app.
 
-            - It replaces Zeron and keeps your Zeron: the same engine, data, account and device.
+            - It replaces Zeron and keeps your Zeron: the same data, account and device.
             - Once installed, it updates from the beta channel. To go back, turn off **Get beta updates** in Settings → About & updates; Zeron then installs the latest stable release.
             - macOS 13 or later on Apple silicon; Linux x86_64 and aarch64 (run `install.sh` from the tarball); Windows x86_64 (the installer or the zip).
       - name: publish the draft (a prerelease, never the latest)
