@@ -17,8 +17,7 @@ use zeron_sync::chat_relay::{RelayEvent, RelayHandle, RelayPolicy, run_link};
 
 use super::{ChatDocHandle, DocHost, DocHostInner, lock};
 
-/// Stream prefix of a chat's direct link.
-pub const CHAT_LINK_PREFIX: &str = "chatlink/";
+pub use zeron_proto::relay_gen::CHAT_LINK_PREFIX;
 /// `spawn_chat2_checkpoint`'s reason for the checkpoint a stop owes.
 pub(super) const HEAL_REASON: &str = "relay-heal";
 

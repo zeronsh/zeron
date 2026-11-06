@@ -119,6 +119,12 @@ struct Counters {
     /// What the next hello tells the room.
     knows_relay_gen: AtomicBool,
     relaying: AtomicBool,
+    /// Pushes go to the room's offline queue. Here rather than on the client, so
+    /// it's already set when the client's first dial and first pull run.
+    queue_pushes: AtomicBool,
+    /// Answer a sync only from the chat's host: this device is on a metered link
+    /// and isn't anyone else's source of truth.
+    serve_host_only: AtomicBool,
     started: Option<std::time::Instant>,
 }
 
@@ -206,6 +212,22 @@ impl RelayHandle {
             self.counters.knows_relay_gen.load(Relaxed).then_some(3),
             self.counters.relaying.load(Relaxed).then_some(1),
         )
+    }
+
+    /// Send pushes to the room's offline queue, when the room has one.
+    pub fn set_queue_pushes(&self, queue: bool) {
+        self.counters.queue_pushes.store(queue, Relaxed);
+    }
+
+    pub(crate) fn queue_pushes(&self) -> bool {
+        self.counters.queue_pushes.load(Relaxed)
+    }
+
+    /// A phone: serve only the chat's host, which may be missing this device's
+    /// sends. A viewer asking a phone instead could pull a whole chat up its
+    /// cellular link, and the host answers that better.
+    pub fn set_serve_host_only(&self, host_only: bool) {
+        self.counters.serve_host_only.store(host_only, Relaxed);
     }
 
     /// Which peer to ask first when several have what this device lacks.
@@ -557,6 +579,12 @@ impl Driver {
 
     /// Answer off this task: an export of a large chat takes real time.
     fn sync_requested(&mut self, from: String, frame: WireFrame) {
+        if self.counters.serve_host_only.load(Relaxed) && self.host.as_deref() != Some(from.as_str()) {
+            // Reads as a task with nothing to give: bounded retries, then the
+            // requester waits for an announce from someone who can answer.
+            self.direct(&from, frame_type::SYNC_DATA, json!({ "xfer": "", "offset": 0, "total": 0, "gone": true, "noDoc": true }), &[]);
+            return;
+        }
         if let Some(xfer) = frame.header["xfer"].as_str().filter(|x| !x.is_empty()) {
             let offset = frame.header["offset"].as_u64().unwrap_or(0) as usize;
             if self.exports.contains_key(xfer) {

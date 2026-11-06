@@ -179,6 +179,14 @@ pub trait ChatDocSink: Send + Sync + 'static {
     fn relay_durable(&self) -> bool {
         true
     }
+    /// The room holds a checkpoint this doc lacks. May it wait? On a relaying chat
+    /// a checkpoint moves with every turn and is a whole chat's bytes, while a host
+    /// that's around sends only what's missing. A phone says yes while it has
+    /// something to show, and asks for the checkpoint with
+    /// [`ChatClient::read_deferred_checkpoint`] if the host doesn't come through.
+    fn relay_defer_checkpoint(&self) -> bool {
+        false
+    }
 }
 
 /// `GET /chat2/{chatId}/checkpoint` over HTTP. Implementations should resume
@@ -358,6 +366,8 @@ struct Shared {
     parked_checkpoint_tried: bool,
     /// The checkpoint that read was of, to notice a newer one.
     room_frontier: Vec<u8>,
+    /// The room's checkpoint isn't in this doc, and the sink chose to wait.
+    checkpoint_deferred: bool,
 }
 
 // Retry failed writes before network admission. Do not reinsert already-ACKed
@@ -539,8 +549,6 @@ struct Flags {
     room_answer: std::sync::atomic::AtomicU8,
     /// Dials keep failing while HTTPS works: this network has no sockets.
     socketless: std::sync::atomic::AtomicBool,
-    /// Pushes go to the room's offline queue instead of its row log.
-    queue_pushes: std::sync::atomic::AtomicBool,
     /// The room says ops were relayed that no checkpoint holds.
     room_relay_dirty: std::sync::atomic::AtomicBool,
 }
@@ -780,6 +788,26 @@ impl ChatClient {
         self.flags.room_relay_dirty.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// The room's checkpoint is known not to be in this doc, and hasn't been read.
+    pub fn checkpoint_deferred(&self) -> bool {
+        lock(&self.shared).checkpoint_deferred
+    }
+
+    /// Stop waiting: read the checkpoint now, unless peers have since filled the doc
+    /// past it. A fresh session makes the read, as any causal repair does.
+    pub fn read_deferred_checkpoint(&self) {
+        let mut shared = lock(&self.shared);
+        if !std::mem::take(&mut shared.checkpoint_deferred)
+            || self.sink.contains_frontier(&shared.room_frontier)
+        {
+            return;
+        }
+        shared.needs_checkpoint = true;
+        shared.causal_gap_generation = shared.causal_gap_generation.wrapping_add(1);
+        drop(shared);
+        self.redial();
+    }
+
     /// Sockets don't work on this network, though HTTPS does.
     pub fn socketless(&self) -> bool {
         self.flags.socketless.load(std::sync::atomic::Ordering::Acquire)
@@ -803,7 +831,9 @@ impl ChatClient {
     /// Send pushes to the room's offline queue, when the room has one. Another
     /// device's ops in a generation 3 chat; a host's go through its doc instead.
     pub fn set_queue_pushes(&self, queue: bool) {
-        self.flags.queue_pushes.store(queue, std::sync::atomic::Ordering::Relaxed);
+        if let Some(relay) = &self.relay {
+            relay.set_queue_pushes(queue);
+        }
     }
 
     /// Queue one local update batch for push (a fresh batch id is minted; the
@@ -1331,7 +1361,9 @@ impl Actor {
         };
         let contained = state.checkpoint_size == 0
             || (!repair_causal_history && self.sink.contains_frontier(&state_frame.payload));
-        let plan = plan_catch_up(cursor, &state, contained);
+        let deferred = !contained && !repair_causal_history && self.sink.relay_defer_checkpoint();
+        lock(&self.shared).checkpoint_deferred = deferred;
+        let plan = plan_catch_up(cursor, &state, contained || deferred);
         let after = match plan {
             CatchUpPlan::RowsOnly { after } => after,
             CatchUpPlan::CheckpointThenRows { after } => after,
@@ -1720,7 +1752,8 @@ impl Actor {
     /// Stored rows, unless this session's room holds a queue for this device.
     fn push_kind(&self) -> u8 {
         use std::sync::atomic::Ordering::Relaxed;
-        if self.flags.queue_pushes.load(Relaxed) && self.flags.room_answer.load(Relaxed) == ROOM_HAS_LAYER {
+        let queue = self.relay.as_ref().is_some_and(|relay| relay.queue_pushes());
+        if queue && self.flags.room_answer.load(Relaxed) == ROOM_HAS_LAYER {
             frame_type::ENQUEUE
         } else {
             frame_type::PUSH
@@ -1749,9 +1782,20 @@ impl Actor {
         let dials_failing = self.relay.is_some()
             && self.flags.failed_dials.load(Relaxed) >= FALLBACK_AFTER_FAILED_DIALS;
         let socketless = self.flags.socketless.load(Relaxed);
+        // These belong in the room's queue, and a socket is the only way in. A
+        // stored row here could depend on ops only peers hold, and it would park on
+        // any old reader in the room, which then redials and re-downloads for as
+        // long as it stays. So the outbox holds them until a socket answers, or
+        // until this network is known to have no sockets.
+        let hold_for_queue =
+            !socketless && self.relay.as_ref().is_some_and(|relay| relay.queue_pushes());
         let flags = self.flags.clone();
         let task = tokio::spawn(async move {
-            let batches: Vec<PendingPush> = lock(&shared).pending.iter().cloned().collect();
+            let batches: Vec<PendingPush> = if hold_for_queue {
+                Vec::new()
+            } else {
+                lock(&shared).pending.iter().cloned().collect()
+            };
             for push in batches {
                 if !ensure_durable(&shared, sink.as_ref(), &push) {
                     break;
@@ -1859,7 +1903,15 @@ impl Actor {
                     };
                     let contained = state.checkpoint_size == 0
                         || (!repair_causal_history && sink.contains_frontier(&state_frame.payload));
-                    let plan = plan_catch_up(cursor, &state, contained);
+                    let deferred = !contained && !repair_causal_history && sink.relay_defer_checkpoint();
+                    {
+                        let mut sh = lock(&shared);
+                        sh.checkpoint_deferred = deferred;
+                        if deferred {
+                            sh.room_frontier = state_frame.payload.to_vec();
+                        }
+                    }
+                    let plan = plan_catch_up(cursor, &state, contained || deferred);
                     if repair_causal_history || cursor > state.head_seq {
                         was_live = false;
                     }

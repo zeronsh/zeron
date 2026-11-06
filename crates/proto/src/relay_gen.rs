@@ -8,6 +8,8 @@ use crate::entities::Device;
 
 /// Advertised by an engine that runs the relay layer.
 pub const CHAT_RELAY_CAPABILITY: &str = "chat-relay-v1";
+/// Stream prefix of a chat's direct link: `chatlink/{chatId}` on the chat's host.
+pub const CHAT_LINK_PREFIX: &str = "chatlink/";
 /// Room generation of a chat whose host relays instead of storing.
 pub const RELAY_ROOM_GEN: u32 = 3;
 /// Generation a host returns a chat to when a device can't follow it.

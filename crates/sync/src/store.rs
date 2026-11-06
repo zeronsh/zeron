@@ -524,6 +524,7 @@ impl DocsStore {
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute("DELETE FROM chat_outbox WHERE doc_id = ?1", params![doc_id])?;
+        tx.execute("DELETE FROM chat_inbox WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
             "DELETE FROM chat_sync_jobs WHERE doc_id = ?1",
             params![doc_id],
