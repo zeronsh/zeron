@@ -134,6 +134,10 @@ impl ClientInner {
         self.path_online.load(Ordering::Acquire)
     }
 
+    pub(crate) fn is_foreground(&self) -> bool {
+        self.foreground.load(Ordering::Acquire)
+    }
+
     /// Re-derive the workspace snapshot; on change, notify and refresh every
     /// open composer (host presence / live status feed them).
     pub(crate) fn recompute_workspace(self: &Arc<Self>) {
@@ -193,6 +197,7 @@ impl ClientInner {
         // New rows may flip a chat's roomGen / host: attach rooms.
         for core in self.cores() {
             core.ensure_room(self);
+            core.refresh_relay(self);
         }
     }
 
@@ -541,6 +546,11 @@ impl ClientInner {
         for core in self.cores() {
             if core.has_pending_sends() {
                 core.refresh();
+            }
+            core.refresh_relay(self);
+            // An empty transcript's patience runs out with no event to say so.
+            if core.view_attached() {
+                core.recompute_composer(self);
             }
         }
     }
@@ -1242,14 +1252,17 @@ impl Client {
         if self.inner.workspace.chat(chat_id).is_none() {
             return Err(ClientError::NotFound(chat_id.to_owned()));
         }
+        let mut journaled = 0;
         let (doc, cursor, hydrated) = match self.inner.backend() {
             Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
             Backend::Live(live) => {
                 let local = crate::live::room::load_local(&live.store, chat_id);
+                journaled = local.journaled;
                 (local.doc, local.cursor, local.had_content)
             }
         };
         let core = SessionCore::new(chat_id, &self.inner, doc, cursor);
+        core.set_journaled(journaled);
         let core = {
             let mut sessions = lock(&self.inner.sessions);
             sessions
@@ -1710,6 +1723,9 @@ impl Client {
             live.flush_registry(&self.inner);
             for core in self.inner.cores() {
                 core.flush();
+                // No ticks from here on, and a link's keepalive would keep the
+                // radio up until the OS suspends us: stop now.
+                core.refresh_relay(&self.inner);
             }
         }
     }

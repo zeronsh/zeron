@@ -743,6 +743,7 @@ impl ChatClient {
             transport,
             offline_task: offline_task.clone(),
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            checkpoint_gate: Arc::new(tokio::sync::Mutex::new(())),
             relay: relay.clone(),
         };
         let task = tokio::spawn(actor.run(ready_tx));
@@ -1051,6 +1052,9 @@ struct Actor {
     offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// One offline sync in flight at a time.
     sync_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// One checkpoint download at a time, held until it's imported: the bootstrap
+    /// pull and the first socket both find the same checkpoint missing.
+    checkpoint_gate: Arc<tokio::sync::Mutex<()>>,
     /// Some: ask for the relay layer, and hand its frames here.
     relay: Option<crate::chat_relay::RelayHandle>,
     /// False until the first backfill of THIS client instance completes.
@@ -1368,7 +1372,14 @@ impl Actor {
         let contained = state.checkpoint_size == 0
             || (!repair_causal_history && self.sink.contains_frontier(&state_frame.payload));
         let deferred = !contained && !repair_causal_history && self.sink.relay_defer_checkpoint();
-        lock(&self.shared).checkpoint_deferred = deferred;
+        {
+            let mut shared = lock(&self.shared);
+            shared.checkpoint_deferred = deferred;
+            // This doc holds that checkpoint, so reading it can't fill any gap.
+            if self.relay.is_some() && contained && state.checkpoint_size > 0 {
+                shared.parked_checkpoint_tried = true;
+            }
+        }
         let plan = plan_catch_up(cursor, &state, contained || deferred);
         let after = match plan {
             CatchUpPlan::RowsOnly { after } => after,
@@ -1424,14 +1435,20 @@ impl Actor {
             // redial retries from wherever the bytes stopped. The socket is
             // drained (into the buffer) for the whole fetch so backpressure
             // can't stall the server's row stream.
-            let fetch = self.fetcher.fetch();
+            let fetch = fetch_once(
+                self.checkpoint_gate.clone(),
+                self.fetcher.clone(),
+                self.sink.clone(),
+                state_frame.payload.to_vec(),
+                repair_causal_history,
+            );
             tokio::pin!(fetch);
             let deadline = tokio::time::sleep(CHECKPOINT_FETCH_DEADLINE);
             tokio::pin!(deadline);
-            let bytes = loop {
+            let (gate, bytes) = loop {
                 tokio::select! {
                     fetched = &mut fetch => match fetched {
-                        Ok(bytes) => break bytes,
+                        Ok(fetched) => break fetched,
                         Err(err) => {
                             tracing::warn!(error = %err, "chat2: checkpoint fetch failed");
                             return SessionEnd::Reconnect;
@@ -1454,12 +1471,19 @@ impl Actor {
                     }
                 }
             };
-            if let Err(err) = self.sink.apply_checkpoint(&bytes, state.checkpoint_seq) {
+            if let Some(bytes) = bytes
+                && let Err(err) = self.sink.apply_checkpoint(&bytes, state.checkpoint_seq)
+            {
                 tracing::warn!(error = %err, "chat2: checkpoint import failed");
                 return SessionEnd::Reconnect;
             }
+            drop(gate);
             let mut shared = lock(&self.shared);
             shared.cursor = shared.cursor.max(state.checkpoint_seq);
+            // A row still parked after this can't be helped by reading it again.
+            if self.relay.is_some() {
+                shared.parked_checkpoint_tried = true;
+            }
             drop(shared);
             let _ = self.events.send(ChatEvent::Applied);
         }
@@ -1782,6 +1806,8 @@ impl Actor {
         let shared = self.shared.clone();
         let sink = self.sink.clone();
         let fetcher = self.fetcher.clone();
+        let checkpoint_gate = self.checkpoint_gate.clone();
+        let relay_client = self.relay.is_some();
         let events = self.events.clone();
         let busy = self.sync_busy.clone();
         let amnesty = self.cursor_amnesty_done.clone();
@@ -1937,13 +1963,29 @@ impl Actor {
                     }
                     if let CatchUpPlan::CheckpointThenRows { .. } = plan {
                         was_live = false;
-                        let fetched =
-                            tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch()).await;
+                        let fetched = tokio::time::timeout(
+                            CHECKPOINT_FETCH_DEADLINE,
+                            fetch_once(
+                                checkpoint_gate,
+                                fetcher.clone(),
+                                sink.clone(),
+                                state_frame.payload.to_vec(),
+                                repair_causal_history,
+                            ),
+                        )
+                        .await;
                         match fetched {
-                            Ok(Ok(bytes)) => {
-                                if sink.apply_checkpoint(&bytes, state.checkpoint_seq).is_err() {
+                            Ok(Ok((_gate, bytes))) => {
+                                if let Some(bytes) = bytes
+                                    && sink.apply_checkpoint(&bytes, state.checkpoint_seq).is_err()
+                                {
                                     busy.store(false, Relaxed);
                                     return;
+                                }
+                                if relay_client {
+                                    let mut sh = lock(&shared);
+                                    sh.room_frontier = state_frame.payload.to_vec();
+                                    sh.parked_checkpoint_tried = true;
                                 }
                                 let _ = events.send(ChatEvent::Applied);
                             }
@@ -2270,6 +2312,24 @@ impl Actor {
         }
         true
     }
+}
+
+/// Download the room's checkpoint unless whoever held the gate just brought it in.
+/// The returned guard is held until the caller has imported the bytes. A causal
+/// repair reads regardless: it's looking for what its doc claims to contain.
+async fn fetch_once(
+    gate: Arc<tokio::sync::Mutex<()>>,
+    fetcher: Arc<dyn CheckpointFetcher>,
+    sink: Arc<dyn ChatDocSink>,
+    frontier: Vec<u8>,
+    repair: bool,
+) -> Result<(tokio::sync::OwnedMutexGuard<()>, Option<Vec<u8>>), SyncError> {
+    let held = gate.lock_owned().await;
+    if !repair && sink.contains_frontier(&frontier) {
+        return Ok((held, None));
+    }
+    let bytes = fetcher.fetch().await?;
+    Ok((held, Some(bytes)))
 }
 
 async fn recv_relay(rx: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {

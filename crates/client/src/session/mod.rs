@@ -29,18 +29,21 @@ use zeron_proto::{
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
-    SnapshotDelta,
+    SnapshotDelta, TranscriptLoad,
 };
 use transcript::{Dirty, Tracker};
 
 use crate::attachments;
 use crate::client::ClientInner;
-use crate::connectivity::{SendState, send_state};
+use crate::connectivity::{ConnectivityState, SendState, send_state};
 use crate::error::{ClientError, Result};
 use crate::{lock, now_ms, read, write};
 
 /// Coalescing window for remote-import republishes (one display frame).
 const REFRESH_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+/// How long an empty transcript on screen says it's syncing. Past this, saying so
+/// would be an endless spinner, so it says what it's waiting for instead.
+const LOAD_PATIENCE_MS: i64 = 20_000;
 
 impl Drop for SessionCore {
     fn drop(&mut self) {
@@ -188,6 +191,10 @@ pub(crate) struct SessionCore {
     room: Mutex<Option<Arc<crate::live::room::Room>>>,
     /// Verified cursor restored with the local snapshot (room join cursor).
     initial_cursor: u64,
+    /// Newest relay journal row replayed with that snapshot.
+    journaled: std::sync::atomic::AtomicI64,
+    /// When a view last attached (ms): the idle clock's and the load's starting point.
+    attached_at_ms: std::sync::atomic::AtomicI64,
     refresh_wake: Arc<tokio::sync::Notify>,
     tasks: tokio_util::sync::CancellationToken,
     doc: Arc<SessionDoc>,
@@ -230,6 +237,8 @@ impl SessionCore {
             client: Arc::downgrade(client),
             room: Mutex::new(None),
             initial_cursor: cursor,
+            journaled: std::sync::atomic::AtomicI64::new(0),
+            attached_at_ms: std::sync::atomic::AtomicI64::new(0),
             refresh_wake: refresh_wake.clone(),
             tasks: tasks.clone(),
             doc,
@@ -347,17 +356,74 @@ impl SessionCore {
                 bearer: crate::live::LiveBackend::bearer(client),
                 edge: live.edge.clone(),
                 device_id: client.config.device_id.clone(),
-                host_device_id: chat.device_id.clone(),
                 store: live.store.clone(),
                 on_applied,
                 on_status,
                 cancel: client.cancel.clone(),
+                relay_layer: client.config.relay_layer,
+                route: self.relay_route(client, &chat),
+                journaled: self.journaled.load(Ordering::Acquire),
+                direct: live.direct().cloned(),
             },
         );
         let mut slot = lock(&self.room);
         if slot.is_none() {
             *slot = Some(room);
         }
+    }
+
+    /// Note the relay journal rows the local load replayed.
+    pub(crate) fn set_journaled(&self, ordinal: i64) {
+        self.journaled.store(ordinal, Ordering::Release);
+    }
+
+    /// Where this chat stands for the relay layer, right now.
+    fn relay_route(
+        &self,
+        client: &Arc<ClientInner>,
+        chat: &zeron_proto::Chat,
+    ) -> crate::live::room::RelayRoute {
+        use zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY;
+        let workspace = client.workspace.snapshot();
+        let device = workspace.device(&chat.device_id);
+        let host_online = device.is_some_and(|d| d.online);
+        let on_screen = self.view_attached();
+        let now = now_ms();
+        let turn_running = workspace
+            .session(&self.chat_id)
+            .is_some_and(|row| row.host_indicator == ChatIndicator::Working);
+        let room_activity = self.room().map_or(0, |room| room.last_activity_ms());
+        let recently = room_activity.max(self.attached_at_ms.load(Ordering::Acquire));
+        let active = turn_running
+            || self.snapshot().streaming
+            || self.has_pending_sends()
+            || now - recently < crate::live::chat_link::LINK_IDLE.as_millis() as i64;
+        let generation = chat.room_gen.unwrap_or(1);
+        crate::live::room::RelayRoute {
+            generation,
+            host: chat.device_id.clone(),
+            host_reads_queue: device
+                .is_some_and(|d| d.capabilities.iter().any(|c| c == CHAT_RELAY_CAPABILITY)),
+            on_screen,
+            host_online,
+            link: crate::live::chat_link::LinkWanted {
+                relayed: generation >= zeron_proto::relay_gen::RELAY_ROOM_GEN,
+                on_screen,
+                foreground: client.is_foreground(),
+                network: client.network_online(),
+                host_online,
+                active,
+            },
+        }
+    }
+
+    /// The chat's row, this screen or the app's state may have changed.
+    pub(crate) fn refresh_relay(&self, client: &Arc<ClientInner>) {
+        let Some(room) = self.room() else { return };
+        let Some(chat) = client.workspace.chat(&self.chat_id) else {
+            return;
+        };
+        room.set_route(&self.relay_route(client, &chat));
     }
 
     /// Persist the doc now (backgrounding).
@@ -529,6 +595,7 @@ impl SessionCore {
             ChatIndicator::Working | ChatIndicator::AwaitingInput
         );
         let turn_running = host_indicator == ChatIndicator::Working || snapshot.streaming;
+        let transcript_load = self.transcript_load(client, &snapshot, row.as_deref(), device);
         let mut next = ComposerState {
             chat_id: self.chat_id.clone(),
             revision: 0,
@@ -562,6 +629,7 @@ impl SessionCore {
             queue_error: st.queue_error.clone(),
             last_submitted_message_id: st.last_submitted.clone(),
             context_usage: st.context_usage,
+            transcript_load,
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -574,6 +642,37 @@ impl SessionCore {
         let revision = next.revision;
         *write(&self.composer) = Arc::new(next);
         client.events.composer(&self.chat_id, revision);
+    }
+
+    /// Why the transcript is empty, if it is. Anything held here shows at once, so
+    /// the row is only read for a chat this device has nothing of.
+    fn transcript_load(
+        &self,
+        client: &Arc<ClientInner>,
+        snapshot: &SessionSnapshot,
+        row: Option<&crate::workspace::SessionRow>,
+        device: Option<&crate::workspace::DeviceView>,
+    ) -> TranscriptLoad {
+        if client.is_demo() || !snapshot.entries.is_empty() {
+            return TranscriptLoad::Ready;
+        }
+        let attached_at = self.attached_at_ms.load(Ordering::Acquire);
+        let room = self.room();
+        snapshot::transcript_load(snapshot::LoadInputs {
+            has_content: false,
+            has_messages: client
+                .workspace
+                .chat(&self.chat_id)
+                .is_some_and(|chat| chat.last_message_at.is_some()),
+            network: client.network_online()
+                && client.connectivity().state != ConnectivityState::Offline,
+            generation: row.map_or(1, |r| r.room_gen),
+            room_answered: room.is_some_and(|room| room.answered()),
+            host_online: device.is_some_and(|d| d.online),
+            waited_too_long: self.view_attached()
+                && attached_at > 0
+                && now_ms() - attached_at >= LOAD_PATIENCE_MS,
+        })
     }
 
     fn update_state(&self, f: impl FnOnce(&mut CoreState)) {
@@ -657,6 +756,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         queue_error: None,
         last_submitted_message_id: None,
         context_usage: None,
+        transcript_load: TranscriptLoad::Ready,
     }
 }
 
@@ -1053,6 +1153,9 @@ impl SessionHandle {
     pub fn set_view_attached(&self, attached: bool) {
         let was = self.core.view_attached.swap(attached, Ordering::AcqRel);
         self.core.touch();
+        if attached && !was {
+            self.core.attached_at_ms.store(now_ms(), Ordering::Release);
+        }
         if attached
             && !was
             && let Some(room) = self.core.room()
@@ -1061,6 +1164,13 @@ impl SessionHandle {
             // quiet socket (the 15-min quiet probe is far too slow for a
             // chat someone is looking at).
             room.kick();
+        }
+        if attached != was
+            && let Ok(client) = self.core.client()
+        {
+            // A chat on screen gets its direct link; one that left gives it up.
+            self.core.refresh_relay(&client);
+            self.core.recompute_composer(&client);
         }
         if attached && !was {
             self.mark_seen();

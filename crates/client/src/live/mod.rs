@@ -13,6 +13,7 @@
 //! short — the legacy client's one-shot chat join left chats dark until a
 //! relaunch.
 
+pub(crate) mod chat_link;
 pub(crate) mod delivery;
 pub(crate) mod direct;
 pub(crate) mod escort;
@@ -127,6 +128,7 @@ struct RegistryHttp {
     edge: String,
     org_id: String,
     device_id: String,
+    relay: bool,
 }
 
 fn http_err(err: reqwest::Error) -> SyncError {
@@ -136,7 +138,7 @@ fn http_err(err: reqwest::Error) -> SyncError {
 impl RegistryTransport for RegistryHttp {
     fn fetch(&self, since: u64) -> BoxFuture<'static, std::result::Result<String, SyncError>> {
         let bearer = self.bearer.clone();
-        let url = urls::registry_rows(&self.edge, &self.org_id, &self.device_id, since);
+        let url = urls::registry_rows(&self.edge, &self.org_id, &self.device_id, since, self.relay);
         Box::pin(async move {
             let token = bearer.get().await?;
             let response = crate::auth::http()
@@ -254,6 +256,11 @@ impl LiveBackend {
     /// Spawn the registry join/event loop, the presence beat, and the
     /// registry saver.
     pub(crate) fn start(&self, inner: &Arc<ClientInner>) {
+        // Before the registry's first hello: the room remembers a client that
+        // says nothing as one that can't follow relayed chats.
+        if inner.config.relay_layer {
+            zeron_sync::registry::announce_relay_layer();
+        }
         // Signaling first: pairing with a host can then start the moment a
         // terminal wants it.
         let _ = self.direct.set(direct::start(inner));
@@ -450,6 +457,7 @@ impl LiveBackend {
             edge: self.edge.clone(),
             org_id: inner.credentials.org_id().to_owned(),
             device_id: inner.config.device_id.clone(),
+            relay: inner.config.relay_layer,
         });
         let doc = inner.workspace.doc().clone();
         let device_id = inner.config.device_id.clone();

@@ -13,14 +13,18 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use loro::VersionVector;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::SessionDoc;
+use zeron_proto::relay_gen::RELAY_ROOM_GEN;
 use zeron_sync::chat_client::{ChatTransport, RowImportOutcome};
+use zeron_sync::chat_relay::{RelayHandle, RelayImport, RelayPolicy};
 use zeron_sync::{
     ChatClient, ChatDocSink, ChatEvent, CheckpointFetcher, DocsStore, SyncError, UrlProvider,
 };
 
+use super::chat_link::{self, LinkWanted};
+use super::urls::PullReader;
 use super::{Bearer, JOIN_RETRY_BASE, JOIN_RETRY_CAP, urls};
 use crate::lock;
 
@@ -35,10 +39,13 @@ pub(crate) struct LocalDoc {
     pub cursor: u64,
     /// A snapshot or outbox existed — content is on screen immediately.
     pub had_content: bool,
+    /// Newest journal row replayed here: the next save covers it.
+    pub journaled: i64,
 }
 
 /// Restore a chat doc from disk: the chat2 snapshot (epoch ≥ 2 only — a
-/// retired s2 lineage is never imported) plus any unacknowledged own writes.
+/// retired s2 lineage is never imported), any unacknowledged own writes, and what
+/// came by relay since the last save, which nothing on the edge can give back.
 pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
     let raw = loro::LoroDoc::new();
     let mut cursor = 0;
@@ -67,10 +74,26 @@ pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
             }
         }
     }
+    let mut journaled = 0;
+    match store.pending_chat_inbox(chat_id) {
+        Ok((received, newest)) => {
+            journaled = newest;
+            for bytes in received {
+                match raw.import(&bytes) {
+                    Ok(_) => had_content = true,
+                    Err(err) => {
+                        tracing::warn!(chat = %chat_id, error = %err, "couldn't replay a kept relay update")
+                    }
+                }
+            }
+        }
+        Err(err) => tracing::warn!(chat = %chat_id, error = %err, "relay journal load failed"),
+    }
     LocalDoc {
         doc: SessionDoc::from_doc(raw),
         cursor,
         had_content,
+        journaled,
     }
 }
 
@@ -86,6 +109,10 @@ pub(crate) struct Persister {
     urgent: AtomicBool,
     write: Mutex<()>,
     wake: Arc<Notify>,
+    /// Newest row in the relay journal, and how far a save has retired it. A row is
+    /// journaled after its import, so an export begun once it's noted holds it.
+    journaled: AtomicI64,
+    retired: AtomicI64,
 }
 
 impl Persister {
@@ -105,7 +132,14 @@ impl Persister {
             urgent: AtomicBool::new(false),
             write: Mutex::new(()),
             wake: Arc::new(Notify::new()),
+            journaled: AtomicI64::new(0),
+            retired: AtomicI64::new(0),
         })
+    }
+
+    /// A journal row that the next save covers.
+    pub(crate) fn note_journaled(&self, ordinal: i64) {
+        self.journaled.fetch_max(ordinal, Ordering::AcqRel);
     }
 
     pub(crate) fn start(self: &Arc<Self>, cancel: CancellationToken) {
@@ -169,6 +203,8 @@ impl Persister {
             return;
         };
         let cursor = self.cursor();
+        // Before the export: only what's noted by now is certainly in it.
+        let journaled = self.journaled.load(Ordering::Acquire);
         let bytes = match doc.export_snapshot() {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -182,13 +218,40 @@ impl Persister {
             cursor,
             CHAT2_DOC_EPOCH,
         ) {
-            Ok(()) => self.saved.store(generation, Ordering::Release),
+            Ok(()) => {
+                self.saved.store(generation, Ordering::Release);
+                if journaled > self.retired.load(Ordering::Acquire) {
+                    match self.store.retire_chat_inbox(&self.chat_id, journaled) {
+                        Ok(()) => self.retired.store(journaled, Ordering::Release),
+                        Err(err) => {
+                            tracing::warn!(chat = %self.chat_id, error = %err, "relay journal retirement failed")
+                        }
+                    }
+                }
+            }
             Err(err) => {
                 tracing::warn!(chat = %self.chat_id, error = %err, "chat snapshot save failed")
             }
         }
     }
 }
+
+/// What the room's relay task and direct link need to know, kept current as the
+/// chat's row, its host and this screen change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RelayRoute {
+    pub generation: u32,
+    pub host: String,
+    /// The host's device row says it can read the queue. A host back on an older
+    /// build keeps the generation it wrote, but this goes false.
+    pub host_reads_queue: bool,
+    pub on_screen: bool,
+    pub host_online: bool,
+    pub link: LinkWanted,
+}
+
+/// How long a chat on screen waits on its host before reading a deferred checkpoint.
+const DEFER_PATIENCE: Duration = Duration::from_secs(8);
 
 /// Remote bytes → the session doc; outbox hooks → the docs store.
 pub(crate) struct ViewerSink {
@@ -198,6 +261,12 @@ pub(crate) struct ViewerSink {
     pub(crate) persister: Arc<Persister>,
     /// Coalesced "the doc changed remotely" wake (republish).
     pub(crate) on_applied: Arc<dyn Fn() + Send + Sync>,
+    /// Relay layer on for this client: the relay hooks below answer for real.
+    pub(crate) relay: bool,
+    /// May a checkpoint wait for the host? Set from the [`RelayRoute`].
+    pub(crate) defer_checkpoint: Arc<AtomicBool>,
+    /// When a relayed update last landed or left (ms), for the link's idle clock.
+    pub(crate) last_activity_ms: Arc<AtomicI64>,
 }
 
 impl ViewerSink {
@@ -259,6 +328,10 @@ impl ChatDocSink for ViewerSink {
     }
 
     fn acknowledge_update(&self, batch_id: &str) -> Result<(), String> {
+        // The outbox row is this send's only local copy until a save holds it. A
+        // kill right after the ack would otherwise lose it from the phone's own
+        // transcript, and offline there's nowhere to read it back from.
+        self.persister.flush();
         self.store
             .acknowledge_chat_update(&self.chat_id, batch_id)
             .map_err(|e| e.to_string())
@@ -298,6 +371,80 @@ impl ChatDocSink for ViewerSink {
     fn advance_cursor(&self, cursor: u64) {
         self.persister.applied(cursor, true);
     }
+
+    fn relay_version(&self) -> Option<Vec<u8>> {
+        if !self.relay {
+            return None;
+        }
+        Some(self.doc.upgrade()?.doc().oplog_vv().encode())
+    }
+
+    fn relay_lacks(&self, version: &[u8]) -> bool {
+        let (Some(doc), Ok(vv)) = (self.doc.upgrade(), VersionVector::decode(version)) else {
+            return false;
+        };
+        !doc.doc().oplog_vv().includes_vv(&vv)
+    }
+
+    fn relay_behind(&self, version: &[u8]) -> bool {
+        let (Some(doc), Ok(vv)) = (self.doc.upgrade(), VersionVector::decode(version)) else {
+            return false;
+        };
+        !vv.includes_vv(&doc.doc().oplog_vv())
+    }
+
+    fn relay_export(&self, since: &[u8]) -> Option<Vec<u8>> {
+        let doc = self.doc.upgrade()?;
+        let vv = VersionVector::decode(since).ok()?;
+        if vv.includes_vv(&doc.doc().oplog_vv()) {
+            return Some(Vec::new());
+        }
+        doc.doc().export(loro::ExportMode::updates(&vv)).ok()
+    }
+
+    /// As with a stored row, except that nothing on the edge can give this back: it
+    /// goes in the journal until a save covers it. Only what moved the doc, so a
+    /// repeat delivery writes nothing.
+    fn relay_import(&self, bytes: &[u8], history: bool) -> RelayImport {
+        let Some(doc) = self.doc.upgrade() else {
+            return RelayImport::Applied;
+        };
+        let before = doc.doc().oplog_vv();
+        let status = match doc.doc().import(bytes) {
+            Ok(status) => status,
+            Err(err) => {
+                tracing::warn!(chat = %self.chat_id, error = %err, "relay import failed");
+                return RelayImport::Unreadable;
+            }
+        };
+        if doc.doc().oplog_vv() != before {
+            match self.store.journal_chat_inbox(&self.chat_id, bytes) {
+                Ok(ordinal) => self.persister.note_journaled(ordinal),
+                Err(err) => {
+                    tracing::warn!(chat = %self.chat_id, error = %err, "relay journal write failed")
+                }
+            }
+            // A catch-up can be the whole chat: save it now, not in a second.
+            self.persister.dirty(history);
+            self.last_activity_ms.store(crate::now_ms(), Ordering::Release);
+            (self.on_applied)();
+        }
+        if status.pending.is_some() {
+            RelayImport::Parked
+        } else {
+            RelayImport::Applied
+        }
+    }
+
+    fn relay_durable(&self) -> bool {
+        true
+    }
+
+    fn relay_defer_checkpoint(&self) -> bool {
+        // A doc with nothing in it has nothing to show meanwhile, so it reads.
+        self.defer_checkpoint.load(Ordering::Acquire)
+            && self.doc.upgrade().is_some_and(|doc| !doc.doc().oplog_vv().is_empty())
+    }
 }
 
 /// Fresh `?token=` per dial.
@@ -306,13 +453,14 @@ pub(crate) struct ChatUrl {
     pub(crate) edge: String,
     pub(crate) chat_id: String,
     pub(crate) device_id: String,
-    pub(crate) host_device_id: String,
+    /// Read per dial: a chat can move to another host.
+    pub(crate) host: Arc<Mutex<String>>,
 }
 
 impl UrlProvider for ChatUrl {
     fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
         let bearer = self.bearer.clone();
-        let host = self.host_device_id.clone();
+        let host = lock(&self.host).clone();
         let (edge, chat, device) = (
             self.edge.clone(),
             self.chat_id.clone(),
@@ -336,7 +484,9 @@ pub(crate) struct ChatHttp {
     pub(crate) edge: String,
     pub(crate) chat_id: String,
     pub(crate) device_id: String,
-    pub(crate) host_device_id: String,
+    pub(crate) host: Arc<Mutex<String>>,
+    /// This client runs the relay layer: its pull isn't an old reader's.
+    pub(crate) relay: bool,
 }
 
 fn http_err(err: reqwest::Error) -> SyncError {
@@ -410,10 +560,10 @@ impl CheckpointFetcher for ChatHttp {
     }
 }
 
-impl ChatTransport for ChatHttp {
-    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+impl ChatHttp {
+    fn pull(&self, after: u64, reader: PullReader) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         let bearer = self.bearer.clone();
-        let url = urls::chat_rows(&self.edge, &self.chat_id, after, &self.device_id);
+        let url = urls::chat_rows(&self.edge, &self.chat_id, after, &self.device_id, reader);
         Box::pin(async move {
             let _permit = zeron_sync::budget::shared()
                 .http(zeron_sync::budget::Priority::Interactive)
@@ -435,6 +585,18 @@ impl ChatTransport for ChatHttp {
             Ok(response.bytes().await.map_err(http_err)?.to_vec())
         })
     }
+}
+
+impl ChatTransport for ChatHttp {
+    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let reader = if self.relay { PullReader::Relay } else { PullReader::Stored };
+        self.pull(after, reader)
+    }
+
+    fn fetch_rows_fallback(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let reader = if self.relay { PullReader::Socketless } else { PullReader::Stored };
+        self.pull(after, reader)
+    }
 
     fn push(
         &self,
@@ -445,7 +607,7 @@ impl ChatTransport for ChatHttp {
         let url = format!(
             "{}&hostDevice={}",
             urls::chat_push(&self.edge, &self.chat_id, &batch_id, &self.device_id),
-            urls::encode(&self.host_device_id)
+            urls::encode(&lock(&self.host))
         );
         Box::pin(async move {
             let _permit = zeron_sync::budget::shared()
@@ -481,6 +643,28 @@ pub(crate) struct RoomStatus {
     pub last_failure: Mutex<Option<String>>,
 }
 
+impl RoomRelay {
+    fn apply_route(&self, route: &RelayRoute) {
+        let relayed = route.generation >= RELAY_ROOM_GEN;
+        self.relayed.store(relayed, Ordering::Release);
+        *lock(&self.host) = route.host.clone();
+        self.handle.set_host(Some(route.host.clone()));
+        // Never the host here: a phone doesn't confirm the queue or relay its own.
+        self.handle.set_hello(relayed, false);
+        self.handle.set_queue_pushes(relayed && route.host_reads_queue);
+        // Off screen it waits for as long as it likes: nobody's looking. On screen,
+        // only while the host can answer.
+        self.defer_checkpoint
+            .store(relayed && (!route.on_screen || route.host_online), Ordering::Release);
+        self.link_wanted.send_if_modified(|current| {
+            let next = route.link.wanted();
+            let changed = *current != next;
+            *current = next;
+            changed
+        });
+    }
+}
+
 /// One live chat room. Dropping it stops the client and flushes the doc.
 pub(crate) struct Room {
     pub(crate) chat_id: String,
@@ -489,6 +673,21 @@ pub(crate) struct Room {
     pub(crate) persister: Arc<Persister>,
     cancel: CancellationToken,
     _local_updates: loro::Subscription,
+    /// The relay layer's state. None: this client doesn't run it.
+    relay: Option<RoomRelay>,
+}
+
+struct RoomRelay {
+    handle: RelayHandle,
+    host: Arc<Mutex<String>>,
+    /// The chat is on the relay generation: a local commit also takes the direct
+    /// link, and its follow-up announces go out. Stored chats pay for none of it.
+    relayed: Arc<AtomicBool>,
+    defer_checkpoint: Arc<AtomicBool>,
+    last_activity_ms: Arc<AtomicI64>,
+    link_wanted: watch::Sender<bool>,
+    /// Since when a chat on screen has been waiting with its checkpoint deferred.
+    deferred_since: Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Default)]
@@ -504,7 +703,6 @@ pub(crate) struct RoomDeps {
     pub bearer: Bearer,
     pub edge: String,
     pub device_id: String,
-    pub host_device_id: String,
     pub store: Arc<DocsStore>,
     /// Remote change landed (schedule a coalesced session refresh).
     pub on_applied: Arc<dyn Fn() + Send + Sync>,
@@ -513,6 +711,14 @@ pub(crate) struct RoomDeps {
     /// The client's lifetime: sign-out stops the room even while a view
     /// still holds its session.
     pub cancel: CancellationToken,
+    /// This client runs the relay layer.
+    pub relay_layer: bool,
+    /// The chat as this device knows it right now.
+    pub route: RelayRoute,
+    /// Newest relay journal row [`load_local`] replayed.
+    pub journaled: i64,
+    /// The direct peers, when they started.
+    pub direct: Option<zeron_preview::viewer::ViewerPeers>,
 }
 
 impl Room {
@@ -527,7 +733,57 @@ impl Room {
         let persister = Persister::new(doc, deps.store.clone(), chat_id, cursor);
         let cancel = deps.cancel.child_token();
         persister.start(cancel.clone());
+        if deps.journaled > 0 {
+            // Replayed at load: the next save holds it, and only then does it go.
+            persister.note_journaled(deps.journaled);
+            persister.dirty(false);
+        }
         let slot = Arc::new(Mutex::new(Slot::default()));
+        let sink = Arc::new(ViewerSink {
+            doc: Arc::downgrade(doc),
+            store: deps.store.clone(),
+            chat_id: chat_id.to_owned(),
+            persister: persister.clone(),
+            on_applied: deps.on_applied.clone(),
+            relay: deps.relay_layer,
+            defer_checkpoint: Arc::new(AtomicBool::new(false)),
+            last_activity_ms: Arc::new(AtomicI64::new(0)),
+        });
+        let relay = deps.relay_layer.then(|| {
+            // Calls arrive from platform threads, and this spawns its task.
+            let _runtime = crate::runtime::handle().enter();
+            let handle = RelayHandle::spawn(&deps.device_id, sink.clone(), RelayPolicy::default());
+            handle.set_serve_host_only(true);
+            let (link_wanted, wanted) = watch::channel(false);
+            let host = Arc::new(Mutex::new(deps.route.host.clone()));
+            if let Some(direct) = deps.direct.clone() {
+                chat_link::spawn(
+                    handle.clone(),
+                    direct,
+                    chat_id.to_owned(),
+                    host.clone(),
+                    wanted,
+                    cancel.clone(),
+                );
+            }
+            RoomRelay {
+                handle,
+                host,
+                relayed: Arc::new(AtomicBool::new(false)),
+                defer_checkpoint: sink.defer_checkpoint.clone(),
+                last_activity_ms: sink.last_activity_ms.clone(),
+                link_wanted,
+                deferred_since: Mutex::new(None),
+            }
+        });
+        if let Some(relay) = &relay {
+            // Before the first dial and pull, which read all of this.
+            relay.apply_route(&deps.route);
+        }
+        // Without the layer, the hint is still what the join and pushes carry.
+        let host = relay
+            .as_ref()
+            .map_or_else(|| Arc::new(Mutex::new(deps.route.host.clone())), |r| r.host.clone());
 
         // Own writes (commands, queue rows): durable outbox first, then the
         // live client (or the pre-join buffer).
@@ -535,6 +791,12 @@ impl Room {
         let store = deps.store.clone();
         let publish_chat = chat_id.to_owned();
         let publish_persister = persister.clone();
+        // The durable copy above is what counts: this one only saves a host that's
+        // on a direct link the trip through the room, and whichever lands second
+        // imports as nothing.
+        let shortcut = relay
+            .as_ref()
+            .map(|r| (r.handle.clone(), r.relayed.clone(), r.last_activity_ms.clone()));
         let local_updates = doc
             .doc()
             .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
@@ -547,6 +809,12 @@ impl Room {
                     Some(client) => client.enqueue_batch(batch_id, bytes.clone()),
                     None => slot.unsent.push((batch_id, bytes.clone())),
                 }
+                if let Some((relay, relayed, activity)) = &shortcut
+                    && relayed.load(Ordering::Acquire)
+                {
+                    activity.store(crate::now_ms(), Ordering::Release);
+                    relay.local_update(bytes.clone(), false);
+                }
                 publish_persister.dirty(false);
                 true
             }));
@@ -558,33 +826,55 @@ impl Room {
             persister,
             cancel,
             _local_updates: local_updates,
+            relay,
         });
-        room.spawn_join(doc, deps);
+        room.spawn_join(sink, host, deps);
         room
     }
 
-    fn spawn_join(self: &Arc<Self>, doc: &Arc<SessionDoc>, deps: RoomDeps) {
-        let sink = Arc::new(ViewerSink {
-            doc: Arc::downgrade(doc),
-            store: deps.store.clone(),
-            chat_id: self.chat_id.clone(),
-            persister: self.persister.clone(),
-            on_applied: deps.on_applied.clone(),
-        });
+    /// The chat, its host or this screen changed.
+    pub(crate) fn set_route(&self, route: &RelayRoute) {
+        let Some(relay) = &self.relay else { return };
+        relay.apply_route(route);
+        let guard = lock(&self.slot);
+        let Some(client) = guard.client.as_ref() else { return };
+        let mut since = lock(&relay.deferred_since);
+        if route.on_screen && client.checkpoint_deferred() {
+            let at = *since.get_or_insert_with(std::time::Instant::now);
+            // The host isn't coming, or hasn't come through: only the room can help.
+            if !route.host_online || at.elapsed() >= DEFER_PATIENCE {
+                client.read_deferred_checkpoint();
+                *since = None;
+            }
+        } else {
+            *since = None;
+        }
+    }
+
+    /// When a relayed update last landed here or left here (ms), if ever.
+    pub(crate) fn last_activity_ms(&self) -> i64 {
+        self.relay
+            .as_ref()
+            .map_or(0, |relay| relay.last_activity_ms.load(Ordering::Acquire))
+    }
+
+    fn spawn_join(self: &Arc<Self>, sink: Arc<ViewerSink>, host: Arc<Mutex<String>>, deps: RoomDeps) {
         let url: Arc<dyn UrlProvider> = Arc::new(ChatUrl {
             bearer: deps.bearer.clone(),
             edge: deps.edge.clone(),
             chat_id: self.chat_id.clone(),
             device_id: deps.device_id.clone(),
-            host_device_id: deps.host_device_id.clone(),
+            host: host.clone(),
         });
         let http = Arc::new(ChatHttp {
             bearer: deps.bearer.clone(),
             edge: deps.edge.clone(),
             chat_id: self.chat_id.clone(),
             device_id: deps.device_id.clone(),
-            host_device_id: deps.host_device_id.clone(),
+            host,
+            relay: deps.relay_layer,
         });
+        let relay = self.relay.as_ref().map(|relay| relay.handle.clone());
         let weak = Arc::downgrade(self);
         let cancel = self.cancel.clone();
         let device_id = deps.device_id.clone();
@@ -597,13 +887,14 @@ impl Room {
                 let cursor = room.persister.cursor();
                 let status = room.status.clone();
                 drop(room);
-                let attempt = ChatClient::connect_via_transport(
+                let attempt = ChatClient::connect_via_relay(
                     url.clone(),
                     sink.clone(),
                     http.clone(),
                     &device_id,
                     cursor,
                     http.clone(),
+                    relay.clone(),
                 );
                 let result = tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -684,6 +975,13 @@ impl Room {
         if let Some(client) = &lock(&self.slot).client {
             client.redial();
         }
+    }
+
+    /// The room has answered this device: its rows and any checkpoint are in, or are
+    /// deferred on purpose. An HTTPS pull counts, for a network with no sockets.
+    pub(crate) fn answered(&self) -> bool {
+        self.status.caught_up.load(Ordering::Acquire)
+            || lock(&self.slot).client.as_ref().is_some_and(ChatClient::caught_up)
     }
 
     pub(crate) fn connected(&self) -> bool {
