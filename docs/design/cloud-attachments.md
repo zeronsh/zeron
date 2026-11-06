@@ -91,6 +91,13 @@ The iOS and Android apps have no engine: `crates/client` writes to the chat's do
 `crates/client/src/live/held.rs` runs the same outbox over the same store and table, with the
 escort stash as its staged bytes. The app's retry and failed state are the existing ones.
 
+## A row already on the machine's disk
+
+A queue restored from disk stays frozen on a user's computer: restarting the app shouldn't send
+anything. A Cloud machine restarts on every wake, so its queue thaws by itself
+(`DocHost::thaw_recovered_queue`), once boot recovery is through and after any turn it brings back.
+Sent first, the row would read to that turn as the chat having moved on, and the turn wouldn't run.
+
 ## How it was attached doesn't matter
 
 Plain sends, app captures and sends queued during a live turn all stage locally and go
