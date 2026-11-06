@@ -763,6 +763,18 @@ pub(crate) struct RawChat {
     /// LENIENT, as `config`: a kind from a newer peer reads as none.
     #[serde(default, deserialize_with = "zeron_proto::lenient_child_kind")]
     child_kind: Option<zeron_proto::ChildKind>,
+    /// Its sleep, a field apiece so each is its own last write
+    /// ([`crate::RegistryDoc::set_chat_sleep`]): until (ms; none, awake),
+    /// when it was put to sleep, whether an open ask was held, and when it
+    /// woke early.
+    #[serde(default)]
+    sleep_until: Option<i64>,
+    #[serde(default)]
+    slept_at: Option<i64>,
+    #[serde(default)]
+    sleep_held: Option<bool>,
+    #[serde(default)]
+    sleep_woke_at: Option<i64>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -806,6 +818,12 @@ impl From<RawChat> for Chat {
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
             child_kind: raw.child_kind,
+            sleep: raw.sleep_until.map(|until| zeron_proto::ChatSleep {
+                until: dt(until),
+                at: dt(raw.slept_at.unwrap_or(until)),
+                held: raw.sleep_held.unwrap_or(false),
+                woke_at: raw.sleep_woke_at.map(dt),
+            }),
         }
     }
 }
@@ -830,6 +848,18 @@ pub(crate) struct RawSession {
     running_subagents: u32,
     #[serde(default)]
     background_tasks: Vec<zeron_proto::BackgroundTask>,
+    /// LENIENT, as a chat's `config`: a wait this build can't read (a newer
+    /// peer's) costs the wait, not the row.
+    #[serde(default, deserialize_with = "lenient_waiting")]
+    waiting: Option<zeron_proto::SessionWaiting>,
+}
+
+fn lenient_waiting<'de, D>(deserializer: D) -> Result<Option<zeron_proto::SessionWaiting>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 impl From<RawSession> for Session {
@@ -845,6 +875,7 @@ impl From<RawSession> for Session {
             terminal_activity: raw.terminal_activity,
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
+            waiting: raw.waiting,
         }
     }
 }
@@ -931,6 +962,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sleep: None,
         }
     }
 
@@ -962,6 +994,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            waiting: None,
         }
     }
 

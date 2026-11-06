@@ -280,6 +280,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         space_id: None,
         last_seen_at: None,
         room_gen: None,
+        sleep: None,
     }
 }
 
@@ -311,6 +312,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         status,
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
+        waiting: None,
     }
 }
 
@@ -2471,4 +2473,79 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
     back.last_seen_at = Some(ts(9_000));
     ws.upsert_device(&back).unwrap();
     assert!(!ws.device_deleted("cloud-1"));
+}
+
+#[test]
+fn a_chat_sleeps_wakes_once_and_clears() {
+    use zeron_proto::{ChatSleep, SleepState};
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    assert!(!ws.wake_chat("chat-1", ts(2_000)).unwrap(), "nothing to wake");
+
+    assert!(ws.set_chat_sleep("chat-1", Some(ts(9_000)), ts(1_000), true).unwrap());
+    let sleep = ws.chat("chat-1").unwrap().unwrap().sleep;
+    assert_eq!(sleep, Some(ChatSleep { until: ts(9_000), at: ts(1_000), held: true, woke_at: None }));
+
+    // The held ask answered, then a new one wakes it, once.
+    assert!(ws.release_chat_sleep_hold("chat-1").unwrap());
+    assert!(!ws.release_chat_sleep_hold("chat-1").unwrap());
+    assert!(ws.wake_chat("chat-1", ts(3_000)).unwrap());
+    assert!(!ws.wake_chat("chat-1", ts(4_000)).unwrap(), "the first wake is the one shown");
+    let woke = ws.chat("chat-1").unwrap().unwrap();
+    assert_eq!(woke.sleep.as_ref().unwrap().woke_at, Some(ts(3_000)));
+    assert_eq!(woke.sleep_state(ts(3_500)), SleepState::Woke { at: ts(3_000) });
+
+    // Put to sleep again: a fresh sleep, the old wake gone. Cleared: awake.
+    assert!(ws.set_chat_sleep("chat-1", Some(ts(20_000)), ts(5_000), false).unwrap());
+    assert_eq!(ws.chat("chat-1").unwrap().unwrap().sleep.unwrap().woke_at, None);
+    assert!(ws.set_chat_sleep("chat-1", None, ts(6_000), false).unwrap());
+    assert_eq!(ws.chat("chat-1").unwrap().unwrap().sleep, None);
+    assert!(!ws.set_chat_sleep("missing", Some(ts(9_000)), ts(1_000), false).unwrap());
+}
+
+#[test]
+fn a_sleep_set_on_one_device_and_a_wake_on_its_host_both_land() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    host.upsert_chat(&chat("chat-1", "host")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert!(viewer.set_chat_sleep("chat-1", Some(ts(90_000)), ts(1_000), false).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(host.chat("chat-1").unwrap().unwrap().sleep.unwrap().until, ts(90_000));
+    // (Later than the sleep, as a wake always is: the same millisecond
+    // settles by device, and "viewer" would take the tie.)
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    assert!(host.wake_chat("chat-1", ts(2_000)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    let seen = viewer.chat("chat-1").unwrap().unwrap().sleep.unwrap();
+    assert_eq!((seen.until, seen.woke_at), (ts(90_000), Some(ts(2_000))));
+}
+
+#[test]
+fn a_wait_replicates_and_an_unreadable_one_costs_only_the_wait() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Idle);
+    row.waiting = Some(zeron_proto::SessionWaiting {
+        since: ts(3_000),
+        on: vec![zeron_proto::WaitingOn {
+            id: "bn1".into(),
+            kind: zeron_proto::WaitingKind::Agent,
+            label: "Review the diff".into(),
+        }],
+    });
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+
+    // A newer peer's shape this build can't read: the row stays, waitless.
+    host.write(KIND_SESSIONS, "chat", OpKind::Update, fields([("waiting", json!({ "since": "soon" }))]));
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    let read = viewer.read_sessions().unwrap();
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].waiting, None);
 }
