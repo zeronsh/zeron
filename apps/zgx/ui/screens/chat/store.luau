@@ -218,8 +218,16 @@ function M.queue_edit(id: string, item: string): any
 	return ui.call("chat.queue_edit", { id = id, item = item })
 end
 
-function M.queue_finish(id: string, item: string, action: string, text: string?): any
-	return ui.call("chat.queue_finish", { id = id, item = item, action = action, text = text })
+-- (`attachments`: on a commit, the files it carries now, as the composer's
+-- chips pack them; nil keeps the ones it had.)
+function M.queue_finish(id: string, item: string, action: string, text: string?, attachments: { any }?): any
+	return ui.call("chat.queue_finish", { id = id, item = item, action = action, text = text, attachments = attachments })
+end
+
+-- A queued message sent on (steered in while a turn runs): a promise, which
+-- rejects when it didn't go.
+function M.queue_send(id: string, item: string): any
+	return ui.call("chat.queue", { id = id, op = "send", item = item })
 end
 
 function M.queue(id: string, op: { [string]: any })

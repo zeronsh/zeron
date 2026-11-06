@@ -290,6 +290,33 @@ stub.deny = function(id: string, request: string)
 end
 stub.answer = function() end
 stub.queue = function() end
+-- A queued message sent on (steered in): noted; `steer_fails` makes the
+-- next one not go.
+local STEER_FAILS = ui.state("fixture_steer_fails", false)
+stub.queue_send = function(id: string, item: string): any
+	note(`queue_send:{id}:{item}`)
+	if STEER_FAILS:peek() then
+		STEER_FAILS:set(false)
+		return {
+			after = function(_self: any, _ok: any, err: (any) -> ())
+				err("failed")
+			end,
+		}
+	end
+	return settled(nil)
+end
+ui.command {
+	id = "steer_fails",
+	title = "The next steer doesn't go",
+	run = function()
+		STEER_FAILS:set(true)
+	end,
+}
+-- A queued message's files, as the host hands them to an edit (`q2`'s).
+local QUEUED_FILES = {
+	{ path = "/host/uploads/9e97a72f-shot.png", name = "shot.png", kind = "image", src = "/host/uploads/9e97a72f-shot.png", on_host = true },
+	{ path = "/host/uploads/ea958e1e-note.txt", name = "note.txt", kind = "file", on_host = true },
+}
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
@@ -301,13 +328,33 @@ stub.queue_edit = function(id: string, item: string): any
 		end
 	end
 	publish(id, { queue = q })
+	if item == "q2" then
+		return settled({ text = "Queued with files", attachments = QUEUED_FILES })
+	end
 	return settled({ text = "Queued words" })
 end
-stub.queue_finish = function(id: string, item: string, action: string, text: string?): any
-	note(`queue_finish:{id}:{item}:{action}:{text or ""}`)
+stub.queue_finish = function(id: string, item: string, action: string, text: string?, attachments: { any }?): any
+	local files = ""
+	if attachments then
+		local names = {}
+		for _, a in attachments do
+			table.insert(names, `{a.path}{if a.on_host then "@host" else ""}`)
+		end
+		files = `:files={table.concat(names, ",")}`
+	end
+	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
 	publish(id, { queue = { { id = item, text = if action == "commit" then text else "Queued words" } } })
 	return settled(nil)
 end
+ui.command {
+	id = "queue_with_files",
+	title = "A message with files waits in the queue",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q2", text = "Queued with files" } } })
+		end
+	end,
+}
 ui.command {
 	id = "queue_one",
 	title = "A message waits in the queue",

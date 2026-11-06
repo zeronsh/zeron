@@ -373,6 +373,9 @@ local function Composer(): Node
 	-- What the agent asks, and which of a question's options are chosen
 	-- (fresh for each question); its queue, todos and tasks. (The same as
 	-- a split pane's composer shows them: screens/chat/asks.)
+	-- A line above it: one of its own (a send that failed), else the
+	-- session's.
+	local own_notice = ui.state("chat_own_notice", nil :: any)
 	local asks = Asks.bind {
 		id = function(): string?
 			return session_id:peek()
@@ -382,11 +385,11 @@ local function Composer(): Node
 		-- (The request the options were picked for: kept, so a reload keeps
 		-- them.)
 		asked = ui.state("chat_asked_by", nil :: any),
+		say = function(tone: string, key: string)
+			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
 	}
 	local ask, queue = asks.ask, asks.queue
-	-- A line above it: one of its own (a send that failed), else the
-	-- session's.
-	local own_notice = ui.state("chat_own_notice", nil :: any)
 	-- Its own goes as the chat changes (kept: a reload isn't a change).
 	local notice_for = ui.state("chat_notice_for", "?")
 	ui.effect(function()
@@ -502,7 +505,7 @@ local function Composer(): Node
 
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
-	local editing = ui.state("chat_editing", nil :: { item: string, aside: string }?)
+	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }? }?)
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return session_id:peek()
@@ -514,6 +517,12 @@ local function Composer(): Node
 		end,
 		say = function(tone: string, key: string)
 			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
+		cargo = function(): { any }
+			return shared.cargo:peek()
+		end,
+		set_cargo = function(list: { any })
+			shared.cargo:set(list)
 		end,
 	}
 	local end_edit = edits.finish
