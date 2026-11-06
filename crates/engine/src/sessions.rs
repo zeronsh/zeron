@@ -2470,7 +2470,7 @@ impl Inner {
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
         let mut env: std::collections::BTreeMap<String, String> = [
             ("ZERON_IPC_PORT".to_owned(), port.to_string()),
-            ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+            (zeron_proto::McpServer::CHAT_ID_ENV.to_owned(), chat_id.to_owned()),
             ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
         ]
         .into_iter()

@@ -293,11 +293,11 @@ local URGENCY: { [string]: number } = {
 	failed = 3,
 	limited = 4,
 	working = 5,
-	connecting = 6,
-	plan = 7,
-	woke = 8,
-	done = 9,
-	waiting = 10,
+	waiting = 6,
+	connecting = 7,
+	plan = 8,
+	woke = 9,
+	done = 10,
 }
 
 -- Sessions as a place holds them: a list read once, or a function a part
@@ -1067,11 +1067,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local function standing(s: Session): Node
 		return SessionRow.standing(now_of(s))
 	end
-	-- Whether a session asks to be seen: in a state other than waiting, or
-	-- the one open.
+	-- Whether a session asks to be seen: in a state, or the one open.
 	local function active(s: Session): boolean
 		local cur = index:get().by_id[s.id] or s
-		return cur.status ~= nil and cur.status ~= "waiting"
+		return cur.status ~= nil
 	end
 
 	local pr_badge = SessionRow.pr_badge
@@ -2555,13 +2554,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 		end
 		-- Whether a session stays in its list with its place folded: it's in a
-		-- state (its corner a glyph, "waiting" none), and folded places keep
+		-- state (its corner a glyph), and folded places keep
 		-- those (`keep_active`).
 		local keep = keep_active:get()
 		-- (The session open shows in its group however far down it is.)
 		local open_id = selected:get()
 		local function peeks(s: Session): boolean
-			return keep and s.status ~= nil and s.status ~= "waiting"
+			return keep and s.status ~= nil
 		end
 		-- Each session's folds in a place folding at `f` (inside `outer`): its
 		-- own, kept in the list as `f` folds when it peeks; nil, not in the

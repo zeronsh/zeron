@@ -669,6 +669,15 @@ impl McpServer {
             .get(Self::SIDE_CHATS_ONLY_ENV)
             .is_some_and(|value| value == "1")
     }
+
+    /// The chat Zeron's own server speaks for, set when the engine launched
+    /// it for a chat's run (its in-chat tools are offered only then).
+    pub const CHAT_ID_ENV: &'static str = "ZERON_CHAT_ID";
+
+    /// Whether this is Zeron's server for a chat's run.
+    pub fn in_chat(&self) -> bool {
+        self.env.get(Self::CHAT_ID_ENV).is_some_and(|id| !id.is_empty())
+    }
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created

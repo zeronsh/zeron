@@ -49,7 +49,9 @@ end
 local KINDS: { [Kind]: KindInfo } = {
 	working = kind("working", "status-working", true),
 	connecting = kind("connecting", "status-working", true),
-	waiting = kind("waiting"),
+	-- Waiting on background work that will wake it: under way, drawn as
+	-- working is (its ring, in working's hue), its name its own.
+	waiting = kind("waiting", "status-working", true),
 	input = kind("input", "status-input"),
 	approval = kind("approval", "status-approval"),
 	plan = kind("plan"),
@@ -59,6 +61,11 @@ local KINDS: { [Kind]: KindInfo } = {
 	woke = kind("woke", "status-woke"),
 }
 M.KINDS = KINDS
+
+-- The hue a state is drawn in: waiting wears working's.
+local function hue(kind: Kind): string
+	return if kind == "waiting" then "working" else kind
+end
 
 -- How long it has worked ("42s", "5m", "1h 5m"), and how long ago in a
 -- corner's room ("now", "5m", "3d"), in the locale's words (ds/locale).
@@ -190,11 +197,12 @@ function M.Spinner(props: { size: number?, ink: string? }): Node
 	return ring(props.ink or "$zeron.status.working", props.size or 14)
 end
 
--- A state's glyph, `size` points: working and connecting their ring.
+-- A state's glyph, `size` points: working, waiting and connecting their
+-- ring.
 local function glyph(kind: Kind, size: number): Node?
 	local k = KINDS[kind]
-	if kind == "working" or kind == "connecting" then
-		return ring(`$zeron.status.{kind}`, size)
+	if kind == "working" or kind == "connecting" or kind == "waiting" then
+		return ring(`$zeron.status.{hue(kind)}`, size)
 	end
 	return if k.glyph then Icon { name = k.glyph, size = size } else nil
 end
@@ -207,17 +215,18 @@ function M.StatusIcon(props: { kind: Kind | () -> Kind, size: number? }): Node
 	local given = props.kind
 	if type(given) ~= "function" then
 		local kind = given :: Kind
-		return ui.div { shrink = 0, color = `$zeron.status.{kind}`, glyph(kind, size) }
+		return ui.div { shrink = 0, color = `$zeron.status.{hue(kind)}`, glyph(kind, size) }
 	end
 	local kind = given :: () -> Kind
+	-- (Working and waiting share one ring: a move between them keeps it.)
 	local function drawn(): string
-		local k = kind()
+		local k = hue(kind())
 		return if k == "working" or k == "connecting" then k else "glyph"
 	end
 	return ui.div {
 		shrink = 0,
 		color = function(): string
-			return `$zeron.status.{kind()}`
+			return `$zeron.status.{hue(kind())}`
 		end,
 		ui.switch(drawn, {
 			working = ring("$zeron.status.working", size),
@@ -247,7 +256,7 @@ M.Status = ui.component(function(props: { kind: Kind, label: string?, since: num
 	return ui.row {
 		gap = "$space.1",
 		items = "center",
-		color = `$zeron.status.{props.kind}`,
+		color = `$zeron.status.{hue(props.kind)}`,
 		text_size = "$font.size.sm",
 		weight = "$font.weight.medium",
 		glyph(props.kind, 16),
@@ -263,8 +272,8 @@ M.Status = ui.component(function(props: { kind: Kind, label: string?, since: num
 end)
 
 -- A list row's dot: 9 points, its state's hue, its long name a tooltip;
--- working or connecting, it pulses (dimming to half and back every two
--- seconds, in six steps each way).
+-- working, waiting or connecting, it pulses (dimming to half and back every
+-- two seconds, in six steps each way).
 function M.StatusDot(props: { kind: Kind, size: number? }): Node
 	local k = KINDS[props.kind]
 	local size = props.size or 9
@@ -273,7 +282,7 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 		h = size,
 		shrink = 0,
 		rounded = "$radius.full",
-		bg = `$zeron.status.dot.{props.kind}`,
+		bg = `$zeron.status.dot.{hue(props.kind)}`,
 		tooltip = k.long,
 		label = k.long,
 	}
@@ -302,7 +311,7 @@ function M.StatusTag(props: { kind: Kind }): Node
 	return ui.row {
 		gap = "$space.1",
 		items = "center",
-		color = `$zeron.status.{props.kind}`,
+		color = `$zeron.status.{hue(props.kind)}`,
 		M.StatusDot { kind = props.kind, size = 6 },
 		ui.text { locale.t(NAMES[props.kind][2]), text_size = "$font.size.xs" },
 	}

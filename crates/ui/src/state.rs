@@ -3197,7 +3197,12 @@ impl AppState {
         if self.send_pending(&chat.id, now) {
             return ChatIndicator::Working;
         }
-        display_status(chat, self.session_for(&chat.id), now)
+        // This app draws no Waiting of its own: waiting on background work
+        // that will wake the agent reads as the work under way it is.
+        match display_status(chat, self.session_for(&chat.id), now) {
+            ChatIndicator::Waiting => ChatIndicator::Working,
+            status => status,
+        }
     }
 
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,

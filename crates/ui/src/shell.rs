@@ -8934,8 +8934,9 @@ impl Shell {
             Some("Queued")
         } else {
             match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
-                zeron_proto::ChatIndicator::Waiting => Some("Waiting"),
+                zeron_proto::ChatIndicator::Working | zeron_proto::ChatIndicator::Waiting => {
+                    Some("Working")
+                }
                 zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
                 zeron_proto::ChatIndicator::Errored => Some("Failed"),
                 zeron_proto::ChatIndicator::Completed => Some("Done"),
