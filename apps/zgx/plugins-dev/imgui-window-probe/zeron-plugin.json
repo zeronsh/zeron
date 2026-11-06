@@ -1,0 +1,7 @@
+{
+  "id": "imgui-window-probe",
+  "name": "ImGui Window Probe",
+  "version": "1.0.0",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"]
+}

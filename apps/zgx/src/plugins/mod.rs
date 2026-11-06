@@ -215,6 +215,8 @@ pub struct Bridge {
     /// Where each plugin's requests may go, as its manifest names them.
     network: network::Network,
     windows: WindowFactory,
+    /// The plugins' own native windows, keyed by (plugin, window id).
+    imgui: Rc<imgui::ImGuiWindows>,
     page: Shared,
     menus: Shared,
     requests: Shared,
@@ -475,6 +477,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         host: host.clone(),
         network: plugin_network,
         windows: cx.windows.clone(),
+        imgui: imgui::ImGuiWindows::new(cx),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
         requests: host.shared("plugins.request", vlist(Vec::new())),
@@ -601,6 +604,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             if let Some(c) = b.consent.borrow_mut().take() {
                 c.close();
             }
+            // Zeron's window is going: no plugin window outlives it.
+            b.imgui.close_all_all(imgui::CloseReason::Shutdown);
         }
     });
 }
@@ -863,11 +868,14 @@ pub fn builtin_dir() -> PathBuf {
 /// Its own actions are heard and dropped; the fixture plays the host.
 /// `ZERON_ZGX_DEV_GITHUB` names a JSON file that plays GitHub for them
 /// (`dev_github`).
-pub fn dev_plugins(host: &ScriptHost) {
+pub fn dev_plugins(host: &ScriptHost, cx: Option<&mut WindowContext>) {
     let Some(dirs) = crate::dev::switch("ZERON_ZGX_DEV_PLUGINS") else { return };
     expose_surface(host);
     let plugin_network = network::Network::default();
     host.fetch_policy(plugin_network.clone());
+    // Their native windows, when the caller has a window context to make
+    // them in (an audit shot has none, and needs none).
+    let imgui = cx.as_ref().map(|cx| imgui::ImGuiWindows::new(cx));
     let mut hosts = Vec::new();
     let mut plugins = Vec::new();
     for dir in std::env::split_paths(&dirs) {
@@ -887,6 +895,21 @@ pub fn dev_plugins(host: &ScriptHost) {
         };
         hosts.push((id.clone(), item.network_hosts()));
         expose_own(host, &id);
+        // Its native windows, through the same `imgui.windows` gate the
+        // bridge uses: a dev plugin asking only for `windows` is refused.
+        if let Some(windows) = &imgui {
+            let listing = item.clone();
+            let plugin = id.clone();
+            imgui::luau::serve(
+                host,
+                &id,
+                windows.clone(),
+                Rc::new(move || Some(listing.clone())),
+                move |window| {
+                    eprintln!("zeron-zgx: dev plugin {plugin}: window {window} closed");
+                },
+            );
+        }
         locales::publish(host, &id, &dir);
         // Its settings, at their defaults (a fixture sets them as it likes).
         let values = settings::values(&settings::declared(&id, &manifest, false), &Default::default());
@@ -1212,6 +1235,9 @@ impl Bridge {
     /// (What its VM holds in memory this run goes when zgx forgets a
     /// script's state, asked of zgx; its storage is the engine's to remove.)
     fn forget(&self, id: &str, old: &Item) {
+        // Its native windows are its own: they go with it, and closing one
+        // never took it out in the first place.
+        self.imgui.close_all(id, imgui::CloseReason::Removed);
         if let Some(calls) = self.calls.borrow_mut().get_mut(id) {
             calls.list.clear();
         }
@@ -1384,6 +1410,9 @@ impl Bridge {
             return;
         }
         eprintln!("zeron-zgx: plugin {id} failed and is withdrawn: {}", recovery::first_line(error));
+        // A failed plugin's windows go before its script does: nothing of
+        // it is left on the desktop.
+        self.imgui.close_all(id, imgui::CloseReason::Failed);
         let why = self.failed_plugins.borrow().why(id).unwrap_or_default().to_string();
         self.request(
             "plugin_failed",
@@ -2330,6 +2359,29 @@ impl Bridge {
                 }
             }
         });
+        // Its native windows (`imgui.windows`): one host function opens,
+        // controls and reports them, and a closed window comes back as an
+        // `imgui.close` call the SDK hands to the plugin's `on_close`.
+        {
+            let item = {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                Rc::new(move || me.upgrade().and_then(|b| b.item(&plugin)))
+            };
+            let closed = {
+                let (me, plugin) = (me, plugin.clone());
+                move |window: &str| {
+                    if let Some(b) = me.upgrade() {
+                        b.push_call(
+                            &plugin,
+                            format!("imgui-{}", next_id()),
+                            "imgui.close",
+                            vec![("window", Value::from(window))],
+                        );
+                    }
+                }
+            };
+            imgui::luau::serve(&self.host, id, self.imgui.clone(), item, closed);
+        }
     }
 
     /// A web link a plugin opens ("links.open"): where Zeron opens links

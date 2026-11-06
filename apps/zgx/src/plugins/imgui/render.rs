@@ -975,6 +975,11 @@ pub struct ImguiViewport {
     prepared: Option<PreparedFrame>,
     clear: wgpu::Color,
     error: Option<RenderError>,
+    /// Frames this view has drawn. zgx calls `render` only while the window
+    /// showing it does (a hidden or minimized window draws none), so this is
+    /// the window's own render lifecycle, and a hidden window's count stays
+    /// where it was.
+    frames: u64,
 }
 
 impl ImguiViewport {
@@ -984,7 +989,13 @@ impl ImguiViewport {
             prepared: None,
             clear: DEFAULT_CLEAR,
             error: None,
+            frames: 0,
         }
+    }
+
+    /// Frames drawn so far (see the field).
+    pub fn frames(&self) -> u64 {
+        self.frames
     }
 
     /// Replaces what the next frame draws.
@@ -1023,6 +1034,7 @@ impl Default for ImguiViewport {
 
 impl Viewport for ImguiViewport {
     fn render(&mut self, frame: &mut ViewportFrame<'_>) {
+        self.frames += 1;
         let target = RenderTarget {
             view: frame.target,
             format: frame.format,

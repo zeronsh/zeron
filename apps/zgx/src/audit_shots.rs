@@ -116,7 +116,7 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
         host.action("close", |_| {});
         // (The network, as every window has it: remote pictures.)
         zgx_run::install_fetcher(&host);
-        crate::plugins::dev_plugins(&host);
+        crate::plugins::dev_plugins(&host, None);
         // (Agent visuals, run as a window runs them: ui/visuals_fixture.)
         crate::visuals::register(&host);
         host.shared("zgx.window.size", zgx_script::window_size_value(shot.size.0, shot.size.1));

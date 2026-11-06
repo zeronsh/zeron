@@ -473,7 +473,7 @@ fn open(cx: &mut WindowContext, entry: &str, inspect: bool) {
     let host = script_host(cx, entry);
     // (Development: `ZERON_ZGX_DEV_PLUGINS` loads plugin folders into a
     // fixture's window, no engine. src/plugins `dev_plugins`.)
-    plugins::dev_plugins(&host);
+    plugins::dev_plugins(&host, Some(cx));
     // (Development: `ZERON_ZGX_HOST_TOASTS=1` lays the host's toasts over a
     // fixture, a template in preview and a notice of each kind.)
     let chrome = plugins::host_bar::dev_toasts(cx);

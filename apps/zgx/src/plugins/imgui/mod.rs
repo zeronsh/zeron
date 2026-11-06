@@ -25,16 +25,23 @@
 //! touches the context). [`render::ImguiViewport`] is the zgx `Viewport` a
 //! plugin window draws through.
 //!
-//! Not here yet: the native window, the Luau bindings and the frame pump.
-//! They call this module, not the other way round, which is why the native
-//! API is allowed to have no caller in the app yet: the tests below exercise
-//! every part of it, and the next milestone wires it to a window.
+//! Not here yet: the frame pump and the widget bindings. They call this
+//! module, not the other way round: [`window::Windows`] makes the native
+//! windows, [`PluginWindow`] is what the pump prepares frames for, and
+//! [`luau`] serves the window ops to a plugin's script.
+
 #![allow(dead_code)]
 
+pub mod luau;
 pub mod permission;
 pub mod render;
 pub mod runtime;
 pub mod snapshot;
+pub mod window;
+
+/// The host's windows: one per `(plugin, window id)`, made through the
+/// app's `WindowFactory` (see [`window`]).
+pub use window::{CloseReason, Windows as ImGuiWindows};
 
 #[cfg(test)]
 mod tests;
