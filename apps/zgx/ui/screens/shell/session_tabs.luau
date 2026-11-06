@@ -11,6 +11,7 @@ local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
 local SessionRow = require("@ds/session_row")
 local motion = require("@ds/motion")
+local TabStrip = require("@ds/tab_strip")
 local look = require("@app/screens/shell/project_look")
 local route = require("@app/screens/shell/route")
 local sessions = require("@account/sessions")
@@ -336,9 +337,10 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			items = "center",
 			rounded = "$radius.lg",
 			cursor = "pointer",
+			-- (Chosen, it stands on the strip's wash, which glides to it.)
 			bg = function(): string
 				if active() then
-					return "$zeron.selected.flat.bg"
+					return "#00000000"
 				end
 				return if hovered:get() or held:get() then "$hover" else "#00000000"
 			end,
@@ -356,9 +358,14 @@ local Tab = ui.component(function(props: { chat: string }): Node
 					close(id)
 				end
 			end,
-			-- (`session`, as a sidebar row's: dropped on a pane, it joins the split.)
+			-- (`session`, as a sidebar row's: dropped on a pane, it joins the split,
+			-- whose panes show where it can land while it's carried.)
 			on_drag = function(): any
+				splits.dragging:set(true)
 				return { session_tab = id, session = face(id) }
+			end,
+			on_drag_end = function()
+				splits.dragging:set(false)
 			end,
 			-- The tab as it stands, on the window's colour. (Nothing here eases: a drag's
 			-- preview has no clock for it.)
@@ -593,8 +600,25 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 				fade_x = bands,
 				ui.row {
 					ref = content,
+					relative = true,
 					gap = "$zeron.space.hair",
 					items = "center",
+					TabStrip.Highlight {
+						key = "session_tab",
+						order = function(): { string }
+							return shown:get()
+						end,
+						width = function(id: string): number
+							local r = tab_refs[id]
+							return if r then r.width or 0 else 0
+						end,
+						content = content,
+						selected = function(): string?
+							return if route.session:get() then splits.current_key() else nil
+						end,
+						h = TAB_H,
+						rounded = "$radius.lg",
+					},
 					ui.each(shown, function(id: string): Node
 						return Tab { chat = id }
 					end, {
