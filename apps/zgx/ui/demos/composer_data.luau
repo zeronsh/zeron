@@ -186,6 +186,16 @@ local TITLES = {
 	"list every caller of Dock.Task",
 	"draft the release notes",
 }
+-- What to know about the chat, worst first.
+function M.alerts(): { Dock.Alert }
+	return {
+		{ id = "al1", tone = "danger", title = "github MCP server failed to start", detail = "exit 127: npx not found", action = "Retry" },
+		{ id = "al2", tone = "warning", title = "Context 92% full", detail = "older turns will be compacted soon", action = "Compact" },
+		{ id = "al3", tone = "warning", title = "Rate limited", detail = "resets at 3:40 PM" },
+		{ id = "al4", tone = "info", title = "pre-commit hook skipped", detail = "no hooks in this worktree" },
+	}
+end
+
 function M.subagents(n: number): { Dock.Task }
 	local running, finished = {}, {}
 	local live = math.max(1, math.ceil(n / 3))

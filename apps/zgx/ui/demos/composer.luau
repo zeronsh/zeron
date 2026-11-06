@@ -39,6 +39,7 @@ local cargo = ui.state("cx_cargo", {} :: { Cargo.Item })
 local queue = ui.state("cx_queue", {} :: { Dock.Queued })
 local todos = ui.state("cx_todos", {} :: { Dock.Todo })
 local tasks = ui.state("cx_tasks", {} :: { Dock.Task })
+local alerts = ui.state("cx_alerts", {} :: { Dock.Alert })
 local tray = ui.state("cx_tray", nil :: Dock.Tray?)
 local question = ui.state("cx_question", nil :: Ask.Question?)
 local chosen = ui.state("cx_chosen", {} :: { [string]: boolean })
@@ -190,6 +191,7 @@ local function reset()
 	queue:set({})
 	todos:set({})
 	tasks:set({})
+	alerts:set({})
 	tray:set(nil)
 	question:set(nil)
 	chosen:set({})
@@ -548,6 +550,16 @@ local GROUPS: { Group } = {
 				end,
 			},
 			{
+				id = "alerts",
+				label = "Alerts",
+				apply = function()
+					turn:set("running")
+					alerts:set(data.alerts())
+					tasks:set(data.subagents(3))
+					tray:set(nil)
+				end,
+			},
+			{
 				id = "beside_jump",
 				label = "Beside Scroll to end",
 				apply = function()
@@ -568,6 +580,7 @@ local GROUPS: { Group } = {
 					queue:set(data.queue())
 					todos:set(data.todos())
 					tasks:set(data.tasks())
+					alerts:set(data.alerts())
 					tray:set("queue")
 				end,
 			},
@@ -852,6 +865,26 @@ local page: Page = {
 							end,
 							on_pill_width = function(w: number?)
 								pill_w:set(w or 0)
+							end,
+							alerts = alerts,
+							-- (An alert's action, here: done, so it goes.)
+							on_alert_action = function(id: string)
+								local list = {}
+								for _, x in alerts:peek() do
+									if x.id ~= id then
+										table.insert(list, x)
+									end
+								end
+								alerts:set(list)
+							end,
+							on_dismiss_alert = function(id: string)
+								local list = {}
+								for _, x in alerts:peek() do
+									if x.id ~= id then
+										table.insert(list, x)
+									end
+								end
+								alerts:set(list)
 							end,
 							value = draft,
 							placeholder = "Ask anything, @ to mention…",

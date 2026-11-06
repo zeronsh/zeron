@@ -806,6 +806,8 @@
       "open_all": "显示待处理内容",
       "waiting": "待处理内容",
       "subagents": "子智能体",
+      "alerts": "提醒",
+      "dismiss_alert": "关闭{title}",
       "fold_all": "收起待处理内容",
       "rest": "另外 {n} 项：{names}",
       "send_now": "立即发送",

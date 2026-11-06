@@ -631,6 +631,8 @@ return {
 	["ds.composer_dock.open_all"] = "Show what's waiting",
 	["ds.composer_dock.waiting"] = "What's waiting",
 	["ds.composer_dock.subagents"] = "Subagents",
+	["ds.composer_dock.alerts"] = "Alerts",
+	["ds.composer_dock.dismiss_alert"] = "Dismiss {title}",
 	["ds.composer_dock.fold_all"] = "Fold what's waiting",
 	["ds.composer_dock.rest"] = "{n} more: {names}",
 	["ds.composer_dock.send_now"] = "Send now",

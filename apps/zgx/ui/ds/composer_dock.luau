@@ -37,6 +37,7 @@ local IconButtonModule = require("@self/icon_button")
 local IconButton = IconButtonModule.IconButton
 local Button = require("@self/button")
 local FadeText = require("@self/fade_text")
+local RollText = require("@self/roll_text")
 local glass = require("@self/glass")
 local motion = require("@self/motion")
 local status = require("@self/status")
@@ -72,7 +73,12 @@ export type Task = {
 	-- A subagent that ended badly: its mark says so.
 	failed: boolean?,
 }
-export type Tray = "todos" | "agents" | "tasks" | "queue"
+export type Tray = "alerts" | "todos" | "agents" | "tasks" | "queue"
+-- Something to know about the chat (a context nearly full, a rate limit, a
+-- server that failed to start): how serious, what it is, a word more, and
+-- a thing to do about it (its button's label).
+export type AlertTone = "info" | "warning" | "danger"
+export type Alert = { id: string, tone: AlertTone, title: string, detail: string?, action: string? }
 export type Props = {
 	queue: State<{ Queued }>?,
 	-- Whether the agent takes a word mid-turn (a row's action is then Steer).
@@ -98,6 +104,11 @@ export type Props = {
 	open: State<Tray?>?,
 	-- Short of room: rows lose their thumbnails, actions become glyphs.
 	narrow: (() -> boolean)?,
+	-- What to know about the chat, each in its tone's colours; its action,
+	-- and letting one go.
+	alerts: State<{ Alert }>?,
+	on_alert_action: ((id: string) -> ())?,
+	on_dismiss_alert: ((id: string) -> ())?,
 	-- Another pill floating over the composer's middle ("Scroll to end"):
 	-- its width while it shows. The folded pill moves aside for it.
 	aside: (() -> number?)?,
@@ -245,6 +256,9 @@ type Tab = {
 	present: () -> boolean,
 	-- Its glyph again, for the folded pill (a node lives in one place).
 	pill_glyph: Node,
+	-- A tab that says something's wrong: its tone (the worst it holds),
+	-- which colours it, in the pill on its tone's wash.
+	tone: (() -> AlertTone)?,
 }
 
 -- The deck's tabs: a capsule each, quiet until touched; the one open sits
@@ -401,12 +415,16 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 						text_size = "$font.size.md",
 						weight = "$font.weight.medium",
 					}),
-					ui.text {
+					RollText {
 						t.count,
 						shrink = 0,
 						tabular = true,
 						text_size = "$font.size.md",
-						color = "$text.tertiary",
+						color = if t.tone
+							then function(): string
+								return `$zeron.tone.{(t.tone :: () -> AlertTone)()}.ink`
+							end
+							else "$text.tertiary",
 					},
 				}
 			)
@@ -590,7 +608,9 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 				local k = t.title
 				return if type(k) == "function" then k() else k
 			end
+			local tone = t.tone
 			table.insert(p, ui.show(t.present, ui.button {
+				relative = true,
 				h = inner,
 				pl = "$space.2",
 				pr = "$space.2",
@@ -610,6 +630,21 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 				on_click = function()
 					open:set(id)
 				end,
+				-- (Something wrong: on its tone's wash, under the touch's.)
+				if tone
+					then ui.div {
+						absolute = true,
+						left = 0,
+						right = 0,
+						top = 0,
+						bottom = 0,
+						rounded = ui.raw(inner / 2, "the capsule's"),
+						pointer_events = "none",
+						bg = function(): string
+							return `$zeron.tone.{tone()}.wash`
+						end,
+					}
+					else nil,
 				ui.div { w = 16, h = 16, shrink = 0, items = "center", justify = "center", t.pill_glyph },
 				ui.show(function(): boolean
 					return not many()
@@ -622,12 +657,17 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 					weight = "$font.weight.medium",
 					color = "$text.primary",
 				}),
-				ui.text {
+				RollText {
 					t.count,
 					shrink = 0,
 					tabular = true,
 					text_size = "$font.size.sm",
 					weight = "$font.weight.medium",
+					color = if tone
+						then function(): string
+							return `$zeron.tone.{tone()}.ink`
+						end
+						else nil,
 				},
 			}))
 		end
@@ -1139,6 +1179,93 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 	return ui.row(p)
 end
 
+-- An alert: its tone's glyph in its ink, what it is, a word more, its
+-- action, and letting it go.
+local function alert_row(a: Alert, row: State<Alert>, props: Props, height: number): Node
+	local function ink(): string
+		return `$zeron.tone.{row:get().tone}.ink`
+	end
+	local parts: { [any]: any } = {
+		min_h = height,
+		pl = "$space.2",
+		pr = "$space.1",
+		gap = "$space.2",
+		items = "center",
+		rounded = "$zeron.composer.tray.row_radius",
+		role = "listitem",
+		hover = { bg = "$hover" },
+		ui.div {
+			w = 18,
+			h = 18,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			color = ink,
+			Icon {
+				name = function(): Icon.Name
+					return if row:get().tone == "info" then "info-circle" else "danger-triangle"
+				end,
+				size = 14,
+			},
+		},
+		FadeText {
+			function(): string
+				return row:get().title
+			end,
+			literal = true,
+			shrink = 1,
+			min_w = 48,
+			text_size = "$font.size.md",
+			color = "$text.primary",
+		},
+		FadeText {
+			function(): string
+				return row:get().detail or ""
+			end,
+			literal = true,
+			grow = 1,
+			basis = 0,
+			text_size = "$font.size.sm",
+			color = "$text.tertiary",
+		},
+	}
+	if props.on_alert_action then
+		table.insert(parts, ui.show(function(): boolean
+			return row:get().action ~= nil
+		end, Button {
+			ui.text {
+				function(): string
+					return row:get().action or ""
+				end,
+			},
+			size = "sm",
+			tone = "ghost",
+			h = 24,
+			px = "$space.2",
+			text_size = "$font.size.xs",
+			color = ink,
+			on_click = function()
+				(props.on_alert_action :: (string) -> ())(a.id)
+			end,
+		}))
+	end
+	if props.on_dismiss_alert then
+		table.insert(parts, IconButton {
+			icon = "close",
+			label = locale.t("ds.composer_dock.dismiss_alert", { title = a.title }),
+			tooltip = locale.s("ds.composer_dock.dismiss"),
+			size = "sm",
+			tone = "quiet",
+			on_click = function()
+				(props.on_dismiss_alert :: (string) -> ())(a.id)
+			end,
+		})
+	else
+		table.insert(parts, ui.div { w = 6, shrink = 0 })
+	end
+	return ui.row(parts)
+end
+
 -- "3 finished": a row that opens the subagents that are done, or folds them.
 local function finished_row(count: () -> number, open: () -> boolean, on_click: () -> ()): Node
 	return ui.row {
@@ -1235,25 +1362,80 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			open:set(nil)
 		elseif (now == "tasks" or now == "agents") and not has(now) then
 			open:set(nil)
+		elseif now == "alerts" and (props.alerts == nil or #props.alerts:get() == 0) then
+			open:set(nil)
 		end
 	end)
-	-- What is running doesn't: it stays folded to its header ("Running 3 ·
-	-- cargo test · 2m") until opened, as a session can hold a score of
-	-- processes for hours. Opened, it stays open while any run.
-	local seen = { queue = false, todos = false }
-	ui.effect(function()
-		local q, t = has_queue(), has_todos()
-		local arrived: Tray? = if q and not seen.queue
-			then "queue"
-			elseif t and not seen.todos and not (all_done() and not live()) then "todos"
-			else nil
-		seen.queue, seen.todos = q, t
-		if arrived and open:peek() == nil then
-			open:set(arrived)
-		end
-	end)
+	-- Nothing opens itself: what arrives shows in the folded pill, and the
+	-- person opens it if they want it.
 
 	local tabs: { Tab } = {}
+
+	-- What to know: first, as the most pressing.
+	if props.alerts then
+		local alerts = props.alerts
+		local function worst(): AlertTone
+			local w: AlertTone = "info"
+			for _, x in alerts:get() do
+				if x.tone == "danger" then
+					return "danger"
+				elseif x.tone == "warning" then
+					w = "warning"
+				end
+			end
+			return w
+		end
+		local function glyph(size: number): Node
+			return ui.div {
+				color = function(): string
+					return `$zeron.tone.{worst()}.ink`
+				end,
+				Icon { name = "danger-triangle", size = size },
+			}
+		end
+		local body = ui.column {
+			w_full = true,
+			pb = "$space.1",
+			role = "list",
+			label = locale.t("ds.composer_dock.alerts"),
+			ui.each(alerts, function(x: Alert): Node
+				local row = ui.computed(function(): Alert
+					for _, y in alerts:get() do
+						if y.id == x.id then
+							return y
+						end
+					end
+					return x
+				end)
+				return alert_row(x, row, props, geometry.row)
+			end, {
+				key = function(x: Alert): string
+					return x.id
+				end,
+				animate = { duration = 220, ease = "outCubic" },
+				enter = { opacity = { 0, 1 }, y = { -4, 0 }, duration = 200, ease = "outCubic" },
+				exit = { opacity = 0, duration = 120 },
+			}),
+		}
+		table.insert(tabs, {
+			id = "alerts",
+			glyph = glyph(16),
+			pill_glyph = glyph(14),
+			title = "ds.composer_dock.alerts",
+			count = function()
+				return tostring(#alerts:get())
+			end,
+			summary = function(): string
+				local first = alerts:get()[1]
+				return if first then first.title else ""
+			end,
+			body = body,
+			present = function(): boolean
+				return #alerts:get() > 0
+			end,
+			tone = worst,
+		})
+	end
 
 	-- The plan.
 	if props.todos then

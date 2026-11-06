@@ -207,6 +207,11 @@ export type Props = {
 	on_stop_all: (() -> ())?,
 	on_open_task: ((id: string) -> ())?,
 	tray: State<dock.Tray?>?,
+	-- What to know about the chat (ds/composer_dock's alerts): each in its
+	-- tone's colours, its action, and letting one go.
+	alerts: State<{ dock.Alert }>?,
+	on_alert_action: ((id: string) -> ())?,
+	on_dismiss_alert: ((id: string) -> ())?,
 	-- Another pill over its middle ("Scroll to end"): its width while it
 	-- shows, so the folded trays' pill moves aside for it.
 	aside: (() -> number?)?,
@@ -2302,7 +2307,7 @@ return ui.component(function(props: Props): Node
 	local trays: Node? = nil
 	-- (Folded, what waits is a pill floating over the conversation.)
 	local tray_pill: Node? = nil
-	if props.queue or props.todos or props.tasks then
+	if props.queue or props.todos or props.tasks or props.alerts then
 		trays, tray_pill = dock.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
@@ -2324,6 +2329,9 @@ return ui.component(function(props: Props): Node
 			open = props.tray,
 			narrow = narrow,
 			aside = props.aside,
+			alerts = props.alerts,
+			on_alert_action = props.on_alert_action,
+			on_dismiss_alert = props.on_dismiss_alert,
 			on_pill_width = props.on_pill_width,
 		}
 	end

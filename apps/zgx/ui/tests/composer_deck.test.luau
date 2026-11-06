@@ -75,9 +75,10 @@ test("the chevrons: the header's folds, the pill's opens the one open last", fun
 	app:set_state("test_running_tasks", tasks(1))
 	app:set_state("test_deck_todos", { { id = "t1", text = "port the deck", state = "doing" }, { id = "t2", text = "test it", state = "pending" } })
 	app:frames(30)
-	-- (A plan arriving with nothing open, opens.)
-	expect(app:state("test_running_tray")).to_be("todos")
-	app:click('role:tab "Open Running"')
+	-- Nothing opens itself: the plan arriving is in the pill.
+	expect(app:state("test_running_tray")).to_be(nil)
+	expect(app:has('role:button "Open Todo"')).to_be(true)
+	app:click('role:button "Open Running"')
 	app:frames(30)
 	app:click('role:button "Fold what\'s waiting"')
 	app:frames(30)
@@ -85,5 +86,34 @@ test("the chevrons: the header's folds, the pill's opens the one open last", fun
 	app:click('role:button "Show what\'s waiting"')
 	app:frames(30)
 	expect(app:state("test_running_tray")).to_be("tasks")
+	expect(app:error()).to_be(nil)
+end)
+
+test("alerts: first in the pill, each with its action and its dismiss", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	app:set_state("test_running_tasks", tasks(1))
+	app:set_state("test_deck_alerts", {
+		{ id = "al1", tone = "danger", title = "github MCP server failed to start", action = "Retry" },
+		{ id = "al2", tone = "warning", title = "Context 92% full" },
+	})
+	app:frames(30)
+	-- In the pill, never opened for the person.
+	expect(app:has('role:button "Open Alerts"')).to_be(true)
+	expect(app:state("test_running_tray")).to_be(nil)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	expect(app:state("test_running_tray")).to_be("alerts")
+	app:click('role:button "Retry"')
+	app:click('role:button "Dismiss Context 92% full"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("alert:al1")
+	expect(app:state("calls")).to_contain("dismiss:al2")
+	-- None left: its tab goes, and folds if it was open.
+	app:set_state("test_deck_alerts", {})
+	app:frames(30)
+	expect(app:state("test_running_tray")).to_be(nil)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
