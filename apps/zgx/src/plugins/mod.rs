@@ -30,6 +30,7 @@
 
 pub mod consent;
 pub mod elements;
+pub mod imgui;
 #[cfg(target_os = "macos")]
 pub mod file_events;
 pub mod grants;

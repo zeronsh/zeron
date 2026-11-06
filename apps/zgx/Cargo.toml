@@ -128,6 +128,13 @@ zeron-visual = { path = "../../crates/visual" }
 # The rules plugins are held to (paths, programs, network), the engine's own.
 zeron-plugin-guard = { path = "../../crates/plugin-guard" }
 zeron-visual-gpu = { path = "../../crates/visual-gpu" }
+# Native Dear ImGui windows for plugins (src/plugins/imgui): Dear ImGui
+# 1.93.1 WIP (docking branch), and its wgpu backend at the wgpu zgx itself
+# draws with (`wgpu-29` is 29.0.4; the crate's default would link a second
+# wgpu major). Exact pins: the ADR (docs/adr/0003-plugin-imgui-windows.md)
+# and the mission's version matrix name these versions.
+dear-imgui-rs = "=0.22.0"
+dear-imgui-wgpu = { version = "=0.22.0", default-features = false, features = ["wgpu-29"] }
 # Their frames' pixel loops, optimized in debug builds too (below).
 zeron-zgx-pixels = { path = "pixels" }
 

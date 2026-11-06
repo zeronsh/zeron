@@ -268,7 +268,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
- "parking_lot",
+ "parking_lot 0.12.5",
  "percent-encoding",
  "windows-sys 0.61.2",
  "x11rb",
@@ -1024,6 +1024,52 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64bff0bd181fba667660276c6b7ebdc50cff37ce593e7adf9e734f89c8f444e8"
 dependencies = [
  "dbus",
+]
+
+[[package]]
+name = "dear-imgui-build-support"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d2683d46e026a93eceeb815ca0f5709b21e089bd99029adc2e52eb1029c5ecb"
+dependencies = [
+ "cc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dear-imgui-rs"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad13a535a4e605dbab22a3e3870bfbcf4e53d9873fdb7f7d713895da511879ad"
+dependencies = [
+ "bitflags 2.13.2",
+ "dear-imgui-sys",
+ "parking_lot 0.13.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "dear-imgui-sys"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b82f66d6c4165fb1e40888e48765d7175ecf96b7c411d351304c8fa8ca6f365"
+dependencies = [
+ "cc",
+ "dear-imgui-build-support",
+ "mint",
+]
+
+[[package]]
+name = "dear-imgui-wgpu"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd1cda5fb3f24d21cefbd0571cc8c03c7ac52ebe2696bd578967f0dc194f1432"
+dependencies = [
+ "bytemuck",
+ "dear-imgui-rs",
+ "thiserror 2.0.21",
+ "wgpu",
 ]
 
 [[package]]
@@ -2456,6 +2502,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lock_api"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65d91b22da179613dcf4d6ec8349563f52a363f6849e03b00dd0a185ec4a59af"
+dependencies = [
+ "scopeguard",
+]
+
+[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2565,6 +2620,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mint"
+version = "0.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e53debba6bda7a793e5f99b8dacf19e626084f525f7829104ba9898f367d85ff"
+
+[[package]]
 name = "mio"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2595,7 +2656,7 @@ dependencies = [
  "libc",
  "mlua-sys",
  "num-traits",
- "parking_lot",
+ "parking_lot 0.12.5",
  "rustc-hash 2.1.3",
 ]
 
@@ -3207,8 +3268,18 @@ version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
 dependencies = [
- "lock_api",
- "parking_lot_core",
+ "lock_api 0.4.14",
+ "parking_lot_core 0.9.12",
+]
+
+[[package]]
+name = "parking_lot"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9cf937ca4e1d0b7578784559063422fc39ae7c5a00f02471f2614d5486fd226"
+dependencies = [
+ "lock_api 0.5.0",
+ "parking_lot_core 0.10.0",
 ]
 
 [[package]]
@@ -3220,6 +3291,18 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall 0.5.18",
+ "smallvec",
+ "windows-link",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cfff060068cc18aa7815010fcaf80c68c7fb9e85fc7f5c0f9bf142c21d19826"
+dependencies = [
+ "libc",
+ "redox_syscall 0.9.5",
  "smallvec",
  "windows-link",
 ]
@@ -4717,7 +4800,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
+ "parking_lot 0.12.5",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -5462,7 +5545,7 @@ dependencies = [
  "js-sys",
  "log",
  "naga",
- "parking_lot",
+ "parking_lot 0.12.5",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
@@ -5494,7 +5577,7 @@ dependencies = [
  "log",
  "naga",
  "once_cell",
- "parking_lot",
+ "parking_lot 0.12.5",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
@@ -5569,7 +5652,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "once_cell",
  "ordered-float",
- "parking_lot",
+ "parking_lot 0.12.5",
  "portable-atomic",
  "portable-atomic-util",
  "profiling",
@@ -6359,6 +6442,8 @@ dependencies = [
  "block",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
+ "dear-imgui-rs",
+ "dear-imgui-wgpu",
  "fontdb",
  "foreign-types",
  "image",
@@ -6479,7 +6564,7 @@ dependencies = [
  "libc",
  "log",
  "miow",
- "parking_lot",
+ "parking_lot 0.12.5",
  "piper",
  "polling",
  "regex-automata",
@@ -6633,7 +6718,7 @@ dependencies = [
  "luau0-src",
  "mlua-sys",
  "num-traits",
- "parking_lot",
+ "parking_lot 0.12.5",
  "rustc-hash 2.1.3",
 ]
 
