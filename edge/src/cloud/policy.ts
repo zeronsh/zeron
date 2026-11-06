@@ -16,7 +16,10 @@ export type CloudState =
   | "sleeping"
   | "stopping"
   | "error"
-  | "deleting";
+  | "deleting"
+  /** The provider deleted the stopped machine's disk. The transcript is safe
+   * in its chat; a fresh machine (`retry`) starts on the same repo and branch. */
+  | "data_expired";
 
 /** Per-session lifecycle workflows. */
 export type WorkflowKind = "provision" | "wake" | "sleep" | "delete";
@@ -108,9 +111,61 @@ export const parseMaxAwake = (raw: string | undefined): number => {
   return Number.isInteger(n) && n > 0 ? n : 5;
 };
 
+/** One machine size, as clients show it. */
+export interface MachineSpec {
+  readonly id: SandboxMachine;
+  readonly name: string;
+  readonly vcpu: number;
+  readonly memoryGB: number;
+  /** What a machine of this size "holds": the limit a resume is refused
+   * against, in what the machine added. `df` also counts the base image
+   * (`SandboxCapabilities.diskOverheadGiB`). */
+  readonly diskGiB: number;
+  /** Credits it spends relative to `default` (metering's live estimate). */
+  readonly creditMultiplier: number;
+}
+
+/**
+ * Every size, smallest first: the one place this is written down. Boat's table
+ * (docs.boat.dev/machines) gives CPU, memory, the multipliers (xlarge is 50/9)
+ * and disk rounded down to 51, 51, 111 and 251. `default`'s 51.2 and `large`'s
+ * 111.8 are what Boat's own refusals said; `small` is refused at the same
+ * figure as `default` on a shrink. It has said no exact figure for `xlarge`.
+ */
+export const MACHINES: readonly MachineSpec[] = [
+  { id: "small", name: "Small", vcpu: 2, memoryGB: 4, diskGiB: 51.2, creditMultiplier: 0.5 },
+  { id: "default", name: "Default", vcpu: 4, memoryGB: 8, diskGiB: 51.2, creditMultiplier: 1 },
+  { id: "large", name: "Large", vcpu: 8, memoryGB: 16, diskGiB: 111.8, creditMultiplier: 2 },
+  { id: "xlarge", name: "Extra large", vcpu: 16, memoryGB: 32, diskGiB: 251, creditMultiplier: 5.56 }
+];
+
+export const machineSpec = (id: string | undefined): MachineSpec | undefined => MACHINES.find((m) => m.id === id);
+
 /** A sandbox size by name, or undefined. */
 export const machineName = (raw: unknown): SandboxMachine | undefined =>
-  raw === "small" || raw === "default" || raw === "large" || raw === "xlarge" ? raw : undefined;
+  typeof raw === "string" ? machineSpec(raw)?.id : undefined;
+
+export type DiskLevel = "ok" | "warn" | "critical";
+
+/** A machine warns before it can no longer fit its size. */
+export const DISK_WARN = 0.8;
+export const DISK_CRITICAL = 0.9;
+
+export const diskLevel = (usedGiB: number, capacityGiB: number): DiskLevel => {
+  const share = usedGiB / capacityGiB;
+  return share >= DISK_CRITICAL ? "critical" : share >= DISK_WARN ? "warn" : "ok";
+};
+
+/**
+ * A sleeping machine is resumed and stopped again this long before its
+ * provider would delete its disk: long enough for a busy account, a provider
+ * outage or a failed attempt to get another try.
+ */
+export const REFRESH_MARGIN_MS = 2 * 24 * 60 * 60_000;
+
+/** When a machine stopped at `stoppedAt` is next due for a refresh. */
+export const refreshDueAt = (stoppedAt: number, retentionMs: number): number =>
+  stoppedAt + retentionMs - REFRESH_MARGIN_MS;
 
 /** `CLOUD_MACHINE`: the session sandbox size (default "default"). */
 export const parseMachine = (raw: string | undefined): SandboxMachine => machineName(raw) ?? "default";
@@ -133,6 +188,8 @@ export interface AwakeSession {
   readonly lastHeartbeatAt?: number;
   readonly activeRuns: number;
   readonly clients: number;
+  /** Background work outliving a turn (a parked chat's subagents). */
+  readonly backgroundRuns?: number;
 }
 
 /**
@@ -160,7 +217,7 @@ export const planEviction = (
         return now - (s.lastActiveAt ?? 0) >= FIRST_REPORT_GRACE_MS;
       }
       if (now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS) return true; // dead engine
-      return s.activeRuns === 0 && s.clients === 0;
+      return s.activeRuns === 0 && s.clients === 0 && (s.backgroundRuns ?? 0) === 0;
     })
     .sort((a, b) => (a.lastActiveAt ?? 0) - (b.lastActiveAt ?? 0));
   return idle.length >= need ? idle.slice(0, need).map((s) => s.chatId) : undefined;

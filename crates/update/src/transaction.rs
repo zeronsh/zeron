@@ -1440,8 +1440,8 @@ fn kill_process(_pid: u32) {}
 /// Whether something asked the service manager to act on this unit: a stop or
 /// restart is a queued job, a unit stopping because its process exited isn't.
 fn unit_has_job(unit: &str) -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "show", unit, "-p", "Job", "--value"])
+    crate::systemctl_query(unit)
+        .args(["show", unit, "-p", "Job", "--value"])
         .output()
         .is_ok_and(|output| {
             let job = String::from_utf8_lossy(&output.stdout);
@@ -1450,8 +1450,8 @@ fn unit_has_job(unit: &str) -> bool {
 }
 
 fn start_unit(unit: &str) {
-    let started = std::process::Command::new("systemctl")
-        .args(["--user", "--no-block", "start", unit])
+    let started = crate::systemctl_action(unit)
+        .args(["--no-block", "start", unit])
         .status();
     if !started.is_ok_and(|status| status.success()) {
         eprintln!("zeron-update: couldn't ask the service manager to start {unit}");

@@ -786,7 +786,10 @@ impl Client {
         }
         let is_read = method == reqwest::Method::GET;
         let token = self.inner.tokens.bearer().await.map_err(Failure::Error)?;
-        let mut request = crate::auth::http().request(method, url).bearer_auth(token);
+        let mut request = crate::auth::http()
+            .request(method, url)
+            .bearer_auth(token)
+            .header(zeron_proto::CLOUD_STATES_HEADER, zeron_proto::CLOUD_STATES_UNDERSTOOD);
         if let Some(body) = body {
             request = request.json(&body);
         }

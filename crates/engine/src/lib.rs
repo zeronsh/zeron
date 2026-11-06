@@ -42,6 +42,7 @@ pub mod chat2_host;
 mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
+pub mod cloud_disk;
 pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
@@ -327,7 +328,9 @@ impl EngineCore {
                 desktop_notify::post_for(&data_dir, &focus, source, &title, body, session).to_owned()
             });
         }
-        if let Some(edge) = &edge {
+        // A Cloud machine's token isn't admitted there (edge/src/runner-policy.ts):
+        // it would ask, get a 403, and ask again every 30 s for as long as it's up.
+        if let Some(edge) = edge.as_ref().filter(|_| !runner::is_cloud_platform()) {
             plugins.set_directory(Arc::new(plugins::keys::EdgeDirectory::new(
                 &edge.url,
                 edge.token.clone(),
@@ -748,7 +751,12 @@ impl RpcService for HeadlessRpc {
         if method == methods::QUIESCE_FOR_SLEEP {
             // Local IPC only (never relayed): a Cloud sleep's last check.
             return RpcReply::value(&match self.doc_host.quiesce_for_sleep().await {
-                Ok(()) => serde_json::json!({ "quiesced": true }),
+                Ok(()) => {
+                    // Asleep it can't make room: leave it fitting its size.
+                    // Bounded, and never in the sleep's way.
+                    cloud_disk::pre_sleep_cleanup().await;
+                    serde_json::json!({ "quiesced": true })
+                }
                 Err(busy) => serde_json::json!({ "quiesced": false, "busy": busy }),
             });
         }
@@ -1004,17 +1012,23 @@ impl Engine {
 
         let preview_org = profile.org_id().to_string();
         let device_root = profile.device_root().to_path_buf();
+        let registry = Arc::new(default_registry());
+        // Assembly's boot recovery may start a killed turn before the broker
+        // below is attached: it waits for it.
+        if auth.runner_identity().is_some() {
+            registry.expect_run_environment();
+        }
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
                 lock,
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
             )?,
@@ -1044,7 +1058,8 @@ impl Engine {
             let heartbeat = runner::spawn_heartbeat(
                 identity.edge_url(),
                 tokens,
-                Arc::new(move || sessions.active_count()),
+                Arc::new(move || sessions.run_counts()),
+                Arc::new(cloud_disk::machine_usage),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
             );

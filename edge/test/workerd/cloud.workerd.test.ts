@@ -4,7 +4,7 @@ import { authenticate } from "../../src/auth";
 import { handleAuthRoute } from "../../src/auth-routes";
 import { QUIESCE_ENGINE_COMMAND, START_ENGINE_COMMAND, STOP_ENGINE_COMMAND } from "../../src/cloud/install-script";
 import { listLedger, listSandboxes, listUsage } from "../../src/cloud/metering";
-import { cloudAccountName } from "../../src/cloud/policy";
+import { MACHINES, cloudAccountName } from "../../src/cloud/policy";
 import type { Env } from "../../src/env";
 import {
   boatControl,
@@ -50,7 +50,7 @@ const registryRows = async (u: TestUser) =>
 describe("account", () => {
   it("reports off + available for a new user and refuses another org", async () => {
     const u = newUser();
-    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true, credits: 0 });
+    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true, credits: 0, machines: MACHINES, machine: "default" });
     expect((await call("GET", "/cloud/other-org", userBearer(u))).status).toBe(403);
     expect((await call("GET", "/cloud/org1")).status).toBe(401);
   });
@@ -518,6 +518,12 @@ describe("idle sleep, waking on sends and the awake cap", () => {
     await backdate();
     await runDurableObjectAlarm(accountStub(u));
     expect((await session(u, chatId))?.state).toBe("ready"); // busy
+
+    // A parked chat's subagents still running hold it awake too.
+    expect((await call("POST", "/runner/heartbeat", bearer, { activeRuns: 0, clients: 0, backgroundRuns: 1 })).status).toBe(200);
+    await backdate();
+    await runDurableObjectAlarm(accountStub(u));
+    expect((await session(u, chatId))?.state).toBe("ready");
 
     expect((await call("POST", "/runner/heartbeat", bearer, { activeRuns: 0, clients: 0 })).status).toBe(200);
     await backdate();
