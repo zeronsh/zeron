@@ -258,6 +258,8 @@ export type Props = {
 	-- send).
 	on_mention: ((item: any, trigger: string, token: string) -> ())?,
 	mention_empty: { [string]: string }?,
+	-- Why a trigger's list couldn't be had (ds/composer_mentions' `failed`).
+	mention_failed: ((trigger: string) -> string?)?,
 }
 
 -- Zeron's geometry. The one line: 47 points inside the hairline, the text
@@ -1117,6 +1119,7 @@ return ui.component(function(props: Props): Node
 		sources = props.mentions or {},
 		enabled = props.mention_enabled,
 		empty = props.mention_empty,
+		failed = props.mention_failed,
 		on_choose = props.on_mention,
 		in_view = function(): boolean
 			return (pill_w:get() or 0) > 0

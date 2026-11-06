@@ -323,11 +323,32 @@ stub.catalog_on = function(device: string?)
 	note(`catalog_on:{device or "here"}`)
 end
 
+-- `lists_fail`: from then on, the file search and the agent's lists fail
+-- (its device unreachable).
+local LISTS_FAIL = ui.state("fixture_lists_fail", false)
+ui.command {
+	id = "lists_fail",
+	title = "The file search and the agent's lists fail",
+	run = function()
+		LISTS_FAIL:set(true)
+	end,
+}
+local function unreachable(): any
+	return {
+		after = function(_self: any, _ok: any, err: (any) -> ())
+			err("unreachable")
+		end,
+	}
+end
+
 -- The session's files, searched for `@`.
 local FILES = { "src/chat.rs", "src/main.rs", "ui/screens/chat/composer.luau", "README.md" }
 local files_stub = files :: any
 files_stub.search = function(target: any, query: string): any
 	note(`search:{target.chat or target.space or "?"}:{query}`)
+	if LISTS_FAIL:peek() then
+		return unreachable()
+	end
 	local found = {}
 	for _, path in FILES do
 		if query == "" or string.find(string.lower(path), string.lower(query), 1, true) then
@@ -343,6 +364,9 @@ local Invocations = require("@app/screens/chat/invocations")
 local invocations_stub = Invocations :: any
 invocations_stub.read = function(harness: string, target: any): any
 	note(`invocations:{harness}:{target.chat or target.space or "?"}`)
+	if LISTS_FAIL:peek() then
+		return unreachable()
+	end
 	return settled({
 		rows = {
 			{ kind = "command", name = "review", label = "/review", detail = "Review the diff · <branch>", link = "[/review](zeron-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22726576696577227d)" },

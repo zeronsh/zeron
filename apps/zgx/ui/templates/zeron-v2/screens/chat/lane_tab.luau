@@ -467,6 +467,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_mention = completions.on_mention,
 		mention_enabled = completions.enabled,
 		mention_empty = completions.empty,
+		mention_failed = completions.failed,
 		notice = notice,
 		on_dismiss_notice = function()
 			notice:set(nil)

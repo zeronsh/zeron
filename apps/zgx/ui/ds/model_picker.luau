@@ -761,6 +761,50 @@ return ui.component(function(props: Props): Node
 			expanded:set(false)
 			tab:set(nil)
 		end,
+		-- The keys, as Zeron's compact picker has them: folded, ←/→ (and
+		-- Home/End) step the reasoning, a tap each level it lands on; ⌘⇧F
+		-- stars the highlighted model (or takes its star), picking nothing.
+		on_key = function(e: KeyEvent, highlighted: string?): boolean
+			if e.cmd and e.shift and not e.alt and string.lower(e.key) == "f" then
+				local v = highlighted or props.model:peek()
+				if v and by_id:peek()[v] then
+					toggle_star(v)
+					return true
+				end
+				return false
+			end
+			if e.cmd or e.ctrl or e.alt or e.meta or expanded:peek() or current() == nil then
+				return false
+			end
+			local list = levels()
+			local n = #list
+			if n == 0 then
+				return false
+			end
+			local i = 1
+			for at, l in list do
+				if l.value == props.effort:peek() then
+					i = at
+				end
+			end
+			local to
+			if e.key == "ArrowLeft" then
+				to = math.max(1, i - 1)
+			elseif e.key == "ArrowRight" then
+				to = math.min(n, i + 1)
+			elseif e.key == "Home" then
+				to = 1
+			elseif e.key == "End" then
+				to = n
+			else
+				return false
+			end
+			if list[to].value ~= props.effort:peek() then
+				props.effort:set(list[to].value)
+				pcall(ui.invoke, "haptic.step")
+			end
+			return true
+		end,
 		on_escape = function(): boolean
 			-- Opened out, Escape folds it back (onto the chosen model, its
 			-- agent's tab, as a pick folds it); folded, it closes.

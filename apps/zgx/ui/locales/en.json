@@ -2666,7 +2666,8 @@
       "untitled": "Untitled chat"
     },
     "invocations": {
-      "couldnt_list": "Commands couldn't be listed"
+      "couldnt_list": "Commands couldn't be listed",
+      "couldnt_list_skills": "Skills couldn't be listed"
     },
     "reply_images": {
       "couldnt_read": "Couldn't be read"
@@ -2726,6 +2727,7 @@
       "edit_unavailable": "That message can't be edited now",
       "couldnt_stop_task": "Couldn't stop that process",
       "commands_or_skills": "commands or skills",
+      "couldnt_search_files": "Files couldn't be searched",
       "drop_to_mention": "Drop to mention"
     }
   },

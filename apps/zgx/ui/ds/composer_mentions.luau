@@ -60,6 +60,10 @@ export type Use = {
 	titles: { [string]: string }?,
 	-- What an empty list says, by trigger.
 	empty: { [string]: string }?,
+	-- Why a trigger's list couldn't be had, if it couldn't (a search that
+	-- failed, an agent's commands not listed): said over what did come, in
+	-- place of "No … available". Read as the list shows (followed).
+	failed: ((trigger: Trigger) -> string?)?,
 	-- Called with the item taken (after it lands in the draft).
 	-- (And the token it is in the draft: a file's is its shortest name.)
 	on_choose: ((item: Item, trigger: Trigger, token: string) -> ())?,
@@ -309,6 +313,13 @@ function M.use(opts: Use)
 				)
 			return locale.s(if t.query == "" then "ds.composer_mentions.none_available" else "ds.composer_mentions.none_matching", { what = what })
 		end
+		local function failed(): string?
+			local t = token:get()
+			if not t or not opts.failed then
+				return nil
+			end
+			return opts.failed(t.trigger)
+		end
 		local rows = ui.each(shown, row, {
 			key = function(item: Item): string
 				return item.value
@@ -341,7 +352,21 @@ function M.use(opts: Use)
 				Menu.Heading { title },
 				ui.show(loading, ui.column { gap = "$zeron.list.gap", table.unpack(skeleton) }),
 				ui.show(function()
-					return not loading() and #shown:get() == 0
+					return not loading() and failed() ~= nil
+				end, ui.row {
+					h = ROW,
+					px = "$space.2",
+					items = "center",
+					ui.text {
+						function(): string
+							return failed() or ""
+						end,
+						text_size = "$font.size.sm",
+						color = "$danger",
+					},
+				}),
+				ui.show(function()
+					return not loading() and #shown:get() == 0 and failed() == nil
 				end, ui.row {
 					h = ROW,
 					px = "$space.2",
