@@ -802,6 +802,9 @@ pub enum TranscriptLoading {
     Syncing,
     Reconnecting,
     Offline,
+    /// This device has never loaded the chat, its room stores nothing, and the
+    /// device that hosts it is away. Nothing is lost; there's nothing to show yet.
+    HostAway,
 }
 
 /// The engine is still bringing this chat's room up to date. Delivery proven
@@ -1781,12 +1784,21 @@ impl AppState {
                         C::Waiting | C::Connecting | C::Offline => false,
                     }
             });
-        if caught_up {
+        // A relayed chat's room stores nothing, so catching up with it says nothing
+        // about a chat with messages. Only its host can fill this copy.
+        let relayed_history = self.chats.iter().any(|chat| {
+            chat.id == chat_id
+                && chat.room_gen.unwrap_or(1) >= zeron_proto::relay_gen::RELAY_ROOM_GEN
+                && chat.last_message_at.is_some()
+        });
+        if caught_up && !relayed_history {
             return None;
         }
-        Some(match self.chat_link_at(chat_id, now).sync {
+        let link = self.chat_link_at(chat_id, now);
+        Some(match link.sync {
             LinkSync::Offline => TranscriptLoading::Offline,
             LinkSync::Stalled | LinkSync::Reconnecting => TranscriptLoading::Reconnecting,
+            _ if relayed_history && link.host_unreachable => TranscriptLoading::HostAway,
             // Not reported yet: the room the replay opened has yet to speak.
             LinkSync::Live | LinkSync::Syncing { .. } => TranscriptLoading::Syncing,
         })
@@ -8803,6 +8815,44 @@ mod tests {
         assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Opening));
         s.unsaved_side_chat = true;
         assert_eq!(s.transcript_loading(t0), None);
+    }
+
+    /// A chat that's only ever been relayed, never loaded here: an empty copy
+    /// isn't "no messages", whatever the room says.
+    #[test]
+    fn a_relayed_chat_never_loaded_here_says_its_host_is_away() {
+        use zeron_proto::ChatSyncState as C;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, _requests) = tokio::sync::mpsc::channel::<String>(8);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(8);
+        let t0 = clock_epoch();
+        let mut s = remote_chat_state(t0);
+        s.selected_chat = Some("c-remote".into());
+        s.set_test_engine(EngineHandle::from_test_client(zeron_rpc::RpcClient::new(
+            out, inbound,
+        )));
+        s.transcript_replayed = true;
+        s.apply_connectivity_at(connectivity(C::Synced, true, true), t0);
+        assert_eq!(s.transcript_loading(t0), None, "a stored chat's room knows");
+        let row = s.chats.iter_mut().find(|chat| chat.id == "c-remote").unwrap();
+        row.room_gen = Some(zeron_proto::relay_gen::RELAY_ROOM_GEN);
+        assert_eq!(s.transcript_loading(t0), None, "no messages yet: it really is empty");
+        let row = s.chats.iter_mut().find(|chat| chat.id == "c-remote").unwrap();
+        row.last_message_at = Some(t0);
+        assert_eq!(s.transcript_loading(t0), Some(TranscriptLoading::Syncing), "the host can answer");
+        let host = s.chats.iter().find(|chat| chat.id == "c-remote").unwrap().device_id.clone();
+        let away = t0 + TimeDelta::days(1);
+        for device in s.devices.iter_mut().filter(|device| device.id == host) {
+            device.last_seen_at = Some(t0);
+        }
+        s.apply_connectivity_at(connectivity(C::Synced, true, true), away);
+        assert_eq!(s.transcript_loading(away), Some(TranscriptLoading::HostAway));
+        s.transcript = vec![user_entry("m")];
+        assert_eq!(s.transcript_loading(away), None, "what's stored here always shows");
     }
 }
 

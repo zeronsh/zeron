@@ -435,6 +435,26 @@ describe("nobody is left waiting on a host that isn't there", () => {
     old.socket.close();
   });
 
+  it("an old client with no hint wakes the host the registry names", async () => {
+    const name = crypto.randomUUID();
+    const org = crypto.randomUUID();
+    await enableRelay(name);
+    const registry = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(`reg1/${org}/${user}`));
+    await runInDurableObject(registry, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO rows (kind, id, seq, deleted, del_hlc, fields, clocks) VALUES ('chats', ?, 1, 0, NULL, ?, '{}')",
+        name,
+        JSON.stringify({ deviceId: "laptop" })
+      );
+    });
+    const host = await connect(name, "laptop", { relay: true, relaying: true });
+    host.socket.close();
+    await host.settled().catch(() => {});
+    const phone = await connect(name, "phone", { org });
+    await expect.poll(() => wakeFor(name)).toBe("laptop");
+    phone.socket.close();
+  });
+
   it("the edge flag alone wakes nobody: a stored chat's readers need no host", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);

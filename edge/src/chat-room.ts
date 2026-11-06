@@ -260,6 +260,10 @@ export class ChatRoom implements DurableObject {
         url.searchParams.get("excludeOwn") === "1" && device !== "" ? device : undefined;
       if (url.searchParams.get("relay") !== "1" || url.searchParams.get("fallback") === "1") {
         this.noteLegacyRead(device);
+        const orgId = request.headers.get(AUTH_ORG_HEADER);
+        if (orgId && this.relayEnabled() && this.relayDirty()) {
+          this.wakeAbsentHost({ userId, device, chatId: url.searchParams.get("chatId") ?? "", orgId });
+        }
       } else {
         this.drainStaleQueue();
       }
@@ -571,9 +575,24 @@ export class ChatRoom implements DurableObject {
    * it won't hear them: nobody else can bring them up to date, or heal for an
    * old client. Rate-limited, because a truly offline host stays away. */
   private wakeAbsentHost(state: SocketState): void {
-    const host = state.hostDevice ?? "";
+    const hint = state.hostDevice ?? "";
+    if (hint) {
+      this.wakeIfAbsent(state, hint);
+      return;
+    }
+    // Shipped phones send no hint. The registry knows, and this only runs for a
+    // chat in the relay era, where nobody else can bring that reader up to date.
+    if (state.relay || !state.orgId) return;
+    this.ctx.waitUntil(
+      this.chatHost(state).then(host => {
+        if (host) this.wakeIfAbsent(state, host);
+      })
+    );
+  }
+
+  private wakeIfAbsent(state: SocketState, host: string): void {
     const chat = state.chatId ?? "";
-    if (!host || host === state.device) return;
+    if (host === state.device || !validWakeRoute(chat, host)) return;
     const now = Date.now();
     if (now - this.hostWokenAt < HOST_WAKE_MIN_MS) return;
     for (const socket of this.ctx.getWebSockets()) {

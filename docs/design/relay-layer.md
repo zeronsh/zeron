@@ -56,8 +56,9 @@ copy, not whether this device keeps its own.
 - A local change goes to the durable outbox first, as it always has. With no network, a sent
   message waits there and goes out on reconnect.
 - A chat this device has never loaded, with its host offline, has nothing to show unless the
-  room holds a checkpoint. That isn't data loss, and the app must say so plainly rather than
-  spin forever.
+  room holds a checkpoint. That isn't data loss, and the app says so: "This chat lives on another
+  device", with no spinner. Being caught up with a room that stores nothing doesn't count as
+  loaded.
 
 ## Protocol
 
