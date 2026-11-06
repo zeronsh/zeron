@@ -1558,6 +1558,7 @@ async fn diff_sync_publishes_without_rewriting_chat_branch() {
     core.workspace
         .create_chat("chat-diff", Some("space-diff"), None, None, None)
         .expect("chat row");
+    let _interest = core.diff_sync.retain_chat("chat-diff");
     core.diff_sync.reconcile_now().await;
 
     // Initial snapshot lands after the debounce; poll the watch.

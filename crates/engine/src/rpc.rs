@@ -3789,6 +3789,12 @@ impl RpcService for EngineRpc {
             methods::WATCH_WORKSPACE_GIT_STATUS => {
                 let request: zeron_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let workspace = self.workspace_files.resolve_target(&request.target).await?;
+                // A chat-targeted file browser can outlive its transcript stream.
+                let interest = request
+                    .target
+                    .chat_id
+                    .as_deref()
+                    .map(|chat_id| self.diff_sync.retain_chat(chat_id));
                 let rx = self.diff_sync.watch_git_statuses();
                 // Only this authorized checkout crosses the connection. None means
                 // unavailable, including plain folders and initial/restarting engines.
@@ -3817,7 +3823,14 @@ impl RpcService for EngineRpc {
                         }
                     },
                 );
-                Ok(RpcReply::Stream(stream.boxed()))
+                Ok(RpcReply::Stream(
+                    stream
+                        .map(move |frame| {
+                            let _held = &interest;
+                            frame
+                        })
+                        .boxed(),
+                ))
             }
             methods::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let p: CheckoutChangeRequestParams = parse_params(params)?;
