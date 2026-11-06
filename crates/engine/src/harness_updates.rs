@@ -3240,7 +3240,21 @@ fn installed_version(harness: HarnessId, output: &str) -> Option<String> {
         return zeron_harness::acp::antigravity_build_version(output)
             .or_else(|| output.lines().next().and_then(extract_version));
     }
+    if harness == HarnessId::Muse {
+        return muse_build_version(output).or_else(|| extract_version(output));
+    }
     extract_version(output)
+}
+
+/// The build Muse says it's on (`Muse Code 1.4.14 (1.4.14-R7309.1)`): what its
+/// release feed names, where the first version alone would read as older than
+/// the build it is.
+fn muse_build_version(output: &str) -> Option<String> {
+    version_tokens(output).find(|version| {
+        version
+            .split_once("-R")
+            .is_some_and(|(_, build)| build.starts_with(|c: char| c.is_ascii_digit()))
+    })
 }
 
 /// Update checks name the installed release before the candidate
@@ -3660,6 +3674,23 @@ esac
             provider(HarnessId::Pi).latest,
             LatestSource::Npm("@earendil-works/pi-coding-agent")
         ));
+    }
+
+    #[test]
+    fn muse_is_on_the_build_it_names_not_only_its_release() {
+        // As `muse --version` prints it.
+        let output = "Muse Code 1.4.14 (1.4.14-R7309.1)";
+        let installed = installed_version(HarnessId::Muse, output).unwrap();
+        assert_eq!(installed, "1.4.14-R7309.1");
+        // The feed's own build: nothing to update, and verification passes.
+        assert!(!version_is_newer("1.4.14-R7309.1", &installed));
+        // A later build, or a later release, is an update.
+        assert!(version_is_newer("1.4.14-R7310", &installed));
+        assert!(version_is_newer("1.4.15", &installed));
+        // A launcher that names only its release still reads.
+        assert_eq!(installed_version(HarnessId::Muse, "Muse Code 1.4.14").as_deref(), Some("1.4.14"));
+        // Only Muse goes by this: another tool's first version stands.
+        assert_eq!(installed_version(HarnessId::Codex, "codex 0.155.1 (x 1.0.0-R2)").as_deref(), Some("0.155.1"));
     }
 
     #[test]
