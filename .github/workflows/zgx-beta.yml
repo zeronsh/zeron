@@ -85,7 +85,7 @@ jobs:
           {
             echo "version=$version"
             echo "stable=$stable"
-            echo "engine=$workspace"
+            echo "engine=$version"
           } >>"$GITHUB_OUTPUT"
 
   # Apple silicon only, as release.yml's macOS build.
@@ -121,6 +121,8 @@ jobs:
             . -> target
             apps/zgx -> target
       - name: the engine, from this commit
+        env:
+          ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
         run: cargo build --release --locked -p zeron --bin zeron-engine
       - name: import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
@@ -214,6 +216,8 @@ jobs:
             . -> target
             apps/zgx -> target
       - name: the engine, from this commit
+        env:
+          ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
         run: cargo build --release --locked -p zeron --bin zeron-engine
       - name: package
         env:
@@ -272,6 +276,8 @@ jobs:
             apps/zgx -> target
       # (A Windows release has no separate engine: it runs as `zeron.exe engine`.)
       - name: the engine, from this commit
+        env:
+          ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
         run: |
           cargo build --release --locked -p zeron
           if ($LASTEXITCODE -ne 0) { throw 'the engine failed to build' }

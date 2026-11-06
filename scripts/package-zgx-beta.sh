@@ -63,7 +63,7 @@ fi
 [[ -d "$ENGINE_SRC" ]] && ENGINE_BIN="$ENGINE_SRC/Contents/MacOS/Zeron Engine"
 [[ -x "$ENGINE_BIN" ]] || die "no engine at $ENGINE_BIN"
 ENGINE_VERSION="$("$ENGINE_BIN" --version | sed -n 's/^zeron-engine //p')"
-[[ "$ENGINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "$ENGINE_BIN didn't say its version"
+[[ "$ENGINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || die "$ENGINE_BIN didn't say its version"
 # The interface hands `zeron headless`, `zeron login` and the engine's other
 # subcommands to this engine, which must parse them with the same command
 # line (crates/cli). An engine from before that runs the background engine
