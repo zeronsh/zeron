@@ -609,9 +609,15 @@ function M.Section(props: SectionProps): Node
 		if foldable and props.count
 			then ui.show(function(): boolean
 				return not (open :: () -> boolean)() and not trailing()
-			end, M.hint(function(): string
-				return tostring((props.count :: () -> number)())
-			end))
+			end, ui.row {
+				shrink = 0,
+				-- (With a trail, back on the line of a section's count without
+				-- one: its trail stands a step further out than words do.)
+				pr = if trail then "$space.1" else nil,
+				M.hint(function(): string
+					return tostring((props.count :: () -> number)())
+				end),
+			})
 			else nil,
 	}
 	if trail then

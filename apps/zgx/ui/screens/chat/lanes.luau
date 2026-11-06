@@ -185,6 +185,7 @@ end
 -- has nothing of one until its first message (the shipping app's
 -- `create_child_chat` writes nothing until then).
 M.unsent = ui.state("chat_lanes_unsent", {} :: { [string]: string })
+M.take_keys = ui.state("chat_lanes_take_keys", {} :: { [string]: boolean })
 -- Where an unsent side chat's composer starts, where it isn't its
 -- parent's (screens/chat/lane_tab reads it once, as it seeds the place).
 M.starts = ui.state("chat_lanes_starts", {} :: { [string]: { project: string?, device: string? } })
@@ -207,6 +208,8 @@ function M.new_side_chat(session: string?, at: { project: string?, device: strin
 		set_in(M.starts, id, { project = at.project, device = at.device })
 	end
 	set_in(M.unsent, id, session)
+	-- (Its composer takes the keys as it's made: nothing to read yet.)
+	set_in(M.take_keys, id, true)
 	M.open(session, { kind = "side_chat", id = id, title = locale.s("chat.lanes.new_side_chat") })
 end
 

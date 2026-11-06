@@ -116,6 +116,10 @@ return function(): Node
 		if panel and panel.find_in_browser and (panel.find_in_browser :: any)() == true then
 			return true
 		end
+		-- (So does a chat's lane with it: its own transcript's.)
+		if panel and panel.find_in_lane and (panel.find_in_lane :: any)() == true then
+			return true
+		end
 		local search: any = boundary.load("@app/screens/settings/search")
 		if search ~= nil and search.focus ~= nil and (search.focus :: any)() == true then
 			return true
@@ -239,6 +243,11 @@ return function(): Node
 	-- ⌘/: the composer's model picker (a focused code editor keeps ⌘/ for
 	-- its comments: it takes the key first).
 	runs["shell.model_picker"] = function()
+		-- (A side chat with the keyboard: its own.)
+		local panel: any = boundary.load("@app/screens/panel")
+		if panel and panel.model_in_lane and (panel.model_in_lane :: any)() == true then
+			return
+		end
 		local chat: any = boundary.load("@app/screens/chat")
 		if chat and chat.open_model_picker then
 			(chat.open_model_picker :: any)()

@@ -631,19 +631,19 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let v = v.clone();
         async move { crate::plugins::preview::refuse("chat.queue")?; v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
-    let v = view.clone();
+    let pick = which.clone();
     host.async_action("chat.retry", move |args| {
-        let v = v.clone();
+        let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
-    let v = view.clone();
+    let pick = which.clone();
     host.async_action("chat.queue_edit", move |args| {
-        let v = v.clone();
+        let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.queue_edit")?; v.begin_edit(args).await.map_err(String::from) }
     });
-    let v = view.clone();
+    let pick = which.clone();
     host.async_action("chat.queue_finish", move |args| {
-        let v = v.clone();
+        let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.queue_finish")?; v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A project's branches, from git where it is (the shipping app's

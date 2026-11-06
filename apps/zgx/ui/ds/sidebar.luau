@@ -3250,12 +3250,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					weight = "$font.weight.medium",
 				}
 			),
+			-- (On the line of every other section's count: its "…" stands a step
+			-- further out than words do.)
 			ui.show(function(): boolean
 				return not open() and not editing() and not hovered:get() and not menu_open:get()
-			end, hint(function(): string
-				local _, n = now()
-				return tostring(n)
-			end)),
+			end, ui.row {
+				shrink = 0,
+				pr = "$space.1",
+				hint(function(): string
+					local _, n = now()
+					return tostring(n)
+				end),
+			}),
 			ui.show(function(): boolean
 				return (hovered:get() or menu_open:get()) and not editing()
 			end, menu),

@@ -131,17 +131,21 @@ function M.mention(q: Quote.Quote)
 	M.focus:add(1)
 end
 
-function M.attach_quote(q: Quote.Quote)
+function M.attach_quote(q: Quote.Quote, key: string?)
 	-- The same passage twice (attached again, or its menu and its bar both
 	-- taken) is one chip.
-	for _, item in M.cargo:peek() do
+	for _, item in M.peek_cargo(key) do
 		if item.kind == "annotation" and item.quote and Quote.same({ text = item.quote, who = item.name, from = item.from }, q) then
-			M.focus:add(1)
+			if key == nil then
+				M.focus:add(1)
+			end
 			return
 		end
 	end
-	M.cargo:push(Quote.chip(q, chip_id("quote")))
-	M.focus:add(1)
+	M.push_cargo(key, Quote.chip(q, chip_id("quote")))
+	if key == nil then
+		M.focus:add(1)
+	end
 end
 
 -- An element (or a region) picked on a page in the panel's browser
@@ -184,7 +188,7 @@ end
 
 -- Chat `key`'s chips, wherever its draft is, for a chat with a composer of
 -- its own (a side chat's tab). (`key` nil: the chat shown's.)
-local function peek_cargo(key: string?): { any }
+function M.peek_cargo(key: string?): { any }
 	if key == nil or here:peek() == key then
 		return M.cargo:peek()
 	end
@@ -212,19 +216,19 @@ local function set_cargo(key: string, list: { any })
 	kept:set(all)
 end
 
-local function push_cargo(key: string?, item: any)
+function M.push_cargo(key: string?, item: any)
 	if key == nil or here:peek() == key then
 		M.cargo:push(item)
 		return
 	end
-	local list = table.clone(peek_cargo(key))
+	local list = table.clone(M.peek_cargo(key))
 	table.insert(list, item)
 	set_cargo(key, list)
 end
 
 -- Chat `key`'s chips, taken for sending (none left on its draft).
 function M.take_cargo_of(key: string): { any }
-	local list = peek_cargo(key)
+	local list = M.peek_cargo(key)
 	if #list > 0 then
 		set_cargo(key, {})
 	end
@@ -235,7 +239,7 @@ end
 -- added since.
 function M.restore_cargo_of(key: string, list: { any })
 	local all = table.clone(list)
-	for _, item in peek_cargo(key) do
+	for _, item in M.peek_cargo(key) do
 		table.insert(all, item)
 	end
 	set_cargo(key, all)
@@ -249,7 +253,7 @@ function M.attach_files(files: { any }, key: string?)
 	for _, f in files do
 		local name = f.name or f.path or "file"
 		local picture = is_image(name)
-		push_cargo(key, {
+		M.push_cargo(key, {
 			id = chip_id("file"),
 			kind = if picture then "image" else "file",
 			name = name,
@@ -270,7 +274,7 @@ end
 -- file is. One already carried isn't added twice.
 function M.add_to_chat(paths: { string }, root: string?, key: string?)
 	local have: { [string]: boolean } = {}
-	for _, item in peek_cargo(key) do
+	for _, item in M.peek_cargo(key) do
 		if item.path then
 			have[item.path] = true
 		end
@@ -291,7 +295,7 @@ function M.add_to_chat(paths: { string }, root: string?, key: string?)
 			have[at] = true
 			local name = string.match(rel, "([^/]+)/?$") or rel
 			local picture = here and is_image(name)
-			push_cargo(key, {
+			M.push_cargo(key, {
 				id = chip_id("file"),
 				kind = if picture then "image" else "file",
 				name = name,
@@ -439,7 +443,7 @@ function M.mention_chat(id: string, key: string?)
 	if not ChatLinks.valid(id) then
 		return
 	end
-	for _, item in peek_cargo(key) do
+	for _, item in M.peek_cargo(key) do
 		if item.kind == "chat" and item.chat == id then
 			return
 		end
@@ -450,7 +454,7 @@ function M.mention_chat(id: string, key: string?)
 			title, mark = c.title, c.agent
 		end
 	end
-	push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
+	M.push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
 end
 
 -- A chat as it's listed now, for what says who sent a message: its title (its
@@ -623,7 +627,7 @@ function M.attach_comment(c: {
 		key = c.key,
 	}
 	-- (Another chat's draft, kept: the chip waits in it.)
-	push_cargo(c.session, item)
+	M.push_cargo(c.session, item)
 	return id
 end
 

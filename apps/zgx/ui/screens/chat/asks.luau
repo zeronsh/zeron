@@ -19,6 +19,60 @@ local store = require("@app/screens/chat/store")
 
 local M = {}
 
+-- A queued message edited in a chat's composer, by whichever composer shows
+-- that chat: `text` its draft, `editing` which message and the draft it set
+-- aside (put back as the edit ends), `focus` gives it the keys, `say` a
+-- notice.
+export type Edits = {
+	id: () -> string?,
+	text: State<string>,
+	editing: State<{ item: string, aside: string }?>,
+	focus: () -> (),
+	say: (tone: string, key: string) -> (),
+}
+
+function M.queue_edits(e: Edits): { [string]: any }
+	-- ("commit" saves what's in the draft, "cancel" leaves it as it was.)
+	local function finish(action: string)
+		local now = e.editing:peek()
+		local id = e.id()
+		if not now or not id then
+			return
+		end
+		local words = e.text:peek()
+		ui.batch(function()
+			e.editing:set(nil)
+			e.text:set(now.aside)
+		end)
+		store.queue_finish(id, now.item, action, if action == "commit" then words else nil):after(function() end, function(err: any)
+			local why = err and err.message
+			e.say("danger", if why == "conflict" then "chat.composer.edit_conflict" else "chat.composer.edit_not_saved")
+		end)
+	end
+	return {
+		finish = finish,
+		on_queue_edit = function(item: string)
+			local id = e.id()
+			if not id or e.editing:peek() then
+				return
+			end
+			store.queue_edit(id, item):after(function(got: any)
+				e.editing:set { item = item, aside = e.text:peek() }
+				e.text:set(if got then got.text else "")
+				e.focus()
+			end, function(err: any)
+				e.say("warning", if err and err.message == "locked" then "chat.composer.edit_locked" else "chat.composer.edit_unavailable")
+			end)
+		end,
+		on_queue_save = function()
+			finish("commit")
+		end,
+		on_queue_cancel = function()
+			finish("cancel")
+		end,
+	}
+end
+
 export type Bind = {
 	id: () -> string?,
 	session: () -> any,
