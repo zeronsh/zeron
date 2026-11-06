@@ -52,7 +52,7 @@ M.PUSH = { dark = 1.6, light = 1.35 }
 M.RECEDE = { dark = 0.05, light = 0.04 }
 
 -- Which candidate each effect draws.
-M.VARIANT = { dither = "film", ascii = "large", halftone = "round", scanlines = "crt" } :: { [string]: string }
+M.VARIANT = { dither = "silk", ascii = "mono", halftone = "tiles", scanlines = "crt" } :: { [string]: string }
 
 local COMMON = [[
 // params[0]: strength, density, light (1) or dark (0), faded (1) or not.
