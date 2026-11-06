@@ -29,9 +29,11 @@ import {
   logStats,
   MAX_ROW_BYTES,
   rowsAfter,
+  seqFloor,
   setMeta
 } from "./chat-log";
-import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
+import { decodeFrame, encodeFrame, FRAME, RELAY_FRAME_TYPES } from "./chat-frames";
+import { drainQueueIntoRows, enqueueRow, ensureRelayQueue, hasRelayQueue, markDelivered, queueLength, queueRows } from "./chat-relay";
 import { AUTH_USER_HEADER, type Env } from "./env";
 import {
   ensureChatWakes, finishChatWake, MAX_WAKE_ATTEMPTS, PERMANENT_WAKE_REJECTIONS,
@@ -57,6 +59,19 @@ const QUOTA_MAX_BYTES = 8 * 1024 * 1024;
  * counts) may lag. Writing them per push made up 2 of a push's 5 billed rows;
  * an active room now pays a few rows every five minutes instead. */
 const BOOKKEEPING_FLUSH_MS = 5 * 60_000;
+/** Relay frames aren't stored and heal if dropped, so past this budget the DO
+ * drops them instead of refusing them. It exists to contain a runaway client;
+ * a host streaming every 120 ms stays far under it. */
+const RELAY_QUOTA_MAX_FRAMES = 6000;
+const RELAY_QUOTA_MAX_BYTES = 256 * 1024 * 1024;
+/** How often an HTTP reader without relay frames re-sends `legacyPeer`, and how
+ * long after its last read it still counts as here. */
+const LEGACY_READ_SIGNAL_MS = 30_000;
+const LEGACY_READ_TTL_MS = 2 * 60_000;
+/** Header budget: about 100 batch ids per `delivered`. */
+const MAX_DELIVERED_IDS = 100;
+/** How often an arriving reader may wake a host that isn't in the room. */
+const HOST_WAKE_MIN_MS = 60_000;
 
 interface SocketState {
   userId: string;
@@ -65,6 +80,8 @@ interface SocketState {
   ready?: boolean;
   chatId?: string;
   hostDevice?: string;
+  /** This socket's hello asked for the relay layer, and the layer is on. */
+  relay?: boolean;
 }
 
 interface PushOutcome {
@@ -94,6 +111,15 @@ export class ChatRoom implements DurableObject {
    * it arms is durable, so losing this field to eviction loses no flush. */
   private flushAt?: number;
   private wakeFlight?: Promise<void>;
+  /** device → rolling relay budget. Memory-only. */
+  private readonly relayQuotas = new Map<string, QuotaWindow>();
+  private relayQueueReady = false;
+  /** Last read of `/rows` by a client that can't take relay frames. */
+  private legacyReadAt = 0;
+  private legacySignaledAt = 0;
+  private hostWokenAt = 0;
+  /** Layer off: whether to look for a queue left from when it was on. */
+  private staleQueueChecked = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -154,9 +180,13 @@ export class ChatRoom implements DurableObject {
       }
       const body = new Uint8Array(await request.arrayBuffer());
       if (body.byteLength > MAX_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
-      const outcome = commitCheckpoint(sql, this.blobs, seqCovered, frontier, body, Date.now());
+      // A relay-era checkpoint prunes nothing, whatever floor the host last saw.
+      const atFloor = this.relayEnabled() && url.searchParams.get("atFloor") === "1";
+      const covered = atFloor ? seqFloor(sql) : seqCovered;
+      const outcome = commitCheckpoint(sql, this.blobs, covered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
       await this.markBackupDirty();
+      if (atFloor) this.resyncLegacySockets();
       return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
     }
 
@@ -208,6 +238,11 @@ export class ChatRoom implements DurableObject {
       const device = url.searchParams.get("device") ?? "";
       const exclude =
         url.searchParams.get("excludeOwn") === "1" && device !== "" ? device : undefined;
+      if (url.searchParams.get("relay") !== "1" || url.searchParams.get("fallback") === "1") {
+        this.noteLegacyRead(device);
+      } else {
+        this.drainStaleQueue();
+      }
       const stats = logStats(sql);
       const frontier = this.blobs.get(FRONTIER_BLOB) ?? new Uint8Array(0);
       const frames: Uint8Array[] = [
@@ -329,6 +364,7 @@ export class ChatRoom implements DurableObject {
       this.sweepPresence();
       return json({
         ...logStats(sql),
+        ...(this.relayEnabled() ? { relayQueue: queueLength(this.relaySql()) } : {}),
         connectedSockets: this.ctx.getWebSockets().length,
         presence: Object.fromEntries(this.presence),
         // The ONLY per-device attribution surface — kept from the 2026-08-05
@@ -346,6 +382,8 @@ export class ChatRoom implements DurableObject {
       sql.exec("DELETE FROM meta");
       sql.exec("DELETE FROM blobs");
       sql.exec("DELETE FROM chat_wake");
+      sql.exec("DROP TABLE IF EXISTS relay_queue");
+      this.relayQueueReady = false;
       this.unflushedOutcomes.clear();
       this.flushAt = undefined;
       for (const ws of this.ctx.getWebSockets()) {
@@ -374,7 +412,7 @@ export class ChatRoom implements DurableObject {
     }
     const frame = decodeFrame(new Uint8Array(message));
     const state = ws.deserializeAttachment() as SocketState;
-    if (!frame) {
+    if (!frame || (RELAY_FRAME_TYPES.has(frame.type) && !this.relayEnabled())) {
       send(ws, FRAME.error, { code: "bad_frame", message: "malformed frame" });
       return;
     }
@@ -394,6 +432,21 @@ export class ChatRoom implements DurableObject {
       case FRAME.probe:
         send(ws, FRAME.probeOk, { headSeq: headSeq(this.ctx.storage.sql) });
         return;
+      case FRAME.relay:
+      case FRAME.announce:
+      case FRAME.syncReq:
+      case FRAME.syncData:
+        this.handleRelayFrame(ws, state, frame.type, frame.header, frame.payload);
+        return;
+      case FRAME.enqueue:
+        await this.handleEnqueue(ws, state, frame.header, frame.payload);
+        return;
+      case FRAME.queueReq:
+        this.handleQueueReq(ws, state);
+        return;
+      case FRAME.delivered:
+        this.handleDelivered(state, frame.header);
+        return;
       default:
         send(ws, FRAME.error, { code: "bad_frame", message: `unexpected type ${frame.type}` });
     }
@@ -412,7 +465,17 @@ export class ChatRoom implements DurableObject {
       state.device = header.device;
     }
     state.ready = true;
+    const layer = this.relayEnabled();
+    state.relay = layer && header.relay === 1;
+    if (!state.relay) delete state.relay;
     ws.serializeAttachment(state);
+    if (layer && !state.relay) {
+      this.drainQueueForLegacy();
+      this.signalLegacyPeer(state.device);
+    } else if (!layer) {
+      this.drainStaleQueue();
+    }
+    if (layer) this.wakeAbsentHost(state);
     const sql = this.ctx.storage.sql;
     const stats = logStats(sql);
     const frontier = this.blobs.get(FRONTIER_BLOB) ?? new Uint8Array(0);
@@ -428,10 +491,246 @@ export class ChatRoom implements DurableObject {
         checkpointSeq: stats.checkpointSeq,
         checkpointSize: stats.checkpointSize,
         rowCount: stats.rowCount,
-        rowBytes: stats.rowBytes
+        rowBytes: stats.rowBytes,
+        ...(state.relay ? { relay: 1, legacyPeers: this.legacyPeerCount() } : {})
       },
       frontier
     );
+  }
+
+  // ── relay layer (docs/design/relay-layer.md) ─────────────────────────────
+
+  private relayEnabled(): boolean {
+    return this.env.CHAT_RELAY_LAYER === "1";
+  }
+
+  /** The room's SQL, with the queue table in place. */
+  private relaySql(): SqlStorage {
+    const sql = this.ctx.storage.sql;
+    if (!this.relayQueueReady) {
+      ensureRelayQueue(sql);
+      this.relayQueueReady = true;
+    }
+    return sql;
+  }
+
+  private relaySockets(except?: WebSocket): Array<{ socket: WebSocket; device: string }> {
+    const sockets: Array<{ socket: WebSocket; device: string }> = [];
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === except) continue;
+      const peer = socket.deserializeAttachment() as SocketState | null;
+      if (peer?.ready && peer.relay) sockets.push({ socket, device: peer.device });
+    }
+    return sockets;
+  }
+
+  private legacyPeerCount(): number {
+    let count = Date.now() - this.legacyReadAt < LEGACY_READ_TTL_MS ? 1 : 0;
+    for (const socket of this.ctx.getWebSockets()) {
+      const peer = socket.deserializeAttachment() as SocketState | null;
+      if (peer?.ready && !peer.relay) count += 1;
+    }
+    return count;
+  }
+
+  private signalLegacyPeer(device: string): void {
+    for (const { socket } of this.relaySockets()) send(socket, FRAME.legacyPeer, { device });
+  }
+
+  /** Someone's here and the host isn't. An idle host has closed its socket, so
+   * it won't hear them: nobody else can bring them up to date, or heal for an
+   * old client. Rate-limited, because a truly offline host stays away. */
+  private wakeAbsentHost(state: SocketState): void {
+    const host = state.hostDevice ?? "";
+    const chat = state.chatId ?? "";
+    if (!host || host === state.device) return;
+    const now = Date.now();
+    if (now - this.hostWokenAt < HOST_WAKE_MIN_MS) return;
+    for (const socket of this.ctx.getWebSockets()) {
+      const peer = socket.deserializeAttachment() as SocketState | null;
+      if (peer?.ready && peer.device === host) return;
+    }
+    this.hostWokenAt = now;
+    const sql = this.ctx.storage.sql;
+    this.ctx.waitUntil(
+      this.ctx.storage
+        .transaction(async () => {
+          queueChatWake(sql, chat, host, state.userId);
+          await this.scheduleAlarm();
+        })
+        .then(() => this.flushWake())
+    );
+  }
+
+  /** A reader that can't use the queue is here: what's queued goes where it can
+   * read it, and where a host on an older build can too. */
+  private drainQueueForLegacy(): void {
+    const sql = this.relaySql();
+    this.storeDrained(drainQueueIntoRows(sql, Date.now()));
+  }
+
+  /** The layer was turned off with rows still queued: nothing can read the queue
+   * now, and those senders have retired their outboxes. Costs one schema read per
+   * object lifetime. A room that never had the layer does nothing else. */
+  private drainStaleQueue(): void {
+    if (this.relayEnabled() || this.staleQueueChecked) return;
+    this.staleQueueChecked = true;
+    const sql = this.ctx.storage.sql;
+    if (!hasRelayQueue(sql)) return;
+    this.storeDrained(drainQueueIntoRows(sql, Date.now()));
+    sql.exec("DROP TABLE relay_queue");
+  }
+
+  private storeDrained(rows: ReturnType<typeof drainQueueIntoRows>): void {
+    if (rows.length === 0) return;
+    this.flushAt ??= Date.now() + BOOKKEEPING_FLUSH_MS;
+    this.ctx.waitUntil(this.markBackupDirty());
+    for (const socket of this.ctx.getWebSockets()) {
+      const peer = socket.deserializeAttachment() as SocketState | null;
+      if (!peer?.ready) continue;
+      for (const row of rows) {
+        send(socket, FRAME.row, { seq: row.seq, device: row.device, batchId: row.batchId }, row.bytes);
+      }
+    }
+  }
+
+  /** Old clients only look at the checkpoint when they join, and an idle chat may
+   * send no row to make them look. A dropped socket makes them join again. */
+  private resyncLegacySockets(): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      const peer = socket.deserializeAttachment() as SocketState | null;
+      if (peer?.ready && !peer.relay) {
+        try {
+          socket.close(1012, "checkpoint updated");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  }
+
+  private noteLegacyRead(device: string): void {
+    if (!this.relayEnabled()) {
+      this.drainStaleQueue();
+      return;
+    }
+    const now = Date.now();
+    this.legacyReadAt = now;
+    this.drainQueueForLegacy();
+    if (now - this.legacySignaledAt < LEGACY_READ_SIGNAL_MS) return;
+    this.legacySignaledAt = now;
+    this.signalLegacyPeer(device);
+  }
+
+  /** Forward without storing. Anything dropped here heals by version exchange. */
+  private handleRelayFrame(
+    ws: WebSocket,
+    state: SocketState,
+    type: typeof FRAME.relay | typeof FRAME.announce | typeof FRAME.syncReq | typeof FRAME.syncData,
+    header: Record<string, unknown>,
+    payload: Uint8Array
+  ): void {
+    if (!state.ready || !state.relay) {
+      send(ws, FRAME.error, { code: "hello_first", message: "relay before a relay hello" });
+      return;
+    }
+    if (!this.admitRelay(state.device, payload.byteLength)) return;
+    const { to, skip, ...rest } = header;
+    const forwarded = { ...rest, device: state.device };
+    if (type === FRAME.syncReq || type === FRAME.syncData) {
+      if (typeof to !== "string") return;
+      for (const peer of this.relaySockets(ws)) {
+        if (peer.device === to) send(peer.socket, type, forwarded, payload);
+      }
+      return;
+    }
+    const skipped = Array.isArray(skip) ? skip : [];
+    for (const peer of this.relaySockets(ws)) {
+      if (!skipped.includes(peer.device)) send(peer.socket, type, forwarded, payload);
+    }
+    // A host's announce follows its commits. Telling it each time an old reader
+    // is still here keeps it storing for as long as that reader stays.
+    if (type === FRAME.announce && this.legacyPeerCount() > 0) {
+      send(ws, FRAME.legacyPeer, { device: "" });
+    }
+  }
+
+  private admitRelay(device: string, bytes: number): boolean {
+    const now = Date.now();
+    let window = this.relayQuotas.get(device);
+    if (!window || now - window.since > QUOTA_WINDOW_MS) {
+      window = { since: now, pushes: 0, bytes: 0 };
+      this.relayQuotas.set(device, window);
+    }
+    window.pushes += 1;
+    window.bytes += bytes;
+    return window.pushes <= RELAY_QUOTA_MAX_FRAMES && window.bytes <= RELAY_QUOTA_MAX_BYTES;
+  }
+
+  private async handleEnqueue(
+    ws: WebSocket,
+    state: SocketState,
+    header: Record<string, unknown>,
+    payload: Uint8Array
+  ): Promise<void> {
+    const batchId = typeof header.batchId === "string" ? header.batchId : "";
+    if (!state.ready || !state.relay || batchId === "" || batchId.length > 128) {
+      this.recordPush(state.device, false);
+      send(ws, FRAME.error, { code: "bad_push", message: "relay hello first / malformed enqueue", batchId });
+      return;
+    }
+    if (!this.admitQuota(state.device, payload.byteLength)) {
+      this.recordPush(state.device, false);
+      send(ws, FRAME.error, { code: "quota", message: "per-device push quota exceeded", batchId });
+      return;
+    }
+    const sql = this.relaySql();
+    const host = state.hostDevice ?? "";
+    const chat = state.chatId ?? "";
+    // The row and its wake commit together, as a stored row and its wake do:
+    // once `queued` goes out, the host is owed a delivery.
+    const outcome = await this.ctx.storage.transaction(async () => {
+      const result = enqueueRow(sql, state.device, batchId, payload, Date.now());
+      if (!result.ok) return result;
+      if (host && host !== state.device) queueChatWake(sql, chat, host, state.userId);
+      this.flushAt ??= Date.now() + BOOKKEEPING_FLUSH_MS;
+      await this.scheduleAlarm();
+      return result;
+    });
+    if (!outcome.ok) {
+      this.recordPush(state.device, false);
+      send(ws, FRAME.error, { code: outcome.error, message: `push rejected: ${outcome.error}`, batchId });
+      return;
+    }
+    if (host && host !== state.device) this.ctx.waitUntil(this.flushWake());
+    this.recordPush(state.device, true);
+    if (!outcome.dup) {
+      for (const peer of this.relaySockets(ws)) {
+        send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
+      }
+    }
+    send(ws, FRAME.queued, { batchId, dup: outcome.dup });
+  }
+
+  private handleQueueReq(ws: WebSocket, state: SocketState): void {
+    if (!state.ready || !state.relay) {
+      send(ws, FRAME.error, { code: "hello_first", message: "queue before a relay hello" });
+      return;
+    }
+    let count = 0;
+    for (const row of queueRows(this.relaySql())) {
+      send(ws, FRAME.relay, { device: row.device, queued: true, batchId: row.batchId }, row.bytes);
+      count += 1;
+    }
+    send(ws, FRAME.queueDone, { count });
+  }
+
+  private handleDelivered(state: SocketState, header: Record<string, unknown>): void {
+    if (!state.ready || !state.relay || !Array.isArray(header.batchIds)) return;
+    const ids = header.batchIds
+      .filter((id): id is string => typeof id === "string")
+      .slice(0, MAX_DELIVERED_IDS);
+    markDelivered(this.relaySql(), state.device, ids);
   }
 
   private handleRowsReq(ws: WebSocket, state: SocketState, header: Record<string, unknown>): void {

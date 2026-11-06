@@ -140,6 +140,9 @@ impl ChatDocSink for EngineChatSink {
                 updates.push((id, bytes));
             }
         }
+        if let Some(handle) = self.handle.upgrade() {
+            updates = handle.uploadable_updates(updates);
+        }
         Ok(updates)
     }
     fn reject_update(&self, batch_id: &str) -> Result<(), String> {
@@ -228,6 +231,80 @@ impl ChatDocSink for EngineChatSink {
 
     fn advance_cursor(&self, cursor: u64) {
         self.persist_with_cursor(cursor);
+    }
+
+    fn relay_version(&self) -> Option<Vec<u8>> {
+        Some(self.doc.upgrade()?.doc().oplog_vv().encode())
+    }
+
+    fn relay_lacks(&self, version: &[u8]) -> bool {
+        let (Some(doc), Ok(vv)) = (self.doc.upgrade(), loro::VersionVector::decode(version)) else {
+            return false;
+        };
+        !doc.doc().oplog_vv().includes_vv(&vv)
+    }
+
+    fn relay_behind(&self, version: &[u8]) -> bool {
+        let (Some(doc), Ok(vv)) = (self.doc.upgrade(), loro::VersionVector::decode(version)) else {
+            return false;
+        };
+        !vv.includes_vv(&doc.doc().oplog_vv())
+    }
+
+    fn relay_export(&self, since: &[u8]) -> Option<Vec<u8>> {
+        let doc = self.doc.upgrade()?;
+        let vv = loro::VersionVector::decode(since).ok()?;
+        if vv.includes_vv(&doc.doc().oplog_vv()) {
+            return Some(Vec::new()); // nothing it lacks
+        }
+        // A fresh reader takes the snapshot: smaller, and quicker to import.
+        if vv.is_empty() {
+            return doc.export_snapshot().ok();
+        }
+        doc.doc().export(loro::ExportMode::updates(&vv)).ok()
+    }
+
+    fn relay_import(&self, bytes: &[u8], history: bool) -> zeron_sync::chat_relay::RelayImport {
+        use zeron_sync::chat_relay::RelayImport;
+        let import = || {
+            let Some(doc) = self.doc.upgrade() else {
+                return RelayImport::Applied;
+            };
+            let origin = if history {
+                crate::transcript_history::REPLAY_ORIGIN
+            } else {
+                ""
+            };
+            let before = doc.doc().oplog_vv();
+            match doc.doc().import_with(bytes, origin) {
+                Ok(status) if status.pending.is_some() => return RelayImport::Parked,
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(chat = %self.chat_id, error = %err, "chat relay: import failed");
+                    return RelayImport::Unreadable;
+                }
+            }
+            // No row seq here: the save covers the content at the same cursor.
+            self.persistence.dirty(false);
+            // A host that's storing must store this too, or its next row parks on
+            // every old reader. Only what's new, however often it's delivered.
+            if let Some(handle) = self.handle.upgrade()
+                && handle.republishes_imports()
+                && doc.doc().oplog_vv() != before
+                && let Ok(delta) = doc.doc().export(loro::ExportMode::updates(&before))
+            {
+                handle.republish(delta);
+            }
+            RelayImport::Applied
+        };
+        match self.handle.upgrade() {
+            Some(handle) => handle.import_transcript(import),
+            None => import(),
+        }
+    }
+
+    fn relay_durable(&self) -> bool {
+        self.persistence.is_clean()
     }
 }
 
@@ -358,11 +435,18 @@ pub struct EdgeChatTransport {
     chat_id: String,
     device_id: String,
     host_device: Option<String>,
+    relay: bool,
 }
 
 impl EdgeChatTransport {
     pub fn with_host_device(mut self, host: Option<String>) -> Self {
         self.host_device = host;
+        self
+    }
+
+    /// This client runs the relay layer: its bootstrap pull isn't an old reader.
+    pub fn with_relay(mut self, relay: bool) -> Self {
+        self.relay = relay;
         self
     }
 
@@ -384,6 +468,7 @@ impl EdgeChatTransport {
             chat_id: chat_id.into(),
             device_id: device_id.into(),
             host_device: None,
+            relay: false,
         }
     }
 
@@ -394,22 +479,28 @@ impl EdgeChatTransport {
             self.chat_id
         )
     }
-}
 
-impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
-    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+    fn pull_rows(&self, after: u64, fallback: bool) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         let priority = self.priority;
         let http = self.http.clone();
         let edge = self.edge.clone();
         let url = self.rows_url();
         let device = self.device_id.clone();
+        let relay = self.relay;
         Box::pin(async move {
             let _permit = zeron_sync::budget::shared().http(priority).await?;
             let bearer = edge.bearer().await.map_err(SyncError::from)?;
-            let res = http
+            let mut request = http
                 .get(&url)
                 .query(&[("after", after.to_string()), ("device", device)])
-                .bearer_auth(&bearer)
+                .bearer_auth(&bearer);
+            if relay {
+                request = request.query(&[("relay", "1")]);
+                if fallback {
+                    request = request.query(&[("fallback", "1")]);
+                }
+            }
+            let res = request
                 .send()
                 .await
                 .map_err(|e| SyncError::WebSocket(describe_http_error(e)))?;
@@ -425,6 +516,16 @@ impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
                 .map_err(|e| SyncError::WebSocket(describe_http_error(e)))?;
             Ok(bytes.to_vec())
         })
+    }
+}
+
+impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
+    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        self.pull_rows(after, false)
+    }
+
+    fn fetch_rows_fallback(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        self.pull_rows(after, true)
     }
 
     fn push(

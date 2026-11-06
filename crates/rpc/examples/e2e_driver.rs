@@ -105,6 +105,144 @@ fn apply_transcript_item(
     zeron_doc::apply_transcript_frame(current, frame).map_err(|err| err.to_string())
 }
 
+/// The chat's row on `client` reaching `generation`.
+async fn wait_for_generation(client: &RpcClient, chat_id: &str, generation: u64, label: &str) {
+    wait_stream(client, methods::WATCH_CHATS, serde_json::json!({}), label, |item| {
+        item.as_array()?.iter().find(|chat| {
+            chat.get("id").and_then(|v| v.as_str()) == Some(chat_id)
+                && chat.get("roomGen").and_then(|v| v.as_u64()) == Some(generation)
+        })?;
+        Some(())
+    })
+    .await;
+}
+
+async fn queue_run(client: &RpcClient, chat_id: &str, prompt: &str) {
+    client
+        .call(
+            methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": chat_id,
+                "command": {
+                    "kind": "run",
+                    "messageId": uuid::Uuid::new_v4().to_string(),
+                    "request": {
+                        "prompt": prompt,
+                        "model": null,
+                        "reasoning": null,
+                        "cwd": "/tmp",
+                        "sandbox": "workspace-write",
+                        "autoApprove": true,
+                        "resume": null,
+                    },
+                },
+            }),
+        )
+        .await
+        .unwrap_or_else(|err| fail(&format!("QueueCommand: {err}")));
+}
+
+/// `client`'s transcript reaching `count` finished assistant entries.
+async fn wait_for_replies(client: &RpcClient, chat_id: &str, count: usize, label: &str) {
+    let mut transcript = Vec::new();
+    wait_stream(
+        client,
+        methods::WATCH_DOC_MESSAGES,
+        serde_json::json!({ "chatId": chat_id }),
+        label,
+        |item| {
+            apply_transcript_item(&mut transcript, item)
+                .unwrap_or_else(|err| fail(&format!("{label}: {err}")));
+            let done = transcript
+                .iter()
+                .filter(|entry| {
+                    entry.role == zeron_doc::MessageRole::Assistant
+                        && entry.status == Some(zeron_doc::MessageStatus::Complete)
+                })
+                .count();
+            (done >= count).then_some(())
+        },
+    )
+    .await;
+}
+
+fn room_stats(chat_id: &str) -> serde_json::Value {
+    let edge = std::env::var("ZERON_E2E_EDGE_URL").unwrap_or_else(|_| fail("ZERON_E2E_EDGE_URL unset"));
+    let token = std::env::var("ZERON_E2E_TOKEN").unwrap_or_else(|_| fail("ZERON_E2E_TOKEN unset"));
+    let output = std::process::Command::new("curl")
+        .args(["-sf", "-m", "5", "-H", &format!("authorization: Bearer {token}")])
+        .arg(format!("{edge}/chat2/{chat_id}/stats"))
+        .output()
+        .unwrap_or_else(|err| fail(&format!("curl: {err}")));
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| fail(&format!("stats: {err}")))
+}
+
+/// Relay layer on in both engines (docs/design/relay-layer.md): the chat moves to
+/// generation 3, a turn stores nothing, and, with `ZERON_E2E_RESTART_B` set, device B
+/// coming back on a build without the layer still gets everything it missed.
+async fn relay_layer(
+    a: &RpcClient,
+    b: &RpcClient,
+    chat_id: &str,
+    b_port: u16,
+    b_dir: Option<&std::path::Path>,
+) {
+    wait_for_generation(b, chat_id, 3, "chat on generation 3").await;
+    pass("host moved the chat to generation 3; B sees it");
+    // Long enough for both engines' next refresh to act on it.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+
+    let before = room_stats(chat_id);
+    queue_run(b, chat_id, "a turn with nothing stored").await;
+    wait_for_replies(b, chat_id, 2, "second reply on B").await;
+    pass("a turn on generation 3 reached B");
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    let after = loop {
+        let stats = room_stats(chat_id);
+        if stats["relayQueue"] == 0 {
+            break stats;
+        }
+        if Instant::now() > deadline {
+            fail(&format!("the queue never emptied: {stats}"));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    if after["headSeq"] != before["headSeq"] || after["checkpointSeq"] != before["checkpointSeq"] {
+        fail(&format!("a generation 3 turn stored rows: before {before}, after {after}"));
+    }
+    pass("the turn stored no rows, and its queued command left the room");
+
+    let Ok(restart) = std::env::var("ZERON_E2E_RESTART_B") else {
+        return;
+    };
+    let stop = std::process::Command::new("bash").arg(&restart).arg("stop").status();
+    if !stop.is_ok_and(|status| status.success()) {
+        fail("couldn't stop B");
+    }
+    queue_run(a, chat_id, "only ever relayed; B is away").await;
+    wait_for_replies(a, chat_id, 3, "third reply on A").await;
+    pass("a turn ran on A while B was away");
+    let start = std::process::Command::new("bash").arg(&restart).arg("start-old").status();
+    if !start.is_ok_and(|status| status.success()) {
+        fail("couldn't restart B");
+    }
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    let old_b = loop {
+        match connect_ipc(b_port, b_dir).await {
+            Ok(client) => break client,
+            Err(_) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(250)).await,
+            Err(err) => fail(&format!("reconnecting to B: {err}")),
+        }
+    };
+    wait_for_replies(&old_b, chat_id, 3, "B, without the layer, catching up").await;
+    pass("B came back without the layer and got the relayed turn");
+    wait_for_generation(&old_b, chat_id, 2, "chat back on generation 2").await;
+    pass("host moved the chat back to generation 2");
+    queue_run(&old_b, chat_id, "from the old client").await;
+    wait_for_replies(&old_b, chat_id, 4, "fourth reply on B").await;
+    pass("B, without the layer, can still send and follow a turn");
+}
+
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
@@ -292,6 +430,10 @@ async fn main() {
     )
     .await;
     pass("session status (A working -> idle) round-tripped to B");
+
+    if std::env::var("ZERON_E2E_RELAY").as_deref() == Ok("1") {
+        relay_layer(&a, &b, &chat_id, b_port, b_dir.as_deref()).await;
+    }
 
     println!("PASS: two-device e2e smoke complete");
 }

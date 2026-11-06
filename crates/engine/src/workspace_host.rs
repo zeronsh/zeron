@@ -160,6 +160,9 @@ fn device_capabilities() -> Vec<String> {
     if crate::runner::session().is_some() {
         capabilities.push(zeron_proto::CLOUD_SESSION_CAPABILITY.to_string());
     }
+    if crate::doc_host::relay_layer_enabled() {
+        capabilities.push(zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY.to_string());
+    }
     capabilities
 }
 
@@ -738,6 +741,21 @@ impl WorkspaceHost {
 
     pub fn read_devices(&self) -> Result<Vec<Device>, EngineError> {
         Ok(self.read(|doc| doc.read_devices())?)
+    }
+
+    /// Device rows with presence applied: a stored `last_seen_at` only moves at
+    /// boot and shutdown, so an app running for weeks looks long gone without it.
+    pub fn read_devices_seen(&self) -> Result<Vec<Device>, EngineError> {
+        let mut devices = self.read_devices()?;
+        let live = self.watch_devices().borrow().clone();
+        for device in &mut devices {
+            if let Some(seen) = live.iter().find(|d| d.id == device.id).and_then(|d| d.last_seen_at)
+                && device.last_seen_at.is_none_or(|at| at < seen)
+            {
+                device.last_seen_at = Some(seen);
+            }
+        }
+        Ok(devices)
     }
 
     pub fn read_sessions(&self) -> Result<Vec<Session>, EngineError> {

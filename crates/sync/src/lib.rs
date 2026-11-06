@@ -12,6 +12,7 @@
 
 pub mod budget;
 pub mod chat_client;
+pub mod chat_relay;
 pub mod chat_frames;
 pub mod dial;
 pub mod net_path;

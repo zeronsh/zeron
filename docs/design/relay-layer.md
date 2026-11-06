@@ -1,7 +1,8 @@
 # Relay layer (chat generation 3)
 
 Status: design, with a first implementation behind flags that default off. See
-[What's built](#whats-built) for exactly which parts exist.
+[What's built](#whats-built) for exactly which parts exist. Rows-per-push figures are in the PR for
+`ChatRoom: write only the row on push`.
 
 ## The goal
 
@@ -57,13 +58,24 @@ client flag off, `hello` is byte-identical to today's.
 | 0x11 | `queued` | s→c | The ack: the row is durable. |
 | 0x12 | `queueReq` | c→s | Send me the queue. |
 | 0x13 | `queueDone` | s→c | End of the queue backlog. |
-| 0x14 | `delivered` | c→s | The host has saved these queue ids. Delete them. |
+| 0x14 | `delivered` | c→s | The host has saved these batch ids. Delete them. |
 | 0x15 | `legacyPeer` | s→c | A reader that can't take relay frames is here. See [Old clients](#what-old-clients-see). |
 
-Queue rows reach sockets as `relay` frames that also carry `queueId`.
+Queue rows reach sockets as `relay` frames that also carry `queued` and `batchId`.
 
 Over a direct link the same frames travel length-prefixed, and the link itself
 identifies the sender.
+
+### Reaching a host that isn't in the room
+
+An idle host closes its chat socket, so a peer's `announce` can't reach it, and neither can
+the `legacyPeer` signal. So a reader arriving (`hello` carrying a `hostDevice` hint, old
+client or new) with the host absent queues the same durable wake a sent message does, at most
+once a minute per room. A host keeps its socket for 15 s after a peer's last frame, so a peer
+it just woke isn't cut off mid-sync.
+
+A wake isn't done until the socket has answered and its queue read has come back. The HTTPS
+bootstrap can finish a catch-up sooner, but it doesn't read the queue.
 
 ### Catch-up for a late joiner
 
@@ -78,8 +90,8 @@ identifies the sender.
 5. The joiner imports, then compares against other peers' announced VVs and repeats
    if anyone still has more.
 
-An export is one causally complete blob, split into fragments of at most 256 KiB
-and sent 1 MiB per request. The requester imports only the complete blob and pulls
+An export is one causally complete blob, split into fragments of at most 64 KiB
+and sent 512 KiB per request. The requester imports only the complete blob and pulls
 each window itself, which gives flow control on slow links and resume by `offset`.
 The responder keeps a finished export for 60 s; if it has been dropped, the
 requester starts again from its current VV.
@@ -87,6 +99,20 @@ requester starts again from its current VV.
 Independently importable chunks would be simpler, but they can livelock: a chunk
 that parks on missing dependencies leaves the requester's VV unchanged, so the
 responder keeps resending it and never reaches the dependencies.
+
+### A stored row that depends on relayed ops
+
+Stored rows are still possible in generation 3: the HTTPS fallback, a crash upload, or an old
+client's push. Such a row can depend on ops that were only ever relayed, and a reader that
+missed those parks it. No checkpoint or row backfill can fill that gap, and treating it as
+one would redial forever.
+
+So with the layer on, a parked row gets one ordinary checkpoint read (it may be an old
+cursor's gap, which a checkpoint does fill). After that the reader keeps its session and holds
+its cursor below the row. Later rows still import, it asks peers for what they have, and it
+re-reads from the cursor when something new arrives, at most every 5 s and backing off to
+every 5 minutes. The cursor holding means a restart re-reads the row rather than losing it. With
+the host away the reader stays where it is, which matches the product decision.
 
 ### Staying converged
 
@@ -113,13 +139,29 @@ the old log stays a valid, quiet log, and deletes can't touch existing rows.
    it through the existing wake path.
 3. The host imports it, saves its snapshot, and only then sends `delivered`. A crash
    in between redelivers the row, and importing it again is a no-op.
-4. The DO deletes the row. It refuses a `delivered` from the row's own author, and
-   the client only sends one from the host.
+4. The DO deletes the row. `delivered` names batch ids, not positions, so a late or
+   repeated one can't delete a newer row. The DO ignores one from the row's own author,
+   and the client only sends one from the host.
 
 Devices that were offline get the content from the host afterwards through VV sync.
 
+A queue row a build can't read is kept, not confirmed, so a newer build can read it later.
+
+**The queue can't strand a message.** A sender retires its outbox on `queued`, so the room has
+to keep the row reachable:
+
+- When a reader that can't use the queue arrives, the DO moves queued rows into `rows` in one
+  transaction and broadcasts them.
+- When the edge flag is off and a room still has the table, the same happens on the next `hello`
+  or read, and the table is dropped. That check is one schema read per object lifetime, and a room
+  that never had the layer does nothing else.
+- A device only queues if the chat's host advertises `chat-relay-v1`. A host back on an older build
+  keeps the generation it wrote, but its device row stops saying it can read the queue.
+
 A network that blocks WebSockets uses `POST /rows`, the stored path every client
-already has. It stays fully supported in generation 3.
+already has. It stays supported in generation 3. A device counts as socketless only once its dials
+keep failing while HTTPS works, which rules out a laptop asleep. Its reads then say so, and a host on
+such a network stops relaying and goes back to stored rows.
 
 ## Cloud checkpoints
 
@@ -128,9 +170,12 @@ existing `POST /checkpoint`:
 
 - at turn end, approximated by 3 s without a local commit, at least 10 s apart;
 - about every 60 s during a long turn;
-- before sleep, with sleep waiting for the checkpoint to land.
+- before sleep, with sleep refused unless the checkpoint lands within 20 s.
 
-These checkpoints pass `seqCovered` equal to the current floor, so they prune
+A Cloud host's socket stays open and its handle stays in memory until its checkpoint covers its doc.
+A failed checkpoint backs off from 2 s to 5 minutes, because each try is a full export and upload.
+
+These checkpoints pass `atFloor=1`, so the DO uses its own current floor and they prune
 nothing. A device opening a sleeping Cloud chat gets the checkpoint from the DO, and
 a message sent to it queues and wakes it, the same as any offline host.
 
@@ -151,16 +196,20 @@ The host may set 3 when all of these hold:
   the chat's host, and the host of its parent chat. Other Cloud machines never open
   this chat, so they don't count.
 
+"Seen" uses live registry presence as well as the stored `last_seen_at`, which only moves at
+boot and shutdown.
+
 **Abandoned devices can't block forever:** past 14 days unseen, a device stops
 counting. If it comes back it's caught by the old-peer signal below, and its device
-row updates on boot, which moves chats back to 2.
+row updates on boot, which moves chats back to 2 as each one's host next evaluates it (there's no
+sweep across chats that aren't open).
 
 The capability is better than comparing `version`: it says exactly what's needed,
 it's off on builds that have the flag off, and it can't be fooled by a version
 string. `version` stays for display and for the rollout dashboards.
 
-The host re-evaluates on join, every 30 s while the chat is open, and on a device
-row change. Other devices just follow `roomGen`. A viewer with a stale value still
+The host re-evaluates on join and every 10 s while the chat is open. Other devices just
+follow `roomGen`. A viewer with a stale value still
 behaves safely either way, because the host reads rows and queue alike and
 re-publishes queue rows while it's storing.
 
@@ -170,15 +219,29 @@ A host switches to stored mode when `roomGen` falls below 3, the DO stops offeri
 relay, or an old reader appears. **It always switches in this order:**
 
 1. Set the mode to stored, so new commits go to rows.
-2. Post a checkpoint exported after that point. It covers everything relayed so far.
+2. Post a checkpoint exported after that point, at the current floor so it prunes nothing.
+   It covers everything relayed so far.
 3. Keep retrying until the checkpoint lands.
+4. Only then, if the reason was a device that can't follow, write `roomGen: 2`.
 
 Reversing steps 1 and 2 would be a bug: commits in the gap would be in neither the
-checkpoint nor the rows, and rows after them would park on every old reader. Tests
-pin this order.
+checkpoint nor the rows, and rows after them would park on every old reader. A host owes
+this checkpoint whenever it isn't relaying a chat on generation 3, even right after a
+restart, because a restarted host can't know what it relayed before. Step 4 comes last so
+that a crash leaves the chat on 3 and the next start owes the same checkpoint.
 
-While storing, the host also re-publishes queue rows it receives as stored rows, for
-the same reason.
+A room that hasn't answered can't start a downgrade. Between sessions a host keeps the
+room's last answer, or a host offline for a day would upload a day of commits as stored rows
+when it returned.
+
+While storing, the host also stores whatever else it imports through this layer: exactly the new ops,
+however many times they're delivered, for the same reason.
+
+A checkpoint only settles this if its export began after the host stopped relaying. One already in
+flight may lack the last relayed commits, so it doesn't count.
+
+The hold for an old reader lasts 10 minutes and is renewed for as long as it stays: the DO answers each
+of the host's announces with `legacyPeer` while such a reader is connected.
 
 ## What old clients see
 
@@ -187,7 +250,7 @@ the same reason.
 | Edge flag off, or client flag off | Nothing changes. Byte-identical. |
 | Flag on, chat at generation 2 | Nothing changes. New clients add `relay: 1`, and the host stores as before. |
 | Flip to 3 with no old devices seen in 14 days | No old client is around to see it. |
-| Old client comes back to a generation 3 chat | Its `hello` or `GET /rows` makes the DO send `legacyPeer`. The host downgrades within seconds: a current checkpoint, then stored rows while the old reader stays around, plus 10 minutes. The old client catches up normally. |
+| Old client comes back to a generation 3 chat | Its `hello` or `GET /rows` makes the DO send `legacyPeer`, and wakes a host that isn't in the room (from `hello` only: an old HTTP read carries no host hint). The host posts a current checkpoint and stores while the old reader stays, plus 10 minutes. The DO then closes the old socket so it rejoins and reads the checkpoint. |
 | Same, but the host is offline | It sees the last checkpoint, frozen, and stays converged on what it has. It catches up when the host returns. This matches the product decision. |
 | Old client sends a message | `push` is stored and relayed, and the wake goes out. The host imports it. This always worked and still does. |
 | New client on a network without WebSockets | Treated like an old reader: its fallback `GET /rows` carries `fallback=1`. |
@@ -212,15 +275,16 @@ separate, later decision with its own review.
 | Relay frame lost | Trailing `announce` shows the gap, and `syncReq` fills it. About 2 s. |
 | Frames reordered | Loro parks them. A `syncReq` fills any real gap. |
 | DO restarts mid-stream | Sockets drop, clients reconnect with `announce{hello}`. Nothing was held in the DO's memory except unsent relay frames. |
-| Host crashes mid-stream | Commits since its last snapshot stay in its local outbox, go up as stored rows on restart, and read back as they do today. Viewers holding newer ops serve them back through symmetric sync. |
+| Host crashes mid-stream | Relayed commits stay in its local outbox until a saved snapshot covers them. Any left at restart go up as stored rows and read back, as they do today. Viewers holding newer ops serve them back through symmetric sync. |
 | Host offline, viewer sends | Queued and acked. The wake waits for the host. Other devices see it through the queue. |
 | Host offline, fresh device | Sees the last checkpoint if any, plus the queue. Accepted by product decision. |
 | Host offline and device-hosted chat with no checkpoint | An empty chat until the host returns. Accepted, and the riskiest visible behaviour: see below. |
-| Direct link dies | Sends fall back to the DO at once. The periodic redial retries with backoff. |
+| Direct link dies | A closed link falls back at once. A silent one takes up to 10 s to be declared dead, and frames sent in that time were kept off the room; `announce{hello}` then recovers them. The redial retries with backoff. |
 | Both paths down | Local-first as today. Sync resumes on reconnect. |
 | Viewer's `delivered` is lost | The row is redelivered next join. Import is a no-op. |
 | Chat moves to a new host | The new host reads the queue and acks. Sync is symmetric, so it also collects what the old host published. |
-| Edge flag turned off while hosts are in relay mode | `state` loses `relay`, the host follows the downgrade rule. |
+| Edge flag turned off while hosts are in relay mode | `state` loses `relay`, the host follows the downgrade rule, and queued rows move into `rows`. |
+| A checkpoint keeps failing, for example a chat over the 32 MiB cap | Retried with backoff. Until it lands, old readers stay behind, a downgrade can't finish and a Cloud machine won't sleep. The socket also stays open, which holds one of the active-sync slots. Known limit. |
 | Oversized update | The existing row cap and rejection path still apply to stored paths. A `relay` or `syncData` frame over the cap is refused by the runtime; VV sync re-fragments it. |
 
 ## WebRTC
@@ -242,7 +306,8 @@ stream service to one that already ships.**
 
 ### Design
 
-A viewer showing a chat opens `chatlink/{chatId}` to the host through
+A viewer showing a chat opens `chatlink/{chatId}` (engine: `doc_host/relay.rs`, protocol: `run_link` in
+`crates/sync/src/chat_relay.rs`) to the host through
 `PreviewService::open_peer_stream`, which pairs if needed. The host's handler accepts
 only chats it hosts, and only from the owner's non-Cloud devices. The link carries
 `relay`, `announce`, `syncReq` and `syncData`.
@@ -303,8 +368,9 @@ The direct path skips the trip through the DO's region.
   shorter than going through the DO's region, though not always.
 
 The savings have **not** been measured on a real network. The loopback test in
-`crates/engine/tests/chat_link_p2p.rs` shows the link adds no holdup of its own, which
-isn't the same as measuring a WAN saving. Before a rollout, compare `relay` against direct
+`crates/engine/tests/chat_link_p2p.rs` measured commit to the viewer's doc at p50 0.53 ms and p95 0.67 ms
+over 200 commits. That shows the link adds no holdup of its own, which isn't the same as measuring a WAN
+saving. Before a rollout, compare `relay` against direct
 one-way delay between two real networks. Streaming text arrives in 120 ms commits, so
 savings smaller than that are hard to see while streaming. Where it should be felt is
 the first token after send, and typing a steer into a running agent.
@@ -334,10 +400,12 @@ Moving fields to live-only frames is riskier, for these reasons:
 
 ## Testing before any real user
 
-Done locally, see the PR for counts: flag-off identity, DO relay and queue behaviour against
+Done locally: flag-off identity, DO relay and queue behaviour against
 real workerd, convergence (two devices plus host, late joiner, host offline, reconnect,
-reordered delivery, an old client in the mix) with real Loro docs, and a real WebRTC pair
-on loopback.
+reordered delivery, an old client in the mix) with real Loro docs against simulated faults and against a
+real DO under `wrangler dev`, a real WebRTC pair on loopback, and two real engines on a local edge:
+generation 3, a turn that stores nothing, and a device returning without the layer. The engines' direct
+link came up in those runs, on one machine.
 
 Still needed, in this order:
 
@@ -365,8 +433,38 @@ Still needed, in this order:
 
 ## What's built
 
-See the PR for the current state. Anything listed here as a rule of the design but not listed
-in the PR as implemented isn't implemented.
+Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine. Both default off.
+
+**Built and tested:**
+
+- The room's relay frames, offline queue and old-client signals (`edge/src/chat-room.ts`, `chat-relay.ts`).
+- The relay task: version exchange, resumable transfers, parked rows (`crates/sync/src/chat_relay.rs`,
+  `chat_client.rs`).
+- Direct links on the existing WebRTC stack, with fallback to the room.
+- The host's side: moving a chat between generations, the downgrade rule, the outbox rules
+  (`crates/engine/src/doc_host/relay.rs`, `crates/proto/src/relay_gen.rs`).
+
+**Built, but only covered by reading and unit-level tests:**
+
+- The Cloud checkpoint policy and the sleep gate. Nothing has run on a real sandbox.
+- A host on a network with HTTPS but no sockets going back to stored rows.
+
+**Not built:**
+
+- Mobile. `crates/client` still works as it does today, and a phone seen in the last 14 days holds its
+  account's chats on generation 2.
+- Sidebar churn.
+- Removing old rows, or backups for device-hosted chats. The nightly backup still runs for a room whose
+  rows change, which a generation 3 room's mostly don't.
+- A sweep that re-evaluates chats that aren't open. Each host evaluates a chat when it opens it.
+
+**Known limits:**
+
+- `delivered` isn't checked against the chat's host, only against the row's author. A stale host that has
+  saved a row can delete it, and the new host then depends on that device coming back. A row whose author
+  later hosts the chat is never deleted, and is redelivered on each join as a no-op.
+- A viewer on a chat whose host has no socket, no wake route and no direct link stays where it is.
+- An old client reading only over HTTP doesn't wake an absent host: its read carries no host hint.
 
 ## Sources
 

@@ -236,6 +236,9 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
     }
 }
 
+mod relay;
+pub use relay::{CHAT_LINK_PREFIX, ChatLinkService, relay_layer_enabled};
+
 #[derive(Debug, Clone)]
 pub struct DocHostConfig {
     pub device_id: String,
@@ -247,6 +250,8 @@ pub struct DocHostConfig {
 }
 
 struct DocHostInner {
+    /// Opens direct links to other devices. Set only with the relay layer on.
+    chat_links: std::sync::OnceLock<zeron_preview::PreviewService>,
     store: Arc<DocsStore>,
     config: DocHostConfig,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
@@ -650,6 +655,8 @@ pub struct ChatDocHandle {
     publication_failed: AtomicBool,
     /// Local-update feed into the chat2 client (drop = unsubscribe).
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
+    /// The relay layer's state for this chat. None with the flag off.
+    relay: Mutex<Option<Arc<relay::ChatRelayState>>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
 }
@@ -712,6 +719,25 @@ pub(crate) fn latest_switch(entries: &[SessionMessageEntry]) -> Option<Option<Ha
 }
 
 impl ChatDocHandle {
+    /// The outbox entries a join should upload. With the relay layer off, all.
+    pub(crate) fn uploadable_updates(&self, pending: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+        match &*lock(&self.relay) {
+            Some(state) => state.uploadable(pending),
+            None => pending,
+        }
+    }
+
+    /// This host is storing a chat: what it imports must go into rows as well.
+    pub(crate) fn republishes_imports(&self) -> bool {
+        lock(&self.relay).as_ref().is_some_and(|state| state.republishes_queue_rows())
+    }
+
+    pub(crate) fn republish(&self, bytes: Vec<u8>) {
+        if let Some(client) = &*lock(&self.chat2) {
+            client.enqueue_batch(uuid::Uuid::new_v4().to_string(), bytes);
+        }
+    }
+
     /// The turn ending now is followed at once by a message the user has
     /// already sent: one still on its way through the command log (a burst
     /// the agent outran), or one held for a turn-boundary agent's turn end.
@@ -1055,6 +1081,7 @@ impl DocHost {
                 store,
                 config,
                 sessions: Mutex::new(None),
+                chat_links: std::sync::OnceLock::new(),
                 quiesced: AtomicBool::new(false),
                 quiesce_generation: AtomicU64::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
@@ -1171,6 +1198,10 @@ impl DocHost {
             None
         };
         if let Some(why) = busy {
+            self.lift_quiesce();
+            return Err(why);
+        }
+        if let Err(why) = self.checkpoint_relayed_chats_for_sleep().await {
             self.lift_quiesce();
             return Err(why);
         }
@@ -1797,6 +1828,7 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
+            relay: Mutex::new(None),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -1842,12 +1874,16 @@ impl DocHost {
                             // check and the push let the join's store+drain
                             // slip between, orphaning the update forever).
                             let client_guard = lock(&handle.chat2);
+                            let relay_state = lock(&handle.relay).clone();
                             for bytes in lock(&own_order).order(handle.doc.doc(), bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
                                 if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, &bytes) {
                                     handle.publication_failed.store(true, Ordering::Release);
                                     lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
                                     tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
+                                }
+                                if relay_state.as_ref().is_some_and(|state| state.publish_local(&batch_id, &bytes)) {
+                                    continue;
                                 }
                                 if let Some(client) = &*client_guard {
                                     client.enqueue_batch(batch_id, bytes);
@@ -2152,6 +2188,7 @@ impl DocHost {
                     // explicit service deadline, never the short reuse grace.
                     let idle = caught_up
                         && !handle.sync_protected()
+                        && handle.relay_lets_socket_close()
                         && (now_ms() - handle.last_access.load(Ordering::Relaxed) >= SYNC_IDLE_MS
                             || (handle.sync_background.load(Ordering::Acquire) && caught_up))
                         && !host
@@ -2338,6 +2375,9 @@ impl DocHost {
 
     async fn stop_sync(&self, handle: &ChatDocHandle) {
         lock(&handle.sync_cancel).cancel();
+        if let Some(state) = &*lock(&handle.relay) {
+            state.stop_link();
+        }
         let client = lock(&handle.chat2).take();
         if let Some(client) = client {
             client.shutdown().await;
@@ -2408,6 +2448,10 @@ impl DocHost {
             ).with_priority(priority));
             let remote_host = host.remote_host_for(&chat);
             let url = edge.room_url_with_host(format!("/chat2/{chat}/ws"), remote_host.clone());
+            let relay_state = relay::relay_layer_enabled()
+                .then(|| host.relay_state_for(&weak, &device, sink.clone()))
+                .flatten();
+            let relay = relay_state.as_ref().map(|state| state.relay.clone());
             let mut wake = zeron_sync::wake::subscribe();
             // Sibling-dial successes end a backoff wait immediately, exactly
             // like the joined clients' own reconnect loops (chat_client.rs).
@@ -2432,16 +2476,17 @@ impl DocHost {
                     edge.clone(),
                     chat.clone(),
                     device.clone(),
-                ).with_host_device(remote_host.clone()).with_priority(priority));
+                ).with_host_device(remote_host.clone()).with_priority(priority).with_relay(relay.is_some()));
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    zeron_sync::ChatClient::connect_via_transport(
+                    zeron_sync::ChatClient::connect_via_relay(
                         url.clone(),
                         sink.clone(),
                         fetcher.clone(),
                         &device,
                         cursor,
                         transport,
+                        relay.clone(),
                     ),
                 )
                 .await;
@@ -2466,7 +2511,12 @@ impl DocHost {
                             // Include commits made after the sink's initial
                             // load but before installation. The same lock is
                             // held by the local-update subscription.
-                            for (id, bytes) in host.inner.store.pending_chat_updates(&chat).unwrap_or_default() {
+                            let pending = host.inner.store.pending_chat_updates(&chat).unwrap_or_default();
+                            let pending = match &relay_state {
+                                Some(state) => state.uploadable(pending),
+                                None => pending,
+                            };
+                            for (id, bytes) in pending {
                                 client.enqueue_batch(id, bytes);
                             }
                             let pending: Vec<(String, Vec<u8>)> =
@@ -2477,6 +2527,9 @@ impl DocHost {
                             *client_slot = Some(client);
                         }
                         tracing::info!(chat = %chat, "chat2 client admitted (catch-up pending)");
+                        if let Some(state) = relay_state.clone() {
+                            host.spawn_relay_maintenance(&handle, state, cancel.clone());
+                        }
                         // A missed event, failed POST or actor restart must not
                         // forget rejected operations. Any author can checkpoint
                         // its own durable history, including a non-host desktop.
@@ -2533,7 +2586,10 @@ impl DocHost {
                                     .read_entries()
                                     .map(|e| !e.is_empty())
                                     .unwrap_or(false);
-                                if no_checkpoint && has_content {
+                                let relayed = lock(&handle.relay).is_some()
+                                    && host.workspace().and_then(|ws| ws.chat(&handle.chat_id).ok().flatten())
+                                        .is_some_and(|chat| chat.room_gen.unwrap_or(1) >= zeron_proto::relay_gen::RELAY_ROOM_GEN);
+                                if no_checkpoint && has_content && !relayed {
                                     tracing::info!(chat = %handle.chat_id,
                                         "chat2 room has rows but no checkpoint; posting bootstrap checkpoint");
                                     host.spawn_chat2_checkpoint(&handle, "bootstrap");
@@ -3014,6 +3070,11 @@ impl DocHost {
         if handle.retired.load(Ordering::Relaxed) {
             return;
         }
+        // Relaying: no stored rows to trim. A device-hosted chat isn't stored at
+        // all, and a Cloud host's checkpoints follow their own policy.
+        if lock(&handle.relay).as_ref().is_some_and(|state| state.relaying()) {
+            return;
+        }
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
             None => return,
@@ -3082,11 +3143,23 @@ impl DocHost {
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
+        // A relaying host's socket closes when idle, and it still owes checkpoints.
+        let relay_state = lock(&handle.relay).clone();
+        let relay_era = relay_state
+            .as_ref()
+            .is_some_and(|state| state.relaying() || reason.starts_with("relay-"));
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
+            None if relay_era => Default::default(),
             None => return,
         };
         let chat_id = handle.chat_id.clone();
+        if relay_era
+            && let Some(state) = &relay_state
+            && !state.checkpoint_may_run()
+        {
+            return;
+        }
         if handle
             .checkpointing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -3097,7 +3170,12 @@ impl DocHost {
         let in_flight = handle.checkpointing.clone();
         let publication_store = self.inner.store.clone();
         let snapshot_doc = handle.doc.clone();
-        let seq_covered = stats.cursor;
+        // A relay-era checkpoint prunes nothing: stored rows stay where they are.
+        // Sampled before the export below, so a mode change after this makes the
+        // result too old to count as the checkpoint that change owes.
+        let at_floor = relay_era;
+        let seq_covered = if at_floor { stats.seq_floor } else { stats.cursor };
+        let mode_epoch = relay_state.as_ref().map_or(0, |state| state.mode_epoch());
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
         let reset = ResetFlag(in_flight);
@@ -3124,15 +3202,17 @@ impl DocHost {
                 return;
             };
             let url = format!(
-                "{}/chat2/{}/checkpoint?seqCovered={}",
+                "{}/chat2/{}/checkpoint?seqCovered={}{}",
                 edge.url.trim_end_matches('/'),
                 chat_id,
-                seq_covered
+                seq_covered,
+                if at_floor { "&atFloor=1" } else { "" }
             );
             let Ok(_permit) = zeron_sync::budget::shared().http(zeron_sync::budget::Priority::Background).await else {
                 return;
             };
             let size = snapshot.len() as u64;
+            let frontier_sent = frontier.clone();
             match http
                 .post(&url)
                 .timeout(std::time::Duration::from_secs(300))
@@ -3147,13 +3227,19 @@ impl DocHost {
             {
                 Ok(res) if res.status().is_success() => {
                     tracing::info!(chat = %chat_id, seq_covered, reason, "chat2 checkpoint posted");
+                    if let Some(state) = &relay_state
+                        && let Ok(version) = loro::VersionVector::decode(&frontier_sent)
+                    {
+                        state.checkpoint_landed(version, reason, mode_epoch);
+                    }
                     for batch_id in &covered_rejections {
                         if let Err(err) = publication_store.acknowledge_chat_update(&chat_id,batch_id) {
                             tracing::warn!(%err, "chat2: checkpoint obligation retirement failed; will retry");
                         }
                     }
 
-                    if let Some(handle) = weak_note.upgrade()
+                    if !at_floor
+                        && let Some(handle) = weak_note.upgrade()
                         && let Some(client) = &*lock(&handle.chat2)
                     {
                         client.note_checkpoint(seq_covered, size);
@@ -3162,10 +3248,16 @@ impl DocHost {
                 Ok(res) => {
                     tracing::warn!(chat = %chat_id, status = res.status().as_u16(),
                         "chat2 checkpoint rejected");
+                    if let Some(state) = &relay_state {
+                        state.checkpoint_failed();
+                    }
                 }
                 Err(err) => {
                     let err = describe_http_error(err);
                     tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
+                    if let Some(state) = &relay_state {
+                        state.checkpoint_failed();
+                    }
                 }
             }
         });
@@ -3259,6 +3351,9 @@ impl DocHost {
             return true;
         }
         if handle.messages_tx.receiver_count() > 0 || handle.queue_tx.receiver_count() > 0 {
+            return true;
+        }
+        if !handle.relay_lets_socket_close() {
             return true;
         }
         // The handle itself holds one doc ref; more means a live writer.

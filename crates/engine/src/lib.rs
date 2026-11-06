@@ -374,6 +374,13 @@ impl EngineCore {
             terminals::link::SERVICE_PREFIX,
             Arc::new(terminals::link::Service::new(terminals.clone())),
         );
+        if doc_host::relay_layer_enabled() {
+            previews.serve_streams(
+                doc_host::CHAT_LINK_PREFIX,
+                Arc::new(doc_host::ChatLinkService::new(&doc_host)),
+            );
+            doc_host.set_chat_links(previews.clone());
+        }
         let uploads = Uploads::from_root_with_fallback(
             profile.uploads_root(),
             legacy_uploads_root.as_deref(),

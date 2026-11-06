@@ -24,6 +24,9 @@ export interface Env {
    * derives the head from the rows: older code reads the stored copy, and a
    * stale one collides on `rows.seq`. */
   CHAT_ROOM_WRITE_THROUGH?: string;
+  /** "1": ChatRoom offers the relay layer to clients that ask for it
+   * (docs/design/relay-layer.md). Off, its behaviour doesn't change at all. */
+  CHAT_RELAY_LAYER?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;
