@@ -16,13 +16,40 @@
 import type { GithubRepoView } from "../api";
 import { isObject, nonEmptyString, upstream, type FetchFn } from "./types";
 
+/** What an installation is, from GitHub's listing. */
+export interface FoundInstallation {
+  readonly id: number;
+  readonly target?: string;
+  readonly targetType?: string;
+}
+
+/** A `/user/installations` item, when it is one. */
+export const toInstallation = (item: unknown): (FoundInstallation & { readonly suspended: boolean }) | undefined => {
+  if (!isObject(item) || typeof item.id !== "number") return undefined;
+  const account = isObject(item.account) ? item.account : {};
+  return {
+    id: item.id,
+    ...(typeof account.login === "string" ? { target: account.login } : {}),
+    ...(typeof account.type === "string" ? { targetType: account.type } : {}),
+    suspended: !!item.suspended_at
+  };
+};
+
 export const GITHUB_API = "https://api.github.com";
 export const MAX_REPOS = 1000;
 const MAX_REQUESTS = 30;
 const PAGE = "per_page=100";
 
+/** A repository as one login sees it. */
+export interface ListedRepo {
+  readonly repo: GithubRepoView;
+  readonly installationId: number;
+  /** Whether this login may push there. */
+  readonly push: boolean;
+}
+
 export type RepoListing =
-  | { readonly kind: "ok"; readonly repos: GithubRepoView[] }
+  | { readonly kind: "ok"; readonly repos: ListedRepo[]; readonly installations: FoundInstallation[] }
   /** GitHub answered 401: the stored token is dead. */
   | { readonly kind: "unauthorized" }
   | { readonly kind: "failed"; readonly reason: string };
@@ -76,7 +103,7 @@ export const listGithubRepos = async (accessToken: string, fetchFn: FetchFn): Pr
     "x-github-api-version": "2022-11-28"
   };
   let requests = 0;
-  const repos = new Map<string, GithubRepoView>();
+  const repos = new Map<string, ListedRepo>();
 
   /** Walk one paginated list; `take` returns false to stop early. */
   const walk = async (
@@ -98,33 +125,71 @@ export const listGithubRepos = async (accessToken: string, fetchFn: FetchFn): Pr
     }
     return undefined;
   };
-  const addRepo = (item: unknown): boolean => {
+  const addRepo = (installationId: number) => (item: unknown): boolean => {
     const repo = toRepoView(item);
-    if (repo && !repos.has(repo.fullName)) repos.set(repo.fullName, repo);
+    if (repo && !repos.has(repo.fullName)) {
+      repos.set(repo.fullName, { repo, installationId, push: canPush(item) });
+    }
     return repos.size < MAX_REPOS;
   };
 
-  const installations: number[] = [];
+  const installations: FoundInstallation[] = [];
   const listed = await walk(
     `${GITHUB_API}/user/installations?${PAGE}`,
     (body) => (isObject(body) && Array.isArray(body.installations) ? body.installations : undefined),
     (item) => {
-      if (isObject(item) && typeof item.id === "number") installations.push(item.id);
+      // A suspended installation mints nothing, so its repositories can't run.
+      const found = toInstallation(item);
+      if (found && !found.suspended) installations.push(found);
       return true;
     }
   );
   if (listed) return listed;
 
-  for (const id of installations) {
+  for (const { id } of installations) {
     if (repos.size >= MAX_REPOS) break;
     const failed = await walk(
       `${GITHUB_API}/user/installations/${id}/repositories?${PAGE}`,
       (body) => (isObject(body) && Array.isArray(body.repositories) ? body.repositories : undefined),
-      addRepo
+      addRepo(id)
     );
     if (failed) return failed;
   }
-  return { kind: "ok", repos: [...repos.values()] };
+  return { kind: "ok", repos: [...repos.values()], installations };
+};
+
+/** Whether a repository item says its login may push. GitHub sends
+ * `permissions` here; without it nothing is known, and the grant checks anyway. */
+const canPush = (item: unknown): boolean => {
+  const permissions = isObject(item) && isObject(item.permissions) ? item.permissions : undefined;
+  return !permissions || permissions.push === true || permissions.admin === true || permissions.maintain === true;
+};
+
+/**
+ * Merge per-login listings, given in the order logins are tried: each
+ * repository once, naming the login a new session would use (the first that
+ * can push, else the first that can read: the grant's own rule).
+ */
+export const mergeListings = (
+  listings: readonly { readonly account?: string; readonly repos: readonly ListedRepo[] }[]
+): GithubRepoView[] => {
+  const merged = new Map<string, { first: ListedRepo; push: string[]; read: string[] }>();
+  for (const { account, repos } of listings) {
+    for (const listed of repos) {
+      const key = listed.repo.fullName.toLowerCase();
+      const entry = merged.get(key) ?? { first: listed, push: [], read: [] };
+      merged.set(key, entry);
+      if (account) (listed.push ? entry.push : entry.read).push(account);
+    }
+  }
+  return [...merged.values()].map(({ first, push, read }) => {
+    const accounts = [...push, ...read];
+    return {
+      ...first.repo,
+      installationId: first.installationId,
+      ...(accounts[0] ? { account: accounts[0], accounts } : {})
+    };
+  });
 };
 
 export type BranchListing =

@@ -411,23 +411,80 @@ retries on the next grant; the DO persists a new generation before returning it.
 
 The standard GitHub App model: sessions act as the App, never as the user.
 
-- The **user token** (device flow) stays in the vault. It lists the user's repositories for
+- Each **user token** (device flow) stays in the vault. It lists the user's repositories for
   the device menu's Cloud row and proves which App installations the user can reach.
 - A `github` grant names the session repository (`repo: "owner/name"`, required). The vault
   lists `/user/installations` with the user token, picks the installation on `owner` (not
-  suspended), and mints `POST /app/installations/{id}/access_tokens` with an RS256 App JWT
-  (`GITHUB_APP_PRIVATE_KEY`, `iss` = client id). The one-hour token reaches every repository
-  of that installation — the usual reach of a GitHub App. Minted tokens are cached sealed per
-  installation and reused while more than 15 minutes remain; the installation lookup runs on
-  every grant, so a user who loses access to an account stops getting its tokens at once.
+  suspended), reads the repository with the user token, and mints `POST
+  /app/installations/{id}/access_tokens` with an RS256 App JWT (`GITHUB_APP_PRIVATE_KEY`, `iss` =
+  client id): a one-hour token for that one repository, read-only when the login can't push.
+  Minted tokens are cached sealed per repository and access level and reused while more than 15
+  minutes remain; both checks run on every grant, so a user who loses access stops getting tokens
+  at once.
 - Because installations are found through the user's own token, a caller can never name an
   installation it doesn't belong to (the GitHub-documented check; an `installation_id` from a
   setup redirect is never trusted).
 - No installation on `owner` → `not_found` with a `github_app_not_installed:` message carrying
-  the install link. A 401 on the lookup → `needs_reconnect`. A 401/403 on minting is our App's
-  credentials, never the user's: `unavailable`, the connection stays connected.
-- Commits keep the sandbox's git author; pushes and pull requests show as the App. The daily
-  canary also checks the App credentials (`GET /app`).
+  the install link, aimed at `owner` when GitHub names its id. A 401 on the lookup →
+  `needs_reconnect`. A 401/403 on minting is our App's credentials, never the user's:
+  `unavailable`, the connection stays connected.
+- Commits are the session's login's (its name and GitHub noreply address, in the run's
+  environment), co-authored by `zeronsh[bot]`; pushes and pull requests show as the App. The
+  daily canary also checks the App credentials (`GET /app`).
+
+#### Several logins
+
+A user connects up to 10 GitHub logins, each through its own device flow (a work and a personal
+one, say). They are all in use at once; connecting never removes one. The same login again
+replaces itself (`alreadyConnected` in the poll: GitHub approves as whoever the browser is signed
+in as, so the app says to switch accounts there).
+
+**Logins and installations are separate records.** A login is a person's identity: who a session
+acts for, who authors its commits, what they may reach. An installation of the App is repository
+access, and belongs to no login. The github `VaultAccount` keeps `accounts` (logins),
+`github_installations`, and `github_login_installations` (which login reaches which), and each
+session's `github_sessions` row records both its login and its installation. Reply shapes keep
+them apart too: a repository names its `installationId` and the logins that reach it (`account`,
+`accounts`), and `GET github/repos` lists `installations` with `reachedBy`. Nothing requires an
+installation to be reached through one person, which is what leaves room for an organization to
+hold them later. (Nothing shares them yet: all of this is per user.)
+
+Rules:
+
+- **Repositories** merge across logins, deduplicated by name; each names the login a new session
+  would use. One login failing leaves the others' repositories and appears in `unavailable`
+  (`needs_reconnect` or `upstream`); the listing fails only when no login answered.
+- **A new session** takes the first login that can push, else the first that can read, in this
+  order: the active one (the most recently connected, unless the user picked another with
+  `POST accounts/github/active`), then the others, most recently connected first. A login that
+  can push always beats one that can only read. A read-only pick isn't kept while another login
+  couldn't answer, since that one might push.
+- **A session keeps its login and installation** from its first grant, whatever is connected or
+  chosen later. The vault holds this per device and repository, so machines need no change and a
+  side chat on the same machine shares it. A delegate
+  (`create_child_session`) takes its parent's: the main Worker names the parent's device
+  (`inheritFrom`, runners only, never from a request's body) at its first grant.
+- **A dead login** (`needs_reconnect`) refuses its sessions' grants by name
+  (`github_account_needs_reconnect:`). They never move to another login that reaches the
+  repository, since that would change who authors the commits. Refreshes are single-flighted per
+  login, so one login's rotation can't touch another's.
+- **Disconnecting one** (`DELETE accounts/github/{slot}`) deletes its token. Its sessions stay on
+  it: the next grant refuses with `github_account_disconnected:` and how to reconnect, and the
+  engine ends the run there saying so, removing the git credentials. A token already handed out
+  lives out its hour (at most) unless the machine asks again first, and a run always asks. The
+  same login connected again resumes them, as sessions hold its identity rather than its row. New
+  sessions use whichever logins are left. `DELETE credentials/github` still wipes every login.
+- **A session's login that lost the repository** refuses with `github_account_no_access:`, again
+  without moving.
+- **Installing the App**: `githubInstallUrl` is GitHub's chooser for the browser's account; a
+  repository whose owner has no installation links straight to that owner
+  (`/installations/new/permissions?suggested_target_id=`). `installations[].manageUrl` is where an
+  installation's repositories are chosen.
+
+A login stored before identities existed takes one from its name when the object starts, and rows
+that doubled up that way merge, keeping the newest. A login GitHub wouldn't name at connect time
+learns its name at first use, its sessions with it. Old clients read the same shapes with fields
+added, and an old engine's "Disconnect" still means all of GitHub.
 
 ### Admin
 
@@ -444,7 +501,9 @@ The standard GitHub App model: sessions act as the App, never as the user.
 | `POST /vault/{orgId}/devices/enroll` | Enroll the caller's device key (laptops) |
 | `POST /vault/{orgId}/devices/{deviceId}/revoke` | Per-device revoke |
 | `POST /vault/{orgId}/github/device` | Start GitHub device flow → `{userCode, verificationUri, interval, flowId}` |
-| `POST /vault/{orgId}/github/device/{flowId}` | Poll; on success the vault stores the token |
+| `POST /vault/{orgId}/github/device/{flowId}` | Poll; on success the vault stores the token (`alreadyConnected` when that login was connected) |
+| `GET /vault/{orgId}/github/repos?q=` | `{repos, installations, unavailable?}`: every login's repositories, merged |
+| `GET /vault/{orgId}/github/branches?repo=` | Branch names, through the first login that sees the repository |
 
 Kill switches: per device (revoke), per user (`POST /vault/{orgId}/disable`), and global
 (`VAULT_DISABLED` var; or drop a leaked key via rotation).
@@ -493,8 +552,7 @@ refresh contract changes is caught within a day, before users' grants start fail
   re-granted before expiry), Claude from a vault grant (Claude Code's credential file with the
   access token and an empty refresh token, rewritten before expiry), else the native sandbox
   login, else `anthropic-key`. GitHub grants (App installation tokens for the session
-  repository's owner, requested with `repo`) become `GH_TOKEN`/`GITHUB_TOKEN` at spawn and
-  are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
+  repository, requested with `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
   wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git`
   keeps working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a
   `#[serde(skip)]` field on `RunRequest`, so they are never persisted in the session doc, the

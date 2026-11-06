@@ -78,7 +78,10 @@ describe("githubRepos", () => {
       defaultBranch: "main",
       private: false,
       description: "Zeron desktop",
-      pushedAt: Date.parse("2026-09-25T00:00:00Z")
+      pushedAt: Date.parse("2026-09-25T00:00:00Z"),
+      installationId: 22,
+      account: "octocat",
+      accounts: ["octocat"]
     });
     expect(repos[1]).toMatchObject({ private: true, defaultBranch: "trunk" });
     expect(repos[1]!.description).toBeUndefined();
