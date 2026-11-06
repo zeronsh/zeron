@@ -147,6 +147,12 @@ enum UpdatePlan {
     /// Muse's official launcher, refreshed through its update environment.
     MuseLauncher(PathBuf),
     Homebrew(HomebrewPackage),
+    /// A WinGet package, upgraded by WinGet. The CLI's own updater asks
+    /// whether to install over it, and with nobody to answer waits for ever.
+    Winget {
+        winget: PathBuf,
+        id: &'static str,
+    },
     /// An npm-packaged CLI, updated by the package manager that owns it.
     Package {
         owner: ownership::PackageOwner,
@@ -184,6 +190,7 @@ impl UpdatePlan {
                 package.cask,
                 package.token
             ),
+            UpdatePlan::Winget { winget, id } => format!("winget:{}:{id}", real(winget)),
             UpdatePlan::Package {
                 owner,
                 launcher,
@@ -208,6 +215,7 @@ impl UpdatePlan {
             // when nothing is running from them.
             UpdatePlan::Registry(_) | UpdatePlan::AntigravityArchive | UpdatePlan::CodexStandalone(_) => Ok(()),
             UpdatePlan::Homebrew(_) => Err("Homebrew deletes the old version straight away."),
+            UpdatePlan::Winget { .. } => Err("Updating replaces the program in place."),
             UpdatePlan::Package { .. } => Err(REPLACES_FILES),
             UpdatePlan::MuseLauncher(_) => Err("Updating removes the version running chats use."),
             UpdatePlan::Command { executable, .. } => {
@@ -239,6 +247,8 @@ impl UpdatePlan {
     fn owner(&self) -> Option<String> {
         match self {
             UpdatePlan::Homebrew(package) => Some(format!("homebrew:{}", package.brew.display())),
+            // WinGet runs one install at a time for the whole user.
+            UpdatePlan::Winget { .. } => Some("winget".into()),
             UpdatePlan::Package {
                 owner,
                 launcher,
@@ -562,6 +572,12 @@ fn update_plan(
     if harness == HarnessId::Muse && is_muse_launcher(executable) {
         return Ok(UpdatePlan::MuseLauncher(executable.to_path_buf()));
     }
+    if let Some(id) = winget_package(harness, executable) {
+        let winget = resolve_winget().ok_or_else(|| {
+            format!("WinGet installed this copy but wasn't found; update it with `winget upgrade --id {id}`")
+        })?;
+        return Ok(UpdatePlan::Winget { winget, id });
+    }
     if let Some(args) = provider(harness).update_args {
         return Ok(UpdatePlan::Command {
             executable: executable.to_path_buf(),
@@ -623,6 +639,9 @@ fn manual_update_command(harness: HarnessId, executable: &Path, can_apply: bool)
     if let Some(package) = homebrew_package(executable).filter(|package| !package.is_node_runtime())
     {
         return Some(package.upgrade_command());
+    }
+    if let Some(id) = winget_package(harness, executable) {
+        return Some(format!("winget upgrade --id {id}"));
     }
     Some(
         claude_package_manager_command_for(harness, executable)
@@ -1730,10 +1749,24 @@ impl HarnessUpdateCoordinator {
         let applied = match plan {
             UpdatePlan::Command { executable, args } => {
                 match self.begin_install(harness, &cancel) {
-                    Ok(()) => run_command(&executable, args, UPDATE_TIMEOUT).await,
+                    Ok(()) => run_command_output_watched(
+                        &executable,
+                        args,
+                        UPDATE_TIMEOUT,
+                        &[],
+                        updater_refusals(harness),
+                    )
+                    .await
+                    .map(drop),
                     Err(error) => Err(error),
                 }
             }
+            UpdatePlan::Winget { winget, id } => match self.begin_install(harness, &cancel) {
+                Ok(()) => run_command_output(&winget, &winget_upgrade_args(id), UPDATE_TIMEOUT)
+                    .await
+                    .map(drop),
+                Err(error) => Err(error),
+            },
             UpdatePlan::AntigravityArchive => {
                 let release = lock(&self.inner.antigravity_release)
                     .clone()
@@ -3089,6 +3122,59 @@ async fn run_command_output_env(
     timeout: Duration,
     env: &[(&str, &str)],
 ) -> Result<String, String> {
+    run_command_output_watched(executable, args, timeout, env, &[]).await
+}
+
+/// Output that means an updater has stopped to ask something nobody will
+/// answer (its stdin is closed): stop it at once with `message` rather than
+/// wait out [`UPDATE_TIMEOUT`].
+struct Refusal {
+    needle: &'static str,
+    message: &'static str,
+}
+
+/// OpenCode's `upgrade` notices a copy a package manager owns (WinGet,
+/// Scoop, Chocolatey…), prints this, and asks "Install anyways?", defaulting
+/// to No. A closed stdin doesn't answer it: it waits for ever.
+const OPENCODE_REFUSALS: &[Refusal] = &[
+    Refusal {
+        needle: "may be managed by a package manager",
+        message: "OpenCode's updater stopped to ask about installing over a copy a package manager \
+                  manages. Update OpenCode with the package manager that installed it.",
+    },
+    Refusal {
+        needle: "Install anyways?",
+        message: "OpenCode's updater stopped to ask whether to install anyway. Update OpenCode \
+                  with the package manager that installed it.",
+    },
+];
+
+fn updater_refusals(harness: HarnessId) -> &'static [Refusal] {
+    match harness {
+        HarnessId::Opencode => OPENCODE_REFUSALS,
+        _ => &[],
+    }
+}
+
+/// The updater printed a [`Refusal`]'s needle.
+#[derive(Debug)]
+struct Refused(&'static str);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+async fn run_command_output_watched(
+    executable: &Path,
+    args: &[&str],
+    timeout: Duration,
+    env: &[(&str, &str)],
+    refusals: &[Refusal],
+) -> Result<String, String> {
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -3117,8 +3203,8 @@ async fn run_command_output_env(
     let result = tokio::time::timeout(timeout, async {
         tokio::try_join!(
             child.wait(),
-            read_tail(&mut stdout, &mut stdout_bytes),
-            read_tail(&mut stderr, &mut stderr_bytes),
+            read_tail_watched(&mut stdout, &mut stdout_bytes, refusals),
+            read_tail_watched(&mut stderr, &mut stderr_bytes, refusals),
         )
     })
     .await;
@@ -3133,6 +3219,17 @@ async fn run_command_output_env(
             let _ = child.wait().await;
             return Err(match error {
                 Err(_) => format!("{} timed out", executable.display()),
+                Ok(Err(error)) if error.get_ref().is_some_and(|inner| inner.is::<Refused>()) => {
+                    tracing::warn!(
+                        executable = %executable.display(),
+                        output = %last_chars(
+                            &String::from_utf8_lossy(&[stdout_bytes, stderr_bytes].concat()),
+                            4000
+                        ),
+                        "agent CLI updater stopped to ask a question; stopped it"
+                    );
+                    error.to_string()
+                }
                 Ok(Err(error)) => format!("could not run {}: {error}", executable.display()),
                 Ok(Ok(_)) => unreachable!(),
             });
@@ -3171,9 +3268,12 @@ async fn run_command_output_env(
 /// last [`OUTPUT_CAP`] bytes of a stream.
 const OUTPUT_CAP: usize = 1024 * 1024;
 
-async fn read_tail(
+/// Read `pipe` to its end into `tail`, failing with [`Refused`] as soon as
+/// the output holds one of `refusals`' needles.
+async fn read_tail_watched(
     pipe: &mut (impl tokio::io::AsyncRead + Unpin),
     tail: &mut Vec<u8>,
+    refusals: &[Refusal],
 ) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt as _;
     let mut chunk = [0_u8; 16 * 1024];
@@ -3183,6 +3283,16 @@ async fn read_tail(
             break;
         }
         tail.extend_from_slice(&chunk[..read]);
+        // Only what's new, plus enough before it for a needle split across reads.
+        for refusal in refusals {
+            let start = tail.len().saturating_sub(read + refusal.needle.len());
+            if tail[start..]
+                .windows(refusal.needle.len())
+                .any(|window| window == refusal.needle.as_bytes())
+            {
+                return Err(std::io::Error::other(Refused(refusal.message)));
+            }
+        }
         // Drain in batches so a chatty updater isn't memmoved per chunk.
         if tail.len() > 2 * OUTPUT_CAP {
             tail.drain(..tail.len() - OUTPUT_CAP);
@@ -3285,6 +3395,81 @@ fn is_muse_launcher(path: &Path) -> bool {
             let text = String::from_utf8_lossy(&bytes);
             text.contains("muse-code/launcher-") && text.contains("MUSE_SYNC_UPDATE")
         })
+}
+
+/// WinGet's id for OpenCode's package.
+const OPENCODE_WINGET_ID: &str = "SST.opencode";
+
+/// The WinGet package that installed `executable`, when Zeron knows how to
+/// upgrade it: WinGet unpacks portable packages to
+/// `%LOCALAPPDATA%\Microsoft\WinGet\Packages\<id>_<source>\`, and its
+/// `Links\opencode.exe` points there.
+fn winget_package(harness: HarnessId, executable: &Path) -> Option<&'static str> {
+    let id = match harness {
+        HarnessId::Opencode => OPENCODE_WINGET_ID,
+        _ => return None,
+    };
+    let canonical = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    [executable, canonical.as_path()]
+        .into_iter()
+        .any(|path| in_winget_package(path, id))
+        .then_some(id)
+}
+
+/// `path` lies inside `…\WinGet\Packages\<id>_<source>\`.
+fn in_winget_package(path: &Path, id: &str) -> bool {
+    let prefix = format!("{}_", id.to_ascii_lowercase());
+    let parts: Vec<String> = path
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+    parts.windows(3).any(|window| {
+        window[0] == "winget" && window[1] == "packages" && window[2].starts_with(&prefix)
+    })
+}
+
+/// The arguments that upgrade one WinGet package with nobody there to answer.
+fn winget_upgrade_args(id: &str) -> Vec<&str> {
+    vec![
+        "upgrade",
+        "--id",
+        id,
+        "--silent",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ]
+}
+
+/// WinGet: on `PATH`, or its app execution alias in `WindowsApps` (a reparse
+/// point that only `symlink_metadata` can see).
+fn resolve_winget() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    winget_from(
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+    )
+}
+
+fn winget_from(
+    path: Option<&std::ffi::OsStr>,
+    local_app_data: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let on_path = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join("winget.exe"));
+    let alias = local_app_data.map(|dir| {
+        Path::new(dir)
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("winget.exe")
+    });
+    on_path
+        .chain(alias)
+        .find(|candidate| candidate.symlink_metadata().is_ok())
 }
 
 fn opencode_release_package(installed: &str) -> &'static str {
@@ -5359,5 +5544,158 @@ esac
             Some("choco upgrade claude-code")
         );
         assert!(!super::can_apply_update(HarnessId::ClaudeCode, path));
+    }
+}
+
+#[cfg(test)]
+mod winget_tests {
+    use super::*;
+
+    const PACKAGE: &str = r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe";
+
+    #[test]
+    fn a_winget_package_is_known_by_its_folder() {
+        assert!(in_winget_package(Path::new(PACKAGE), OPENCODE_WINGET_ID));
+        assert!(in_winget_package(
+            Path::new(&PACKAGE.to_ascii_uppercase()),
+            OPENCODE_WINGET_ID
+        ));
+        for other in [
+            r"C:\Users\me\.opencode\bin\opencode.exe",
+            r"C:\Users\me\scoop\apps\opencode\current\opencode.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\SST.opencodeX_src\opencode.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Other.tool_src\opencode.exe",
+        ] {
+            assert!(
+                !in_winget_package(Path::new(other), OPENCODE_WINGET_ID),
+                "{other}"
+            );
+        }
+        assert_eq!(
+            winget_package(HarnessId::Opencode, Path::new(PACKAGE)),
+            Some(OPENCODE_WINGET_ID)
+        );
+        // Only OpenCode's WinGet package is upgraded through WinGet here.
+        assert_eq!(winget_package(HarnessId::Codex, Path::new(PACKAGE)), None);
+    }
+
+    #[test]
+    fn winget_is_found_on_path_or_as_its_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let alias = dir.path().join("Microsoft").join("WindowsApps");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&alias).unwrap();
+        let local = dir.path().as_os_str();
+        assert_eq!(winget_from(Some(bin.as_os_str()), Some(local)), None);
+        std::fs::write(alias.join("winget.exe"), "").unwrap();
+        assert_eq!(
+            winget_from(Some(bin.as_os_str()), Some(local)),
+            Some(alias.join("winget.exe"))
+        );
+        std::fs::write(bin.join("winget.exe"), "").unwrap();
+        assert_eq!(
+            winget_from(Some(bin.as_os_str()), Some(local)),
+            Some(bin.join("winget.exe"))
+        );
+    }
+
+    #[test]
+    fn winget_upgrades_without_asking() {
+        assert_eq!(
+            winget_upgrade_args(OPENCODE_WINGET_ID).join(" "),
+            "upgrade --id SST.opencode --silent --accept-package-agreements \
+             --accept-source-agreements --disable-interactivity"
+        );
+    }
+
+    /// The question can arrive split across reads.
+    #[tokio::test]
+    async fn a_refusal_is_seen_across_reads() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        let writing = tokio::spawn(async move {
+            writer
+                .write_all(b"x  opencode is installed to C:\\x and may be man")
+                .await
+                .unwrap();
+            writer.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            writer
+                .write_all(b"aged by a package manager\n")
+                .await
+                .unwrap();
+            // Then waits, as the prompt does.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let mut tail = Vec::new();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_tail_watched(&mut reader, &mut tail, OPENCODE_REFUSALS),
+        )
+        .await
+        .expect("seen without waiting for the pipe to close")
+        .unwrap_err();
+        assert!(error.get_ref().is_some_and(|inner| inner.is::<Refused>()));
+        assert!(
+            error
+                .to_string()
+                .contains("package manager that installed it")
+        );
+        writing.abort();
+    }
+
+    /// A real process that asks and then waits: stopped at once, with a
+    /// reason, instead of at the timeout.
+    #[tokio::test]
+    async fn an_updater_that_asks_is_stopped_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let script = {
+            let script = dir.path().join("opencode.cmd");
+            std::fs::write(
+                &script,
+                "@echo off\r\necho x  opencode is installed to C:\\x and may be managed by a package manager\r\necho *  Install anyways?\r\nping -n 30 127.0.0.1 >nul\r\n",
+            )
+            .unwrap();
+            script
+        };
+        #[cfg(unix)]
+        let script = {
+            use std::os::unix::fs::PermissionsExt as _;
+            let script = dir.path().join("opencode");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\necho 'x  opencode is installed to /x and may be managed by a package manager'\necho '*  Install anyways?'\nsleep 30\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script
+        };
+        let started = std::time::Instant::now();
+        let error = run_command_output_watched(
+            &script,
+            &["upgrade"],
+            Duration::from_secs(60),
+            &[],
+            updater_refusals(HarnessId::Opencode),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            error.contains("package manager that installed it"),
+            "{error}"
+        );
+        // Without the refusal it's the timeout that ends it.
+        let error =
+            run_command_output_watched(&script, &["upgrade"], Duration::from_secs(2), &[], &[])
+                .await
+                .unwrap_err();
+        assert!(error.ends_with("timed out"), "{error}");
     }
 }
