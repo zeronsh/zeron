@@ -21,6 +21,10 @@ test("Stop on a background process asks its host, and says when it couldn't", fu
 	app:command("stop_fails")
 	app:click('role:button "Stop npm run dev"')
 	app:frames(10)
+	-- Said as an alert of the composer's deck, a tab beside Running.
+	expect(app:has('role:tab "Open Alerts"')).to_be(true)
+	app:click('role:tab "Open Alerts"')
+	app:frames(30)
 	expect(app:has('~"Couldn\'t stop that process"')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
