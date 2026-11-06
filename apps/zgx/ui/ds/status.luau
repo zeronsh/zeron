@@ -140,19 +140,20 @@ local RUN, REST, FPS = 3.9, 900, 30
 -- an animation starting then would wait for that look, and leap. Still
 -- when motion is reduced.
 local function looping(props: ContainerProps, start: (el: Element) -> Animation): Node
-	-- The loop, held weakly: the engine holds it while it plays. Held here
-	-- strongly, it would hold its element, the element this node, and this
-	-- node this function: a cycle through Rust that no collector sees, and
-	-- every row with a loop would stay alive after it leaves.
-	local held = setmetatable({}, { __mode = "v" }) :: { anim: Animation? }
+	-- Whether it plays, and not the loop itself: a handle held here strongly
+	-- would hold its element, the element this node, and this node this
+	-- function, a cycle through Rust that no collector sees; held weakly, the
+	-- collector takes it while the loop plays, and nothing could stop it.
+	local playing = false
 	props.on_visible = function(visible: boolean, el: Element)
 		if visible then
-			if not held.anim and not motion.reduced_now() then
-				held.anim = start(el)
+			if not playing and not motion.reduced_now() then
+				playing = true
+				start(el)
 			end
-		elseif held.anim then
-			held.anim:cancel()
-			held.anim = nil
+		elseif playing then
+			playing = false
+			anime.utils.remove(el)
 		end
 	end
 	return ui.div(props)
