@@ -1848,8 +1848,23 @@
         "range_name": "用量范围"
       },
       "github": {
-        "terms": "连接 断开连接 账户 克隆 推送 connect disconnect account clone push",
-        "description": "Cloud 对话通过 GitHub 克隆你的仓库并推送其分支。"
+        "terms": "连接 断开连接 账户 克隆 推送 connect disconnect account clone push 其他账户 重新连接 组织 another reconnect organization login",
+        "description": "Cloud 对话通过 GitHub 克隆你的仓库并推送其分支。",
+        "connected": "已连接",
+        "needs_reconnect": "需要重新连接",
+        "needs_reconnect_description": "使用此账户的对话在重新连接前无法推送。",
+        "reconnect": "重新连接",
+        "disconnect": "断开连接",
+        "another": "其他 GitHub 账户",
+        "another_description": "例如工作账户和个人账户。每个账户都会带来它能访问的仓库。",
+        "another_action": "连接其他账户",
+        "another_hint": "GitHub 会连接浏览器当前登录的账户。如需连接其他账户，请先在 github.com 上切换账户。",
+        "already_title": "{login} 已连接",
+        "already_body": "GitHub 连接了浏览器当前登录的账户。请在 github.com 上切换账户后再次连接。",
+        "install": "其他账户或组织",
+        "install_description": "在那里安装 Zeron 应用，或更改它可访问的仓库。GitHub 会列出浏览器当前账户可以安装的位置。",
+        "forget_title": "断开 {login} 的连接？",
+        "forget_body": "使用此账户的对话会停止并显示提示，直到你重新连接它。其他对话继续使用各自的账户。新对话将使用其余账户。"
       },
       "repos": {
         "title": "仓库",

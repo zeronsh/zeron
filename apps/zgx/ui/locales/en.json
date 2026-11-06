@@ -1848,8 +1848,23 @@
         "range_name": "Usage range"
       },
       "github": {
-        "terms": "connect disconnect account clone push",
-        "description": "Cloud chats clone your repositories and push their branches through GitHub."
+        "terms": "connect disconnect account clone push another reconnect organization login",
+        "description": "Cloud chats clone your repositories and push their branches through GitHub.",
+        "connected": "Connected",
+        "needs_reconnect": "Needs reconnecting",
+        "needs_reconnect_description": "Chats using it can't push until you do.",
+        "reconnect": "Reconnect",
+        "disconnect": "Disconnect",
+        "another": "Another GitHub account",
+        "another_description": "A work and a personal login, say. Each brings the repositories it reaches.",
+        "another_action": "Connect another",
+        "another_hint": "GitHub connects whichever account your browser is signed in to. To connect a different one, switch accounts on github.com first.",
+        "already_title": "{login} is already connected",
+        "already_body": "GitHub connected the account your browser is signed in to. Switch accounts on github.com, then connect again.",
+        "install": "Another account or organization",
+        "install_description": "Install the Zeron app there, or change which repositories it covers. GitHub offers what your browser's account can install on.",
+        "forget_title": "Disconnect {login}?",
+        "forget_body": "Chats using this account stop with a message until you connect it again. Others keep their accounts. New chats use the accounts that are left."
       },
       "repos": {
         "title": "Repositories",
