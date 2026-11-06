@@ -335,6 +335,21 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 .ok_or_else(|| "not ready".to_string())
         }
     });
+    // A chat put to sleep until `until` (Unix seconds), or woken (none):
+    // synced, and its host wakes it early when it asks for you.
+    let a = s.clone();
+    host.async_action("sessions.sleep", move |args| {
+        let a = a.clone();
+        let id = args.field("id").map(text).unwrap_or_default();
+        let until = args.field("until").and_then(|v| v.as_f64()).map(|secs| (secs * 1000.0) as i64);
+        let params = json!({ "op": "setChatSleep", "chatId": id, "until": until });
+        async move {
+            if id.is_empty() {
+                return Err("missing".to_string());
+            }
+            a.mutate(params).await.map_err(String::from)
+        }
+    });
     let a = s.clone();
     host.action("sessions.seen", move |id| {
         let a = a.clone();
