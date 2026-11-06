@@ -32,8 +32,8 @@ returns:
 - Dropped after 15 minutes without a search or warm-up (`IDLE_EVICT`; a
   reaper thread checks every 60 s, so up to 16 minutes in practice).
 - At most 7 live indexes (`MAX_LIVE`); creating an eighth evicts the least
-  recently used. Each index runs its own file watcher, so the cap also bounds
-  inotify instances.
+  recently used. Each fff index runs its own file watcher, so the cap also
+  bounds inotify instances.
 - The UI warms the focused chat's index once, when the chat gains focus. There
   is no heartbeat or pinning: a focused chat left without searches for 15
   minutes loses its index and the next search (or refocus) rebuilds it.
@@ -74,6 +74,101 @@ names-only walk instead (`crates/engine/src/home_index.rs`):
 New projectless chats don't run in home at all: each gets its own folder,
 `~/.zeron/scratch/<date>-<id>` (`zeron_proto::projectless`), created by the
 host when it first runs or browses the chat.
+
+## Large plain folders
+
+A folder outside any git work tree whose walk finds more than 50,000 files
+(`MAX_LIVE_FILES`; hidden, dependency and gitignored paths don't count) gets
+the same names-only index as home, minus home's cloud and machine folder
+rules. The typical case is a folder that holds many projects, opened as a
+chat's folder. Repositories keep fff whatever their size, and so does any
+folder inside one.
+
+fff on such a folder (fff-search 0.11, reported on Windows with a
+110 GB, 1.3M-file folder of about 100 projects):
+
+- After every scan, it reads each indexed file up to 10 MB to the end to
+  tell text from binary, known binary extensions included, one file at a
+  time.
+- Outside a repository its watcher has no ignore rules but a fixed list
+  (`node_modules`, `target/debug`, …): it doesn't read the nested
+  repositories' `.gitignore` and doesn't skip hidden folders, so build
+  output (`dist/`, `.next/`, …) lands in the index's overflow. Past 1,024
+  overflow files the watcher rescans, which reads every file again; the
+  rescan throttle allows one every 30 s.
+- On Windows a write inside a folder also reports the folder itself as
+  changed. fff takes any changed folder for a new one, walks it again and
+  re-reads every file under it while holding the index's write lock, so
+  name searches wait behind it.
+
+The names-only index reads directory listings only. Telling a large folder
+apart costs one walk that stops at the limit, once per index creation.
+`MAX_LIVE` now counts home and names-only indexes too.
+
+On Windows and macOS a large plain folder's index follows changes through
+one recursive watch on the engine's `FsWatchHub` (one ReadDirectoryChangesW
+handle or FSEvents stream for the whole tree). Changed paths wait 200 ms and
+are then applied in one pass:
+
+- Each path is checked against the walk's own rules with `ignore`'s
+  `IncrementalIgnore`, which reads the nested projects' `.gitignore` files.
+  Paths in ignored, hidden or dependency folders cost no disk access.
+- A file is added, updated or removed with one stat.
+- A folder the index already lists is left alone. Windows reports a folder
+  as changed for every write inside it, and fff walks it again for that.
+- A new folder is listed once, with the same rules.
+- A changed `.gitignore` or `.ignore`, or a sign of lost events from the
+  watcher, starts a new walk in the background. Paths reported during a
+  walk are applied to its result.
+
+Linux keeps the 60 s walk: inotify needs one watch per folder, and on trees
+this size that kept a core busy (see `diff_sync::watch_targets`). Home keeps
+it on every platform.
+
+Name search uses fff's fuzzy matcher (frizbee, smart case). A path ranks by
+the better of its path score and its file name score; an empty query lists
+files by modification time, which the walk reads from the listing on
+Windows and with one stat per file elsewhere.
+
+Content search (not in home) reads the listed files when someone searches,
+most recently changed first, on up to 16 threads, and stops at the result
+limit or the 2 s budget. It skips known binary extensions, files over
+10 MB, cloud-only files, and files with a NUL byte in their first 8 KB, as
+git does. A file is read only while a search needs it, so nothing is read
+in the background.
+
+On the folder below (77,078 searchable files), a name query took 4–110 ms.
+A content search read about 9,000 files per second with a warm disk cache,
+so it covered the 18,000 most recently changed files in its 2 s and
+returned those results flagged truncated. fff's grep also opens each file
+per search here, since Zeron runs it without a content index; its speed on
+this folder was not measured.
+
+Measured on Windows 11 with a real folder of projects (25 entries, most of
+them repositories and worktrees; fff indexes 83,484 files in 12,585
+folders), release build, a 25-minute run with synthetic churn in one
+sub-project (a log appended every 100 ms, a gitignored `dist/` file every
+500 ms, 3,000 `node_modules` files created and removed every minute) and a
+`SearchFiles` call every 2 s:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Index ready | 619 s (walk 1.2 s, then the read pass) | 1.2 s (size check ≤ 0.44 s, walk 0.73 s) |
+| Bytes read by the process in 25 min | 62.7 GB | 1.0 MB |
+| Full rescans | 30 | none (no watcher) |
+| CPU once ready, per 10 s sample | 0.5–2.8 cores, 1.6 average | 0.01–0.29 cores, 0.06 average |
+| `SearchFiles` median / slowest once ready | 434 ms / 6 s (its timeout, 10 samples) | 23 ms / 64 ms |
+| Slowest 50 ms timer on the runtime | 93 ms | 104 ms |
+
+The runtime's timers were not held up in either run: index work never runs
+on it. Name searches were, behind the index's write lock. The after run
+rewalks the folder once a minute while searches keep coming (0.37–0.44 s,
+the CPU peaks above).
+
+One 10-byte file written into a 100-file `src/` folder of a plain folder
+with a live index read 13.1 MB (fff handled the folder's event twice and
+re-read the whole folder each time). Repositories and smaller plain folders
+still pay this, scaled to the folder written to.
 
 ## Measurements
 

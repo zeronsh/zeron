@@ -51,6 +51,10 @@ reqwest.workspace = true
 zeron-plugin-guard.workspace = true
 ignore.workspace = true
 fff-search.workspace = true
+# The names-only index: fff's fuzzy matcher and a literal pattern for its
+# content search (both already in the tree through fff-search).
+neo_frizbee = "0.13.3"
+regex = "1"
 
 same-file = "1"
 tempfile.workspace = true
