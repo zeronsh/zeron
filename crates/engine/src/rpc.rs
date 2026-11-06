@@ -1770,6 +1770,14 @@ impl EngineRpc {
                 }
                 Err(err)
             }
+            Err(_) if method == methods::APPLY_HARNESS_UPDATE => {
+                // Still going there (an update waits for that device's chats
+                // to finish before it starts): the link is fine, and the
+                // update's row follows how it ends.
+                Err(RpcError::Failed(
+                    "The update is still running on that device. Its row shows how it ends.".into(),
+                ))
+            }
             Err(_) => {
                 // No reply inside the deadline. The link may be a zombie — the
                 // relay's auto-pong keeps a dead host socket looking alive
@@ -2275,9 +2283,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
-        // Leave headroom beyond the provider's 15-minute mutation timeout for
-        // queueing, verification, and the relayed response itself.
-        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
+        // The updater's own limit, plus headroom for queueing behind another
+        // update, verification, and the relayed response itself.
+        methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
@@ -5893,9 +5901,10 @@ mod tests {
             forward_deadline(methods::CLONE_REPO),
             Duration::from_secs(15 * 60)
         );
-        assert_eq!(
-            forward_deadline(methods::APPLY_HARNESS_UPDATE),
-            Duration::from_secs(20 * 60)
+        // Never shorter than the updater it waits on.
+        assert!(
+            forward_deadline(methods::APPLY_HARNESS_UPDATE)
+                > crate::harness_updates::UPDATE_TIMEOUT
         );
         assert_eq!(
             forward_deadline(methods::CHECK_HARNESS_UPDATES),
