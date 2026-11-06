@@ -123,6 +123,9 @@ struct View {
     draft: Shared,
     rpc: RefCell<Option<Rpc>>,
     open: RefCell<Option<Open>>,
+    /// Prompts not yet in the engine's transcript, by chat. They outlive
+    /// the open view: a send can still be in flight while another chat shows.
+    pending: RefCell<HashMap<String, Vec<Pending>>>,
     /// Moves on every open: an older watch's frames are dropped.
     generation: Cell<u64>,
     /// A finished subagent's transcript, read whole from its uploaded blob
@@ -199,8 +202,6 @@ struct Open {
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
     queue: Vec<Json>,
-    /// Sent, not yet in the transcript: shown under it meanwhile.
-    pending: Vec<Pending>,
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
@@ -230,6 +231,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         draft: host.shared("chat.draft", draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
+        pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
     });
@@ -377,6 +379,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         draft: host.shared(&format!("chat.lane.{slot}.draft"), draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
+        pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
     });
@@ -995,6 +998,7 @@ impl View {
         self.messages.set(Value::List(Rc::from([])));
         self.draft.set(draft_value("", ""));
         self.subscribe();
+        self.publish_messages();
         self.publish_session();
         if let Some(id) = self.open_id() {
             // Its finished state seen, as the shipping app marks it.
@@ -1121,7 +1125,13 @@ impl View {
             if result.is_ok() {
                 open.heard = true;
                 let ids: Vec<&str> = open.entries.iter().filter_map(|e| e["id"].as_str()).collect();
-                open.pending.retain(|p| !ids.contains(&p.id.as_str()));
+                let mut pending = self.pending.borrow_mut();
+                if let Some(prompts) = pending.get_mut(&open.id) {
+                    prompts.retain(|p| !ids.contains(&p.id.as_str()));
+                    if prompts.is_empty() {
+                        pending.remove(&open.id);
+                    }
+                }
             }
             result
         };
@@ -1220,14 +1230,18 @@ impl View {
                     _ if running || fresh => Some(("sending", sent)),
                     _ => None,
                 };
-                if let (Some((waiting, since)), Some(shown)) = (waiting, list.pop()) {
+                if let Some((waiting, since)) = waiting
+                    && let Some(shown) = list.pop()
+                {
                     list.push(with_fields(
                         shown,
                         [("waiting", Value::from(waiting)), ("since", Value::Num(since))],
                     ));
                 }
             }
-            list.extend(open.pending.iter().map(Pending::value));
+            if let Some(pending) = self.pending.borrow().get(&open.id) {
+                list.extend(pending.iter().map(Pending::value));
+            }
             list
         };
         // The list first: a reply that ended takes its words into its row
@@ -1267,18 +1281,15 @@ impl View {
             .unwrap_or_else(new_id);
         // Shown until the transcript has it (the page's own copy kept in
         // step as the list is published again meanwhile), sending.
-        if self.open_id().as_deref() == Some(&id)
-            && let Some(open) = self.open.borrow_mut().as_mut()
-        {
-            open.pending.push(Pending {
-                id: message_id.clone(),
-                words: words.clone(),
-                paths: local_paths(&req),
-                waiting: "sending",
-                retry: None,
-                at: stamp(now_seconds()),
-            });
-        }
+        self.pending.borrow_mut().entry(id.clone()).or_default().push(Pending {
+            id: message_id.clone(),
+            words: words.clone(),
+            paths: local_paths(&req),
+            waiting: "sending",
+            retry: None,
+            at: stamp(now_seconds()),
+        });
+        self.publish_messages();
         // What it carries, uploaded to the chat's host.
         let mut paths = Vec::new();
         let mut images = 0;
@@ -1307,7 +1318,7 @@ impl View {
                 }
                 Err(why) => {
                     // Failed before it could go: the prompt says so.
-                    self.mark_failed(&message_id, None);
+                    self.mark_failed(&id, &message_id, None);
                     return Err(why);
                 }
             }
@@ -1334,14 +1345,9 @@ impl View {
             .collect();
         let words = crate::appshots::with_appshots(&words, &shots);
         let prompt = with_attachments(&words, &paths, images);
-        let forget = |me: &Rc<Self>| {
-            if let Some(open) = me.open.borrow_mut().as_mut() {
-                open.pending.retain(|p| p.id != message_id);
-            }
-        };
         if !fresh && chats.running(&id) {
             // Queued: it shows in the queue, not the transcript.
-            forget(self);
+            self.forget_pending(&id, &message_id);
             self.publish_messages();
             let mut params = json!({ "chatId": id, "text": words, "holdForTurnEnd": true });
             if !paths.is_empty() {
@@ -1360,7 +1366,7 @@ impl View {
         // parent's.)
         if fresh && config["harness"].is_null() {
             eprintln!("zeron-zgx: chat: {id}: no agent to send with (the chat isn't known here yet)");
-            self.mark_failed(&message_id, None);
+            self.mark_failed(&id, &message_id, None);
             return Err("missing");
         }
         if fresh {
@@ -1369,6 +1375,7 @@ impl View {
                 .await
                 .map_err(|e| {
                     eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
+                    self.mark_failed(&id, &message_id, None);
                     engine::outcome(&e)
                 })?;
         }
@@ -1407,7 +1414,7 @@ impl View {
         let sent = command(&id, run.clone()).await;
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
-            self.mark_failed(&message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run));
         } else if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
             // composer's pick, kept as a draft until now): the chat takes
@@ -1431,9 +1438,9 @@ impl View {
 
     /// A pending prompt that didn't go: failed, with the command that sends
     /// it again (none: it never got that far, and is sent again whole).
-    fn mark_failed(&self, message_id: &str, retry: Option<Json>) {
-        if let Some(open) = self.open.borrow_mut().as_mut()
-            && let Some(p) = open.pending.iter_mut().find(|p| p.id == message_id)
+    fn mark_failed(&self, id: &str, message_id: &str, retry: Option<Json>) {
+        if let Some(pending) = self.pending.borrow_mut().get_mut(id)
+            && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
         {
             p.waiting = "failed";
             p.retry = retry;
@@ -1441,14 +1448,27 @@ impl View {
         self.publish_messages();
     }
 
+    fn forget_pending(&self, id: &str, message_id: &str) {
+        let mut pending = self.pending.borrow_mut();
+        if let Some(prompts) = pending.get_mut(id) {
+            prompts.retain(|p| p.id != message_id);
+            if prompts.is_empty() {
+                pending.remove(id);
+            }
+        }
+    }
+
     /// A failed prompt sent again (its run as it was), sending meanwhile.
     async fn retry(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("id").map(text).unwrap_or_default();
         let message_id = args.field("message").map(text).unwrap_or_default();
+        if self.open_id().as_deref() != Some(&id) {
+            return Err("missing");
+        }
         let run = {
-            let mut slot = self.open.borrow_mut();
-            let open = slot.as_mut().filter(|o| o.id == id).ok_or("missing")?;
-            let p = open.pending.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
+            let mut pending = self.pending.borrow_mut();
+            let prompts = pending.get_mut(&id).ok_or("missing")?;
+            let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
             p.retry.clone()
         };
@@ -1456,15 +1476,13 @@ impl View {
         let Some(run) = run else {
             // It never got as far as a run (an upload failed): the composer
             // has the words; the row goes.
-            if let Some(open) = self.open.borrow_mut().as_mut() {
-                open.pending.retain(|p| p.id != message_id);
-            }
+            self.forget_pending(&id, &message_id);
             self.publish_messages();
             return Err("failed");
         };
         let sent = command(&id, run.clone()).await;
         if sent.is_err() {
-            self.mark_failed(&message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run));
         }
         self.publish_messages();
         sent
@@ -3568,6 +3586,10 @@ fn base64(bytes: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "chat_pending_tests.rs"]
+mod pending_tests;
 
 #[cfg(test)]
 mod tests {
