@@ -184,9 +184,8 @@ function M.Wallpaper(props: Props): Node
 			return ""
 		end
 		local how = effect()
-		-- (Every effect's paper but the dither's follows the scheme, as
-		-- Zeron's.)
-		local paper = if how ~= "dither" and how ~= "none" then (if light() then ":light" else ":dark") else ""
+		-- (Every effect's paper follows the scheme.)
+		local paper = if how ~= "none" then (if light() then ":light" else ":dark") else ""
 		return `{how}{paper}|{w}`
 	end
 	local function strength(): number
@@ -234,7 +233,7 @@ function M.Wallpaper(props: Props): Node
 			x = props.beside,
 			overflow = "hidden",
 			provide = props.provide,
-			layer_shader = effects.SHADERS[how] or effects.SHADERS.none,
+			layer_shader = effects.shader(how),
 			layer_params = effects.params {
 				strength = strength(),
 				threshold = threshold(),
