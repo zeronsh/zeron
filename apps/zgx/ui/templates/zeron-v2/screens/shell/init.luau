@@ -132,6 +132,14 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	-- Check for Updates…: Settings' About & updates, checking now.
+	runs["shell.check_updates"] = function()
+		route.settings("about")
+		local about: any = boundary.load("@app/screens/settings/about")
+		if about and about.check then
+			about.check()
+		end
+	end
 	runs["shell.toggle_sidebar"] = function()
 		fit.toggle_sidebar()
 	end
@@ -307,6 +315,9 @@ return function(): Node
 					run()
 				end,
 			}
+			if k.rule then
+				ui.command { separator = true, menu = k.menu }
+			end
 		end
 	end
 
