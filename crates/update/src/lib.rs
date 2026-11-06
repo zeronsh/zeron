@@ -1199,13 +1199,77 @@ fn in_service_cgroup(cgroups: &str, unit: &str) -> bool {
         .any(|path| path.split('/').any(|part| part == unit))
 }
 
+/// A Cloud machine's engine: a *system* unit the installer enables
+/// (edge/src/cloud/install-script.ts), because enabled system units are what a
+/// sandbox provider starts again on resume.
+pub const CLOUD_SERVICE_UNIT: &str = "zeron-cloud.service";
+
 /// The systemd unit this engine runs as. `ZERON_SERVICE_UNIT` names another, so
-/// a test install beside a real one can never restart the real one.
+/// a test install beside a real one can never restart the real one. A Cloud
+/// machine says so in its environment (`ZERON_DEVICE_PLATFORM=cloud`, written
+/// by the installer on every machine, so machines already out there need no
+/// reinstall).
 pub fn service_unit() -> String {
-    std::env::var("ZERON_SERVICE_UNIT")
-        .ok()
-        .filter(|unit| !unit.trim().is_empty())
-        .unwrap_or_else(|| "zeron.service".to_owned())
+    resolve_service_unit(
+        std::env::var("ZERON_SERVICE_UNIT").ok().as_deref(),
+        std::env::var("ZERON_DEVICE_PLATFORM").ok().as_deref(),
+    )
+}
+
+fn resolve_service_unit(unit: Option<&str>, platform: Option<&str>) -> String {
+    match unit.filter(|unit| !unit.trim().is_empty()) {
+        Some(unit) => unit.to_owned(),
+        None if platform == Some("cloud") => CLOUD_SERVICE_UNIT.to_owned(),
+        None => "zeron.service".to_owned(),
+    }
+}
+
+/// Which service manager holds a unit, and so how to talk to it. Worked out
+/// from the unit's name, because an update request names only that, and the
+/// watchdog acting on one may run a version later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceScope {
+    /// The login user's manager: `zeron daemon` and the curl|sh installer.
+    User,
+    /// The system manager: a Cloud machine, whose engine is an unprivileged
+    /// user with passwordless sudo.
+    System,
+}
+
+impl ServiceScope {
+    pub fn of(unit: &str) -> Self {
+        if unit == CLOUD_SERVICE_UNIT {
+            Self::System
+        } else {
+            Self::User
+        }
+    }
+}
+
+/// `systemctl` asking the unit's manager to do something.
+pub fn systemctl_action(unit: &str) -> std::process::Command {
+    match ServiceScope::of(unit) {
+        ServiceScope::User => {
+            let mut command = std::process::Command::new("systemctl");
+            command.arg("--user");
+            command
+        }
+        ServiceScope::System => {
+            let mut command = std::process::Command::new("sudo");
+            // Never wait on a password: nobody is there to type one.
+            command.args(["-n", "systemctl"]);
+            command
+        }
+    }
+}
+
+/// `systemctl` reading the unit's state, which takes no privilege.
+pub fn systemctl_query(unit: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("systemctl");
+    if ServiceScope::of(unit) == ServiceScope::User {
+        command.arg("--user");
+    }
+    command
 }
 
 /// Restart the installed engine service (the same units `zeron daemon` and the
@@ -1233,8 +1297,8 @@ pub fn restart_service() -> anyhow::Result<()> {
 /// be killed by the very restart it asked for. Killed isn't refused: only an exit
 /// status says it didn't work.
 fn ask_systemd_to_restart(unit: &str) -> anyhow::Result<()> {
-    let output = std::process::Command::new("systemctl")
-        .args(["--user", "--no-block", "restart", unit])
+    let output = systemctl_action(unit)
+        .args(["--no-block", "restart", unit])
         .output()
         .context("running systemctl")?;
     restart_outcome(output.status.code(), &output.stderr)
@@ -2287,6 +2351,43 @@ mod tests {
         let cgroups = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zeron.service\n";
         assert!(in_service_cgroup(cgroups, "zeron.service"));
         assert!(!in_service_cgroup(cgroups, "zeron-test.service"));
+    }
+
+    /// Cloud runs a system unit of its own; every other install a user one.
+    #[test]
+    fn a_cloud_machine_restarts_its_own_system_unit() {
+        let cloud = resolve_service_unit(None, Some("cloud"));
+        assert_eq!(cloud, CLOUD_SERVICE_UNIT);
+        assert_eq!(ServiceScope::of(&cloud), ServiceScope::System);
+        assert!(in_service_cgroup(
+            "0::/system.slice/zeron-cloud.service\n",
+            &cloud
+        ));
+
+        let action = systemctl_action(&cloud);
+        assert_eq!(action.get_program(), "sudo");
+        assert_eq!(
+            action.get_args().collect::<Vec<_>>(),
+            ["-n", "systemctl"],
+            "never --user: that's where it logged \"service restart failed\""
+        );
+        let query = systemctl_query(&cloud);
+        assert_eq!(query.get_program(), "systemctl");
+        assert_eq!(query.get_args().count(), 0);
+
+        let laptop = resolve_service_unit(None, None);
+        assert_eq!(laptop, "zeron.service");
+        assert_eq!(ServiceScope::of(&laptop), ServiceScope::User);
+        let action = systemctl_action(&laptop);
+        assert_eq!(action.get_program(), "systemctl");
+        assert_eq!(action.get_args().collect::<Vec<_>>(), ["--user"]);
+
+        // A test install's own unit wins, on Cloud too.
+        assert_eq!(
+            resolve_service_unit(Some("zeron-test.service"), Some("cloud")),
+            "zeron-test.service"
+        );
+        assert_eq!(resolve_service_unit(Some("  "), None), "zeron.service");
     }
 
     /// Inside the unit, the restart kills the `systemctl` that asked for it.
