@@ -159,6 +159,11 @@ local send_fails = ui.state("test_send_fails", false)
 stub_store.send = function(req: any): any
 	note(`send:{req.session}:{req.text}{if req.fresh then ":fresh" else ""}`)
 	note(`pick:{req.session}:{req.model or ""}:{req.harness or ""}:{req.effort or ""}:{req.access or ""}{if req.worktree then ":worktree" else ""}`)
+	-- (What it carries, each by its name, `@` if it's on the chat's computer
+	-- already.)
+	for _, a in req.attachments or {} do
+		note(`attach:{req.session}:{a.kind}:{a.name}{if a.on_host then "@" else ""}`)
+	end
 	if send_fails:peek() then
 		-- (Refused a beat later, as the host answers.)
 		return {
@@ -283,6 +288,17 @@ return ui.row {
 		p = "$space.3",
 		gap = "$space.4",
 		lanes.Card(),
+		-- What's carried onto a side chat from elsewhere in the window: a
+		-- sidebar session, the files pane's files.
+		ui.row {
+			gap = "$space.2",
+			ui.div { id = "carry-session", w = 40, h = 20, on_drag = function(): any
+				return { session = "chat-1" }
+			end },
+			ui.div { id = "carry-paths", w = 40, h = 20, on_drag = function(): any
+				return { paths = { "src/lib.rs" }, root = "/proj" }
+			end },
+		},
 		-- The transcript's spawn chips (a live group: open), each opening
 		-- its subagent's lane.
 		ui.column {

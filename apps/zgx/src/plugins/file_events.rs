@@ -16,6 +16,17 @@ use std::{
     },
 };
 
+/// How many descriptors this process may have open.
+fn open_files_limit() -> usize {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: `limit` is a valid rlimit for the call to write.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur.min(1 << 20) as usize
+    } else {
+        256
+    }
+}
+
 pub struct FileEvents {
     /// The queue, shared with its thread: it closes when both have let go,
     /// so neither uses its number after the other closed it.
@@ -125,9 +136,16 @@ impl FileEvents {
         }
         // Closing a descriptor drops what watched it.
         self.fds.clear();
+        // Never all there are: past this, what isn't watched is only seen late,
+        // where a process out of descriptors can't open anything at all.
+        let most = open_files_limit() / 2;
         let file = libc::NOTE_WRITE | libc::NOTE_EXTEND | libc::NOTE_ATTRIB | libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE;
         let dir = libc::NOTE_WRITE | libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE;
         for (path, notes) in wanted.0.iter().map(|p| (p, file)).chain(wanted.1.iter().map(|d| (d, dir))) {
+            if self.fds.len() >= most {
+                eprintln!("zeron-zgx: templates: watching only the first {most} files");
+                break;
+            }
             let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
                 continue;
             };

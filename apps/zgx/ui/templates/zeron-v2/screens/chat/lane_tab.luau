@@ -24,6 +24,9 @@ local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+local Carried = require("@app/screens/chat/carried")
+local Appshots = require("@app/screens/chat/appshots")
+local DropOverlay = require("@ds/drop_overlay")
 
 -- What its tab says, and its icon, as the shipping app's.
 local M = {}
@@ -53,11 +56,17 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
 	local draft = ui.state(`chat_lane_draft_{chat}`, "")
+	-- Its draft's chips: one draft's per chat (screens/chat/shared), wherever
+	-- it's kept.
+	local carried = ui.use_state({} :: { any })
+	ui.effect(function()
+		carried:set(Shared.cargo_of(chat))
+	end)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
 	local running = ui.computed(function(): boolean
@@ -275,6 +284,32 @@ local function composer(chat: string, view: any, name: string): Node
 		end)
 		else nil
 	return ds.Composer {
+		cargo = carried,
+		-- (Its chips' × under the pointer, as the chat page's.)
+		on_remove_cargo = function(cid: string)
+			Shared.remove_cargo_of(chat, cid)
+		end,
+		-- (What's dropped on it is its tab's to take, under its own overlays.)
+		drop_overlay = false,
+		-- Its + and a picture pasted: chips on its own draft, as the chat page's.
+		on_attach = function()
+			ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
+				if files and #files > 0 then
+					Shared.attach_files(files, chat)
+					focus:add(1)
+				end
+			end, function() end)
+		end,
+		on_paste_image = function(): boolean
+			store.paste_image():after(function(path: string?)
+				if type(path) == "string" and path ~= "" then
+					Shared.attach_files({ { name = "image.png", path = path } }, chat)
+					focus:add(1)
+				end
+			end, function() end)
+			return true
+		end,
+		focus = focus,
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
 		placeholder = locale.s("chat.lane_tab.placeholder"),
@@ -316,7 +351,7 @@ local function composer(chat: string, view: any, name: string): Node
 		branch_fixed = branch_fixed,
 		on_send = function(text: string)
 			local words = string.match(text, "^%s*(.-)%s*$") or ""
-			if words == "" then
+			if words == "" and #carried:peek() == 0 then
 				return
 			end
 			-- (Nowhere it can start, a project gone: the line says why.)
@@ -327,6 +362,10 @@ local function composer(chat: string, view: any, name: string): Node
 			end
 			draft:set("")
 			notice:set(nil)
+			-- What it carries goes with it, as the chat page's does.
+			local chips = Shared.take_cargo_of(chat)
+			local pack = Carried.pack(chips, words, words)
+			local prompt = Carried.text(pack.typed, pack)
 			-- As the chat page sends: the prompt joins its transcript as the
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
@@ -334,23 +373,26 @@ local function composer(chat: string, view: any, name: string): Node
 			local mid = store.new_id()
 			local req = picks()
 			req.message_id = mid
+			req.attachments = pack.attachments
+			req.appshots = Appshots.of_cargo(chips)
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
 					-- (On its way from this moment: the line under it says so.)
-					view.messages:push { id = mid, role = "user", text = words, waiting = "sending" }
+					view.messages:push { id = mid, role = "user", text = pack.typed, attachments = Carried.shown(pack), waiting = "sending" }
 				end
 			end, mid, name)
 			-- Its first message makes it (New side chat), then sends.
 			if is_unsent then
-				sent = lanes.send_first(chat, words, req, place())
+				sent = lanes.send_first(chat, prompt, req, place())
 			else
-				req.session, req.text = chat, words
+				req.session, req.text = chat, prompt
 				sent = store.send(req :: any)
 			end
 			sent:after(function() end, function(err: any)
 				draft:set(words)
+				Shared.restore_cargo_of(chat, chips)
 				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
 				notice:set({
 					tone = "danger",
@@ -399,6 +441,13 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local slot, chat = tab.id, tab.chat
 	local data = tab.data or {}
 	local view = lanes.view(slot)
+	-- Files, and the files pane's, carried over it, dropped anywhere on it, as
+	-- on the chat page: chips on its own draft (a sidebar chat, mentioned), its
+	-- composer taking the keys.
+	local focus = ui.use_state(0)
+	local zone, carrying, carrying_session = Shared.own_drop_zone(`lane.{slot}`, chat, function()
+		focus:add(1)
+	end)
 	-- What the tab is now: a fork under way or failed, or its chat (a new
 	-- side chat's not yet made, until its first message).
 	local kind = ui.computed(function(): string
@@ -534,7 +583,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 			-- As the chat page: the transcript to the composer's footer line,
 			-- running on behind the composer, which floats at the foot.
-			return ui.column {
+			local body: { [any]: any } = {
 				grow = 1,
 				w_full = true,
 				min_h = 0,
@@ -546,8 +595,14 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					pb = Dock.page_pad(),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
-				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`), id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus), id = `lane-composer-{slot}` },
 			}
+			for k, v in zone do
+				body[k] = v
+			end
+			table.insert(body, DropOverlay { shown = carrying, id = `lane-drop-{slot}` })
+			table.insert(body, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+			return ui.column(body :: any)
 		end, { grow = 1, w_full = true, min_h = 0 }),
 	}
 end)

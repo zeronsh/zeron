@@ -139,7 +139,30 @@ enum Screen {
     Fixture(String),
 }
 
+/// Room for open files. An app the Finder starts is given 256, which its pictures,
+/// scripts, sockets and file watches can use up, and then nothing can be opened:
+/// no icon, no lazily loaded screen, no template. (A shell usually gives far more,
+/// so a build started from one never shows it.)
+#[cfg(unix)]
+fn raise_open_files() {
+    // macOS refuses more than this however high the hard limit reads (`OPEN_MAX`).
+    const WANTED: libc::rlim_t = 10_240;
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: `limit` is a valid rlimit for each call to read or write.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 || limit.rlim_cur >= WANTED {
+            return;
+        }
+        limit.rlim_cur = WANTED.min(limit.rlim_max);
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+            eprintln!("zeron-zgx: couldn't raise the open file limit: {}", std::io::Error::last_os_error());
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    raise_open_files();
     // A terminal tab's bridge (src/terminal.rs): this binary, run by zgx's
     // terminal, passing a shell's bytes to and from the engine.
     let argv: Vec<String> = std::env::args().collect();
