@@ -396,4 +396,34 @@ mod tests {
         let _: Value = gated;
         core.sessions.shutdown().await;
     }
+
+    /// An agent says what its OWN chat waits on: whatever chat it names, the
+    /// mark is pinned to the one its MCP server runs in; one that runs in
+    /// none can't mark any. Sleep is the person's: no agent sets it.
+    #[tokio::test]
+    async fn an_agent_marks_only_its_own_chat_as_waiting_and_never_sleeps_one() {
+        let (_temp, core) = core().await;
+        let rpc = core.rpc_service();
+        let gated = with_caller(agent("mine"), async {
+            rpc.agent_gate(
+                methods::AWAIT_BACKGROUND,
+                json!({"chatId":"someone-elses", "taskIds":["bn1"], "waiting": true}),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(gated["chatId"], "mine");
+        assert_eq!(gated["taskIds"], json!(["bn1"]));
+        let refused = with_caller(Caller::Agent { chat: None }, async {
+            rpc.agent_gate(methods::AWAIT_BACKGROUND, json!({"chatId":"any", "taskIds":["bn1"]}))
+        })
+        .await;
+        assert!(refused.is_err());
+        let sleep = with_caller(agent("mine"), async {
+            rpc.agent_gate(methods::MUTATE, json!({"op":"setChatSleep", "chatId":"mine", "until": 1}))
+        })
+        .await;
+        assert!(sleep.is_err(), "sleep is the person's to set");
+        core.sessions.shutdown().await;
+    }
 }
