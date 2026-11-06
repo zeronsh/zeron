@@ -205,6 +205,7 @@ export type Props = {
 	tasks: State<{ dock.Task }>?,
 	on_stop_task: ((id: string) -> ())?,
 	on_stop_all: (() -> ())?,
+	on_open_task: ((id: string) -> ())?,
 	tray: State<dock.Tray?>?,
 
 	-- What the agent asks: a question (its chosen options kept by the
@@ -2316,6 +2317,7 @@ return ui.component(function(props: Props): Node
 			tasks = props.tasks,
 			on_stop_task = props.on_stop_task,
 			on_stop_all = props.on_stop_all,
+			on_open_task = props.on_open_task,
 			open = props.tray,
 			narrow = narrow,
 		}

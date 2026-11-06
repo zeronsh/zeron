@@ -48,3 +48,35 @@ test("a background process outlives the turn: its tray stays as the turn ends", 
 	expect(app:state("calls")).to_contain("stop_task:s2:bg1")
 	expect(app:error()).to_be(nil)
 end)
+
+test("a chat's subagents run in the Running tray, and a row opens its subagent", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("go_s2")
+	app:frames(30)
+	-- None yet: no tray.
+	expect(app:has('role:button "Open Running"')).to_be(false)
+	app:command("subagents_running")
+	app:command("task_running")
+	app:frames(30)
+	-- Two agents and a process run: the header says so, naming an agent
+	-- first, not the process's command.
+	expect(app:has('role:button "Open Running"')).to_be(true)
+	expect(app:has('~"2 agents · 1 process · scan the repo"')).to_be(true)
+	app:click('role:button "Open Running"')
+	app:frames(30)
+	-- A row opens its subagent in the session's panel; an agent has no Stop.
+	expect(app:has('role:button "Stop npm run dev"')).to_be(true)
+	expect(app:has('role:button "Stop scan the repo"')).to_be(false)
+	app:click('role:button "Open read the docs"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_subagent:s2:d2")
+	-- The one that finished is folded apart, and opens from there.
+	expect(app:has('role:button "Open find the flaky test"')).to_be(false)
+	app:click('role:button "Show 1 finished"')
+	app:frames(30)
+	app:click('role:button "Open find the flaky test"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_subagent:s2:d3")
+	expect(app:error()).to_be(nil)
+end)

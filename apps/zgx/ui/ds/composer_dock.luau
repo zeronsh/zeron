@@ -24,7 +24,12 @@
 -- the turn is live), pending; a long plan folds to the step in progress and
 -- its neighbours, "N earlier" and "N later" opening the rest. What is
 -- running is ours: a row a task or terminal, how long it has run, Stop at
--- its end, Stop all in the header.
+-- its end, Stop all in the header. The chat's subagents run in the same
+-- tray (`kind = "agent"`): a row with its title that opens it
+-- (`on_open_task`), no Stop; those done fold behind "N finished", and the
+-- header counts what runs and leads with an agent's name over a command's.
+-- A list longer than the trays' cap scrolls, its edges fading as there is
+-- more past them.
 
 local Icon = require("@self/icon")
 local IconButtonModule = require("@self/icon_button")
@@ -59,8 +64,10 @@ export type Task = {
 	detail: string?,
 	-- When it started, in `os.time()` seconds.
 	since: number?,
-	-- Done: how it ended ("exited 0").
+	-- Done: how it ended ("exited 0", a subagent's "done").
 	ended: string?,
+	-- A subagent that ended badly: its mark says so.
+	failed: boolean?,
 }
 export type Tray = "todos" | "tasks" | "queue"
 export type Props = {
@@ -81,6 +88,9 @@ export type Props = {
 	tasks: State<{ Task }>?,
 	on_stop_task: ((id: string) -> ())?,
 	on_stop_all: (() -> ())?,
+	-- A subagent's row opens it (a tab of the panel). Its row is a plain
+	-- listing without this.
+	on_open_task: ((id: string) -> ())?,
 	-- Which tray is open; the dock keeps its own when not given.
 	open: State<Tray?>?,
 	-- Short of room: rows lose their thumbnails, actions become glyphs.
@@ -125,8 +135,24 @@ end
 -- reload) opens at it from its first frame rather than growing open again.
 local SEEN = ui.state("composer_tray_heights", {} :: { [string]: number })
 
+-- How deep a tray list's edges fade: each as far as there is more past it
+-- that way, up to this, easing in with the scroll rather than popping on.
+local FADE_DEPTH = 16
+
+-- A scroll's edge fades (the sidebar's `edge_fades`, ds/sidebar): the top as
+-- deep as it is scrolled, the bottom as deep as there is left to scroll,
+-- each up to `depth`; none at either end. (`over`: how far the content runs
+-- past its view.)
+local function edge_fades(offset: State<number>, over: () -> number, depth: number): () -> { number }
+	return function(): { number }
+		local o = offset:get()
+		return { math.min(o, depth), math.min(math.max(0, over() - o), depth) }
+	end
+end
+
 local function folding(open: () -> boolean, cap: number, body: Node, key: string): Node
 	local inner = ui.ref()
+	local offset = ui.use_state(0)
 	local function want(): number
 		local h = inner.height or 0
 		if h <= 0 then
@@ -176,9 +202,10 @@ local function folding(open: () -> boolean, cap: number, body: Node, key: string
 				return not laid:get()
 			end,
 			overscroll = "contain",
-			fade = function()
-				return { 0, if (inner.height or 0) > cap then 16 else 0 }
-			end,
+			offset = offset,
+			fade = edge_fades(offset, function(): number
+				return math.max(0, (inner.height or 0) - want())
+			end, FADE_DEPTH),
 			ui.column {
 				ref = inner,
 				w_full = true,
@@ -200,8 +227,9 @@ end
 type Head = {
 	id: Tray,
 	glyph: Node,
-	-- (Its title's message's key.)
-	title: string,
+	-- (Its title's message's key, or a function giving one: a tray whose
+	-- title follows what it holds.)
+	title: string | () -> string,
 	count: (() -> string)?,
 	summary: (() -> string)?,
 	trail: { Node }?,
@@ -210,10 +238,16 @@ local function head(opts: Head, open: State<Tray?>, height: number): Node
 	local function is_open(): boolean
 		return open:get() == opts.id
 	end
+	local function title_key(): string
+		local t = opts.title
+		return if type(t) == "function" then t() else t
+	end
 	local parts: { Child } = {
 		ui.div { w = 18, h = 18, shrink = 0, items = "center", justify = "center", color = "$text.secondary", opts.glyph },
 		ui.text {
-			locale.t(opts.title),
+			function(): string
+				return locale.s(title_key())
+			end,
 			shrink = 0,
 			text_size = "$font.size.md",
 			weight = "$font.weight.medium",
@@ -274,7 +308,7 @@ local function head(opts: Head, open: State<Tray?>, height: number): Node
 		cursor = "pointer",
 		role = "button",
 		label = function()
-			return locale.s(if is_open() then "ds.composer_dock.fold" else "ds.composer_dock.open", { title = locale.s(opts.title) })
+			return locale.s(if is_open() then "ds.composer_dock.fold" else "ds.composer_dock.open", { title = locale.s(title_key()) })
 		end,
 		expanded = is_open,
 		hover = { bg = "$hover" },
@@ -654,13 +688,22 @@ local function fold_row(count: () -> number, later: boolean, on_click: () -> ())
 end
 
 -- A running task or terminal: its glyph, its name, a word on it, how long,
--- and Stop.
+-- and Stop. A subagent's is its mark (working, or how it ended), its title
+-- and, ended, how; with `on_open_task` the whole row opens it, and it has no
+-- Stop (the host stops a process, not a subagent).
 local function task_row(t: Task, row: State<Task>, now: State<number>, props: Props, height: number): Node
 	local function ended(): boolean
 		return row:get().ended ~= nil
 	end
-	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif t.kind == "agent" then "bot" else "action-play"
-	return ui.row {
+	local agent = t.kind == "agent"
+	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "bot" else "action-play"
+	local opens = agent and props.on_open_task ~= nil
+	local function open()
+		if props.on_open_task then
+			props.on_open_task(t.id)
+		end
+	end
+	local p: { [any]: any } = {
 		h = height,
 		pl = "$space.2",
 		pr = "$space.1",
@@ -668,8 +711,17 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		items = "center",
 		-- Concentric with the tray, as its head is.
 		rounded = "$zeron.composer.tray.row_radius",
-		role = "listitem",
+		role = if opens then "button" else "listitem",
 		hover = { bg = "$hover" },
+	}
+	if opens then
+		p.label = locale.t("ds.composer_dock.open_agent", { name = t.name })
+		p.cursor = "pointer"
+		p.focus = control.ring
+		p.active = { bg = "$pressed" }
+		p.on_click = open
+	end
+	local parts: { Child } = {
 		ui.div {
 			w = 18,
 			h = 18,
@@ -679,17 +731,24 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 			color = function()
 				return if ended() then "$text.tertiary" else "$text.secondary"
 			end,
-			ui.show(function()
-				return not ended() and t.kind == "agent"
-			end, status.StatusIcon { kind = "working", size = 14 }, Icon { name = glyph, size = 14 }),
+			if agent
+				then ui.switch(function(): string
+					local r = row:get()
+					return if not r.ended then "working" elseif r.failed then "failed" else "done"
+				end, {
+					working = status.StatusIcon { kind = "working", size = 14 },
+					done = status.StatusIcon { kind = "done", size = 14 },
+					failed = status.StatusIcon { kind = "failed", size = 14 },
+				})
+				else Icon { name = glyph, size = 14 },
 		},
 		FadeText {
 			t.name,
 			literal = true,
 			shrink = 1,
 			min_w = 48,
-			font = if t.kind == "agent" then nil else "$font.mono",
-			text_size = if t.kind == "agent" then "$font.size.md" else "$font.size.sm",
+			font = if agent then nil else "$font.mono",
+			text_size = if agent then "$font.size.md" else "$font.size.sm",
 			color = function()
 				return if ended() then "$text.tertiary" else "$text.primary"
 			end,
@@ -714,23 +773,75 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 			text_size = "$font.size.xs",
 			color = "$text.tertiary",
 		},
-		ui.show(
-			function()
-				return not ended()
-			end,
-			IconButton {
-				icon = "stop",
-				label = locale.t("ds.composer_dock.stop_named", { name = t.name }),
-				tooltip = locale.s("ds.composer_dock.stop"),
-				size = "sm",
-				tone = "quiet",
-				on_click = function()
-					if props.on_stop_task then
-						props.on_stop_task(t.id)
-					end
+	}
+	if not agent then
+		table.insert(
+			parts,
+			ui.show(
+				function()
+					return not ended()
 				end,
-			}
-		),
+				IconButton {
+					icon = "stop",
+					label = locale.t("ds.composer_dock.stop_named", { name = t.name }),
+					tooltip = locale.s("ds.composer_dock.stop"),
+					size = "sm",
+					tone = "quiet",
+					on_click = function()
+						if props.on_stop_task then
+							props.on_stop_task(t.id)
+						end
+					end,
+				}
+			)
+		)
+	else
+		-- (Room where a process's Stop is, so the rows' ends line up.)
+		table.insert(parts, ui.div { w = 6, shrink = 0 })
+	end
+	for _, c in parts do
+		table.insert(p, c)
+	end
+	return ui.row(p)
+end
+
+-- "3 finished": a row that opens the subagents that are done, or folds them.
+local function finished_row(count: () -> number, open: () -> boolean, on_click: () -> ()): Node
+	return ui.row {
+		h = 28,
+		px = "$space.2",
+		gap = "$space.2",
+		items = "center",
+		cursor = "pointer",
+		rounded = "$zeron.composer.tray.row_radius",
+		hover = { bg = "$hover" },
+		active = { bg = "$pressed" },
+		focus = control.ring,
+		role = "button",
+		expanded = open,
+		label = function()
+			return locale.s(if open() then "ds.composer_dock.hide_finished" else "ds.composer_dock.show_finished", { n = count() })
+		end,
+		on_click = on_click,
+		ui.div { w = 18, shrink = 0, items = "center", justify = "center", color = "$text.tertiary", Icon { name = "check-circle", size = 14 } },
+		ui.text {
+			function()
+				return locale.s("ds.composer_dock.n_finished", { n = count() })
+			end,
+			text_size = "$font.size.sm",
+			color = "$text.tertiary",
+		},
+		ui.div { grow = 1 },
+		ui.div {
+			shrink = 0,
+			color = "$text.tertiary",
+			Icon {
+				name = function(): Icon.Name
+					return if open() then "alt-arrow-up" else "alt-arrow-down"
+				end,
+				size = 12,
+			},
+		},
 	}
 end
 
@@ -763,8 +874,20 @@ M.Dock = ui.component(function(props: Props): Node
 	local function has_todos(): boolean
 		return props.todos ~= nil and #props.todos:get() > 0
 	end
+	-- Tasks show while any runs. Once none does, the tray stays only for
+	-- whoever has it open (what just finished, a subagent to go back to,
+	-- stays in reach); folded, it goes.
 	local function has_tasks(): boolean
-		return props.tasks ~= nil and #props.tasks:get() > 0
+		if props.tasks == nil then
+			return false
+		end
+		local list = props.tasks:get()
+		for _, t in list do
+			if not t.ended then
+				return true
+			end
+		end
+		return #list > 0 and open:get() == "tasks"
 	end
 	-- Each tray's level: how many trays sit between it and the pill, and one.
 	local function queue_level(): number
@@ -960,6 +1083,10 @@ M.Dock = ui.component(function(props: Props): Node
 	if props.tasks then
 		local tasks = props.tasks
 		local now = ui.use_state(os.time())
+		-- Whether the subagents that are done are listed (they fold behind
+		-- one row while anything else runs; with nothing running they are
+		-- the list).
+		local show_finished = ui.use_state(false)
 		local function running(): { Task }
 			local out: { Task } = {}
 			for _, t in tasks:get() do
@@ -968,6 +1095,20 @@ M.Dock = ui.component(function(props: Props): Node
 				end
 			end
 			return out
+		end
+		-- A subagent that is done folds; a process that ended stays where
+		-- it was (it goes from the list soon, as it was stopped).
+		local function folds(t: Task): boolean
+			return t.kind == "agent" and t.ended ~= nil
+		end
+		local function finished_count(): number
+			local n = 0
+			for _, t in tasks:get() do
+				if folds(t) then
+					n += 1
+				end
+			end
+			return n
 		end
 		-- The clock ticks only while something runs (a timer made in an
 		-- effect belongs to its run, and stops as it runs again).
@@ -983,11 +1124,32 @@ M.Dock = ui.component(function(props: Props): Node
 				now:set(os.time())
 			end)
 		end)
+		-- The folded line. A subagent's title says more than a command, so
+		-- with any running it leads, after how many of each there are:
+		-- "3 agents · 2 processes · scan the repo". Processes alone keep
+		-- their line: "cargo test · 2m 14s · 2 more".
 		local function summary(): string
 			local list = running()
 			local first = list[1]
 			if not first then
 				return locale.s("ds.composer_dock.nothing_running")
+			end
+			local agents, processes, lead = 0, 0, nil :: Task?
+			for _, t in list do
+				if t.kind == "agent" then
+					agents += 1
+					lead = lead or t
+				else
+					processes += 1
+				end
+			end
+			if agents > 0 then
+				local parts = { locale.s("ds.composer_dock.agents", { n = agents }) }
+				if processes > 0 then
+					table.insert(parts, locale.s("ds.composer_dock.processes", { n = processes }))
+				end
+				table.insert(parts, (lead :: Task).name)
+				return table.concat(parts, " · ")
 			end
 			local s = first.name
 			if first.since then
@@ -1014,10 +1176,45 @@ M.Dock = ui.component(function(props: Props): Node
 				end,
 			}))
 		end
+		-- The rows: what runs, in the order given, then the subagents that
+		-- are done behind "N finished" (listed outright when nothing else
+		-- runs, as they are all there is).
+		type Listed = { kind: "task", task: Task } | { kind: "finished" }
+		local shown = ui.computed(function(): { Listed }
+			local out: { Listed } = {}
+			local done: { Task } = {}
+			for _, t in tasks:get() do
+				if folds(t) then
+					table.insert(done, t)
+				else
+					table.insert(out, { kind = "task", task = t } :: Listed)
+				end
+			end
+			if #done > 0 then
+				local alone = #out == 0
+				if not alone then
+					table.insert(out, { kind = "finished" } :: Listed)
+				end
+				if alone or show_finished:get() then
+					for _, t in done do
+						table.insert(out, { kind = "task", task = t } :: Listed)
+					end
+				end
+			end
+			return out
+		end)
 		local body = ui.column {
 			w_full = true,
 			pb = "$space.1",
-			ui.each(tasks, function(t: Task): Node
+			ui.each(shown, function(item: Listed): Node
+				if item.kind == "finished" then
+					return finished_row(finished_count, function(): boolean
+						return show_finished:get()
+					end, function()
+						show_finished:set(not show_finished:peek())
+					end)
+				end
+				local t = item.task
 				-- The row follows its task (zgx's animated rows get no state
 				-- of their own): found in the list by its id.
 				local row = ui.computed(function(): Task
@@ -1030,8 +1227,8 @@ M.Dock = ui.component(function(props: Props): Node
 				end)
 				return task_row(t, row, now, props, geometry.row)
 			end, {
-				key = function(t: Task): string
-					return t.id
+				key = function(item: Listed): string
+					return if item.kind == "finished" then "\0finished" else item.task.id
 				end,
 				animate = { duration = 220, ease = "outCubic" },
 				enter = { opacity = { 0, 1 }, y = { -4, 0 }, duration = 200, ease = "outCubic" },
@@ -1045,9 +1242,13 @@ M.Dock = ui.component(function(props: Props): Node
 				tray(tasks_level, head({
 					id = "tasks",
 					glyph = Icon { name = "action-play", size = 16 },
-					title = "ds.composer_dock.running",
+					-- (Nothing running, the tray held open: what finished.)
+					title = function(): string
+						return if #running() > 0 then "ds.composer_dock.running" else "ds.composer_dock.finished"
+					end,
 					count = function()
-						return tostring(#running())
+						local n = #running()
+						return tostring(if n > 0 then n else finished_count())
 					end,
 					summary = summary,
 					trail = trail,

@@ -505,6 +505,42 @@ local GROUPS: { Group } = {
 				end,
 			},
 			{
+				id = "subagents_1",
+				label = "1 subagent",
+				apply = function()
+					turn:set("running")
+					tasks:set(data.subagents(1))
+					tray:set(nil)
+				end,
+			},
+			{
+				id = "subagents_3",
+				label = "3 subagents",
+				apply = function()
+					turn:set("running")
+					tasks:set(data.subagents(3))
+					tray:set(nil)
+				end,
+			},
+			{
+				id = "subagents_10",
+				label = "10 subagents, open",
+				apply = function()
+					turn:set("running")
+					tasks:set(data.subagents(10))
+					tray:set("tasks")
+				end,
+			},
+			{
+				id = "subagents_50",
+				label = "50 subagents, open",
+				apply = function()
+					turn:set("running")
+					tasks:set(data.subagents(50))
+					tray:set("tasks")
+				end,
+			},
+			{
 				id = "everything",
 				label = "Everything at once",
 				apply = function()
@@ -938,6 +974,9 @@ local page: Page = {
 							end,
 							on_stop_all = function()
 								tasks:set({})
+							end,
+							on_open_task = function(id: string)
+								notice:set({ tone = "info", text = `Opened subagent {id}`, dismissable = true })
 							end,
 							question = question,
 							chosen = chosen,

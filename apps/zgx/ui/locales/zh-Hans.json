@@ -828,6 +828,13 @@
       "more_running": "另外 {n} 项",
       "stop_all": "全部停止",
       "running": "运行中",
+      "finished": "已完成",
+      "agents": "{n, plural, other {# 个子智能体}}",
+      "processes": "{n, plural, other {# 个进程}}",
+      "open_agent": "打开 {name}",
+      "n_finished": "{n} 个已完成",
+      "show_finished": "显示 {n} 个已完成",
+      "hide_finished": "隐藏 {n} 个已完成",
       "queued_messages": "队列中的消息",
       "queued": "已加入队列"
     },
