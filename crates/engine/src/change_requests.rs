@@ -157,7 +157,11 @@ impl GitStamp {
         ];
         let stamps = std::iter::once(Some(head))
             .chain(files.iter().map(|path| FileStamp::read(path)))
-            .chain(global_git_configs().iter().map(|path| FileStamp::read(path)))
+            .chain(
+                global_git_configs()
+                    .iter()
+                    .map(|path| FileStamp::read(path)),
+            )
             .collect();
         Some(Self(stamps))
     }
@@ -360,10 +364,14 @@ impl CheckoutChangeRequests {
         let timing = self.inner.timing;
         let cached = {
             let mut inspections = self.inspections();
-            // Forget paths no subscription has inspected for two intervals.
-            inspections.retain(|_, inspection| {
-                inspection.checked.elapsed() < timing.context_poll_interval * 2
-            });
+            // Keep a run for as long as it could still be reused. A joining
+            // poll doesn't move `checked`, so a retention keyed to it dropped
+            // runs whenever a short wait before a GitHub refresh and a full
+            // poll after it stretched past two intervals, and Git ran again.
+            let keep = timing
+                .full_inspection_interval
+                .max(timing.context_poll_interval * 2);
+            inspections.retain(|_, inspection| inspection.started.elapsed() < keep);
             match inspections.get(cwd) {
                 Some(inspection) if inspection.checked.elapsed() < timing.context_poll_interval => {
                     Cached::Fresh(inspection.run.clone())
@@ -805,6 +813,34 @@ mod tests {
         assert_eq!(switched.branch, "feature/other-branch");
         assert_eq!(switched.change_request.unwrap().number, 91);
         assert_eq!(lookup.inspect_count(), 2);
+    }
+
+    /// Production ratios, scaled down: GitHub refreshes every few polls must
+    /// not re-run Git for a checkout whose Git files never change.
+    #[tokio::test]
+    async fn github_refreshes_reuse_an_unchanged_inspection() {
+        let (_temp, identity) = git_layout();
+        let lookup = FakeLookup::new(
+            source("feature/status"),
+            std::iter::repeat_with(|| Ok(None)).take(64),
+        );
+        let poll = Duration::from_millis(20);
+        let timing = Timing {
+            with_change_request_ttl: poll * 8,
+            without_change_request_ttl: poll * 3,
+            failure_initial_backoff: poll * 4,
+            failure_max_backoff: poll * 8,
+            context_poll_interval: poll,
+            full_inspection_interval: poll * 20,
+        };
+        let service = service(lookup.clone(), timing);
+        let mut stream = service.watch_checkout(identity.root.clone(), identity.clone());
+        stream.next().await.unwrap();
+
+        let _ = tokio::time::timeout(poll * 12, stream.next()).await;
+
+        assert!(lookup.resolve_count() >= 3, "GitHub refreshed");
+        assert_eq!(lookup.inspect_count(), 1);
     }
 
     #[tokio::test]
