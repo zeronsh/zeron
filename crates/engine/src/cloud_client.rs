@@ -678,6 +678,20 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `DELETE /vault/{orgId}/accounts/github/{slot}`: one GitHub login, the
+    /// others left as they are.
+    async fn github_forget(&self, slot: &str) -> Result<Vec<VaultAccount>, EngineError> {
+        require_id(slot, "account id")?;
+        self.vault_forget(VaultProvider::Github, slot).await
+    }
+
+    /// `POST /vault/{orgId}/accounts/github/active {slot}`: the login new
+    /// sessions try first.
+    async fn github_activate(&self, slot: &str) -> Result<Vec<VaultAccount>, EngineError> {
+        require_id(slot, "account id")?;
+        self.vault_activate(VaultProvider::Github, Some(slot)).await
+    }
+
     /// `PATCH /vault/{orgId}/credentials/{provider}` with `{authorizedDevices}`.
     pub async fn authorize(
         &self,
@@ -791,6 +805,9 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::VAULT_REVOKE_DEVICE
             | methods::GITHUB_CONNECT_START
             | methods::GITHUB_CONNECT_POLL
+            | methods::GITHUB_ACCOUNTS
+            | methods::GITHUB_ACCOUNT_FORGET
+            | methods::GITHUB_ACCOUNT_ACTIVATE
     )
 }
 
@@ -847,6 +864,12 @@ struct DeviceParams {
 #[serde(rename_all = "camelCase")]
 struct FlowParams {
     flow_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SlotParams {
+    slot: String,
 }
 
 #[derive(Deserialize)]
@@ -1005,6 +1028,23 @@ pub(crate) async fn dispatch(
         methods::GITHUB_CONNECT_POLL => {
             let p: FlowParams = params(raw)?;
             RpcReply::value(&cloud.github_poll(&p.flow_id).await.map_err(failed)?)
+        }
+        methods::GITHUB_ACCOUNTS => {
+            let accounts = cloud
+                .vault_accounts(VaultProvider::Github)
+                .await
+                .map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
+        }
+        methods::GITHUB_ACCOUNT_FORGET => {
+            let p: SlotParams = params(raw)?;
+            let accounts = cloud.github_forget(&p.slot).await.map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
+        }
+        methods::GITHUB_ACCOUNT_ACTIVATE => {
+            let p: SlotParams = params(raw)?;
+            let accounts = cloud.github_activate(&p.slot).await.map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
         }
         methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE => {
             let p: DevicesParams = params(raw)?;
@@ -1498,6 +1538,7 @@ mod tests {
                     private: true,
                     description: None,
                     pushed_at: 0,
+                    ..Default::default()
                 },
                 Some("feature/x"),
             )

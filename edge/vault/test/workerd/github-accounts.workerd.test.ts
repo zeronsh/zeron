@@ -417,6 +417,29 @@ describe("a session's login", () => {
     expect(value(await grant(await session(), "shared-org/app", parentSession.deviceId)).account).toBe("second");
   });
 
+  it("a machine gets grants and nothing else: no listing, no logins, no way to change them", async () => {
+    const { caller, userId, parent, session, grant } = await cloudUser();
+    const work = person("work-me", 1, [workInstall], { "work-org/api": true });
+    const github = fakeGithub(work);
+    await connect(caller, github, work, [parent]);
+    const device = await session();
+    const runner: VaultCaller = { userId, orgId: "org_test", kind: "runner", deviceId: device.deviceId };
+    const slot = value(await vault().accounts(caller, "github"))[0]!.slot;
+    for (const refused of [
+      await vault().githubListing(runner),
+      await vault().githubRepos(runner),
+      await vault().githubBranches(runner, "work-org/api"),
+      await vault().accounts(runner, "github"),
+      await vault().forgetAccount(runner, "github", slot),
+      await vault().activateAccount(runner, "github", slot)
+    ]) {
+      expect(refused).toMatchObject({ ok: false, error: "forbidden", status: 403 });
+    }
+    const granted = value(await grant(device, "work-org/api", undefined, runner));
+    expect(granted.accessToken).toMatch(/^ghs_/);
+    expect(JSON.stringify(granted)).not.toContain(work.token);
+  });
+
   it("refuses a device no login authorizes", async () => {
     const { caller, session, grant } = await cloudUser();
     const work = person("work-me", 1, [workInstall], { "work-org/api": true });

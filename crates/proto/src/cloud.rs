@@ -373,6 +373,9 @@ pub struct VaultAccount {
     pub organization: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// GitHub logins: their picture on github.com.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub authorized_devices: Vec<String>,
     #[serde(default)]
@@ -459,12 +462,16 @@ pub struct GithubConnectProgress {
     /// GitHub login once connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Connected, but as a login already connected: nothing was added (GitHub
+    /// approves as whoever the browser is signed in as).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_connected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// One repository from `ListGithubRepos`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubRepo {
     /// `owner/name`.
@@ -477,6 +484,16 @@ pub struct GithubRepo {
     /// Unix ms of the last push, for sorting.
     #[serde(default)]
     pub pushed_at: i64,
+    /// The GitHub App installation that gives access to it. Access comes from
+    /// here; logins say who may use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<i64>,
+    /// The connected login a new session on it would use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Every connected login that reaches it, the one above first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<String>,
 }
 
 #[cfg(test)]

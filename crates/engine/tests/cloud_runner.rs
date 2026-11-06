@@ -1019,6 +1019,139 @@ async fn runs_commit_as_the_signed_in_github_user() {
     assert_eq!(github.requests("/users/").len(), 1);
 }
 
+/// The vault keeps a session on its own GitHub login, and a grant names it:
+/// that login authors the commits, whichever others are connected.
+#[tokio::test]
+async fn runs_commit_as_the_login_the_vault_names_for_this_session() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "github",
+        200,
+        json!({"provider": "github", "accessToken": "ghs_installation", "expiresAt": in_ms(3600),
+               "account": "work-me", "installationId": 100, "generation": 7}),
+    );
+    rig.grant(
+        "anthropic-key",
+        200,
+        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+    );
+    let github = Stub::start(|req: &Req| match req.path.as_str() {
+        "/users/work-me" => (
+            200,
+            json!({"login": "work-me", "id": 11, "name": "Work Me"}),
+        ),
+        _ => (404, json!({})),
+    })
+    .await;
+    let broker = rig.broker(identity, &github.url());
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::ClaudeCode, &mut request)
+        .await
+        .unwrap();
+    assert_eq!(
+        request.env.get("GIT_AUTHOR_EMAIL").map(String::as_str),
+        Some("11+work-me@users.noreply.github.com")
+    );
+    assert_eq!(
+        request.env.get("GIT_AUTHOR_NAME").map(String::as_str),
+        Some("Work Me")
+    );
+}
+
+/// A session whose own login is gone or dead doesn't run on as if nothing
+/// happened: the run fails saying which login and what to do, its token files
+/// go, and connecting the login again lets the next run through.
+#[tokio::test]
+async fn a_run_on_a_login_that_cant_serve_its_session_fails_naming_it() {
+    for (status, error, message, shown) in [
+        (
+            409,
+            "needs_reconnect",
+            "github_account_disconnected: GitHub account work-me was disconnected, and this session uses it. Connect it again in Settings → Cloud, or start a new session.",
+            "GitHub account work-me was disconnected, and this session uses it. Connect it again in Settings → Cloud, or start a new session.",
+        ),
+        (
+            409,
+            "needs_reconnect",
+            "github_account_needs_reconnect: GitHub account work-me needs reconnecting. Reconnect it in Settings → Cloud, then send again.",
+            "GitHub account work-me needs reconnecting. Reconnect it in Settings → Cloud, then send again.",
+        ),
+        (
+            404,
+            "not_found",
+            "github_account_no_access: GitHub account work-me can't reach acme/app any more, and this session uses it. Give it access on GitHub, or start a new session.",
+            "GitHub account work-me can't reach acme/app any more, and this session uses it. Give it access on GitHub, or start a new session.",
+        ),
+    ] {
+        let rig = Rig::new().await;
+        let identity = rig.enrolled().await;
+        rig.grant(
+            "anthropic-key",
+            200,
+            json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+        );
+        // Four minutes left: inside the slack, so each run asks the vault.
+        rig.grant(
+            "github",
+            200,
+            json!({"provider": "github", "accessToken": "ghs_one", "expiresAt": in_ms(240),
+                   "account": "work-me", "generation": 1}),
+        );
+        let github = Stub::start(|req: &Req| match req.path.as_str() {
+            "/users/work-me" => (200, json!({"login": "work-me", "id": 11})),
+            _ => (404, json!({})),
+        })
+        .await;
+        let broker = rig.broker(identity, &github.url());
+        let store = zeron_engine::credentials::git_credentials_path(&rig.data_dir);
+        broker
+            .prepare(HarnessId::ClaudeCode, &mut run_request())
+            .await
+            .unwrap();
+        assert!(store.exists(), "the first run has its token");
+
+        rig.grant(
+            "github",
+            status,
+            json!({"error": error, "message": message}),
+        );
+        let refused = broker
+            .prepare(HarnessId::ClaudeCode, &mut run_request())
+            .await
+            .unwrap_err();
+        assert_eq!(refused, shown);
+        assert!(!store.exists(), "no token stays for a login that's gone");
+        assert_eq!(broker.ensure_git_credentials().await.unwrap_err(), shown);
+    }
+}
+
+/// Other reasons for having no GitHub grant still leave the run to work
+/// without it, as they always did: nothing about the session's login is wrong.
+#[tokio::test]
+async fn a_run_without_a_github_grant_for_other_reasons_still_starts() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "anthropic-key",
+        200,
+        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+    );
+    rig.grant(
+        "github",
+        404,
+        json!({"error": "not_found", "message": "github_app_not_installed: The Zeron GitHub App isn't installed on acme"}),
+    );
+    let broker = rig.broker(identity, "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::ClaudeCode, &mut request)
+        .await
+        .unwrap();
+    assert!(!request.env.contains_key("GIT_AUTHOR_EMAIL"));
+}
+
 #[tokio::test]
 async fn grants_are_cached_fall_back_offline_and_drop_on_revocation() {
     let rig = Rig::new().await;

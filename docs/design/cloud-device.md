@@ -321,7 +321,8 @@ binding from the main Worker, which passes the **verified** identity. It has its
 
 ### Multiple accounts
 
-A provider holds several accounts; grants always come from the active one, and every Cloud
+A provider holds several accounts. Agent logins and API keys work this way (GitHub's are all in
+use at once: see "GitHub"): grants always come from the active one, and every Cloud
 machine uses it from its next turn (the engine re-checks a cached grant older than 30 s before
 a run). Uploading the same login again replaces its own account instead of adding one —
 identity is never secret material: Claude's profile `email|organization` (sent beside the
