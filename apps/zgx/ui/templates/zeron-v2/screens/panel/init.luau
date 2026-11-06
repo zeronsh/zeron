@@ -29,7 +29,10 @@
 -- the Left and Right; tabs drag to reorder; "+" opens the empty page.
 -- ⌘W closes the active tab; ⌃Tab and ⌃⇧Tab step through them.
 --
---   Panel.close_focused_tab()    (the app's ⌘W) with the keyboard in the
+--   Panel.close_active_tab()     (the app's ⌘W) closes the visible panel's
+--                                 active tab, asking first as × does;
+--                                 false if hidden or no tab is active
+--   Panel.close_focused_tab()    with the keyboard in the
 --                                 panel (a file tab's tree or editor, a
 --                                 terminal), closes its active tab, asking
 --                                 first as a click on × does: true; else false
@@ -173,6 +176,7 @@ local focus_in: string? = nil
 local claimed = false
 local closer: ((id: string) -> ())? = nil
 local shown_key: (() -> string?)? = nil
+local is_shown: (() -> boolean)? = nil
 
 -- Whether the active tab's terminal has the keyboard (a terminal's focus
 -- is its own: its node may not say).
@@ -358,13 +362,12 @@ function M.find_in_browser(): boolean
 	return true
 end
 
-function M.close_focused_tab(): boolean
+-- Close the visible panel's active tab regardless of keyboard focus. The
+-- shell keeps the panel mounted while hidden, so its layout supplies visibility.
+function M.close_active_tab(): boolean
 	local k = if shown_key then shown_key() else nil
 	local close_tab = closer
-	if not k or not close_tab then
-		return false
-	end
-	if focus_in ~= k and not terminal_focused(k) then
+	if not k or not close_tab or (is_shown and not is_shown()) then
 		return false
 	end
 	local active = state.of(k).active
@@ -373,6 +376,14 @@ function M.close_focused_tab(): boolean
 	end
 	close_tab(active)
 	return true
+end
+
+function M.close_focused_tab(): boolean
+	local k = if shown_key then shown_key() else nil
+	if not k or (focus_in ~= k and not terminal_focused(k)) then
+		return false
+	end
+	return M.close_active_tab()
 end
 
 -- The strip where Zeron's is: in the window's top row over the panel (its
@@ -591,10 +602,13 @@ end
 -- its edge clipping it, so the tabs never pass under the title bar's fixed
 -- controls at the window's right (as Zeron's pane header is revealed in
 -- place).
+-- `visible`: whether the shell currently shows the panel (including window fit).
+-- Not given, a standalone panel is visible. Used by the app's ⌘W.
+--
 -- `docked`: whether the window has room for a file tab's tree beside its
 -- file (the shell's fit, as Zeron's Files column); not given, each file tab
 -- decides by its own width.
-export type Props = { project: any?, session: any?, page: any?, left: (() -> number)?, hold: (() -> number)?, on_last_closed: (() -> ())?, docked: (() -> boolean)?, [any]: any }
+export type Props = { project: any?, session: any?, page: any?, visible: (() -> boolean)?, left: (() -> number)?, hold: (() -> number)?, on_last_closed: (() -> ())?, docked: (() -> boolean)?, [any]: any }
 
 local STRIP_START_PT = (ui.theme.get("space.2") :: number?) or 8
 
@@ -1416,7 +1430,7 @@ M.Panel = ui.component(function(props: Props): Node
 
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "left" and k ~= "hold" and k ~= "on_last_closed" and k ~= "docked" and k ~= "children" then
+		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "visible" and k ~= "left" and k ~= "hold" and k ~= "on_last_closed" and k ~= "docked" and k ~= "children" then
 			box[k] = v
 		end
 	end
@@ -1433,6 +1447,7 @@ M.Panel = ui.component(function(props: Props): Node
 	-- Where the keyboard is (focus and blur reach the panel from what's in
 	-- it), and how a tab closes, for the app's ⌘W.
 	closer = close
+	is_shown = props.visible
 	shown_key = function(): string?
 		return key:peek()
 	end
@@ -1448,7 +1463,7 @@ M.Panel = ui.component(function(props: Props): Node
 	end
 	ui.on_cleanup(function()
 		if closer == close then
-			closer, shown_key, focus_in = nil, nil, nil
+			closer, shown_key, focus_in, is_shown = nil, nil, nil, nil
 		end
 	end)
 	box.on_key = function(e): boolean?
