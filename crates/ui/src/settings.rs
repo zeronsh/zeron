@@ -1215,7 +1215,16 @@ pub struct UiSettings {
     /// context-menu actions remain available regardless of this preference.
     /// Off, pull request links leave Zeron too; on, they open where
     /// [`Self::pull_request_destination`] says.
+    ///
+    /// Off by default: once a session Browser page has opened, the window
+    /// presents every frame inside a Core Animation transaction for the rest
+    /// of its life (zui's `enable_scene_overlay`), which roughly halved the
+    /// scrolling frame rate on a Retina display.
     pub open_web_links_in_zeron: bool,
+    /// Whether [`Self::open_web_links_in_zeron`] was last saved after its
+    /// default became off. A file without it was written while on was the
+    /// default, so [`Self::load`] turns the preference off once.
+    web_links_default_off: bool,
     /// Compact transcript: a turn's working steps (thinking, tool calls, and
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
@@ -1351,7 +1360,8 @@ impl Default for UiSettings {
             math_font: MathFont::Fira,
             math_size: MATH_SIZE_DEFAULT,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
-            open_web_links_in_zeron: true,
+            open_web_links_in_zeron: false,
+            web_links_default_off: true,
             transcript_compact_mode: false,
             pull_request_destination: PullRequestDestination::Native,
             last_pull_request_repository: None,
@@ -2198,6 +2208,7 @@ impl UiSettings {
             math_size,
             transcript_width,
             open_web_links_in_zeron,
+            web_links_default_off,
             transcript_compact_mode,
             files_autosave_enabled,
             files_autosave_delay_ms,
@@ -2306,6 +2317,13 @@ impl UiSettings {
                         // legacy destination key (see `save`).
                         if let Some(legacy) = settings.remove("pullRequestDestination") {
                             settings.entry("pullRequestOpenIn").or_insert(legacy);
+                        }
+                        // Written while web links opened in Zeron by default:
+                        // a stored `true` may never have been chosen. Turn it
+                        // off once; turning it back on saves it with the marker.
+                        if !settings.contains_key("webLinksDefaultOff") {
+                            settings.insert("openWebLinksInZeron".into(), false.into());
+                            settings.insert("webLinksDefaultOff".into(), true.into());
                         }
                     }
                     if let Some(keymap) = value
@@ -2625,6 +2643,36 @@ mod tests {
     }
 
     #[test]
+    fn web_links_leave_zeron_by_default_and_an_old_default_resets_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = |dir: &Path| -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(UiSettings::path(dir)).unwrap()).unwrap()
+        };
+        assert!(!UiSettings::default().open_web_links_in_zeron);
+        assert!(!UiSettings::load(dir.path()).open_web_links_in_zeron);
+
+        // Saved while on was the default: the stored `true` turns off once,
+        // and saving writes it off for older builds sharing the file.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "openWebLinksInZeron": true}"#,
+        )
+        .unwrap();
+        let mut loaded = UiSettings::load(dir.path());
+        assert!(!loaded.open_web_links_in_zeron);
+        assert_eq!(loaded.sidebar_width, 300.0);
+        loaded.save(dir.path()).unwrap();
+        assert_eq!(stored(dir.path())["openWebLinksInZeron"], false);
+
+        // Turned back on, it stays on.
+        loaded.open_web_links_in_zeron = true;
+        loaded.save(dir.path()).unwrap();
+        assert!(UiSettings::load(dir.path()).open_web_links_in_zeron);
+        assert_eq!(stored(dir.path())["openWebLinksInZeron"], true);
+        assert_eq!(stored(dir.path())["webLinksDefaultOff"], true);
+    }
+
+    #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2635,7 +2683,7 @@ mod tests {
 
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
-        assert!(loaded.open_web_links_in_zeron);
+        assert!(!loaded.open_web_links_in_zeron);
         assert!(loaded.new_thread_composer_background.is_none());
         assert_eq!(
             loaded.new_thread_background_effect,

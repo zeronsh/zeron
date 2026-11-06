@@ -555,6 +555,10 @@ fn pull_requests_from_a_chat_open_as_tabs_beside_the_focused_session(cx: &mut Te
             .collect()
     };
     cx.update(|window, cx| {
+        // Web links, pull requests included, stay in Zeron only when asked to.
+        settings::update(SavePolicy::Immediate, cx, |settings| {
+            settings.open_web_links_in_zeron = true;
+        });
         shell.update(cx, |shell, cx| {
             // A link into a pull request opens its view in this session's pane.
             assert_eq!(

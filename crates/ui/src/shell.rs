@@ -18054,11 +18054,13 @@ mod exit_regressions {
     #[gpui::test]
     fn transcript_links_open_new_tabs_and_reject_stale_sessions(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
+        let mut initial = settings::UiSettings::default();
+        initial.open_web_links_in_zeron = true;
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(initial, dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -18192,6 +18194,7 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         let mut initial = settings::UiSettings::default();
         initial.pull_request_destination = settings::PullRequestDestination::Browser;
+        initial.open_web_links_in_zeron = true;
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
@@ -18427,11 +18430,13 @@ mod exit_regressions {
     fn markdown_preview_events_open_browser_from_tree_and_file_tabs(cx: &mut TestAppContext) {
         use crate::markdown::render::{LinkAction, LinkActivation, LinkTarget};
         let dir = tempfile::tempdir().unwrap();
+        let mut initial = settings::UiSettings::default();
+        initial.open_web_links_in_zeron = true;
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(initial, dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());

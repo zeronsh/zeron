@@ -274,6 +274,7 @@ fn transcript_pull_request_links_open_where_settings_send_them(cx: &mut TestAppC
     });
     redraw(cx);
 
+    send_pull_requests(cx, PullRequestDestination::Native, true);
     click_at(cx, painted("fix 1"));
     assert_eq!(pane(&shell, cx), (1, Some(("view", pull_request(1)))));
 
