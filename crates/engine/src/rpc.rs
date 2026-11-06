@@ -3784,11 +3784,31 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::WATCH_CHECKOUT_DIFFS => {
-                Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
+                // A chat seen from another device: its transcript stream runs on
+                // the viewer's engine, so naming it here is what keeps its
+                // checkout scanned on this host.
+                let interest = params
+                    .get("chatId")
+                    .and_then(|chat_id| chat_id.as_str())
+                    .map(|chat_id| self.diff_sync.retain_chat(chat_id));
+                Ok(RpcReply::Stream(
+                    watch_stream(self.diff_sync.watch_diffs())
+                        .map(move |frame| {
+                            let _held = &interest;
+                            frame
+                        })
+                        .boxed(),
+                ))
             }
             methods::WATCH_WORKSPACE_GIT_STATUS => {
                 let request: zeron_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let workspace = self.workspace_files.resolve_target(&request.target).await?;
+                // A file browser can outlive its chat's transcript stream, or
+                // have none (a project's).
+                let interest = match request.target.chat_id.as_deref() {
+                    Some(chat_id) => vec![self.diff_sync.retain_chat(chat_id)],
+                    None => self.diff_sync.retain_checkout(&workspace.root),
+                };
                 let rx = self.diff_sync.watch_git_statuses();
                 // Only this authorized checkout crosses the connection. None means
                 // unavailable, including plain folders and initial/restarting engines.
@@ -3817,7 +3837,14 @@ impl RpcService for EngineRpc {
                         }
                     },
                 );
-                Ok(RpcReply::Stream(stream.boxed()))
+                Ok(RpcReply::Stream(
+                    stream
+                        .map(move |frame| {
+                            let _held = &interest;
+                            frame
+                        })
+                        .boxed(),
+                ))
             }
             methods::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let p: CheckoutChangeRequestParams = parse_params(params)?;
