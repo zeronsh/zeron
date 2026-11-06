@@ -207,6 +207,12 @@ export type Props = {
 	on_stop_all: (() -> ())?,
 	on_open_task: ((id: string) -> ())?,
 	tray: State<dock.Tray?>?,
+	-- Another pill over its middle ("Scroll to end"): its width while it
+	-- shows, so the folded trays' pill moves aside for it.
+	aside: (() -> number?)?,
+	-- The trays' pill's width while it shows (for "Scroll to end" to make
+	-- room in turn).
+	on_pill_width: ((w: number?) -> ())?,
 
 	-- What the agent asks: a question (its chosen options kept by the
 	-- caller), or an approval.
@@ -1798,18 +1804,13 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		h = eased(height),
 		overflow = "hidden",
+		-- (Its glass, edge and shadow are the frame's, round it and the deck
+		-- over it: one surface. Its own corner only clips what's in it, and
+		-- its edge, clear, keeps the room the frame's takes, so everything in
+		-- it sits where it always has.)
 		rounded = "$zeron.composer.radius",
 		border = 1,
-		border_color = "$zeron.composer.edge",
-		bg = function()
-			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-		end,
-		backdrop_blur = function()
-			return if material.see_through() then 16 else 0
-		end,
-		shadow = function()
-			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
-		end,
+		border_color = "#00000000",
 		-- (Neither `on_files` nor its overlay: files are what's around it to
 		-- take, the drop going on up to it.)
 		on_file_hover = if props.on_files or props.drop_overlay ~= false
@@ -2299,8 +2300,10 @@ return ui.component(function(props: Props): Node
 
 	-- The trays, behind the pill.
 	local trays: Node? = nil
+	-- (Folded, what waits is a pill floating over the conversation.)
+	local tray_pill: Node? = nil
 	if props.queue or props.todos or props.tasks then
-		trays = dock.Dock {
+		trays, tray_pill = dock.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
 			on_queue_send = props.on_queue_send,
@@ -2320,6 +2323,8 @@ return ui.component(function(props: Props): Node
 			on_open_task = props.on_open_task,
 			open = props.tray,
 			narrow = narrow,
+			aside = props.aside,
+			on_pill_width = props.on_pill_width,
 		}
 	end
 
@@ -2373,9 +2378,45 @@ return ui.component(function(props: Props): Node
 			enter = { opacity = { 0, 1 }, duration = 220, ease = "out(3)" },
 			exit = { opacity = 0, duration = 160 },
 		}),
-		trays,
-		ui.popover(m.popover(surface)),
+		-- The frame: the pill's glass, edge and shadow, round the deck (what
+		-- waits on the agent, the composer's own top) and the pill, so the two
+		-- read as one surface growing upward.
+		ui.column {
+			w_full = true,
+			shrink = 0,
+			overflow = "hidden",
+			rounded = "$zeron.composer.radius",
+			border = 1,
+			border_over = true,
+			border_color = "$zeron.composer.edge",
+			bg = function()
+				return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+			end,
+			backdrop_blur = function()
+				return if material.see_through() then 16 else 0
+			end,
+			shadow = function()
+				return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
+			end,
+			trays,
+			ui.popover(m.popover(surface)),
+		},
 		footer,
+		-- Folded, what waits on the agent: a pill floating just over the
+		-- composer's middle, out of the layout (the conversation shows under
+		-- it, as under "Scroll to end", which it moves aside for).
+		if tray_pill
+			then ui.row {
+				absolute = true,
+				left = 0,
+				right = 0,
+				justify = "center",
+				top = ui.raw(-(dock.PILL_H + dock.PILL_GAP), "the pill's height and its gap over the composer"),
+				h = dock.PILL_H,
+				pointer_events = "none",
+				tray_pill,
+			}
+			else nil,
 	}
 
 	return ui.column {

@@ -11,7 +11,7 @@ test("Stop on a background process asks its host, and says when it couldn't", fu
 	app:frames(30)
 	-- The tray stays folded to its header until opened.
 	expect(app:has('role:button "Open Running"')).to_be(true)
-	expect(app:has('role:button "Fold Running"')).to_be(false)
+	expect(app:has('role:tab "Fold Running"')).to_be(false)
 	app:click('role:button "Open Running"')
 	app:frames(30)
 	app:click('role:button "Stop npm run dev"')
@@ -54,20 +54,20 @@ test("a chat's subagents run in the Running tray, and a row opens its subagent",
 	app:resize(900, 700)
 	app:command("go_s2")
 	app:frames(30)
-	-- None yet: no tray.
-	expect(app:has('role:button "Open Running"')).to_be(false)
+	-- None yet: no pill.
+	expect(app:has('role:button "Open Subagents"')).to_be(false)
 	app:command("subagents_running")
 	app:command("task_running")
 	app:frames(30)
-	-- Two agents and a process run: the header says so, naming an agent
-	-- first, not the process's command.
+	-- Two agents and a process run: each its own, in the pill.
+	expect(app:has('role:button "Open Subagents"')).to_be(true)
 	expect(app:has('role:button "Open Running"')).to_be(true)
-	expect(app:has('~"2 agents · 1 process · scan the repo"')).to_be(true)
-	app:click('role:button "Open Running"')
+	app:click('role:button "Open Subagents"')
 	app:frames(30)
-	-- A row opens its subagent in the session's panel; an agent has no Stop.
-	expect(app:has('role:button "Stop npm run dev"')).to_be(true)
+	-- A row opens its subagent in the session's panel; an agent has no Stop,
+	-- and the process is the other tab's.
 	expect(app:has('role:button "Stop scan the repo"')).to_be(false)
+	expect(app:has('role:button "Stop npm run dev"')).to_be(false)
 	app:click('role:button "Open read the docs"')
 	app:frames(5)
 	expect(app:state("calls")).to_contain("open_subagent:s2:d2")

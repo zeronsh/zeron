@@ -803,6 +803,10 @@
     "composer_dock": {
       "fold": "Fold {title}",
       "open": "Open {title}",
+      "open_all": "Show what's waiting",
+      "waiting": "What's waiting",
+      "subagents": "Subagents",
+      "fold_all": "Fold what's waiting",
       "rest": "{n} more: {names}",
       "send_now": "Send now",
       "steer": "Steer",

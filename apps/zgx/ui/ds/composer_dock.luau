@@ -1,19 +1,20 @@
--- The trays behind the composer: what waits on the agent, stacked behind
--- the pill as pages behind a page. Each tray is the menus' glass with
--- rounded top corners, tucked under the one below it (and the last under
--- the pill), and each sits a step further in than the one below, so the
--- stack recedes rather than towers. From the pill upward, by what the
--- person will act on soonest: the queue (their own words, sent next), what
--- is running (now), the plan (the whole).
+-- The deck: what waits on the agent, as the composer's own top rather than
+-- trays behind it. The composer's frame (its glass, edge, corner and
+-- shadow) holds the deck and the pill as one surface, a rule between them,
+-- so it grows upward as there is more to say. It holds the queue (their own
+-- words, sent next), what is running (now) and the plan (the whole).
 --
--- One tray is open at a time. The others fold to their header, a line
--- that still says what matters: "Todo 3/7 · Porting the queue's reorder",
--- "Running 2 · cargo test · 2m 14s", "Queued 2 · Then run the tests…".
--- Opening one folds the rest; a tray whose work is done folds itself (the
--- plan once every step is done and the turn is idle). A queue or plan that
--- arrives while nothing is open, opens; what is running stays folded.
+-- With one of them there, the header reads as its title and, folded, says
+-- what it holds: "Running 2 · cargo test · 2m 14s", "Todo 3/7 · Porting the
+-- queue's reorder". With more, the header is tabs, as ⌘K's scopes: each its
+-- glyph, name and count, the open one on a thumb that springs from tab to
+-- tab. A tab opens its rows under the header, a click on the open one (or
+-- the chevron) folds them; folded, the header alone is as tall as the
+-- pill's own line. A tab whose work is done folds itself (the plan once
+-- every step is done and the turn is idle). A queue or plan that arrives
+-- while nothing is open, opens; what is running stays folded.
 --
---   Dock { queue = queued, todos = plan, tasks = running, open = tray, … }
+--   Dock { queue = queued, todos = plan, tasks = running, open = tab, … }
 --
 -- The queue's rows are Zeron's (crates/ui/src/queue.rs): a grip, its
 -- thumbnails, its first line, and at its end Edit, Remove and one primary
@@ -25,10 +26,10 @@
 -- its neighbours, "N earlier" and "N later" opening the rest. What is
 -- running is ours: a row a task or terminal, how long it has run, Stop at
 -- its end, Stop all in the header. The chat's subagents run in the same
--- tray (`kind = "agent"`): a row with its title that opens it
+-- tab (`kind = "agent"`): a row with its title that opens it
 -- (`on_open_task`), no Stop; those done fold behind "N finished", and the
 -- header counts what runs and leads with an agent's name over a command's.
--- A list longer than the trays' cap scrolls, its edges fading as there is
+-- A list longer than the deck's cap scrolls, its edges fading as there is
 -- more past them.
 
 local Icon = require("@self/icon")
@@ -36,6 +37,8 @@ local IconButtonModule = require("@self/icon_button")
 local IconButton = IconButtonModule.IconButton
 local Button = require("@self/button")
 local FadeText = require("@self/fade_text")
+local glass = require("@self/glass")
+local motion = require("@self/motion")
 local status = require("@self/status")
 local material = require("@self/material")
 local control = require("@self/control")
@@ -69,7 +72,7 @@ export type Task = {
 	-- A subagent that ended badly: its mark says so.
 	failed: boolean?,
 }
-export type Tray = "todos" | "tasks" | "queue"
+export type Tray = "todos" | "agents" | "tasks" | "queue"
 export type Props = {
 	queue: State<{ Queued }>?,
 	-- Whether the agent takes a word mid-turn (a row's action is then Steer).
@@ -95,6 +98,12 @@ export type Props = {
 	open: State<Tray?>?,
 	-- Short of room: rows lose their thumbnails, actions become glyphs.
 	narrow: (() -> boolean)?,
+	-- Another pill floating over the composer's middle ("Scroll to end"):
+	-- its width while it shows. The folded pill moves aside for it.
+	aside: (() -> number?)?,
+	-- The folded pill's width while it shows, nil while it doesn't (so the
+	-- other pill can move aside for it in turn).
+	on_pill_width: ((w: number?) -> ())?,
 }
 
 -- The trays' geometry, in points, read as the dock is built (the theme's).
@@ -221,136 +230,461 @@ local function folding(open: () -> boolean, cap: number, body: Node, key: string
 	}
 end
 
--- A tray's header: its glyph, its name, its count, and (folded) the line
--- that stands for it; at its end whatever the tray adds, then the chevron.
--- A click anywhere on it opens the tray, or folds it.
-type Head = {
+-- A tab of the deck: its glyph, its name (a message's key, or a function
+-- giving one: a tab whose name follows what it holds), its count, the line
+-- that stands for it while the deck is folded, whatever it adds at the
+-- header's end, its rows, and whether it has anything to show.
+type Tab = {
 	id: Tray,
 	glyph: Node,
-	-- (Its title's message's key, or a function giving one: a tray whose
-	-- title follows what it holds.)
 	title: string | () -> string,
-	count: (() -> string)?,
-	summary: (() -> string)?,
+	count: () -> string,
+	summary: () -> string,
 	trail: { Node }?,
+	body: Node,
+	present: () -> boolean,
+	-- Its glyph again, for the folded pill (a node lives in one place).
+	pill_glyph: Node,
 }
-local function head(opts: Head, open: State<Tray?>, height: number): Node
-	local function is_open(): boolean
-		return open:get() == opts.id
-	end
-	local function title_key(): string
-		local t = opts.title
-		return if type(t) == "function" then t() else t
-	end
-	local parts: { Child } = {
-		ui.div { w = 18, h = 18, shrink = 0, items = "center", justify = "center", color = "$text.secondary", opts.glyph },
-		ui.text {
-			function(): string
-				return locale.s(title_key())
-			end,
-			shrink = 0,
-			text_size = "$font.size.md",
-			weight = "$font.weight.medium",
-			color = "$text.primary",
+
+-- The deck's tabs: a capsule each, quiet until touched; the one open sits
+-- on a thumb that springs from tab to tab (the segmented control's), there
+-- only while there are tabs to choose between and one is open.
+-- A tab's look: on the thumb (full ink, no wash of its own over it), alone
+-- (a title: full ink, washed as it is touched), or one of several not open
+-- (quieter, coming up as it is touched).
+local tab_ink = ui.variants {
+	base = { bg = "#00000000" },
+	variants = {
+		look = {
+			thumb = { color = "$text.primary", hover = { bg = "#00000000" }, active = { bg = "#00000000" } },
+			title = { color = "$text.primary", hover = { bg = "$hover" }, active = { bg = "$pressed" } },
+			quiet = { color = "$text.secondary", hover = { bg = "$hover", color = "$text.primary" }, active = { bg = "$pressed", color = "$text.primary" } },
 		},
+	},
+	defaults = { look = "quiet" },
+}
+local THUMB_SPRING: SpringOptions = { stiffness = 380, damping = 30 }
+-- The folded pill: its height and the capsules' inset in it (the "Scroll
+-- to end" pill's height, ds/transcript), and how far over the composer it
+-- floats (that pill's six).
+local PILL_H, PILL_PAD = 30, 3
+-- Between it and "Scroll to end", side by side.
+local PILL_PAIR_GAP = 8
+M.PILL_PAIR_GAP = PILL_PAIR_GAP
+M.PILL_H, M.PILL_GAP = PILL_H, 6
+
+-- The deck, in two parts. Folded, a pill floating over the conversation
+-- just above the composer (the "Scroll to end" pill's glass and height):
+-- each thing waiting its glyph and count, a tap opening it. Open, the
+-- composer's own top: a header of tabs (one alone reads as a title), the
+-- open tab's rows, a rule, then the pill. Returns the top, then the pill.
+local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: number }, narrow: () -> boolean, aside: (() -> number?)?, on_pill_width: ((w: number?) -> ())?): (Node, Node)
+	local inset, tab_h, gap = geometry.inset, geometry.tab, geometry.tab_gap
+	local function present(): { Tab }
+		local out: { Tab } = {}
+		for _, t in tabs do
+			if t.present() then
+				table.insert(out, t)
+			end
+		end
+		return out
+	end
+	local function any(): boolean
+		return #present() > 0
+	end
+	local function many(): boolean
+		return #present() > 1
+	end
+	-- The tab the header stands for: the one open, else the one open last,
+	-- else the first there.
+	local last = ui.use_state(nil :: Tray?)
+	ui.effect(function()
+		local o = open:get()
+		if o then
+			last:set(o)
+		end
+	end)
+	local function current(): Tray?
+		local list = present()
+		local want = open:get() or last:get()
+		for _, t in list do
+			if t.id == want then
+				return t.id
+			end
+		end
+		return if list[1] then list[1].id else nil
+	end
+	local function is_open(): boolean
+		return open:get() ~= nil and any()
+	end
+	-- The top is laid out while open, and until its fold has played.
+	local laid = ui.use_state(is_open())
+	local leaving: (() -> ())? = nil
+	ui.effect(function()
+		if is_open() then
+			if leaving then
+				leaving()
+				leaving = nil
+			end
+			laid:set(true)
+		elseif laid:peek() then
+			leaving = ui.after(FOLD_MS + 40, function()
+				leaving = nil
+				laid:set(false)
+			end)
+		end
+	end)
+
+	local refs: { [Tray]: any } = {}
+	local tab_nodes: { Node } = {}
+	for _, t in tabs do
+		local id = t.id
+		local ref = ui.ref()
+		refs[id] = ref
+		local function chosen(): boolean
+			return open:get() == id and many()
+		end
+		local function title_key(): string
+			local k = t.title
+			return if type(k) == "function" then k() else k
+		end
+		table.insert(
+			tab_nodes,
+			ui.show(
+				t.present,
+				ui.button {
+					ref = ref,
+					h = tab_h,
+					shrink = 0,
+					pl = "$space.2",
+					pr = ui.raw(10, "a step past the count, so it sits off the capsule's curve"),
+					gap = "$zeron.space.tight",
+					items = "center",
+					rounded = ui.raw(tab_h / 2, "a capsule: the frame's corner less its edge and the header's inset"),
+					cursor = "pointer",
+					role = "tab",
+					selected = chosen,
+					expanded = function(): boolean
+						return open:get() == id
+					end,
+					label = function()
+						return locale.s(if open:get() == id then "ds.composer_dock.fold" else "ds.composer_dock.open", { title = locale.s(title_key()) })
+					end,
+					focus = control.ring,
+					variants = tab_ink {
+						look = function(): string
+							return if chosen() then "thumb" elseif not many() then "title" else "quiet"
+						end,
+					},
+					on_click = function()
+						open:set(if open:peek() == id then nil else id)
+					end,
+					ui.div {
+						w = 18,
+						h = 18,
+						shrink = 0,
+						items = "center",
+						justify = "center",
+						color = function(): string
+							return if open:get() == id or not many() then "$text.secondary" else "$text.tertiary"
+						end,
+						t.glyph,
+					},
+					ui.show(function(): boolean
+						return not (narrow() and many())
+					end, ui.text {
+						function(): string
+							return locale.s(title_key())
+						end,
+						shrink = 0,
+						text_size = "$font.size.md",
+						weight = "$font.weight.medium",
+					}),
+					ui.text {
+						t.count,
+						shrink = 0,
+						tabular = true,
+						text_size = "$font.size.md",
+						color = "$text.tertiary",
+					},
+				}
+			)
+		)
+	end
+	-- The thumb under the open tab: where it starts and how wide, from the
+	-- widths of the tabs there before it.
+	local function thumb_box(): (number, number)
+		local cur = open:get()
+		local x = 0
+		for _, t in present() do
+			local w = refs[t.id].width or 0
+			if t.id == cur then
+				return x, w
+			end
+			x += w + gap
+		end
+		return 0, 0
+	end
+	local thumb = ui.div {
+		absolute = true,
+		left = 0,
+		top = 0,
+		h = tab_h,
+		rounded = ui.raw(tab_h / 2, "the tab's capsule"),
+		bg = "$zeron.composer.deck.thumb",
+		pointer_events = "none",
+		opacity = ui.tween(ui.computed(function(): number
+			return if is_open() and many() then 1 else 0
+		end), { duration = 160 }),
+		x = motion.spring(ui.computed(function(): number
+			local x = thumb_box()
+			return x
+		end), THUMB_SPRING),
+		w = motion.spring(ui.computed(function(): number
+			local _, w = thumb_box()
+			return w
+		end), THUMB_SPRING),
 	}
-	if opts.count then
-		table.insert(parts, ui.text {
-			opts.count,
-			shrink = 0,
-			tabular = true,
-			text_size = "$font.size.md",
-			color = "$text.tertiary",
-		})
+	local strip: { [any]: any } = {
+		relative = true,
+		h = tab_h,
+		shrink = 1,
+		min_w = 0,
+		gap = "$zeron.space.hair",
+		items = "center",
+		role = "tablist",
+		thumb,
+	}
+	for _, node in tab_nodes do
+		table.insert(strip, node)
 	end
-	if opts.summary then
-		-- Folded: what the tray would say, after its name; open, the room
-		-- stays (the header's end holds still).
-		table.insert(parts, ui.row {
-			grow = 1,
-			min_w = 0,
-			items = "center",
-			opacity = ui.tween(ui.computed(function(): number
-				return if is_open() then 0 else 1
-			end), { duration = 180 }),
-			FadeText { opts.summary, grow = 1, text_size = "$font.size.md", color = "$text.secondary" },
-		})
-	else
-		table.insert(parts, ui.div { grow = 1 })
+
+	-- Past the tabs, a click folds it.
+	local spacer = ui.div {
+		grow = 1,
+		h_full = true,
+		cursor = "pointer",
+		on_click = function()
+			open:set(nil)
+		end,
+	}
+	-- At the header's end: what the tab it stands for adds (Stop all, the
+	-- plan's dismiss), then the chevron that opens it or folds it.
+	local trail: { Child } = {}
+	for _, t in tabs do
+		if t.trail and #t.trail > 0 then
+			local id = t.id
+			table.insert(trail, ui.show(function(): boolean
+				return current() == id
+			end, ui.row { shrink = 0, items = "center", gap = "$space.1", table.unpack(t.trail) }))
+		end
 	end
-	for _, t in opts.trail or {} do
-		table.insert(parts, t)
-	end
-	table.insert(parts, ui.div {
-		w = 22,
-		h = 22,
+	local chevron = ui.div {
+		w = 28,
+		h = 28,
 		shrink = 0,
 		items = "center",
 		justify = "center",
+		rounded = ui.raw(14, "round, as the pill's controls"),
 		color = "$text.tertiary",
-		Icon {
-			name = function(): Icon.Name
-				return if is_open() then "alt-arrow-down" else "alt-arrow-up"
-			end,
-			size = 14,
-		},
-	})
-	local p: { [any]: any } = {
-		h = height,
-		pl = "$space.2",
-		pr = "$space.1",
-		gap = "$space.2",
-		items = "center",
-		shrink = 0,
-		-- Concentric with the tray's top corners, through its edge and inset.
-		-- Concentric with the tray: its corner less its edge and padding.
-		rounded = "$zeron.composer.tray.row_radius",
 		cursor = "pointer",
 		role = "button",
-		label = function()
-			return locale.s(if is_open() then "ds.composer_dock.fold" else "ds.composer_dock.open", { title = locale.s(title_key()) })
-		end,
-		expanded = is_open,
-		hover = { bg = "$hover" },
-		active = { bg = "$pressed" },
+		focusable = true,
+		label = locale.t("ds.composer_dock.fold_all"),
+		hover = { bg = "$hover", color = "$text.secondary" },
+		active = { bg = "$pressed", color = "$text.secondary" },
 		focus = control.ring,
 		on_click = function()
-			open:set(if is_open() then nil else opts.id)
+			open:set(nil)
 		end,
+		Icon { name = "alt-arrow-down", size = 14 },
 	}
-	for _, c in parts do
-		table.insert(p, c)
-	end
-	return ui.row(p)
-end
-
--- A tray: the glass, its top corners, its inset by level (1 just behind
--- the pill, 2 behind that…), tucked under what is below it.
-local function tray(level: () -> number, head_node: Node, body: Node, open: () -> boolean, geometry: { [string]: number }, key: string): Node
-	local step, tuck, radius = geometry.step, geometry.tuck, geometry.radius
-	return ui.column {
+	local head_row: { [any]: any } = {
+		h = tab_h,
 		shrink = 0,
-		mx = function(): number
-			return step * level()
-		end,
-		mb = ui.raw(-tuck, "tucked under the next tray, or the pill"),
-		rounded_tl = ui.raw(radius, "the tray's corner, worked out from the pill's (geometry)"),
-		rounded_tr = ui.raw(radius, "the tray's corner, worked out from the pill's (geometry)"),
-		border = 1,
-		border_sides = { 1, 1, 0, 1 },
-		border_color = "$zeron.composer.tray.edge",
-		bg = function()
-			return if material.see_through() then "$zeron.composer.tray.tint" else "$zeron.composer.tray.solid"
-		end,
-		backdrop_blur = function()
-			return if material.see_through() then "$zeron.composer.tray.blur" else 0
-		end,
-		px = "$space.1",
-		pt = "$space.1",
-		pb = ui.raw(tuck + 4, "the tuck, and the tray's own inset"),
-		head_node,
-		folding(open, geometry.body, body, key),
+		gap = "$space.2",
+		items = "center",
+		ui.row(strip),
+		spacer,
 	}
+	for _, c in trail do
+		table.insert(head_row, c)
+	end
+	table.insert(head_row, chevron)
+
+	-- The rows of the tab it stands for.
+	local bodies: { [string]: Node } = {}
+	for _, t in tabs do
+		bodies[t.id] = ui.column {
+			w_full = true,
+			px = ui.raw(inset, "the header's inset: rows' glyphs under the tabs'"),
+			pb = ui.raw(inset - 4, "the header's inset, less the rows' own"),
+			t.body,
+		}
+	end
+	bodies.none = ui.div {}
+	local body = folding(is_open, geometry.body, ui.switch(function(): string
+		return current() or "none"
+	end, bodies), "deck")
+
+	local top = ui.column {
+		w_full = true,
+		shrink = 0,
+		hidden = function(): boolean
+			return not laid:get()
+		end,
+		overflow = "hidden",
+		-- The header grows in from nothing as something arrives (the frame
+		-- above the pill rising with it), and goes the same way.
+		ui.column {
+			w_full = true,
+			shrink = 0,
+			overflow = "hidden",
+			h = ui.tween(ui.computed(function(): number
+				return if is_open() then tab_h + inset * 2 else 0
+			end), FOLD),
+			opacity = ui.tween(ui.computed(function(): number
+				return if is_open() then 1 else 0
+			end), { duration = 180 }),
+			ui.column {
+				w_full = true,
+				p = ui.raw(inset, "the header's inset: its capsules concentric with the frame"),
+				ui.row(head_row),
+			},
+		},
+		body,
+		-- The rule between it and the pill, edge to edge (a menu's).
+		ui.div {
+			h = 1,
+			w_full = true,
+			shrink = 0,
+			bg = "$border.subtle",
+			aria_hidden = true,
+			opacity = ui.tween(ui.computed(function(): number
+				return if is_open() then 1 else 0
+			end), { duration = 180 }),
+		},
+	}
+
+	-- The pill: each thing waiting, its glyph and count (one alone, its name
+	-- too), a tap opening that one; the chevron opens the one open last.
+	-- (Its width, as laid out: how far it moves aside.)
+	local pill_w = ui.use_state(0)
+	local function pill(): Node
+		local p = glass.style({
+			h = PILL_H,
+			px = ui.raw(PILL_PAD, "the capsules' inset in the pill"),
+			gap = "$zeron.space.hair",
+			items = "center",
+			shrink = 0,
+			rounded = ui.raw(PILL_H / 2, "a capsule, as the Scroll to end pill"),
+			role = "toolbar",
+			label = locale.t("ds.composer_dock.waiting"),
+		}, "menu")
+		p.shadow = "$shadow.md"
+		local inner = PILL_H - PILL_PAD * 2
+		for _, t in tabs do
+			local id = t.id
+			local function title_key(): string
+				local k = t.title
+				return if type(k) == "function" then k() else k
+			end
+			table.insert(p, ui.show(t.present, ui.button {
+				h = inner,
+				pl = "$space.2",
+				pr = "$space.2",
+				gap = "$zeron.space.tight",
+				items = "center",
+				shrink = 0,
+				rounded = ui.raw(inner / 2, "concentric with the pill: its corner less the inset"),
+				bg = "#00000000",
+				color = "$text.secondary",
+				cursor = "pointer",
+				hover = { bg = "$hover", color = "$text.primary" },
+				active = { bg = "$pressed", color = "$text.primary" },
+				focus = control.ring,
+				label = function()
+					return locale.s("ds.composer_dock.open", { title = locale.s(title_key()) })
+				end,
+				on_click = function()
+					open:set(id)
+				end,
+				ui.div { w = 16, h = 16, shrink = 0, items = "center", justify = "center", t.pill_glyph },
+				ui.show(function(): boolean
+					return not many()
+				end, ui.text {
+					function(): string
+						return locale.s(title_key())
+					end,
+					shrink = 0,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+					color = "$text.primary",
+				}),
+				ui.text {
+					t.count,
+					shrink = 0,
+					tabular = true,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+				},
+			}))
+		end
+		table.insert(p, ui.button {
+			w = inner,
+			h = inner,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			rounded = ui.raw(inner / 2, "round, as the capsules beside it"),
+			bg = "#00000000",
+			color = "$text.tertiary",
+			cursor = "pointer",
+			hover = { bg = "$hover", color = "$text.primary" },
+			active = { bg = "$pressed", color = "$text.primary" },
+			focus = control.ring,
+			label = locale.t("ds.composer_dock.open_all"),
+			on_click = function()
+				open:set(current())
+			end,
+			Icon { name = "alt-arrow-up", size = 14 },
+		})
+		p.on_resize = function(size: { w: number, h: number })
+			if math.abs(pill_w:peek() - size.w) >= 1 then
+				pill_w:set(size.w)
+			end
+		end
+		return ui.row(p)
+	end
+	-- Centred over the composer; while another pill floats there ("Scroll
+	-- to end", `aside` its width), the two glide apart into a centred pair,
+	-- this one on the right (the other moves left by as much: `on_pill_width`
+	-- says how wide this one is while it shows).
+	local floating = ui.div {
+		shrink = 0,
+		x = motion.spring(ui.computed(function(): number
+			local other = if aside then aside() else nil
+			if not other or other <= 0 then
+				return 0
+			end
+			return (other + PILL_PAIR_GAP) / 2
+		end), THUMB_SPRING),
+		ui.presence(function(): string?
+			return if any() and not is_open() then "pill" else nil
+		end, pill, {
+			enter = { opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "outQuad" },
+			exit = { opacity = 0, y = 8, duration = 120 },
+		}),
+	}
+	if on_pill_width then
+		local report = on_pill_width
+		ui.effect(function()
+			local w = pill_w:get()
+			report(if any() and not is_open() and w > 0 then w else nil)
+		end)
+	end
+	return top, floating
 end
 
 -- A queued message's thumbnails: its first picture or two (one, narrow),
@@ -845,12 +1179,11 @@ local function finished_row(count: () -> number, open: () -> boolean, on_click: 
 	}
 end
 
-M.Dock = ui.component(function(props: Props): Node
+local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }, () -> boolean)
 	local geometry = {
-		radius = n("zeron.composer.tray.radius", 16),
-		step = n("zeron.composer.tray.step", 16),
-		tuck = n("zeron.composer.tray.tuck", 10),
-		header = n("zeron.composer.tray.header", 32),
+		inset = n("zeron.composer.deck.inset", 10),
+		tab = n("zeron.composer.deck.tab", 30),
+		tab_gap = n("zeron.space.hair", 2),
 		row = n("zeron.composer.tray.row", 32),
 		body = n("zeron.composer.tray.body", 216),
 	}
@@ -861,11 +1194,6 @@ M.Dock = ui.component(function(props: Props): Node
 	local live = props.live or function()
 		return false
 	end
-	local function opened(id: Tray): () -> boolean
-		return function(): boolean
-			return open:get() == id
-		end
-	end
 	-- Which trays are there: the queue with rows, the plan with steps,
 	-- tasks running.
 	local function has_queue(): boolean
@@ -874,30 +1202,16 @@ M.Dock = ui.component(function(props: Props): Node
 	local function has_todos(): boolean
 		return props.todos ~= nil and #props.todos:get() > 0
 	end
-	-- Tasks show while any runs. Once none does, the tray stays only for
-	-- whoever has it open (what just finished, a subagent to go back to,
-	-- stays in reach); folded, it goes.
-	local function has_tasks(): boolean
-		if props.tasks == nil then
-			return false
-		end
-		local list = props.tasks:get()
-		for _, t in list do
-			if not t.ended then
-				return true
+	-- What runs: each tab's own `present` (made with the tab, below).
+	local present_fns: { { id: Tray, present: () -> boolean } } = {}
+	local function has(id: Tray): boolean
+		for _, f in present_fns do
+			if f.id == id then
+				return f.present()
 			end
 		end
-		return #list > 0 and open:get() == "tasks"
-	end
-	-- Each tray's level: how many trays sit between it and the pill, and one.
-	local function queue_level(): number
-		return 1
-	end
-	local function tasks_level(): number
-		return 1 + (if has_queue() then 1 else 0)
-	end
-	local function todos_level(): number
-		return 1 + (if has_queue() then 1 else 0) + (if has_tasks() then 1 else 0)
+		-- (Its tab not made yet: as it was.)
+		return props.tasks ~= nil
 	end
 	-- A tray arriving while none is open, opens; one gone while open,
 	-- closes; the plan folds itself once every step is done and the turn
@@ -919,7 +1233,7 @@ M.Dock = ui.component(function(props: Props): Node
 			open:set(nil)
 		elseif now == "todos" and (not has_todos() or (all_done() and not live())) then
 			open:set(nil)
-		elseif now == "tasks" and not has_tasks() then
+		elseif (now == "tasks" or now == "agents") and not has(now) then
 			open:set(nil)
 		end
 	end)
@@ -939,7 +1253,7 @@ M.Dock = ui.component(function(props: Props): Node
 		end
 	end)
 
-	local trays: { Node } = {}
+	local tabs: { Tab } = {}
 
 	-- The plan.
 	if props.todos then
@@ -1060,60 +1374,37 @@ M.Dock = ui.component(function(props: Props): Node
 				exit = { opacity = 0, duration = 120 },
 			}),
 		}
-		table.insert(
-			trays,
-			ui.show(
-				has_todos,
-				tray(todos_level, head({
-					id = "todos",
-					glyph = glyph,
-					title = "ds.composer_dock.todo",
-					count = function()
-						local done, total = counts()
-						return `{done}/{total}`
-					end,
-					summary = summary,
-					trail = trail,
-				}, open, geometry.header), body, opened("todos"), geometry, "todos")
-			)
-		)
+		table.insert(tabs, {
+			id = "todos",
+			glyph = glyph,
+			pill_glyph = ui.div {
+				ui.show(all_done, ui.div { color = "$success", Icon { name = "check-circle", size = 14 } }, Icon { name = "checklist", size = 14 }),
+			},
+			title = "ds.composer_dock.todo",
+			count = function()
+				local done, total = counts()
+				return `{done}/{total}`
+			end,
+			summary = summary,
+			trail = trail,
+			body = body,
+			present = has_todos,
+		})
 	end
 
 	-- What is running.
 	if props.tasks then
 		local tasks = props.tasks
+		-- One clock for both tabs, ticking only while something runs (a timer
+		-- made in an effect belongs to its run, and stops as it runs again).
 		local now = ui.use_state(os.time())
-		-- Whether the subagents that are done are listed (they fold behind
-		-- one row while anything else runs; with nothing running they are
-		-- the list).
-		local show_finished = ui.use_state(false)
-		local function running(): { Task }
-			local out: { Task } = {}
+		local any_running = ui.computed(function(): boolean
 			for _, t in tasks:get() do
 				if not t.ended then
-					table.insert(out, t)
+					return true
 				end
 			end
-			return out
-		end
-		-- A subagent that is done folds; a process that ended stays where
-		-- it was (it goes from the list soon, as it was stopped).
-		local function folds(t: Task): boolean
-			return t.kind == "agent" and t.ended ~= nil
-		end
-		local function finished_count(): number
-			local n = 0
-			for _, t in tasks:get() do
-				if folds(t) then
-					n += 1
-				end
-			end
-			return n
-		end
-		-- The clock ticks only while something runs (a timer made in an
-		-- effect belongs to its run, and stops as it runs again).
-		local any_running = ui.computed(function(): boolean
-			return #running() > 0
+			return false
 		end)
 		ui.effect(function()
 			if not any_running:get() then
@@ -1124,137 +1415,171 @@ M.Dock = ui.component(function(props: Props): Node
 				now:set(os.time())
 			end)
 		end)
-		-- The folded line. A subagent's title says more than a command, so
-		-- with any running it leads, after how many of each there are:
-		-- "3 agents · 2 processes · scan the repo". Processes alone keep
-		-- their line: "cargo test · 2m 14s · 2 more".
-		local function summary(): string
-			local list = running()
-			local first = list[1]
-			if not first then
-				return locale.s("ds.composer_dock.nothing_running")
+		-- A tab of what runs: the subagents (`agents`), or the processes and
+		-- terminals (`tasks`).
+		local function running_tab(id: Tray, agents: boolean)
+			local function mine(t: Task): boolean
+				return (t.kind == "agent") == agents
 			end
-			local agents, processes, lead = 0, 0, nil :: Task?
-			for _, t in list do
-				if t.kind == "agent" then
-					agents += 1
-					lead = lead or t
-				else
-					processes += 1
+			local function list(): { Task }
+				local out: { Task } = {}
+				for _, t in tasks:get() do
+					if mine(t) then
+						table.insert(out, t)
+					end
 				end
+				return out
 			end
-			if agents > 0 then
-				local parts = { locale.s("ds.composer_dock.agents", { n = agents }) }
-				if processes > 0 then
-					table.insert(parts, locale.s("ds.composer_dock.processes", { n = processes }))
+			local function running(): { Task }
+				local out: { Task } = {}
+				for _, t in list() do
+					if not t.ended then
+						table.insert(out, t)
+					end
 				end
-				table.insert(parts, (lead :: Task).name)
-				return table.concat(parts, " · ")
+				return out
 			end
-			local s = first.name
-			if first.since then
-				s ..= ` · {status.elapsed(now:get() - first.since)}`
-			end
-			if #list > 1 then
-				s ..= ` · {locale.s("ds.composer_dock.more_running", { n = #list - 1 })}`
-			end
-			return s
-		end
-		local trail: { Node } = {}
-		if props.on_stop_all then
-			table.insert(trail, ui.show(function()
-				return #running() > 0
-			end, Button {
-				locale.t("ds.composer_dock.stop_all"),
-				size = "sm",
-				tone = "ghost",
-				h = 24,
-				px = "$space.2",
-				text_size = "$font.size.xs",
-				on_click = function()
-					(props.on_stop_all :: () -> ())()
-				end,
-			}))
-		end
-		-- The rows: what runs, in the order given, then the subagents that
-		-- are done behind "N finished" (listed outright when nothing else
-		-- runs, as they are all there is).
-		type Listed = { kind: "task", task: Task } | { kind: "finished" }
-		local shown = ui.computed(function(): { Listed }
-			local out: { Listed } = {}
-			local done: { Task } = {}
-			for _, t in tasks:get() do
-				if folds(t) then
-					table.insert(done, t)
-				else
-					table.insert(out, { kind = "task", task = t } :: Listed)
+			-- Whether the subagents that are done are listed (they fold behind
+			-- one row while others run; with none running they are the list).
+			local show_finished = ui.use_state(false)
+			local function finished_count(): number
+				if not agents then
+					return 0
 				end
-			end
-			if #done > 0 then
-				local alone = #out == 0
-				if not alone then
-					table.insert(out, { kind = "finished" } :: Listed)
+				local n = 0
+				for _, t in list() do
+					if t.ended then
+						n += 1
+					end
 				end
-				if alone or show_finished:get() then
-					for _, t in done do
+				return n
+			end
+			-- There while any runs; once none does, only while it is open
+			-- (what just finished, a subagent to go back to, stays in reach).
+			local function present(): boolean
+				local l = list()
+				for _, t in l do
+					if not t.ended then
+						return true
+					end
+				end
+				return #l > 0 and open:get() == id
+			end
+			table.insert(present_fns, { id = id, present = present })
+			-- What stands for it: the first running, how long, how many more.
+			local function summary(): string
+				local r = running()
+				local first = r[1]
+				if not first then
+					return locale.s("ds.composer_dock.nothing_running")
+				end
+				local s = first.name
+				if first.since and not agents then
+					s ..= ` · {status.elapsed(now:get() - first.since)}`
+				end
+				if #r > 1 then
+					s ..= ` · {locale.s("ds.composer_dock.more_running", { n = #r - 1 })}`
+				end
+				return s
+			end
+			local trail: { Node } = {}
+			if not agents and props.on_stop_all then
+				table.insert(trail, ui.show(function()
+					return #running() > 0
+				end, Button {
+					locale.t("ds.composer_dock.stop_all"),
+					size = "sm",
+					tone = "ghost",
+					h = 24,
+					px = "$space.2",
+					text_size = "$font.size.xs",
+					on_click = function()
+						(props.on_stop_all :: () -> ())()
+					end,
+				}))
+			end
+			-- The rows: what runs, in the order given; then (subagents) those
+			-- done behind "N finished", listed outright when none runs.
+			type Listed = { kind: "task", task: Task } | { kind: "finished" }
+			local shown = ui.computed(function(): { Listed }
+				local out: { Listed } = {}
+				local done: { Task } = {}
+				for _, t in list() do
+					if agents and t.ended then
+						table.insert(done, t)
+					else
 						table.insert(out, { kind = "task", task = t } :: Listed)
 					end
 				end
-			end
-			return out
-		end)
-		local body = ui.column {
-			w_full = true,
-			pb = "$space.1",
-			ui.each(shown, function(item: Listed): Node
-				if item.kind == "finished" then
-					return finished_row(finished_count, function(): boolean
-						return show_finished:get()
-					end, function()
-						show_finished:set(not show_finished:peek())
-					end)
-				end
-				local t = item.task
-				-- The row follows its task (zgx's animated rows get no state
-				-- of their own): found in the list by its id.
-				local row = ui.computed(function(): Task
-					for _, x in tasks:get() do
-						if x.id == t.id then
-							return x
+				if #done > 0 then
+					local alone = #out == 0
+					if not alone then
+						table.insert(out, { kind = "finished" } :: Listed)
+					end
+					if alone or show_finished:get() then
+						for _, t in done do
+							table.insert(out, { kind = "task", task = t } :: Listed)
 						end
 					end
-					return t
-				end)
-				return task_row(t, row, now, props, geometry.row)
-			end, {
-				key = function(item: Listed): string
-					return if item.kind == "finished" then "\0finished" else item.task.id
+				end
+				return out
+			end)
+			local body = ui.column {
+				w_full = true,
+				pb = "$space.1",
+				ui.each(shown, function(item: Listed): Node
+					if item.kind == "finished" then
+						return finished_row(finished_count, function(): boolean
+							return show_finished:get()
+						end, function()
+							show_finished:set(not show_finished:peek())
+						end)
+					end
+					local t = item.task
+					-- The row follows its task (zgx's animated rows get no state
+					-- of their own): found in the list by its id.
+					local row = ui.computed(function(): Task
+						for _, x in tasks:get() do
+							if x.id == t.id then
+								return x
+							end
+						end
+						return t
+					end)
+					return task_row(t, row, now, props, geometry.row)
+				end, {
+					key = function(item: Listed): string
+						return if item.kind == "finished" then "\0finished" else item.task.id
+					end,
+					animate = { duration = 220, ease = "outCubic" },
+					enter = { opacity = { 0, 1 }, y = { -4, 0 }, duration = 200, ease = "outCubic" },
+					exit = { opacity = 0, duration = 120 },
+				}),
+			}
+			-- Subagents: the right panel's side chat's glyph; what runs, the
+			-- command line's.
+			local glyph_name: Icon.Name = if agents then "side-chat" else "terminal"
+			local name_key = if agents then "ds.composer_dock.subagents" else "ds.composer_dock.running"
+			table.insert(tabs, {
+				id = id,
+				glyph = Icon { name = glyph_name, size = 16 },
+				pill_glyph = Icon { name = glyph_name, size = 14 },
+				-- (Nothing running, the tab held open: what finished.)
+				title = function(): string
+					return if #running() > 0 or agents then name_key else "ds.composer_dock.finished"
 				end,
-				animate = { duration = 220, ease = "outCubic" },
-				enter = { opacity = { 0, 1 }, y = { -4, 0 }, duration = 200, ease = "outCubic" },
-				exit = { opacity = 0, duration = 120 },
-			}),
-		}
-		table.insert(
-			trays,
-			ui.show(
-				has_tasks,
-				tray(tasks_level, head({
-					id = "tasks",
-					glyph = Icon { name = "action-play", size = 16 },
-					-- (Nothing running, the tray held open: what finished.)
-					title = function(): string
-						return if #running() > 0 then "ds.composer_dock.running" else "ds.composer_dock.finished"
-					end,
-					count = function()
-						local n = #running()
-						return tostring(if n > 0 then n else finished_count())
-					end,
-					summary = summary,
-					trail = trail,
-				}, open, geometry.header), body, opened("tasks"), geometry, "tasks")
-			)
-		)
+				count = function()
+					local n = #running()
+					return tostring(if n > 0 then n else (if agents then finished_count() else #list()))
+				end,
+				summary = summary,
+				trail = trail,
+				body = body,
+				present = present,
+			})
+		end
+		running_tab("agents", true)
+		running_tab("tasks", false)
 	end
 
 	-- The queue.
@@ -1305,29 +1630,40 @@ M.Dock = ui.component(function(props: Props): Node
 				end,
 			}),
 		}
-		table.insert(
-			trays,
-			ui.show(
-				has_queue,
-				tray(queue_level, head({
-					id = "queue",
-					glyph = Icon { name = "list", size = 16 },
-					title = "ds.composer_dock.queued",
-					count = function()
-						return tostring(#queue:get())
-					end,
-					summary = summary,
-				}, open, geometry.header), body, opened("queue"), geometry, "queue")
-			)
-		)
+		table.insert(tabs, {
+			id = "queue",
+			glyph = Icon { name = "list", size = 16 },
+			pill_glyph = Icon { name = "list", size = 14 },
+			title = "ds.composer_dock.queued",
+			count = function()
+				return tostring(#queue:get())
+			end,
+			summary = summary,
+			body = body,
+			present = has_queue,
+		})
 	end
 
+	return tabs, open, geometry, narrow
+end
+
+-- The deck's two parts, for the composer: its top (inside the frame, over
+-- the pill), and the folded pill (floating over the conversation).
+function M.parts(props: Props): (Node, Node)
+	local tabs, open, geometry, narrow = build(props)
+	return deck(tabs, open, geometry, narrow, props.aside, props.on_pill_width)
+end
+
+-- The deck alone (a fixture's): the pill over the top.
+M.Dock = ui.component(function(props: Props): Node
+	local top, pill = M.parts(props)
 	return ui.column {
 		w_full = true,
 		shrink = 0,
-		-- Each tray is painted after the one above it, so the lower tray
-		-- covers the tuck of the one behind.
-		table.unpack(trays),
+		gap = M.PILL_GAP,
+		items = "start",
+		pill,
+		top,
 	}
 end)
 

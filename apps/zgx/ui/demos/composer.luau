@@ -6,6 +6,7 @@
 -- once" is the worst case, built first.
 
 local ds = require("@ds")
+local motion = require("@ds/motion")
 local Composer = require("@ds/composer")
 local UserMessage = require("@ds/user_message")
 local Markdown = require("@ds/markdown")
@@ -46,6 +47,11 @@ local notice = ui.state("cx_notice", nil :: Composer.Notice?)
 local dictating = ui.state("cx_dictating", false)
 local disabled = ui.state("cx_disabled", false)
 local narrow = ui.state("cx_narrow", false)
+-- A stand-in for the transcript's "Scroll to end" pill: shown, the trays'
+-- pill moves aside for it.
+local jump = ui.state("cx_jump", false)
+local jump_w = ui.state("cx_jump_w", 0)
+local pill_w = ui.state("cx_pill_w", 0)
 local expanded = ui.state("cx_expanded", false)
 local dropping = ui.state("cx_dropping", false)
 local focus = ui.state("cx_focus", 0)
@@ -192,6 +198,7 @@ local function reset()
 	dictating:set(false)
 	disabled:set(false)
 	narrow:set(false)
+	jump:set(false)
 	expanded:set(false)
 	dropping:set(false)
 	plan:set(false)
@@ -528,7 +535,7 @@ local GROUPS: { Group } = {
 				apply = function()
 					turn:set("running")
 					tasks:set(data.subagents(10))
-					tray:set("tasks")
+					tray:set("agents")
 				end,
 			},
 			{
@@ -537,7 +544,18 @@ local GROUPS: { Group } = {
 				apply = function()
 					turn:set("running")
 					tasks:set(data.subagents(50))
-					tray:set("tasks")
+					tray:set("agents")
+				end,
+			},
+			{
+				id = "beside_jump",
+				label = "Beside Scroll to end",
+				apply = function()
+					turn:set("running")
+					tasks:set(data.subagents(3))
+					queue:set(data.queue())
+					tray:set(nil)
+					jump:set(true)
 				end,
 			},
 			{
@@ -787,7 +805,54 @@ local page: Page = {
 						max_w = function(): number
 							return if narrow:get() then 360 else 640
 						end,
+						relative = true,
+						-- (The stand-in "Scroll to end", where the transcript's
+						-- floats: six over the composer, centred. Its toggle
+						-- in the index brings it and takes it away.)
+						ui.row {
+							absolute = true,
+							left = 0,
+							right = 0,
+							top = -36,
+							justify = "center",
+							-- (Beside the trays' pill, the two centred together.)
+							x = motion.spring(ui.computed(function(): number
+								local w = pill_w:get()
+								return if w > 0 then -(w + 8) / 2 else 0
+							end), { stiffness = 380, damping = 30 }),
+							ui.presence(function(): string?
+								return if jump:get() then "jump" else nil
+							end, function(): Node
+								local p = ds.glass({
+									id = "cx-jump",
+									h = 30,
+									px = "$space.3",
+									gap = "$space.2",
+									items = "center",
+									rounded = "$zeron.prose.bubble.radius",
+									color = "$text.primary",
+									text_size = "$font.size.sm",
+									weight = "$font.weight.medium",
+									on_resize = function(size: { w: number, h: number })
+										jump_w:set(size.w)
+									end,
+								}, "menu")
+								p.shadow = "$shadow.md"
+								p[1] = ui.text { "Scroll to end" }
+								p[2] = ds.Icon { name = "arrow-down", size = 14 }
+								return ui.row(p)
+							end, {
+								enter = { opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "outQuad" },
+								exit = { opacity = 0, y = 8, duration = 120 },
+							}),
+						},
 						Composer {
+							aside = function(): number?
+								return if jump:get() then jump_w:get() else nil
+							end,
+							on_pill_width = function(w: number?)
+								pill_w:set(w or 0)
+							end,
 							value = draft,
 							placeholder = "Ask anything, @ to mention…",
 							expanded = function()

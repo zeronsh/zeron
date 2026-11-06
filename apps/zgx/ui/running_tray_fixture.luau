@@ -23,6 +23,9 @@ return ui.column {
 	justify = "end",
 	Dock.Dock {
 		tasks = ui.state("test_running_tasks", {} :: { Dock.Task }),
+		-- (Empty unless a test fills them: the deck's tabs then.)
+		queue = ui.state("test_deck_queue", {} :: { Dock.Queued }),
+		todos = ui.state("test_deck_todos", {} :: { Dock.Todo }),
 		open = ui.state("test_running_tray", nil :: Dock.Tray?),
 		on_stop_task = function(id: string)
 			call(`stop:{id}`)
