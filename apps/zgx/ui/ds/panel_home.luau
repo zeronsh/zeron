@@ -643,6 +643,9 @@ function M.Lanes(props: LanesProps): Node
 	local shown = ui.use_state(height:peek())
 	local target = shown:peek()
 	local going: any = nil
+	-- (By number: a callback holding its own clip would keep both for good, what
+	-- Rust keeps of a clip being out of the collector's sight.)
+	local slide = 0
 	ui.effect(function()
 		local to = height:get()
 		if to == target then
@@ -654,13 +657,14 @@ function M.Lanes(props: LanesProps): Node
 		if going then
 			going:cancel()
 		end
-		local this: any = nil
-		this = anime.animate(shown, motion.params({
+		slide += 1
+		local this = slide
+		going = anime.animate(shown, motion.params({
 			value = to,
 			duration = SLIDE.duration,
 			ease = SLIDE.ease,
 			onComplete = function()
-				if going == this then
+				if slide == this then
 					going = nil
 				end
 				if away then
@@ -669,7 +673,6 @@ function M.Lanes(props: LanesProps): Node
 				end
 			end,
 		}))
-		going = this
 	end)
 	local function list_h(): number
 		return math.floor(math.min(shown:get(), drawn_h:get()) + 0.5)
