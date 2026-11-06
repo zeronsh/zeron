@@ -582,7 +582,7 @@ impl HarnessesPage {
         ]);
         self.native_subagents = Loadable::Ready(zeron_engine::registry::NativeSubagentSettings {
             switchable: vec![harness],
-            off: Vec::new(),
+            ..Default::default()
         });
         self.expanded_harness = None;
         self.toggle_agent_details(harness, cx);

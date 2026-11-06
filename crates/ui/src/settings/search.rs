@@ -151,6 +151,8 @@ settings_index! {
         "slash menu skills autocomplete"),
     (NativeSubagents, Harnesses, Some("Delegation"), "Native subagents",
         "subagent delegate side chats tasks spawn"),
+    (ZeronTools, Harnesses, Some("Delegation"), "Zeron tools",
+        "mcp server side chats visuals context"),
     (UpdatePolicy, Harnesses, Some("Updates"), "Update policy",
         "automatic upgrade version cli"),
     (CloudUsage, Cloud, None, "Usage",
@@ -202,6 +204,7 @@ impl SettingId {
             SettingId::SkillDollar
                 | SettingId::SkillSlash
                 | SettingId::NativeSubagents
+                | SettingId::ZeronTools
                 | SettingId::UpdatePolicy
         )
     }
@@ -778,6 +781,7 @@ mod tests {
             top("subagents"),
             Target::Setting(SettingId::NativeSubagents)
         );
+        assert_eq!(top("zeron tools"), Target::Setting(SettingId::ZeronTools));
         assert_eq!(
             top("update policy"),
             Target::Setting(SettingId::UpdatePolicy)

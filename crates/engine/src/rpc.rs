@@ -2317,6 +2317,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_COMMIT_CREDIT
             | methods::GET_NATIVE_SUBAGENTS
             | methods::SET_NATIVE_SUBAGENTS
+            | methods::SET_ZERON_TOOLS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -2967,6 +2968,13 @@ impl RpcService for EngineRpc {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 self.registry
                     .set_native_subagents(p.harness, p.enabled)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.native_subagent_settings())
+            }
+            methods::SET_ZERON_TOOLS => {
+                let p: SetHarnessEnabledParams = parse_params(params)?;
+                self.registry
+                    .set_zeron_tools(p.harness, p.enabled)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.native_subagent_settings())
             }
