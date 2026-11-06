@@ -1,15 +1,16 @@
 -- The Activity sidebar: one list of what needs you, the one back last at the
 -- top, no groups or sections; Working, Asleep and Archived folded at the
--- list's foot, each opened by its title and kept so. A chat that stops
--- working comes back to the top after a moment; one put to sleep waits in
--- Asleep until its time, or until it asks for you with something new. The
--- view menu turns it on and off, opens its settings, and holds what it
--- stands aside from out of reach. Off, the sidebar is as it was. On the
--- shell in ui/shell_fixture.luau.
+-- list's foot, each opened by its title and kept so. A chat under way
+-- (running, or waiting on background work that will wake it) is in
+-- Working, and back at the top once it's done; Stop waiting releases a
+-- wait. One put to sleep waits in Asleep, its corner counting down, and
+-- shows the alarm once it wakes. (When it wakes, and that it syncs, are the
+-- engine's: its tests.) The view menu turns it on and off, opens its
+-- settings, and holds what it stands aside from out of reach. Off, the
+-- sidebar is as it was. On the shell in ui/shell_fixture.luau.
 
 local SIDE = "#shell-sidebar"
 local ON = "screens/shell/activity.luau::shell_sidebar_activity"
-local SLEEPING = "screens/shell/activity.luau::activity_sleeping"
 local FOLDED = "screens/shell/sidebar.luau::shell_sidebar_folded"
 
 local function open(): any
@@ -79,17 +80,31 @@ test("Activity: a shelf opens from its title and stays open", function()
 	expect(((app:state(FOLDED) :: any) or {})["::shelf:working"]).to_be(nil)
 end)
 
-test("Activity: a chat that stops working comes back to the top after a moment", function()
+test("Activity: a chat that stops working is back at the top", function()
 	local app = open()
 	expect(shows(app, "Fix the build")).to_be(false)
 	app:command("finish")
 	settle(app)
-	-- (Still in Working for its moment's grace.)
-	expect(shows(app, "Working 1")).to_be(true)
-	wait_ms(app, 2400)
 	expect(shows(app, "Working")).to_be(false)
 	expect(shows(app, "Fix the build")).to_be(true)
 	expect(top(app, "Fix the build") < top(app, "Write the docs")).to_be(true)
+end)
+
+test("Activity: a chat waiting on its tests is under way, and Stop waiting brings it back", function()
+	local app = open()
+	app:command("wait_on_tests")
+	settle(app)
+	expect(shows(app, "Working 2")).to_be(true)
+	expect(shows(app, "Write the docs")).to_be(false)
+	app:click(`{SIDE} >> role:button "Working 2"`)
+	settle(app)
+	app:right_click(`{SIDE} >> role:button "Write the docs"`)
+	settle(app)
+	app:click('"Stop waiting"')
+	settle(app)
+	-- Back in the list, over the shelf; the build still under way in it.
+	expect(top(app, "Write the docs") < top(app, "Working")).to_be(true)
+	expect(top(app, "Working") < top(app, "Fix the build")).to_be(true)
 end)
 
 test("Activity: a chat that starts working folds into Working", function()
@@ -100,9 +115,9 @@ test("Activity: a chat that starts working folds into Working", function()
 	expect(shows(app, "Write the docs")).to_be(false)
 end)
 
-test("Activity: a chat asleep waits in Asleep, saying when it wakes, and wakes at its time", function()
+test("Activity: a chat asleep waits in Asleep, saying when it wakes, and wears the alarm once it wakes", function()
 	local app = open()
-	app:set_state(SLEEPING, { a3 = { wake_at = os.time() + 2 * 3600 + 60, at = os.time() } })
+	app:command("sleep_a3")
 	settle(app)
 	expect(shows(app, "Asleep 1")).to_be(true)
 	expect(shows(app, "Tidy the tests")).to_be(false)
@@ -110,27 +125,32 @@ test("Activity: a chat asleep waits in Asleep, saying when it wakes, and wakes a
 	settle(app)
 	expect(shows(app, "Tidy the tests")).to_be(true)
 	expect(app:tree(SIDE):find('text "3h"', 1, true) ~= nil).to_be(true)
-	-- Its time come: back in the list, at the top.
-	app:set_state(SLEEPING, { a3 = { wake_at = os.time() + 1, at = os.time() - 60 } })
-	wait_ms(app, 1500)
+	-- It woke: back in the list, at the top, wearing the alarm.
+	app:command("woke")
+	settle(app)
 	expect(shows(app, "Asleep")).to_be(false)
 	expect(top(app, "Tidy the tests") < top(app, "Write the docs")).to_be(true)
-	expect(((app:state(SLEEPING) :: any) or {}).a3).to_be(nil)
+	expect(app:tree(SIDE):find('"Woke from sleep"', 1, true) ~= nil).to_be(true)
 end)
 
-test("Activity: a chat asleep on a question stays asleep; asleep without one, a question wakes it", function()
+test("Activity: Sleep's times are in the chat's menu, and Wake once it's asleep", function()
 	local app = open()
-	-- Ship the release asks for input: put to sleep on that question, it
-	-- stays asleep.
-	app:set_state(SLEEPING, { b1 = { wake_at = os.time() + 3600, at = os.time(), held = "input" } })
+	app:right_click(`{SIDE} >> role:button "Write the docs"`)
+	settle(app)
+	app:hover('"Sleep"')
+	settle(app)
+	expect(app:has('~"In 1 hour"')).to_be(true)
+	expect(app:has('"Custom…"')).to_be(true)
+	app:click('~"In 1 hour"')
 	settle(app)
 	expect(shows(app, "Asleep 1")).to_be(true)
-	expect(shows(app, "Ship the release")).to_be(false)
-	-- A sleep that didn't know of it: the question wakes it at once.
-	app:set_state(SLEEPING, { b1 = { wake_at = os.time() + 3600, at = os.time() } })
+	app:click(`{SIDE} >> role:button "Asleep 1"`)
+	settle(app)
+	app:right_click(`{SIDE} >> role:button "Write the docs"`)
+	settle(app)
+	app:click('"Wake"')
 	settle(app)
 	expect(shows(app, "Asleep")).to_be(false)
-	expect(shows(app, "Ship the release")).to_be(true)
 end)
 
 test("Activity: the view menu opens its settings, and holds what it stands aside from out of reach", function()

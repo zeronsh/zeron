@@ -312,7 +312,7 @@ local ASKED: { [string]: string } = { approval = "approval", question = "input" 
 -- or `{ statuses = { "working", … }, by = "Focus" }`, those in these
 -- states ("idle", in none). Written by a plugin, so read with care: what
 -- isn't that shape is nil, and a word it doesn't know counts for nothing.
-local KNOWN = { working = true, input = true, approval = true, failed = true, done = true, idle = true }
+local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, done = true, woke = true, idle = true }
 local filter = ui.shared("sidebar.filter", nil :: any)
 type Narrow = { statuses: { [string]: boolean }, words: { string }, by: string }
 local narrow = ui.computed(function(): Narrow?
@@ -511,18 +511,24 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		local group = (c.project and by[c.project]) or loose
 		-- (Waiting on you beats working: an approval, then a question.)
 		local status = ASKED[asked[c.id] or ""] or c.status
+		-- (The Activity view's: woken from sleep and not looked at since, the
+		-- alarm, unless it's asking for you or under way. Which shelf it's
+		-- on, and its place; asleep, its corner says when it wakes. Off, none
+		-- of it.)
+		local act = activity.on:get()
+		if act and c.woke and (status == nil or status == "done") then
+			status = "woke"
+		end
 		if only and not only.statuses[status or "idle"] then
 			continue
 		end
-		-- (The Activity view's: which shelf it's on, and its place; asleep, its
-		-- corner says when it wakes. Off, none of it.)
-		local on_shelf = activity.shelf(c.id, status)
-		local rank = if activity.on:get() then activity.rank(c, on_shelf) else nil
+		local on_shelf = activity.shelf(c, status)
+		local rank = if act then activity.rank(c, on_shelf) else nil
 		table.insert(group.sessions, kept({
 			id = c.id,
 			title = c.title,
 			status = status :: any,
-			time = if on_shelf == "asleep" then activity.wakes_in(c.id) or c.updated else c.updated,
+			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
 			shelf = on_shelf,
 			rank = rank,
 			created = c.created,
@@ -822,6 +828,10 @@ local renaming_row = ui.state("shell_renaming_row", nil :: string?)
 -- The session asked about deleting, and its dialog.
 local deleting = ui.state("shell_deleting", nil :: string?)
 local delete_open = ui.state("shell_delete_open", false)
+-- Sleep → Custom…: the chat, the moment chosen, and whether it's asking.
+local sleep_custom = ui.state("shell_sleep_custom", nil :: string?)
+local sleep_custom_at = ui.state("shell_sleep_custom_at", nil :: number?)
+local sleep_custom_open = ui.state("shell_sleep_custom_open", false)
 local new_title = ui.state("shell_rename_title", "")
 
 local function chat(id: string): sessions.Chat?
@@ -1111,11 +1121,11 @@ local function menu(id: string): { any }?
 		end,
 	})
 	local side = is_side(id)
-	-- The Activity view's Sleep (its times, each saying when), or, asleep,
-	-- Wake.
+	-- The Activity view's Sleep (its times, each saying when, and one of
+	-- your own), or, asleep, Wake.
 	local sleep: any = false
 	if activity.on:peek() and not side then
-		if activity.asleep(id) then
+		if c.sleep_until then
 			sleep = {
 				label = locale.s("shell.activity.wake"),
 				icon = "sun",
@@ -1129,11 +1139,40 @@ local function menu(id: string): { any }?
 				table.insert(times, {
 					label = locale.s("shell.activity.sleep.choice", { name = p.label, when = p.detail }),
 					on_select = function()
-						activity.sleep(id, p.wake_at)
+						activity.sleep(id, p.until_at)
 					end,
 				})
 			end
+			table.insert(times, { separator = true })
+			table.insert(times, {
+				label = locale.s("shell.activity.sleep.custom"),
+				on_select = function()
+					sleep_custom:set(id)
+					sleep_custom_at:set(nil)
+					sleep_custom_open:set(true)
+				end,
+			})
 			sleep = { label = locale.s("shell.activity.sleep.title"), icon = "moon", submenu = times }
+		end
+	end
+	-- Waiting on background work it said it waits on: the person can say
+	-- otherwise (a dev server marked by mistake). Its background agents
+	-- aren't its say, so there's nothing to take back there.
+	local stop_waiting: any = false
+	if c.status == "waiting" then
+		for _, w in c.waiting or {} do
+			if w.kind == "process" then
+				stop_waiting = {
+					label = locale.s("shell.activity.stop_waiting"),
+					icon = "close-circle",
+					on_select = function()
+						sessions.stop_waiting(id):after(function() end, function()
+							ds.toast.show { title = locale.s("shell.activity.stop_waiting_failed"), tone = "danger" }
+						end)
+					end,
+				}
+				break
+			end
 		end
 	end
 	local entries = {
@@ -1162,12 +1201,13 @@ local function menu(id: string): { any }?
 		-- (Activity lists no sections: nothing to move into.)
 		if side or activity.on:peek() then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
 		sleep,
+		stop_waiting,
 		{ separator = true },
 		{
 			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
 			label = locale.s("common.archive"),
 			icon = "archive-minimalistic",
-			disabled = if c.status == "working" then locale.s("shell.sidebar.menu.archive_working") else nil,
+			disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
 			on_select = function()
 				M.archive(id)
 			end,
@@ -1417,6 +1457,38 @@ local function delete_dialog(): Node
 	}
 end
 
+-- Sleep until a time of your own: a day and a time from a minute ahead.
+local function sleep_dialog(): Node
+	return ds.Dialog {
+		open = sleep_custom_open,
+		title = ui.t("shell.activity.sleep.custom_title") :: any,
+		size = "sm",
+		confirm = {
+			label = ui.t("shell.activity.sleep.title") :: any,
+			-- (A time that has passed, or none chosen, puts nothing to sleep.)
+			on_click = function()
+				local id, at = sleep_custom:peek(), sleep_custom_at:peek()
+				sleep_custom:set(nil)
+				sleep_custom_open:set(false)
+				if id and at and at > os.time() then
+					activity.sleep(id, at)
+				end
+			end,
+		},
+		-- (Built as it opens: its month of days is nothing to keep.)
+		build = function(): Node
+			return ds.DatePicker {
+				id = "sleep-custom",
+				value = sleep_custom_at,
+				min = function(): number
+					return os.time() + 60
+				end,
+				label = ui.t("shell.activity.sleep.custom_title") :: any,
+			}
+		end,
+	}
+end
+
 local function rename_dialog(): Node
 	local function done()
 		local id = renaming:peek()
@@ -1537,6 +1609,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		bar,
 		rename_dialog(),
 		delete_dialog(),
+		sleep_dialog(),
 		project_dialogs(),
 	}
 end)

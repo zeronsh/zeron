@@ -295,8 +295,9 @@ local URGENCY: { [string]: number } = {
 	working = 5,
 	connecting = 6,
 	plan = 7,
-	done = 8,
-	waiting = 9,
+	woke = 8,
+	done = 9,
+	waiting = 10,
 }
 
 -- Sessions as a place holds them: a list read once, or a function a part

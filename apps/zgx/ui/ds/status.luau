@@ -13,7 +13,7 @@ local locale = require("@self/locale")
 
 local M = {}
 
-export type Kind = "working" | "connecting" | "waiting" | "input" | "approval" | "plan" | "done" | "failed" | "limited"
+export type Kind = "working" | "connecting" | "waiting" | "input" | "approval" | "plan" | "done" | "failed" | "limited" | "woke"
 
 -- Each state's glyph (none: its name alone) and its names: short, in a
 -- header; long, on a list's dot. The names are read as strings in the
@@ -30,6 +30,8 @@ local NAMES: { [Kind]: { string } } = {
 	done = { "ds.status.done", "ds.status.done_long" },
 	failed = { "ds.status.failed", "ds.status.failed" },
 	limited = { "ds.status.limited", "ds.status.limited" },
+	-- Put to sleep, and woken (its time came, or it asked): not looked at since.
+	woke = { "ds.status.woke", "ds.status.woke_long" },
 }
 local function kind(name: Kind, glyph: Icon.Name?, pulse: boolean?): KindInfo
 	local names = NAMES[name]
@@ -54,6 +56,7 @@ local KINDS: { [Kind]: KindInfo } = {
 	done = kind("done", "status-done"),
 	failed = kind("failed", "status-failed"),
 	limited = kind("limited", "status-failed"),
+	woke = kind("woke", "status-woke"),
 }
 M.KINDS = KINDS
 

@@ -270,11 +270,12 @@ local function name_of(r: any): string
 end
 
 -- Running chats on its device: updating its Zeron restarts its engine, which
--- stops them, and they carry on after.
+-- stops them, and they carry on after. (One waiting on background work counts:
+-- the restart ends that work too.)
 local function running_on(device: string, here: boolean): number
 	local n = 0
 	for _, c in sessions.now:get().chats or {} do
-		if (c.device == device or (here and device == "")) and (c.status == "working" or c.status == "input") then
+		if (c.device == device or (here and device == "")) and (c.status == "working" or c.status == "input" or c.status == "waiting") then
 			n += 1
 		end
 	end
