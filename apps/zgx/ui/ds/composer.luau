@@ -566,6 +566,8 @@ export type Project = {
 	warn: boolean?,
 	disabled: boolean?,
 	description: string?,
+	-- A folder with no git: it can't make a worktree.
+	plain: boolean?,
 }
 -- What working in no project is, among the projects.
 local NO_PROJECT = "none"
@@ -662,12 +664,26 @@ local function work_in(
 		)
 	end
 	if checkout then
-		-- A checkout is a project's: with none, no row; nor on Cloud, whose
-		-- machine checks the repository out on its own.
+		-- Whether the project chosen is a folder with no git.
+		local function plain(): boolean
+			if not project or not projects then
+				return false
+			end
+			local v = project:get()
+			for _, pr in list_of(projects) :: { Project } do
+				if pr.value == v then
+					return pr.plain == true
+				end
+			end
+			return false
+		end
+		-- A checkout is a project's: with none, no row; nor in a folder with
+		-- no git, with only itself to work in; nor on Cloud, whose machine
+		-- checks the repository out on its own.
 		table.insert(
 			rows,
 			ui.show(function(): boolean
-				return (project == nil or project:get() ~= NO_PROJECT) and not on_cloud(device, devices)
+				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
 			end, submenu(locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
 		)
 	end
@@ -2063,6 +2079,10 @@ return ui.component(function(props: Props): Node
 			local function runs_in(): Icon.Name?
 				if on_cloud(props.device, props.devices) then
 					return "cloud"
+				end
+				local chosen = chosen_project()
+				if chosen and chosen.plain then
+					return nil
 				end
 				return if checkout and checkout:get() == "local" then nil else "worktree"
 			end
