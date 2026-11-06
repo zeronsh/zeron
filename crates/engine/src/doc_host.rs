@@ -258,6 +258,7 @@ struct DocHostInner {
     /// Quiesced for a Cloud sleep ([`DocHost::quiesce_for_sleep`]): drains
     /// leave new work pending in the room, for the machine once it wakes.
     quiesced: AtomicBool,
+    boot_recovery_finished: AtomicBool,
     /// Bumped per quiesce: only the newest one's lease lifts it.
     quiesce_generation: AtomicU64,
     /// Drains between their quiesce check and the end of their dispatch (a
@@ -609,6 +610,8 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     queue_paused: AtomicBool,
+    /// The queue is paused because it was restored from disk, not by a person.
+    queue_frozen_by_recovery: AtomicBool,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -1066,6 +1069,7 @@ impl DocHost {
                 config,
                 sessions: Mutex::new(None),
                 quiesced: AtomicBool::new(false),
+                boot_recovery_finished: AtomicBool::new(false),
                 quiesce_generation: AtomicU64::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
@@ -1356,6 +1360,32 @@ impl DocHost {
     /// transport for queued attachment transfers to a remote host.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
         let _ = self.inner.links.set(links);
+    }
+
+    /// Boot recovery has been through every chat it cut off, and each it means
+    /// to pick back up is marked: queues it restored can go now, or after those
+    /// turns.
+    pub fn boot_recovery_finished(&self) {
+        self.inner.boot_recovery_finished.store(true, Ordering::Release);
+        self.kick_drains();
+    }
+
+    /// A Cloud machine restarts on every wake, which nobody there asked for or
+    /// sees, so a message queued before a sleep or a kill was meant to go, and
+    /// frozen it would wait for a prompt that may never come. Not ahead of a turn
+    /// the kill cut off, though: boot recovery brings that back first, and a row
+    /// sent now would read to it as the chat having moved on.
+    fn thaw_recovered_queue(&self, handle: &ChatDocHandle, sessions: &SessionsEngine) {
+        if !handle.queue_frozen_by_recovery.load(Ordering::Acquire)
+            || !zeron_proto::is_cloud_device(&self.inner.config.device_id, "")
+            || !self.inner.boot_recovery_finished.load(Ordering::Acquire)
+            || sessions.revival_pending(&handle.chat_id)
+        {
+            return;
+        }
+        if handle.queue_frozen_by_recovery.swap(false, Ordering::AcqRel) {
+            handle.queue_paused.store(false, Ordering::Release);
+        }
     }
 
     /// Re-evaluate every open chat's commands and queue NOW. Called after an
@@ -1776,11 +1806,8 @@ impl DocHost {
         // user submitted to this live engine. Keep that recovered work frozen
         // until an explicit prompt / Send now / Steer action thaws it. Rows
         // appended after the handle exists retain the normal automatic drain.
-        // Not on a Cloud machine: it restarts on every wake, which nobody there
-        // asked for or sees, and a message queued before a sleep or a kill was
-        // meant to go. It would otherwise wait for a prompt that may never come.
-        let recovered_queue_pending = !initial_queue.is_empty()
-            && !zeron_proto::is_cloud_device(&self.inner.config.device_id, "");
+        // A Cloud machine thaws it itself (`thaw_recovered_queue`).
+        let recovered_queue_pending = !initial_queue.is_empty();
         let (queue_tx, _) = watch::channel(initial_queue);
 
         let handle = Arc::new(ChatDocHandle {
@@ -1797,6 +1824,7 @@ impl DocHost {
             held_sends: Mutex::new(HashMap::new()),
             stopped_by: Mutex::new(None),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            queue_frozen_by_recovery: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             last_focus: AtomicU64::new(0),
@@ -4292,6 +4320,7 @@ impl DocHost {
         // lock next re-reads the queue and the status, so a drain that became
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
+        self.thaw_recovered_queue(handle, &sessions);
         if handle.queue_paused.load(Ordering::Acquire) {
             return;
         }
@@ -4456,6 +4485,7 @@ impl DocHost {
         {
             return Ok(false);
         }
+        handle.queue_frozen_by_recovery.store(false, Ordering::Release);
         handle.queue_paused.store(true, Ordering::Release);
         self.cancel_held_sends(handle);
         match sessions.interrupt(&handle.chat_id).await {

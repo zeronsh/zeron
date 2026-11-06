@@ -1558,6 +1558,11 @@ impl SessionsEngine {
         lock(&self.inner.runs).contains_key(chat_id)
     }
 
+    /// Boot recovery means to bring this chat's killed turn back, and hasn't yet.
+    pub(crate) fn revival_pending(&self, chat_id: &str) -> bool {
+        lock(&self.inner.revivals).contains_key(chat_id)
+    }
+
     /// Fold an engine-made event (a `show_visual` page, a `show_image` image)
     /// into the chat's live run, after whatever the harness streamed so far.
     /// Returns `false` when the chat has no run on this device.
@@ -1828,6 +1833,9 @@ impl SessionsEngine {
                         tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
                     }
                 }
+                // Whatever waited behind this revival: a turn it started holds it
+                // again until it ends, and one that didn't start doesn't.
+                host.kick_drains();
             });
         }
         Ok(recovered)

@@ -729,6 +729,95 @@ async fn a_row_on_a_cloud_machines_disk_goes_out_when_it_comes_back() {
     after.shutdown().await;
 }
 
+/// Seen on a real machine right after that fix: the row went first, the killed
+/// turn read that as the chat having moved on, and it never ran again, under a
+/// note saying it was resuming.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_on_a_machines_disk_waits_for_the_turn_the_kill_cut_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("machine");
+    let before = assemble(&dir, HOST, None);
+    create_chat(&before, HOST).await;
+    before.workspace.set_chat_cwd(CHAT, "~").unwrap();
+    before.shutdown().await;
+    drop(before);
+
+    let now = now();
+    let doc = zeron_doc::SessionDoc::init(CHAT).unwrap();
+    doc.push_message(&zeron_doc::SessionMessageEntry {
+        id: "m1".into(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text { id: "t0".into(), text: "the killed turn".into() }],
+        created_at: now - 60_000,
+        device_id: HOST.into(),
+        status: Some(MessageStatus::Complete),
+        continuation_of: None,
+        duration_ms: None,
+    })
+    .unwrap();
+    doc.push_message(&zeron_doc::SessionMessageEntry {
+        id: "a1".into(),
+        role: MessageRole::Assistant,
+        parts: vec![MessagePart::Text { id: "t0".into(), text: "partial".into() }],
+        created_at: now - 30_000,
+        device_id: HOST.into(),
+        status: Some(MessageStatus::Streaming),
+        continuation_of: None,
+        duration_ms: None,
+    })
+    .unwrap();
+    doc.push_queued(&QueuedMessage::new("row-1", "and then this", "phone")).unwrap();
+    let store_dir = dir.join("orgs/dev-org/dev-user");
+    let store = zeron_sync::DocsStore::open(&store_dir).unwrap();
+    store.save_snapshot(CHAT, &doc.export_snapshot().unwrap()).unwrap();
+    drop(store);
+    zeron_engine::RunJournal::open(store_dir.join("journals"))
+        .unwrap()
+        .append(
+            CHAT,
+            &AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "mock-1".into(),
+                tools: vec![],
+                cwd: "/tmp".into(),
+                session_id: "hs-killed".into(),
+                assistant_message_id: "a-killed".into(),
+            },
+        )
+        .unwrap();
+
+    let after = assemble(&dir, HOST, None);
+    let handle = after.doc_host.open(CHAT).unwrap();
+    wait_for(
+        || handle.doc().read_queue().unwrap().is_empty() && replies(&after) >= 2,
+        "the killed turn, then the row",
+    )
+    .await;
+    let users: Vec<String> = handle
+        .doc()
+        .read_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.role == MessageRole::User)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(users, ["m1", "row-1"], "the row never overtakes the turn");
+    let answered: Vec<String> = handle
+        .doc()
+        .read_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
+        .flat_map(|e| e.parts)
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, ["ack", "ack"], "both ran");
+    after.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_computer_hosting_a_chat_never_asks_the_store() {
     let tmp = tempfile::tempdir().unwrap();
