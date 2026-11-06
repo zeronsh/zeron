@@ -12,6 +12,9 @@ local recipe = ui.variants {
 				letter_spacing = -1,
 			},
 			title = { text_size = "$font.size.xxl", line_height = "$font.line.xxl", weight = "$font.weight.semibold" },
+			-- A page's title (ds/page): every page in the page's card, Settings'
+			-- and a plugin's alike.
+			headline = { text_size = "$font.size.xl", line_height = "$font.line.xl", weight = "$font.weight.semibold" },
 			heading = { text_size = "$font.size.lg", line_height = "$font.line.lg", weight = "$font.weight.medium" },
 			body = { text_size = "$font.size.md", line_height = "$font.line.md" },
 			caption = { text_size = "$font.size.sm", line_height = "$font.line.sm" },
@@ -29,7 +32,7 @@ local recipe = ui.variants {
 	defaults = { style = "body", tone = "primary" },
 }
 
-export type Style = "display" | "title" | "heading" | "body" | "caption" | "label" | "mono"
+export type Style = "display" | "title" | "headline" | "heading" | "body" | "caption" | "label" | "mono"
 export type Tone = "primary" | "secondary" | "tertiary" | "accent" | "danger"
 export type Props = Merge<TextProps, { style: Style?, tone: Tone? }>
 

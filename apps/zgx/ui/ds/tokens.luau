@@ -30,13 +30,18 @@ function M.setup()
 			-- cards set into the window, the title bar's line inside them.
 			-- `gap` is the window showing round and between them (the title
 			-- bar's controls stay where they were, so a gap past its 4 of top
-			-- padding would crowd them against the cards' top); `radius` their
-			-- corners;
+			-- padding would crowd them against the cards' top); `top` the top
+			-- bar over them (a tab on the bar's line, the window's gap over and
+			-- under it), where every card starts; `rim` the window's edge round
+			-- them, a point more than the gap between them (the same to the
+			-- eye); `radius` their corners;
 			-- `bg` their fill over the window's glass or colour; `edge` their
 			-- hairline, `edge_hover` the panel's under the pointer at its edge
 			-- (and as it's dragged).
 			inset = {
 				gap = 4,
+				top = 42,
+				rim = 5,
 				radius = "{radius.xl}",
 				bg = "{surface.raised}",
 				edge = "{border.subtle}",

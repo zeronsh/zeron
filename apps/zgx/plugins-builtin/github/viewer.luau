@@ -32,6 +32,8 @@ local MenuAt = require("@ds/menu_at")
 local Inline = require("@ds/inline_block")
 local comment = require("@ds/comment")
 local Settings = require("@ds/settings")
+-- A page's gutters in its card (ds/layout), and where they tighten.
+local layout = require("@ds/layout")
 local banner = require("@ds/banner")
 local TextArea = require("@ds/text_area")
 local RadioGroup = require("@ds/radio")
@@ -87,10 +89,11 @@ export type Check = { name: string?, context: string?, status: string?, conclusi
 
 -- A file's diff shows at most this many lines (and says so past them).
 local MAX_LINES = 2000
--- Under this width the header stacks, the gutters tighten and a file opens
--- its diff in place (the gallery's side-pane layout); past the second, the
--- Code tab's list stands beside the diff (its window layout).
-local NARROW, SPLIT = 640, 880
+-- Narrow (a pane's: ds/layout `narrow`), the header stacks, the gutters
+-- tighten and a file opens its diff in place (the gallery's side-pane
+-- layout); past this width, the Code tab's list stands beside the diff (its
+-- window layout).
+local SPLIT = 880
 
 -- The plugin's words (the SDK's `s` and `t`, locales/en.json), set as the
 -- viewer is made: every line here says them through it.
@@ -2044,14 +2047,14 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 					badges = badges,
 				},
 			}
-			-- The gallery's gutters: a side pane's tighter than the window's.
-			local px = if narrow then "$space.4" else "$space.6"
+			-- A page's gutters: a side pane's tighter than the window's.
+			local px = layout.gutter(narrow)
 			if fixed then
 				return ui.column {
 					w_full = true,
 					h_full = true,
 					px = px,
-					pt = "$space.4",
+					pt = layout.TOP,
 					pb = "$space.4",
 					gap = "$space.5",
 					head,
@@ -2078,7 +2081,7 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 				ui.column {
 					w_full = true,
 					px = px,
-					pt = "$space.4",
+					pt = layout.TOP,
 					pb = "$space.6",
 					gap = "$space.5",
 					head,
@@ -2126,7 +2129,7 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 			ready = function(): Node
 				return ui.presence(function(): string
 					local w = width:get()
-					local narrow = w > 0 and w < NARROW
+					local narrow = layout.narrow(w)
 					local split = w >= SPLIT
 					-- (And once the diff is here: the files' statuses are its.)
 					-- (The Code tab follows a version in place: its threads read the
@@ -2142,7 +2145,7 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 						return ui.div {}
 					end
 					local w = width:peek()
-					return page(d, w > 0 and w < NARROW, w >= SPLIT, tab:peek() == "code")
+					return page(d, layout.narrow(w), w >= SPLIT, tab:peek() == "code")
 				end, { w_full = true, h_full = true })
 			end,
 		}

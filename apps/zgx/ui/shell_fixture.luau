@@ -1265,6 +1265,11 @@ require("@app/screens/shell/sidebar").options.organize:set("project")
 local plugins_on = ui.state("shell_fixture.plugins", false)
 ui.effect(function()
 	if plugins_on:get() then
+		-- (No sources to check for updates here: the host would ask the
+		-- engine, as the Plugins page's other fixtures stub it.)
+		(require("@app/screens/plugins/state") :: any).check_updates = function(): any
+			return nil
+		end
 		require("@app/screens/plugins")
 	end
 end)

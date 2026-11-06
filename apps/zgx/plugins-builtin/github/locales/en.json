@@ -34,6 +34,7 @@
     "choose_project": "Choose a project",
     "search_projects": "Search projects…",
     "hint": "Open pull requests in a project's repository on GitHub.",
+    "on_github": "{repo} on GitHub",
     "filter": "Filter",
     "filters": {
       "authored": "Authored",

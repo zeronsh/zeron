@@ -727,9 +727,8 @@ local function agents_page(): Node
 		-- Agents are per device: which one's (a choice once there's more
 		-- than this one).
 		-- (The same choice as Plugins': screens/settings/devices.)
-		trail = devices_page.picker(shown_device, choose_device),
-		-- (At the top right, on the title's line, as Plugins' is.)
-		trail_top = true,
+		-- (On the title's line, as Plugins' is.)
+		actions = devices_page.picker(shown_device, choose_device),
 		ui.presence(kind, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 	}
 end

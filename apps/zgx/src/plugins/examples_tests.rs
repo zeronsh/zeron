@@ -1806,7 +1806,7 @@ fn github_s_board_lists_a_project_s_pull_requests_by_filter_and_opens_one() {
     assert!(runs(&asked).iter().any(|r| ran(r, &["repo", "view"]) && r["cwd"] == "/work/atlas"), "{:?}", runs(&asked));
     assert!(runs(&asked).iter().any(|r| ran(r, &["search(", "repo:zeronsh/zgx", "author:@me"])), "{:?}", runs(&asked));
     let tree = app.tree();
-    for text in ["zeronsh/zgx", "Pull request 1, open", "Pull request 2, draft", "First fix", "Second draft", "ada · Approved · CI passed", "ada · Draft · CI passed", "2 of 3"] {
+    for text in ["zeronsh/zgx on GitHub", "Pull request 1, open", "Pull request 2, draft", "First fix", "Second draft", "ada · Approved · CI passed", "ada · Draft · CI passed", "2 of 3"] {
         assert!(tree.contains(&format!("\"{text}\"")), "{text}: {tree}");
     }
     // Kept for the next run.
@@ -1914,6 +1914,37 @@ fn a_plugin_s_page_survives_a_reload_and_takes_its_place_in_the_history() {
     app.host.run_command("router.forward");
     app.frames(20);
     assert!(!on_board(&mut app), "forward to the session");
+}
+
+#[test]
+fn github_s_board_stands_its_title_where_settings_does() {
+    // One page in the page's card (ui/ds/page): the pull request board, a
+    // plugin's page, has Settings' title at the same top and line, on its
+    // own column's edge (the wide one), which is its card's, wide and
+    // narrow. (Settings' pages among themselves: ui/tests/page_gutters.)
+    for width in [1400f32, 900.] {
+        let items = vec![builtin("github")];
+        let (mut app, _) = shell_hearing(items.clone());
+        app.host.shared("zgx.window.size", zgx_script::Value::Nil).set(zgx_script::window_size_value(width, 900.));
+        app.ui.scene.borrow_mut().resize(width, 900.);
+        publish_records(&app, &items);
+        app.host.shared("plugins.pages", zgx_script::Value::Nil).set(json_value(&json!([{ "plugin": "github", "plugin_name": "GitHub", "id": "pulls", "title": "Pull requests", "icon": "pull-request" }])));
+        app.frames(10);
+        app.host.run_command("settings_stub.sign_in");
+        app.host.run_command("shell.settings");
+        app.frames(40);
+        let settings = app.bounds("#settings-page >> role:heading \"General\"");
+        app.click("role:button \"Back to chats\"");
+        app.frames(20);
+        app.click(".plugin-page-row");
+        app.frames(40);
+        let board = app.bounds("#plugin-page-area >> role:heading \"Pull requests\"");
+        let tabs = app.bounds("#github-board-filters");
+        let at = |r: zgx::scene::Rect| (r.y.round(), r.height.round());
+        assert_eq!(at(board), at(settings), "{width}: the board's title at Settings' top: {}", app.tree());
+        assert_eq!(tabs.x.round(), board.x.round(), "{width}: its tabs (its list's edge) under its title's edge");
+        assert_eq!(app.error(), None);
+    }
 }
 
 /// What a new chat's wallpaper holds on the GPU, state by state: the shell

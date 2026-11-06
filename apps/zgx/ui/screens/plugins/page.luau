@@ -672,9 +672,8 @@ function M.View(): Node
 	return ds.Settings.Catalog {
 		title = ui.t("plugins.page.title"),
 		description = ui.t("plugins.page.description"),
-		trail = devices_page.picker(device, choose),
-		-- (At the top right, on the title's line, as Providers' is.)
-		trail_top = true,
+		-- (On the title's line, as Providers' is.)
+		actions = devices_page.picker(device, choose),
 		search = { value = query, placeholder = ui.t("plugins.page.search") },
 		tabs = {
 			value = tab,

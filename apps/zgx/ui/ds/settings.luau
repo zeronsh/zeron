@@ -27,11 +27,11 @@ local Hint = require("@self/hint")
 local FadeText = require("@self/fade_text")
 local PrivateText = require("@self/private_text")
 local look = require("@self/look")
-local Tabs = require("@self/tabs")
 local SearchField = require("@self/search_field")
 local EmptyState = require("@self/empty_state")
 local Button = require("@self/button")
 local skeleton = require("@self/skeleton")
+local Page = require("@self/page")
 
 local M = {}
 
@@ -46,9 +46,9 @@ local CHEVRON = 14
 local SEARCH_INK = 1.5
 
 -- Where a row's words start, from a card's outer edge: its 16 inset, past
--- the card's 1 edge. A page's title, a section's, and whatever else stands
--- over or under a card (a page's tabs, a hint) start their words here, so
--- the words line up down one edge and the cards hang past it.
+-- the card's 1 edge. Inside a card only: what stands over or under one (a
+-- page's title, a section's, its tabs, a hint) is on the column's edge,
+-- the cards' own (ds/page).
 M.TEXT_INSET = 17
 
 -- That inset as a padding, less `pad` (points of the node's own between its
@@ -57,119 +57,11 @@ function M.inset(pad: number?): any
 	return ui.raw(M.TEXT_INSET - (pad or 0), "a row's 16 inset, past the card's 1 edge")
 end
 
--- (Each word a component here takes may be a message, `ui.t`: drawn as it
--- is, or read where only a string will do, so it follows the locale.)
-export type PageProps = {
-	title: control.Live<string> | Message,
-	description: (control.Live<string> | Message)?,
-	-- Something at the title's end (a search, a Reset): beside the
-	-- description's last line, or with `trail_top`, centred on the title's
-	-- line at the page's top right (a device choice, which the whole page
-	-- is about). Short of room, it goes under the title either way.
-	trail: Node?,
-	trail_top: boolean?,
-	-- Something that stands beside the page's groups (a profile's card, a
-	-- preview of what the fields make): a column of `aside_w` at the right,
-	-- its top on the first group's; `aside_top`, over the groups instead,
-	-- centred (a window too narrow for two columns). A state or function
-	-- moves it as the width crosses, in place: nothing is built again.
-	aside: Node?,
-	aside_w: number?,
-	aside_top: control.Live<boolean>?,
-	[number]: Child,
-}
-
--- An aside's column, by default.
-local ASIDE = 180
-
-function M.Page(props: PageProps): Node
-	local children: { any } = {}
-	for _, c in ipairs(props :: any) do
-		table.insert(children, c)
-	end
-	-- The groups take the page's whole measure, but beside an aside, where
-	-- they take what it leaves.
-	local function top(): boolean
-		return control.value(props.aside_top) == true
-	end
-	local groups = ui.column {
-		grow = 1,
-		min_w = 0,
-		w_full = if props.aside then top else true,
-		gap = "$space.6",
-		table.unpack(children),
-	}
-	local body: Node
-	if props.aside then
-		-- Beside the groups, a column of its own at the right, its top on
-		-- theirs; over them, on the page's middle (its own box, centred), a
-		-- step of the page's rhythm above them. One box either way, turned
-		-- (the aside after the groups, so over them is a reversed column).
-		body = ui.div {
-			w_full = true,
-			gap = "$space.6",
-			direction = function(): Direction
-				return if top() then "column_reverse" else "row"
-			end,
-			items = function(): Align
-				return if top() then "stretch" else "start"
-			end,
-			groups,
-			ui.column {
-				shrink = 0,
-				-- (Over the groups, the page's whole width.)
-				w = function(): number | string
-					return if top() then "100%" else (props.aside_w or ASIDE)
-				end,
-				items = function(): Align
-					return if top() then "center" else "stretch"
-				end,
-				props.aside,
-			},
-		}
-	else
-		body = groups
-	end
-	return ui.column {
-		w_full = true,
-		-- (A theme number, read as it is built: max_w takes points.)
-		max_w = ui.theme.get("zeron.settings.measure") :: number?,
-		gap = "$space.6",
-		ui.row {
-			-- Inset to the rows' text, as a section's title is: the page's
-			-- words line up down one edge, the cards hang past it.
-			px = M.inset(),
-			gap = "$space.3",
-			items = "end",
-			-- Short of room, what's at its end goes under the title.
-			flex_wrap = true,
-			ui.column {
-				grow = 1,
-				-- (From nothing, at least its least: a long line under the
-				-- title wraps beside what's at its end, which goes under only
-				-- when the words would have less than their least.)
-				basis = 0,
-				min_w = MIN_TEXT,
-				gap = "$space.1",
-				ui.text { props.title, heading = 1, text_size = "$font.size.xl", line_height = "$font.line.xl", weight = "$font.weight.semibold", color = "$text.primary" },
-				if props.description
-					then ui.text { props.description, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
-					else nil,
-			},
-			if props.trail and props.trail_top
-				then ui.row {
-					-- (Its own top, a title's line high, it in the middle: its
-					-- centre on the title's.)
-					self = "start",
-					min_h = ui.theme.get("font.line.xl") :: number?,
-					items = "center",
-					props.trail,
-				}
-				else props.trail,
-		},
-		body,
-	}
-end
+-- A page: ds/page's, the one every page in the page's card is (its title,
+-- the line under it, `actions` on the title's line, `trail` beside the
+-- line, an `aside`), at the reading measure.
+export type PageProps = Page.Props
+M.Page = Page.Page
 
 export type SectionProps = {
 	title: (string | Message)?,
@@ -186,9 +78,7 @@ function M.Section(props: SectionProps): Node
 	local head: Node? = nil
 	if props.title or props.description then
 		head = ui.column {
-			-- Inset to the rows' text (past the card's edge), so a section's
-			-- title stands over what it names.
-			px = M.inset(),
+			-- (On the column's edge, the cards' own, as the page's title.)
 			gap = "$space.1",
 			if props.title then SectionTitle { props.title, trail = props.trail, heading = 2 } else nil,
 			if props.description then Hint { props.description } else nil,
@@ -860,7 +750,7 @@ end
 --
 --   Settings.Catalog {
 --     title = "Plugins", description = "…",
---     trail = Node,                                   -- optional, at the title's end (a device choice)
+--     actions = Node,                                 -- optional, on the title's line (a device choice)
 --     search = { value = query, placeholder = "Search plugins" },
 --     tabs = { value = tab, label = "Plugins", options = { { value = "installed", label = "Installed", count = … }, … } },
 --     new = { label = "New plugin", on_click = … },
@@ -878,10 +768,8 @@ export type CatalogProps = {
 	-- (The words may be messages, `ui.t`.)
 	title: string | Message,
 	description: (string | Message)?,
-	-- Something at the title's end, as a Page's (which device's), and
-	-- whether it's on the title's line (`trail_top`, a Page's).
-	trail: Node?,
-	trail_top: boolean?,
+	-- On the title's line, as a Page's (which device's).
+	actions: Node?,
 	search: { value: State<string>, placeholder: string | Message },
 	tabs: { value: State<string>, label: string | Message, options: { any } },
 	new: { label: string | Message, on_click: () -> () }?,
@@ -1036,23 +924,6 @@ function M.Catalog(props: CatalogProps): Node
 	local column: { any } = {
 		w_full = true,
 		gap = "$space.4",
-		ui.row {
-			w_full = true,
-			items = "end",
-			gap = "$space.2",
-			-- In to the rows' words, as the title is: the tab's label (its
-			-- space.1 inside the tab) on that edge, its underline hanging
-			-- past it as a wash does.
-			Tabs {
-				value = tab,
-				label = props.tabs.label,
-				rule = true,
-				-- (The rule runs the card's width, as the board's does.)
-				inset = M.inset(ui.theme.get("space.1") :: number?),
-				options = props.tabs.options,
-				trail = trail(props),
-			},
-		},
 		if props.notice and props.notice_when
 			then ui.show(props.notice_when, ui.column { w_full = true, (props.notice :: () -> Node)() })
 			elseif props.notice then props.notice()
@@ -1065,23 +936,19 @@ function M.Catalog(props: CatalogProps): Node
 		end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 	}
 	if props.hint then
-		table.insert(column, ui.text {
+		table.insert(column, Hint {
 			id = props.hint.id,
 			props.hint.text,
-			-- In to the rows' words, as the title is.
-			px = M.inset(),
+			-- (On the column's edge, as the title is.)
 			w_full = true,
-			wrap = true,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			color = "$text.tertiary",
 		})
 	end
 	local page: { any } = {
 		title = props.title,
 		description = props.description,
-		trail = props.trail,
-		trail_top = props.trail_top,
+		actions = props.actions,
+		-- The page's tabs, New (and Import) at the rule's far end.
+		tabs = { value = tab, label = props.tabs.label, options = props.tabs.options, trail = trail(props) },
 		ui.column(column),
 	}
 	for _, overlay in props.overlays or {} do

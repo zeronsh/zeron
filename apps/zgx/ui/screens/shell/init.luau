@@ -541,7 +541,7 @@ return function(): Node
 					shrink = 0,
 					hidden = in_settings,
 					boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
-						return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = 42 }
+						return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = (ui.theme.get("zeron.inset.top") :: number?) or 42 }
 					end),
 				},
 				boundary.screen(boundary.named("shell.boundary.screen.page"), "@app/screens/shell/page", function(Page): Node

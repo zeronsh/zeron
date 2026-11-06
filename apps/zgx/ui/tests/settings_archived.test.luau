@@ -312,14 +312,14 @@ test("a row's height is what the list was told, at every text size, with a line 
 	expect(chats(app)[1].h > at_13[1].h).to_be(true)
 end)
 
-test("the header's words and the groups' names sit on the cards' text edge", function()
+test("the header's words and the groups' names sit on the cards' edge", function()
 	local app = open()
 	-- (The card is its section's width: the section's box gives its edges.)
 	local card = box(app, `{PAGE} >> role:group "Today"`)
 	local title = box(app, `{PAGE} >> role:heading "Archived"`)
 	local today = box(app, `{PAGE} >> role:heading "Today"`)
-	expect(math.abs(title.x - (card.x + 17)) < 0.5).to_be(true)
-	expect(math.abs(today.x - (card.x + 17)) < 0.5).to_be(true)
+	expect(math.abs(title.x - card.x) < 0.5).to_be(true)
+	expect(math.abs(today.x - card.x) < 0.5).to_be(true)
 	-- A row's wash: the card's inner box edge to edge, no inset (and no
 	-- corner of its own: Settings.CatalogRow's, the card's clipping it).
 	local wash = box(app, `{PAGE} >> role:group "Today" >> .catalog-row[1]`)
@@ -336,7 +336,7 @@ test("the header's words and the groups' names sit on the cards' text edge", fun
 	-- cards' end edge.
 	local delete = box(app, "#archived-delete-all")
 	expect(math.abs((delete.y + delete.h / 2) - (title.y + title.h / 2)) < 2).to_be(true)
-	expect(math.abs((delete.x + delete.w - 10) - (card.x + card.w - 17)) < 0.5).to_be(true)
+	expect(math.abs((delete.x + delete.w - 10) - (card.x + card.w)) < 0.5).to_be(true)
 end)
 
 test("narrow, Delete all goes under the title", function()

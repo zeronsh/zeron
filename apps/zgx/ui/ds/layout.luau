@@ -7,6 +7,7 @@
 --   Link { "Learn more", on_click = … } inline, the accent's ink
 --   Breadcrumbs { items = { { label = "zeron" }, { label = "ds" }, { label = "badge.luau" } } }
 --   KeyValue { items = { { key = "Branch", value = "main" }, … } }
+--   gutter(w), narrow(w), TOP          a page's sides' room in its card, `w` wide
 
 local Icon = require("@self/icon")
 local FadeText = require("@self/fade_text")
@@ -201,6 +202,30 @@ function M.KeyValue(props: KeyValueProps): Node
 		table.insert(rows, Pair { pair = pair, key_width = props.key_width or 96, dense = props.dense })
 	end
 	return ui.column { w_full = true, role = "list", table.unpack(rows) }
+end
+
+-- A page in the page's card (Settings' pages, a plugin's page, a pull
+-- request), one rule for all of them: `gutter(w)` each side, `$space.6`,
+-- and `$space.4` once the page is under `NARROW` wide (`w` its own width as
+-- laid out, 0 not yet: wide; or whether it's narrow); its first words
+-- `TOP` under the card's top, the gutter's step (as far as the composer
+-- stands from a chat page's sides), so the title clears the top bar and
+-- the card's corner on the page's own rhythm (its header and sections,
+-- `$space.6` apart); and `WIDE`, a page's column when it must be wider
+-- than one that reads (`zeron.settings.measure`): ds/page's `width =
+-- "wide"`. (Standard steps, not tokens of Zeron's own: a template's own
+-- tokens don't lose them.)
+M.NARROW = 640
+M.WIDE = 960
+M.TOP = "$space.6"
+
+function M.narrow(w: number): boolean
+	return w > 0 and w < M.NARROW
+end
+
+function M.gutter(at: number | boolean): string
+	local narrow = if type(at) == "boolean" then at else M.narrow(at)
+	return if narrow then "$space.4" else "$space.6"
 end
 
 return M

@@ -438,7 +438,6 @@ local function repositories(): Node
 					ui.show(function(): boolean
 						return count() > SHOWN
 					end, ui.row {
-						px = ds.Settings.inset(),
 						ui.text {
 							function(): string
 								return ui.t("settings.cloud.repos.more", { n = count() - SHOWN }):get()

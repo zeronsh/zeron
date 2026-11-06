@@ -254,7 +254,6 @@ M.view = ui.component(function(_: {}): Node
 		ui.row {
 			gap = "$space.3",
 			items = "center",
-			pl = ds.Settings.inset(),
 			ui.text { ui.t("settings.appshots.changed"), text_size = "$font.size.sm", color = "$text.secondary" },
 			ds.Button { tone = "ghost", size = "sm", on_click = Appshots.refresh, ui.t("settings.appshots.check_again") },
 		},

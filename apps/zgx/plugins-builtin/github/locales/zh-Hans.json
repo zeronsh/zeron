@@ -34,6 +34,7 @@
     "choose_project": "选择项目",
     "search_projects": "搜索项目…",
     "hint": "查看项目的 GitHub 仓库中打开的拉取请求。",
+    "on_github": "GitHub 上的 {repo}",
     "filter": "筛选",
     "filters": {
       "authored": "我创建的",

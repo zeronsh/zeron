@@ -44,10 +44,10 @@ export type Props = {
 -- The title bar's height (Zeron's): the pages start under it, the
 -- wallpaper runs under it to the window's top.
 local TITLE_H = 38
--- The top bar over the cards: a tab on the bar's line, the window's gap over
--- and under it.
-local TOP_BAR = 42
-local WINDOW_EDGE = 5
+-- The top bar over the cards, and the window's edge round them
+-- (`zeron.inset.top`, `zeron.inset.rim`: ds/tokens).
+local TOP_BAR = (ui.theme.get("zeron.inset.top") :: number?) or 42
+local WINDOW_EDGE = (ui.theme.get("zeron.inset.rim") :: number?) or 5
 -- The panel's Expand on the top bar (the bar's controls' size).
 local EXPAND = 24
 -- What the title line's right end keeps for the bar's controls there. (The
@@ -603,7 +603,9 @@ return function(props: Props): Node
 				absolute = true,
 				left = 0,
 				right = 0,
-				top = TITLE_H - INSET,
+				-- (From the card's top, under the top bar, as Settings' pages
+				-- and a chat's transcript start: the page keeps its own top.)
+				top = 0,
 				bottom = 0,
 				ui.presence(function(): string
 					local c = route.current:get()
