@@ -374,18 +374,17 @@ pub struct Laid {
 /// (`.active`, a template made or removed), the active template's files and
 /// folders, and Zeron's own `ui/` (a save while developing).
 ///
-/// Each watch is a descriptor of its own, so `ui/` (over a thousand files,
-/// most of them art) is watched by its folders, which hear a file made,
-/// removed or saved by replacing it, plus its scripts and themes, the files
-/// saved in place. The gallery's and the tests' folders aren't the app's
-/// and aren't watched.
+/// `ui/` (over a thousand files, most of them art) is watched by its
+/// folders, which hear a file made, removed or saved by replacing it, plus
+/// its scripts and themes, the files saved in place. The gallery's and the
+/// tests' folders aren't the app's and aren't watched.
 pub fn watched(templates: &Path, ui: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut files_ = vec![templates.join(ACTIVE)];
     let mut dirs = vec![templates.to_path_buf()];
     let id = active(templates);
     let edited_in_place = |rel: &str| rel.ends_with(".luau") || rel.ends_with(".json") || rel == ".luaurc";
-    // (A bundle's interface doesn't change while it runs, and a descriptor for
-    // each of its files uses up the app's: it's read again at the next launch.)
+    // (A bundle's interface doesn't change while it runs: it's read again at
+    // the next launch.)
     if !in_app_bundle(ui) {
         files_.extend(files(ui, |rel| synced(rel) && edited_in_place(rel)).into_values());
         folders(ui, &mut dirs, synced);
