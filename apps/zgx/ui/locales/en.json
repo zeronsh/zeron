@@ -828,6 +828,13 @@
       "more_running": "{n} more",
       "stop_all": "Stop all",
       "running": "Running",
+      "finished": "Finished",
+      "agents": "{n, plural, one {# agent} other {# agents}}",
+      "processes": "{n, plural, one {# process} other {# processes}}",
+      "open_agent": "Open {name}",
+      "n_finished": "{n} finished",
+      "show_finished": "Show {n} finished",
+      "hide_finished": "Hide {n} finished",
       "queued_messages": "Queued messages",
       "queued": "Queued"
     },

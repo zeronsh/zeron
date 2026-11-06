@@ -30,5 +30,8 @@ return ui.column {
 		on_stop_all = function()
 			call("stop_all")
 		end,
+		on_open_task = function(id: string)
+			call(`open:{id}`)
+		end,
 	},
 }
