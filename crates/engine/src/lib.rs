@@ -66,6 +66,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod runner;
+pub mod wake_trace;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
@@ -560,10 +561,17 @@ impl EngineCore {
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> zeron_rpc::HostRelay {
         let auth = self.auth();
-        let config =
+        let mut config =
             zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+        if runner::is_cloud_platform() {
+            // One host per device room, so nothing to decorrelate from, and a
+            // message is usually waiting on this very dial.
+            config.max_jitter = std::time::Duration::from_millis(100);
+            config.on_connected = Some(Arc::new(|| wake_trace::mark(wake_trace::Stage::Relay)));
+        }
         let doc_host = self.doc_host.clone();
         let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
+            wake_trace::mark(wake_trace::Stage::Nudge);
             match doc_host.enqueue_wakeup(&chat_id) {
                 Ok(()) => true,
                 Err(err) => {
@@ -1038,6 +1046,7 @@ impl Engine {
         // Attached before the host relay so relayed RPCs see the broker.
         if let Some(identity) = auth.runner_identity() {
             let tokens: Arc<dyn zeron_rpc::TokenSource> = Arc::new(auth.clone());
+            wake_trace::report_to(identity.edge_url(), tokens.clone());
             let broker = credentials::CredentialBroker::new(
                 credentials::BrokerConfig::detect(&device_root),
                 identity.clone(),
@@ -1111,7 +1120,16 @@ impl Engine {
         let quiescent: zeron_update::QuiescentCheck = {
             let sessions = core.sessions.clone();
             let terminals = core.terminals.clone();
-            Arc::new(move || !sessions.any_active() && !terminals.any_open())
+            // A Cloud machine is woken by a message: right after boot "nothing
+            // is running" only means its run hasn't started yet, and an update
+            // applied then restarts the engine under the waiting message.
+            let booted = std::time::Instant::now();
+            let cloud = runner::is_cloud_platform();
+            Arc::new(move || {
+                !sessions.any_active()
+                    && !terminals.any_open()
+                    && runner::settled_after_boot(cloud, booted.elapsed())
+            })
         };
         core.harness_updates.set_compatibility_feed(format!(
             "{}/releases/harness-compatibility.json",
@@ -1121,7 +1139,14 @@ impl Engine {
         // dir (update-channel.json), so this report follows the app's choice.
         zeron_update::channel::set_data_dir(&config.data_dir);
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
-        if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
+        // (Not on a Cloud machine: every boot's first token would start a
+        // release check, and possibly a download, as the message starts its run.
+        // Its checks keep their own schedule; its token is never a recovery.)
+        if let Some(mut token_changes) = edge
+            .as_ref()
+            .filter(|_| !runner::is_cloud_platform())
+            .and_then(EdgeConfig::token_changes)
+        {
             let updater_for_tokens = updater.clone();
             let wake = tokio::spawn(async move {
                 while token_changes.changed().await.is_ok() {
@@ -1191,6 +1216,7 @@ impl Engine {
         // Cloud runner: runner.json wins; else ZERON_RUNNER_ENROLL enrolls
         // first (retrying network failures; a rejected code is fatal).
         if let Some(identity) = runner::bootstrap(&config.data_dir, &config.edge_url).await? {
+            wake_trace::enable();
             if identity.edge_url() != config.edge_url.trim_end_matches('/') {
                 tracing::info!(edge = %identity.edge_url(), "runner: using the edge this device enrolled with");
                 config.edge_url = identity.edge_url().to_string();
