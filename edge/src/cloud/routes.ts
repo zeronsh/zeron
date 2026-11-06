@@ -24,6 +24,7 @@
  *   POST   /runner/enroll                  pre-bearer: one-time code → key
  *   POST   /runner/token                   pre-bearer: signed ts → runner JWT
  *   POST   /runner/heartbeat               runner bearer
+ *   POST   /runner/wake-timing             runner bearer: a wake's engine side
  *
  * Every route lands on the caller's OWN CloudAccount DO (`cloud1/{org}/{user}`,
  * org/user from the verified bearer — or, for the two pre-bearer runner
@@ -44,6 +45,7 @@ const MAX_USAGE_DAYS = 366;
 import { CLOUD_DEVICE_PREFIX, MACHINES, cloudAccountName, machineName, parseMachine } from "./policy";
 import { MAX_PACKS, billingAvailable, parseEvent, planById, verifySignature, type StripeEnv } from "./stripe";
 import { sandboxProvider, type ProviderEnv } from "./providers";
+import { parseEngineTiming } from "./wake";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const CLOUD_ID_RE = /^cloud-[A-Za-z0-9-]{1,100}$/;
@@ -290,6 +292,19 @@ export const handleCloudRoute = async (
         ...(diskUsedBytes === undefined ? {} : { diskUsedBytes })
       })
     );
+  }
+
+  if (url.pathname === "/runner/wake-timing") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const timing = parseEngineTiming(await readJsonBody(request, MAX_RUNNER_BODY), Date.now());
+    if (!timing) return jsonError(400, "bad_request", "Expected stage times in Unix milliseconds.");
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() => accountStub(ns, runner.orgId, runner.userId).wakeTimingReport(runner, timing));
   }
 
   const parts = url.pathname.split("/").filter(Boolean);

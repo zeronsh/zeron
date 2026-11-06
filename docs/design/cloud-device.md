@@ -212,9 +212,15 @@ Linux release from `{edge}/releases/`, writes `~/.zeron/env` (0600) from the per
 `zeron headless` as the exec user with `Restart=always`. Enabled units restart on resume
 (verified on Boat: a resumed sandbox lands on a new machine in ~4 s with the service up).
 
-**WakeWorkflow** — `resume` → poll until ready → `waitForEvent("online", 5 min)` (the
-runner's first token after resume); on timeout it runs one idempotent
-`sudo systemctl restart zeron-cloud` before failing.
+**WakeWorkflow** — one step (`edge/src/cloud/wake.ts`, `fastWake`): `resume`, then at once
+`systemctl start --no-block zeron-cloud` (Boat holds a command until the machine can run it,
+so this races the machine's own start of its enabled units), polling the state every 250 ms,
+then easing off (no Workflow sleep: those cost whole seconds). A resume during a stop is taken
+(it keeps the machine); a refused one falls back to the slow poll. Then
+`waitForEvent("online", 90 s)` (the runner's first token after resume); on timeout it runs one
+idempotent `sudo systemctl restart zeron-cloud` and waits 5 more minutes before failing. None of
+this gates the queued message: the engine drains it as soon as it joins its room, so the
+workflow only decides when the session reads `ready`.
 
 **SleepWorkflow** — `zeron quiesce` → `sudo systemctl stop zeron-cloud` → `stop` → poll until
 stopped. A refused stop is retried (the provider bills nothing while a stop is refused); it is
@@ -368,6 +374,36 @@ A Cloud machine runs a *system* unit, `zeron-cloud.service`, not the user unit i
 use. `zeron_update::service_unit()` knows it from `ZERON_DEVICE_PLATFORM=cloud` (written by the
 installer on every machine, so existing ones need no reinstall), and `ServiceScope::of(unit)` picks
 the manager: `sudo -n systemctl` to act, plain `systemctl` to read.
+
+On a Cloud machine nothing restarts the engine for an update in the first two minutes after boot:
+`runner::settled_after_boot` holds both the auto-update and the restart into a newer installed
+binary, since "nothing running" that early means the message that woke it hasn't started its run.
+
+### Waking
+
+What a wake is made of, in order, and who owns each part. The target is a send to a running
+agent in under 5 s; today's floor is below.
+
+| Stage | Owner | What keeps it short |
+| --- | --- | --- |
+| Send → nudge → `autoWake` → workflow | us | sender polls its durable job every 100 ms; the rest is a Worker and a DO |
+| Resume accepted, machine `ready` | Boat | "a few seconds"; every resume lands on a new machine and is a reboot (no memory, no processes) |
+| Engine started | us | `zeron-cloud-boot.service` (active through the snapshot, so it starts on any resume) races the exec; the unit no longer waits on `network-online.target` |
+| Binary loads | Boat's lazy disk | `~/.zeron/app` isn't in the base image, so it downloads on every resume; Boat's playbook (`~/.ascii/playbook.json`) fetches what we opened first, first |
+| First token, room joined | us | connect timeout 3 s and 250 ms retries (a restored machine often loses its first connection) |
+| Command → agent running | us | grants and git identity primed at boot; for 2 minutes after boot no agent CLI check (its install would hold the run) and no engine update applies |
+
+The sleep's stop command brings machines provisioned before these units up to date, since
+nothing re-runs the installer.
+
+**Measuring.** Every wake writes a `wake_timing` ledger entry (detail: JSON, `WakeTiming` in
+`wake.ts`) and a `cloud.wake_timing` log line: when the machine is up, and again once the engine
+reports its side (`POST /runner/wake-timing`, once per wake, at the run's first output).
+`GET /admin/cloud/wakes?orgId&userId` (`ADMIN_TOKEN`) lists one user's. `at` is each stage in ms
+after the wake was requested (`sent` is negative and on the sender's clock); `spans` has the
+totals; `asleepMs` says whether a longer idle window would have caught it. A wake with no `sent`
+had no send behind it (an explicit wake, or a dark machine brought back to recover its turn); a
+refresh writes no timeline.
 
 ### Portability
 

@@ -52,6 +52,18 @@ describe("Boat provider wire format", () => {
     expect(new Headers(calls[0]!.init.headers).get("x-ascii-confirm-delete")).toBe("bx_23456789");
   });
 
+  it("treats a resume already under way as done, and any other refusal as a refusal", async () => {
+    const refusal = (code: string) =>
+      fakeBoat(() => jsonReply(409, { ok: false, code, message: code, error: { code, message: code } })).boat;
+    await expect(refusal("sandbox_resuming").resume("bx_1", { ttlSeconds: null })).resolves.toBeUndefined();
+    await expect(refusal("resume_failed").resume("bx_1", { ttlSeconds: null })).rejects.toMatchObject({ kind: "conflict" });
+  });
+
+  it("calls a command sent to a machine still starting worth retrying", () => {
+    expect(boatErrorKind(409, "sandbox_starting")).toBe("retryable");
+    expect(boatErrorKind(502, "sandbox_direct_failed")).toBe("retryable");
+  });
+
   it("never forces a stop and resumes with the TTL", async () => {
     const { boat, calls } = fakeBoat(() => jsonReply(202, { ok: true, sandbox: { id: "bx_1", state: "archiving" } }));
     await boat.stop("bx_1");

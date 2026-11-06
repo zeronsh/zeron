@@ -587,6 +587,110 @@ describe("idle sleep, waking on sends and the awake cap", () => {
     expect((await status(u)).awakeSessions).toBe(2);
   });
 
+  describe("a wake's timeline", () => {
+    const admin = { authorization: "Bearer test-admin-token" };
+    interface Wake {
+      chatId: string;
+      at: Record<string, number>;
+      spans: Record<string, number>;
+      requestedAt: number;
+      asleepMs?: number;
+      engineExit?: number | null;
+      engineRetried?: boolean;
+    }
+    const wakesOf = async (u: TestUser) =>
+      ((await (await SELF.fetch(`https://edge.test/admin/cloud/wakes?orgId=${u.orgId}&userId=${u.userId}`, { headers: admin })).json()) as { wakes: Wake[] }).wakes;
+    const sleepThenSend = async (u: TestUser, chatId: string, deviceId: string) => {
+      expect((await call("POST", `/cloud/org1/sessions/${chatId}/sleep`, userBearer(u), {})).status).toBe(200);
+      await waitForSession(u, chatId, "sleeping");
+      await call("POST", `/device/${deviceId}/nudge`, userBearer(u), { chatId });
+      await waitForSession(u, chatId, "starting");
+    };
+
+    it("is there for an operator from the moment the machine is up, and completed by its engine's report", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      await waitForSession(u, chatId, "ready");
+
+      const [up] = await wakesOf(u);
+      expect(up).toMatchObject({ chatId, engineExit: 0 });
+      expect(up!.asleepMs).toBeGreaterThanOrEqual(0);
+      for (const stage of ["requested", "workflowStarted", "resumed", "ready", "engineStarted", "online"]) {
+        expect(up!.at[stage], stage).toBeGreaterThanOrEqual(0);
+      }
+      expect(up!.at.firstOutput).toBeUndefined();
+
+      // Only the machine's own runner reports, and only sensible times.
+      expect((await call("POST", "/runner/wake-timing", userBearer(u), { token: 1 })).status).toBe(403);
+      expect((await call("POST", "/runner/wake-timing", bearer, { token: "soon" })).status).toBe(400);
+
+      const reported = up!.requestedAt + 4_000;
+      expect((await call("POST", "/runner/wake-timing", bearer, { sent: up!.requestedAt - 100, firstOutput: reported, bogus: 1 })).status).toBe(200);
+      const wakes = await wakesOf(u);
+      expect(wakes).toHaveLength(1); // the fuller entry replaces the first
+      expect(wakes[0]!.at).toMatchObject({ sent: -100, firstOutput: 4_000 });
+      expect(wakes[0]!.spans.sentToFirstOutput).toBe(4_100);
+      expect(wakes[0]!.at).not.toHaveProperty("bogus");
+
+      // A wake is reported once: a second report (a runner's own, or a stolen
+      // token's) writes nothing.
+      expect((await call("POST", "/runner/wake-timing", bearer, { firstOutput: reported + 1 })).status).toBe(200);
+      expect((await wakesOf(u))[0]!.at.firstOutput).toBe(4_000);
+    });
+
+    it("keeps an engine's report that beats the workflow to its end", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      // No token yet, so the workflow is still waiting on the engine.
+      const runner = { orgId: u.orgId, userId: u.userId, deviceId };
+      await accountStub(u).wakeTimingReport(runner, { firstOutput: Date.now() + 5_000 });
+      await runnerToken(u, deviceId, key);
+      await waitForSession(u, chatId, "ready");
+      const wakes = await wakesOf(u);
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]!.at.firstOutput).toBeGreaterThan(0);
+      expect(wakes[0]!.at.resumed).toBeGreaterThanOrEqual(0);
+    });
+
+    it("writes nothing for a machine that wasn't woken", async () => {
+      const u = newUser();
+      const { deviceId, key } = await readySession(u);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      expect((await call("POST", "/runner/wake-timing", bearer, { firstOutput: Date.now() })).status).toBe(200);
+      expect(await wakesOf(u)).toEqual([]);
+    });
+
+    it("is an operator's alone", async () => {
+      const u = newUser();
+      expect((await SELF.fetch(`https://edge.test/admin/cloud/wakes?orgId=${u.orgId}&userId=${u.userId}`)).status).toBe(401);
+      expect((await SELF.fetch(`https://edge.test/admin/cloud/wakes?orgId=${u.orgId}&userId=${u.userId}`, { headers: { authorization: userBearer(u) } })).status).toBe(401);
+      expect((await SELF.fetch("https://edge.test/admin/cloud/wakes?orgId=a'b&userId=c", { headers: admin })).status).toBe(400);
+    });
+
+    it("runs the start again when it can't be sent during the resume, and says so", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key, sandboxId } = await readySession(u);
+      await boatControl("__fail", { sandboxId, op: "commands", status: 403, code: "api_key_action_forbidden", action: "exec", times: 1 });
+      expect((await call("POST", `/cloud/org1/sessions/${chatId}/sleep`, userBearer(u), {})).status).toBe(200);
+      await waitForSession(u, chatId, "sleeping");
+      // (The injected refusal was the sleep's quiesce; inject another for the wake.)
+      await boatControl("__fail", { sandboxId, op: "commands", status: 403, code: "api_key_action_forbidden", action: "exec", times: 1 });
+      await call("POST", `/device/${deviceId}/nudge`, userBearer(u), { chatId });
+      await waitForSession(u, chatId, "starting");
+      await expect
+        .poll(async () => (await boatState()).calls.filter((c) => c.sandboxId === sandboxId && c.path.endsWith("/commands") && c.body?.command === START_ENGINE_COMMAND).length, { timeout: 15_000 })
+        .toBeGreaterThanOrEqual(2);
+      await runnerToken(u, deviceId, key);
+      await waitForSession(u, chatId, "ready");
+      const [wake] = await wakesOf(u);
+      expect(wake!.engineExit).toBeNull();
+      expect(wake!.engineRetried).toBe(true);
+    });
+  });
+
   it("surfaces a Boat key that cannot resume as a configuration error, and retries the exact action", async () => {
     const u = newUser();
     const { chatId, deviceId, sandboxId } = await readySession(u);

@@ -92,6 +92,8 @@ const CONFIG = new Set([
 export const boatErrorKind = (status: number, code: string): SandboxErrorKind => {
   if (status === 0 || status === 408 || status === 425 || status >= 500) return "retryable";
   if (status === 409 && (code === "idempotency_in_progress" || code === "boat_starting")) return "retryable";
+  // A command sent while a machine starts: held for up to a minute, then this.
+  if (status === 409 && code === "sandbox_starting") return "retryable";
   if (status === 400 && code === "machine_not_running") return "retryable";
   if (status === 429 && code === "rate_limited") return "retryable";
   if (status === 404) return "notFound";
@@ -292,10 +294,15 @@ export class BoatProvider implements SandboxProvider {
   }
 
   async resume(sandboxId: string, options: { ttlSeconds: number | null; machine?: SandboxMachine }): Promise<void> {
-    await this.request("POST", this.path(sandboxId, "/resume"), {
-      ...(options.machine ? { type: options.machine } : {}),
-      ttlSeconds: options.ttlSeconds
-    });
+    try {
+      await this.request("POST", this.path(sandboxId, "/resume"), {
+        ...(options.machine ? { type: options.machine } : {}),
+        ttlSeconds: options.ttlSeconds
+      });
+    } catch (e) {
+      // Already on its way up (a retried step whose first reply was lost).
+      if (!(e instanceof SandboxError && e.providerCode === "sandbox_resuming")) throw e;
+    }
   }
 
   async delete(sandboxId: string): Promise<{ operationId?: string }> {
