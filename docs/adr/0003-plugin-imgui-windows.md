@@ -29,20 +29,44 @@ consent flow, and a second window runtime for no user-visible gain. The ImGui ho
 `apps/zgx/src/plugins/imgui/` as a separate module reached through a small host API, so the
 bridge keeps discovery, grants, reloads, and storage while containing no drawing code.
 
-### Binding and renderer: `dear-imgui-rs` 0.22 with `dear-imgui-wgpu` 0.22
+### Binding and renderer: `dear-imgui-rs` 0.22, first-party wgpu renderer
 
 Plugins draw through `dear-imgui-rs = "=0.22.0"` (Dear ImGui 1.93.1 WIP, docking branch; docking
-is compiled in and enabled at runtime) and
-`dear-imgui-wgpu = { version = "=0.22.0", default-features = false, features = ["wgpu-29"] }`.
-The `wgpu-29` feature selects the renderer's `wgpu 29.0` dependency, which resolves to
-`wgpu 29.0.4`, the version `apps/zgx` already links through `zgx`. The app is a separate
-cargo workspace with its own lockfile, so both pins are declared and resolved there. The
+is compiled in and enabled at runtime), and
+`dear-imgui-wgpu = { version = "=0.22.0", default-features = false, features = ["wgpu-29"] }`
+stays declared beside it. The `wgpu-29` feature selects the renderer's `wgpu 29.0` dependency,
+which resolves to `wgpu 29.0.4`, the version `apps/zgx` already links through `zgx`. The app is a
+separate cargo workspace with its own lockfile, so both pins are declared and resolved there. The
 `&wgpu::Device` and `&wgpu::Queue` in `ViewportFrame` are therefore the same types the renderer
-expects: no second device, no version bridge, no copied textures. `default-features` must stay
-off because the crate's default is `wgpu-30`; leaving it on would link two wgpu major versions.
-Both pins are exact (`=`) because the binding's renderer API and the framework's wgpu move
-together; a wgpu bump in `zgx` requires a matching `dear-imgui-wgpu` feature, not a floating
-range.
+compiles against: no second device, no version bridge, no copied textures. `default-features`
+must stay off because the crate's default is `wgpu-30`; leaving it on would link two wgpu major
+versions. Both pins are exact (`=`) because the binding and the framework's wgpu move together; a
+wgpu bump in `zgx` requires a matching `dear-imgui-wgpu` feature, not a floating range.
+
+The renderer is first-party, in `apps/zgx/src/plugins/imgui/render.rs`, fed by
+`Context::render_legacy()`. `runtime.rs` ends the ImGui frame, copies the draw data into a
+`PreparedFrame` and converts vertex positions to clip space on the CPU; `WgpuRenderer` then
+replays that prepared frame into the `ViewportFrame` target. It owns exactly two upload buffers
+that only ever grow, one font-atlas texture, one sampler, and one pipeline per target format;
+`device_changed()` drops and rebuilds all of them. There is no uniform buffer and no per-frame
+uniform write.
+
+Rejected: the managed `WgpuRenderer` in `dear-imgui-wgpu` 0.22. Its frame-resource arena creates
+vertex, index and uniform buffers for every render epoch, and an epoch is one native frame
+(`Context::render()` allocates a fresh snapshot epoch per call). An animating plugin window would
+create and destroy three GPU buffers sixty times a second, which the no-churn requirement forbids
+(no GPU buffer or texture may be created per frame, even if it is freed later).
+The first-party path was measured instead: over frames 30..300 of a 2000-text-item workload at
+1280×720, buffers created stayed 2 → 2 and destroyed 0 → 0, textures created stayed 1 → 1 and
+destroyed 0 → 0, leaving 2 live buffers and 1 live texture. `dear-imgui-wgpu` stays declared and
+pinned because it states and fixes the wgpu 29 alignment the renderer compiles against; nothing
+calls its renderer, and reintroducing it would reintroduce the churn.
+
+Verified platforms for this renderer: Windows 10 native and WSL Ubuntu on Linux, where the
+`imgui::` suite passes: offscreen text and a filled rect, a frame through a `ViewportFrame`
+target, two contexts through suspend/activate, a rebuild on a second device, and the 270-frame
+churn measurement. The renderer is not yet exercised inside a plugin window (the window host
+lands later), and macOS is not runtime-verified; no other platform is claimed.
 
 ### Window model: framework-native windows, one context per window
 
@@ -67,7 +91,7 @@ Rejected alternatives:
 - **`dear-imgui-winit`.** It needs the winit event loop and window handles the framework never
   exposes; it could only work inside a fork, with the same objections as above.
 - **The older `imgui-rs` binding.** It tracks an older Dear ImGui and has no maintained wgpu 29
-  renderer; `dear-imgui-wgpu` 0.22 is the renderer verified against this wgpu version.
+  renderer; the 0.22 binding family is the one verified against this wgpu version.
 
 The choice was validated by a running spike on Windows: an 800×600 offscreen frame with real
 content (48.1% non-background pixels, 70 distinct colours), two contexts rendered interleaved
@@ -182,8 +206,8 @@ verdict says so.
 
 | Platform | Status |
 | --- | --- |
-| Windows | The primary target: the app is built, run, and validated with real windows on D3D12 and Vulkan, and every feature claim is evidenced here first. |
-| Linux | Built and run under WSLg (Wayland and X11), with real windows, input, and snapshots validated as the feature lands. Wayland forbids client-side placement, and saved frames restore only size and maximized state. |
+| Windows | The primary target: the app is built and run natively on Windows 10 (D3D12 and Vulkan), the renderer's `imgui::` suite passes here, and every later feature claim is evidenced here first. |
+| Linux | Built and run under WSLg (Wayland and X11); the renderer's `imgui::` suite passes here, and real windows, input, and snapshots are validated as the feature lands. Wayland forbids client-side placement, and saved frames restore only size and maximized state. |
 | macOS | Code paths are compile-gated and a CI job builds and tests `apps/zgx`; **not runtime-verified in this environment**, and never claimed as working without CI evidence. |
 
 ## Consequences
@@ -199,9 +223,10 @@ verdict says so.
 - One frame in flight per window and no pumping for hidden windows bound both CPU and memory;
   buffers, draw lists, and the font atlas are reused rather than reallocated per frame.
 - Renderer failures and device loss are contained per window: `device_changed()` drops every
-  GPU-owned resource and the next frame rebuilds it. If the binding's managed-texture protocol
-  ever conflicts with per-window pumping, `Context::render_legacy()` plus a first-party renderer
-  inside `render.rs` is the contained fallback, with no change to the Luau API.
+  GPU-owned resource (both upload buffers, the atlas texture, sampler and pipelines), and the
+  next frame rebuilds them from the new device. The first-party renderer is the shipped path,
+  not a fallback: `Context::render_legacy()` plus `render.rs` is what draws, no Luau API exposes
+  a renderer object, and the managed `dear-imgui-wgpu` renderer must not be reintroduced.
 - The mandatory suspend/activate around each window turn means any new ImGui call site must run
   inside the pump; touching a context outside its turn is a defect, not a style choice.
 - The dependency pins must move with the framework's wgpu version, and the honest platform
