@@ -8,7 +8,7 @@
 //! What scripts see, `sessions`:
 //!   { state = "loading" | "ready" | "offline",
 //!     here = this Mac's device id?,
-//!     devices = { { id, name, platform, here, online, seen?, version? } },
+//!     devices = { { id, name, platform, here, online, seen? (while away), version? } },
 //!     projects = { { id, name, device, path, git, github?, repository?, created?,
 //!                    icon? = { emoji?, image?, hue? } } },
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
@@ -130,6 +130,15 @@ struct Sessions {
     /// Each chat's row as last built, by id: the engine sends the whole list
     /// with any chat's change, and only that chat's row is built again.
     rows: RefCell<HashMap<String, Row>>,
+    /// What the scripts were last given of the live states and the devices,
+    /// as `value` judged them: the engine sends every row again with each
+    /// heartbeat (a row's `updatedAt`, a device's `lastSeenAt`), and a frame
+    /// that leaves both as they were changes nothing shown, so isn't published.
+    shown_live: RefCell<HashMap<String, Live>>,
+    shown_devices: RefCell<Option<Value>>,
+    /// Publishes so far (for tests).
+    #[cfg(test)]
+    published: Cell<u32>,
 }
 
 /// A chat's row for scripts, and what it was built from besides the chat's
@@ -409,13 +418,15 @@ impl Sessions {
                     return;
                 }
             }
-            Slot::Devices => {
-                if !replace_changed(&self.devices, item) {
+            Slot::Devices | Slot::Live => {
+                let slot = if matches!(slot, Slot::Devices) { &self.devices } else { &self.live };
+                if !replace_changed(slot, item) {
                     return;
                 }
-            }
-            Slot::Live => {
-                if !replace_changed(&self.live, item) {
+                // A heartbeat: nothing shown moved. (When a state goes stale
+                // or a device quiet is looked at again from what's now known.)
+                if self.shows_the_same() {
+                    self.look_again();
                     return;
                 }
             }
@@ -440,6 +451,8 @@ impl Sessions {
     }
 
     fn publish(&self) {
+        #[cfg(test)]
+        self.published.set(self.published.get() + 1);
         let value = self.value();
         for (_, shared) in self.shared.borrow().iter() {
             shared.set(value.clone());
@@ -471,10 +484,16 @@ impl Sessions {
         });
     }
 
-    fn value(&self) -> Value {
+    /// Whether the live states and devices, judged now, are what the scripts
+    /// were last given.
+    fn shows_the_same(&self) -> bool {
         let now = now_seconds();
-        let state = if self.heard.get() { "ready" } else { "loading" };
-        let here = self.here.borrow().clone();
+        *self.shown_live.borrow() == live_states(&self.live.borrow(), now)
+            && self.shown_devices.borrow().as_ref() == Some(&self.devices_value(now))
+    }
+
+    fn devices_value(&self, now: i64) -> Value {
+        let here = self.here.borrow();
         let devices: Vec<Value> = self
             .devices
             .borrow()
@@ -501,7 +520,11 @@ impl Sessions {
                     ("here", Value::Bool(here.as_deref() == Some(id))),
                     ("online", Value::Bool(online)),
                 ];
-                if let Some(at) = seen {
+                // When it was last seen, while it's away (Settings → Devices
+                // and the place picker say so). Online, its beat moves every
+                // few seconds and shows nowhere; it going quiet is published
+                // as that happens (`look_again`).
+                if let Some(at) = seen.filter(|_| !online) {
                     fields.push(("seen", Value::Num(at as f64)));
                 }
                 // The Zeron it runs, as it last said (Settings → Devices).
@@ -511,6 +534,15 @@ impl Sessions {
                 Some(Value::record(fields))
             })
             .collect();
+        Value::List(devices.into())
+    }
+
+    fn value(&self) -> Value {
+        let now = now_seconds();
+        let state = if self.heard.get() { "ready" } else { "loading" };
+        let here = self.here.borrow().clone();
+        let devices = self.devices_value(now);
+        *self.shown_devices.borrow_mut() = Some(devices.clone());
         let spaces = self.spaces.borrow();
         let mut known_spaces: HashSet<&str> = HashSet::new();
         let projects: Vec<Value> = spaces
@@ -682,10 +714,10 @@ impl Sessions {
                 ])
             })
             .collect();
-        Value::record([
+        let value = Value::record([
             ("state", Value::from(state)),
             ("here", here.as_deref().map_or(Value::Nil, Value::from)),
-            ("devices", Value::List(devices.into())),
+            ("devices", devices),
             ("projects", Value::List(projects.into())),
             ("chats", Value::List(chats.into())),
             (
@@ -701,7 +733,9 @@ impl Sessions {
             ),
             ("places_ready", Value::Bool(self.places_ready.get())),
             ("connection", connection(&self.connectivity.borrow()).map_or(Value::Nil, Value::from)),
-        ])
+        ]);
+        *self.shown_live.borrow_mut() = live;
+        value
     }
 
     async fn mutate(&self, params: Json) -> Result<Value, Outcome> {
@@ -996,6 +1030,7 @@ fn project_name<'a>(name: Option<&'a str>, path: &'a str) -> &'a str {
 
 /// What a chat's live state says, by chat: its status, whether its last turn
 /// was interrupted. Several hosts may report one chat: an active state wins.
+#[derive(PartialEq, Debug)]
 struct Live {
     status: String,
     interrupted: bool,
@@ -1293,6 +1328,24 @@ pub(crate) fn now_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
+#[cfg(test)]
+/// An RFC 3339 time for `secs` (Unix seconds), as the engine writes them.
+pub(crate) fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rest = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", rest / 3600, (rest % 3600) / 60, rest % 60)
+}
+
 /// An RFC 3339 time as Unix seconds ("2026-10-31T21:27:23.486Z", or with an
 /// offset).
 pub(crate) fn unix_seconds(stamp: &str) -> Option<i64> {
@@ -1572,6 +1625,85 @@ mod tests {
         // (`publish` would have asked to look again at the live state going stale.)
         assert_eq!(s.due.get(), None);
     }
+
+    /// The engine's heartbeats (every couple of seconds, the whole list
+    /// again): a row whose `updatedAt` alone moved, or a device's beat while
+    /// it's online, changes nothing shown and publishes nothing; a change that
+    /// shows is published at once.
+    #[test]
+    fn a_heartbeat_that_shows_nothing_new_publishes_nothing() {
+        let now = now_seconds();
+        let stamp = |secs: i64| iso(secs);
+        let s = with_children("2099-01-01T00:00:00Z");
+        s.heard.set(true);
+        *s.here.borrow_mut() = Some("here".into());
+        *s.devices.borrow_mut() = json!([
+            { "id": "here", "name": "This Mac", "lastSeenAt": stamp(now - 1) },
+            { "id": "laptop", "name": "Laptop", "lastSeenAt": stamp(now - 5) },
+            { "id": "gone", "name": "Old PC", "lastSeenAt": stamp(now - 5000) },
+        ]);
+        *s.live.borrow_mut() = json!([
+            { "chatId": "p", "status": "working", "updatedAt": stamp(now - 2), "runningSubagents": 2 },
+            { "chatId": "a", "status": "idle", "updatedAt": stamp(now - 600) },
+        ]);
+        s.publish();
+        let before = s.published.get();
+        // The laptop beats; this Mac beats; the working chat's row is fresher;
+        // an idle one's time moves.
+        s.heard(Slot::Devices, json!([
+            { "id": "here", "name": "This Mac", "lastSeenAt": stamp(now) },
+            { "id": "laptop", "name": "Laptop", "lastSeenAt": stamp(now) },
+            { "id": "gone", "name": "Old PC", "lastSeenAt": stamp(now - 5000) },
+        ]));
+        s.heard(Slot::Live, json!([
+            { "chatId": "p", "status": "working", "updatedAt": stamp(now), "runningSubagents": 2 },
+            { "chatId": "a", "status": "idle", "updatedAt": stamp(now) },
+        ]));
+        assert_eq!(s.published.get(), before, "nothing shown moved");
+        // A real change: shown at once.
+        s.heard(Slot::Live, json!([
+            { "chatId": "p", "status": "awaitingInput", "updatedAt": stamp(now), "runningSubagents": 2 },
+            { "chatId": "a", "status": "idle", "updatedAt": stamp(now) },
+        ]));
+        assert_eq!(s.published.get(), before + 1);
+        assert_eq!(chat(&s.value(), "p").field("status").map(crate::auth::text).as_deref(), Some("input"));
+        // The old PC comes back: shown at once, online.
+        s.heard(Slot::Devices, json!([
+            { "id": "here", "name": "This Mac", "lastSeenAt": stamp(now) },
+            { "id": "laptop", "name": "Laptop", "lastSeenAt": stamp(now) },
+            { "id": "gone", "name": "Old PC", "lastSeenAt": stamp(now) },
+        ]));
+        assert_eq!(s.published.get(), before + 2);
+        let online = |v: &zgx_script::Value, id: &str| {
+            v.field("devices").unwrap().list().iter().find(|d| d.field("id").map(crate::auth::text).as_deref() == Some(id)).unwrap().field("online").cloned()
+        };
+        assert_eq!(online(&s.value(), "gone"), Some(zgx_script::Value::Bool(true)));
+    }
+
+    /// A device's last beat is given while it's away (Settings → Devices and
+    /// the place picker say when it was last seen); while it's online the beat
+    /// shows nowhere, and isn't given.
+    #[test]
+    fn a_device_s_last_beat_is_given_while_it_s_away() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("here".into());
+        *s.devices.borrow_mut() = json!([
+            { "id": "here", "lastSeenAt": iso(now - 1) },
+            { "id": "laptop", "lastSeenAt": iso(now - 5) },
+            { "id": "gone", "lastSeenAt": iso(now - 5000) },
+            { "id": "never" },
+        ]);
+        let v = s.value();
+        let device = |id: &str| v.field("devices").unwrap().list().iter().find(|d| d.field("id").map(crate::auth::text).as_deref() == Some(id)).unwrap().clone();
+        for (id, online, seen) in [("here", true, None), ("laptop", true, None), ("gone", false, Some((now - 5000) as f64)), ("never", false, None)] {
+            let d = device(id);
+            assert_eq!(d.field("online"), Some(&zgx_script::Value::Bool(online)), "{id}");
+            assert_eq!(d.field("seen").and_then(|n| n.as_f64()), seen, "{id}");
+        }
+    }
+
+    use super::rfc3339 as iso;
 
     #[test]
     fn running_subagents_go_quiet_with_their_row() {
