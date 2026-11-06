@@ -390,6 +390,8 @@ interface SessionRecord {
   lastTtlExtendAt?: number;
   /** Throttles the "ready but silent — did the provider auto-stop it?" probe. */
   lastProbeAt?: number;
+  /** The last send that reached this machine while it was up. */
+  lastNudgeAt?: number;
   workflow?: { kind: WorkflowKind; id: string };
   /** A wake requested while stopping: start it as soon as the stop lands. */
   pendingWake?: boolean;
@@ -1678,6 +1680,14 @@ export class CloudAccount extends DurableObject<Env> {
     if (!s || !this.matches(caller) || s.pendingDelete || s.state === "deleting") return false;
     // A machine wakes only the sessions it started (its delegates).
     if (caller.deviceId !== undefined && s.parentChatId !== this.byDevice.get(caller.deviceId)) return false;
+    if (s.state === "ready") {
+      // A send to a machine that's up. If it goes dark before its next
+      // heartbeat, that heartbeat never reports the turn this started.
+      const now = Date.now();
+      s.lastNudgeAt = now;
+      s.idleCheckAt = Math.min(s.idleCheckAt ?? Infinity, now + HEARTBEAT_STALE_MS);
+      await this.saveSession(s);
+    }
     return this.wake(s, edgeUrl);
   }
 
@@ -2062,7 +2072,10 @@ export class CloudAccount extends DurableObject<Env> {
       // something boots it. Sleep it and bring it straight back, so its
       // engine's boot recovery resumes the turn or says why it can't.
       const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS;
-      const working = s.activeRuns - (s.waitingRuns ?? 0) > 0 || (s.backgroundRuns ?? 0) > 0;
+      const working =
+        s.activeRuns - (s.waitingRuns ?? 0) > 0 ||
+        (s.backgroundRuns ?? 0) > 0 ||
+        (s.lastNudgeAt ?? 0) > (s.lastHeartbeatAt ?? 0);
       const decision =
         dark && working
           ? { sleep: true as const }

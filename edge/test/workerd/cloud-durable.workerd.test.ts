@@ -710,6 +710,24 @@ describe("a machine that goes dark during a turn", () => {
     expect(ledger.some((e) => e.detail === "went dark during a turn; recovering it")).toBe(true);
   });
 
+  it("is brought back when it dies right after a send, before any heartbeat reported the turn", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    await beat(u, s, { activeRuns: 0 });
+    // Seen on a real machine: stopped seconds after the send.
+    await call("POST", `/device/${s.deviceId}/nudge`, userBearer(u), { chatId: s.chatId });
+    await boatControl("__set", { sandboxId: s.sandboxId, state: "archived" });
+    const before = Date.now();
+    await withSession(u, s.chatId, (r) => {
+      expect(r.idleCheckAt!).toBeLessThanOrEqual(before + HEARTBEAT_STALE_MS);
+      r.lastHeartbeatAt = r.lastNudgeAt! - HEARTBEAT_STALE_MS;
+      r.idleCheckAt = Date.now() - 1;
+    });
+    const resumed = (await resumes(s.sandboxId)).length;
+    await runDurableObjectAlarm(accountStub(u));
+    await expect.poll(async () => (await resumes(s.sandboxId)).length).toBe(resumed + 1);
+  });
+
   it("is looked at as soon as its heartbeats are late, not an idle window on", async () => {
     const u = newUser();
     const s = await readySession(u);

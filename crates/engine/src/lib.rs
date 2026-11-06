@@ -329,7 +329,9 @@ impl EngineCore {
                 desktop_notify::post_for(&data_dir, &focus, source, &title, body, session).to_owned()
             });
         }
-        if let Some(edge) = &edge {
+        // A Cloud machine's token isn't admitted there (edge/src/runner-policy.ts):
+        // it would ask, get a 403, and ask again every 30 s for as long as it's up.
+        if let Some(edge) = edge.as_ref().filter(|_| !runner::is_cloud_platform()) {
             plugins.set_directory(Arc::new(plugins::keys::EdgeDirectory::new(
                 &edge.url,
                 edge.token.clone(),
