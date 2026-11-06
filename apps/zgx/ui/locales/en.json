@@ -2448,12 +2448,9 @@
       "not_applied_body": "It restarted on the same version. You can try again from the update button.",
       "offline": "Offline",
       "on_that_device": "updates from that device",
-      "plan_agents": "{n, plural, one {Updates # agent. It waits for what's running to finish} other {Updates # agents. Each waits for what's running to finish}}",
+      "plan_agents": "Agents wait for what's running to finish",
       "plan_chats": "{n, plural, one {Stops # running chat. It picks up again after the restart} other {Stops # running chats. They pick up again after the restart}}",
       "plan_here": "Downloads Zeron for this device, then asks you to restart",
-      "plan_skip": "Skips {name} on {device}: {why}",
-      "plan_skips_more": "{n, plural, one {and # more} other {and # more}}",
-      "plan_zerons": "{n, plural, one {Updates Zeron on # other device} other {Updates Zeron on # other devices}}",
       "preparing": "Preparing…",
       "ready": "{version} is ready. Restart to finish",
       "restart": "Restart",
@@ -2470,7 +2467,17 @@
       "verifying": "Verifying…",
       "version": "Version {version} available",
       "view_steps": "View steps",
-      "waiting": "Waiting for the current run"
+      "waiting": "Waiting for the current run",
+      "all_title": "Update all?",
+      "all_count": "{n, plural, one {# update} other {# updates}}",
+      "all_count_devices": "{n, plural, one {# update} other {# updates}} across {devices} devices",
+      "not_included": "Not included",
+      "skip": "Skip",
+      "skip_all": "Skip all",
+      "skipped": "{n, plural, one {Skipped # update} other {Skipped # updates}}",
+      "skipped_body": "You'll see it again when there's a newer version",
+      "undo": "Undo",
+      "skip_hint": "Hide until there's a newer version"
     }
   },
   "onboarding": {
