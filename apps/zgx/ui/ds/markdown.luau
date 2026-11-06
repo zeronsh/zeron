@@ -203,19 +203,20 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 		if v.ticking then
 			v.ticking:cancel()
 		end
-		-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.)
-		local clock
-		clock = anime.animate(tick, {
+		-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
+		-- By number: a callback holding its own clip would keep both for good.)
+		local clock = (v.clocks or 0) + 1
+		v.clocks = clock
+		v.ticking = anime.animate(tick, {
 			value = tick:peek() + 1,
 			duration = longest,
 			ease = "linear",
 			onComplete = function()
-				if v.ticking == clock then
+				if v.clocks == clock then
 					v.ticking = nil
 				end
 			end,
 		})
-		v.ticking = clock
 	end
 	return going
 end
