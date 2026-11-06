@@ -11864,6 +11864,9 @@ impl Render for Composer {
         // Compensate for the transcript canvas beneath the frosted surface.
         // Keep the opaque fallback when frost is disabled or unsupported.
         let pill = div()
+            // The transcript scrolls beneath this surface. Keep its image
+            // hitboxes from receiving clicks meant for the composer.
+            .occlude()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -12802,6 +12805,111 @@ mod tests {
             assert!(input.read(cx).focus_handle.is_focused(window));
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn composer_click_does_not_open_image_under_it(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+
+        struct Overlap {
+            composer: Entity<Composer>,
+            image_opens: Rc<Cell<usize>>,
+        }
+
+        impl Render for Overlap {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let opens = self.image_opens.clone();
+                div()
+                    .size_full()
+                    .relative()
+                    // Generated transcript images use the same on_click handler.
+                    .child(
+                        div()
+                            .id("composer-overlap-image")
+                            .absolute()
+                            .inset_0()
+                            .on_click(move |_, _, _| opens.set(opens.get() + 1)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(80.0))
+                            .right(px(80.0))
+                            .bottom(px(40.0))
+                            .child(self.composer.clone()),
+                    )
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let image_opens = Rc::new(Cell::new(0));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Overlap {
+                composer: cx.new(|cx| Composer::new(state, cx)),
+                image_opens: image_opens.clone(),
+            }
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let input = handle
+            .read_with(cx, |fixture, cx| fixture.composer.read(cx).input.clone())
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let position = input.read(cx).last_bounds.unwrap().center();
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            assert!(input.read(cx).focus_handle.is_focused(window));
+            assert_eq!(image_opens.get(), 0, "composer click reached the image");
+            let outside = point(px(20.0), px(20.0));
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: outside,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: outside,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(image_opens.get(), 1);
     }
 
     #[gpui::test]
