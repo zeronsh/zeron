@@ -22,10 +22,10 @@
 -- Everything else is in the pill or behind it. In it, over the draft: the
 -- cargo (ds/composer_cargo: what the message carries, as chips), or what
 -- the agent asks (ds/composer_ask: a question's options, an approval), the
--- draft then being the answer. Behind it: the trays (ds/composer_dock: the
--- queue, what is running, the plan), tucked under the pill, one open at a
--- time. Above all of it, a line of notice when there is one (offline, a
--- failed send, a draft restored): small text with a dot, never a box.
+-- draft then being the answer. Over it, the deck (ds/composer_dock: the
+-- alerts, the queue, subagents, what is running, the plan): folded, a pill
+-- floating over it; opened, its own top. A notice (offline, a failed send,
+-- a draft restored) is the first of the alerts, there till it's over.
 -- Mentions (ds/composer_mentions) open at the caret. Dictating, a track
 -- unrolls from the microphone over the controls: a dot, "Listening", the
 -- voice, a clock.
@@ -899,81 +899,6 @@ fn fill(input: FillInput) -> vec4<f32> {
  return vec4(ink.rgb, ink.a * a);
 }
 ]], { fps = 30 })
-
--- The notice line: its words on the draft's own left edge, in the tone's
--- ink (a warning amber, a failure red, the rest the secondary ink), a
--- spinner before them while something is on its way, an action, and the ×
--- that puts it away. No dot, no badge: the words say it.
--- One line while there is a notice, following it in place as it changes
--- (its words, its tone, a spinner, an action): a notice that moves on
--- ("Uploading 2 of 5", "3 of 5") never fades out and in again. Going, it
--- keeps the last it said as it fades.
-local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_dismiss: (() -> ())?): Node
-	return ui.presence(function(): string?
-		return if notice:get() then "notice" else nil
-	end, function(): Node
-		local last = notice:peek() :: Notice
-		local function now(): Notice
-			local n = notice:get()
-			if n then
-				last = n
-			end
-			return last
-		end
-		return ui.row {
-			h = 24,
-			pl = "$zeron.composer.chip.inset",
-			pr = "$space.2",
-			gap = "$space.2",
-			items = "center",
-			role = "status",
-			ui.show(function(): boolean
-				return now().spinner == true
-			end, status.StatusIcon { kind = "working", size = 14 }),
-			FadeText {
-				function(): string
-					return now().text
-				end,
-				grow = 1,
-				text_size = "$font.size.sm",
-				color = function(): string
-					local tone = now().tone or "neutral"
-					return if tone == "danger" or tone == "warning" then `$zeron.tone.{tone}.ink` else "$text.secondary"
-				end,
-			},
-			ui.show(
-				function(): boolean
-					return now().action ~= nil
-				end,
-				Button {
-					function(): string
-						return now().action or ""
-					end,
-					size = "sm",
-					tone = "ghost",
-					h = 22,
-					px = "$space.2",
-					text_size = "$font.size.xs",
-					on_click = on_action,
-				}
-			),
-			ui.show(function(): boolean
-				return now().dismissable == true
-			end, IconButton {
-				icon = "close",
-				label = locale.t("ds.composer.dismiss"),
-				tooltip = locale.s("ds.composer.dismiss"),
-				size = "sm",
-				tone = "quiet",
-				on_click = on_dismiss,
-			}),
-		}
-	end, {
-		w_full = true,
-		enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 180, ease = "outCubic" },
-		exit = { opacity = 0, duration = 120 },
-	})
-end
 
 -- Composers' lightbox groups, each its own.
 local lightboxes = 0
@@ -2307,7 +2232,36 @@ return ui.component(function(props: Props): Node
 	local trays: Node? = nil
 	-- (Folded, what waits is a pill floating over the conversation.)
 	local tray_pill: Node? = nil
-	if props.queue or props.todos or props.tasks or props.alerts then
+	-- The notice (not connected, a send that failed, a draft restored) is
+	-- an alert of the deck's, first, in its tone; it goes only as what it
+	-- says is over, unless it says it may be let go.
+	local NOTICE = "\0notice"
+	local alerts: any = props.alerts
+	if props.notice then
+		local notice = props.notice
+		alerts = ui.computed(function(): { dock.Alert }
+			local out: { dock.Alert } = {}
+			local n = notice:get()
+			if n then
+				local tone: dock.AlertTone = if n.tone == "danger" then "danger" elseif n.tone == "warning" then "warning" else "info"
+				table.insert(out, {
+					id = NOTICE,
+					tone = tone,
+					title = n.text,
+					action = n.action,
+					spinner = n.spinner,
+					dismissable = n.dismissable == true,
+				})
+			end
+			if props.alerts then
+				for _, x in props.alerts:get() do
+					table.insert(out, x)
+				end
+			end
+			return out
+		end)
+	end
+	if props.queue or props.todos or props.tasks or alerts then
 		trays, tray_pill = dock.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
@@ -2329,9 +2283,25 @@ return ui.component(function(props: Props): Node
 			open = props.tray,
 			narrow = narrow,
 			aside = props.aside,
-			alerts = props.alerts,
-			on_alert_action = props.on_alert_action,
-			on_dismiss_alert = props.on_dismiss_alert,
+			alerts = alerts,
+			on_alert_action = function(id: string)
+				if id == NOTICE then
+					if props.on_notice_action then
+						props.on_notice_action()
+					end
+				elseif props.on_alert_action then
+					props.on_alert_action(id)
+				end
+			end,
+			on_dismiss_alert = function(id: string)
+				if id == NOTICE then
+					if props.on_dismiss_notice then
+						props.on_dismiss_notice()
+					end
+				elseif props.on_dismiss_alert then
+					props.on_dismiss_alert(id)
+				end
+			end,
 			on_pill_width = props.on_pill_width,
 		}
 	end
@@ -2430,7 +2400,6 @@ return ui.component(function(props: Props): Node
 	return ui.column {
 		w_full = true,
 		gap = 0,
-		if props.notice then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice) else nil,
 		body,
 	}
 end)

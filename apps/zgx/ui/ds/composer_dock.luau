@@ -78,7 +78,10 @@ export type Tray = "alerts" | "todos" | "agents" | "tasks" | "queue"
 -- server that failed to start): how serious, what it is, a word more, and
 -- a thing to do about it (its button's label).
 export type AlertTone = "info" | "warning" | "danger"
-export type Alert = { id: string, tone: AlertTone, title: string, detail: string?, action: string? }
+-- `spinner`: still being worked on (reconnecting), the working ring in its
+-- glyph's place. `dismissable = false`: it stays until what it says is
+-- over (not connected), no × of its own.
+export type Alert = { id: string, tone: AlertTone, title: string, detail: string?, action: string?, spinner: boolean?, dismissable: boolean? }
 export type Props = {
 	queue: State<{ Queued }>?,
 	-- Whether the agent takes a word mid-turn (a row's action is then Steer).
@@ -1201,12 +1204,14 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 			items = "center",
 			justify = "center",
 			color = ink,
-			Icon {
+			ui.show(function(): boolean
+				return row:get().spinner == true
+			end, status.StatusIcon { kind = "working", size = 14 }, Icon {
 				name = function(): Icon.Name
 					return if row:get().tone == "info" then "info-circle" else "danger-triangle"
 				end,
 				size = 14,
-			},
+			}),
 		},
 		FadeText {
 			function(): string
@@ -1250,16 +1255,20 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 		}))
 	end
 	if props.on_dismiss_alert then
-		table.insert(parts, IconButton {
+		table.insert(parts, ui.show(function(): boolean
+			return row:get().dismissable ~= false
+		end, IconButton {
 			icon = "close",
-			label = locale.t("ds.composer_dock.dismiss_alert", { title = a.title }),
+			label = function(): string
+				return locale.s("ds.composer_dock.dismiss_alert", { title = row:get().title })
+			end,
 			tooltip = locale.s("ds.composer_dock.dismiss"),
 			size = "sm",
 			tone = "quiet",
 			on_click = function()
 				(props.on_dismiss_alert :: (string) -> ())(a.id)
 			end,
-		})
+		}, ui.div { w = 6, shrink = 0 }))
 	else
 		table.insert(parts, ui.div { w = 6, shrink = 0 })
 	end
