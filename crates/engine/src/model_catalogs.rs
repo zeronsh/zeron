@@ -31,6 +31,24 @@ fn read(path: &Path, context: &ModelContext) -> Option<Vec<Model>> {
         && !saved.catalog.is_empty())
     .then_some(saved.catalog)
 }
+/// A saved catalog this young answers an unforced request without asking the
+/// CLI again. Opening the model picker, a new chat and a harness page each
+/// list models, and every list used to start the harness's discovery
+/// command (one process per installed CLI, a JSON catalog parse each). A
+/// forced refresh, a new binary or a different account still asks.
+#[cfg(not(test))]
+const FRESH_FOR: Duration = Duration::from_secs(10 * 60);
+#[cfg(test)]
+const FRESH_FOR: Duration = Duration::ZERO;
+
+fn saved_within(path: &Path, window: Duration) -> bool {
+    !window.is_zero()
+        && std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age < window)
+}
 fn save(path: &Path, context: &ModelContext, models: &[Model]) -> std::io::Result<()> {
     if models.is_empty() {
         return Ok(());
@@ -84,7 +102,7 @@ pub(crate) async fn list_with_lease(
     let root = root.to_path_buf();
     tokio::spawn(async move {
         let _lease = lease.clone();
-        list_inner(&root, harness, force, lease).await
+        list_inner(&root, harness, force, lease, FRESH_FOR).await
     })
     .await
     .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
@@ -104,6 +122,7 @@ async fn list_inner(
     harness: Arc<dyn Harness>,
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    fresh_for: Duration,
 ) -> Result<Vec<Model>, HarnessError> {
     let Some(context) = harness.model_context().map_err(|error| {
         let failure = CatalogFailure::from(error);
@@ -117,6 +136,11 @@ async fn list_inner(
     };
     let path = location(root, harness.as_ref(), &context);
     let disk = read(&path, &context);
+    if !force
+        && let Some(models) = disk.as_ref().filter(|_| saved_within(&path, fresh_for))
+    {
+        return Ok(models.clone());
+    }
     // The refresh owns its lifetime; returning disk early must not cancel it.
     let mut refresh = tokio::spawn({
         let harness = harness.clone();
@@ -233,6 +257,7 @@ mod tests {
         cached: std::sync::atomic::AtomicBool,
         failure: std::sync::Mutex<String>,
         harness: zeron_proto::HarnessId,
+        calls: std::sync::atomic::AtomicUsize,
     }
     impl Probe {
         fn new() -> Arc<Self> {
@@ -244,6 +269,7 @@ mod tests {
                 cached: false.into(),
                 failure: std::sync::Mutex::new("offline".into()),
                 harness: zeron_proto::HarnessId::Codex,
+                calls: 0.into(),
             })
         }
     }
@@ -278,6 +304,7 @@ mod tests {
         }
         async fn model_catalog(&self, force: bool) -> Result<ModelCatalog, HarnessError> {
             self.forced.store(force, SeqCst);
+            self.calls.fetch_add(1, SeqCst);
             if self.delay.load(SeqCst) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -304,6 +331,34 @@ mod tests {
             unreachable!()
         }
     }
+    #[tokio::test]
+    async fn fresh_saved_catalog_skips_the_cli_unless_forced() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        let window = Duration::from_secs(600);
+        list_inner(dir.path(), probe.clone(), false, None, window)
+            .await
+            .unwrap();
+        assert_eq!(probe.calls.load(SeqCst), 1);
+        assert_eq!(
+            list_inner(dir.path(), probe.clone(), false, None, window)
+                .await
+                .unwrap(),
+            models()
+        );
+        assert_eq!(probe.calls.load(SeqCst), 1, "a fresh catalog answers alone");
+        list_inner(dir.path(), probe.clone(), true, None, window)
+            .await
+            .unwrap();
+        assert_eq!(probe.calls.load(SeqCst), 2, "a forced refresh still asks");
+        // Another account partitions to a different file, so it asks too.
+        probe.account.store(2, SeqCst);
+        list_inner(dir.path(), probe.clone(), false, None, window)
+            .await
+            .unwrap();
+        assert_eq!(probe.calls.load(SeqCst), 3);
+    }
+
     #[tokio::test]
     async fn background_refresh_holds_lease_after_cached_reply() {
         let dir = tempfile::tempdir().unwrap();

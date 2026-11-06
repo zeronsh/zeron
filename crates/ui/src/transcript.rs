@@ -3287,6 +3287,38 @@ impl SavedViewportCache {
     }
 }
 
+/// Laid-out state for a chat the user just left. Restored only when the
+/// same prepared transcript is still current, so a warm switch does not
+/// clone every row and reset the virtual list. Two is enough for the
+/// switch-and-come-back case; a third visit rebuilds from prepared rows.
+const PARKED_PRESENTATION_CAP: usize = 2;
+
+struct ParkedPresentation {
+    chat_id: String,
+    prepared: Arc<PreparedTranscript>,
+    compact_mode: bool,
+    list: ListState,
+    rows: Vec<Row>,
+    render_cache: Rc<RefCell<RenderCache>>,
+    folds: HashMap<SharedString, FoldState>,
+    tool_group_reveals: HashMap<SharedString, ToolGroupReveal>,
+    tool_details: HashMap<SharedString, FoldState>,
+    user_folds: HashMap<SharedString, FoldState>,
+    user_heights: HashMap<SharedString, Rc<Cell<f32>>>,
+    veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
+    veil_baseline: HashSet<SharedString>,
+    veil_attach_pending: bool,
+    last_replay_baseline: Option<Arc<zeron_doc::TranscriptBaseline>>,
+    historical_markdown: HashMap<SharedString, Row>,
+    pinned: bool,
+    last_scroll_distance: f32,
+    show_jump_button: bool,
+    code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
+    /// Font and zoom changes remeasure only the active list; a parked one
+    /// remeasures when it comes back under a newer generation.
+    typography_generation: u32,
+}
+
 pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
@@ -3313,9 +3345,10 @@ pub struct Transcript {
     loader_shown: bool,
     loader_delay: Option<Task<()>>,
     /// Memory-only viewport state for primary chats visited in this window.
-    /// A transcript instance is shared across tabs, so the active ListState is
-    /// reset on every attach and cannot retain these positions by itself.
+    /// A transcript instance is shared across tabs. The active list is parked
+    /// for the last [`PARKED_PRESENTATION_CAP`] chats and reset for the rest.
     saved_viewports: SavedViewportCache,
+    parked_presentations: VecDeque<ParkedPresentation>,
     /// An anchored viewport waiting for the selected chat's async replay.
     pending_viewport: Option<SavedViewport>,
     /// Generation of the selected chat, guarding post-layout restoration
@@ -3789,6 +3822,7 @@ impl Transcript {
             loader_delay: None,
             doc_override,
             saved_viewports: SavedViewportCache::default(),
+            parked_presentations: VecDeque::new(),
             pending_viewport: None,
             viewport_generation: 0,
             viewport_finalize_pending: false,
@@ -5035,6 +5069,157 @@ impl Transcript {
         }
     }
 
+    fn fresh_list(&self, cx: &mut Context<Self>) -> ListState {
+        let alignment = if self.doc_override.is_some() {
+            ListAlignment::Top
+        } else {
+            ListAlignment::Bottom
+        };
+        let list = ListState::new(0, alignment, px(OVERDRAW_PX));
+        let weak = cx.weak_entity();
+        list.set_scroll_handler(move |event: &ListScrollEvent, _window, cx| {
+            weak.update(cx, |this: &mut Transcript, cx| {
+                this.handle_scroll(event, cx)
+            })
+            .ok();
+        });
+        list
+    }
+
+    /// Move the current primary chat's laid-out list aside before `sync`
+    /// clears it. Empty rows, optimistic echoes, and chats with no prepared
+    /// transcript stay on the rebuild path: a parked list has to match the
+    /// prepared `Arc` exactly when the user comes back.
+    fn park_current(&mut self, destination: Option<&str>, cx: &mut Context<Self>) {
+        if self.rows.is_empty() || self.doc_override.is_some() {
+            return;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        if self.state.read(cx).has_pending_echoes(&chat_id) {
+            return;
+        }
+        let Some(prepared) = self.state.read(cx).prepared_for(&chat_id) else {
+            return;
+        };
+        let list = self.fresh_list(cx);
+        // The chat being opened has to survive the cap. Evicting it here would
+        // throw away the list this switch is about to restore.
+        let held_destination = destination.and_then(|id| {
+            if id == chat_id {
+                return None;
+            }
+            let index = self
+                .parked_presentations
+                .iter()
+                .position(|parked| parked.chat_id == id)?;
+            self.parked_presentations.remove(index)
+        });
+        self.parked_presentations
+            .retain(|parked| parked.chat_id != chat_id);
+        self.parked_presentations.push_back(ParkedPresentation {
+            chat_id,
+            prepared,
+            compact_mode: self.compact_mode,
+            list: std::mem::replace(&mut self.list, list),
+            rows: std::mem::take(&mut self.rows),
+            render_cache: std::mem::replace(
+                &mut self.render_cache,
+                Rc::new(RefCell::new(RenderCache::default())),
+            ),
+            folds: std::mem::take(&mut self.folds),
+            tool_group_reveals: std::mem::take(&mut self.tool_group_reveals),
+            tool_details: std::mem::take(&mut self.tool_details),
+            user_folds: std::mem::take(&mut self.user_folds),
+            user_heights: std::mem::take(&mut self.user_heights),
+            veils: std::mem::take(&mut self.veils),
+            veil_baseline: std::mem::take(&mut self.veil_baseline),
+            veil_attach_pending: std::mem::take(&mut self.veil_attach_pending),
+            last_replay_baseline: self.last_replay_baseline.take(),
+            historical_markdown: std::mem::take(&mut self.historical_markdown),
+            pinned: self.pinned,
+            last_scroll_distance: self.last_scroll_distance,
+            show_jump_button: self.show_jump_button,
+            code_fences: std::mem::take(&mut self.code_fences),
+            typography_generation: self.typography_generation,
+        });
+        let room = if held_destination.is_some() {
+            PARKED_PRESENTATION_CAP.saturating_sub(1)
+        } else {
+            PARKED_PRESENTATION_CAP
+        };
+        while self.parked_presentations.len() > room {
+            self.parked_presentations.pop_front();
+        }
+        if let Some(destination) = held_destination {
+            self.parked_presentations.push_back(destination);
+        }
+    }
+
+    /// Put a parked list back when this attach is still the same prepared
+    /// transcript. Returns after installing it, so the caller must not reset
+    /// the list or clone rows.
+    fn restore_parked_presentation(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.doc_override.is_some() {
+            return false;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return false;
+        };
+        if self.state.read(cx).has_pending_echoes(&chat_id) {
+            return false;
+        }
+        let Some(prepared) = self.state.read(cx).prepared_for(&chat_id) else {
+            return false;
+        };
+        let Some(index) = self.parked_presentations.iter().position(|parked| {
+            parked.chat_id == chat_id
+                && parked.compact_mode == self.compact_mode
+                && Arc::ptr_eq(&parked.prepared, &prepared)
+        }) else {
+            return false;
+        };
+        let Some(parked) = self.parked_presentations.remove(index) else {
+            return false;
+        };
+        self.list = parked.list;
+        self.rows = parked.rows;
+        self.render_cache = parked.render_cache;
+        self.folds = parked.folds;
+        self.tool_group_reveals = parked.tool_group_reveals;
+        self.tool_details = parked.tool_details;
+        self.user_folds = parked.user_folds;
+        self.user_heights = parked.user_heights;
+        self.veils = parked.veils;
+        self.veil_baseline = parked.veil_baseline;
+        self.veil_attach_pending = parked.veil_attach_pending;
+        self.last_replay_baseline = parked.last_replay_baseline;
+        self.historical_markdown = parked.historical_markdown;
+        self.pinned = parked.pinned;
+        self.last_scroll_distance = parked.last_scroll_distance;
+        self.show_jump_button = parked.show_jump_button;
+        self.code_fences = parked.code_fences;
+        if parked.typography_generation != self.typography_generation {
+            self.list.remeasure();
+        }
+        // The list already holds its scroll. A saved viewport applied on top
+        // would jump a chat the user had left mid-read.
+        self.pending_viewport = None;
+        self.input_escaped = false;
+        self.list_took_input = false;
+        self.spring.reset();
+        self.spring_last_tick = None;
+        self.spring_settled_at = None;
+        self.spring_kick = false;
+        self.rows_revision = self.rows_revision.wrapping_add(1);
+        self.viewport_generation = self.viewport_generation.wrapping_add(1);
+        self.viewport_finalize_pending = false;
+        self.refresh_protected_attachments(cx);
+        cx.notify();
+        true
+    }
+
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
         if self.retain_on_deselect
@@ -5078,6 +5263,13 @@ impl Transcript {
         self.last_source = Some(source);
 
         let attached = selected != self.chat_id;
+        // Snapshot and park before the attach clears veils and the list.
+        // `remember_current_viewport` reads the outgoing list; an empty park
+        // replacement must not overwrite that snapshot.
+        if attached && self.doc_override.is_none() {
+            self.remember_current_viewport();
+            self.park_current(selected.as_deref(), cx);
+        }
         // Arm the replay baseline before classifying tool arrivals. Selection
         // and replay may arrive in one sync; a retained same-chat entity can
         // also see a fresh pending subscription without changing chat_id.
@@ -5125,6 +5317,8 @@ impl Transcript {
             self.highlights.entries.clear();
             self.copied_message = None;
             self.copied_message_clear = None;
+            self.input_escaped = false;
+            self.list_took_input = false;
             self.list.reset(0);
             self.pending_viewport = None;
             self.viewport_generation = self.viewport_generation.wrapping_add(1);
@@ -5165,6 +5359,9 @@ impl Transcript {
             self.spring_kick = false;
             self.scroll_anim = None;
             self.stop_selection_scroll();
+            if self.restore_parked_presentation(cx) {
+                return;
+            }
         }
 
         let mut new_rows: Vec<Row> = Vec::new();
@@ -12016,6 +12213,74 @@ mod tests {
             eprintln!(
                 "background_preparation_ms={preparation_ms} ui_open_ms={open_ms} ui_revisit_ms={revisit_ms}"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn warm_chat_switch_reuses_the_parked_rows(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            let show = |chat_id: &str, cx: &mut gpui::App| {
+                let entries = vec![assistant(
+                    chat_id,
+                    MessageStatus::Complete,
+                    vec![MessagePart::Text {
+                        id: format!("{chat_id}-text"),
+                        text: format!("hello {chat_id}"),
+                    }],
+                )];
+                let update = zeron_doc::TranscriptUpdate {
+                    frame: zeron_doc::TranscriptFrame::reset(&entries),
+                    replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+                    context_usage: None,
+                };
+                let prepared = TranscriptPreparation::default().prepare(&update).unwrap();
+                state.update(cx, |state, cx| {
+                    state.select_chat(Some(chat_id.into()), cx);
+                    state
+                        .receive_opening_transcript_update(update, false, cx)
+                        .unwrap();
+                    state
+                        .prepared_transcripts
+                        .insert(chat_id.to_string(), prepared);
+                });
+                transcript.update(cx, |this, cx| this.sync(cx));
+            };
+            show("a", cx);
+            let parked = transcript.read(cx).rows.as_ptr();
+            assert!(!transcript.read(cx).rows.is_empty());
+            show("b", cx);
+            state.update(cx, |state, cx| state.select_chat(Some("a".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            assert_eq!(
+                transcript.read(cx).rows.as_ptr(),
+                parked,
+                "switching back must restore the laid-out rows"
+            );
+            assert_eq!(transcript.read(cx).chat_id.as_deref(), Some("a"));
+            let revision = state.read(cx).transcript_revision;
+            state.update(cx, |state, cx| {
+                let entries = state.transcript.clone();
+                state
+                    .receive_opening_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame: zeron_doc::TranscriptFrame::reset(&entries),
+                            replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+                            context_usage: None,
+                        },
+                        false,
+                        cx,
+                    )
+                    .unwrap();
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            assert_eq!(state.read(cx).transcript_revision, revision);
+            assert_eq!(transcript.read(cx).rows.as_ptr(), parked);
         });
     }
 
