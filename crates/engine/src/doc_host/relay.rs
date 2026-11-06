@@ -762,6 +762,7 @@ impl zeron_preview::mux::Connector for ChatLinkService {
         let inner = self.host.upgrade().ok_or_else(|| anyhow::anyhow!("engine stopped"))?;
         let host = DocHost { inner };
         let state = host.accept_chat_link(chat)?;
+        tracing::info!(%chat, %peer, "chat link accepted");
         let (ours, theirs) = tokio::io::duplex(256 * 1024);
         let relay = state.relay.clone();
         let stop = state.accepted.child_token();

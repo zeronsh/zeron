@@ -540,7 +540,10 @@ impl SessionCore {
                 .last()
                 .is_some_and(|e| e.is_streaming());
             let live = LiveFlags {
-                working: indicator_working || streaming,
+                // Saved mid-turn and with no way to hear the rest, a streaming tail
+                // is only a copy of what was. "Writing…" with a clock running would
+                // read as stuck, for as long as the host stays away.
+                working: (indicator_working || streaming) && !degraded,
                 working_since_ms,
                 cloud_booting,
             };
@@ -613,7 +616,8 @@ impl SessionCore {
                 turn_running,
                 working_since_ms: row.as_ref().and_then(|r| r.working_since_ms),
                 streaming: snapshot.streaming,
-                can_interrupt: busy || snapshot.streaming,
+                // Unreachable, a stop would wait in the doc and could land on a later turn.
+                can_interrupt: (busy || snapshot.streaming) && !degraded,
             },
             queue: st
                 .queue

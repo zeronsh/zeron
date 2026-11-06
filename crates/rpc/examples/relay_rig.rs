@@ -65,6 +65,9 @@ async fn main() {
                 .await
                 .unwrap_or_else(|err| fail(&format!("LocalDevice: {err}")));
             let space = uuid::Uuid::new_v4().to_string();
+            // A folder of its own: a second space at the same path is the first one.
+            let path = std::env::temp_dir().join(format!("relay-rig-{space}"));
+            std::fs::create_dir_all(&path).unwrap_or_else(|err| fail(&format!("mkdir: {err}")));
             client
                 .call(
                     methods::MUTATE,
@@ -72,24 +75,35 @@ async fn main() {
                         "op": "createSpace",
                         "spaceId": space,
                         "deviceId": device["deviceId"],
-                        "path": "/tmp",
+                        "path": path,
                     }),
                 )
                 .await
                 .unwrap_or_else(|err| fail(&format!("createSpace: {err}")));
             let chat = uuid::Uuid::new_v4().to_string();
-            client
-                .call(
-                    methods::MUTATE,
-                    serde_json::json!({
-                        "op": "createChat",
-                        "chatId": chat,
-                        "spaceId": space,
-                        "config": { "harness": "mock", "model": null, "reasoning": null, "sandbox": "workspace-write" },
-                    }),
-                )
-                .await
-                .unwrap_or_else(|err| fail(&format!("createChat: {err}")));
+            // A space just created can take a moment to read back.
+            let mut attempts = 0;
+            loop {
+                let created = client
+                    .call(
+                        methods::MUTATE,
+                        serde_json::json!({
+                            "op": "createChat",
+                            "chatId": chat,
+                            "spaceId": space,
+                            "config": { "harness": "mock", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+                        }),
+                    )
+                    .await;
+                match created {
+                    Ok(_) => break,
+                    Err(err) if attempts >= 20 => fail(&format!("createChat: {err}")),
+                    Err(_) => {
+                        attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
             println!("{chat}");
         }
         ("run", [chat, prompt]) => {

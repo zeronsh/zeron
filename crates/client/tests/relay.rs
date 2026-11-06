@@ -778,6 +778,42 @@ async fn a_chat_off_screen_leaves_a_new_checkpoint_alone_until_someone_looks() {
 // ── saying where a chat is ───────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_saved_mid_stream_doesnt_claim_to_be_running_with_nobody_to_hear_from() {
+    let _serial = SERIAL.lock().await;
+    let chat = "frozen-tail";
+    let edge = MockEdge::start_relay().await;
+    let _registry = Registry::start(&edge, &[chat_row(chat, 3, true)], true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    registered(&client, chat).await;
+    leave(client);
+
+    // What a kill left: a reply still streaming when the last frame came.
+    let doc = LoroDoc::new();
+    let mut tail = message("tail", MessageRole::Assistant, HOST, "half a sen");
+    tail.status = Some(zeron_doc::MessageStatus::Streaming);
+    SessionDoc::from_doc(doc.clone()).push_message(&tail).unwrap();
+    doc.commit();
+    DocsStore::open(dir.path())
+        .unwrap()
+        .journal_chat_inbox(chat, &doc.export(ExportMode::all_updates()).unwrap())
+        .unwrap();
+
+    let offline = phone_at(DEAD_EDGE, dir.path(), true);
+    offline.set_network_online(false);
+    let session = offline.open_session(chat).unwrap();
+    session.set_view_attached(true);
+    assert!(shows(&session, "half a sen"));
+    eventually("it to stop saying it's working", 10, || {
+        !session.snapshot().working && !session.composer().live.can_interrupt
+    })
+    .await;
+    assert!(session.composer().live.turn_running, "a send still queues rather than starts a turn");
+    offline.set_network_online(true);
+    leave(offline);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_chat_never_loaded_says_where_it_is_and_fills_in_when_its_host_returns() {
     let _serial = SERIAL.lock().await;
     let chat = "never-loaded";
