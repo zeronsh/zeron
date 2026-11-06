@@ -164,7 +164,16 @@ impl Desktop {
     fn available(&self) -> Option<String> {
         let status = self.status.borrow();
         let status = status.as_ref()?;
-        status.update_available.then(|| status.latest_version.clone()).flatten()
+        let latest = status.update_available.then(|| status.latest_version.clone()).flatten()?;
+        // Another device updated this Mac under this window: what's on offer
+        // is on disk already, and only wants reopening on (`moved_on_to`).
+        if let InstallKind::MacApp { bundle } = &self.install
+            && let Some(on_disk) = zeron_update::bundle_app_version(bundle)
+            && already_there(&on_disk, &latest, APP_VERSION)
+        {
+            return None;
+        }
+        Some(latest)
     }
 
     fn status_heard(self: &Rc<Self>, status: UpdateStatus) {
@@ -467,6 +476,13 @@ fn start(about: &Rc<About>) {
     });
 }
 
+/// Whether the bundle on disk has moved on from the app that's open, to what's
+/// on offer or past it. (Not when it's the app that's open: going back to
+/// stable from a beta offers an older version on purpose.)
+fn already_there(on_disk: &str, offered: &str, open: &str) -> bool {
+    on_disk != open && !zeron_update::version_newer(offered, on_disk)
+}
+
 /// The version this device's engine updated it to, past the app that's open:
 /// another device updated it. (Only a finished update says so: a beta's engine
 /// can be ahead of its app without one, and reopening wouldn't change that.)
@@ -642,6 +658,17 @@ mod tests {
         assert!(!value.field("self_updating").is_some_and(Value::truthy));
         assert!(!value.field("channels").is_some_and(Value::truthy));
         assert_eq!(value.field("app_version").map(|v| v.to_json()).as_deref(), Some(format!("\"{APP_VERSION}\"").as_str()));
+    }
+
+    #[test]
+    fn what_another_device_already_installed_isn_t_offered_again() {
+        // Updated under this window: nothing to download.
+        assert!(already_there("0.3.0", "0.3.0", "0.2.0"));
+        // Something newer still.
+        assert!(!already_there("0.3.0", "0.4.0", "0.2.0"));
+        // Nothing has moved: an update, or leaving a beta for an older stable.
+        assert!(!already_there("0.2.0", "0.3.0", "0.2.0"));
+        assert!(!already_there("0.3.0-beta.2", "0.2.9", "0.3.0-beta.2"));
     }
 
     #[test]

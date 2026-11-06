@@ -300,7 +300,8 @@ impl Updates {
     fn heard_zeron(&self, id: &str, item: &Json) {
         let usable = item["held"].is_null() && !item["switch"].as_bool().unwrap_or(false);
         let zeron = Zeron {
-            current: item["currentVersion"].as_str().unwrap_or_default().to_owned(),
+            // (A beta's app, which isn't its engine: `currentVersion` is the engine's.)
+            current: item["appVersion"].as_str().or(item["currentVersion"].as_str()).unwrap_or_default().to_owned(),
             latest: item["latestVersion"].as_str().map(Into::into),
             available: usable && item["updateAvailable"].as_bool().unwrap_or(false),
             can_apply: item["canApplyRemotely"].as_bool(),
@@ -794,6 +795,16 @@ mod tests {
         assert!(updates.devices.borrow()["m"].updating_from.is_some());
         updates.heard_zeron("m", &json!({ "currentVersion": "2" }));
         assert!(updates.devices.borrow()["m"].updating_from.is_none());
+    }
+
+    #[test]
+    fn a_beta_s_zeron_goes_by_its_app_version_not_its_engine_s() {
+        let updates = Updates::default();
+        updates.devices.borrow_mut().insert("m".into(), Device::default());
+        updates.heard_zeron("m", &json!({ "currentVersion": "0.2.136", "appVersion": "0.2.137-beta.17" }));
+        assert_eq!(updates.devices.borrow()["m"].zeron.as_ref().unwrap().current, "0.2.137-beta.17");
+        updates.heard_zeron("m", &json!({ "currentVersion": "0.2.136" }));
+        assert_eq!(updates.devices.borrow()["m"].zeron.as_ref().unwrap().current, "0.2.136");
     }
 
     #[test]
