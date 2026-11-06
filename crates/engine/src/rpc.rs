@@ -2996,6 +2996,10 @@ impl RpcService for EngineRpc {
                 )
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // A catalog that changed is told to plugins (models.updated).
+                if let Some(plugins) = &self.plugins {
+                    plugins.agents().observe_models(p.harness, &models);
+                }
                 RpcReply::value(&models)
             }
             methods::LIST_SKILLS => {

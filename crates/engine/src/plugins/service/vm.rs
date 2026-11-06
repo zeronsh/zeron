@@ -75,6 +75,8 @@ pub enum Kind {
     Method,
     Tool,
     Timer,
+    /// An event a `zeron.on` listener hears (plugins/agents).
+    Event,
 }
 
 impl Kind {
@@ -83,6 +85,7 @@ impl Kind {
             Kind::Method => "method",
             Kind::Tool => "tool",
             Kind::Timer => "timer",
+            Kind::Event => "event",
         }
     }
 }
@@ -153,6 +156,9 @@ pub struct Described {
     pub tools: Vec<String>,
     /// Each timer's key (`#1`, `#2`: by its place) and period in seconds.
     pub timers: Vec<(String, f64)>,
+    /// Each `zeron.on` listener: its key (`@1`, `@2`: by its place), the
+    /// event it hears and its options (a threshold's `below`, …).
+    pub listeners: Vec<(String, String, Json)>,
 }
 
 /// How a VM stands, read by the host without going through its thread.
@@ -905,6 +911,17 @@ fn describe(table: &Table) -> Result<Described, String> {
         described
             .timers
             .push((timer.get("key").map_err(fail)?, timer.get("seconds").map_err(fail)?));
+    }
+    if let Ok(listeners) = table.get::<Table>("listeners") {
+        for listener in listeners.sequence_values::<Table>() {
+            let listener = listener.map_err(fail)?;
+            let opts: Value = listener.get("opts").map_err(fail)?;
+            described.listeners.push((
+                listener.get("key").map_err(fail)?,
+                listener.get("event").map_err(fail)?,
+                to_json(&opts, 0).unwrap_or(Json::Null),
+            ));
+        }
     }
     Ok(described)
 }

@@ -2152,6 +2152,16 @@ impl Inner {
         if matches!(event, AgentEvent::Done { .. }) {
             self.journal.clear_user_stop(chat_id);
         }
+        // A turn's error, for plugins' events: a usage limit hit, a login
+        // expired (`plugins::agents`; told only if it's one of those).
+        let problem = match event {
+            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Done { error: Some(error), .. } => Some(error.as_str()),
+            _ => None,
+        };
+        if let (Some(message), Some(plugins)) = (problem, self.plugins.get()) {
+            plugins.agents().observe_problem(chat_id, message);
+        }
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
             let _ = hub.send(JournaledEvent {
                 seq,

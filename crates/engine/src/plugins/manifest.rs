@@ -42,6 +42,13 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // each device that allowed it, called by its windows and agents from
     // this device or another (plugins/service).
     "service",
+    // The agents' accounts, usage and models (plugins/agents): reading
+    // them, and the two controls (switching an account, setting a model).
+    "usage.read",
+    "accounts.read",
+    "accounts.switch",
+    "models.read",
+    "models.set",
 ];
 
 /// Ids the app keeps for itself.
