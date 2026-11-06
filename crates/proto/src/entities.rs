@@ -115,7 +115,9 @@ pub struct Space {
     pub device_id: String,
     /// Absolute folder path on the owning device.
     pub path: String,
-    /// User rename; absent ⇒ display = basename(path).
+    /// User rename; absent ⇒ display = basename(path). As read from the
+    /// registry, its repository's: the same on every copy with a shared
+    /// `repository_id` (any but `local:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Owner-stamped: is `path` inside a git work tree?
@@ -142,7 +144,8 @@ pub struct Space {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repo: Option<String>,
     /// The picture its people chose for it (LWW, from any device); absent ⇒
-    /// its default tile (its repository's artwork, else its initial).
+    /// its default tile (its repository's artwork, else its initial). Shared
+    /// by a repository's copies like `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<SpaceIcon>,
     pub created_at: DateTime<Utc>,
