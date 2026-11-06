@@ -24,6 +24,7 @@
 -- axes from the host, src/visuals.rs.)
 
 local ink = require("@self/visual_ink")
+local field = require("@self/chart_field")
 
 export type Props = {
 	data: () -> any,
@@ -34,6 +35,9 @@ export type Props = {
 -- The plot's insets: room for the tick labels.
 local PAD_TOP, PAD_RIGHT, LABEL_GAP, X_LABELS = 8, 6, 8, 22
 local DOT = 8
+-- A bar narrower than this is plain; how far inside a mark its characters
+-- start (ds/chart_field).
+local MIN_FIELD, FIELD_X, FIELD_Y = 12, 3, 4
 
 local function fade(color: any, alpha: number): any
 	if type(color) == "table" then
@@ -63,7 +67,9 @@ return ui.component(function(props: Props): Node
 		return props.data() or {}
 	end
 
-	local function draw(c: any, w: number, h: number)
+	-- Two canvases, one drawing: the plot (gridlines, labels, what the pointer
+	-- picks out) and over it the marks, in the characters (ds/chart_field).
+	local function draw(c: any, w: number, h: number, marks: boolean)
 		local d = data()
 		local series = d.series or {}
 		local kind = d.type or "bar"
@@ -102,7 +108,7 @@ return ui.component(function(props: Props): Node
 		local hover = hovered:get()
 
 		-- Gridlines and their labels, along the value axis.
-		for i, t in y.ticks or {} do
+		for i, t in if marks then {} else (y.ticks or {}) do
 			local label = (y.labels or {})[i] or ""
 			local line = if t == 0 then axis else grid
 			if horizontal then
@@ -123,12 +129,13 @@ return ui.component(function(props: Props): Node
 			local function sx(v: number): number
 				return left + (v - xlo) / xspan * pw
 			end
-			for i, t in xa.ticks or {} do
+			for i, t in if marks then {} else (xa.ticks or {}) do
 				local x = sx(t)
 				c:rect(x - 0.5, top, 1, ph, if t == 0 then axis else grid)
 				c:text((xa.labels or {})[i] or "", x, top + ph + 6, { size = size, color = faint, align = "center", baseline = "top", tabular = true })
 			end
-			for si, s in series do
+			-- (Points stay plain, on the plot: lone characters don't read as points.)
+			for si, s in if marks then {} else series do
 				local color = ink.canvas(s.color or `chart{si}`)
 				local pts = s.points or {}
 				for i = 1, #pts - 1, 2 do
@@ -147,7 +154,9 @@ return ui.component(function(props: Props): Node
 		for _, label in cats do
 			widest = math.max(widest, (c:measure_text(tostring(label), { size = size })))
 		end
-		if horizontal then
+		if marks then
+			-- (No labels on the marks' canvas.)
+		elseif horizontal then
 			for i, label in cats do
 				local yy = top + (i - 0.5) * band
 				c:text(tostring(label), left - LABEL_GAP, yy, { size = size, color = if hover == i then "$text.primary" else faint, align = "end", baseline = "middle" })
@@ -172,11 +181,34 @@ return ui.component(function(props: Props): Node
 			local per = if stacked then group else group / math.max(1, #series)
 			local gap = if stacked or #series < 2 then 0 else math.min(2, per * 0.15)
 			local radius = math.min(3, per / 4)
-			if hover > 0 and hover <= count then
+			if not marks and hover > 0 and hover <= count then
 				if horizontal then
 					c:rect(left, top + (hover - 1) * band, pw, band, "$hover", 4)
 				else
 					c:rect(left + (hover - 1) * band, top, band, ph, "$hover", 4)
+				end
+			end
+			-- As the effort slider's fill: a wash of the ink, a ring of it, and
+			-- (ds/chart_field) its characters inside the ring. A bar too thin
+			-- to hold them is plain.
+			local tint, ring = n("zeron.slider.tint", 0.3), n("zeron.slider.ring", 0.45)
+			local function bar(x: number, y: number, bw: number, bh: number, color: any)
+				if bw <= 0 or bh <= 0 then
+					return
+				end
+				local across = if horizontal then bh else bw
+				local paint = ink.canvas(color)
+				if across < MIN_FIELD then
+					if not marks then
+						c:rect(x, y, bw, bh, paint, radius)
+					end
+				elseif marks then
+					if bw > FIELD_X * 2 and bh > FIELD_Y * 2 then
+						c:rect(x + FIELD_X, y + FIELD_Y, bw - FIELD_X * 2, bh - FIELD_Y * 2, paint)
+					end
+				else
+					c:rect(x, y, bw, bh, ink.hex(fade(color, tint)), radius)
+					c:stroke(ui.path():rect(x + 0.5, y + 0.5, math.max(0, bw - 1), math.max(0, bh - 1), radius), ink.hex(fade(color, ring)), 1)
 				end
 			end
 			for i = 1, count do
@@ -196,16 +228,16 @@ return ui.component(function(props: Props): Node
 						else
 							a, b = math.min(0, v), math.max(0, v)
 						end
-						local color = ink.canvas(s.color or `chart{si}`)
+						local color = s.color or `chart{si}`
 						local offset = if stacked then 0 else (si - 1) * per
 						if horizontal then
 							local y0 = top + (i - 1) * band + (band - group) / 2 + offset + gap / 2
 							local x0, x1 = vx(math.max(a, lo)), vx(math.min(b, hi))
-							c:rect(x0, y0, math.max(0, x1 - x0), math.max(1, per - gap), color, radius)
+							bar(x0, y0, x1 - x0, math.max(1, per - gap), color)
 						else
 							local x0 = left + (i - 1) * band + (band - group) / 2 + offset + gap / 2
 							local y0, y1 = vy(math.min(b, hi)), vy(math.max(a, lo))
-							c:rect(x0, y0, math.max(1, per - gap), math.max(0, y1 - y0), color, radius)
+							bar(x0, y0, math.max(1, per - gap), y1 - y0, color)
 						end
 					end
 				end
@@ -222,7 +254,7 @@ return ui.component(function(props: Props): Node
 		for i = 1, count do
 			base[i] = 0
 		end
-		if hover > 0 and hover <= count then
+		if not marks and hover > 0 and hover <= count then
 			c:rect(cx(hover) - 0.5, top, 1, ph, "$border.strong")
 		end
 		local stacked = d.stacked == true and kind == "area"
@@ -252,18 +284,25 @@ return ui.component(function(props: Props): Node
 			end
 			for _, r in runs do
 				if kind == "area" then
-					local p = ui.path():move(cx(r[1]), vy(tops[r[1]] :: number))
+					-- Under the line, a wash on the plot and the characters over it,
+					-- starting below the line so none crosses it.
+					local below = if marks then FIELD_Y + 1 else 0
+					local p = ui.path():move(cx(r[1]), vy(tops[r[1]] :: number) + below)
 					for k = 2, #r do
-						p = p:line(cx(r[k]), vy(tops[r[k]] :: number))
+						p = p:line(cx(r[k]), vy(tops[r[k]] :: number) + below)
 					end
 					for k = #r, 1, -1 do
 						local under = if stacked then base[r[k]] else math.max(lo, math.min(0, hi))
 						p = p:line(cx(r[k]), vy(under))
 					end
 					p = p:close()
-					c:fill(p, ui.linear(0, top, 0, top + ph, { ink.hex(fade(color, 0.32)), ink.hex(fade(color, 0.04)) }))
+					if marks then
+						c:fill(p, paint)
+					else
+						c:fill(p, ui.linear(0, top, 0, top + ph, { ink.hex(fade(color, 0.2)), ink.hex(fade(color, 0.04)) }))
+					end
 				end
-				if #r > 1 then
+				if not marks and #r > 1 then
 					local p = ui.path():move(cx(r[1]), vy(tops[r[1]] :: number))
 					for k = 2, #r do
 						p = p:line(cx(r[k]), vy(tops[r[k]] :: number))
@@ -271,12 +310,14 @@ return ui.component(function(props: Props): Node
 					c:stroke(p, paint, 2, { join = "round", cap = "round" })
 				end
 				-- Points where there are few enough to tell apart, or one alone.
-				if #r == 1 or (band >= 14 and kind == "line") then
-					for _, i in r do
-						c:circle(cx(i), vy(tops[i] :: number), if hover == i then 4 else 2.5, paint)
+				if not marks then
+					if #r == 1 or (band >= 14 and kind == "line") then
+						for _, i in r do
+							c:circle(cx(i), vy(tops[i] :: number), if hover == i then 4 else 2.5, paint)
+						end
+					elseif hover > 0 and tops[hover] then
+						c:circle(cx(hover), vy(tops[hover] :: number), 4, paint)
 					end
-				elseif hover > 0 and tops[hover] then
-					c:circle(cx(hover), vy(tops[hover] :: number), 4, paint)
 				end
 			end
 			if stacked then
@@ -327,6 +368,15 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 	local text_sm = { size = "$zeron.visual.text.sm.size", line = "$zeron.visual.text.sm.line" }
+	-- Which way the field's axis runs.
+	local field_el = ui.ref()
+	ui.effect(function()
+		local d = data()
+		local el = field_el:get()
+		if el then
+			anime.utils.set(el, { layerParam3 = if d.horizontal == true then 1 else 0 })
+		end
+	end)
 	return ui.column {
 		class = "chart",
 		w_full = true,
@@ -399,18 +449,45 @@ return ui.component(function(props: Props): Node
 				end, { flex_wrap = true, items = "center", gap_x = "$space.4", gap_y = "$space.1" }),
 			}
 		),
-		ui.canvas {
-			class = "chart-plot",
+		ui.div {
+			relative = true,
 			w_full = true,
 			h = props.height,
-			label = props.label,
-			draw = draw,
-			on_pointer_move = pointer,
-			on_hover = function(inside: boolean)
-				if not inside then
-					hovered:set(0)
-				end
-			end,
+			ui.canvas {
+				class = "chart-plot",
+				w_full = true,
+				h = props.height,
+				label = props.label,
+				draw = function(c: any, w: number, h: number)
+					draw(c, w, h, false)
+				end,
+				on_pointer_move = pointer,
+				on_hover = function(inside: boolean)
+					if not inside then
+						hovered:set(0)
+					end
+				end,
+			},
+			ui.div {
+				absolute = true,
+				left = 0,
+				top = 0,
+				w_full = true,
+				h = props.height,
+				pointer_events = "none",
+				layer_shader = field.shader,
+				layer_params = field.params(),
+				ref = field_el,
+				on_mount = field.mounted,
+				ui.canvas {
+					w_full = true,
+					h = props.height,
+					pointer_events = "none",
+					draw = function(c: any, w: number, h: number)
+						draw(c, w, h, true)
+					end,
+				},
+			},
 		},
 	}
 end)
