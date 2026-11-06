@@ -57,6 +57,10 @@ local defaults = ui.persist("chat_new_defaults", {
 	device = nil :: string?,
 })
 
+-- The last default a plugin chose that was taken (its time, ms): one is
+-- taken once, across restarts, never again over a pick made since.
+local plugin_default_seen = ui.persist("chat_new_defaults_plugin", 0)
+
 local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
 -- Those a session takes only with a message sent (shared.picks keeps them
 -- meanwhile); the rest change it as they're picked.
@@ -190,6 +194,33 @@ local function Composer(): Node
 		end)
 		if was:peek() ~= id then
 			was:set(id)
+		end
+	end)
+	-- What a new chat starts with, as a plugin allowed "models.set" chose it
+	-- (screens/plugins publishes it once the engine allowed it): kept as a
+	-- pick made here would be, and shown at once on a new chat.
+	local plugin_default = ui.shared("plugins.new_chat_model", nil :: any)
+	ui.effect(function()
+		local asked = plugin_default:get()
+		if type(asked) ~= "table" or type(asked.model) ~= "string" then
+			return
+		end
+		local seq = tonumber(asked.seq) or 0
+		if seq <= plugin_default_seen:peek() then
+			return
+		end
+		plugin_default_seen:set(seq)
+		local d = table.clone(defaults:peek()) :: any
+		d.model = asked.model
+		d.effort = asked.effort
+		defaults:set(d)
+		if session_id:peek() == nil then
+			ui.batch(function()
+				locals.model:set(asked.model)
+				if asked.effort ~= nil then
+					locals.effort:set(asked.effort)
+				end
+			end)
 		end
 	end)
 	-- A new chat's project follows the route's: as the route comes home, or
