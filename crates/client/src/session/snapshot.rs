@@ -245,6 +245,9 @@ pub struct HostCapabilities {
     /// The host moves the chat to another provider between turns; older
     /// hosts would resume one provider's session under another.
     pub provider_switch: bool,
+    /// The host fetches attachment bytes from the edge's store, so a send to
+    /// it needn't reach it directly.
+    pub attachment_store: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

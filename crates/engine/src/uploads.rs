@@ -7,8 +7,9 @@
 //! in-memory buffers), and `commit` assembles them into
 //! `{uploads_root}/{id8}-{name}` and returns the absolute path, which the
 //! composer appends to the prompt so the agent can read the file from disk.
-//! Attachments live only on the host device — every read proxies through the
-//! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
+//! Attachments live on the host device — every read proxies through the owning
+//! device via `ReadAttachmentChunk`. The edge only ever holds bytes in transit
+//! to a Cloud machine, until it has them (docs/design/cloud-attachments.md).
 //!
 //! `read_chunk` serves attachments back in 45KB base64 chunks. Path jail:
 //! only files under the uploads dir or a workspace-known chat cwd are readable
@@ -220,6 +221,28 @@ impl Uploads {
         std::fs::write(&path, &bytes)?;
         let _ = std::fs::remove_dir_all(&dir);
         Ok(path.to_string_lossy().to_string())
+    }
+
+    /// Save whole bytes fetched from the edge's attachment store, at the path
+    /// their `pending://` ref resolves to. Written aside and renamed: a landed
+    /// ref must only ever name a complete file (the drain trusts `is_file`).
+    pub fn commit_fetched(
+        &self,
+        upload_id: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<String, EngineError> {
+        self.staging_dir(upload_id)?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(EngineError::Other("Upload too large".into()));
+        }
+        std::fs::create_dir_all(&self.inner.dir)?;
+        std::fs::create_dir_all(&self.inner.tmp)?;
+        let target = self.pending_target(upload_id, file_name);
+        let part = self.inner.tmp.join(format!("{upload_id}.fetched"));
+        std::fs::write(&part, bytes)?;
+        std::fs::rename(&part, &target)?;
+        Ok(target.to_string_lossy().to_string())
     }
 
     /// The committed absolute path a pending ref resolves to on THIS device
@@ -794,6 +817,23 @@ mod tests {
             .unwrap();
         let committed = uploads.commit("abcd1234-rest", "my photo (1).png").unwrap();
         assert_eq!(uploads.resolve_pending(&r), Some(committed));
+    }
+
+    #[test]
+    fn fetched_bytes_land_where_the_ref_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        let reference = pending_ref("abcd1234-rest", "my photo (1).png");
+        assert_eq!(uploads.resolve_pending(&reference), None);
+
+        let path = uploads
+            .commit_fetched("abcd1234-rest", "my photo (1).png", b"png")
+            .unwrap();
+        assert_eq!(uploads.resolve_pending(&reference).as_deref(), Some(path.as_str()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        // Nothing half-written stays behind, and a bad id can't name a path.
+        assert_eq!(std::fs::read_dir(dir.path().join("uploads/tmp")).unwrap().count(), 0);
+        assert!(uploads.commit_fetched("../evil", "a.png", b"png").is_err());
     }
 
     #[test]

@@ -402,16 +402,19 @@ impl ClientInner {
                 .is_some_and(|v| v >= QUEUED_ATTACHMENTS_MIN),
             mid_turn_steering,
             provider_switch: has(capability::PROVIDER_SWITCH_V1),
+            attachment_store: has(capability::ATTACHMENT_STORE_V1),
         }
     }
 
     /// Mint `pending://` refs for picked images and keep their bytes local
-    /// (the echo renders them immediately; the escort pushes them).
+    /// (the echo renders them immediately; the escort pushes them, or with
+    /// `via_store` the held-send worker stores them at the edge).
     pub(crate) fn stage_attachments(
         &self,
         chat_id: &str,
         device_id: &str,
         attachments: &[OutgoingAttachment],
+        via_store: bool,
     ) -> Result<Vec<String>> {
         if let Some(too_big) = attachments
             .iter()
@@ -435,6 +438,7 @@ impl ClientInner {
                         host_device_id: device_id.to_owned(),
                         name: name.clone(),
                         created_at_ms: now_ms(),
+                        via_store,
                     };
                     live.escorts
                         .stash(&meta, &attachment.data)

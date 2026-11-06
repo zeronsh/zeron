@@ -1025,6 +1025,9 @@ pub struct AppState {
     /// snapshots): real relay-leg progress for the sending thumbnail's
     /// percent ring, present exactly while bytes are moving.
     transfers: HashMap<String, (u64, u64)>,
+    /// Sends the engine is holding until their bytes reach the edge's store
+    /// (`WatchHeldSends`): a Cloud-hosted chat's message before it goes out.
+    held_sends: Vec<zeron_proto::HeldSendStatus>,
     /// Written by the changes pane, read by the composer.
     review_comments: HashMap<String, Vec<ReviewComment>>,
     /// File surfaces whose editor-backed comments currently cite a buffer
@@ -1187,6 +1190,7 @@ impl AppState {
             pending_sends: HashMap::new(),
             upload_progress: None,
             transfers: HashMap::new(),
+            held_sends: Vec::new(),
             review_comments: HashMap::new(),
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
@@ -2338,6 +2342,72 @@ impl AppState {
         true
     }
 
+    /// The engine's outbox changed. A send still held shows as an in-flight
+    /// message even after a relaunch forgot its echo; a send leaving the outbox
+    /// has only just gone out, so its delivery clock starts over.
+    pub fn apply_held_sends(&mut self, held: Vec<zeron_proto::HeldSendStatus>) -> bool {
+        if self.held_sends == held {
+            return false;
+        }
+        let now = Utc::now();
+        for gone in std::mem::take(&mut self.held_sends) {
+            if !held.iter().any(|send| send.id == gone.id)
+                && self
+                    .pending_sends
+                    .get(&gone.chat_id)
+                    .is_some_and(|p| gone.message_id.as_deref() == Some(p.message_id.as_str()))
+            {
+                self.retry_pending_send(&gone.chat_id, now);
+            }
+        }
+        for send in &held {
+            let Some(message_id) = send.message_id.as_deref() else {
+                continue;
+            };
+            if self.echoes.get(&send.chat_id).is_some_and(|e| e.iter().any(|e| e.id == message_id))
+            {
+                continue;
+            }
+            self.push_echo(
+                &send.chat_id,
+                SessionMessageEntry {
+                    id: message_id.to_string(),
+                    role: zeron_doc::MessageRole::User,
+                    parts: vec![zeron_doc::MessagePart::Text {
+                        id: "t0".into(),
+                        text: send.prompt.clone(),
+                    }],
+                    created_at: send.created_at,
+                    device_id: "local".into(),
+                    status: None,
+                    continuation_of: None,
+                    duration_ms: None,
+                },
+            );
+            if !self.pending_sends.contains_key(&send.chat_id) {
+                self.begin_pending_send(&send.chat_id, message_id, now);
+            }
+        }
+        self.held_sends = held;
+        true
+    }
+
+    /// A send of this chat is still on its way to the edge's store: not late,
+    /// however long that takes.
+    fn send_held(&self, chat_id: &str) -> bool {
+        self.held_sends
+            .iter()
+            .any(|send| send.chat_id == chat_id && send.failure.is_none())
+    }
+
+    /// Why a held send of this chat stopped trying. It waits for a retry.
+    pub fn held_send_failure(&self, chat_id: &str) -> Option<&str> {
+        self.held_sends
+            .iter()
+            .filter(|send| send.chat_id == chat_id)
+            .find_map(|send| send.failure.as_deref())
+    }
+
     /// Percent of one queued attachment's relay transfer, by the uploadId
     /// its `pending://{uploadId}/…` ref names. Same 99-clamp as
     /// [`Self::upload_progress_percent`]: the last point belongs to the
@@ -2362,6 +2432,7 @@ impl AppState {
             now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                 || self.chat_link_at(chat_id, now).delivery_unconfirmed()
                 || self.cloud_machine_booting(chat_id).is_some()
+                || self.send_held(chat_id)
         })
     }
 
@@ -2372,6 +2443,12 @@ impl AppState {
     /// first pushes, or leaves when the room joins, and its adoption shows
     /// once the copy catches up.
     pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        if self.held_send_failure(chat_id).is_some() {
+            return true;
+        }
+        if self.send_held(chat_id) {
+            return false;
+        }
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
         }) && self.cloud_machine_booting(chat_id).is_none()
@@ -2401,6 +2478,7 @@ impl AppState {
                 now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                     || self.chat_link_at(chat_id, now).delivery_unconfirmed()
                     || self.cloud_machine_booting(chat_id).is_some()
+                    || self.send_held(chat_id)
             })
             .map(|p| p.started)
     }
@@ -3921,6 +3999,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_TRANSFERS,
                 AppState::apply_transfers,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_HELD_SENDS,
+                AppState::apply_held_sends,
             ),
             spawn_watch(
                 cx,
@@ -6515,6 +6599,69 @@ mod tests {
         );
         s.devices[0].last_seen_at = Some(Utc::now());
         assert_eq!(s.chat_machine_down("c"), None, "up again");
+    }
+
+    fn held_send(id: &str, failure: Option<&str>) -> zeron_proto::HeldSendStatus {
+        zeron_proto::HeldSendStatus {
+            id: id.into(),
+            chat_id: "c".into(),
+            message_id: Some(format!("m-{id}")),
+            prompt: "look at this".into(),
+            created_at: 1_000,
+            failure: failure.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_held_send_stays_in_flight_however_long_its_upload_takes() {
+        let mut s = AppState::new();
+        let start = chrono::Utc::now();
+        s.begin_pending_send("c", "m-a", start);
+        assert!(s.apply_held_sends(vec![held_send("a", None)]));
+        assert!(!s.apply_held_sends(vec![held_send("a", None)]), "no change, no redraw");
+
+        let later = start + chrono::TimeDelta::hours(5);
+        assert!(s.send_pending("c", later));
+        assert!(!s.send_undelivered("c", later));
+        assert!(s.pending_send_started("c", later).is_some());
+    }
+
+    #[test]
+    fn a_held_send_comes_back_after_a_relaunch() {
+        let mut s = AppState::new();
+        s.apply_held_sends(vec![held_send("a", None)]);
+        // The echo the relaunch forgot, and the send state with it.
+        assert!(s.echoes["c"].iter().any(|e| e.id == "m-a"));
+        assert!(s.send_pending("c", chrono::Utc::now()));
+        // Not a second echo on the next frame.
+        s.apply_held_sends(vec![held_send("a", None), held_send("b", None)]);
+        assert_eq!(s.echoes["c"].iter().filter(|e| e.id == "m-a").count(), 1);
+    }
+
+    #[test]
+    fn a_failed_held_send_says_so_and_clears_on_retry() {
+        let mut s = AppState::new();
+        let now = chrono::Utc::now();
+        s.begin_pending_send("c", "m-a", now);
+        s.apply_held_sends(vec![held_send("a", Some("the file is too large"))]);
+        assert!(s.send_undelivered("c", now), "right away, no grace to wait out");
+        assert_eq!(s.held_send_failure("c"), Some("the file is too large"));
+        assert_eq!(s.held_send_failure("other"), None);
+
+        s.apply_held_sends(vec![held_send("a", None)]);
+        assert!(!s.send_undelivered("c", now));
+        assert_eq!(s.held_send_failure("c"), None);
+    }
+
+    #[test]
+    fn a_send_leaving_the_outbox_gets_a_fresh_delivery_clock() {
+        let mut s = AppState::new();
+        let start = chrono::Utc::now() - chrono::TimeDelta::hours(5);
+        s.begin_pending_send("c", "m-a", start);
+        s.apply_held_sends(vec![held_send("a", None)]);
+        s.apply_held_sends(Vec::new());
+        // Five hours since the send, but only now did it go out.
+        assert!(!s.send_undelivered("c", chrono::Utc::now()));
     }
 
     #[test]

@@ -3524,6 +3524,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_TRANSFERS => Ok(RpcReply::Stream(watch_stream(
                 self.doc_host.watch_transfers(),
             ))),
+            methods::WATCH_HELD_SENDS => Ok(RpcReply::Stream(watch_stream(
+                self.doc_host.watch_held_sends(),
+            ))),
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self

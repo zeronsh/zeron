@@ -1788,6 +1788,26 @@ pub struct TransferProgress {
     pub total: u64,
 }
 
+/// A send waiting for its attachment bytes to reach the edge's store before it
+/// enters the chat (`WatchHeldSends`). It survives restarts, so a restarted
+/// interface can still show the message and what it's waiting on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldSendStatus {
+    pub id: String,
+    pub chat_id: String,
+    /// The transcript message it becomes (a queue row names none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// As the transcript would show it, attachment trailer included.
+    pub prompt: String,
+    /// Epoch millis.
+    pub created_at: i64,
+    /// Why it stopped trying; it waits for the user's retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
 /// Live edge-connectivity posture (the `WatchConnectivity` stream): the truth
 /// the connection pill, composer honesty, and queued-send badges render.
 /// Derived engine-side from the registry room's reconnect state, the OS

@@ -74,6 +74,17 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // Sends waiting for their attachment bytes to reach the edge
+    // (held_sends.rs). Ordinal order is send order, per chat.
+    "CREATE TABLE held_sends (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        chat_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        failure TEXT
+    ) STRICT;
+    CREATE INDEX held_sends_chat ON held_sends(chat_id,ordinal);",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);

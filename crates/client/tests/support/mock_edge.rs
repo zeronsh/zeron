@@ -57,6 +57,10 @@ struct Shared {
     nudge_status_by_chat: Mutex<HashMap<String, u16>>,
     nudges: Mutex<Vec<(String, usize)>>,
     host_hints: Mutex<HashMap<String, String>>,
+    /// The attachment store: scripted answers, requests seen, objects.
+    store_statuses: Mutex<std::collections::VecDeque<u16>>,
+    store_puts: Mutex<Vec<String>>,
+    stored: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 enum Out {
@@ -94,6 +98,9 @@ impl MockEdge {
             nudge_status_by_chat: Mutex::new(HashMap::new()),
             nudges: Mutex::new(Vec::new()),
             host_hints: Mutex::new(HashMap::new()),
+            store_statuses: Mutex::new(std::collections::VecDeque::new()),
+            store_puts: Mutex::new(Vec::new()),
+            stored: Mutex::new(HashMap::new()),
         });
         let accept_shared = shared.clone();
         let task = tokio::spawn(async move {
@@ -132,6 +139,29 @@ impl MockEdge {
                                 .unwrap_or(0);
                             if request.len() < end + 4 + length {
                                 continue;
+                            }
+                            let first_line = headers.lines().next().unwrap_or_default().to_owned();
+                            if first_line.contains("/attachments/") {
+                                let upload = first_line
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .and_then(|p| p.rsplit('/').next())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let scripted = shared.store_statuses.lock().unwrap().pop_front();
+                                let status = scripted.unwrap_or(200);
+                                shared.store_puts.lock().unwrap().push(upload.clone());
+                                if status == 200 {
+                                    shared.stored.lock().unwrap().insert(
+                                        upload,
+                                        request[end + 4..end + 4 + length].to_vec(),
+                                    );
+                                }
+                                let response = format!(
+                                    "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                                );
+                                let _ = stream.write_all(response.as_bytes()).await;
+                                return;
                             }
                             if headers
                                 .lines()
@@ -218,6 +248,24 @@ impl MockEdge {
             shared,
             task,
         }
+    }
+
+    /// Answers for the next attachment-store PUTs (then 200).
+    pub fn script_store(&self, statuses: &[u16]) {
+        self.shared
+            .store_statuses
+            .lock()
+            .unwrap()
+            .extend(statuses.iter().copied());
+    }
+
+    /// What the attachment store holds, by upload id.
+    pub fn stored(&self, upload_id: &str) -> Option<Vec<u8>> {
+        self.shared.stored.lock().unwrap().get(upload_id).cloned()
+    }
+
+    pub fn store_puts(&self) -> usize {
+        self.shared.store_puts.lock().unwrap().len()
     }
 
     pub fn nudge_status(&self, status: u16) {
