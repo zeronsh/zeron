@@ -3154,9 +3154,9 @@ impl DocHost {
         };
         // A relaying host's socket closes when idle, and it still owes checkpoints.
         let relay_state = lock(&handle.relay).clone();
-        let relay_era = relay_state
-            .as_ref()
-            .is_some_and(|state| state.relaying() || reason.starts_with("relay-"));
+        // So does a build with the layer off, healing what one with it on left.
+        let relay_era = reason.starts_with("relay-")
+            || relay_state.as_ref().is_some_and(|state| state.relaying());
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
             None if relay_era => Default::default(),
