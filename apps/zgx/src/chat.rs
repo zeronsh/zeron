@@ -194,45 +194,19 @@ struct RowContext {
 
 impl zgx_script::Unfold for FoldedEntry {
     fn unfold(&self) -> Value {
-        let json = miniz_oxide::inflate::decompress_to_vec(&self.bytes).ok();
+        let json = lz4_flex::block::decompress_size_prepended(&self.bytes).ok();
         let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
         let RowContext { doc, device, model } = &*self.context;
         built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil)
     }
 }
 
-/// How hard a settled entry is compressed: fast, as a long chat's are made in
-/// slices between frames, and most of what it saves is had by the first level.
-const FOLD_LEVEL: i32 = 1;
-
-/// `bytes` compressed, the compressor's tables kept for the next (a compressor is
-/// about 300 KB, against the kilobytes of an entry: one a call was gigabytes
-/// allocated to open a few long chats).
-fn compressed(mut bytes: &[u8]) -> Box<[u8]> {
-    use miniz_oxide::deflate::core::{
-        CompressorOxide, TDEFLFlush, TDEFLStatus, compress, create_comp_flags_from_zip_params,
-    };
-    thread_local! {
-        static COMPRESSOR: RefCell<CompressorOxide> =
-            RefCell::new(CompressorOxide::new(create_comp_flags_from_zip_params(FOLD_LEVEL, 0, 0)));
-    }
-    COMPRESSOR.with_borrow_mut(|compressor| {
-        compressor.reset();
-        let mut out = vec![0; (bytes.len() / 2).max(64)];
-        let mut at = 0;
-        loop {
-            let (status, read, written) = compress(compressor, bytes, &mut out[at..], TDEFLFlush::Finish);
-            at += written;
-            bytes = &bytes[read..];
-            if matches!(status, TDEFLStatus::Done) {
-                break;
-            }
-            let room = out.len() * 2;
-            out.resize(room, 0);
-        }
-        out.truncate(at);
-        out.into_boxed_slice()
-    })
+/// `bytes` compressed: fast to make, as a long chat's are made each time it opens,
+/// and to open, as a scroll does. (LZ4 makes them in a quarter of the time deflate's
+/// fastest level does and opens them in a twelfth, for rows a quarter larger, measured
+/// on 16,271 rows of real chats; deflate spends most of its time on a table per row.)
+fn compressed(bytes: &[u8]) -> Box<[u8]> {
+    lz4_flex::block::compress_prepend_size(bytes).into_boxed_slice()
 }
 
 /// An entry's row, as a view keeps it: its subagents apart, as the transcript
@@ -4914,7 +4888,7 @@ mod tests {
         let long = "words that repeat ".repeat(4000);
         for input in [long.as_bytes(), b"short", b""] {
             let out = super::compressed(input);
-            assert_eq!(miniz_oxide::inflate::decompress_to_vec(&out).unwrap(), input);
+            assert_eq!(lz4_flex::block::decompress_size_prepended(&out).unwrap(), input);
         }
         assert!(super::compressed(long.as_bytes()).len() < long.len() / 10);
     }
