@@ -337,9 +337,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     });
     // A chat put to sleep until `until` (Unix seconds), or woken (none):
     // synced, and its host wakes it early when it asks for you.
-    let a = s.clone();
     host.async_action("sessions.sleep", move |args| {
-        let a = a.clone();
         let id = args.field("id").map(text).unwrap_or_default();
         let until = args.field("until").and_then(|v| v.as_f64()).map(|secs| (secs * 1000.0) as i64);
         let params = json!({ "op": "setChatSleep", "chatId": id, "until": until });
@@ -347,7 +345,13 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             if id.is_empty() {
                 return Err("missing".to_string());
             }
-            a.mutate(params).await.map_err(String::from)
+            // An engine from before Sleep doesn't know the request at all:
+            // "outdated", so the app can say what would let it.
+            match engine::get().call("Mutate", params).await {
+                Ok(_) => Ok(Value::Nil),
+                Err(error) if error.contains("unknown variant") => Err("outdated".to_string()),
+                Err(error) => Err(fail(&error).to_string()),
+            }
         }
     });
     let a = s.clone();

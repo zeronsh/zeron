@@ -1,12 +1,14 @@
 -- A date picker: a month of days to choose one from, and the time of day
--- under it, as wide as where it's put. The month's name heads it, the
--- previous and next month at its end; then the weekdays, and the month's
--- days in seven even columns (six rows always, so it never changes height;
--- the days of the months either side left blank). Today wears a dot of the
--- accent under its number; the chosen day the segmented control's selected
--- wash, flat. Days before `min` read disabled and can't be chosen, nor
--- times before it on its day. The time of day stands on a row of its own
--- under a hairline.
+-- under it, as wide as where it's put. One edge and one rhythm: the month's
+-- name, the first day's box, the hairline and the time's label start on
+-- its left edge; the next-month arrow, the last day's box and the time's
+-- field end on its right; its parts stand one gap apart (`space.3`), the
+-- weekdays a small one over their days. The days are boxes spread edge to
+-- edge, a hairline between weeks (a sixth week only for a month that
+-- reaches into it; other months' days left blank). Today wears a dot of
+-- the accent under its number; the chosen day the segmented control's
+-- selected wash, flat. Days before `min` read disabled and can't be
+-- chosen, nor times before it on its day.
 --
 --   DatePicker { value = state, min = os.time(), on_change = function(at) … end }
 --
@@ -45,8 +47,9 @@ export type Props = {
 }
 
 local DAY = 86400
--- A day's square: its wash, as tall as a row of the grid.
-local CELL = 36
+-- A day's box (its wash): as wide as a weekday's short name needs, as tall
+-- as a compact row.
+local CELL_W, CELL_H = 36, 32
 local WEEKS = 6
 -- The times of day offered, minutes apart.
 local STEP = 15
@@ -241,15 +244,7 @@ return ui.component(function(props: Props): Node
 		local function on(): boolean
 			return chosen:get() == day() and not outside()
 		end
-		-- (Each column as wide as the others; the day's square in its middle.)
 		return ui.div {
-			grow = 1,
-			basis = 0,
-			min_w = 0,
-			h = CELL,
-			items = "center",
-			justify = "center",
-			ui.div {
 				on_mount = function(el: Element)
 					cells[i] = el
 				end,
@@ -263,8 +258,9 @@ return ui.component(function(props: Props): Node
 				disabled = function(): boolean
 					return blocked() or outside()
 				end,
-				w = CELL,
-				h = CELL,
+				w = CELL_W,
+				h = CELL_H,
+				shrink = 0,
 				relative = true,
 				items = "center",
 				justify = "center",
@@ -331,7 +327,7 @@ return ui.component(function(props: Props): Node
 				-- Today: a dot of the accent under its number.
 				ui.div {
 					absolute = true,
-					bottom = 5,
+					bottom = 3,
 					w = 4,
 					h = 4,
 					rounded = "$radius.full",
@@ -341,7 +337,6 @@ return ui.component(function(props: Props): Node
 					end,
 					aria_hidden = true,
 				},
-			},
 		}
 	end
 
@@ -353,9 +348,8 @@ return ui.component(function(props: Props): Node
 				function(): string
 					return locale.s("time.weekday_short", { d = tostring((first_weekday:get() + i - 2) % 7 + 1) })
 				end,
-				grow = 1,
-				basis = 0,
-				min_w = 0,
+				w = CELL_W,
+				shrink = 0,
 				align = "center",
 				text_size = "$font.size.xs",
 				weight = "$font.weight.medium",
@@ -375,7 +369,7 @@ return ui.component(function(props: Props): Node
 		for d = 1, 7 do
 			table.insert(row, cell(week * 7 + d))
 		end
-		local r = ui.row { w_full = true, role = "row", table.unpack(row) }
+		local r = ui.row { w_full = true, justify = "between", role = "row", table.unpack(row) }
 		table.insert(rows, if week == WEEKS - 1 then ui.show(six, r) else r)
 	end
 
@@ -439,14 +433,10 @@ return ui.component(function(props: Props): Node
 	local before_min = function(): boolean
 		return first_of(month:get()) <= min_day:get()
 	end
-	-- (The arrows' ink on the grid's edge, as Settings' chevrons sit on a
-	-- control's: pulled out by their button's inset and the glyph's own
-	-- margin, measured.)
-	local nudge = ui.raw(-10, "an icon button's inset and its chevron's margin: the ink on the grid's edge")
-
 	return ui.column {
 		w_full = true,
 		gap = "$space.3",
+		-- The month, and its arrows at the right edge.
 		ui.row {
 			w_full = true,
 			items = "center",
@@ -463,74 +453,69 @@ return ui.component(function(props: Props): Node
 				color = "$text.primary",
 				live = "polite",
 			},
-			ui.row {
-				shrink = 0,
-				items = "center",
-				mr = nudge,
-				IconButton {
-					id = `{base}-previous`,
-					icon = "alt-arrow-left",
-					label = locale.t("ds.date_picker.previous_month"),
-					tooltip = false,
-					disabled = before_min,
-					on_click = function()
-						if not before_min() then
-							month:set(month:peek() - 1)
-						end
-					end,
-				},
-				IconButton {
-					id = `{base}-next`,
-					icon = "alt-arrow-right",
-					label = locale.t("ds.date_picker.next_month"),
-					tooltip = false,
-					on_click = function()
-						month:set(month:peek() + 1)
-					end,
-				},
+			IconButton {
+				id = `{base}-previous`,
+				icon = "alt-arrow-left",
+				size = "sm",
+				label = locale.t("ds.date_picker.previous_month"),
+				tooltip = false,
+				disabled = before_min,
+				on_click = function()
+					if not before_min() then
+						month:set(month:peek() - 1)
+					end
+				end,
+			},
+			IconButton {
+				id = `{base}-next`,
+				icon = "alt-arrow-right",
+				size = "sm",
+				label = locale.t("ds.date_picker.next_month"),
+				tooltip = false,
+				on_click = function()
+					month:set(month:peek() + 1)
+				end,
 			},
 		},
+		-- The weekdays over their days.
 		ui.column {
 			w_full = true,
 			gap = "$space.1",
-			ui.row { w_full = true, aria_hidden = true, table.unpack(heads) },
+			ui.row { w_full = true, justify = "between", aria_hidden = true, table.unpack(heads) },
 			ui.column {
 				w_full = true,
+				gap = "$zeron.space.hair",
 				role = "grid",
 				label = props.label or locale.t("ds.date_picker.label"),
 				focus_group = "both",
 				table.unpack(rows),
 			},
 		},
+		if with_time then ui.div { h = 1, w_full = true, shrink = 0, bg = "$border.subtle", aria_hidden = true } else nil,
 		if with_time
-			then ui.column {
+			then ui.row {
 				w_full = true,
+				items = "center",
 				gap = "$space.3",
-				ui.div { h = 1, w_full = true, shrink = 0, bg = "$border.subtle", aria_hidden = true },
-				ui.row {
-					w_full = true,
-					items = "center",
-					gap = "$space.3",
-					ui.text {
-						locale.t("ds.date_picker.time"),
-						grow = 1,
-						min_w = 0,
-						text_size = "$font.size.md",
-						color = "$text.secondary",
-					},
-					ui.div {
-						id = `{base}-time`,
-						w = 132,
-						shrink = 0,
-						Select {
-							value = time_of_day :: any,
-							options = function(): { any }
-								return times:get()
-							end,
-							name = locale.t("ds.date_picker.time"),
-							size = "sm",
-							w_full = true,
-						},
+				ui.text {
+					locale.t("ds.date_picker.time"),
+					grow = 1,
+					min_w = 0,
+					text_size = "$font.size.md",
+					color = "$text.secondary",
+				},
+				ui.div {
+					id = `{base}-time`,
+					w = 132,
+					shrink = 0,
+					Select {
+						value = time_of_day :: any,
+						options = function(): { any }
+							return times:get()
+						end,
+						name = locale.t("ds.date_picker.time"),
+						size = "sm",
+						w_full = true,
 					},
 				},
 			}

@@ -2547,10 +2547,13 @@
         "next_week": "Next week",
         "custom": "Custom…",
         "custom_title": "Sleep until",
-        "wakes": "Wakes {day}, {date} at {time}"
+        "failed": "Couldn't put this chat to sleep",
+        "needs_update": "Zeron on this chat's device needs an update for Sleep.",
+        "until_when": "{day}, {date} at {time}"
       },
       "stop_waiting": "Stop waiting",
-      "stop_waiting_failed": "Couldn't stop waiting"
+      "stop_waiting_failed": "Couldn't stop waiting",
+      "wake_failed": "Couldn't wake this chat"
     }
   },
   "onboarding": {

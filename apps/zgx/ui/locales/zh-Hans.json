@@ -2547,10 +2547,13 @@
         "next_week": "下周",
         "custom": "自定义…",
         "custom_title": "休眠至",
-        "wakes": "{date}（{day}）{time} 唤醒"
+        "failed": "无法让此会话休眠",
+        "needs_update": "此会话所在设备上的 Zeron 需要更新才能使用休眠。",
+        "until_when": "{date}（{day}）{time}"
       },
       "stop_waiting": "停止等待",
-      "stop_waiting_failed": "无法停止等待"
+      "stop_waiting_failed": "无法停止等待",
+      "wake_failed": "无法唤醒此会话"
     }
   },
   "onboarding": {

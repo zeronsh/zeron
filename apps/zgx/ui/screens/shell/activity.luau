@@ -26,6 +26,7 @@
 
 local sessions = require("@account/sessions")
 local locale = require("@ds/locale")
+local toast = require("@ds/toast")
 local route = require("@app/screens/shell/route")
 
 local M = {}
@@ -65,12 +66,26 @@ function M.rank(c: sessions.Chat, shelf: string?): number
 	return math.max(c.updated or 0, c.woke or 0)
 end
 
+-- A sleep or a wake its host refused says so: never a click that does
+-- nothing. (An engine from before Sleep doesn't know the request at all:
+-- that one says what would let it.)
+local function said(waking: boolean): (any) -> ()
+	return function(err: any)
+		local outdated = err == "outdated"
+		toast.show {
+			title = locale.s(if waking then "shell.activity.wake_failed" else "shell.activity.sleep.failed"),
+			body = if outdated then locale.s("shell.activity.sleep.needs_update") else nil,
+			tone = "danger",
+		}
+	end
+end
+
 function M.sleep(id: string, until_at: number)
-	sessions.sleep(id, until_at)
+	sessions.sleep(id, until_at):after(function() end, said(false))
 end
 
 function M.wake(id: string)
-	sessions.sleep(id, nil)
+	sessions.sleep(id, nil):after(function() end, said(true))
 end
 
 -- How soon `until_at` is, as a row's corner says it: "45m", "3h", "2d".

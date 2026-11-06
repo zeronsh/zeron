@@ -1465,6 +1465,18 @@ local function sleep_dialog(): Node
 	return ds.Dialog {
 		open = sleep_custom_open,
 		title = ui.t("shell.activity.sleep.custom_title") :: any,
+		-- Under it, the moment chosen, in words: what Sleep will do.
+		body = function(): string
+			local at = sleep_custom_at:get()
+			if not at then
+				return ""
+			end
+			return locale.s("shell.activity.sleep.until_when", {
+				day = locale.weekday(at),
+				date = locale.month_day(at),
+				time = locale.clock(at),
+			})
+		end,
 		size = "sm",
 		confirm = {
 			label = ui.t("shell.activity.sleep.title") :: any,
@@ -1478,38 +1490,15 @@ local function sleep_dialog(): Node
 				end
 			end,
 		},
-		-- (Built as it opens: its month of days is nothing to keep.) Under
-		-- it, when that is, in words.
+		-- (Built as it opens: its month of days is nothing to keep.)
 		build = function(): Node
-			return ui.column {
-				w_full = true,
-				gap = "$space.4",
-				ds.DatePicker {
-					id = "sleep-custom",
-					value = sleep_custom_at,
-					min = function(): number
-						return os.time() + 60
-					end,
-					label = ui.t("shell.activity.sleep.custom_title") :: any,
-				},
-				ui.text {
-					function(): string
-						local at = sleep_custom_at:get()
-						if not at then
-							return ""
-						end
-						return locale.s("shell.activity.sleep.wakes", {
-							day = locale.weekday(at),
-							date = locale.month_day(at),
-							time = locale.clock(at),
-						})
-					end,
-					id = "sleep-custom-wakes",
-					w_full = true,
-					wrap = true,
-					text_size = "$font.size.md",
-					color = "$text.secondary",
-				},
+			return ds.DatePicker {
+				id = "sleep-custom",
+				value = sleep_custom_at,
+				min = function(): number
+					return os.time() + 60
+				end,
+				label = ui.t("shell.activity.sleep.custom_title") :: any,
 			}
 		end,
 	}
