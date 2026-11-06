@@ -645,6 +645,11 @@ pub(crate) struct RoomStatus {
 
 impl RoomRelay {
     fn apply_route(&self, route: &RelayRoute) {
+        // This runs every second: an unchanged route mustn't wake the relay task.
+        if lock(&self.applied).as_ref() == Some(route) {
+            return;
+        }
+        *lock(&self.applied) = Some(route.clone());
         let relayed = route.generation >= RELAY_ROOM_GEN;
         self.relayed.store(relayed, Ordering::Release);
         *lock(&self.host) = route.host.clone();
@@ -688,6 +693,7 @@ struct RoomRelay {
     link_wanted: watch::Sender<bool>,
     /// Since when a chat on screen has been waiting with its checkpoint deferred.
     deferred_since: Mutex<Option<std::time::Instant>>,
+    applied: Mutex<Option<RelayRoute>>,
 }
 
 #[derive(Default)]
@@ -774,6 +780,7 @@ impl Room {
                 last_activity_ms: sink.last_activity_ms.clone(),
                 link_wanted,
                 deferred_since: Mutex::new(None),
+                applied: Mutex::new(None),
             }
         });
         if let Some(relay) = &relay {
@@ -1018,5 +1025,171 @@ impl Drop for Room {
             crate::runtime::shared().spawn(client.shutdown());
         }
         self.persister.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sink(store: Arc<DocsStore>, doc: &Arc<SessionDoc>, chat: &str) -> ViewerSink {
+        ViewerSink {
+            doc: Arc::downgrade(doc),
+            store: store.clone(),
+            chat_id: chat.into(),
+            persister: Persister::new(doc, store, chat, 0),
+            on_applied: Arc::new(|| {}),
+            relay: true,
+            defer_checkpoint: Arc::new(AtomicBool::new(false)),
+            last_activity_ms: Arc::new(AtomicI64::new(0)),
+        }
+    }
+
+    fn update(text: &str) -> (loro::LoroDoc, Vec<u8>) {
+        let doc = loro::LoroDoc::new();
+        doc.get_text("t").insert(0, text).unwrap();
+        doc.commit();
+        let bytes = doc.export(loro::ExportMode::all_updates()).unwrap();
+        (doc, bytes)
+    }
+
+    #[test]
+    fn a_repeat_delivery_writes_nothing_and_a_save_retires_only_what_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store.clone(), &doc, "chat");
+        let (_, first) = update("first");
+        assert_eq!(sink.relay_import(&first, false), RelayImport::Applied);
+        assert_eq!(sink.relay_import(&first, false), RelayImport::Applied, "idempotent");
+        assert_eq!(store.pending_chat_inbox("chat").unwrap().0.len(), 1, "one row, however often it comes");
+        assert!(sink.relay_durable());
+
+        sink.persister.flush();
+        assert!(store.pending_chat_inbox("chat").unwrap().0.is_empty(), "the save holds it");
+
+        // Saved already, and a later frame arrives: its row outlives the old save.
+        let (_, second) = update("second");
+        assert_eq!(sink.relay_import(&second, false), RelayImport::Applied);
+        assert_eq!(store.pending_chat_inbox("chat").unwrap().0.len(), 1);
+        let local = load_local(&store, "chat");
+        assert!(local.had_content);
+        assert!(local.journaled > 0, "the load knows what it replayed");
+        let text = local.doc.doc().get_text("t").to_string();
+        assert!(text.contains("first") && text.contains("second"), "{text}");
+    }
+
+    #[test]
+    fn a_frame_that_parks_keeps_what_it_could_apply_and_says_it_parked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store.clone(), &doc, "chat");
+        let (remote, first) = update("first");
+        let at = remote.oplog_vv();
+        remote.get_text("t").insert(0, "second ").unwrap();
+        remote.commit();
+        let later = remote.export(loro::ExportMode::updates(&at)).unwrap();
+        // Its history hasn't come: nothing moved, so nothing's kept, and it says so.
+        assert_eq!(sink.relay_import(&later, false), RelayImport::Parked);
+        assert!(store.pending_chat_inbox("chat").unwrap().0.is_empty());
+        // It lands with its history, and both are kept.
+        assert_eq!(sink.relay_import(&first, false), RelayImport::Applied);
+        assert_eq!(store.pending_chat_inbox("chat").unwrap().0.len(), 1);
+        assert_eq!(doc.doc().get_text("t").to_string(), "second first");
+    }
+
+    #[test]
+    fn a_save_between_journal_rows_never_retires_a_row_it_does_not_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store.clone(), &doc, "chat");
+        let (_, first) = update("first");
+        sink.relay_import(&first, false);
+        // A row journaled after the save sampled what it covers survives it: this is
+        // that order, spelled out. It's noted only after the flush below.
+        let (_, second) = update("second");
+        let row = store.journal_chat_inbox("chat", &second).unwrap();
+        sink.persister.flush();
+        let kept = store.pending_chat_inbox("chat").unwrap();
+        assert_eq!(kept.0.len(), 1, "the later row stays");
+        assert_eq!(kept.1, row);
+        // And the next load reads it back.
+        let text = load_local(&store, "chat").doc.doc().get_text("t").to_string();
+        assert!(text.contains("first") && text.contains("second"), "{text}");
+    }
+
+    #[test]
+    fn a_doc_with_nothing_in_it_never_defers_its_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store, &doc, "chat");
+        sink.defer_checkpoint.store(true, Ordering::Release);
+        assert!(!sink.relay_defer_checkpoint(), "with nothing to show, it reads");
+        let (_, first) = update("first");
+        sink.relay_import(&first, false);
+        assert!(sink.relay_defer_checkpoint());
+        sink.defer_checkpoint.store(false, Ordering::Release);
+        assert!(!sink.relay_defer_checkpoint());
+    }
+
+    #[test]
+    fn a_route_turns_every_relay_behaviour_on_or_off_together() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = Arc::new(sink(store, &doc, "chat"));
+        let (link_wanted, wanted) = watch::channel(false);
+        let handle = RelayHandle::spawn("ios", sink.clone(), RelayPolicy::default());
+        let relay = RoomRelay {
+            handle: handle.clone(),
+            host: Arc::new(Mutex::new(String::new())),
+            relayed: Arc::new(AtomicBool::new(false)),
+            defer_checkpoint: sink.defer_checkpoint.clone(),
+            last_activity_ms: sink.last_activity_ms.clone(),
+            link_wanted,
+            deferred_since: Mutex::new(None),
+            applied: Mutex::new(None),
+        };
+        let everything = LinkWanted {
+            relayed: true,
+            on_screen: true,
+            foreground: true,
+            network: true,
+            host_online: true,
+            active: true,
+        };
+        let route = RelayRoute {
+            generation: 3,
+            host: "mac".into(),
+            host_reads_queue: true,
+            on_screen: true,
+            host_online: true,
+            link: everything,
+        };
+        relay.apply_route(&route);
+        assert!(relay.relayed.load(Ordering::Acquire));
+        assert_eq!(*lock(&relay.host), "mac");
+        assert!(*wanted.borrow());
+        assert!(relay.defer_checkpoint.load(Ordering::Acquire), "the host can answer");
+
+        // On screen with the host gone, only the room can help.
+        relay.apply_route(&RelayRoute { host_online: false, link: LinkWanted { host_online: false, ..everything }, ..route.clone() });
+        assert!(!relay.defer_checkpoint.load(Ordering::Acquire));
+        assert!(!*wanted.borrow(), "no link to a host that isn't there");
+
+        // Off screen, nobody's waiting for it.
+        relay.apply_route(&RelayRoute { host_online: false, on_screen: false, ..route.clone() });
+        assert!(relay.defer_checkpoint.load(Ordering::Acquire));
+
+        // Stored: nothing relay-shaped is left.
+        relay.apply_route(&RelayRoute { generation: 2, link: LinkWanted { relayed: false, ..everything }, ..route });
+        assert!(!relay.relayed.load(Ordering::Acquire));
+        assert!(!relay.defer_checkpoint.load(Ordering::Acquire));
+        assert!(!*wanted.borrow());
     }
 }

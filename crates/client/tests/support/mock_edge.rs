@@ -213,11 +213,13 @@ impl MockEdge {
                                     "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
                                 );
                                 let _ = stream.write_all(response.as_bytes()).await;
-                            } else if let Some(reply) = http_push(
-                                &headers,
-                                &request[end + 4..end + 4 + length],
-                                &shared,
-                            ) {
+                            } else if *shared.http.lock().unwrap()
+                                && let Some(reply) = http_push(
+                                    &headers,
+                                    &request[end + 4..end + 4 + length],
+                                    &shared,
+                                )
+                            {
                                 let _ = stream.write_all(&reply).await;
                             }
                             return;

@@ -34,6 +34,8 @@ const TICK: Duration = Duration::from_secs(1);
 /// is evicted. On-screen sessions, streaming ones and ones with unadopted
 /// sends are never evicted.
 pub const WARM_SESSION_CAP: usize = 6;
+/// Away from the foreground this long, a chat on screen redials on return.
+const SUSPENSION_CUTS_SOCKETS: std::time::Duration = std::time::Duration::from_secs(8);
 /// Sessions `preload_sessions` warms (front page order).
 pub const PRELOAD_CAP: usize = 4;
 
@@ -1707,6 +1709,17 @@ impl Client {
             live.kick();
             live.probe_health();
             self.kick_rooms();
+            // Suspended this long, the OS has likely cut its sockets without saying.
+            // Whoever's looking at a chat shouldn't wait out a probe to find that out.
+            if away >= SUSPENSION_CUTS_SOCKETS {
+                for core in self.inner.cores() {
+                    if core.view_attached()
+                        && let Some(room) = core.room()
+                    {
+                        room.redial();
+                    }
+                }
+            }
             live.relay.clear_unsupported();
             self.inner.reconcile_change_request_watches();
         }

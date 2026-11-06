@@ -159,6 +159,13 @@ final class CoreSessionSource: SessionSource {
             return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate)
         }
         next.error = c.queueError
+        next.emptyNotice = switch c.transcriptLoad {
+        case .ready: nil
+        case .syncing: .syncing
+        case .reconnecting: .reconnecting
+        case .offline: .offline
+        case .hostAway: .hostAway
+        }
         if next != chrome {
             chrome = next
             onChange?()

@@ -879,6 +879,11 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     let mut next = Vec::with_capacity(order.len());
     for message_id in order {
         let attempt = &attempts[&message_id];
+        // No path, or no host: this send is saved and goes when one's back, so that
+        // doesn't count against it. "Not delivered" is for a path that's up and failing.
+        if degraded && attempt.live {
+            st.grace_started.insert(message_id.clone(), now);
+        }
         let started = st
             .grace_started
             .get(&message_id)
