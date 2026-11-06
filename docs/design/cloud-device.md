@@ -331,8 +331,11 @@ a charge. The alternative, a saved snapshot, is $0.056 a day past the included c
 days, 10 included per $20 of plan), and restoring one means a new sandbox and re-enrollment.
 
 **When it's gone anyway** (no credits, a user who didn't act, or the provider's refusal
-`snapshot_data_expired`), the session reads `data_expired`. A send or a wake starts nothing: an
-empty machine must be asked for. `POST …/retry {machine?}` starts a fresh one: the same session
+`snapshot_data_expired`), the session reads `data_expired`, for a client that says it can read that
+(`x-zeron-cloud-states: data_expired`). A shipped engine's `CloudState` is a closed enum, and one
+state it doesn't know would fail its whole session list, so a client that doesn't say gets `error`
+with `failedAction: "wake"` and `dataExpired: true` on every session route. A send or a wake starts
+nothing: an empty machine must be asked for. `POST …/retry {machine?}` starts a fresh one: the same session
 device, chat, repository and base branch, a new sandbox and a newly enrolled key. The clone checks
 out the session's branch from `origin` if it was pushed, so only unpushed work is lost. The
 transcript lives in the chat's room, regardless.
@@ -662,6 +665,7 @@ the bearer's `org_id`.
 | `POST /cloud/{orgId}/sessions/{chatId}/wake` | user | `{machine?, wake?}` → `CloudSession`. `wake: false` only records the size for its next wake. `409`: `machine_too_small` {`machine`, `neededGiB`, `capacityGiB`}, `machine_awake`, `data_expired` |
 | `POST /cloud/{orgId}/sessions/{chatId}/sleep` | user | → `CloudSession` |
 | `POST /cloud/{orgId}/sessions/{chatId}/retry` | user | `{machine?}` → `CloudSession`: a failed lifecycle again; a fresh machine once `data_expired` |
+| any session route | | `x-zeron-cloud-states: data_expired` lets a reply say `state: "data_expired"`; without it, that session reads `state: "error", failedAction: "wake", dataExpired: true` |
 | `DELETE /cloud/{orgId}/sessions/{chatId}` | user | → `CloudSession` (`deleting` → removed) |
 | `GET /vault/{orgId}/github/repos?q=` | user | → `{repos: GithubRepo[]}` (the vault calls GitHub) |
 | `POST /runner/enroll` | none | `{orgId, userId, deviceId, code, publicKey}` → `{ok: true}` |

@@ -23,6 +23,7 @@ use zeron_proto::{
     GithubConnectProgress, GithubDeviceFlow, GithubRepo, HarnessId, VaultAccount,
     VaultAccountProfile, VaultProvider, VaultStatus,
 };
+use zeron_proto::{CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD};
 
 #[derive(Deserialize)]
 struct AccountList {
@@ -78,6 +79,11 @@ impl SessionAction {
         }
     }
 }
+
+/// Starts the error of a wake the edge refused as too small for the machine's
+/// disk, so a client can tell it from any other failure across the RPC's
+/// plain-text errors. The edge's own sentence follows it.
+pub const DISK_TOO_SMALL: &str = "disk_too_small";
 
 /// Shown for anything forwarded to the logical Cloud device, which has no
 /// engine: work happens on a session's own device.
@@ -278,6 +284,7 @@ impl CloudClient {
 
     /// `PUT /cloud/{orgId}/machine`: the size new sessions start on.
     pub async fn set_machine(&self, machine: &str) -> Result<CloudStatus, EngineError> {
+        require_id(machine, "machine")?;
         self.target()?
             .call::<CloudStatus>(
                 reqwest::Method::PUT,
@@ -300,6 +307,7 @@ impl CloudClient {
         require_id(chat_id, "chatId")?;
         let mut body = serde_json::Map::new();
         if let Some(machine) = machine {
+            require_id(machine, "machine")?;
             body.insert("machine".into(), machine.into());
         }
         if let Some(wake) = wake {
@@ -326,7 +334,10 @@ impl CloudClient {
     ) -> Result<CloudSession, EngineError> {
         require_id(chat_id, "chatId")?;
         let body = match machine {
-            Some(machine) => serde_json::json!({ "machine": machine }),
+            Some(machine) => {
+                require_id(machine, "machine")?;
+                serde_json::json!({ "machine": machine })
+            }
             None => serde_json::json!({}),
         };
         self.target()?
@@ -868,7 +879,7 @@ struct MachineParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WakeParams {
+struct SizedChatParams {
     chat_id: String,
     #[serde(default)]
     machine: Option<String>,
@@ -982,7 +993,7 @@ pub(crate) async fn dispatch(
             RpcReply::value(&cloud.set_machine(&p.machine).await.map_err(failed)?)
         }
         methods::CLOUD_SESSION_WAKE => {
-            let p: WakeParams = params(raw)?;
+            let p: SizedChatParams = params(raw)?;
             RpcReply::value(
                 &cloud
                     .wake_session(&p.chat_id, p.machine.as_deref(), p.wake)
@@ -991,7 +1002,7 @@ pub(crate) async fn dispatch(
             )
         }
         methods::CLOUD_SESSION_RETRY => {
-            let p: WakeParams = params(raw)?;
+            let p: SizedChatParams = params(raw)?;
             RpcReply::value(
                 &cloud
                     .retry_session(&p.chat_id, p.machine.as_deref())
@@ -1220,7 +1231,11 @@ impl Target {
         let is_read = method == reqwest::Method::GET;
         let is_delete = method == reqwest::Method::DELETE;
         let token = self.token.token().await.map_err(token_error)?;
-        let mut request = self.http.request(method, url).bearer_auth(token);
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(token)
+            .header(CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1313,6 +1328,11 @@ fn edge_error(status: u16, body: &[u8], what: &str) -> EngineError {
         (_, status) => format!("{what} failed ({status})."),
     });
     tracing::warn!(status, code = code.as_deref().unwrap_or(""), %what, "cloud: edge refused");
+    // The one refusal a client acts on rather than shows: kept in the text, as
+    // an RPC's error is only text.
+    if code.as_deref().is_some_and(|c| c.contains("too_small")) {
+        return EngineError::Other(format!("{DISK_TOO_SMALL}: {text}"));
+    }
     EngineError::Other(text)
 }
 
@@ -1328,6 +1348,7 @@ mod tests {
         method: String,
         target: String,
         authorization: Option<String>,
+        cloud_states: Option<String>,
         body: serde_json::Value,
     }
 
@@ -1370,6 +1391,7 @@ mod tests {
                         let target = request_line.next().unwrap_or("").to_string();
                         let mut length = 0usize;
                         let mut authorization = None;
+                        let mut cloud_states = None;
                         for line in lines {
                             if let Some((name, value)) = line.split_once(':') {
                                 let value = value.trim();
@@ -1377,6 +1399,8 @@ mod tests {
                                     length = value.parse().unwrap_or(0);
                                 } else if name.eq_ignore_ascii_case("authorization") {
                                     authorization = Some(value.to_string());
+                                } else if name.eq_ignore_ascii_case(CLOUD_STATES_HEADER) {
+                                    cloud_states = Some(value.to_string());
                                 }
                             }
                         }
@@ -1396,6 +1420,7 @@ mod tests {
                             method,
                             target,
                             authorization,
+                            cloud_states,
                             body,
                         });
                         let reply = reply.to_string();
@@ -1609,6 +1634,15 @@ mod tests {
         assert_eq!(
             busy.to_string(),
             "All 5 of your Cloud sessions that may run at once are busy."
+        );
+        // Every call says which states this build can parse: without it the
+        // edge answers as it must to an engine that can't read them.
+        assert!(
+            edge.requests()
+                .iter()
+                .all(|r| r.cloud_states.as_deref() == Some(CLOUD_STATES_UNDERSTOOD)),
+            "{:?}",
+            edge.requests()
         );
         // The size picked rides the wake, and only then.
         let _ = client.wake_session("chat-1", Some("xlarge"), None).await;
@@ -1829,6 +1863,41 @@ mod tests {
             start.body,
             serde_json::json!({"authorizedDevices": ["cloud-1"]})
         );
+    }
+
+    #[tokio::test]
+    async fn a_size_too_small_is_told_apart_across_the_rpcs_plain_text_errors() {
+        fn edge(_: &str, target: &str, _: &serde_json::Value) -> (u16, serde_json::Value) {
+            if target.ends_with("/data-expired/wake") {
+                return (
+                    409,
+                    serde_json::json!({"error": "data_expired", "message": "Its files are gone."}),
+                );
+            }
+            (
+                409,
+                serde_json::json!({
+                    "error": "machine_too_small",
+                    "message": "This machine needs 118.3 GiB of disk; a large machine holds 111.8 GiB.",
+                    "machine": "large", "neededGiB": 118.3, "capacityGiB": 111.8
+                }),
+            )
+        }
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_1");
+        let refused = client
+            .wake_session("chat-1", Some("large"), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.starts_with("disk_too_small: "), "{refused}");
+        assert!(refused.contains("118.3 GiB"), "{refused}");
+        // Any other refusal stays the edge's own sentence.
+        let expired = client
+            .wake_session("data-expired", None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(expired.to_string(), "Its files are gone.");
     }
 
     #[tokio::test]

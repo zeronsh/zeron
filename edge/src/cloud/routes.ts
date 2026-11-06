@@ -72,6 +72,34 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 const unavailable = () => jsonError(503, "unavailable", "Cloud is not available on this server.");
 
+/**
+ * What a client names here it can parse. An engine's `CloudState` is a closed
+ * enum, so one state it has never heard of fails its whole session list: shipped
+ * engines must never receive `data_expired`. A client that sends nothing gets the
+ * nearest state it knows, plus a field for anything newer reading it.
+ */
+const CLOUD_STATES_HEADER = "x-zeron-cloud-states";
+
+const understandsDataExpired = (request: Request): boolean =>
+  (request.headers.get(CLOUD_STATES_HEADER) ?? "")
+    .split(",")
+    .some((state) => state.trim() === "data_expired");
+
+type SessionLike = { readonly state?: unknown };
+
+/** A session as a client that doesn't name `data_expired` can read it: `error`,
+ * with the message saying what happened. Its Retry reaches a typed refusal. */
+const sessionForOlderClient = <T extends SessionLike>(session: T): T | (Omit<T, "state"> & { state: "error" }) =>
+  session.state === "data_expired" ? { ...session, state: "error", failedAction: "wake", dataExpired: true } : session;
+
+/** One session, or `{sessions}`, as this client can read it. */
+const forClient = <T>(request: Request, value: T): T => {
+  if (understandsDataExpired(request)) return value;
+  const body = value as { sessions?: SessionLike[] } & SessionLike;
+  if (Array.isArray(body?.sessions)) return { ...body, sessions: body.sessions.map(sessionForOlderClient) } as T;
+  return sessionForOlderClient(body) as T;
+};
+
 const reply = <T>(result: CloudResult<T>): Response =>
   result.ok ? json(result.value) : json({ ...result.details, error: result.error, message: result.message }, result.status);
 
@@ -380,7 +408,12 @@ export const handleCloudRoute = async (
   }
 
   if (rest[0] === "sessions") {
-    if (rest.length === 1 && request.method === "GET") return rpc(async () => stub.listSessions(caller));
+    const sessionRpc = <T>(run: () => Promise<CloudResult<T>>) =>
+      rpc(async () => {
+        const result = await run();
+        return result.ok ? { ok: true as const, value: forClient(request, result.value) } : result;
+      });
+    if (rest.length === 1 && request.method === "GET") return sessionRpc(async () => stub.listSessions(caller));
     if (rest.length === 1 && request.method === "POST") {
       if (!cloudAvailable(env)) return unavailable();
       if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
@@ -398,7 +431,7 @@ export const handleCloudRoute = async (
         if (config !== undefined && !isChildConfig(config)) {
           return jsonError(400, "bad_request", "Expected config {harness: codex | claude-code, …}.");
         }
-        return rpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
+        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
       }
       const { chatId, spaceId, repo, branch } = body;
       if (typeof chatId !== "string" || !ID_RE.test(chatId)) return jsonError(400, "bad_request", "Bad chatId.");
@@ -409,25 +442,25 @@ export const handleCloudRoute = async (
       if (branch !== undefined && (typeof branch !== "string" || branch.length > 255)) {
         return jsonError(400, "bad_request", "Bad branch.");
       }
-      return rpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch));
+      return sessionRpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch));
     }
     const chatId = rest[1];
     if (!chatId || !ID_RE.test(chatId)) return jsonError(404, "not_found", "Not found.");
-    if (rest.length === 2 && request.method === "DELETE") return rpc(() => stub.deleteSession(caller, chatId));
+    if (rest.length === 2 && request.method === "DELETE") return sessionRpc(() => stub.deleteSession(caller, chatId));
     if (rest.length === 3 && request.method === "POST") {
       if (rest[2] === "wake") {
         const body = await readJsonBody(request, MAX_RUNNER_BODY);
         const picked = machineOfBody(body);
         if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
         const options = { ...picked, ...(isObject(body) && body.wake === false ? { wake: false } : {}) };
-        return rpc(() => stub.wakeSession(caller, chatId, options));
+        return sessionRpc(() => stub.wakeSession(caller, chatId, options));
       }
-      if (rest[2] === "sleep") return rpc(() => stub.sleepSession(caller, chatId));
+      if (rest[2] === "sleep") return sessionRpc(() => stub.sleepSession(caller, chatId));
       if (rest[2] === "retry") {
         if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
         const picked = machineOfBody(await readJsonBody(request, MAX_RUNNER_BODY));
         if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
-        return rpc(() => stub.retrySession(caller, chatId, edgeUrl, picked.machine));
+        return sessionRpc(() => stub.retrySession(caller, chatId, edgeUrl, picked.machine));
       }
     }
   }

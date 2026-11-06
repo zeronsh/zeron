@@ -541,6 +541,49 @@ describe("a machine whose data is gone", () => {
     expect(await refused.json()).toMatchObject({ error: "data_expired" });
   });
 
+  it("never reaches an already-shipped engine as a state it can't parse", async () => {
+    // Every state a shipped engine's closed `CloudState` knows (older than this
+    // edge; one it doesn't know fails its whole session list).
+    const SHIPPED = ["off", "provisioning", "starting", "ready", "sleeping", "stopping", "deleting", "error"];
+    const u = newUser();
+    const s = await expired(u);
+    const bearer = userBearer(u);
+
+    const listed = (await (await call("GET", "/cloud/org1/sessions", bearer)).json()) as { sessions: (SessionView & { dataExpired?: boolean })[] };
+    const old = listed.sessions.find((x) => x.chatId === s.chatId)!;
+    expect(SHIPPED).toContain(old.state);
+    expect(old).toMatchObject({ state: "error", failedAction: "wake", dataExpired: true });
+    expect(old.error).toContain("files were deleted");
+
+    // A session comes back from every other route too.
+    const again = await createSession(u, s.chatId, s.spaceId);
+    expect(SHIPPED).toContain(((await again.json()) as SessionView).state);
+    const slept = await call("POST", `/cloud/org1/sessions/${s.chatId}/sleep`, bearer, {});
+    expect(SHIPPED).toContain(((await slept.json()) as SessionView).state);
+
+    // Its Retry is a wake, which says plainly why not.
+    const retried = await call("POST", `/cloud/org1/sessions/${s.chatId}/wake`, bearer, {});
+    expect(retried.status).toBe(409);
+    expect(await retried.json()).toMatchObject({ error: "data_expired" });
+
+    // A current client asks for the state itself, and gets no compatibility field.
+    const current = (await session(u, s.chatId)) as unknown as { state: string; dataExpired?: boolean; failedAction?: string };
+    expect(current.state).toBe("data_expired");
+    expect(current.dataExpired).toBeUndefined();
+    expect(current.failedAction).toBeUndefined();
+    const named = await call("POST", `/cloud/org1/sessions/${s.chatId}/sleep`, bearer, {}, { "x-zeron-cloud-states": "something_later, data_expired" });
+    expect(((await named.json()) as SessionView).state).toBe("data_expired");
+  });
+
+  it("leaves every other session as it is for an older client", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    const listed = (await (await call("GET", "/cloud/org1/sessions", userBearer(u))).json()) as { sessions: SessionView[] };
+    const old = listed.sessions.find((x) => x.chatId === s.chatId) as SessionView & { dataExpired?: boolean };
+    expect(old.state).toBe("ready");
+    expect(old.dataExpired).toBeUndefined();
+  });
+
   it("types Boat's refusal of a resume the same way", async () => {
     const u = newUser();
     const s = await readySession(u);
