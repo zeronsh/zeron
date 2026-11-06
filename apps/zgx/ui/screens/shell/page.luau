@@ -205,9 +205,7 @@ return function(props: Props): Node
 		top = ui.raw(-1, "over the card's 1-point edge"),
 		bottom = ui.raw(-1, "over the card's 1-point edge"),
 		pointer_events = "none",
-		-- (Frosted, no fill of its own: the page on the window's frost, as
-		-- Zeron's transcript is; its edge says where it is.)
-		bg = ds.material.pick("$zeron.inset.tint", "$zeron.inset.bg"),
+		bg = "$zeron.inset.bg",
 		border = 1,
 		border_color = "$zeron.inset.edge",
 		rounded = "$zeron.inset.radius",

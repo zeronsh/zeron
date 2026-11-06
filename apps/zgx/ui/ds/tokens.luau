@@ -45,10 +45,6 @@ function M.setup()
 				gap = 4,
 				radius = "{radius.xl}",
 				bg = "{surface.raised}",
-				-- Frosted, the page's card lays no fill of its own: its
-				-- transcript sits on the window's frost, as Zeron's does
-				-- (shell.rs), its edge alone saying where it is.
-				tint = "#00000000",
 				edge = "{border.subtle}",
 				edge_hover = "{border.strong}",
 				-- Split chats (screens/shell/split): what lies over a pane
