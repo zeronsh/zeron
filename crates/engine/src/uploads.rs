@@ -72,6 +72,34 @@ pub struct AttachmentTransfer {
     pub file_name: String,
 }
 
+/// Rewrite a landed ref to its absolute path everywhere a prompt names it. An
+/// app capture names its image in an XML attribute, where both the ref and the
+/// path are escaped; everywhere else they're plain text.
+pub fn rewrite_pending_ref(prompt: &str, reference: &str, absolute: &str) -> String {
+    let attribute = |path: &str| format!("image=\"{}\"", xml_attribute_escape(path));
+    prompt
+        .replace(&attribute(reference), &attribute(absolute))
+        .replace(reference, absolute)
+}
+
+/// The escaping the composer gives an app capture's attributes.
+fn xml_attribute_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '\r' => escaped.push_str("&#13;"),
+            '\n' => escaped.push_str("&#10;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 /// Pending refs listed on a text's attachment-ref lines (`- pending://…`).
 /// Line-wise so file names with spaces survive intact.
 pub fn pending_refs_in(text: &str) -> Vec<String> {
@@ -817,6 +845,22 @@ mod tests {
             .unwrap();
         let committed = uploads.commit("abcd1234-rest", "my photo (1).png").unwrap();
         assert_eq!(uploads.resolve_pending(&r), Some(committed));
+    }
+
+    #[test]
+    fn a_capture_attribute_and_the_trailer_each_get_their_own_spelling() {
+        let reference = "pending://u1/a&b.png";
+        let prompt = "look\n\n<appshot app=\"Notes\" image=\"pending://u1/a&amp;b.png\">\nbody\n</appshot>\n\n- pending://u1/a&b.png";
+        assert_eq!(
+            rewrite_pending_ref(prompt, reference, "/home/o'neil/u1-a_b.png"),
+            "look\n\n<appshot app=\"Notes\" image=\"/home/o&apos;neil/u1-a_b.png\">\nbody\n</appshot>\n\n- /home/o'neil/u1-a_b.png"
+        );
+        // A name with nothing to escape still gets an escaped path in the attribute.
+        let plain = "<appshot image=\"pending://u1/a.png\">\n- pending://u1/a.png";
+        assert_eq!(
+            rewrite_pending_ref(plain, "pending://u1/a.png", "/a&b/a.png"),
+            "<appshot image=\"/a&amp;b/a.png\">\n- /a&b/a.png"
+        );
     }
 
     #[test]

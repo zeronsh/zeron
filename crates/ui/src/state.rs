@@ -1840,6 +1840,19 @@ impl AppState {
             .is_some_and(|v| v >= min)
     }
 
+    /// Whether a send to this host can go through the edge's attachment store:
+    /// a Cloud machine that says it fetches from there, or one that hasn't
+    /// reported in yet (the engine then pushes over the peer link too).
+    pub fn host_fetches_from_store(&self, device_id: &str) -> bool {
+        zeron_proto::is_cloud_device(device_id, "")
+            && self
+                .devices
+                .iter()
+                .find(|d| d.id == device_id)
+                .filter(|d| d.version.is_some())
+                .is_none_or(|d| d.supports(zeron_proto::capabilities::ATTACHMENT_STORE_V1))
+    }
+
     /// Capability checks use the live EngineInfo for this device (including a
     /// localhost daemon that may not match the UI binary) and synced device
     /// rows for peers. Missing declarations are conservatively unsupported.
@@ -2351,11 +2364,18 @@ impl AppState {
         }
         let now = Utc::now();
         for gone in std::mem::take(&mut self.held_sends) {
-            if !held.iter().any(|send| send.id == gone.id)
-                && self
-                    .pending_sends
-                    .get(&gone.chat_id)
-                    .is_some_and(|p| gone.message_id.as_deref() == Some(p.message_id.as_str()))
+            if held.iter().any(|send| send.id == gone.id) {
+                continue;
+            }
+            // A row is in the queue now, and its panel takes over from the echo.
+            if gone.queue_row {
+                if let Some(message_id) = &gone.message_id {
+                    self.remove_echo(&gone.chat_id, message_id);
+                }
+            } else if self
+                .pending_sends
+                .get(&gone.chat_id)
+                .is_some_and(|p| gone.message_id.as_deref() == Some(p.message_id.as_str()))
             {
                 self.retry_pending_send(&gone.chat_id, now);
             }
@@ -2384,7 +2404,8 @@ impl AppState {
                     duration_ms: None,
                 },
             );
-            if !self.pending_sends.contains_key(&send.chat_id) {
+            // A row waits for its turn, so it never starts one's overlay.
+            if !send.queue_row && !self.pending_sends.contains_key(&send.chat_id) {
                 self.begin_pending_send(&send.chat_id, message_id, now);
             }
         }
@@ -6607,9 +6628,56 @@ mod tests {
             chat_id: "c".into(),
             message_id: Some(format!("m-{id}")),
             prompt: "look at this".into(),
+            queue_row: false,
             created_at: 1_000,
             failure: failure.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn a_held_queue_row_shows_until_the_queue_panel_has_it() {
+        let mut s = AppState::new();
+        let mut row = held_send("r", None);
+        row.queue_row = true;
+        s.apply_held_sends(vec![row]);
+        assert!(s.echoes["c"].iter().any(|e| e.id == "m-r"), "visible while it uploads");
+        assert!(!s.send_pending("other", chrono::Utc::now()));
+        assert!(
+            !s.pending_sends.contains_key("c"),
+            "a row waits for its turn: no working overlay"
+        );
+        s.apply_held_sends(Vec::new());
+        assert!(!s.echoes["c"].iter().any(|e| e.id == "m-r"));
+    }
+
+    #[test]
+    fn only_a_cloud_machine_that_can_fetch_takes_the_store() {
+        let device = |id: &str, version: Option<&str>, capable: bool| zeron_proto::Device {
+            id: id.into(),
+            name: id.into(),
+            platform: "linux".into(),
+            last_seen_at: None,
+            created_at: None,
+            version: version.map(str::to_string),
+            cursor_sdk_version: None,
+            capabilities: if capable {
+                vec![zeron_proto::capabilities::ATTACHMENT_STORE_V1.to_string()]
+            } else {
+                Vec::new()
+            },
+        };
+        let mut s = AppState::new();
+        s.apply_devices(vec![
+            device("cloud-new", Some("0.2.138"), true),
+            device("cloud-old", Some("0.2.100"), false),
+            device("cloud-booting", None, false),
+            device("laptop", Some("0.2.138"), true),
+        ]);
+        assert!(s.host_fetches_from_store("cloud-new"));
+        assert!(!s.host_fetches_from_store("cloud-old"));
+        assert!(s.host_fetches_from_store("cloud-booting"));
+        assert!(s.host_fetches_from_store("cloud-unseen"));
+        assert!(!s.host_fetches_from_store("laptop"));
     }
 
     #[test]

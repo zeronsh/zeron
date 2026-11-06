@@ -91,9 +91,10 @@ The iOS and Android apps have no engine: `crates/client` writes to the chat's do
 `crates/client/src/live/held.rs` runs the same outbox over the same store and table, with the
 escort stash as its staged bytes. The app's retry and failed state are the existing ones.
 
-## Not covered
+## How it was attached doesn't matter
 
-- Desktop sends carrying app captures, and sends queued during a live turn, still upload
-  directly to the host before sending, so a sleeping machine fails them at send time with a
-  visible error and the draft kept. App captures embed final paths the ref rewrite can't reach.
-- The beta interface (`apps/zgx`) has its own direct-upload path, with the same behavior.
+Plain sends, app captures and sends queued during a live turn all stage locally and go
+through the store. A capture names its image in an XML attribute, so the host rewrites a ref
+in both spellings (`uploads::rewrite_pending_ref`). A queued send waits in the outbox as a row:
+its message shows in the transcript until the queue panel has it. Over a peer link nothing
+changed: those two still upload straight to the host first.

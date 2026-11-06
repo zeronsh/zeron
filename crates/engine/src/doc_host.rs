@@ -3706,6 +3706,26 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_transfers(
+            chat_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::queue_message_with_behavior`] plus the row's `pending://` bytes,
+    /// already committed to THIS device's uploads dir: a Cloud-hosted chat's
+    /// row waits until they're in the edge's store, like a command does.
+    pub fn queue_message_with_transfers(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         let item = QueuedMessage {
@@ -3718,12 +3738,13 @@ impl DocHost {
             edited_at: None,
             delivery_gate: None,
         };
-        if self.hold_row_if_behind(chat_id, &item)? {
+        if self.hold_row_if_needed(chat_id, &item, &transfers)? {
             self.unarchive_on_send(chat_id);
             return Ok(id);
         }
         handle.doc.push_queued(&item)?;
         handle.publish_queue();
+        self.spawn_row_transfers(chat_id, transfers);
         // Same reasoning as a command: the user is acting in this chat again.
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
@@ -5500,7 +5521,7 @@ impl DocHost {
         };
         for path in attachments.iter_mut() {
             if let Some(abs) = uploads.resolve_pending(path) {
-                *prompt = prompt.replace(path.as_str(), &abs);
+                *prompt = crate::uploads::rewrite_pending_ref(prompt, path, &abs);
                 *path = abs;
             }
         }
@@ -5537,7 +5558,7 @@ impl DocHost {
         let mut out = prompt.to_string();
         for r in crate::uploads::pending_refs_in(prompt) {
             if let Some(abs) = uploads.resolve_pending(&r) {
-                out = out.replace(&r, &abs);
+                out = crate::uploads::rewrite_pending_ref(&out, &r, &abs);
             }
         }
         out

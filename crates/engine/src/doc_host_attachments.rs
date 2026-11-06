@@ -117,23 +117,47 @@ impl DocHost {
         Ok(Some(id))
     }
 
-    /// A queue row typed while an earlier send is still held keeps its place.
-    pub(super) fn hold_row_if_behind(
+    /// A queue row waits like a command does: for its own bytes, and behind an
+    /// earlier held send, so it keeps its place. `true` = held.
+    pub(super) fn hold_row_if_needed(
         &self,
         chat_id: &str,
         item: &QueuedMessage,
+        transfers: &[AttachmentTransfer],
     ) -> Result<bool, EngineError> {
-        if !self.inner.store.has_active_held_send(chat_id)? {
+        let behind = self.inner.store.has_active_held_send(chat_id)?;
+        if !behind && transfers.is_empty() {
+            return Ok(false);
+        }
+        let route = self.attachment_route(chat_id);
+        if !behind && route == AttachmentRoute::Peer {
             return Ok(false);
         }
         self.hold(
             &item.id,
             chat_id,
             HeldBody::Row { item: item.clone() },
-            &[],
-            false,
+            transfers,
+            matches!(route, AttachmentRoute::Store { also_peer: true }),
         )?;
         Ok(true)
+    }
+
+    /// A row's bytes over the peer link, once the row is in the chat.
+    pub(super) fn spawn_row_transfers(&self, chat_id: &str, transfers: Vec<AttachmentTransfer>) {
+        if transfers.is_empty() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let host = self.clone();
+        let chat = chat_id.to_string();
+        self.spawn_worker_on(&runtime, async move {
+            if host.remote_host_for(&chat).is_some() {
+                host.deliver_attachments(&chat, &transfers).await;
+            }
+        });
     }
 
     fn hold(
@@ -276,13 +300,30 @@ impl DocHost {
         self.inner.held_status.send_replace(
             sends
                 .iter()
-                .map(|send| HeldSendStatus {
-                    id: send.id.clone(),
-                    chat_id: send.chat_id.clone(),
-                    message_id: send.payload.message_id().map(str::to_string),
-                    prompt: send.payload.prompt().to_string(),
-                    created_at: send.created_at,
-                    failure: send.failure.clone(),
+                .map(|send| {
+                    // A row's id becomes its message's, and its attachment
+                    // trailer is only added when it's dispatched.
+                    let (message_id, prompt, queue_row) = match &send.payload.body {
+                        HeldBody::Row { item } => (
+                            Some(item.id.clone()),
+                            super::queued_message_prompt(&item.text, &item.attachments),
+                            true,
+                        ),
+                        HeldBody::Command { .. } => (
+                            send.payload.message_id().map(str::to_string),
+                            send.payload.prompt().to_string(),
+                            false,
+                        ),
+                    };
+                    HeldSendStatus {
+                        id: send.id.clone(),
+                        chat_id: send.chat_id.clone(),
+                        message_id,
+                        prompt,
+                        queue_row,
+                        created_at: send.created_at,
+                        failure: send.failure.clone(),
+                    }
                 })
                 .collect(),
         );
@@ -485,6 +526,8 @@ impl DocHost {
         self.nudge_remote_host(&send.chat_id);
         if let Some(entry) = escort {
             self.spawn_command_delivery(&send.chat_id, entry, transfers);
+        } else if matches!(send.payload.body, HeldBody::Row { .. }) {
+            self.spawn_row_transfers(&send.chat_id, transfers);
         }
         Ok(())
     }

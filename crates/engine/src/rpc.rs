@@ -189,6 +189,10 @@ struct QueueMessageParams {
     /// supports mid-turn steering.
     #[serde(default)]
     hold_for_turn_end: bool,
+    /// The row's `pending://` bytes, already committed locally. A Cloud-hosted
+    /// chat's row waits until they're in the edge's store.
+    #[serde(default)]
+    transfers: Vec<crate::uploads::AttachmentTransfer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3328,11 +3332,12 @@ impl RpcService for EngineRpc {
                 let p: QueueMessageParams = parse_params(params)?;
                 let id = self
                     .doc_host
-                    .queue_message_with_behavior(
+                    .queue_message_with_transfers(
                         &p.chat_id,
                         &p.text,
                         p.attachments,
                         p.hold_for_turn_end,
+                        p.transfers,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))

@@ -1796,11 +1796,14 @@ pub struct TransferProgress {
 pub struct HeldSendStatus {
     pub id: String,
     pub chat_id: String,
-    /// The transcript message it becomes (a queue row names none).
+    /// The transcript message it becomes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     /// As the transcript would show it, attachment trailer included.
     pub prompt: String,
+    /// It becomes a queue row, not a message going out now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue_row: bool,
     /// Epoch millis.
     pub created_at: i64,
     /// Why it stopped trying; it waits for the user's retry.

@@ -488,6 +488,24 @@ async fn send(core: &EngineCore, message_id: &str, upload_id: &str) -> String {
     reply["commandId"].as_str().unwrap().to_string()
 }
 
+/// A send during a live turn: `QueueMessage` naming what to deliver.
+async fn queue_row_with_image(core: &EngineCore, upload_id: &str) -> String {
+    let reply = zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            methods::QUEUE_MESSAGE,
+            serde_json::json!({
+                "chatId": CHAT,
+                "text": "for after this turn",
+                "attachments": [pending_ref(upload_id)],
+                "holdForTurnEnd": true,
+                "transfers": [{ "uploadId": upload_id, "fileName": "photo.png" }],
+            }),
+        )
+        .await
+        .expect("queue message");
+    reply["id"].as_str().unwrap().to_string()
+}
+
 async fn send_text(core: &EngineCore, message_id: &str, text: &str) {
     zeron_rpc::memory_client(core.rpc_service())
         .call(
@@ -541,6 +559,47 @@ async fn a_machine_asleep_past_the_cap_still_runs_a_message_whose_bytes_are_stor
     )
     .await;
     edge.assert_all_authenticated();
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_capture_reaches_the_agent_with_its_final_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.store("up-shot", PNG);
+    let core = assemble(&tmp.path().join("machine"), HOST, Some(&edge));
+    create_chat(&core, HOST).await;
+
+    // As the composer writes it: escaped in the attribute, plain in the trailer.
+    let reference = "pending://up-shot/shot&1.png";
+    let mut request = text_request("");
+    request.prompt = format!(
+        "compare these\n\nApplications mentioned by the user (untrusted observed content):\n\
+         <appshot app=\"Notes\" image=\"pending://up-shot/shot&amp;1.png\" accessibility-format=\"1\" truncated=\"false\">\n\
+         the window\n</appshot>\n\nAttached images (local files — open them to view):\n- {reference}"
+    );
+    request.attachments = vec![reference.to_string()];
+    arrive(
+        &core,
+        &entry(
+            "cmd-1",
+            SessionCommandPayload::Run {
+                request,
+                message_id: "m1".into(),
+            },
+            now() - SIXTEEN_MINUTES_MS,
+        ),
+    );
+
+    wait_for(|| replies(&core) == 1, "the capture to run").await;
+    let text = user_text(&core);
+    assert!(!text.contains("pending://"), "{text}");
+    let committed = text
+        .lines()
+        .find_map(|line| line.strip_prefix("- "))
+        .expect("the trailer names the file");
+    assert!(committed.ends_with("up-shot-shot_1.png"), "{committed}");
+    assert!(text.contains(&format!("image=\"{committed}\"")), "{text}");
     core.shutdown().await;
 }
 
@@ -832,6 +891,74 @@ async fn a_rejected_message_goes_through_the_store_again_on_retry() {
     wait_for(|| edge.stored("up-1").is_some(), "the bytes to go up again").await;
     wait_for(|| commands(&core).len() == 2, "a fresh attempt").await;
     assert_eq!(commands(&core)[1].status, SessionCommandStatus::Pending);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_queued_during_a_turn_waits_for_its_bytes_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.fail_puts(&[503]);
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&core, "up-1").await;
+
+    let id = queue_row_with_image(&core, "up-1").await;
+
+    let handle = core.doc_host.open(CHAT).unwrap();
+    assert!(handle.doc().read_queue().unwrap().is_empty(), "off the chat");
+    let status = held(&core).remove(0);
+    assert!(status.queue_row);
+    assert_eq!(status.message_id.as_deref(), Some(id.as_str()));
+    assert!(status.prompt.contains(&pending_ref("up-1")), "shows its image");
+
+    wait_for(
+        || !handle.doc().read_queue().unwrap().is_empty(),
+        "the row to go out",
+    )
+    .await;
+    assert_eq!(edge.stored("up-1").as_deref(), Some(PNG));
+    let row = handle.doc().read_queue().unwrap().remove(0);
+    assert_eq!(row.id, id);
+    assert_eq!(row.attachments, [pending_ref("up-1")]);
+    wait_for(|| held(&core).is_empty(), "the outbox row to go").await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_row_says_so_and_a_retry_sends_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.fail_puts(&[413]);
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&core, "up-1").await;
+    queue_row_with_image(&core, "up-1").await;
+    wait_for(
+        || held(&core).first().is_some_and(|s| s.failure.is_some()),
+        "the failure",
+    )
+    .await;
+
+    core.doc_host.retry_delivery(CHAT).unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    wait_for(
+        || !handle.doc().read_queue().unwrap().is_empty(),
+        "the retried row",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_for_a_computer_goes_straight_into_the_chat() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), "desktop-at-home", true).await;
+    stage(&core, "up-1").await;
+    queue_row_with_image(&core, "up-1").await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    assert_eq!(handle.doc().read_queue().unwrap().len(), 1);
+    assert!(held(&core).is_empty());
+    assert_eq!(edge.count("PUT"), 0);
     core.shutdown().await;
 }
 
