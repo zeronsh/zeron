@@ -124,6 +124,9 @@ export type Props = {
 	harnesses: { ModelPicker.Harness } | State<{ ModelPicker.Harness }> | () -> { ModelPicker.Harness },
 	models: { ModelPicker.Model } | State<{ ModelPicker.Model }> | () -> { ModelPicker.Model },
 	models_loading: (() -> boolean)?,
+	-- The model's name while the catalog doesn't list it (ds.ModelPicker's
+	-- `model_label`).
+	model_label: (() -> string?)?,
 	-- A model's agent's accounts, putting one in use, and asking after them
 	-- again (ds.ModelPicker's).
 	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
@@ -1439,6 +1442,7 @@ return ui.component(function(props: Props): Node
 			harnesses = props.harnesses :: any,
 			models = props.models :: any,
 			loading = props.models_loading,
+			model_label = props.model_label,
 			accounts = props.accounts,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,

@@ -75,6 +75,10 @@ export type Props = {
 	options: State<{ [string]: string }>?,
 	-- Its catalog is still on its way (a device's first look).
 	loading: (() -> boolean)?,
+	-- The chosen model's name while its catalog doesn't list it (a chat on
+	-- another device, its catalog not looked at yet or short of it): what
+	-- the chip says rather than nothing, as Zeron's `selected_model_label`.
+	model_label: (() -> string?)?,
 	-- The agents and their models: lists, or states or functions of them
 	-- (a catalog that arrives or changes, followed in place: the tabs and
 	-- rows come and go, the picker stays).
@@ -157,6 +161,15 @@ return ui.component(function(props: Props): Node
 	end)
 	local function current(): Model?
 		return by_id:get()[props.model:get() or ""]
+	end
+	-- The chosen model's name when the catalog can't say it, or what runs
+	-- when none is chosen (nil: the catalog says it, or no one can).
+	local function named(): string?
+		if current() ~= nil or not props.model_label then
+			return nil
+		end
+		local said = props.model_label()
+		return if said and said ~= "" then said else nil
 	end
 	-- Read bottom up (the tabs by the trigger, the list over them): see
 	-- Dropdown's `bottom_up`.
@@ -684,12 +697,13 @@ return ui.component(function(props: Props): Node
 	return Dropdown {
 		fold = props.fold,
 		-- (Only with nothing to show yet: a catalog being looked at again keeps
-		-- what it knows.)
+		-- what it knows, and a model it doesn't list yet is named.)
 		loading = if props.loading
 			then function(): boolean
-				return (props.loading :: () -> boolean)() and current() == nil
+				return (props.loading :: () -> boolean)() and current() == nil and named() == nil
 			end
 			else nil,
+		say = named,
 		value = props.model,
 		items = items :: any,
 		tone = props.tone or "chip",

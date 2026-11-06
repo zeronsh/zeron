@@ -102,6 +102,9 @@ struct Chats {
     /// time, `look_ahead`): moving to it shows this at once, while it's looked
     /// at again, so a model is never missing for the moment that takes.
     known_remotes: RefCell<HashMap<String, Remote>>,
+    /// Which look at `remote` is the latest (`reload_remote`): an older one's
+    /// answers, for this device or another, change nothing.
+    remote_turn: Cell<u64>,
     /// The chat a view has just let go of, kept a moment: a chat on its own
     /// that becomes a split is opened again at once, in its pane, and has
     /// what it had rather than reading and building it all again.
@@ -364,6 +367,18 @@ const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long after connecting other devices' catalogs start being looked at.
 const LOOK_AHEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// How long after a device's catalog didn't come it's asked again: each
+/// try waits the next, the last one again after that (`load_remote`).
+const RETRY_AFTER: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(3),
+    std::time::Duration::from_secs(8),
+    std::time::Duration::from_secs(15),
+];
+/// How many times an agent's models are asked again on another device
+/// before it's left out (one signed out fails every time).
+const MODEL_RETRIES: usize = 2;
+
 /// How many entries a reset may leave to build at once; more go to a worker and
 /// in slices.
 const BUILT_AT_ONCE: usize = 64;
@@ -372,12 +387,22 @@ const BUILD_SLICE: std::time::Duration = std::time::Duration::from_millis(3);
 const BUILD_REST: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Another device's catalog, read through the engine (`targetDeviceId`).
+/// (Kept in `known_remotes`, `ready` is whether it was whole: every agent's
+/// models came.)
 #[derive(Clone)]
 struct Remote {
     device: String,
     harnesses: Vec<Json>,
     models: HashMap<String, Vec<Json>>,
     ready: bool,
+}
+
+/// A catalog looked at ahead of time, kept unless the device has one: one
+/// short of an agent's models gives way to a whole one.
+fn keep_known(known: &mut HashMap<String, Remote>, remote: Remote) {
+    if known.get(&remote.device).is_none_or(|r| !r.ready && remote.ready) {
+        known.insert(remote.device.clone(), remote);
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -779,6 +804,9 @@ impl Chats {
             if let Ok(answer) = rpc.call("LocalDevice", json!({})).await {
                 *me.here.borrow_mut() = answer["deviceId"].as_str().map(Into::into);
             }
+            // The composer's other device's, if it's on one: what an earlier
+            // connection was asking is gone with it.
+            me.reload_remote();
             // Every composer needs it: looked up once a connection is there.
             me.load_catalog(false).await;
         });
@@ -1001,42 +1029,61 @@ impl Chats {
             ready: false,
         }));
         self.publish_catalog();
-        let (me, device) = (self.clone(), device.to_owned());
-        engine::get().spawn(async move { me.load_remote(device).await });
+        self.reload_remote();
+    }
+
+    /// The composer's other device's catalog looked at again, a look of its
+    /// own: whatever an earlier one (this device's or another's) still hears
+    /// changes nothing.
+    fn reload_remote(self: &Rc<Self>) {
+        let Some(device) = self.remote.borrow().as_ref().map(|r| r.device.clone()) else { return };
+        let turn = self.remote_turn.get() + 1;
+        self.remote_turn.set(turn);
+        let me = self.clone();
+        engine::get().spawn(async move { me.load_remote(device, turn).await });
+    }
+
+    /// Whether the look `turn` is still the composer's, on `device`.
+    fn on_remote(&self, device: &str, turn: u64) -> bool {
+        self.remote_turn.get() == turn && self.remote.borrow().as_ref().is_some_and(|r| r.device == device)
     }
 
     /// `device`'s agents, then each one's models as they come, while the
-    /// composer is still on it.
-    async fn load_remote(self: &Rc<Self>, device: String) {
-        let still = |me: &Chats| me.remote.borrow().as_ref().is_some_and(|r| r.device == device);
-        let list = engine::get()
-            .call("ListHarnesses", json!({ "targetDeviceId": device, "includeRegistry": true }))
-            .await;
-        if !still(self) {
-            return;
-        }
-        let harnesses: Vec<Json> = match list {
-            Ok(list) => list
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|h| {
-                    h["id"].as_str() != Some("mock")
-                        && h["installed"].as_bool() != Some(false)
-                        && h["enabled"].as_bool() != Some(false)
-                })
-                .cloned()
-                .collect(),
-            Err(error) => {
-                // (Unreachable: this device's catalog stands in, as before.)
-                eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
-                if !self.known_remotes.borrow().contains_key(&device) {
-                    self.remote.borrow_mut().take();
-                    self.publish_catalog();
-                }
+    /// composer is still on it (and this is still its look: `turn`).
+    async fn load_remote(self: &Rc<Self>, device: String, turn: u64) {
+        let mut tries = 0;
+        let list = loop {
+            let list = engine::get()
+                .call("ListHarnesses", json!({ "targetDeviceId": device, "includeRegistry": true }))
+                .await;
+            if !self.on_remote(&device, turn) {
                 return;
             }
+            match list {
+                Ok(list) => break list,
+                Err(error) => {
+                    // (Unreachable for now: its catalog stays looking, never
+                    // this device's in its place, and it's asked again.)
+                    eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
+                    zgx::timer::sleep(RETRY_AFTER[tries.min(RETRY_AFTER.len() - 1)]).await;
+                    tries += 1;
+                    if !self.on_remote(&device, turn) {
+                        return;
+                    }
+                }
+            }
         };
+        let harnesses: Vec<Json> = list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|h| {
+                h["id"].as_str() != Some("mock")
+                    && h["installed"].as_bool() != Some(false)
+                    && h["enabled"].as_bool() != Some(false)
+            })
+            .cloned()
+            .collect();
         let ids: Vec<String> = harnesses.iter().filter_map(|h| h["id"].as_str().map(Into::into)).collect();
         if let Some(r) = self.remote.borrow_mut().as_mut() {
             crate::agents::remember_icons(&harnesses);
@@ -1045,27 +1092,52 @@ impl Chats {
         }
         self.publish_catalog();
         let left = Rc::new(Cell::new(ids.len()));
+        // (Whether every agent's models came: one that didn't isn't kept as whole.)
+        let whole = Rc::new(Cell::new(true));
         for id in ids {
-            let (me, left, device) = (self.clone(), left.clone(), device.clone());
+            let (me, left, whole, device) = (self.clone(), left.clone(), whole.clone(), device.clone());
             engine::get().spawn(async move {
-                let list = engine::get()
-                    .call("ListModels", json!({ "harness": id, "targetDeviceId": device }))
-                    .await;
+                let mut tries = 0;
+                let list = loop {
+                    let list = engine::get()
+                        .call("ListModels", json!({ "harness": id, "targetDeviceId": device }))
+                        .await;
+                    if !me.on_remote(&device, turn) {
+                        return;
+                    }
+                    match list {
+                        Ok(list) => break Some(list),
+                        Err(error) => {
+                            eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}");
+                            if tries == MODEL_RETRIES {
+                                break None;
+                            }
+                            zgx::timer::sleep(RETRY_AFTER[tries]).await;
+                            tries += 1;
+                            if !me.on_remote(&device, turn) {
+                                return;
+                            }
+                        }
+                    }
+                };
                 left.set(left.get() - 1);
                 {
                     let mut remote = me.remote.borrow_mut();
-                    let Some(r) = remote.as_mut().filter(|r| r.device == device) else {
-                        return;
-                    };
+                    let Some(r) = remote.as_mut() else { return };
                     match list {
-                        Ok(list) => {
+                        Some(list) => {
                             r.models.insert(id, list.as_array().cloned().unwrap_or_default());
                         }
-                        Err(error) => eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}"),
+                        // (What it had before, if anything, stays.)
+                        None => whole.set(false),
                     }
                     r.ready = left.get() == 0;
                     if r.ready {
-                        me.known_remotes.borrow_mut().insert(device.clone(), r.clone());
+                        // Kept short, it isn't ready: moving to it shows it
+                        // while it's looked at again.
+                        let mut kept = r.clone();
+                        kept.ready = whole.get();
+                        me.known_remotes.borrow_mut().insert(device.clone(), kept);
                     }
                 }
                 me.publish_catalog();
@@ -1078,7 +1150,8 @@ impl Chats {
     async fn look_ahead(self: &Rc<Self>) {
         zgx::timer::sleep(LOOK_AHEAD_AFTER).await;
         for device in crate::sessions::other_devices_online() {
-            if self.known_remotes.borrow().contains_key(&device) {
+            // (One kept short of an agent's models is looked at again.)
+            if self.known_remotes.borrow().get(&device).is_some_and(|r| r.ready) {
                 continue;
             }
             let params = json!({ "targetDeviceId": device, "includeRegistry": true });
@@ -1095,18 +1168,19 @@ impl Chats {
                 .cloned()
                 .collect();
             let mut models = HashMap::new();
+            let mut whole = true;
             for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
                 let params = json!({ "harness": id, "targetDeviceId": device });
-                if let Ok(list) = engine::get().call("ListModels", params).await {
-                    models.insert(id.to_owned(), list.as_array().cloned().unwrap_or_default());
+                match engine::get().call("ListModels", params).await {
+                    Ok(list) => {
+                        models.insert(id.to_owned(), list.as_array().cloned().unwrap_or_default());
+                    }
+                    Err(_) => whole = false,
                 }
             }
             crate::agents::remember_icons(&harnesses);
             // (One opened meanwhile has its own, as new.)
-            self.known_remotes
-                .borrow_mut()
-                .entry(device.clone())
-                .or_insert(Remote { device, harnesses, models, ready: true });
+            keep_known(&mut self.known_remotes.borrow_mut(), Remote { device, harnesses, models, ready: whole });
         }
     }
 
@@ -1143,15 +1217,20 @@ impl Chats {
         live && !stale(&s["updatedAt"])
     }
 
-    fn label_of(&self, harness: &str, model: &str) -> Option<String> {
+    /// `model`'s name in `harness`'s catalog; with none, its first model's
+    /// (what the agent runs when a chat names none).
+    fn label_of(&self, harness: &str, model: Option<&str>) -> Option<String> {
         let find = |by: &HashMap<String, Vec<Json>>| {
             by.get(harness)?
                 .iter()
-                .find(|m| m["id"].as_str() == Some(model))
+                .find(|m| model.is_none() || m["id"].as_str() == model)
                 .and_then(|m| m["label"].as_str().map(Into::into))
         };
-        // (This device's, else the composer's other device's.)
-        find(&self.models.borrow()).or_else(|| self.remote.borrow().as_ref().and_then(|r| find(&r.models)))
+        // (This device's, else the composer's other device's, else any other
+        // device's looked at.)
+        find(&self.models.borrow())
+            .or_else(|| self.remote.borrow().as_ref().and_then(|r| find(&r.models)))
+            .or_else(|| self.known_remotes.borrow().values().find_map(|r| find(&r.models)))
     }
 
     fn steers(&self, harness: &str) -> bool {
@@ -2864,7 +2943,7 @@ enum Change {
 fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
     let chat = chats.chat(&open.id).unwrap_or(Json::Null);
     let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
-    let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, m).unwrap_or_else(|| m.to_owned()));
+    let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, Some(m)).unwrap_or_else(|| m.to_owned()));
     if open.built_model.as_ref() != Some(&model) {
         // (Settled entries are the engine's now: the rows show the last name
         // until its copy comes, `model_moved`, and are built again from that.)
@@ -4161,6 +4240,14 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         .as_str()
         .map(|m| Value::from(format!("{harness}/{m}").as_str()))
         .unwrap_or(Value::Nil);
+    // Its name, for a picker whose catalog doesn't list it (its device's not
+    // looked at yet, or not offering it): the catalog's, else its id (as
+    // `build_context`'s). None named: the agent's own default, its
+    // catalog's first.
+    let model_label = match config["model"].as_str() {
+        Some(m) => Value::from(chats.label_of(harness, Some(m)).unwrap_or_else(|| m.to_owned()).as_str()),
+        None => chats.label_of(harness, None).map_or(Value::Nil, |l| Value::from(l.as_str())),
+    };
     let access = match config["access"].as_str() {
         Some("supervised") => "supervised",
         Some("auto-accept-edits") => "edits",
@@ -4202,6 +4289,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("cwd", s(&chat["cwd"])),
         ("harness", Value::from(harness)),
         ("model", model),
+        ("model_label", model_label),
         ("effort", s(&config["reasoning"])),
         ("fast", Value::Bool(fast)),
         ("options", options),
@@ -4776,12 +4864,78 @@ mod tests {
         assert_eq!(harnesses.len(), 1);
         assert!(matches!(harnesses[0].field("id"), Some(Value::Str(s)) if s.as_ref() == "claude-code"));
         // Labels: this device's, else the box's.
-        assert_eq!(chats.label_of("codex", "gpt").as_deref(), Some("GPT"));
-        assert_eq!(chats.label_of("claude-code", "opus").as_deref(), Some("Opus"));
+        assert_eq!(chats.label_of("codex", Some("gpt")).as_deref(), Some("GPT"));
+        assert_eq!(chats.label_of("claude-code", Some("opus")).as_deref(), Some("Opus"));
         // Back here: this device's again.
         chats.catalog_on("mac");
         assert!(chats.remote.borrow().is_none());
         assert!(chats.catalog_value().field("device").is_none());
+    }
+
+    /// A look at another device's catalog answers for itself alone: once the
+    /// composer has moved on (another device, or the same one looked at
+    /// again since), what it hears changes nothing.
+    #[test]
+    fn only_the_latest_look_at_a_devices_catalog_counts() {
+        let chats = Chats::default();
+        *chats.remote.borrow_mut() = Some(Remote {
+            device: "laptop".into(),
+            harnesses: Vec::new(),
+            models: HashMap::new(),
+            ready: false,
+        });
+        chats.remote_turn.set(2);
+        assert!(chats.on_remote("laptop", 2));
+        assert!(!chats.on_remote("laptop", 1), "an earlier look at the same device");
+        assert!(!chats.on_remote("linux", 2), "another device's");
+        chats.remote.borrow_mut().take();
+        assert!(!chats.on_remote("laptop", 2), "back here");
+    }
+
+    /// One looked at ahead of time without all its agents' models is kept as
+    /// not ready, and gives way to a whole one; a whole one stays.
+    #[test]
+    fn a_catalog_short_of_an_agents_models_gives_way_to_a_whole_one() {
+        let remote = |ready: bool, model: &str| Remote {
+            device: "laptop".into(),
+            harnesses: vec![json!({ "id": "codex" })],
+            models: [("codex".to_owned(), vec![json!({ "id": model })])].into_iter().collect(),
+            ready,
+        };
+        let mut known = HashMap::new();
+        keep_known(&mut known, remote(false, "short"));
+        assert!(!known["laptop"].ready);
+        keep_known(&mut known, remote(true, "whole"));
+        assert!(known["laptop"].ready);
+        keep_known(&mut known, remote(true, "later"));
+        keep_known(&mut known, remote(false, "later"));
+        assert_eq!(known["laptop"].models["codex"][0]["id"], "whole");
+    }
+
+    /// A chat on another device names its model before (or without) that
+    /// device's catalog: its id, then the catalog's name once one has it.
+    #[test]
+    fn a_sessions_model_is_named_without_its_devices_catalog() {
+        let chats = Chats::default();
+        chats.chats.borrow_mut().insert(
+            "c".into(),
+            json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "pi", "model": "kimi-k3" } }),
+        );
+        let open = Open { id: "c".into(), ..Open::default() };
+        let label = |chats: &Chats| session_value(chats, &open, false).field("model_label").map(text);
+        assert_eq!(label(&chats).as_deref(), Some("kimi-k3"));
+        chats.known_remotes.borrow_mut().insert(
+            "laptop".into(),
+            Remote {
+                device: "laptop".into(),
+                harnesses: Vec::new(),
+                models: [("pi".to_owned(), vec![json!({ "id": "kimi-k3", "label": "Kimi K3" })])].into_iter().collect(),
+                ready: true,
+            },
+        );
+        assert_eq!(label(&chats).as_deref(), Some("Kimi K3"));
+        let model = session_value(&chats, &open, false).field("model").map(text);
+        assert_eq!(model.as_deref(), Some("pi/kimi-k3"));
     }
 
     #[test]

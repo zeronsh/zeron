@@ -58,6 +58,8 @@ export type Session = {
 	cwd: string?,
 	harness: string?,
 	model: string?,
+	-- Its model's name: its catalog's, else its id (chat.rs `session_value`).
+	model_label: string?,
 	effort: string?,
 	fast: boolean?,
 	-- The choices made of the model's options (option id to choice id).
