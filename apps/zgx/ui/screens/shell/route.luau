@@ -276,7 +276,7 @@ local function project_of(id: string?): sessions.Project?
 	if not id or id == "none" then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -297,7 +297,7 @@ local where = steady(function(): Current
 	end
 	local p = chosen:get()
 	-- A chosen project since deleted: none chosen.
-	if p and p ~= "none" and sessions.now:get().state == "ready" and not project_of(p) then
+	if p and p ~= "none" and sessions.state:get() == "ready" and not project_of(p) then
 		p = nil
 	end
 	return { name = "home", project = p }
@@ -364,15 +364,14 @@ M.device = steady(function(): string?
 	if p and p.device then
 		return p.device
 	end
-	return sessions.now:get().here
+	return sessions.here:get()
 end)
 
 -- A new chat with nowhere to work yet (Zeron's first launch): no project,
 -- and none not chosen ("No project"). Its page asks for one in the
 -- composer's place.
 M.needs_project = ui.computed(function(): boolean
-	local now = sessions.now:get()
-	return now.state == "ready" and #now.projects == 0 and M.chat:get().name == "home" and chosen:get() ~= "none"
+	return sessions.state:get() == "ready" and #sessions.projects:get() == 0 and M.chat:get().name == "home" and chosen:get() ~= "none"
 end)
 
 -- A project's hue: one of the palette's, the same for it every time (a
@@ -384,7 +383,7 @@ M.look = look.by_id
 
 M.projects = steady(function(): { Choice }
 	local out: { Choice } = {}
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		local l = look.of(p)
 		table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji })
 	end

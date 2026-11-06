@@ -41,7 +41,7 @@ local function project_of(c: any): any
 	if not c or not c.project then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == c.project then
 			return p
 		end

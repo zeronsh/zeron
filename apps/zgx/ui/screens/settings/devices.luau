@@ -58,7 +58,7 @@ local renaming_open = ui.state("settings_device_renaming_open", false)
 local new_name = ui.state("settings_device_name", "")
 
 local function device(id: string): sessions.Device?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.id == id then
 			return d
 		end
@@ -95,10 +95,10 @@ local icon_of = M.icon
 -- `shown`.
 function M.picker(shown: () -> string?, choose: (id: string) -> ()): Node
 	local function computers(): { sessions.Device }
-		return sessions.computers(sessions.now:get().devices, true)
+		return sessions.computers(sessions.devices:get(), true)
 	end
 	local function here(): string
-		for _, d in sessions.now:get().devices or {} do
+		for _, d in sessions.devices:get() or {} do
 			if d.here then
 				return d.id
 			end
@@ -142,7 +142,7 @@ end
 
 function M.view(): Node
 	local list = ui.computed(function(): { sessions.Device }
-		return sessions.computers(sessions.now:get().devices)
+		return sessions.computers(sessions.devices:get())
 	end)
 	-- (Minutes tick the "last seen" lines over, once a minute.)
 	local clock = ui.use_state(os.time())

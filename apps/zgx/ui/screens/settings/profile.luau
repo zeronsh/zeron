@@ -691,7 +691,7 @@ function M.view(): Node
 	end
 	-- Where you're signed in: your devices, not Cloud sessions' machines.
 	local devices = ui.computed(function(): { sessions.Device }
-		return sessions.computers(sessions.now:get().devices)
+		return sessions.computers(sessions.devices:get())
 	end)
 	return ui.column {
 		ref = room,

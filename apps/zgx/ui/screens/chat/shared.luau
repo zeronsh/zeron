@@ -786,7 +786,7 @@ end
 
 -- Which of `sessions`' devices is this one.
 local here_device = ui.computed(function(): string?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.here then
 			return d.id
 		end

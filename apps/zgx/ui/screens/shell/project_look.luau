@@ -120,11 +120,10 @@ end
 -- Each project's picture asked for as it comes (or changes): its uploaded
 -- image's file, or, wearing no picture of its own, its repository's.
 ui.effect(function()
-	local now = sessions.now:get()
-	if now.state ~= "ready" then
+	if sessions.state:get() ~= "ready" then
 		return
 	end
-	for _, p in now.projects do
+	for _, p in sessions.projects:get() do
 		local icon = p.icon
 		if icon and icon.image then
 			want_file(icon.image)
@@ -168,7 +167,7 @@ end
 -- (Looked up by id, not searched: a list of projects each asks for its own.)
 local by_id = ui.computed(function(): { [string]: sessions.Project }
 	local out: { [string]: sessions.Project } = {}
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		out[p.id] = p
 	end
 	return out
