@@ -963,3 +963,111 @@ async fn cloud_projects_group_with_a_full_clone_of_their_repository() {
 
     a.shutdown().await;
 }
+
+fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test")
+        .output()
+        .expect("git spawns");
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// What a project shows on `core`: its name, and its icon's emoji.
+fn project_look(core: &EngineCore, id: &str) -> Option<(String, Option<String>)> {
+    let space = core.workspace.read_spaces().ok()?.into_iter().find(|s| s.id == id)?;
+    Some((space.display_name().to_owned(), space.icon.and_then(|icon| icon.emoji)))
+}
+
+#[tokio::test]
+async fn a_repositorys_name_and_icon_are_the_same_on_every_device() {
+    let (dir_a, dir_b, dir_c) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let a = assemble(dir_a.path(), "dev-a");
+    let b = assemble(dir_b.path(), "dev-b");
+    let link = bridge(&a, &b).await;
+
+    // Real clones, stamped by each engine itself; and beside them, histories
+    // with nothing safe to match (`local:`), which stay their own.
+    let folders = tempfile::tempdir().unwrap();
+    let folder = |name: &str| folders.path().join(name);
+    std::fs::create_dir_all(folder("flint")).unwrap();
+    git(&folder("flint"), &["init", "-q", "-b", "main"]);
+    git(&folder("flint"), &["commit", "-q", "--allow-empty", "-m", "first"]);
+    git(folders.path(), &["clone", "-q", "flint", "flint-work"]);
+    git(folders.path(), &["clone", "-q", "flint", "flint-three"]);
+    for name in ["scratch", "scratch-b/scratch"] {
+        std::fs::create_dir_all(folder(name)).unwrap();
+        git(&folder(name), &["init", "-q", "-b", "main"]);
+    }
+
+    let path = |name: &str| folder(name).to_str().unwrap().to_owned();
+    a.workspace.create_space("copy-a", "dev-a", &path("flint"), None, true).unwrap();
+    b.workspace.create_space("copy-b", "dev-b", &path("flint-work"), None, true).unwrap();
+    a.workspace.create_space("scratch-a", "dev-a", &path("scratch"), None, true).unwrap();
+    b.workspace.create_space("scratch-b", "dev-b", &path("scratch-b/scratch"), None, true).unwrap();
+    let identity = |core: &EngineCore, id: &str| {
+        let spaces = core.workspace.read_spaces().unwrap_or_default();
+        spaces.into_iter().find(|s| s.id == id).and_then(|s| s.repository_id)
+    };
+    wait_for(
+        || {
+            identity(&a, "copy-a").is_some_and(|i| i.starts_with("commit:"))
+                && identity(&a, "copy-b") == identity(&a, "copy-a")
+                && identity(&b, "copy-a") == identity(&a, "copy-a")
+                && identity(&a, "scratch-a").is_some_and(|i| i.starts_with("local:"))
+                && identity(&a, "scratch-b").is_some_and(|i| i.starts_with("local:"))
+        },
+        "the engines to stamp their copies",
+    )
+    .await;
+
+    // Renamed on A, over the RPC surface every app uses; icon set on B.
+    let client_a = zeron_rpc::memory_client(a.rpc_service());
+    let client_b = zeron_rpc::memory_client(b.rpc_service());
+    client_a
+        .call(methods::MUTATE, serde_json::json!({ "op": "renameSpace", "spaceId": "copy-a", "name": "Flint" }))
+        .await
+        .expect("rename");
+    client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "setSpaceIcon", "spaceId": "copy-b", "icon": { "emoji": "🚀" } }),
+        )
+        .await
+        .expect("set icon");
+    client_a
+        .call(methods::MUTATE, serde_json::json!({ "op": "renameSpace", "spaceId": "scratch-a", "name": "Mine" }))
+        .await
+        .expect("rename local");
+
+    let shared = Some(("Flint".to_owned(), Some("🚀".to_owned())));
+    for core in [&a, &b] {
+        wait_for(
+            || project_look(core, "copy-a") == shared && project_look(core, "copy-b") == shared,
+            "the same look on both copies",
+        )
+        .await;
+    }
+    wait_for(|| project_look(&b, "scratch-a").is_some_and(|l| l.0 == "Mine"), "the local rename").await;
+    assert_eq!(project_look(&a, "scratch-b"), Some(("scratch".to_owned(), None)));
+
+    // A third device, added later, inherits both once it knows what it holds.
+    let c = assemble(dir_c.path(), "dev-c");
+    c.workspace.connect_registry_url(&link.url());
+    c.workspace.create_space("copy-c", "dev-c", &path("flint-three"), None, true).unwrap();
+    wait_for(|| project_look(&c, "copy-c") == shared, "the look on the newcomer").await;
+    wait_for(|| project_look(&a, "copy-c") == shared, "the newcomer on A").await;
+    assert_eq!(project_look(&a, "copy-a"), shared, "its arrival changes nobody");
+
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
+}

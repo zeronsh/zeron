@@ -2472,3 +2472,309 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
     ws.upsert_device(&back).unwrap();
     assert!(!ws.device_deleted("cloud-1"));
 }
+
+// ── a repository's name and icon, on every copy ─────────────────────────────
+
+const REPOSITORY: &str = "commit:root1";
+
+/// A copy of a repository as its owner adds it: created, then stamped.
+fn add_copy(doc: &mut RegistryDoc, id: &str, path: &str, repository: Option<&str>) {
+    let device = doc.device_id().to_owned();
+    doc.upsert_space(&space(id, &device, path)).unwrap();
+    doc.set_space_git(id, true, None, repository, None, ts(2_000)).unwrap();
+}
+
+fn shown_name(doc: &RegistryDoc, id: &str) -> String {
+    doc.space(id).unwrap().expect("the row").display_name().to_owned()
+}
+
+fn rocket() -> zeron_proto::SpaceIcon {
+    zeron_proto::SpaceIcon { emoji: Some("🚀".into()), image: None, hue: Some("violet".into()) }
+}
+
+fn shown_emoji(doc: &RegistryDoc, id: &str) -> Option<String> {
+    doc.space(id).unwrap().expect("the row").icon.and_then(|icon| icon.emoji)
+}
+
+/// A copy already in the registry from before look rows: written at
+/// `created_ms`, with what its device chose on each field's own clock.
+fn existing_copy(
+    doc: &mut RegistryDoc,
+    id: &str,
+    device: &str,
+    path: &str,
+    created_ms: i64,
+    name: Option<(&str, i64)>,
+    icon: Option<(&str, i64)>,
+) {
+    let mut set = fields([
+        ("id", json!(id)),
+        ("deviceId", json!(device)),
+        ("path", json!(path)),
+        ("repositoryId", json!(REPOSITORY)),
+        ("createdAt", json!(1_500)),
+    ]);
+    let mut clocks = BTreeMap::new();
+    if let Some((name, ms)) = name {
+        set.insert("name".into(), json!(name));
+        clocks.insert("name".to_owned(), encode_hlc(ms, 0, device));
+    }
+    if let Some((emoji, ms)) = icon {
+        set.insert("icon".into(), json!({ "emoji": emoji }));
+        clocks.insert("icon".to_owned(), encode_hlc(ms, 0, device));
+    }
+    doc.enqueue_ops(vec![RowOp {
+        kind: KIND_SPACES.into(),
+        id: id.into(),
+        op: OpKind::Upsert,
+        set: Some(set),
+        hlc: encode_hlc(created_ms, 0, device),
+        clocks: Some(clocks),
+    }]);
+}
+
+#[test]
+fn a_rename_on_one_device_shows_on_every_copy_of_the_repository() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    add_copy(&mut a, "sp-a", "/home/a/flint", Some(REPOSITORY));
+    add_copy(&mut b, "sp-b", "/Users/b/flint-copy", Some(REPOSITORY));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(shown_name(&a, "sp-b"), "flint-copy", "no choice yet: its own folder");
+
+    assert!(a.rename_space("sp-a", Some("Flint")).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        assert_eq!(shown_name(doc, "sp-a"), "Flint");
+        assert_eq!(shown_name(doc, "sp-b"), "Flint");
+        assert!(doc.read_spaces().unwrap().iter().all(|s| s.name.as_deref() == Some("Flint")));
+    }
+
+    // Set from the other copy, on a later clock, it moves back the other way.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(b.rename_space("sp-b", Some("Flint 2")).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(shown_name(&a, "sp-a"), "Flint 2");
+
+    // Cleared, each copy is its own folder again.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(a.rename_space("sp-a", None).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(shown_name(&b, "sp-a"), "flint");
+    assert_eq!(shown_name(&b, "sp-b"), "flint-copy");
+}
+
+#[test]
+fn an_icon_set_on_one_device_shows_on_every_copy_and_clears_for_all() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    add_copy(&mut a, "sp-a", "/home/a/flint", Some(REPOSITORY));
+    add_copy(&mut b, "sp-b", "/Users/b/flint", Some(REPOSITORY));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    assert!(b.set_space_icon("sp-b", Some(&rocket())).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        assert_eq!(doc.space("sp-a").unwrap().unwrap().icon, Some(rocket()));
+        assert_eq!(doc.space("sp-b").unwrap().unwrap().icon, Some(rocket()));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(a.set_space_icon("sp-a", None).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        assert_eq!(shown_emoji(doc, "sp-a"), None);
+        assert_eq!(shown_emoji(doc, "sp-b"), None);
+    }
+}
+
+#[test]
+fn a_device_adding_the_repository_later_inherits_both() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut a = RegistryDoc::new("dev-a");
+    add_copy(&mut a, "sp-a", "/home/a/flint", Some(REPOSITORY));
+    server_round(&mut server, &mut seq, &mut [&mut a]);
+    a.rename_space("sp-a", Some("Flint")).unwrap();
+    a.set_space_icon("sp-a", Some(&rocket())).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a]);
+
+    // Joins well after, and its own create writes `name: null` on a newer
+    // clock than the rename: that is no clear.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut c = RegistryDoc::new("dev-c");
+    c.apply_state(seq, true, 0, server.values().cloned().collect());
+    add_copy(&mut c, "sp-c", "/srv/flint-three", Some(REPOSITORY));
+    assert_eq!(shown_name(&c, "sp-c"), "Flint");
+    assert_eq!(shown_emoji(&c, "sp-c").as_deref(), Some("🚀"));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut c]);
+    assert_eq!(shown_name(&a, "sp-a"), "Flint", "the newcomer changes nobody");
+    assert_eq!(shown_name(&a, "sp-c"), "Flint");
+    assert_eq!(shown_emoji(&a, "sp-a").as_deref(), Some("🚀"));
+}
+
+#[test]
+fn a_copy_stamped_after_it_was_named_joins_with_its_choice() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    doc.upsert_space(&space("sp-b", "dev-a", "/b/flint")).unwrap();
+    doc.rename_space("sp-b", Some("Named early")).unwrap();
+    assert_eq!(shown_name(&doc, "sp-a"), "flint", "not known as a copy yet");
+    doc.set_space_git("sp-b", true, None, Some(REPOSITORY), None, ts(2_000)).unwrap();
+    assert_eq!(shown_name(&doc, "sp-a"), "Named early");
+}
+
+#[test]
+fn copies_that_already_disagree_settle_on_the_most_recently_set() {
+    // Whatever order the rows arrive in, on any reader.
+    let mut one = RegistryDoc::new("reader-1");
+    existing_copy(&mut one, "sp-a", "dev-a", "/a/flint", 1_000_000_000_000, Some(("Older", 1_000_000_000_100)), Some(("🆕", 1_000_000_000_400)));
+    existing_copy(&mut one, "sp-b", "dev-b", "/b/flint", 1_000_000_000_000, Some(("Newer", 1_000_000_000_300)), Some(("🐢", 1_000_000_000_200)));
+    let mut two = RegistryDoc::new("reader-2");
+    existing_copy(&mut two, "sp-b", "dev-b", "/b/flint", 1_000_000_000_000, Some(("Newer", 1_000_000_000_300)), Some(("🐢", 1_000_000_000_200)));
+    existing_copy(&mut two, "sp-a", "dev-a", "/a/flint", 1_000_000_000_000, Some(("Older", 1_000_000_000_100)), Some(("🆕", 1_000_000_000_400)));
+    for doc in [&one, &two] {
+        for id in ["sp-a", "sp-b"] {
+            // Each field on its own clock: the name from one, the icon from the other.
+            assert_eq!(shown_name(doc, id), "Newer");
+            assert_eq!(shown_emoji(doc, id).as_deref(), Some("🆕"));
+        }
+    }
+
+    // And a choice made now beats them all.
+    assert!(one.rename_space("sp-a", Some("Now")).unwrap());
+    assert_eq!(shown_name(&one, "sp-b"), "Now");
+}
+
+#[test]
+fn a_name_written_only_at_creation_is_no_choice_unless_it_says_something() {
+    // (A create naming the row after its folder, on a newer clock than the
+    // real rename: the rename stands.)
+    let mut doc = RegistryDoc::new("reader");
+    existing_copy(&mut doc, "sp-a", "dev-a", "/a/flint", 1_000_000_000_000, Some(("Chosen", 1_000_000_000_100)), None);
+    let mut folder = space("sp-b", "dev-b", "/b/flint");
+    folder.name = Some("flint".into());
+    folder.repository_id = Some(REPOSITORY.into());
+    doc.upsert_space(&folder).unwrap();
+    assert_eq!(shown_name(&doc, "sp-b"), "Chosen");
+
+    // A name migrated from before the registry shares one clock with its row,
+    // and is someone's choice: it still counts.
+    let mut doc = RegistryDoc::new("reader");
+    let migrated = encode_hlc(1_000_000_000_500, 0, "migration");
+    doc.enqueue_ops(vec![RowOp {
+        kind: KIND_SPACES.into(),
+        id: "sp-m".into(),
+        op: OpKind::Upsert,
+        set: Some(fields([
+            ("id", json!("sp-m")),
+            ("deviceId", json!("dev-m")),
+            ("path", json!("/m/flint")),
+            ("name", json!("Migrated")),
+            ("repositoryId", json!(REPOSITORY)),
+            ("createdAt", json!(1_500)),
+        ])),
+        hlc: migrated,
+        clocks: None,
+    }]);
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    assert_eq!(shown_name(&doc, "sp-a"), "Migrated");
+}
+
+#[test]
+fn local_and_folder_projects_keep_their_own_name_and_icon() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let local = Some("local:abc");
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    add_copy(&mut a, "local-a", "/a/scratch", local);
+    add_copy(&mut b, "local-b", "/b/scratch", local);
+    a.upsert_space(&space("folder-a", "dev-a", "/a/notes")).unwrap();
+    b.upsert_space(&space("folder-b", "dev-b", "/b/notes")).unwrap();
+    a.rename_space("local-a", Some("Mine")).unwrap();
+    a.set_space_icon("local-a", Some(&rocket())).unwrap();
+    a.rename_space("folder-a", Some("My notes")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    for doc in [&a, &b] {
+        assert_eq!(shown_name(doc, "local-a"), "Mine", "shown everywhere, as ever");
+        assert_eq!(shown_emoji(doc, "local-a").as_deref(), Some("🚀"));
+        assert_eq!(shown_name(doc, "local-b"), "scratch");
+        assert_eq!(shown_emoji(doc, "local-b"), None);
+        assert_eq!(shown_name(doc, "folder-a"), "My notes");
+        assert_eq!(shown_name(doc, "folder-b"), "notes");
+    }
+}
+
+#[test]
+fn an_older_engine_writing_only_its_own_row_still_reaches_every_copy() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    add_copy(&mut doc, "sp-b", "/b/flint", Some(REPOSITORY));
+    assert!(doc.rename_space("sp-a", Some("From a new engine")).unwrap());
+    doc.set_space_icon("sp-a", Some(&rocket())).unwrap();
+
+    // What 0.2.126 (or a Cloud runner, refused the look row) writes.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    doc.write(KIND_SPACES, "sp-b", OpKind::Update, fields([("name", json!("From an old engine"))]));
+    assert_eq!(shown_name(&doc, "sp-a"), "From an old engine");
+
+    // Its clear is a clock on its own row too, and only a later one.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    doc.write(KIND_SPACES, "sp-b", OpKind::Update, fields([("icon", Value::Null)]));
+    assert_eq!(shown_emoji(&doc, "sp-a"), None);
+}
+
+#[test]
+fn an_older_engine_still_reads_the_name_and_icon_on_the_row_they_were_set_on() {
+    // It reads a Space's row and nothing else, so the row a device changed
+    // carries the change, and no other copy's row is touched.
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    add_copy(&mut doc, "sp-b", "/b/flint", Some(REPOSITORY));
+    let before = doc.overlay_row(KIND_SPACES, "sp-b").unwrap();
+    doc.rename_space("sp-a", Some("Flint")).unwrap();
+    doc.set_space_icon("sp-a", Some(&rocket())).unwrap();
+
+    let own = doc.overlay_row(KIND_SPACES, "sp-a").unwrap();
+    assert_eq!(own.fields.get("name"), Some(&json!("Flint")));
+    assert_eq!(own.fields.get("icon"), Some(&json!(rocket())));
+    assert_eq!(doc.overlay_row(KIND_SPACES, "sp-b").unwrap(), before);
+}
+
+#[test]
+fn a_look_outlives_a_deleted_copy_and_comes_back_with_the_next() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    doc.rename_space("sp-a", Some("Flint")).unwrap();
+    doc.delete_space("sp-a").unwrap();
+    assert!(doc.read_spaces().unwrap().is_empty());
+    add_copy(&mut doc, "sp-b", "/b/flint", Some(REPOSITORY));
+    assert_eq!(shown_name(&doc, "sp-b"), "Flint");
+}
+
+#[test]
+fn an_unreadable_look_never_loses_a_project_row() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    doc.rename_space("sp-a", Some("Flint")).unwrap();
+    doc.set_space_icon("sp-a", Some(&rocket())).unwrap();
+    // A later writer's values this build can't read: every look row replaced.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    for row in doc.overlay_rows("repositoryLooks") {
+        doc.write(&row.kind, &row.id, OpKind::Update, fields([("name", json!(7)), ("icon", json!("🚀"))]));
+    }
+    assert_eq!(doc.read_spaces().unwrap().len(), 1);
+    assert_eq!(shown_name(&doc, "sp-a"), "Flint");
+    assert_eq!(shown_emoji(&doc, "sp-a").as_deref(), Some("🚀"));
+
+    // Nothing readable left at all: no icon, and still the row.
+    doc.write(KIND_SPACES, "sp-a", OpKind::Update, fields([("icon", json!({ "image": "file:///etc/passwd" }))]));
+    assert_eq!(doc.read_spaces().unwrap().len(), 1);
+    assert_eq!(shown_emoji(&doc, "sp-a"), None);
+}
