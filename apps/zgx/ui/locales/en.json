@@ -2546,7 +2546,8 @@
         "tomorrow": "Tomorrow",
         "next_week": "Next week",
         "custom": "Custom…",
-        "custom_title": "Sleep until"
+        "custom_title": "Sleep until",
+        "wakes": "Wakes {day}, {date} at {time}"
       },
       "stop_waiting": "Stop waiting",
       "stop_waiting_failed": "Couldn't stop waiting"

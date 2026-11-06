@@ -1,10 +1,12 @@
 -- A date picker: a month of days to choose one from, and the time of day
--- under it. The month's name heads it with the previous and next month
--- beside; then the weekdays, and six weeks of days (the month's, and the
--- ends of the months either side, quieter). Today's number is in the
--- accent; the chosen day takes the menus' selected wash, as a sidebar's
--- chosen row does, never a ring. Days before `min` can't be chosen, nor
--- times before it on its day.
+-- under it, as wide as where it's put. The month's name heads it, the
+-- previous and next month at its end; then the weekdays, and the month's
+-- days in seven even columns (six rows always, so it never changes height;
+-- the days of the months either side left blank). Today wears a dot of the
+-- accent under its number; the chosen day the segmented control's selected
+-- wash, flat. Days before `min` read disabled and can't be chosen, nor
+-- times before it on its day. The time of day stands on a row of its own
+-- under a hairline.
 --
 --   DatePicker { value = state, min = os.time(), on_change = function(at) … end }
 --
@@ -43,9 +45,8 @@ export type Props = {
 }
 
 local DAY = 86400
--- A day's square, and the gap between days (zeron.space.hair, in points
--- for the width sum).
-local CELL = 32
+-- A day's square: its wash, as tall as a row of the grid.
+local CELL = 36
 local WEEKS = 6
 -- The times of day offered, minutes apart.
 local STEP = 15
@@ -133,7 +134,6 @@ return ui.component(function(props: Props): Node
 	local value = props.value
 	local base = props.id or "date-picker"
 	local with_time = props.time ~= false
-	local hair = ui.theme.get("zeron.space.hair") :: number
 
 	-- The earliest moment that can be chosen (nil: any), and its day (NONE).
 	local function min_at(): number?
@@ -210,7 +210,8 @@ return ui.component(function(props: Props): Node
 		day = math.max(day, min_day:peek())
 		local m = month_of(day)
 		local s = grid_start(month:peek())
-		if day < s or day >= s + WEEKS * 7 then
+		-- (Another month's day, here or past the grid: its month first.)
+		if m ~= month:peek() then
 			month:set(m)
 			s = grid_start(m)
 		end
@@ -238,83 +239,108 @@ return ui.component(function(props: Props): Node
 			return day() < min_day:get()
 		end
 		local function on(): boolean
-			return chosen:get() == day()
+			return chosen:get() == day() and not outside()
 		end
+		-- (Each column as wide as the others; the day's square in its middle.)
 		return ui.div {
-			on_mount = function(el: Element)
-				cells[i] = el
-			end,
-			id = `{base}-day-{i}`,
-			role = "gridcell",
-			focusable = true,
-			label = function(): string
-				return locale.date(at(day(), 12 * 60))
-			end,
-			selected = on,
-			disabled = blocked,
-			w = CELL,
+			grow = 1,
+			basis = 0,
+			min_w = 0,
 			h = CELL,
 			items = "center",
 			justify = "center",
-			rounded = "$radius.md",
-			cursor = function(): any
-				return if blocked() then "default" else "pointer"
-			end,
-			bg = function(): Color
-				return if on() then "$zeron.menu.selected" else "#00000000"
-			end,
-			hover = { bg = "$hover" },
-			active = { bg = "$pressed" },
-			focus = control.ring,
-			on_click = function()
-				pick(day())
-			end,
-			on_key = function(e: KeyEvent): boolean
-				local d = day()
-				local k = e.key
-				if k == "Enter" or k == " " then
-					pick(d)
-				elseif k == "ArrowLeft" then
-					go(d - 1)
-				elseif k == "ArrowRight" then
-					go(d + 1)
-				elseif k == "ArrowUp" then
-					go(d - 7)
-				elseif k == "ArrowDown" then
-					go(d + 7)
-				elseif k == "Home" then
-					go(d - (weekday(d) - first_weekday:peek()) % 7)
-				elseif k == "End" then
-					go(d + 6 - (weekday(d) - first_weekday:peek()) % 7)
-				elseif k == "PageUp" then
-					go(months_on(d, -1))
-				elseif k == "PageDown" then
-					go(months_on(d, 1))
-				else
-					return false
-				end
-				return true
-			end,
-			ui.text {
-				function(): string
-					local _, _, d = civil(day())
-					return tostring(d)
+			ui.div {
+				on_mount = function(el: Element)
+					cells[i] = el
 				end,
-				text_size = "$font.size.sm",
-				tabular = true,
-				weight = function(): any
-					return if day() == today or on() then "$font.weight.medium" else "$font.weight.regular"
+				id = `{base}-day-{i}`,
+				role = "gridcell",
+				focusable = true,
+				label = function(): string
+					return if outside() then "" else locale.date(at(day(), 12 * 60))
 				end,
-				color = function(): Color
-					if blocked() then
-						return "$text.disabled"
-					elseif day() == today then
-						return "$accent"
-					elseif outside() then
-						return "$text.tertiary"
+				selected = on,
+				disabled = function(): boolean
+					return blocked() or outside()
+				end,
+				w = CELL,
+				h = CELL,
+				relative = true,
+				items = "center",
+				justify = "center",
+				rounded = "$radius.md",
+				-- (Another month's day: nothing, and nothing to press.)
+				opacity = function(): number
+					return if outside() then 0 else 1
+				end,
+				pointer_events = function(): any
+					return if outside() or blocked() then "none" else "auto"
+				end,
+				cursor = "pointer",
+				bg = function(): Color
+					return if on() then "$zeron.segmented.thumb" else "#00000000"
+				end,
+				hover = { bg = "$hover" },
+				active = { bg = "$pressed" },
+				focus = control.ring,
+				on_click = function()
+					if not outside() then
+						pick(day())
 					end
-					return "$text.primary"
 				end,
+				on_key = function(e: KeyEvent): boolean
+					local d = day()
+					local k = e.key
+					if k == "Enter" or k == " " then
+						pick(d)
+					elseif k == "ArrowLeft" then
+						go(d - 1)
+					elseif k == "ArrowRight" then
+						go(d + 1)
+					elseif k == "ArrowUp" then
+						go(d - 7)
+					elseif k == "ArrowDown" then
+						go(d + 7)
+					elseif k == "Home" then
+						go(d - (weekday(d) - first_weekday:peek()) % 7)
+					elseif k == "End" then
+						go(d + 6 - (weekday(d) - first_weekday:peek()) % 7)
+					elseif k == "PageUp" then
+						go(months_on(d, -1))
+					elseif k == "PageDown" then
+						go(months_on(d, 1))
+					else
+						return false
+					end
+					return true
+				end,
+				ui.text {
+					function(): string
+						local _, _, d = civil(day())
+						return tostring(d)
+					end,
+					text_size = "$font.size.md",
+					tabular = true,
+					weight = function(): any
+						return if on() then "$font.weight.semibold" else "$font.weight.regular"
+					end,
+					color = function(): Color
+						return if blocked() then "$text.disabled" else "$text.primary"
+					end,
+				},
+				-- Today: a dot of the accent under its number.
+				ui.div {
+					absolute = true,
+					bottom = 5,
+					w = 4,
+					h = 4,
+					rounded = "$radius.full",
+					bg = "$accent",
+					opacity = function(): number
+						return if day() == today and not outside() then 1 else 0
+					end,
+					aria_hidden = true,
+				},
 			},
 		}
 	end
@@ -327,7 +353,9 @@ return ui.component(function(props: Props): Node
 				function(): string
 					return locale.s("time.weekday_short", { d = tostring((first_weekday:get() + i - 2) % 7 + 1) })
 				end,
-				w = CELL,
+				grow = 1,
+				basis = 0,
+				min_w = 0,
 				align = "center",
 				text_size = "$font.size.xs",
 				weight = "$font.weight.medium",
@@ -336,9 +364,19 @@ return ui.component(function(props: Props): Node
 			}
 		)
 	end
-	local grid: { Node } = {}
-	for i = 1, WEEKS * 7 do
-		table.insert(grid, cell(i))
+	-- Its weeks: a sixth only for a month that reaches into it (no row of
+	-- blanks under a month of five).
+	local six = ui.computed(function(): boolean
+		return first_of(month:get() + 1) > start:get() + 35
+	end)
+	local rows: { Node } = {}
+	for week = 0, WEEKS - 1 do
+		local row: { Node } = {}
+		for d = 1, 7 do
+			table.insert(row, cell(week * 7 + d))
+		end
+		local r = ui.row { w_full = true, role = "row", table.unpack(row) }
+		table.insert(rows, if week == WEEKS - 1 then ui.show(six, r) else r)
 	end
 
 	-- The time of day: the value's own minute, read and written through it
@@ -401,14 +439,17 @@ return ui.component(function(props: Props): Node
 	local before_min = function(): boolean
 		return first_of(month:get()) <= min_day:get()
 	end
+	-- (The arrows' ink on the grid's edge, as Settings' chevrons sit on a
+	-- control's: pulled out by their button's inset and the glyph's own
+	-- margin, measured.)
+	local nudge = ui.raw(-10, "an icon button's inset and its chevron's margin: the ink on the grid's edge")
 
 	return ui.column {
-		w = CELL * 7 + hair * 6,
-		gap = "$space.2",
+		w_full = true,
+		gap = "$space.3",
 		ui.row {
 			w_full = true,
 			items = "center",
-			gap = "$space.1",
 			ui.text {
 				function(): string
 					local m = month:get()
@@ -416,59 +457,81 @@ return ui.component(function(props: Props): Node
 				end,
 				id = `{base}-title`,
 				grow = 1,
+				min_w = 0,
 				text_size = "$font.size.md",
-				weight = "$font.weight.medium",
+				weight = "$font.weight.semibold",
 				color = "$text.primary",
 				live = "polite",
 			},
-			IconButton {
-				id = `{base}-previous`,
-				icon = "alt-arrow-left",
-				label = locale.t("ds.date_picker.previous_month"),
-				tooltip = false,
-				disabled = before_min,
-				on_click = function()
-					if not before_min() then
-						month:set(month:peek() - 1)
-					end
-				end,
-			},
-			IconButton {
-				id = `{base}-next`,
-				icon = "alt-arrow-right",
-				label = locale.t("ds.date_picker.next_month"),
-				tooltip = false,
-				on_click = function()
-					month:set(month:peek() + 1)
-				end,
+			ui.row {
+				shrink = 0,
+				items = "center",
+				mr = nudge,
+				IconButton {
+					id = `{base}-previous`,
+					icon = "alt-arrow-left",
+					label = locale.t("ds.date_picker.previous_month"),
+					tooltip = false,
+					disabled = before_min,
+					on_click = function()
+						if not before_min() then
+							month:set(month:peek() - 1)
+						end
+					end,
+				},
+				IconButton {
+					id = `{base}-next`,
+					icon = "alt-arrow-right",
+					label = locale.t("ds.date_picker.next_month"),
+					tooltip = false,
+					on_click = function()
+						month:set(month:peek() + 1)
+					end,
+				},
 			},
 		},
 		ui.column {
+			w_full = true,
 			gap = "$space.1",
-			ui.row { gap = "$zeron.space.hair", aria_hidden = true, table.unpack(heads) },
-			ui.div {
+			ui.row { w_full = true, aria_hidden = true, table.unpack(heads) },
+			ui.column {
+				w_full = true,
 				role = "grid",
 				label = props.label or locale.t("ds.date_picker.label"),
-				grid = true,
-				cols = 7,
-				gap = "$zeron.space.hair",
 				focus_group = "both",
-				table.unpack(grid),
+				table.unpack(rows),
 			},
 		},
 		if with_time
-			then ui.div {
-				id = `{base}-time`,
+			then ui.column {
 				w_full = true,
-				Select {
-					value = time_of_day :: any,
-					options = function(): { any }
-						return times:get()
-					end,
-					name = locale.t("ds.date_picker.time"),
-					placeholder = locale.t("ds.date_picker.time"),
-					size = "sm",
+				gap = "$space.3",
+				ui.div { h = 1, w_full = true, shrink = 0, bg = "$border.subtle", aria_hidden = true },
+				ui.row {
 					w_full = true,
+					items = "center",
+					gap = "$space.3",
+					ui.text {
+						locale.t("ds.date_picker.time"),
+						grow = 1,
+						min_w = 0,
+						text_size = "$font.size.md",
+						color = "$text.secondary",
+					},
+					ui.div {
+						id = `{base}-time`,
+						w = 132,
+						shrink = 0,
+						Select {
+							value = time_of_day :: any,
+							options = function(): { any }
+								return times:get()
+							end,
+							name = locale.t("ds.date_picker.time"),
+							size = "sm",
+							w_full = true,
+						},
+					},
 				},
 			}
 			else nil,

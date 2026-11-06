@@ -1147,8 +1147,11 @@ local function menu(id: string): { any }?
 			table.insert(times, {
 				label = locale.s("shell.activity.sleep.custom"),
 				on_select = function()
+					-- (It opens on tomorrow at 9: a time already chosen,
+					-- moved from there.)
+					local d = os.date("*t") :: any
 					sleep_custom:set(id)
-					sleep_custom_at:set(nil)
+					sleep_custom_at:set(activity.local_time({ year = d.year, month = d.month, day = d.day + 1, hour = 9, min = 0, sec = 0 }))
 					sleep_custom_open:set(true)
 				end,
 			})
@@ -1475,15 +1478,38 @@ local function sleep_dialog(): Node
 				end
 			end,
 		},
-		-- (Built as it opens: its month of days is nothing to keep.)
+		-- (Built as it opens: its month of days is nothing to keep.) Under
+		-- it, when that is, in words.
 		build = function(): Node
-			return ds.DatePicker {
-				id = "sleep-custom",
-				value = sleep_custom_at,
-				min = function(): number
-					return os.time() + 60
-				end,
-				label = ui.t("shell.activity.sleep.custom_title") :: any,
+			return ui.column {
+				w_full = true,
+				gap = "$space.4",
+				ds.DatePicker {
+					id = "sleep-custom",
+					value = sleep_custom_at,
+					min = function(): number
+						return os.time() + 60
+					end,
+					label = ui.t("shell.activity.sleep.custom_title") :: any,
+				},
+				ui.text {
+					function(): string
+						local at = sleep_custom_at:get()
+						if not at then
+							return ""
+						end
+						return locale.s("shell.activity.sleep.wakes", {
+							day = locale.weekday(at),
+							date = locale.month_day(at),
+							time = locale.clock(at),
+						})
+					end,
+					id = "sleep-custom-wakes",
+					w_full = true,
+					wrap = true,
+					text_size = "$font.size.md",
+					color = "$text.secondary",
+				},
 			}
 		end,
 	}
