@@ -30,6 +30,7 @@ beta = []
 layout_probe = []
 
 [dependencies]
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
 zgx = { git = "https://github.com/zeronsh/zgx", rev = "88ff58c08b6318eb2e05bb2a22128fefdfca8db9" }
 # `mimalloc`: the program's allocator, in place of the system's. It hands
 # freed memory back to the system (the system's keeps the most it ever
