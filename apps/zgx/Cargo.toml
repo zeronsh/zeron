@@ -159,7 +159,7 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "88ff58c08b6318eb2
 # 11 (and with Edge on Windows 10); without it, pages are placeholders.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading"] }
-zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "0f0aa6a13a30631067cb857d82d788ab6244717b", features = ["webview2"] }
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "88ff58c08b6318eb2e05bb2a22128fefdfca8db9", features = ["webview2"] }
 
 # The Windows beta's icon (build.rs), as apps/zeron embeds it.
 [target.'cfg(windows)'.build-dependencies]
