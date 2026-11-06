@@ -398,6 +398,16 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
         await step.do("mark-refused", DO_STEP, () => account.wfWakeRefused(p.chatId, p.generation, refused));
         return;
       }
+      // A machine that came up with no engine bills until its TTL, for a chat
+      // that reads `error`. A send resumes it just the same from stopped.
+      await step.do("stop-after-failure", PROVIDER_STEP, async () => {
+        try {
+          await requireProvider(this.env, p.provider).stop(p.sandboxId);
+        } catch (stop) {
+          console.warn("cloud wake: stopping after a failed wake failed", String(stop));
+        }
+        return true;
+      });
       await step.do("mark-error", DO_STEP, () => account.wfFailed(p.chatId, p.generation, failureMessage(e)));
     }
   }

@@ -131,6 +131,18 @@ describe("a send recovers a session in error", () => {
     expect(back.error).toBeUndefined();
   });
 
+  it("doesn't leave a machine billing behind a wake that failed", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    await putToSleep(u, s.chatId);
+    await boatControl("__fail", { sandboxId: s.sandboxId, op: "resume", status: 400, code: "sleep_timed_out" });
+    const stopsBefore = (await boatState()).calls.filter((c) => c.sandboxId === s.sandboxId && c.path.endsWith("/stop")).length;
+    await wake(u, s.chatId);
+    await waitForSession(u, s.chatId, "error");
+    const stops = (await boatState()).calls.filter((c) => c.sandboxId === s.sandboxId && c.path.endsWith("/stop"));
+    expect(stops.length).toBe(stopsBefore + 1);
+  });
+
   it("leaves a failure a retry can't fix alone", async () => {
     const u = newUser();
     const s = await blockedSession(u);
