@@ -19,6 +19,8 @@
 //!   through, and the sentence a refused plugin gets.
 //! - [`frame`] — the frame pump: one script-driven frame per shown window,
 //!   the per-callback CPU budget, and the errors that keep the plugin loaded.
+//! - [`input`] — the window's own pointer events → Dear ImGui's IO, so a
+//!   widget the plugin drew answers the pointer over it.
 //!
 //! The frame is split the way the window and script layers need it:
 //! [`runtime::WindowContext::prepare`] copies a finished frame off the
@@ -27,14 +29,15 @@
 //! touches the context). [`render::ImguiViewport`] is the zgx `Viewport` a
 //! plugin window draws through.
 //!
-//! Not here yet: the frame pump and the widget bindings. They call this
-//! module, not the other way round: [`window::Windows`] makes the native
-//! windows, [`PluginWindow`] is what the pump prepares frames for, and
-//! [`luau`] serves the window ops to a plugin's script.
+//! Not here yet: the rest of the widget bindings. They call this module, not
+//! the other way round: [`window::Windows`] makes the native windows,
+//! [`PluginWindow`] is what the pump prepares frames for, and [`luau`] serves
+//! the window ops to a plugin's script.
 
 #![allow(dead_code)]
 
 pub mod frame;
+pub mod input;
 pub mod luau;
 pub mod permission;
 pub mod render;

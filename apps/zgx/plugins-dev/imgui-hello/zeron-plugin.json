@@ -1,0 +1,8 @@
+{
+  "id": "imgui-hello",
+  "name": "ImGui Hello",
+  "version": "1.0.0",
+  "description": "A native window drawn from Luau: text and a button that prints. The smallest plugin allowed to open Dear ImGui windows.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"]
+}

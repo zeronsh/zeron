@@ -1,4 +1,6 @@
 mod frame_tests;
+mod hello_tests;
+mod input_tests;
 mod permission_tests;
 mod render_tests;
 mod runtime_tests;

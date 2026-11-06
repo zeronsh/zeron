@@ -309,6 +309,29 @@ pub(super) fn shell_with(items: Vec<Item>, github: World) -> (TestApp, Heard) {
                 host.action(key.clone(), move |v: zgx_script::Value| heard.borrow_mut().push((key.clone(), v.to_json())));
             }
             {
+                // (The host side of a plugin's native window — "imgui.windows"
+                // — so an example that opens one loads headless too: the test
+                // plays the window and widget ops the app would serve.)
+                let (heard, key) = (heard.clone(), format!("plugin.{id}.imgui"));
+                host.expose_action(key.clone(), None);
+                let told = heard.clone();
+                let name = key.clone();
+                host.function(key.clone(), move |arg| {
+                    let asked: serde_json::Value = serde_json::from_str(&arg.to_json()).unwrap_or_default();
+                    told.borrow_mut().push((name.clone(), asked.to_string()));
+                    let answer = match asked["op"].as_str().unwrap_or_default() {
+                        "open_window" => json!({ "ok": true, "id": asked["id"] }),
+                        "button" => json!({ "ok": true, "value": false }),
+                        "text" => json!({ "ok": true, "min": { "x": 0.0, "y": 0.0 }, "max": { "x": 100.0, "y": 18.0 } }),
+                        _ => json!({ "ok": true }),
+                    };
+                    json_value(&answer)
+                });
+                let (heard, key) = (heard.clone(), format!("plugin.{id}.imgui_end"));
+                host.expose_action(key.clone(), None);
+                host.action(key.clone(), move |v: zgx_script::Value| heard.borrow_mut().push((key.clone(), v.to_json())));
+            }
+            {
                 // (Storage as the host keeps it: written, then published.)
                 let store = host.shared(&format!("plugin.{id}.store"), json_value(&serde_json::json!({})));
                 host.action(format!("plugin.{id}.store_set"), move |v: zgx_script::Value| {
@@ -390,6 +413,31 @@ fn focus_shows_only_what_s_working_or_needs_you() {
     assert_eq!(app.host.shared("sidebar.filter", zgx_script::Value::Nil).signal().get(), zgx_script::Value::Nil);
 }
 
+/// The native-window example loads in the shell with no script error and asks
+/// for its one window, with the id, title and size the folder documents. The
+/// shell plays the `imgui.windows` host side, so this is the loading half;
+/// the real window is `imgui::tests::hello_tests` and the app itself.
+#[test]
+fn the_imgui_hello_example_asks_for_its_window() {
+    let (app, heard) = shell_with(vec![example("imgui-hello")], world(json!({ "viewer": "ada" })));
+    assert_eq!(app.error(), None, "the shell with the example failed: {:?}", app.error());
+    let asked: Vec<serde_json::Value> = heard
+        .borrow()
+        .iter()
+        .filter(|(key, _)| key == "plugin.imgui-hello.imgui")
+        .filter_map(|(_, value)| serde_json::from_str(value).ok())
+        .collect();
+    let opened: Vec<&serde_json::Value> = asked.iter().filter(|a| a["op"] == "open_window").collect();
+    assert_eq!(opened.len(), 1, "exactly one window: {asked:?}");
+    assert_eq!(opened[0]["id"], json!("hello"), "{}", opened[0]);
+    assert_eq!(opened[0]["title"], json!("Hello from Luau"), "{}", opened[0]);
+    assert_eq!(opened[0]["size"]["width"].as_f64(), Some(520.0), "{}", opened[0]);
+    assert_eq!(opened[0]["size"]["height"].as_f64(), Some(300.0), "{}", opened[0]);
+    assert!(
+        asked.iter().any(|a| a["op"] == "render" && a["window"] == json!("hello") && a["on"] == json!(true)),
+        "it registered its render callback: {asked:?}"
+    );
+}
 
 /// A branch's pull request as GitHub's GraphQL gives it (the badges'
 /// fields), `extra` laid over it.

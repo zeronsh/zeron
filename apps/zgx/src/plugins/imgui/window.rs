@@ -617,6 +617,22 @@ impl PluginWindow {
         }
     }
 
+    /// Feeds one event this window's content received into its Dear ImGui IO,
+    /// and asks for a frame when what is drawn changed. The framework routes
+    /// each window's document events to that window's own view, so input from
+    /// one plugin window never reaches another's.
+    pub fn pointer(&self, event: &zgx::input::InputEvent) {
+        if !self.is_shown() {
+            return;
+        }
+        let changed = self
+            .with_context(|context| super::input::pointer(context, event))
+            .unwrap_or(false);
+        if changed {
+            self.request_frame();
+        }
+    }
+
     /// Runs `f` with the window's Dear ImGui context. None when the window
     /// closed and its context went with it.
     pub fn with_context<R>(&self, f: impl FnOnce(&mut ImGuiContext) -> R) -> Option<R> {
@@ -844,6 +860,16 @@ fn build_content(
             .w_full()
             .h_full()
             .focusable(true)
+            // The window's own pointer events go to its Dear ImGui context:
+            // only this window's view is mounted in this window's document.
+            .on_document_event({
+                let slot = slot.clone();
+                move |event: &zgx::input::InputEvent| {
+                    if let Some(window) = slot.borrow().clone() {
+                        window.pointer(event);
+                    }
+                }
+            })
             // The content, not a control inside it, takes the keyboard: focus
             // once it is laid out (a node nothing has laid out cannot take
             // focus yet).

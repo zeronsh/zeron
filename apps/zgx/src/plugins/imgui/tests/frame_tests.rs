@@ -14,11 +14,13 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use dear_imgui_rs::{Io, MouseButton};
+use zgx::input::{InputEvent, PointerButton};
 use zgx_gpu::wgpu;
 use zgx_script::Value;
 
 use super::support::{TestGpu, headless_gpu, imgui_guard};
 use crate::plugins::imgui::frame::{self, FrameCalls, FrameEnd, FrameState, FrameWindow};
+use crate::plugins::imgui::input;
 use crate::plugins::imgui::render::{PreparedFrame, WgpuRenderer};
 use crate::plugins::imgui::runtime::{FrameSpec, WindowContext};
 use crate::plugins::imgui::snapshot::{self, OffscreenTarget, Snapshot};
@@ -443,6 +445,94 @@ fn button_fires_on_release_and_not_on_press() {
         assert!(!seen.borrow()[frame - 1], "frame {frame} is not a click");
     }
     assert_eq!(clicks.get(), 1, "one press and release is one click");
+}
+
+// The same click, driven by the window's own document events through
+// `input::apply`: the chain a real pointer takes (move, down, up) — no
+// desktop needed.
+#[test]
+fn the_window_s_pointer_events_click_a_button() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("mapped");
+    let rect = Rc::new(RefCell::new((0.0, 0.0, 0.0, 0.0)));
+    let clicks = Rc::new(Cell::new(0));
+
+    let draw = {
+        let (rect, clicks) = (rect.clone(), clicks.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frames
+                .widget(
+                    probe,
+                    "button",
+                    seq,
+                    &Value::record([("label", Value::from("Click me"))]),
+                )
+                .expect("a button call");
+            *rect.borrow_mut() = rect_of(&answer);
+            if matches!(answer.field("value"), Some(Value::Bool(true))) {
+                clicks.set(clicks.get() + 1);
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+
+    // The pointer moves over the button: hover, not a click.
+    probe.edit_io(|io| {
+        input::apply(io, &InputEvent::PointerMove { x, y });
+    });
+    run_frame(&probe, draw.clone()).expect("frame 1");
+    assert_eq!(clicks.get(), 0, "moving onto a button is not a click");
+
+    // The press alone: still not a click.
+    probe.edit_io(|io| {
+        input::apply(
+            io,
+            &InputEvent::PointerDown {
+                x,
+                y,
+                button: PointerButton::Primary,
+            },
+        );
+    });
+    run_frame(&probe, draw.clone()).expect("frame 2");
+    assert_eq!(clicks.get(), 0, "a press alone is not a click");
+
+    // The release: the click.
+    probe.edit_io(|io| {
+        input::apply(
+            io,
+            &InputEvent::PointerUp {
+                x,
+                y,
+                button: PointerButton::Primary,
+            },
+        );
+    });
+    run_frame(&probe, draw.clone()).expect("frame 3");
+    assert_eq!(clicks.get(), 1, "the release is the click");
+
+    // A pointer taken out of the window mid-press does not click either.
+    probe.edit_io(|io| {
+        input::apply(
+            io,
+            &InputEvent::PointerDown {
+                x,
+                y,
+                button: PointerButton::Primary,
+            },
+        );
+    });
+    run_frame(&probe, draw.clone()).expect("frame 4");
+    probe.edit_io(|io| {
+        input::apply(io, &InputEvent::PointerCancel);
+    });
+    run_frame(&probe, draw.clone()).expect("frame 5");
+    assert_eq!(clicks.get(), 1, "a cancelled press is not a click");
 }
 
 // VAL-WIDGET-022: a widget called with no live frame errors instead of
