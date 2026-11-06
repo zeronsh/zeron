@@ -2066,8 +2066,15 @@ impl ProcessRunner for SystemProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command
-            .spawn()
+        // `spawn` blocks its thread, and on Windows the standard library runs
+        // every process creation in the engine behind one lock. On a runtime
+        // worker, one slow `CreateProcessW` (often over half a second) parks
+        // every other worker queued behind it, and the engine stops answering
+        // anything. On the blocking pool only these launches wait. If this
+        // call is dropped first, the finished spawn's child drops and is killed.
+        let mut child = tokio::task::spawn_blocking(move || command.spawn())
+            .await
+            .map_err(|_| ProcessRunError::Spawn(io::ErrorKind::Other))?
             .map_err(|error| ProcessRunError::Spawn(error.kind()))?;
         let stdout = child.stdout.take().ok_or(ProcessRunError::Io)?;
         let stderr = child.stderr.take().ok_or(ProcessRunError::Io)?;

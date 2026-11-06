@@ -348,7 +348,7 @@ impl Repos {
 
     /// Async existence probe with a timeout: a wedged network mount just reads
     /// as "gone" instead of hanging every caller.
-    async fn path_exists(path: &Path) -> bool {
+    pub(crate) async fn path_exists(path: &Path) -> bool {
         let path = path.to_path_buf();
         matches!(
             tokio::time::timeout(PATH_EXISTS_TIMEOUT, tokio::fs::metadata(path)).await,
@@ -1329,6 +1329,20 @@ impl Repos {
                 .filter_map(|path| std::fs::canonicalize(path).ok())
                 .any(|path| path == candidate)
                 .then_some(candidate)
+        })
+        .await
+        .flatten()
+    }
+
+    /// [`Self::workspace_checkout`] for a folder that is not a repository: it
+    /// has no linked worktrees, so only the folder itself matches, and no git
+    /// runs. Resolved on a disposable thread for the same dead-mount reason.
+    pub(crate) async fn same_folder(&self, folder: &Path, candidate: &Path) -> Option<PathBuf> {
+        let folder = folder.to_path_buf();
+        let candidate = candidate.to_path_buf();
+        disposable_worker("folder-auth", move || {
+            let candidate = std::fs::canonicalize(candidate).ok()?;
+            (std::fs::canonicalize(folder).ok()? == candidate).then_some(candidate)
         })
         .await
         .flatten()
