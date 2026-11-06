@@ -99,6 +99,10 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Watches a new version while it proves itself after an update: started by
+    /// the old version just before it hands over.
+    #[command(name = "update-watchdog", hide = true)]
+    UpdateWatchdog,
 }
 
 #[derive(Subcommand)]
@@ -283,6 +287,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
                 .map_err(anyhow::Error::from)
                 .and_then(|runtime| runtime.block_on(update_cli::update(&edge_url_from_env(), check))),
         ),
+        Some(Command::UpdateWatchdog) => Launch::Done(zeron_update::transaction::run_watchdog()),
         Some(Command::Daemon { command }) => Launch::Done(match command {
             DaemonCommand::Install => daemon::install(&paths::data_dir()),
             DaemonCommand::Uninstall => daemon::uninstall(),
@@ -313,7 +318,7 @@ impl Command {
             | Self::Template { .. } => true,
             #[cfg(target_os = "linux")]
             Self::Appshot => false,
-            Self::Update { .. } | Self::Daemon { .. } => false,
+            Self::Update { .. } | Self::UpdateWatchdog | Self::Daemon { .. } => false,
         }
     }
 }

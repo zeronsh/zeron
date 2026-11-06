@@ -204,6 +204,7 @@ impl Engine {
         let config = self.config;
         tracing::info!(data_dir = %config.data_dir.display(), port = config.ipc_port, "background engine starting");
         std::fs::create_dir_all(&config.data_dir)?;
+        crate::update_trial::boot(&config.data_dir)?;
         let lock = acquire_lock(&config.data_dir).await?;
         desktop_notify::enable();
 
@@ -242,6 +243,13 @@ impl Engine {
             Ok(())
         });
         let uninstalled_stop = stop_tx.clone();
+        // Signed in with no organization chosen, there's no profile to open
+        // (maybe for a long while), and so nothing a trial could migrate:
+        // answering on the port is all it can prove.
+        if !engine.profile_is_resolved {
+            crate::update_trial::commit_without_a_profile(&config);
+        }
+        let trial_config = config.clone();
         let boot = engine.spawn_boot(
             config.clone(),
             lock,
@@ -251,6 +259,7 @@ impl Engine {
                     updater.restart_when_superseded();
                 }
                 stop_when_uninstalled(runtime, uninstalled_stop);
+                crate::update_trial::prove_and_commit(runtime.core(), &trial_config);
             },
         );
 
@@ -290,6 +299,12 @@ impl Engine {
         if let Some(runtime) = runtime {
             runtime.shutdown().await;
         }
+        // macOS: the engine never starts its successor as a new process, so an
+        // update asked of it happens here, in this one, with the data directory
+        // let go. Without an update this does nothing. (Elsewhere a relaunch has
+        // already started the process that does this on its way up.)
+        #[cfg(target_os = "macos")]
+        crate::update_trial::boot(&config.data_dir)?;
         outcome
     }
 }
