@@ -1776,7 +1776,11 @@ impl DocHost {
         // user submitted to this live engine. Keep that recovered work frozen
         // until an explicit prompt / Send now / Steer action thaws it. Rows
         // appended after the handle exists retain the normal automatic drain.
-        let recovered_queue_pending = !initial_queue.is_empty();
+        // Not on a Cloud machine: it restarts on every wake, which nobody there
+        // asked for or sees, and a message queued before a sleep or a kill was
+        // meant to go. It would otherwise wait for a prompt that may never come.
+        let recovered_queue_pending = !initial_queue.is_empty()
+            && !zeron_proto::is_cloud_device(&self.inner.config.device_id, "");
         let (queue_tx, _) = watch::channel(initial_queue);
 
         let handle = Arc::new(ChatDocHandle {

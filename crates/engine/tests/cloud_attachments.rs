@@ -699,6 +699,36 @@ async fn a_queue_row_on_a_cloud_machine_gets_its_bytes_from_the_store() {
     core.shutdown().await;
 }
 
+/// Seen on a real machine: a message queued behind a turn, the machine killed,
+/// and after the wake the row sat there until someone sent another prompt.
+/// Frozen is right for a computer whose user restarted the app, not for a machine
+/// that restarts on every wake.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_on_a_cloud_machines_disk_goes_out_when_it_comes_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("machine");
+    let before = assemble(&dir, HOST, None);
+    create_chat(&before, HOST).await;
+    before.workspace.set_chat_cwd(CHAT, "~").unwrap();
+    before.shutdown().await;
+    drop(before);
+
+    let doc = zeron_doc::SessionDoc::init(CHAT).unwrap();
+    doc.push_queued(&QueuedMessage::new("row-1", "and then this", "phone"))
+        .unwrap();
+    let store = zeron_sync::DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+    store
+        .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+        .unwrap();
+    drop(store);
+
+    let after = assemble(&dir, HOST, None);
+    let handle = after.doc_host.open(CHAT).unwrap();
+    wait_for(|| replies(&after) == 1, "the row to send").await;
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    after.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_computer_hosting_a_chat_never_asks_the_store() {
     let tmp = tempfile::tempdir().unwrap();
