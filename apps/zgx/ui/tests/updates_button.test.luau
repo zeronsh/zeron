@@ -278,7 +278,7 @@ test("a long line fades at its end, beside Skip and its action", function()
 	expect((tonumber(width) or 0) > 340).to_be(true)
 end)
 
-test("Skip stays in one place, whatever the action beside it says", function()
+test("Skip sits before a row's action, and actions keep the row's end", function()
 	local long = row("here", "Muse Code", "muse", "retry")
 	long.phase = "failed"
 	long.message = "it failed"
@@ -288,14 +288,19 @@ test("Skip stays in one place, whatever the action beside it says", function()
 	local app = open({ row("here", "Codex", "codex", "update"), long, going })
 	app:click("#updates-button")
 	app:frames(10)
-	local function right(sel: string): number
+	local function span(sel: string): (number, number)
 		local x, w = string.match(string.match(app:tree(sel), "[^\n]+") or "", " (%-?%d+),%-?%d+ (%d+)x")
-		return (tonumber(x) or 0) + (tonumber(w) or 0)
+		return tonumber(x) or 0, (tonumber(x) or 0) + (tonumber(w) or 0)
 	end
-	expect(right("#update-skip-here:codex")).to_be(right("#update-skip-here:muse"))
-	-- Nothing to skip mid-update, and its action keeps its place.
+	local _, skip_end = span("#update-skip-here:codex")
+	local action_start, action_end = span("#update-action-here:codex")
+	expect(skip_end <= action_start).to_be(true)
+	local _, muse_end = span("#update-action-here:muse")
+	local _, grok_end = span("#update-action-here:grok")
+	expect(muse_end).to_be(action_end)
+	expect(grok_end).to_be(action_end)
+	-- Nothing to skip mid-update.
 	expect(app:has("#update-skip-here:grok")).to_be(false)
-	expect(right("#update-action-here:grok")).to_be(right("#update-action-here:codex"))
 end)
 
 test("no title: Update all alone over the list, and with nothing to run together, no room for it", function()

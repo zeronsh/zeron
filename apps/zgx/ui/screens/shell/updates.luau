@@ -43,7 +43,6 @@ local HEAD_H = 44
 local EDGE_FADE = 20
 -- The room over the first row with nothing else up there.
 local TOP_ROOM = 8
-local SKIP_W = 30
 -- Update all's list: its lines, and how tall before it scrolls.
 local REVIEW_ROW_H, REVIEW_MARK = 40, 24
 local REVIEW_LIST_H = 6 * REVIEW_ROW_H
@@ -425,22 +424,19 @@ local function action_button(r: any, close: () -> ()): Node
 	}
 end
 
--- A row's skip: quiet words at its end, in the same place on every row. (One
--- that can't be skipped keeps the room, so its action stays where it was.)
-local function skip_button(r: any): Node
+-- A row's skip: quiet words beside its action.
+local function skip_button(r: any): Node?
 	if skip_token(r) == nil then
-		return ui.div { shrink = 0, w = ui.raw(SKIP_W, "a skip's room") }
+		return nil
 	end
 	return ui.button {
 		id = `update-skip-{r.id}`,
 		label = `{locale.s("shell.updates.skip")} · {name_of(r)}`,
 		tooltip = locale.s("shell.updates.skip_hint"),
 		h = ACTION_H,
-		w = ui.raw(SKIP_W, "a skip's room"),
-		p = 0,
+		px = ui.raw(4, "words, close by what's beside them"),
 		shrink = 0,
 		items = "center",
-		justify = "end",
 		bg = "#00000000",
 		color = "$text.tertiary",
 		hover = { color = "$text.primary", bg = "#00000000" },
@@ -479,8 +475,8 @@ local function row(r: any, close: () -> ()): Node
 		},
 		if r.active then ui.div { shrink = 0, status.StatusIcon { kind = "working", size = 14 } } else nil,
 		if r.phase == "updated" then ui.div { shrink = 0, color = "$success", ds.Icon { name = "check", size = 14 } } else nil,
-		if r.action then action_button(r, close) else nil,
 		skip_button(r),
+		if r.action then action_button(r, close) else nil,
 	}
 end
 
