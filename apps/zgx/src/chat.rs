@@ -631,9 +631,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let v = v.clone();
         async move { crate::plugins::preview::refuse("chat.queue")?; v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
-    let v = view.clone();
+    let pick = which.clone();
     host.async_action("chat.retry", move |args| {
-        let v = v.clone();
+        let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let pick = which.clone();
