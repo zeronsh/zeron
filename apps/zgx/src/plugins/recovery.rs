@@ -86,9 +86,55 @@ impl Failures {
         self.by.remove(what);
     }
 
+    /// Everything named under `prefix` is forgotten, to be tried again:
+    /// whether any was.
+    pub fn forget_under(&mut self, prefix: &str) -> bool {
+        let before = self.by.len();
+        self.by.retain(|what, _| !what.starts_with(prefix));
+        self.by.len() != before
+    }
+
     pub fn why(&self, what: &str) -> Option<&str> {
         self.by.get(what).map(|(_, why)| why.as_str())
     }
+}
+
+/// Why a plugin failed, as its row in Settings → Plugins says it: zgx's rules
+/// for plugins in words its author can act on, any other error as it is.
+pub fn reason(error: &str) -> String {
+    let line = first_line(error);
+    rule_broken(&line).unwrap_or(line)
+}
+
+/// What's between the first pair of backticks after `start`.
+fn quoted<'a>(line: &'a str, start: &str) -> Option<&'a str> {
+    let rest = &line[line.find(start)? + start.len()..];
+    rest.split('`').next()
+}
+
+/// `line` (zgx's words) in plain ones, if it's a rule a plugin broke.
+fn rule_broken(line: &str) -> Option<String> {
+    if line.contains("ui.slot `") {
+        let slot = quoted(line, "ui.slot `")?;
+        if let Some(owner) = quoted(line, "the plugin `").filter(|_| line.contains("offers only slots")) {
+            return Some(format!("It offers a slot named “{slot}”, but a plugin's slots start with its id. Call it “{owner}.{slot}”, or use zeron.slot(\"{slot}\")."));
+        }
+        return Some(format!("It offers a slot named “{slot}”, but names starting with “zeron” are Zeron's own."));
+    }
+    if line.contains("ui.command `") && line.contains("`key = \"") {
+        let command = quoted(line, "ui.command `")?;
+        let key = line[line.find("`key = \"")? + "`key = \"".len()..].split('"').next()?;
+        return Some(format!("Its command “{command}” has the shortcut “{key}” with no ⌘, ⌃ or ⌥, which would take that key from everything you type in. Add a modifier, like “cmd+shift+{key}”."));
+    }
+    if line.contains("ui.command `") && line.contains("names are the app's alone") {
+        let command = quoted(line, "ui.command `")?;
+        return Some(format!("Its command “{command}” starts with “zeron”, and those names are Zeron's own. Rename it."));
+    }
+    if line.contains("ui.override { module = \"") && line.contains("a trust grant") {
+        let module = line[line.find("module = \"")? + "module = \"".len()..].split('"').next()?;
+        return Some(format!("It replaces {module}, which its manifest doesn't list. Add it to \"ui\": {{ \"replace\": [] }} and ask for \"ui.replace\"."));
+    }
+    None
 }
 
 /// An error's first line, without the VM's preamble and the copy's path: what
@@ -167,5 +213,21 @@ mod tests {
             "sidebar.luau:12: attempt to index nil"
         );
         assert_eq!(first_line("focus: runtime error: focus:3: filter broke"), "focus:3: filter broke");
+    }
+
+    /// zgx's words for its rules, as a plugin's row says them; anything else
+    /// as it is. (`loading_tests` holds these to what zgx really says.)
+    #[test]
+    fn what_a_person_reads_of_a_rule_broken() {
+        let slot = reason("plug: runtime error: init.luau:1: ui.slot `bar`: the plugin `plug` offers only slots of its own, named `plug.…`");
+        assert_eq!(slot, "It offers a slot named “bar”, but a plugin's slots start with its id. Call it “plug.bar”, or use zeron.slot(\"bar\").");
+        let reserved = reason("plug: runtime error: ui.slot `zeron.x`: `zeron.` names are the app's alone, not the plugin `plug`'s");
+        assert_eq!(reserved, "It offers a slot named “zeron.x”, but names starting with “zeron” are Zeron's own.");
+        let key = reason("plug: runtime error: ui.command `go`: `key = \"k\"`: a plugin's shortcut has a modifier, unless the host grants `Capability::Named(\"zgx.command.bare_keys\")`: a key alone would be taken from every field");
+        assert!(key.starts_with("Its command “go” has the shortcut “k” with no ⌘, ⌃ or ⌥"), "{key}");
+        assert!(!key.contains("Capability"), "{key}");
+        let module = reason("plug: runtime error: ui.override { module = \"@app/screens/chat\" }: plug needs OverrideModule(\"@app/screens/chat\"), a trust grant: the replacement runs as the app");
+        assert!(module.contains("@app/screens/chat") && module.contains("ui.replace") && !module.contains("OverrideModule"), "{module}");
+        assert_eq!(reason("plug: runtime error: init.luau:3: boom"), "init.luau:3: boom");
     }
 }

@@ -21,6 +21,9 @@ export type Props = {
 	files: State<boolean>,
 	-- Whether the bar stands over a wallpaper (its island shows, collapsed).
 	art: () -> boolean,
+	caption_over_art: boolean?,
+	-- A new chat's page has a panel too (v3's).
+	panel_on_home: boolean?,
 }
 
 -- Production's "corner card" glyph (icons.rs `corner_card_glyph`): the
@@ -137,8 +140,9 @@ return function(props: Props): Node
 		ui.show(
 			function(): boolean
 				-- (A plugin's page has a panel of its own too.)
-				local name = route.current:get().name
-				return name == "session" or name == "plugin"
+				-- (Under settings, as the chats stand there: in v3 it's beside them.)
+				local name = if props.panel_on_home == true then route.chat:get().name else route.current:get().name
+				return name == "session" or name == "plugin" or (props.panel_on_home == true and name == "home")
 			end,
 			-- The session's panel: the sidebar's glyph mirrored (its panel at
 			-- the right), narrowing as the panel closes, as the left one does.
@@ -167,8 +171,10 @@ return function(props: Props): Node
 		ds.TitleBar {
 			collapsed = props.collapsed,
 			on_toggle = fit.toggle_sidebar,
+			-- (No glass behind the window's buttons and the controls: they stand on
+			-- the top bar, over nothing but the window.)
 			island = function(): boolean
-				return props.collapsed:get() and props.art()
+				return false
 			end,
 			can_back = route.can_back,
 			can_forward = route.can_forward,
@@ -178,6 +184,7 @@ return function(props: Props): Node
 			-- (Over a new chat's wallpaper, what's in it (a plugin's) stands on
 			-- the island's glass, the sidebar open or not.)
 			actions_island = props.art,
+			caption_over_art = props.caption_over_art,
 			actions_width = actions_width,
 		},
 	}

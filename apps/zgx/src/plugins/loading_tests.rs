@@ -723,7 +723,7 @@ impl Live {
                 let loaded: Vec<zgx_script::Plugin> = self.items.iter().filter_map(Item::plugin).collect();
                 if let Some(id) = recovery::blame(&error, &loaded) {
                     let hash = self.items.iter().find(|i| i.id() == id).map(|i| i.hash().to_string()).unwrap_or_default();
-                    if self.failed_plugins.fail(&id, &hash, &error) {
+                    if self.failed_plugins.fail(&id, &hash, &recovery::reason(&error)) {
                         self.notices.push(format!("plugin {id}"));
                         again = true;
                     }
@@ -1015,4 +1015,40 @@ end }
     assert!(place["mean_ms"].as_f64().unwrap() >= 2.5, "{cost}");
     let words = super::surfaces::cost_words(&cost).unwrap();
     assert!(words.starts_with("Slow: ") && words.contains("ms per row"), "{words}");
+}
+
+/// R22, R27: a plugin that breaks one of zgx's rules fails as it loads, alone,
+/// and its row says why in plain words (what's asserted is what zgx says now,
+/// through `recovery::reason`). Its own slots and a shortcut with a modifier
+/// load as ever.
+#[test]
+fn a_plugin_breaking_a_rule_fails_alone_and_says_why() {
+    let root = dir("rules-plugins");
+    let fine = plugin(&root, "fine", r#"
+        ui.command { id = "ok", title = "Ok", key = "cmd+shift+o", run = function() end }
+        ui.command { id = "named", title = "Named", key = "shift+f5", run = function() end }
+        local own = ui.slot("fine.spot")
+    "#, &[], &[], &[]);
+    let slot = plugin(&root, "slot", r#"local s = ui.slot("bar")"#, &[], &[], &[]);
+    let reserved = plugin(&root, "zeronish", r#"local s = ui.slot("zeron.chat")"#, &[], &[], &[]);
+    let key = plugin(&root, "key", r#"ui.command { id = "go", title = "Go", key = "k", run = function() end }"#, &[], &[], &[]);
+    let shift = plugin(&root, "shift", r#"ui.command { id = "go", title = "Go", key = "shift+k", run = function() end }"#, &[], &[], &[]);
+    let command = plugin(&root, "command", r#"ui.command { id = "zeron.go", title = "Go", run = function() end }"#, &[], &[], &[]);
+    let module = plugin(&root, "module", r#"ui.override { module = "@app/screens/card", with = "./init" }"#, &["ui.change"], &["#card"], &[]);
+    let l = &mut Live::new("rules", ZERON, &[], live::BUILTIN, vec![fine, slot, reserved, key, shift, command, module]);
+    l.settle();
+    assert_eq!(l.app.text("card"), "Zeron's", "the window carries on");
+    for (id, says) in [
+        ("slot", "a slot named “bar”, but a plugin's slots start with its id. Call it “slot.bar”"),
+        ("zeronish", "a slot named “zeron.chat”, but names starting with “zeron” are Zeron's own"),
+        ("key", "has the shortcut “k” with no ⌘, ⌃ or ⌥"),
+        ("shift", "has the shortcut “shift+k” with no ⌘, ⌃ or ⌥"),
+        ("command", "“zeron.go” starts with “zeron”"),
+        ("module", "It replaces @app/screens/card, which its manifest doesn't list"),
+    ] {
+        let why = l.failed_plugins.why(id).unwrap_or_else(|| panic!("{id} loaded"));
+        assert!(why.contains(says), "{id}: {why}");
+        assert!(!why.contains("Capability"), "{id}: {why}");
+    }
+    assert_eq!(l.failed_plugins.why("fine"), None);
 }

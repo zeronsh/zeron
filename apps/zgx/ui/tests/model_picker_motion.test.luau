@@ -151,10 +151,9 @@ test("the reasoning thumb follows the pointer, the frame it moves", function()
 	expect(app:state("test_picker_thumb")).to_be(at(0.5))
 end)
 
--- A new chat's composer, mid-page, re-centres as its draft grows: held
--- where it is while its model picker is open (its chip, and the picker
--- hanging from it, still), it goes to its place as the picker closes. (On
--- ui/chat_fixture.luau.)
+-- A new chat's composer, mid-page, grows down as its draft grows: its chip
+-- held while its model picker is open (and the picker hanging from it, still),
+-- it goes to its place as the picker closes. (On ui/chat_fixture.luau.)
 test("a new chat's composer holds still under its open model picker", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(960, 760)
@@ -174,7 +173,7 @@ test("a new chat's composer holds still under its open model picker", function()
 	expect(chip_y()).to_be(before)
 	local _, panel_now = box(app, "role:dialog")
 	expect(panel_now).to_be(panel_y)
-	-- Closed: to its place (lower, as it grew by its middle).
+	-- Closed: to its place (lower, as it grew down).
 	app:key("Escape")
 	settle(app)
 	expect(listed(app)).to_be(false)

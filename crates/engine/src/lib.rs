@@ -72,6 +72,7 @@ pub mod terminals;
 pub mod titles;
 pub mod tool_output;
 mod transcript_history;
+mod update_trial;
 pub mod uploads;
 pub mod voice;
 pub mod workspace_files;
@@ -263,6 +264,7 @@ impl EngineCore {
     ) -> Result<Self, EngineError> {
         let data_dir = profile.device_root();
         std::fs::create_dir_all(data_dir)?;
+        update_trial::refuse_mid_update(data_dir)?;
         let legacy_uploads_root = profile.claim_legacy_uploads_root()?;
         let device_id = load_or_create_device_id(data_dir)?;
         // This device's harness enablement (Settings → Providers) rides the
@@ -333,10 +335,17 @@ impl EngineCore {
         }
         sessions.set_plugins(plugins.clone());
         sessions.set_doc_host(doc_host.clone());
-        match sessions.recover_stale() {
-            Ok(0) => {}
-            Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
-            Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
+        // A new version on trial may yet be undone, and recovering clears the
+        // journals' marks of what to resume, which a rollback doesn't restore.
+        // It waits for the commit (`update_trial`), with all other new work.
+        if zeron_update::transaction::in_trial() {
+            doc_host.hold_work();
+        } else {
+            match sessions.recover_stale() {
+                Ok(0) => {}
+                Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
+                Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
+            }
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
@@ -1171,6 +1180,7 @@ impl Engine {
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
         std::fs::create_dir_all(&config.data_dir)?;
+        update_trial::boot(&config.data_dir)?;
         // Cloud runner: runner.json wins; else ZERON_RUNNER_ENROLL enrolls
         // first (retrying network failures; a rejected code is fatal).
         if let Some(identity) = runner::bootstrap(&config.data_dir, &config.edge_url).await? {
@@ -1229,6 +1239,7 @@ impl Engine {
             .core()
             .sessions
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
+        update_trial::prove_and_commit(runtime.core(), &config);
 
         tokio::select! {
             result = shutdown_signal() => result?,

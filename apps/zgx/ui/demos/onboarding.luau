@@ -27,7 +27,7 @@ return {
 					h = 380,
 					p = "$space.6",
 					onboarding.Hero {
-						art = ui.svg { src = "assets/icons/ui/zeron-logo.svg", w = 40, h = 46, tint = "$text.primary" },
+						art = ui.svg { src = "assets/icons/ui/zeron-logo.svg", w = 46, h = 46, tint = "$text.primary" },
 						title = "Welcome to Zeron",
 						body = "Every agent you use, on every machine you have, in one place.",
 						foot = ui.text { "Already set up on another Mac? Sign in", text_size = "$font.size.sm", color = "$text.tertiary" },

@@ -770,6 +770,36 @@ ui.command {
 		publish()
 	end,
 }
+-- Thousands archived (Settings → Archived builds what it shows): `Chat <n>`,
+-- each seventh with no project nor a device still known, so nothing under
+-- its name. (Kept across a reload, as the host's sessions are.)
+local thousands = ui.state("fixture_archive_thousands", false)
+local function archive_thousands()
+	for i = 1, 2000 do
+		local plain = i % 7 == 0
+		table.insert(model.archived, {
+			id = `many{i}`,
+			title = `Chat {i}`,
+			project = if plain then nil else "atlas",
+			device = if plain then "gone" else "mac",
+			updated = NOW - (200 + i) * HOUR,
+			created = NOW - (300 + i) * HOUR,
+			agent = "claude",
+		})
+	end
+	publish()
+end
+if thousands:peek() then
+	archive_thousands()
+end
+ui.command {
+	id = "archive_thousands",
+	title = "Two thousand sessions archived",
+	run = function()
+		thousands:set(true)
+		archive_thousands()
+	end,
+}
 -- Subagents running under Fix the build (`subagents_<n>`).
 for _, n in { 0, 3, 120 } do
 	ui.command {
@@ -834,7 +864,7 @@ ui.command {
 		publish()
 	end,
 }
--- Five hundred repositories on this Mac and fifteen hundred sessions in
+-- Five hundred repositories on this computer and fifteen hundred sessions in
 -- them, three each on branches of their own (`r<i>-<k>`): fifty touched in
 -- the last day, four hundred and fifty in the last fortnight, the rest
 -- older (GitHub's watch at scale: examples_tests' github_scale).
@@ -875,12 +905,12 @@ ui.command {
 		require("@app/screens/shell/route").plugin_page("fixture", "board")
 	end,
 }
--- Six more projects on this Mac, a session each, older than Atlas's (Proj 1
+-- Six more projects on this computer, a session each, older than Atlas's (Proj 1
 -- the newest): by device then project, MacBook Pro holds seven project
 -- groups, its first five then "Show 2 more" (tests/sidebar_tree).
 ui.command {
 	id = "many_projects",
-	title = "Six more projects on this Mac",
+	title = "Six more projects on this computer",
 	run = function()
 		for i = 1, 6 do
 			table.insert(model.projects, { id = `p{i}`, name = `Proj {i}`, device = "mac", path = `/work/p{i}`, git = true })
@@ -889,7 +919,7 @@ ui.command {
 		publish()
 	end,
 }
--- Three more projects on this Mac: Cobalt and Dune with every session
+-- Three more projects on this computer: Cobalt and Dune with every session
 -- archived (empty: folded into the sidebar's "2 empty projects"), and Ember,
 -- just added, with none at all (not empty: a new chat is about to start
 -- in it) (tests/sidebar_empty_projects).
@@ -914,6 +944,47 @@ ui.command {
 		for i = 1, 60 do
 			table.insert(model.projects, { id = `g{i}`, name = `Gone {i}`, device = "mac", path = `/work/g{i}`, git = true })
 			table.insert(model.archived, { id = `ga{i}`, title = `Gone work {i}`, project = `g{i}`, device = "mac", updated = NOW - (200 + i) * HOUR, created = NOW - (210 + i) * HOUR, agent = "claude" })
+		end
+		publish()
+	end,
+}
+-- Links clicked in a chat: a pull request's, an issue's, another site's
+-- (tests/plugin_links).
+for id, url in {
+	click_pr_link = "https://github.com/acme/atlas/pull/12/files",
+	click_issue_link = "https://github.com/acme/atlas/issues/12",
+	click_other_link = "https://example.com/acme/atlas/pull/12",
+} do
+	ui.command {
+		id = id,
+		title = id,
+		run = function()
+			require("@ds/links").take(url)
+		end,
+	}
+end
+-- Atlas cloned on the devbox too, with a session there (tests/sidebar_repository).
+ui.command {
+	id = "atlas_cloned_on_box",
+	title = "Atlas is cloned on devbox",
+	run = function()
+		for _, p in model.projects do
+			if p.id == "atlas" then
+				p.repository, p.created = "commit:atlas", 100
+			end
+		end
+		table.insert(model.projects, { id = "atlas-clone", name = "atlas-clone", device = "box", path = "/srv/atlas-clone", git = true, repository = "commit:atlas", created = 200 })
+		table.insert(model.chats, { id = "cl1", title = "On the clone", project = "atlas-clone", device = "box", updated = NOW - 30 * HOUR, created = NOW - 30 * HOUR })
+		publish()
+	end,
+}
+-- A chat beside each of the five, to compose tabs from (tests/session_tabs).
+ui.command {
+	id = "partner_chats",
+	title = "Five more chats",
+	run = function()
+		for i = 1, 5 do
+			table.insert(model.chats, { id = `p{i}`, title = `Partner {i}`, project = "atlas", device = "mac", updated = NOW - 40 * HOUR - i, created = NOW - 40 * HOUR - i })
 		end
 		publish()
 	end,
@@ -958,7 +1029,7 @@ ui.command {
 		publish()
 	end,
 }
--- Fix the build's side chats, on this Mac as Tidy the tests is (no branch):
+-- Fix the build's side chats, on this computer as Tidy the tests is (no branch):
 -- the panel home's rows to set beside the sidebar's (tests/
 -- sidebar_panel_parity). One moved last and made first, one the other way.
 ui.command {
@@ -1143,8 +1214,8 @@ ui.command {
 		settings.add { id = "profile", title = "Profile", group = "Personal", before = "general", view = function(): Node
 			return ui.text { "Your profile" }
 		end }
-		settings.add { id = "devices", title = "This Mac", group = "Devices", before = "archived", view = function(): Node
-			return ui.text { "This Mac" }
+		settings.add { id = "devices", title = "This computer", group = "Devices", before = "archived", view = function(): Node
+			return ui.text { "This computer" }
 		end }
 	end,
 }

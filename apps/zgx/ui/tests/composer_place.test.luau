@@ -227,3 +227,67 @@ test("composer place: zgx's built-in menus take our menu tint and row wash", fun
 	end
 	expect(app:error()).to_be(nil)
 end)
+
+-- What a chip says, a line each for what it shows: its text, nothing when folded
+-- to its icon.
+local function chip_text(app: any, name: string): string
+	local out = {}
+	for line in app:tree(`role:button "{name}"`):gmatch("[^\n]+") do
+		if not line:find(" hidden", 1, true) then
+			local text = line:match('text "([^"]+)"') or line:match('#[%w%-]+ "([^"]+)"')
+			if text then
+				table.insert(out, text)
+			end
+		end
+	end
+	return table.concat(out, " ")
+end
+
+test("composer footer: short of room the effort goes first, the model's name last", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(800, 500)
+	app:frames(60)
+	expect(chip_text(app, "Model")).to_contain("High")
+	-- Narrowing: the effort is gone while the access mode still has its name.
+	local effort_gone, access_folded = nil :: number?, nil :: number?
+	for w = 600, 360, -4 do
+		app:resize(w, 500)
+		app:frames(10)
+		if not effort_gone and not chip_text(app, "Model"):find("High", 1, true) then
+			effort_gone = w
+		end
+		if not access_folded and chip_text(app, "Access") == "" then
+			access_folded = w
+		end
+	end
+	expect(effort_gone ~= nil and access_folded ~= nil).to_be(true)
+	expect((effort_gone :: number) > (access_folded :: number)).to_be(true)
+	expect(chip_text(app, "Model")).to_contain("Opus")
+	-- Wide again, all of it.
+	app:resize(800, 500)
+	app:frames(60)
+	expect(chip_text(app, "Model")).to_contain("High")
+	expect(chip_text(app, "Access")).never.to_be("")
+	expect(app:error()).to_be_nil()
+end)
+
+test("composer footer: the model's name goes only after everything else has folded", function()
+	local app = mounted()
+	app:set_state("test_place_w", 800)
+	rested(app)
+	expect(chip_text(app, "Model")).to_contain("Opus")
+	app:set_state("test_place_w", 260)
+	rested(app)
+	expect(chip_text(app, "Access")).to_be("")
+	expect(chip_text(app, "Branch")).to_be("")
+	expect(chip_text(app, "Model")).to_contain("Opus")
+	app:set_state("test_place_w", 180)
+	rested(app)
+	expect(chip_text(app, "Model")).to_be("")
+	expect(width(app, 'role:button "Model"')).to_be(24)
+	-- Back with room, its name again.
+	app:set_state("test_place_w", 800)
+	rested(app)
+	expect(chip_text(app, "Model")).to_contain("Opus")
+	expect(app:error()).to_be_nil()
+end)

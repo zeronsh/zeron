@@ -343,13 +343,8 @@ local Workspace = require("@app/screens/files/workspace")
 
 local session = ui.state("test_panel_session", { id = "chat-1", cwd = "/proj" } :: any)
 local generation = ui.state("test_panel_generation", 1)
--- Where the panel's left edge is in the window, as the shell says (0: at
--- the window's edge, under the title bar's controls).
-local left = ui.state("test_panel_left", 1000)
 -- How many times closing the last tab closed the panel.
 local panel_closed = ui.state("test_panel_closed", 0)
--- Whether the window's layout has room for a file tab's tree beside its file.
-local docked = ui.state("test_panel_docked", true)
 -- The app's ⌘W, as the shell calls it: what the panel answered.
 local visible = ui.state("test_panel_visible", true)
 local closed = ui.state("test_panel_closed_focused", "")
@@ -488,13 +483,7 @@ return ui.column {
 			end,
 			session = session,
 			project = { id = "p1", path = "/proj", name = "proj" },
-			left = function(): number
-				return left:get()
-			end,
 			-- (As the shell closes the panel: here, how many times.)
-			docked = function(): boolean
-				return docked:get()
-			end,
 			on_last_closed = function()
 				panel_closed:set(panel_closed:peek() + 1)
 			end,

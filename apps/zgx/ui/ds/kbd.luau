@@ -165,7 +165,7 @@ return function(props: Props): Node
 					for _, p in parts do
 						table.insert(out, shown(p))
 					end
-					return table.concat(out)
+					return table.concat(out, if mac then "" else "+")
 				end,
 				literal = true,
 				aria_hidden = true,

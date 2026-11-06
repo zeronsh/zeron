@@ -2,3 +2,14 @@
 # zgx sets this in its own workspace, and an app built elsewhere repeats it.
 [env]
 LUAU_CXXFLAGS = "-DNDEBUG"
+# mimalloc's pages at this Mac's own page size, not its default 64 KiB. A long
+# session frees most of what it allocated, and what survives is scattered: a
+# page goes back to the system only when all of it is free, so a page a quarter
+# of the size holds a quarter as much memory for each survivor. (On an M5 Max,
+# the same long session: 259 MB dirty at rest with 64 KiB pages, 188 MB with these.)
+#
+# And no pages of larger blocks (64 KiB to 512 KiB by default, shared in pages of
+# 4 MiB, here 16 KiB to 128 KiB in 1 MiB): what asks for that much is few and of
+# sizes all its own, so one block of 50 KiB left in such a page holds up to a
+# megabyte. Each now has a page of its own, freed with it.
+CFLAGS_aarch64_apple_darwin = "-DMI_ARENA_SLICE_SHIFT=14 -DMI_ENABLE_LARGE_PAGES=0"

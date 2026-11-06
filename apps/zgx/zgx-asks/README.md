@@ -4,17 +4,18 @@ Every open ask from Zeron's zgx app, one folder per topic: an `ASK.md` (who
 needs it, what fails today, the ask) and, where one exists, a minimal repro
 (`zgx run <folder>/repro` or `zgx test <folder>`, with `ZGX_CHECK=0`). Most
 were seen on zgx `b3371f8` on macOS, unless the folder says otherwise; Zeron's
-pin is now zgx main `99a50ad5` (0.1.9, its fixes, and Linux's popups and glass blur). Each open ask is assigned to a zgx lane,
+pin is now zgx `0.1.10` (`c85c72c6`) (0.1.9, its fixes, Linux popups and glass blur, full screen to scripts, terminal colours from the theme, lists that scroll with the view around them, an app-owned network policy for plugins, the host's top layer, and the module, slot and shortcut rules for plugins). Each open ask is assigned to a zgx lane,
 which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 ## High: users see it
 
 | Ask | What users see today |
 |---|---|
-| [host-top-layer](host-top-layer/ASK.md) | A template in preview (or a plugin) can paint a modal over Zeron's own Keep / Revert strip and the Linux/Windows menu bar. |
-| [host-guard](host-guard/ASK.md) | A template in preview can still use `ui.fetch`/`ui.socket`; every host action is guarded one by one. |
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
+| [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |
+| [windows-popup-backdrop](windows-popup-backdrop/ASK.md) | A popup's glass on Windows blurs nothing: a wallpaper's dither shows sharp through the model picker. Zeron draws the menus' glass solid there meanwhile. |
+| [windows-transparency](windows-transparency/ASK.md) | Windows' Transparency effects aren't reported (`ui.prefers.reduced_transparency` is always false there). Zeron watches the registry meanwhile. |
 
 ## Medium: users meet it now and then, or a feature waits on it
 
@@ -44,6 +45,8 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | |
 |---|---|
+| [host-guard](host-guard/ASK.md) | `ScriptHost::guard` and its kinds (#1461, #1463, #1468). In the pin; adopted: src/plugins/preview.rs `guard`. |
+| [host-top-layer](host-top-layer/ASK.md) | `View::top_layer` (e379b925) and `PopupsInWindow` (#1455). In the pin; adopted: src/plugins/host_bar.rs. A plugin's own popup in a window of its own is still over it: `PopupsInWindow` is provided around a plugin by zgx, and follows decision controls alone. |
 | Inherited token colours | Text taking its colour from a token around it follows every theme switch (#1439, `d81d2c33`): button labels kept the first switch's colour after a second (setup's Continue and Back on Make it yours). In the pin; no Zeron workaround was taken; tests/onboarding_continue_ink.rs guards the setup footer. |
 | Token corners and sides | A token `rounded` or `border` takes its single corners or sides, as a number does (#1415, `b72e15db`). In the pin `d81d2c33`; adopted: the composer's tray is `rounded` with `rounded_tl`/`rounded_tr` = 0 again, not a `corners` function (tests/composer_tray.rs). |
 | [modal-over-popups](modal-over-popups/ASK.md) | A modal opening closes every anchored popup outside it, popup windows included (#1419, `fbc62abe`). In the pin `f81d5e99`; adopted: ds/popups is gone (glass's `Popups.track`, the `Popups.modal` wrapping in the command palette, dialog and lightbox, the `popups.dismiss` host action); src/popups_tests.rs stays as the guard. |

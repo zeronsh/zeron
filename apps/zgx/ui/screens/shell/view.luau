@@ -41,6 +41,10 @@ local function owner(c: any): string?
 	if c.name == "plugin" and c.plugin and c.page then
 		return `page:{c.plugin}/{c.page}`
 	end
+	-- (A new chat's page has a panel of its own too.)
+	if c.name == "home" then
+		return "home"
+	end
 	return if c.name == "session" then c.session else nil
 end
 local function session(): string?
@@ -78,6 +82,7 @@ function M.set_files(on: boolean)
 		return
 	end
 	local members = sharing(id, true)
+	local was_open = M.files:peek()
 	local now = table.clone(M.panels:peek())
 	for _, member in members do
 		now[member] = if on then true else nil
@@ -91,6 +96,8 @@ function M.set_files(on: boolean)
 				M.expanded_panels:set_key(member, nil)
 			end
 		end
+	else
+		require("@app/screens/shell/fit").panel_opened(was_open)
 	end
 end
 function M.toggle_files()
