@@ -188,6 +188,139 @@ async fn cloud_rpcs_reach_the_edge_as_the_user_and_are_never_forwarded() {
 /// Records every request line + body.
 type Requests = Arc<Mutex<Vec<(String, String)>>>;
 
+#[tokio::test]
+async fn waking_on_a_size_and_the_default_size_reach_the_edge() {
+    let (edge_url, seen) = scripted_edge(|request, body| {
+        if request.contains("/machine") {
+            return (
+                200,
+                r#"{"state":"ready","deviceId":"cloud-abc","available":true,"machine":"large"}"#
+                    .to_string(),
+            );
+        }
+        if request.contains("/retry") {
+            return (
+                200,
+                r#"{"chatId":"chat-1","deviceId":"cloud-s1","spaceId":"sp","state":"provisioning","createdAt":1}"#
+                    .to_string(),
+            );
+        }
+        if request.contains("/wake") {
+            if body.contains("\"small\"") {
+                return (
+                    409,
+                    r#"{"error":"machine_too_small","message":"That machine holds 20 GB."}"#
+                        .to_string(),
+                );
+            }
+            return (
+                200,
+                r#"{"chatId":"chat-1","deviceId":"cloud-s1","spaceId":"sp","state":"starting","createdAt":1,"machine":"xlarge"}"#
+                    .to_string(),
+            );
+        }
+        if request.starts_with("GET /cloud/") {
+            return (
+                200,
+                r#"{"state":"ready","deviceId":"cloud-abc","available":true,"machine":"large"}"#
+                    .to_string(),
+            );
+        }
+        (404, r#"{"error":"not_found"}"#.to_string())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+    let org = core.workspace.org_id().to_string();
+
+    let woke: zeron_proto::CloudSession = client
+        .call_as(
+            methods::CLOUD_SESSION_WAKE,
+            serde_json::json!({ "chatId": "chat-1", "machine": "xlarge" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(woke.state, CloudState::Starting);
+    assert_eq!(woke.machine.as_deref(), Some("xlarge"));
+    // A caller from before sizes (only a chat id) still wakes it as it is.
+    let _: zeron_proto::CloudSession = client
+        .call_as(
+            methods::CLOUD_SESSION_WAKE,
+            serde_json::json!({ "chatId": "chat-1" }),
+        )
+        .await
+        .unwrap();
+    let fresh: zeron_proto::CloudSession = client
+        .call_as(
+            methods::CLOUD_SESSION_RETRY,
+            serde_json::json!({ "chatId": "chat-1", "machine": "large" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.state, CloudState::Provisioning);
+    let refused = client
+        .call_as::<zeron_proto::CloudSession>(
+            methods::CLOUD_SESSION_WAKE,
+            serde_json::json!({ "chatId": "chat-1", "machine": "small" }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("disk_too_small"),
+        "the typed refusal survives the RPC: {refused}"
+    );
+    let status: CloudStatus = client
+        .call_as(
+            methods::CLOUD_SET_MACHINE,
+            serde_json::json!({ "machine": "large" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.machine.as_deref(), Some("large"));
+
+    let seen = seen.lock().unwrap().clone();
+    let wake = format!("POST /cloud/{org}/sessions/chat-1/wake");
+    let wakes: Vec<serde_json::Value> = seen
+        .iter()
+        .filter(|(request, _)| *request == wake)
+        .map(|(_, body)| serde_json::from_str(body).unwrap())
+        .collect();
+    assert_eq!(
+        wakes,
+        vec![
+            serde_json::json!({ "machine": "xlarge" }),
+            serde_json::json!({}),
+            serde_json::json!({ "machine": "small" }),
+        ]
+    );
+    let retry = format!("POST /cloud/{org}/sessions/chat-1/retry");
+    let (_, body) = seen
+        .iter()
+        .find(|(request, _)| *request == retry)
+        .unwrap_or_else(|| panic!("{retry} not called: {seen:?}"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        serde_json::json!({ "machine": "large" })
+    );
+    let put = format!("PUT /cloud/{org}/machine");
+    let (_, body) = seen
+        .iter()
+        .find(|(request, _)| *request == put)
+        .unwrap_or_else(|| panic!("{put} not called: {seen:?}"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        serde_json::json!({ "machine": "large" })
+    );
+    core.shutdown().await;
+}
+
 async fn scripted_edge(
     respond: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
 ) -> (String, Requests) {

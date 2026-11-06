@@ -92,6 +92,11 @@ pub const BLOCKED: &[&str] = &[
     "github.disconnect",
     "engine.restart",
     "billing.checkout",
+    // (Each runs a machine, or says which one new chats run on: credits.)
+    "cloud.wake",
+    "cloud.sleep",
+    "cloud.retry",
+    "cloud.set_machine",
 ];
 
 pub fn blocked(action: &str) -> bool {

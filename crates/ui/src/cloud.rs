@@ -123,7 +123,13 @@ pub fn session_presence(online: bool, session: Option<&CloudSession>) -> Presenc
         Some(CloudState::Ready) => Presence::Online,
         Some(CloudState::Sleeping | CloudState::Stopping) => Presence::Asleep,
         Some(CloudState::Provisioning | CloudState::Starting) => Presence::Waking,
-        Some(CloudState::Off | CloudState::Deleting | CloudState::Error) => Presence::Offline,
+        Some(
+            CloudState::Off
+            | CloudState::Deleting
+            | CloudState::Error
+            | CloudState::DataExpired
+            | CloudState::Unknown,
+        ) => Presence::Offline,
         None if online => Presence::Online,
         None => Presence::Asleep,
     }

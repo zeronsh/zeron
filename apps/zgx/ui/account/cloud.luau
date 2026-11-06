@@ -17,9 +17,31 @@
 --   cloud.usage(from, to)              a promise of the credits used per day
 --   cloud.branches(repo, default?)     a promise of a repository's branches
 --
+-- A chat's machine (what's said of it: screens/chat/cloud_machine):
+--
+--   cloud.sessions:get()        the Cloud sessions, as last read
+--   cloud.session_for(chat, device)  a chat's session (tracked); a side chat
+--                               shares its parent's, by its machine's device
+--   cloud.on_device(device)     whether that device is a Cloud machine
+--   cloud.follow(on)            read the sessions while `on()` says a Cloud chat
+--                               is showing: closely while one is settling, else
+--                               rarely, never redrawing unless they changed
+--   cloud.machines()            the sizes on offer (tracked); none from an edge
+--                               that predates choosing one
+--   cloud.machine()             the size new chats start on (tracked)
+--   cloud.set_machine(id)       choose it, shown at once, put back if refused
+--   cloud.wake(chat, machine?)  wake a chat's machine (on that size)
+--   cloud.resize(chat, machine) a machine that's up: to sleep, and back on it
+--   cloud.fresh(chat, machine?) files expired: a fresh machine, same repository
+--                               and branch
+--   cloud.wake_state(chat)      { busy?, failure? } of the last wake (tracked)
+--   cloud.clear_failure(chat)   that failure read
+--
 -- A status: { state, available, device?, credits?, error?, failed_action?,
--- awake?, max_awake? }. A repository: { name, private, branch?, pushed }.
--- Every function here is a field, so a fixture answers in the host's place.
+-- awake?, max_awake?, machines?, machine? }. A repository: { name, private,
+-- branch?, pushed }. Every function here is a field, so a fixture answers in
+-- the host's place (`ask_*`: the host's calls alone, what's done with their
+-- answers staying as it is here).
 
 local auth = require("@account/auth")
 
@@ -34,6 +56,29 @@ export type Status = {
 	failed_action: string?,
 	awake: number?,
 	max_awake: number?,
+	machines: { Machine }?,
+	machine: string?,
+}
+-- A size of machine, as the edge offers it. `rate`: its credits relative to
+-- the standard machine's (xlarge 5.56).
+export type Machine = { id: string, name: string?, vcpu: number, memory_gb: number, disk_gb: number, rate: number }
+export type Disk = { used: number, capacity: number, level: string }
+export type Session = {
+	chat: string,
+	device: string,
+	-- provisioning, starting, ready, sleeping, stopping, deleting, error,
+	-- data_expired, off.
+	state: string,
+	space: string?,
+	repo: string?,
+	error: string?,
+	failed_action: string?,
+	machine: string?,
+	stage: string?,
+	disk: Disk?,
+	wake_blocked: { reason: string?, needed: number? }?,
+	-- When its files go, in Unix seconds, while it sleeps.
+	expires: number?,
 }
 export type Repo = { name: string, private: boolean, branch: string?, clone_url: string?, pushed: number }
 export type Now = {
@@ -43,6 +88,8 @@ export type Now = {
 	repos_loading: boolean,
 	repos_failure: string?,
 	failure: string?,
+	-- Why the size chosen for new chats didn't take.
+	machine_failure: string?,
 }
 
 M.now = ui.state("account_cloud", { phase = "unknown", repos_loading = false } :: Now)
@@ -64,6 +111,23 @@ local function patch(fields: { [string]: any })
 		next[k] = v
 	end
 	M.now:set(next)
+end
+
+-- The sessions as last read, and a wake's progress by chat.
+M.sessions = ui.state("account_cloud_sessions", {} :: { Session })
+M.wakes = ui.state("account_cloud_wakes", {} :: { [string]: { busy: boolean?, failure: string? } })
+-- (As above: a wake out when the scripts reload never answers these ones.)
+do
+	local was = M.wakes:peek()
+	if next(was) ~= nil then
+		local next_wakes = {}
+		for chat, w in was do
+			if w.failure then
+				next_wakes[chat] = { failure = w.failure }
+			end
+		end
+		M.wakes:set(next_wakes)
+	end
 end
 
 -- Cloud is on: a Cloud of the account's to run on (not being turned off).
@@ -145,6 +209,231 @@ function M.load_repos(done: (() -> ())?)
 	end)
 end
 
+-- The host's calls, each a field a fixture answers.
+function M.ask_sessions(): any
+	return ui.call("cloud.sessions", nil)
+end
+function M.ask_wake(args: { [string]: any }): any
+	return ui.call("cloud.wake", args)
+end
+function M.ask_sleep(args: { [string]: any }): any
+	return ui.call("cloud.sleep", args)
+end
+function M.ask_retry(args: { [string]: any }): any
+	return ui.call("cloud.retry", args)
+end
+function M.ask_set_machine(machine: string): any
+	return ui.call("cloud.set_machine", { machine = machine })
+end
+
+function M.machines(): { Machine }
+	local s = M.now:get().status
+	return (s and s.machines) or {}
+end
+
+function M.machine(): string?
+	local s = M.now:get().status
+	return s and s.machine
+end
+
+function M.on_device(device: string?): boolean
+	return device ~= nil and string.sub(device, 1, 6) == "cloud-"
+end
+
+function M.session_for(chat: string?, device: string?): Session?
+	local list = M.sessions:get()
+	if chat then
+		for _, s in list do
+			if s.chat == chat then
+				return s
+			end
+		end
+	end
+	if device then
+		for _, s in list do
+			if s.device == device then
+				return s
+			end
+		end
+	end
+	return nil
+end
+
+-- Two reads the same? (A read that changed nothing draws nothing.)
+local function same(a: any, b: any): boolean
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return a == b
+	end
+	for k, v in a do
+		if not same(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+local READ_GAP_MS = 1500
+local reading = false
+local read_at = -READ_GAP_MS
+
+-- (Several panes may follow at once, and a wake reads as it lands: one read
+-- out at a time, none straight after another.)
+function M.load_sessions(force: boolean?)
+	if reading or (not force and ui.now() - read_at < READ_GAP_MS) then
+		return
+	end
+	reading, read_at = true, ui.now()
+	M.ask_sessions():after(function(list: any)
+		reading = false
+		local next_list = list or {}
+		if not same(M.sessions:peek(), next_list) then
+			M.sessions:set(next_list)
+		end
+	end, function()
+		-- (What was known stays: a poll that failed says nothing.)
+		reading = false
+	end)
+end
+
+-- One session's answer, in the list.
+local function take_session(s: Session)
+	local list = table.clone(M.sessions:peek())
+	for i, was in list do
+		if was.chat == s.chat then
+			list[i] = s
+			M.sessions:set(list)
+			return
+		end
+	end
+	table.insert(list, s)
+	M.sessions:set(list)
+end
+
+-- States that settle on their own, followed closely.
+local SETTLING = { provisioning = true, starting = true, stopping = true, deleting = true }
+local SETTLING_EVERY, RESTING_EVERY = 3000, 60000
+
+function M.follow(on: () -> boolean)
+	local settling = ui.computed(function(): boolean
+		for _, s in M.sessions:get() do
+			if SETTLING[s.state] then
+				return true
+			end
+		end
+		return false
+	end)
+	ui.effect(function()
+		if not on() then
+			return
+		end
+		if M.now:peek().status == nil then
+			M.load()
+		end
+		M.load_sessions()
+		-- (A timer made in an effect belongs to its run. A read alone draws
+		-- nothing: the window still rests between them.)
+		ui.every(if settling:get() then SETTLING_EVERY else RESTING_EVERY, function()
+			M.load_sessions()
+		end)
+	end)
+end
+
+function M.wake_state(chat: string?): { busy: boolean?, failure: string? }
+	return (chat and M.wakes:get()[chat]) or {}
+end
+
+local function set_wake(chat: string, w: { busy: boolean?, failure: string? }?)
+	M.wakes:set_key(chat, w :: any)
+end
+
+function M.clear_failure(chat: string)
+	if M.wakes:peek()[chat] then
+		set_wake(chat, nil)
+	end
+end
+
+local function word_of(e: any): string
+	return if type(e) == "table" and type(e.message) == "string" then e.message else "failed"
+end
+
+-- One action on a chat's machine: busy until it lands, its session taken, or
+-- why not kept. (Refused for its size: what it needs may have changed, so the
+-- sessions are read again either way.)
+local function act(chat: string, ask: () -> any)
+	set_wake(chat, { busy = true })
+	ask():after(function(s: any)
+		set_wake(chat, nil)
+		if s then
+			take_session(s)
+		end
+		M.load_sessions(true)
+	end, function(e: any)
+		set_wake(chat, { failure = word_of(e) })
+		M.load_sessions(true)
+	end)
+end
+
+local function is_busy(chat: string): boolean
+	local w = M.wakes:peek()[chat]
+	return w ~= nil and w.busy == true
+end
+
+function M.wake(chat: string, machine: string?)
+	if not is_busy(chat) then
+		act(chat, function(): any
+			return M.ask_wake({ chat = chat, machine = machine })
+		end)
+	end
+end
+
+function M.fresh(chat: string, machine: string?)
+	if not is_busy(chat) then
+		act(chat, function(): any
+			return M.ask_retry({ chat = chat, machine = machine })
+		end)
+	end
+end
+
+-- A machine that's up won't change size (the edge's `machine_awake`): it's put
+-- to sleep, and a wake on the new size is taken as it stops.
+function M.resize(chat: string, machine: string)
+	if is_busy(chat) then
+		return
+	end
+	set_wake(chat, { busy = true })
+	M.ask_sleep({ chat = chat }):after(function()
+		set_wake(chat, nil)
+		M.wake(chat, machine)
+	end, function(e: any)
+		set_wake(chat, { failure = word_of(e) })
+	end)
+end
+
+function M.set_machine(id: string)
+	local status = M.now:peek().status
+	if not status or status.machine == id then
+		return
+	end
+	local was = status.machine
+	local shown = table.clone(status) :: any
+	shown.machine = id
+	patch { status = shown, machine_failure = nil :: any }
+	M.ask_set_machine(id):after(function(s: any)
+		if s then
+			M.take(s)
+		end
+	end, function(e: any)
+		local back = table.clone(M.now:peek().status or status) :: any
+		back.machine = was
+		patch { status = back, machine_failure = word_of(e) }
+	end)
+end
+
 function M.usage(from: string, to: string): any
 	return ui.call("cloud.usage", { from = from, to = to })
 end
@@ -163,6 +452,8 @@ end
 -- Signed out, nothing of the account's Cloud stays for the next one.
 function M.forget()
 	M.now:set { phase = "unknown", repos_loading = false }
+	M.sessions:set({})
+	M.wakes:set({})
 end
 
 return M

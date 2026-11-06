@@ -365,10 +365,18 @@ pub mod methods {
     pub const CLOUD_DELETE: &str = "CloudDelete";
     /// `{}` → `CloudSessions`.
     pub const CLOUD_SESSIONS: &str = "CloudSessions";
-    /// `{chatId}` → `CloudSession`. Wake/sleep one session's sandbox; sending
-    /// to a sleeping session wakes it on its own (the host nudge).
+    /// `{machine}` → `CloudStatus`. The size new sessions start on.
+    pub const CLOUD_SET_MACHINE: &str = "CloudSetMachine";
+    /// `{chatId, machine?, wake?}` → `CloudSession`. Wake one session's sandbox
+    /// (on `machine`, when given; `wake: false` only records the size for its
+    /// next wake); sending to a sleeping session wakes it on its own (the host
+    /// nudge). A size its disk doesn't fit is refused.
     pub const CLOUD_SESSION_WAKE: &str = "CloudSessionWake";
+    /// `{chatId}` → `CloudSession`.
     pub const CLOUD_SESSION_SLEEP: &str = "CloudSessionSleep";
+    /// `{chatId, machine?}` → `CloudSession`. Retry a failed lifecycle; on a
+    /// session whose data expired, a fresh machine on the same repo and branch.
+    pub const CLOUD_SESSION_RETRY: &str = "CloudSessionRetry";
     /// `{chatId}` → `CloudSession` (`Deleting`). Deletes the sandbox and
     /// anything uncommitted in it; the transcript stays.
     pub const CLOUD_SESSION_DELETE: &str = "CloudSessionDelete";

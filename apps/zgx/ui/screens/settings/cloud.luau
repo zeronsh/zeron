@@ -4,7 +4,8 @@
 -- it (set up as it's first read), so there's no switch: the credits Cloud used,
 -- day by day, over a range; GitHub, the way Cloud clones and pushes (the
 -- block setup's Connect GitHub shows, ds.GitHubBlock); and the repositories
--- Cloud can open, chosen on GitHub. Billing has its own page.
+-- Cloud can open, chosen on GitHub; and the size of machine new chats start on.
+-- Billing has its own page.
 --
 -- Listed only while the account has Cloud (screens/settings/init.luau).
 -- Cloud's status and repositories are the account's (account/cloud), read
@@ -14,6 +15,7 @@ local ds = require("@ds")
 local cloud = require("@account/cloud")
 local github = require("@account/github")
 local search = require("@app/screens/settings/search")
+local machine_logic = require("@app/screens/chat/cloud_machine")
 
 local M = {}
 
@@ -22,6 +24,7 @@ M.TITLE = "Cloud"
 
 M.ROWS = {
 	{ key = "usage", title = ui.t("settings.cloud.usage.title"), terms = ui.t("settings.cloud.usage.terms") },
+	{ key = "machine", title = ui.t("settings.cloud.machine.title"), terms = ui.t("settings.cloud.machine.terms") },
 	{ key = "github", title = "GitHub", terms = ui.t("settings.cloud.github.terms") },
 	{ key = "repos", title = ui.t("settings.cloud.repos.title"), terms = ui.t("settings.cloud.repos.terms") },
 }
@@ -285,6 +288,67 @@ local function usage(): Node
 	}
 end
 
+local MachineChoice = ui.component(function(): Node
+	local value = ui.use_state(cloud.machine())
+	ui.effect(function()
+		local now = cloud.machine()
+		if value:peek() ~= now then
+			value:set(now)
+		end
+	end)
+	return ds.RadioGroup {
+		value = value,
+		label = ui.t("settings.cloud.machine.title"),
+		options = machine_logic.default_options(cloud.machines()),
+		on_change = function(id: string)
+			cloud.set_machine(id)
+		end,
+	}
+end)
+
+-- The size new chats start on: every size the account's offered, each with
+-- its specs and rate. (An edge that offers no choice: no section.)
+local function default_machine(): Node
+	local function ids(): string
+		local out = {}
+		for _, m in cloud.machines() do
+			table.insert(out, m.id)
+		end
+		return table.concat(out, ",")
+	end
+	return ui.show(function(): boolean
+		return ids() ~= ""
+	end, ds.Settings.Section {
+		title = ui.t("settings.cloud.machine.title"),
+		description = ui.t("settings.cloud.machine.description"),
+		row(
+			"machine",
+			ds.Settings.Group {
+				ui.column {
+					w_full = true,
+					px = "$space.4",
+					py = "$space.3",
+					gap = "$space.2",
+					-- (Its options are fixed as it's built: built again as the sizes
+					-- on offer change.)
+					ui.presence(ids, function(): Node
+						return MachineChoice {}
+					end, { w_full = true }),
+					ui.show(function(): boolean
+						return cloud.now:get().machine_failure ~= nil
+					end, ui.text {
+						ui.t("settings.cloud.machine.failed"),
+						wrap = true,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$zeron.tone.danger.ink",
+					}),
+				},
+			}
+		),
+	})
+end
+
 local function github_now(): github.Now
 	return github.now:get() :: github.Now
 end
@@ -500,6 +564,7 @@ function M.view(): Node
 			w_full = true,
 			gap = "$space.6",
 			usage(),
+			default_machine(),
 			github_section(),
 			repositories(),
 		}),

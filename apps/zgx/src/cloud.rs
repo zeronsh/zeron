@@ -12,7 +12,28 @@
 //!                                machine starts, nothing is billed, until a
 //!                                chat runs there):
 //!                                { state, available, device?, credits?,
-//!                                  error?, failed_action?, awake, max_awake }
+//!                                  error?, failed_action?, awake, max_awake,
+//!                                  machines, machine? }; `machines` is empty
+//!                                from an edge that predates machine choice,
+//!                                each { id, name, vcpu, memory_gb, disk_gb,
+//!                                rate } (`rate`: credits relative to standard)
+//!   cloud.set_machine({ machine })  the size new chats start on; the status
+//!   cloud.sessions               the Cloud sessions, each { chat, device, state,
+//!                                space, repo?, error?, failed_action?,
+//!                                machine?, stage?, disk?, wake_blocked?,
+//!                                expires? }; disk: { used, capacity, level };
+//!                                wake_blocked: { reason, needed }; expires in
+//!                                Unix seconds, as the scripts' times are. Nil
+//!                                from an edge with no sessions route.
+//!   cloud.wake({ chat, machine? })  wake a chat's machine (on that size): its
+//!                                session. Rejects with `disk_too_small` for a
+//!                                size too small, else a word as below or the
+//!                                edge's own sentence.
+//!   cloud.sleep({ chat })        put it to sleep (what a machine that's up has
+//!                                to do to change size): its session.
+//!   cloud.retry({ chat, machine? })  on a session whose files expired, a fresh
+//!                                machine on its repository and branch: its
+//!                                session. Rejects as `cloud.wake` does.
 //!   cloud.usage({ from, to })    credits used per UTC day, `YYYY-MM-DD` each:
 //!                                { days = { { day, credits } }, credits,
 //!                                  balance, available }
@@ -42,6 +63,41 @@ const MAX_PACKS: u64 = 20;
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("cloud.status", |_| async { status(true).await });
+    host.async_action("cloud.sessions", |_| async {
+        let listed = call("CloudSessions", json!({})).await?;
+        Ok(sessions_value(&listed))
+    });
+    host.async_action("cloud.wake", |args| {
+        let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
+        let machine = args.field("machine").map(text).filter(|m| !m.is_empty());
+        async move {
+            crate::plugins::preview::refuse("cloud.wake")?;
+            on_machine("CloudSessionWake", chat, machine).await
+        }
+    });
+    host.async_action("cloud.sleep", |args| {
+        let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
+        async move {
+            crate::plugins::preview::refuse("cloud.sleep")?;
+            on_machine("CloudSessionSleep", chat, None).await
+        }
+    });
+    host.async_action("cloud.retry", |args| {
+        let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
+        let machine = args.field("machine").map(text).filter(|m| !m.is_empty());
+        async move {
+            crate::plugins::preview::refuse("cloud.retry")?;
+            on_machine("CloudSessionRetry", chat, machine).await
+        }
+    });
+    host.async_action("cloud.set_machine", |args| {
+        let machine = args.field("machine").map(text).filter(|m| !m.is_empty());
+        async move {
+            crate::plugins::preview::refuse("cloud.set_machine")?;
+            let status = call("CloudSetMachine", json!({ "machine": machine.ok_or("invalid")? })).await?;
+            Ok(status_value(&status))
+        }
+    });
     host.async_action("cloud.usage", |args| {
         let day = |key: &str| args.field(key).map(text).filter(|d| is_day(d));
         let range = day("from").zip(day("to"));
@@ -120,6 +176,32 @@ async fn status(set_up: bool) -> Result<Value, String> {
     Ok(status_value(&status))
 }
 
+/// One action on a chat's machine: its session, or why not.
+async fn on_machine(method: &str, chat: Option<String>, machine: Option<String>) -> Result<Value, String> {
+    let mut params = json!({ "chatId": chat.ok_or("invalid")? });
+    if let Some(machine) = machine {
+        params["machine"] = Json::from(machine);
+    }
+    let session = engine::get().call(method, params).await.map_err(|error| wake_failure(&error))?;
+    Ok(session_value(&session))
+}
+
+/// Why a machine's action didn't happen, for the screen: `disk_too_small` for the typed
+/// refusal, a word for what has one, else the edge's own sentence.
+fn wake_failure(error: &str) -> String {
+    eprintln!("zeron-zgx: cloud: a machine's action failed: {error}");
+    if error.contains("disk_too_small") {
+        return "disk_too_small".into();
+    }
+    if error.to_ascii_lowercase().contains("unknown method") {
+        return "outdated".into();
+    }
+    match engine::outcome(error) {
+        "failed" => crate::sessions::cloud_words(error),
+        word => word.to_string(),
+    }
+}
+
 /// A Stripe page from the engine, opened in the browser.
 async fn open_link(method: &str, params: Json) -> Result<Value, String> {
     let link = call(method, params).await?;
@@ -157,6 +239,66 @@ fn status_value(s: &Json) -> Value {
         ("failed_action", str_or_nil(&s["failedAction"])),
         ("awake", num(&s["awakeSessions"])),
         ("max_awake", num(&s["maxAwakeSessions"])),
+        ("machines", machines_value(&s["machines"])),
+        ("machine", str_or_nil(&s["machine"])),
+    ])
+}
+
+fn machines_value(list: &Json) -> Value {
+    let machines: Vec<Value> = list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["id"].is_string())
+        .map(|m| {
+            Value::record([
+                ("id", Value::from(m["id"].as_str().unwrap_or_default())),
+                ("name", str_or_nil(&m["name"])),
+                ("vcpu", Value::from(m["vcpu"].as_f64().unwrap_or(0.0))),
+                ("memory_gb", Value::from(m["memoryGB"].as_f64().unwrap_or(0.0))),
+                ("disk_gb", Value::from(m["diskGiB"].as_f64().unwrap_or(0.0))),
+                ("rate", Value::from(m["creditMultiplier"].as_f64().unwrap_or(1.0))),
+            ])
+        })
+        .collect();
+    Value::List(machines.into())
+}
+
+fn sessions_value(listed: &Json) -> Value {
+    Value::List(listed["sessions"].as_array().into_iter().flatten().map(session_value).collect::<Vec<_>>().into())
+}
+
+/// A session's fields, as the edge left them: what an old edge doesn't send is
+/// nil here, so the scripts read one shape from either.
+fn session_value(s: &Json) -> Value {
+    let disk = if s["disk"].is_object() {
+        Value::record([
+            ("used", Value::from(s["disk"]["usedGiB"].as_f64().unwrap_or(0.0))),
+            ("capacity", Value::from(s["disk"]["capacityGiB"].as_f64().unwrap_or(0.0))),
+            ("level", Value::from(s["disk"]["level"].as_str().unwrap_or("ok"))),
+        ])
+    } else {
+        Value::Nil
+    };
+    let blocked = if s["wakeBlocked"].is_object() {
+        Value::record([("reason", str_or_nil(&s["wakeBlocked"]["reason"])), ("needed", num(&s["wakeBlocked"]["neededGiB"]))])
+    } else {
+        Value::Nil
+    };
+    Value::record([
+        ("chat", Value::from(s["chatId"].as_str().unwrap_or_default())),
+        ("device", Value::from(s["deviceId"].as_str().unwrap_or_default())),
+        ("state", Value::from(s["state"].as_str().unwrap_or("off"))),
+        ("space", Value::from(s["spaceId"].as_str().unwrap_or_default())),
+        ("repo", str_or_nil(&s["repo"])),
+        ("error", str_or_nil(&s["error"])),
+        ("failed_action", str_or_nil(&s["failedAction"])),
+        ("machine", str_or_nil(&s["machine"])),
+        ("stage", str_or_nil(&s["stage"])),
+        ("disk", disk),
+        ("wake_blocked", blocked),
+        // (Seconds, as the scripts' times are.)
+        ("expires", s["expiresAt"].as_f64().map_or(Value::Nil, |ms| Value::from(ms / 1000.0))),
     ])
 }
 
@@ -290,6 +432,47 @@ fn billing_value(b: &Json) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machines_and_a_session_read_as_the_scripts_expect() {
+        let status = json!({ "state": "ready", "available": true, "deviceId": "cloud-1", "machine": "large",
+            "machines": [{ "id": "xlarge", "name": "Extra large", "vcpu": 8, "memoryGB": 32, "diskGiB": 400, "creditMultiplier": 5.56 }] });
+        let out: Json = serde_json::from_str(&status_value(&status).to_json()).unwrap();
+        assert_eq!(out["machine"], "large");
+        assert_eq!(out["machines"][0]["disk_gb"], 400.0);
+        assert_eq!(out["machines"][0]["memory_gb"], 32.0);
+        assert_eq!(out["machines"][0]["rate"], 5.56);
+
+        let session = json!({ "chatId": "c1", "deviceId": "cloud-s1", "state": "sleeping", "repo": "acme/atlas", "machine": "default",
+            "disk": { "usedGiB": 41.5, "capacityGiB": 50, "level": "warn" },
+            "wakeBlocked": { "reason": "disk_too_small", "neededGiB": 150 },
+            "expiresAt": 1_800_000_000_000_i64 });
+        let out: Json = serde_json::from_str(&session_value(&session).to_json()).unwrap();
+        assert_eq!(out["chat"], "c1");
+        assert_eq!(out["disk"]["used"], 41.5);
+        assert_eq!(out["disk"]["level"], "warn");
+        assert_eq!(out["wake_blocked"]["needed"], 150.0);
+        assert_eq!(out["expires"], 1_800_000_000.0);
+    }
+
+    #[test]
+    fn an_old_edge_s_answers_read_with_nothing_of_the_new_fields() {
+        let out: Json = serde_json::from_str(&status_value(&json!({ "state": "ready", "available": true })).to_json()).unwrap();
+        assert_eq!(out["machines"].as_array().map(Vec::len), Some(0));
+        assert!(out["machine"].is_null());
+        let out: Json = serde_json::from_str(&session_value(&json!({ "chatId": "c", "deviceId": "d", "state": "ready" })).to_json()).unwrap();
+        assert!(out["disk"].is_null());
+        assert!(out["wake_blocked"].is_null());
+        assert!(out["expires"].is_null());
+        assert!(out["machine"].is_null());
+    }
+
+    #[test]
+    fn a_refused_wake_says_why() {
+        assert_eq!(wake_failure("disk_too_small: That machine holds 20 GB."), "disk_too_small");
+        assert_eq!(wake_failure("unknown method CloudSessionWake"), "outdated");
+        assert_eq!(wake_failure("All 5 of your Cloud sessions that may run at once are busy."), "All 5 of your Cloud sessions that may run at once are busy.");
+    }
 
     #[test]
     fn days_are_checked() {

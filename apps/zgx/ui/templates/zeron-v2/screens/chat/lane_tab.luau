@@ -18,6 +18,8 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
+local CloudTray = require("@app/screens/chat/cloud_tray")
+local LinkNotice = require("@app/screens/chat/link_notice")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
@@ -99,6 +101,21 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
+	-- Its Cloud machine, on a chat that has one (a side chat shares its
+	-- parent's).
+	local machine = CloudTray.bind {
+		chat = function(): string?
+			return chat
+		end,
+		device = function(): string?
+			local s = session:get()
+			return s and s.device
+		end,
+		running = function(): boolean
+			local s = session:get()
+			return s ~= nil and s.running == true
+		end,
+	}
 	-- A queued message edited in its composer.
 	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string }?)
 	local edits = Asks.queue_edits {
@@ -467,10 +484,22 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_mention = completions.on_mention,
 		mention_enabled = completions.enabled,
 		mention_empty = completions.empty,
-		notice = notice,
+		-- (Its own line first, else its Cloud machine's, on a chat with one.)
+		notice = ui.computed(function(): any
+			local mine = notice:get()
+			if mine then
+				return mine
+			end
+			local link = machine.cloud_link()
+			return if link then LinkNotice.of { cloud = link } else nil
+		end),
 		on_dismiss_notice = function()
 			notice:set(nil)
 		end,
+		on_notice_action = machine.wake,
+		alerts = machine.alerts,
+		on_alert_action = machine.on_alert,
+		on_dismiss_alert = machine.dismiss,
 		harnesses = function(): { any }
 			return store.catalog:get().harnesses
 		end,

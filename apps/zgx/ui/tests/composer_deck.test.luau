@@ -89,6 +89,57 @@ test("the chevrons: the header's folds, the pill's opens the one open last", fun
 	expect(app:error()).to_be(nil)
 end)
 
+-- How many alert rows wear a glyph of their own (not a button's, within them).
+local function row_glyphs(app: any): number
+	local n = 0
+	for line in app:tree('role:list "Alerts"'):gmatch("[^\n]+") do
+		if line:match("^    @%d+ img") and not line:find(" hidden", 1, true) then
+			n += 1
+		end
+	end
+	return n
+end
+
+-- How far in from its row an alert's words start. (It needs a word more for the
+-- tree to list them apart from its row.)
+local function words_in(app: any, title: string): number
+	local tree = app:tree('role:list "Alerts"')
+	local row = string.match(tree, `listitem "{title}[^"]*" (%d+),`)
+	local words = string.match(tree, `text "{title}" (%d+),`)
+	return (tonumber(words) :: number) - (tonumber(row) :: number)
+end
+
+test("an alert alone has one glyph, the tab's; with others, each its own", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	local context = { id = "al1", tone = "warning", title = "Context nearly full", detail = "a word more" }
+	app:set_state("test_deck_alerts", { context })
+	app:frames(30)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	expect(row_glyphs(app)).to_be(0)
+	-- Its words stand where the glyph would have been, not after a gap.
+	expect(words_in(app, "Context nearly full") < 16).to_be(true)
+	app:set_state("test_deck_alerts", { context, { id = "al2", tone = "danger", title = "github MCP server failed to start" } })
+	app:frames(30)
+	expect(row_glyphs(app)).to_be(2)
+	expect(words_in(app, "Context nearly full") > 16).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
+test("an alert alone that's still working keeps its ring: the tab's glyph doesn't say so", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	app:set_state("test_deck_alerts", { { id = "al1", tone = "info", title = "Reconnecting", detail = "a word more", spinner = true } })
+	app:frames(30)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	expect(words_in(app, "Reconnecting") > 16).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
 test("alerts: first in the pill, each with its action and its dismiss", function()
 	local app = mount("running_tray_fixture.luau")
 	app:resize(700, 600)

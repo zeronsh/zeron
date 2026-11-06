@@ -152,6 +152,24 @@ for _, d in { "box", "old" } do
 		end,
 	}
 end
+-- The open session, on a Cloud machine of its own, which the device list
+-- says isn't online (a machine asleep or waking, as it does): what it says
+-- comes from `cloud_stub.session.*`.
+ui.command {
+	id = "session_on_cloud",
+	title = "The open session runs on Cloud",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		local devices = table.clone(now.devices)
+		table.insert(devices, { id = "cloud-s2", name = "Cloud machine", platform = "cloud", here = false, online = false, cloud = true })
+		now.devices = devices
+		sessions.now:set(now)
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { device = "cloud-s2" })
+		end
+	end,
+}
 -- The chat open, kept across a reload as the host keeps it (the fixture
 -- runs again on one; the host's transcript doesn't start over).
 local kept_open = ui.state("fixture_opened", nil :: string?)
