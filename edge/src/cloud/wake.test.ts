@@ -198,6 +198,13 @@ describe("fastWake", () => {
     expect((await fastWake(broke.provider, "bx", broke.options)).state).toBe("error");
   });
 
+  it("resumes a sandbox in the provider's error state: only that gets it out", async () => {
+    const s = scripted({ states: ["error", "ready"], exec: async () => ran });
+    const wake = await fastWake(s.provider, "bx", { ...s.options, machine: "large" });
+    expect(s.calls).toContain("resume");
+    expect(wake.state).toBe("ready");
+  });
+
   it("gives up at its deadline so the slow path can take over", async () => {
     const s = scripted({ states: ["stopped", "provisioning"] });
     const wake = await fastWake(s.provider, "bx", { ...s.options, deadlineMs: 5_000 });

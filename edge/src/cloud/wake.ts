@@ -86,10 +86,13 @@ export const fastWake = async (
   };
 
   let state = await read("stopped");
-  if (state === "error" || state === "deleted") return { state, stages };
+  if (state === "deleted") return { state, stages };
 
-  // Anything else is already on its way up (a retried step, another wake).
-  if (state === "stopped" || state === "stopping") {
+  // Anything else is already on its way up (a retried step, another wake). A
+  // sandbox in the provider's error state still has its disk: a resume that
+  // failed for want of room leaves it there, and a resume on a bigger size is
+  // what gets it out, so it's asked. If that's refused, the refusal says why.
+  if (state === "stopped" || state === "stopping" || state === "error") {
     // A resume during a stop keeps the machine and downloads nothing; a
     // provider that refuses it leaves the slow path to wait the stop out.
     const stopping = state === "stopping";
