@@ -129,11 +129,13 @@ const ensureRunning = async (
   machine?: SandboxMachine
 ): Promise<SandboxFailure | undefined> => {
   let state = await readState(step, provider, sandboxId, `${label}-state`);
-  if (state === "error" || state === "deleted") gone(state);
+  if (state === "deleted") gone(state);
   if (state === "stopping") {
     state = await pollSandbox(step, provider, sandboxId, `${label}-stopped`, (s) => s === "stopped", 40);
   }
-  if (state === "stopped") {
+  // The provider's error state keeps the disk (a resume that didn't fit lands
+  // there), and a resume is what leaves it; a refusal says why it can't.
+  if (state === "stopped" || state === "error") {
     const refused = await step.do(`${label}-resume`, PROVIDER_STEP, async (): Promise<SandboxFailure | null> => {
       try {
         await provider.resume(sandboxId, { ttlSeconds, ...(machine ? { machine } : {}) });

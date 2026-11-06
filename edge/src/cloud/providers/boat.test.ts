@@ -85,6 +85,14 @@ describe("Boat provider wire format", () => {
 
   it("types the documented refusals without a figure", async () => {
     expect(boatFailure("type_too_small", "Too much data.")).toEqual({ kind: "disk_too_small" });
+    // Real Boat, a 400 on a resume to a smaller type: decimal GB with the base
+    // image in. The same machine read "needs 51.8 GiB" on its own size.
+    expect(
+      boatFailure(
+        "type_too_small",
+        "This sandbox uses 77.7 GB of disk, which does not fit a 'default' machine (76.0 GB). Delete data in the sandbox and let it snapshot again, or resume it as 'large' or larger."
+      )
+    ).toEqual({ kind: "disk_too_small", neededGiB: 51.9 });
     expect(boatFailure("snapshot_data_expired", "gone")).toEqual({ kind: "data_expired" });
     const { boat } = fakeBoat(() => boatErr(409, "snapshot_data_expired"));
     await expect(boat.resume("bx_1", { ttlSeconds: null })).rejects.toMatchObject({ failure: { kind: "data_expired" } });

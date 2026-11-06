@@ -256,13 +256,15 @@ are active, and a provider-initiated stop is detected and recorded as sleep.
 ### Machine sizes
 
 The sizes live in one place, `MACHINES` in `edge/src/cloud/policy.ts`, and clients read them from
-`CloudStatus.machines`. `diskGiB` is what a size *holds*, the limit a resume is refused against;
-never what `df` reports.
+`CloudStatus.machines`. `diskGiB` is what a size *holds*, the limit a resume is refused against. It
+counts what the machine added, not the base image `df` also counts (about 20.5 GiB on Boat,
+`SandboxCapabilities.diskOverheadGiB`): a `default` machine reading 62 GiB in `df` fits, and one
+reading 72.4 doesn't.
 
 | Size | vCPU | Memory | Holds | Credits | Source |
 | --- | --- | --- | --- | --- | --- |
-| `small` | 2 | 4 GB | 51 GiB | 0.5× | Boat's table (rounded down) |
-| `default` | 4 | 8 GB | 51 GiB | 1× | Boat's table (rounded down) |
+| `small` | 2 | 4 GB | 51.2 GiB | 0.5× | Refused at the same figure as `default` on a shrink |
+| `default` | 4 | 8 GB | 51.2 GiB | 1× | Boat's refusal text (its table says 51) |
 | `large` | 8 | 16 GB | 111.8 GiB | 2× | Boat's refusal text (its table says 111) |
 | `xlarge` | 16 | 32 GB | 251 GiB | 5.56× (50/9) | Boat's table (rounded down) |
 
@@ -280,6 +282,16 @@ and a send leaves it alone. A wake on a size smaller than `neededGiB` is refused
 block. A refused *shrink* leaves the machine stopped and wakeable on its own size: the session reads
 `sleeping`, with `wakeBlocked` saying what the smaller size couldn't take.
 
+Boat refuses in two ways, both seen on real machines:
+
+- **A resume on the size it's on** is accepted (`202`). The sandbox then reads `error`, with "needs
+  51.8 GiB of disk but the largest 'default' machine holds 51.2 GiB" on it. Asking again on the same
+  size right away answers `409 resume_failed`. A resume on a bigger type gets it out, so a wake
+  resumes a sandbox in the provider's error state rather than giving up on it.
+- **A resume to a smaller type** is refused outright: `400 type_too_small`, "uses 77.7 GB of disk,
+  which does not fit a 'default' machine (76.0 GB)". That's decimal GB with the base image in, and
+  the same machine read "needs 51.8 GiB" above.
+
 **Metering across a resize.** Credits come from the provider's billable seconds, which carry the
 multiplier of the size that was running, so nothing here splits a stretch by size. The sandbox row
 records the size it is on, which is what the live estimate between meter reads spends at, and a
@@ -287,9 +299,10 @@ resize schedules a reconcile. A day's `sandboxType` shows its last size.
 
 ### Disk
 
-The heartbeat reports the machine's disk as `df` reads it. The edge judges the used figure against
-what the size holds, `warn` from 80% and `critical` from 90%, so a machine warns before it can no
-longer fit its size. The heartbeat's reply carries `diskCapacityGiB` for the engine's cleanup.
+The heartbeat reports the machine's disk as `df` reads it. The edge takes off the base image and
+judges the rest against what the size holds, `warn` from 80% and `critical` from 90%, so a machine
+warns before it can no longer fit its size. The heartbeat's reply carries `diskCapacityGiB` for the
+engine's cleanup, in `df`'s terms (what the size holds, plus the base image).
 
 **Lazy hydration.** A resumed disk copies its files in on demand, so `df` under-reads until that's
 done (seen: 26 GiB right after a resume Boat said needed 118.9). The edge therefore keeps a
@@ -349,7 +362,9 @@ What follows a machine dying mid-turn is a resume or a clear failure, never sile
   command sweep rejects it, and the sender sees "Not delivered".
 - **Running, journal open** (the usual case): boot recovery (`SessionsEngine::recover_stale`) stamps
   the streaming reply and re-dispatches the turn, resuming the provider's session, if it is under
-  12 hours old and has revivals left.
+  12 hours old and has revivals left. That happens during assembly, ahead of the credential broker,
+  so the run waits for the broker (`HarnessRegistry::expect_run_environment`): without it the agent
+  has no login and can't find its own conversation.
 - **Running, but it can't resume** (stale, out of revivals, nothing to run it with): the note goes
   on the reply. A kill before the reply reached disk leaves no reply to stamp, so the note gets an
   entry of its own, as does a revival that fails to start.
@@ -358,9 +373,9 @@ What follows a machine dying mid-turn is a resume or a clear failure, never sile
   no run behind it, or a `Run` marked applied that this disk's ledger has never seen, gets a note
   (`DocHost::settle_rolled_back_turn`, Cloud machines only). A message still pending just runs.
 - **Nobody around to boot it**: a machine that goes silent with a turn in flight would stay stuck
-  until the next send. When idle sleep finds it dark (no heartbeat for 3 minutes, and it last
-  reported work), the edge stops it and wakes it straight back, so boot recovery runs. A machine the
-  provider lost ends in `error`.
+  until the next send. Once its heartbeats are 3 minutes late and it last reported work, the edge
+  stops it and wakes it straight back, so boot recovery runs. A machine the provider lost ends in
+  `error`.
 
 ### Engine updates on Cloud
 

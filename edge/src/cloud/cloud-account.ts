@@ -1839,9 +1839,16 @@ export class CloudAccount extends DurableObject<Env> {
     s.lastHeartbeatAt = now;
     if (busy || changed) s.lastActiveAt = now;
     this.markAlive(s, now);
-    if (beat.diskUsedBytes !== undefined) this.noteDisk(s, beat.diskUsedBytes / GIB, now);
-    if (s.state === "ready") s.idleCheckAt = (s.lastActiveAt ?? now) + this.idleMs();
     const provider = this.providerOf(s);
+    // What's judged is what the size's limit counts, never the base image.
+    const diskOverheadGiB = provider?.capabilities.diskOverheadGiB ?? 0;
+    if (beat.diskUsedBytes !== undefined) this.noteDisk(s, Math.max(0, beat.diskUsedBytes / GIB - diskOverheadGiB), now);
+    if (s.state === "ready") {
+      s.idleCheckAt = (s.lastActiveAt ?? now) + this.idleMs();
+      // A turn in flight is looked at as soon as its heartbeats would be late,
+      // not a whole idle window on: a chat is waiting on that machine.
+      if (working) s.idleCheckAt = Math.min(s.idleCheckAt, now + HEARTBEAT_STALE_MS);
+    }
     const ttlSeconds = provider ? effectiveTtl(provider.capabilities, parseTtlSeconds(this.env.CLOUD_TTL_SECONDS)) : null;
     // Out of credits, a busy machine is not kept alive past its TTL.
     if (provider && s.sandboxId && this.balance() > 0 && shouldExtendTtl({ ttlSeconds, busy, lastExtendedAt: s.lastTtlExtendAt, now })) {
@@ -1866,8 +1873,10 @@ export class CloudAccount extends DurableObject<Env> {
         await this.wake(parent).catch((e: unknown) => console.warn("cloud parent wake failed", explain(e)));
       }
     }
-    // What its pre-sleep cleanup measures itself against: what this size holds.
-    const diskCapacityGiB = machineSpec(this.currentMachine(s))?.diskGiB;
+    // What its pre-sleep cleanup measures its own `df` against: what this size
+    // holds, as `df` would read it with the base image in.
+    const holds = machineSpec(this.currentMachine(s))?.diskGiB;
+    const diskCapacityGiB = holds === undefined ? undefined : holds + diskOverheadGiB;
     return { ok: true, value: { ok: true, ...(diskCapacityGiB === undefined ? {} : { diskCapacityGiB }) } };
   }
 
@@ -2012,21 +2021,24 @@ export class CloudAccount extends DurableObject<Env> {
     }
     for (const s of [...this.sessions.values()]) {
       if (s.state !== "ready" || s.idleCheckAt === undefined || now < s.idleCheckAt) continue;
-      const decision = idleDecision({
-        now,
-        idleMs: this.idleMs(),
-        lastActiveAt: s.lastActiveAt,
-        lastHeartbeatAt: s.lastHeartbeatAt,
-        activeRuns: s.activeRuns + (s.backgroundRuns ?? 0),
-        clients: s.clients
-      });
+      // It went dark with a turn in flight (the machine died, or its engine
+      // hung): nobody may send again for days, and the turn is stuck until
+      // something boots it. Sleep it and bring it straight back, so its
+      // engine's boot recovery resumes the turn or says why it can't.
+      const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS;
+      const working = s.activeRuns - (s.waitingRuns ?? 0) > 0 || (s.backgroundRuns ?? 0) > 0;
+      const decision =
+        dark && working
+          ? { sleep: true as const }
+          : idleDecision({
+              now,
+              idleMs: this.idleMs(),
+              lastActiveAt: s.lastActiveAt,
+              lastHeartbeatAt: s.lastHeartbeatAt,
+              activeRuns: s.activeRuns + (s.backgroundRuns ?? 0),
+              clients: s.clients
+            });
       if (decision.sleep) {
-        // It went dark with a turn in flight (the machine died, or its engine
-        // hung): nobody may send again for days, and the turn is stuck until
-        // something boots it. Sleep it and bring it straight back, so its
-        // engine's boot recovery resumes the turn or says why it can't.
-        const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS;
-        const working = s.activeRuns - (s.waitingRuns ?? 0) > 0 || (s.backgroundRuns ?? 0) > 0;
         const sleeping = await this.beginSleep(s, dark && working ? "went dark during a turn; recovering it" : "idle");
         if (dark && working && sleeping.ok) {
           s.pendingWake = true;
@@ -2431,8 +2443,10 @@ export class CloudAccount extends DurableObject<Env> {
     } else {
       const asked = s.pendingMachine ?? this.currentMachine(s);
       const askedHolds = machineSpec(asked)?.diskGiB ?? 0;
-      // A refusal without a figure still says it doesn't fit what was asked.
-      const neededGiB = failure.neededGiB ?? roundGiB(Math.max(s.disk?.usedGiB ?? 0, askedHolds + 0.1));
+      // A refusal without a figure still says it doesn't fit what was asked, and
+      // so does one whose figure reads a little under it (a shrink is judged on
+      // a slightly tighter limit than a resume on the same size).
+      const neededGiB = roundGiB(Math.max(failure.neededGiB ?? s.disk?.usedGiB ?? 0, askedHolds + 0.1));
       s.wakeBlocked = { reason: "disk_too_small", neededGiB };
       s.pendingMachine = undefined;
       s.refreshing = false;
