@@ -234,6 +234,11 @@ impl Harness for MuseHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    /// A steer during an open tool call: `turn/interrupt` ends the turn; the
+    /// host and its background agents stay up.
+    fn steer_stops_tool(&self) -> bool {
+        true
+    }
     /// The launch reads the sandbox and approval posture; the model moves
     /// with `session/setModel` and the effort rides each turn.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
