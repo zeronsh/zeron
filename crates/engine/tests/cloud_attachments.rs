@@ -1042,7 +1042,7 @@ async fn an_edge_without_the_store_falls_back_to_the_peer_path() {
         "the message to go out anyway",
     )
     .await;
-    assert!(held(&core).is_empty());
+    wait_for(|| held(&core).is_empty(), "the outbox row to go").await;
     assert_eq!(edge.count("PUT"), 1);
     core.shutdown().await;
 }
