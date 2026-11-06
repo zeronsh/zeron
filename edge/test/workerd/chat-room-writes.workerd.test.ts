@@ -328,4 +328,66 @@ describe("rolling back past this release", () => {
     });
     host.socket.close();
   });
+
+  describe("a room from before the bound keeps its UNIQUE batch index", () => {
+    const seedLegacyRoom = (name: string, rows: number) =>
+      runInDurableObject(room(name), (_instance, state) => {
+        const sql = state.storage.sql;
+        sql.exec("DROP TABLE rows");
+        sql.exec(
+          "CREATE TABLE rows (seq INTEGER PRIMARY KEY, device TEXT NOT NULL, batch_id TEXT NOT NULL UNIQUE, bytes BLOB NOT NULL, received_at INTEGER NOT NULL)"
+        );
+        for (let seq = 1; seq <= rows; seq++) {
+          sql.exec("INSERT INTO rows VALUES (?, 'viewer', ?, x'01', 0)", seq, `legacy-${seq}`);
+        }
+        setMeta(sql, "headSeq", String(rows));
+      });
+
+    it("acks a replay older than the dedupe window over HTTP, with its original seq", async () => {
+      const name = crypto.randomUUID();
+      await seedLegacyRoom(name, 4200);
+      const response = await room(name).fetch(
+        `https://chat/rows?device=viewer&batchId=legacy-1&chatId=${name}`,
+        { method: "POST", headers: { [AUTH_USER_HEADER]: user }, body: new Uint8Array(16).fill(1) }
+      );
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { seq: number }).seq).toBe(1);
+      const head = await runInDurableObject(room(name), (_instance, state) => headSeq(state.storage.sql));
+      expect(head).toBe(4200);
+    });
+
+    it("acks the same replay over a socket", async () => {
+      const name = crypto.randomUUID();
+      await seedLegacyRoom(name, 4200);
+      const response = await room(name).fetch(`https://chat/ws?device=viewer&chatId=${name}`, {
+        headers: { [AUTH_USER_HEADER]: user, upgrade: "websocket" }
+      });
+      const socket = response.webSocket!;
+      socket.accept();
+      socket.binaryType = "arraybuffer";
+      const frames: Frame[] = [];
+      socket.addEventListener("message", event => {
+        const frame = decodeFrame(new Uint8Array(event.data as ArrayBuffer));
+        if (frame) frames.push(frame);
+      });
+      const send = (type: Frame["type"], header: Record<string, unknown>, payload?: Uint8Array) => {
+        const frame = encodeFrame(type, header, payload);
+        socket.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer);
+      };
+      const until = async (type: Frame["type"]) => {
+        for (let i = 0; i < 300; i++) {
+          const found = frames.find(f => f.type === type);
+          if (found) return found;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        throw new Error(`no frame ${type}`);
+      };
+      send(FRAME.hello, { cursor: 0, device: "viewer" });
+      await until(FRAME.state);
+      send(FRAME.push, { batchId: "legacy-1" }, new Uint8Array(16).fill(1));
+      const ack = await until(FRAME.ack);
+      expect(ack.header.seq).toBe(1);
+      socket.close();
+    });
+  });
 });

@@ -103,14 +103,21 @@ export const appendRow = (
     return { ok: true, seq: existing[0]!.seq as number, dup: true };
   }
   const seq = head + 1;
-  sql.exec(
-    "INSERT INTO rows (seq, device, batch_id, bytes, received_at) VALUES (?, ?, ?, ?, ?)",
+  // OR IGNORE: a room from before the bound still has its UNIQUE index on
+  // batch_id, and the window above doesn't reach a replay older than it. There
+  // the index answers; a plain INSERT would throw and the batch would never ack.
+  const insert = sql.exec(
+    "INSERT OR IGNORE INTO rows (seq, device, batch_id, bytes, received_at) VALUES (?, ?, ?, ?, ?)",
     seq,
     device,
     batchId,
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     receivedAt
   );
+  if (insert.rowsWritten === 0) {
+    const original = [...sql.exec("SELECT seq FROM rows WHERE batch_id = ?", batchId)];
+    return { ok: true, seq: original[0]!.seq as number, dup: true };
+  }
   return { ok: true, seq, dup: false };
 };
 
