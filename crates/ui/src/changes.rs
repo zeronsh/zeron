@@ -6130,6 +6130,7 @@ rename to new_name.rs
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sleep: None,
         }
     }
 

@@ -3051,6 +3051,9 @@ pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
         // strength: at full alpha the colored words shouted across the
         // whole sidebar (user request) — only Done keeps its pop.
         ChatIndicator::Working => theme.busy.opacity(0.55),
+        // Waiting on background work that will wake the agent: under way,
+        // but quieter than a turn running.
+        ChatIndicator::Waiting => theme.busy.opacity(0.35),
         // Blue: "asking you a question" must read differently from "busy
         // working" at a glance.
         ChatIndicator::AwaitingInput => theme.accent.opacity(0.6),
@@ -9178,6 +9181,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sleep: None,
         }
     }
 
