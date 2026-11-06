@@ -79,6 +79,11 @@ export type Props = {
 	-- another device, its catalog not looked at yet or short of it): what
 	-- the chip says rather than nothing, as Zeron's `selected_model_label`.
 	model_label: (() -> string?)?,
+	-- What runs while no model is chosen (a chat naming none runs its agent's
+	-- own): shown as the chosen one is, its mark and reasoning, as Zeron's
+	-- `effective_model_id` falls back to the agent's default, but never
+	-- written into `model` or `effort`, so it isn't sent as a pick.
+	default_model: (() -> string?)?,
 	-- The agents and their models: lists, or states or functions of them
 	-- (a catalog that arrives or changes, followed in place: the tabs and
 	-- rows come and go, the picker stays).
@@ -159,9 +164,50 @@ return ui.component(function(props: Props): Node
 		end
 		return out
 	end)
-	local function current(): Model?
-		return by_id:get()[props.model:get() or ""]
+	-- The model shown: the one chosen, else what runs without one.
+	local function shown_id(): string?
+		local v = props.model:get()
+		if v == nil and props.default_model then
+			return props.default_model()
+		end
+		return v
 	end
+	local function current(): Model?
+		return by_id:get()[shown_id() or ""]
+	end
+	-- The level a model starts on.
+	local function own_effort(m: Model): string?
+		if not m.efforts or #m.efforts == 0 then
+			return nil
+		end
+		return m.effort or m.efforts[math.ceil(#m.efforts / 2)].value
+	end
+	-- The effort shown: the one chosen, else the shown model's own.
+	local function shown_effort(): string?
+		local e = props.effort:get()
+		if e == nil then
+			local m = current()
+			return if m then own_effort(m) else nil
+		end
+		return e
+	end
+	-- What the dropdown and the slider show, followed from the above. A pick
+	-- reaches `model` and `effort` by `on_choose` and `on_change`, so the
+	-- default shown is never written back as one.
+	local shown_model = ui.use_state(shown_id())
+	local shown_level = ui.use_state(shown_effort())
+	ui.effect(function()
+		local v = shown_id()
+		if shown_model:peek() ~= v then
+			shown_model:set(v)
+		end
+	end)
+	ui.effect(function()
+		local e = shown_effort()
+		if shown_level:peek() ~= e then
+			shown_level:set(e)
+		end
+	end)
 	-- The chosen model's name when the catalog can't say it, or what runs
 	-- when none is chosen (nil: the catalog says it, or no one can).
 	local function named(): string?
@@ -232,9 +278,10 @@ return ui.component(function(props: Props): Node
 	end
 
 	-- A model moved to keeps the effort when it has it, else takes its own.
+	-- (Only one chosen: the default shown sets nothing.)
 	ui.effect(function()
 		local m = current()
-		if not m or not m.efforts or #m.efforts == 0 then
+		if not m or not m.efforts or #m.efforts == 0 or props.model:get() == nil then
 			return
 		end
 		local e = props.effort:peek()
@@ -243,7 +290,7 @@ return ui.component(function(props: Props): Node
 				return
 			end
 		end
-		props.effort:set(m.effort or m.efforts[math.ceil(#m.efforts / 2)].value)
+		props.effort:set(own_effort(m))
 	end)
 
 	-- The models as the dropdown's items, each in its agent's mark.
@@ -675,7 +722,10 @@ return ui.component(function(props: Props): Node
 				-- inset); room above and below.
 				py = "$space.1",
 				EffortSlider {
-					value = props.effort,
+					value = shown_level,
+					on_change = function(v: string)
+						props.effort:set(v)
+					end,
 					levels = levels,
 					title = locale.t("ds.model_picker.reasoning"),
 					accessory = if accessory then ui.show(has_fast, accessory) else nil,
@@ -704,12 +754,12 @@ return ui.component(function(props: Props): Node
 			end
 			else nil,
 		say = named,
-		value = props.model,
+		value = shown_model,
 		items = items :: any,
 		tone = props.tone or "chip",
 		mark = true,
 		detail = function(): string
-			local e = props.effort:get()
+			local e = shown_effort()
 			for _, l in levels() do
 				if l.value == e then
 					return l.label
@@ -771,7 +821,8 @@ return ui.component(function(props: Props): Node
 			expanded:set(true)
 		end,
 		keep_open = true,
-		on_choose = function()
+		on_choose = function(v: string)
+			props.model:set(v)
 			expanded:set(false)
 			tab:set(nil)
 		end,

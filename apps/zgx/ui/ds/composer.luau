@@ -127,6 +127,9 @@ export type Props = {
 	-- The model's name while the catalog doesn't list it (ds.ModelPicker's
 	-- `model_label`).
 	model_label: (() -> string?)?,
+	-- What runs while no model is chosen, shown and not sent
+	-- (ds.ModelPicker's `default_model`).
+	default_model: (() -> string?)?,
 	-- A model's agent's accounts, putting one in use, and asking after them
 	-- again (ds.ModelPicker's).
 	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
@@ -1443,6 +1446,7 @@ return ui.component(function(props: Props): Node
 			models = props.models :: any,
 			loading = props.models_loading,
 			model_label = props.model_label,
+			default_model = props.default_model,
 			accounts = props.accounts,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,

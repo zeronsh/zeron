@@ -1002,6 +1002,21 @@ local function Composer(): Node
 				end
 				return nil
 			end,
+			-- A session naming no model runs its agent's own: the catalog's
+			-- first of that agent (the host's `model_label` names it too),
+			-- shown with its mark and reasoning, never sent as a pick.
+			default_model = function(): string?
+				local s = open()
+				if not s or s.model ~= nil or s.harness == nil then
+					return nil
+				end
+				for _, m in store.catalog:get().models do
+					if m.harness == s.harness then
+						return m.value
+					end
+				end
+				return nil
+			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
 			end,

@@ -1317,7 +1317,9 @@ ui.command {
 			local next = table.clone(META[s.id] or {}) :: any
 			next.id = s.id
 			next.state = "ready"
+			next.harness = "claude-code"
 			next.model = nil
+			next.effort = nil
 			next.model_label = "Its own model"
 			META[s.id] = next
 			store.session:set(next)
