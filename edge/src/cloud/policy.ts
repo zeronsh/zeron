@@ -118,7 +118,8 @@ export interface MachineSpec {
   readonly vcpu: number;
   readonly memoryGB: number;
   /** What a machine of this size "holds": the limit a resume is refused
-   * against. Never what `df` says, which also counts the OS. */
+   * against, in what the machine added. `df` also counts the base image
+   * (`SandboxCapabilities.diskOverheadGiB`). */
   readonly diskGiB: number;
   /** Credits it spends relative to `default` (metering's live estimate). */
   readonly creditMultiplier: number;
@@ -127,12 +128,13 @@ export interface MachineSpec {
 /**
  * Every size, smallest first: the one place this is written down. Boat's table
  * (docs.boat.dev/machines) gives CPU, memory, the multipliers (xlarge is 50/9)
- * and disk rounded down to 51, 51, 111 and 251; `large`'s 111.8 is what Boat's
- * own refusal said it holds. It has said no other size's exact figure yet.
+ * and disk rounded down to 51, 51, 111 and 251. `default`'s 51.2 and `large`'s
+ * 111.8 are what Boat's own refusals said; `small` is refused at the same
+ * figure as `default` on a shrink. It has said no exact figure for `xlarge`.
  */
 export const MACHINES: readonly MachineSpec[] = [
-  { id: "small", name: "Small", vcpu: 2, memoryGB: 4, diskGiB: 51, creditMultiplier: 0.5 },
-  { id: "default", name: "Default", vcpu: 4, memoryGB: 8, diskGiB: 51, creditMultiplier: 1 },
+  { id: "small", name: "Small", vcpu: 2, memoryGB: 4, diskGiB: 51.2, creditMultiplier: 0.5 },
+  { id: "default", name: "Default", vcpu: 4, memoryGB: 8, diskGiB: 51.2, creditMultiplier: 1 },
   { id: "large", name: "Large", vcpu: 8, memoryGB: 16, diskGiB: 111.8, creditMultiplier: 2 },
   { id: "xlarge", name: "Extra large", vcpu: 16, memoryGB: 32, diskGiB: 251, creditMultiplier: 5.56 }
 ];

@@ -241,6 +241,10 @@ impl Disk {
 
     /// Boot over it, with a harness that records what it's asked to run.
     fn boot(&self) -> (EngineCore, RequestLog) {
+        self.boot_with(|_| {})
+    }
+
+    fn boot_with(&self, set_up: impl FnOnce(&HarnessRegistry)) -> (EngineCore, RequestLog) {
         let store = DocsStore::open(self.store_dir()).unwrap();
         store
             .save_snapshot(CHAT, &self.doc.export_snapshot().unwrap())
@@ -251,6 +255,7 @@ impl Disk {
         registry.register(Arc::new(Recording {
             requests: requests.clone(),
         }));
+        set_up(&registry);
         let core = EngineCore::assemble(&self.dir, Arc::new(registry), HarnessId::Mock, None)
             .expect("engine core assembles");
         (core, requests)
@@ -300,6 +305,45 @@ fn on_a_cloud_machine() {
 }
 
 // ── what the journal saw ─────────────────────────────────────────────────────
+
+/// What the credential broker does: an agent started without this has no login.
+struct Logins;
+
+#[async_trait]
+impl zeron_engine::registry::RunEnvironment for Logins {
+    async fn prepare(&self, _harness: HarnessId, request: &mut RunRequest) -> Result<(), String> {
+        request.env.insert("LOGGED_IN".into(), "yes".into());
+        Ok(())
+    }
+}
+
+/// Seen on a real machine: boot recovery beat the broker to it, and Codex came
+/// up with no login and no way to find its earlier conversation.
+#[tokio::test]
+async fn a_revived_turn_waits_for_the_machines_logins() {
+    let now = now_ms();
+    let disk = Disk::new()
+        .user_message("m1", now - 60_000)
+        .streaming_reply("a1", now - 30_000)
+        .open_journal();
+    let (core, requests) = disk.boot_with(|registry| registry.expect_run_environment());
+    settle().await;
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "a run started ahead of the broker"
+    );
+    core.registry.set_run_environment(Arc::new(Logins));
+    wait_for(
+        || !requests.lock().unwrap().is_empty(),
+        "the killed turn to run once the logins are there",
+    )
+    .await;
+    assert_eq!(
+        requests.lock().unwrap()[0].env.get("LOGGED_IN").map(String::as_str),
+        Some("yes")
+    );
+    core.shutdown().await;
+}
 
 #[tokio::test]
 async fn a_recent_kill_resumes_the_turn() {

@@ -7,7 +7,8 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { describe, expect, it } from "vitest";
 import { START_ENGINE_COMMAND } from "../../src/cloud/install-script";
 import { listLedger, listSandboxes } from "../../src/cloud/metering";
-import { cloudAccountName } from "../../src/cloud/policy";
+import { cloudAccountName, HEARTBEAT_STALE_MS } from "../../src/cloud/policy";
+import { BOAT_IMAGE_GIB } from "../../src/cloud/providers/boat";
 import {
   boatControl,
   boatState,
@@ -55,6 +56,9 @@ const beat = async (u: TestUser, s: { deviceId: string; key: Awaited<ReturnType<
   call("POST", "/runner/heartbeat", `Bearer ${await runnerToken(u, s.deviceId, s.key)}`, { activeRuns: 0, clients: 0, ...body });
 
 const gib = (n: number) => Math.round(n * 1024 ** 3);
+
+/** What `df` reads on a machine that has added `n` GiB to its base image. */
+const df = (n: number) => gib(n + BOAT_IMAGE_GIB);
 
 /** A machine asleep whose resume Boat refuses for want of disk: blocked. */
 const blockedSession = async (u: TestUser) => {
@@ -128,6 +132,18 @@ describe("a send recovers a session in error", () => {
     expect(back.error).toBeUndefined();
   });
 
+  it("doesn't leave a machine billing behind a wake that failed", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    await putToSleep(u, s.chatId);
+    await boatControl("__fail", { sandboxId: s.sandboxId, op: "resume", status: 400, code: "sleep_timed_out" });
+    const stopsBefore = (await boatState()).calls.filter((c) => c.sandboxId === s.sandboxId && c.path.endsWith("/stop")).length;
+    await wake(u, s.chatId);
+    await waitForSession(u, s.chatId, "error");
+    const stops = (await boatState()).calls.filter((c) => c.sandboxId === s.sandboxId && c.path.endsWith("/stop"));
+    expect(stops.length).toBe(stopsBefore + 1);
+  });
+
   it("leaves a failure a retry can't fix alone", async () => {
     const u = newUser();
     const s = await blockedSession(u);
@@ -165,7 +181,7 @@ describe("a wake refused for want of disk", () => {
     // Nothing tried a bigger size meanwhile.
     expect((await resumes(s.sandboxId)).map((c) => c.body?.type)).toEqual([undefined]);
     // The figure Boat gave counts as the machine's use: over what it holds.
-    expect((s.blocked as unknown as { disk: unknown }).disk).toEqual({ usedGiB: 118.3, capacityGiB: 51, level: "critical" });
+    expect((s.blocked as unknown as { disk: unknown }).disk).toEqual({ usedGiB: 118.3, capacityGiB: 51.2, level: "critical" });
   });
 
   it("refuses a size smaller than it needs with a typed 409, and wakes on one that fits", async () => {
@@ -173,7 +189,7 @@ describe("a wake refused for want of disk", () => {
     const s = await blockedSession(u);
     const same = await wake(u, s.chatId);
     expect(same.status).toBe(409);
-    expect(await same.json()).toMatchObject({ error: "machine_too_small", neededGiB: 118.3, capacityGiB: 51, machine: "default" });
+    expect(await same.json()).toMatchObject({ error: "machine_too_small", neededGiB: 118.3, capacityGiB: 51.2, machine: "default" });
     const tooSmall = await wake(u, s.chatId, { machine: "large" });
     expect(tooSmall.status).toBe(409);
     expect(await tooSmall.json()).toMatchObject({ error: "machine_too_small", neededGiB: 118.3, capacityGiB: 111.8, machine: "large" });
@@ -196,11 +212,33 @@ describe("a wake refused for want of disk", () => {
     await putToSleep(u, s.chatId);
     // The resume is accepted, then the sandbox fails with Boat's text on it.
     await boatControl("__fail", { sandboxId: s.sandboxId, op: "commands", status: 500, code: "down", times: 3 });
-    await boatControl("__set", { sandboxId: s.sandboxId, state: "error", error: NEEDS_118 });
+    await boatControl("__set", { sandboxId: s.sandboxId, resumeFails: NEEDS_118 });
     await wake(u, s.chatId);
     await expect
       .poll(async () => ((await session(u, s.chatId)) as unknown as { wakeBlocked?: unknown })?.wakeBlocked)
       .toEqual({ reason: "disk_too_small", neededGiB: 118.3 });
+  });
+
+  it("wakes on a bigger size out of the error state a refused resume leaves", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    await putToSleep(u, s.chatId);
+    // Real Boat: 202 on the resume, then `error` on the sandbox, which stays
+    // there until a resume on another type.
+    await boatControl("__set", { sandboxId: s.sandboxId, resumeFails: NEEDS_118 });
+    await wake(u, s.chatId);
+    await waitForSession(u, s.chatId, "error");
+    expect((await boatState()).sandboxes.find((b) => b.id === s.sandboxId)?.state).toBe("error");
+
+    const up = await wake(u, s.chatId, { machine: "xlarge" });
+    expect(up.status).toBe(200);
+    await expect.poll(async () => (await resumes(s.sandboxId)).at(-1)?.body).toEqual({ type: "xlarge", ttlSeconds: 7200 });
+    await expect.poll(async () => (await boatState()).sandboxes.find((b) => b.id === s.sandboxId)?.state).toBe("idle");
+    await runnerToken(u, s.deviceId, s.key);
+    const ready = (await waitForSession(u, s.chatId, "ready")) as unknown as { machine: string; wakeBlocked?: unknown; error?: string };
+    expect(ready.machine).toBe("xlarge");
+    expect(ready.wakeBlocked).toBeUndefined();
+    expect(ready.error).toBeUndefined();
   });
 
   it("a refused shrink leaves the machine as it was, wakeable on its own size", async () => {
@@ -209,11 +247,18 @@ describe("a wake refused for want of disk", () => {
     await call("PUT", "/cloud/org1/machine", userBearer(u), { machine: "large" });
     const s = await readySession(u);
     await putToSleep(u, s.chatId);
-    await boatControl("__fail", { sandboxId: s.sandboxId, op: "resume", status: 409, code: "type_too_small", message: "Too much data for that size." });
+    // As real Boat answers it.
+    await boatControl("__fail", {
+      sandboxId: s.sandboxId,
+      op: "resume",
+      status: 400,
+      code: "type_too_small",
+      message: "This sandbox uses 77.7 GB of disk, which does not fit a 'small' machine (76.0 GB). Delete data in the sandbox and let it snapshot again, or resume it as 'large' or larger."
+    });
     await wake(u, s.chatId, { machine: "small" });
     await expect
       .poll(async () => ((await session(u, s.chatId)) as unknown as { wakeBlocked?: { neededGiB: number } })?.wakeBlocked?.neededGiB)
-      .toBe(51.1);
+      .toBe(51.9);
     const after = (await session(u, s.chatId)) as unknown as { machine: string; state: string };
     expect(after).toMatchObject({ machine: "large", state: "sleeping" });
     // Small stays refused for what it now knows, while its own size wakes it.
@@ -305,27 +350,41 @@ describe("disk levels", () => {
     await beat(u, s, {});
     expect(await diskOf(u, s.chatId)).toBeUndefined();
 
-    const reply = await beat(u, s, { diskUsedBytes: gib(10) });
-    expect(await reply.json()).toEqual({ ok: true, diskCapacityGiB: 51 });
-    expect(await diskOf(u, s.chatId)).toEqual({ usedGiB: 10, capacityGiB: 51, level: "ok" });
-    await beat(u, s, { diskUsedBytes: gib(40.7) });
+    const reply = await beat(u, s, { diskUsedBytes: df(10) });
+    // `df`'s scale, for the engine that compares its own reading with it.
+    expect(await reply.json()).toEqual({ ok: true, diskCapacityGiB: 51.2 + BOAT_IMAGE_GIB });
+    expect(await diskOf(u, s.chatId)).toEqual({ usedGiB: 10, capacityGiB: 51.2, level: "ok" });
+    await beat(u, s, { diskUsedBytes: df(40.7) });
     expect(await diskOf(u, s.chatId)).toMatchObject({ level: "ok" });
-    await beat(u, s, { diskUsedBytes: gib(40.9) });
+    await beat(u, s, { diskUsedBytes: df(41) });
     expect(await diskOf(u, s.chatId)).toMatchObject({ level: "warn" });
-    await beat(u, s, { diskUsedBytes: gib(46) });
+    await beat(u, s, { diskUsedBytes: df(46.1) });
     expect(await diskOf(u, s.chatId)).toMatchObject({ level: "critical" });
     // Nothing hydrating: a clean-up shows at once.
-    await beat(u, s, { diskUsedBytes: gib(12) });
+    await beat(u, s, { diskUsedBytes: df(12) });
     expect(await diskOf(u, s.chatId)).toMatchObject({ usedGiB: 12, level: "ok" });
     // Rejected, not stored: not a byte count.
     expect((await beat(u, s, { diskUsedBytes: -1 })).status).toBe(200);
     expect(await diskOf(u, s.chatId)).toMatchObject({ usedGiB: 12 });
   });
 
+  it("doesn't count the base image a fresh machine already reads", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    // Measured on a real fresh machine.
+    await beat(u, s, { diskUsedBytes: gib(20.7) });
+    expect(await diskOf(u, s.chatId)).toMatchObject({ level: "ok" });
+    expect(((await diskOf(u, s.chatId)) as { usedGiB: number }).usedGiB).toBeLessThan(1);
+    // 41 GiB of data: `df` reads 62, past what a default machine holds, and yet
+    // real Boat resumed this on its own size.
+    await beat(u, s, { diskUsedBytes: gib(62) });
+    expect(await diskOf(u, s.chatId)).toMatchObject({ usedGiB: 41.5, level: "warn" });
+  });
+
   it("holds the high-water mark while a resumed disk is still copying in", async () => {
     const u = newUser();
     const s = await readySession(u);
-    await beat(u, s, { diskUsedBytes: gib(45) });
+    await beat(u, s, { diskUsedBytes: df(45) });
     await putToSleep(u, s.chatId);
     await boatControl("__set", { sandboxId: s.sandboxId, hydrated: false });
     await wake(u, s.chatId);
@@ -333,17 +392,17 @@ describe("disk levels", () => {
     await waitForSession(u, s.chatId, "ready");
 
     // Right after a resume `df` reads a fraction of it.
-    await beat(u, s, { diskUsedBytes: gib(26) });
-    expect(await diskOf(u, s.chatId)).toEqual({ usedGiB: 45, capacityGiB: 51, level: "warn" });
+    await beat(u, s, { diskUsedBytes: df(26) });
+    expect(await diskOf(u, s.chatId)).toEqual({ usedGiB: 45, capacityGiB: 51.2, level: "warn" });
     // It still rises while copying in.
-    await beat(u, s, { diskUsedBytes: gib(46) });
+    await beat(u, s, { diskUsedBytes: df(46) });
     expect(await diskOf(u, s.chatId)).toMatchObject({ usedGiB: 46 });
 
     // Still not there: the provider says so, and it keeps holding.
     await withSession(u, s.chatId, (r) => {
       r.lastHydrationProbeAt = 0;
     });
-    await beat(u, s, { diskUsedBytes: gib(30) });
+    await beat(u, s, { diskUsedBytes: df(30) });
     await new Promise((r) => setTimeout(r, 100));
     expect(await diskOf(u, s.chatId)).toMatchObject({ usedGiB: 46 });
 
@@ -352,10 +411,10 @@ describe("disk levels", () => {
     await withSession(u, s.chatId, (r) => {
       r.lastHydrationProbeAt = 0;
     });
-    await beat(u, s, { diskUsedBytes: gib(30) });
+    await beat(u, s, { diskUsedBytes: df(30) });
     await expect
       .poll(async () => {
-        await beat(u, s, { diskUsedBytes: gib(30) });
+        await beat(u, s, { diskUsedBytes: df(30) });
         return ((await diskOf(u, s.chatId)) as { usedGiB: number }).usedGiB;
       })
       .toBe(30);
@@ -649,6 +708,27 @@ describe("a machine that goes dark during a turn", () => {
     await waitForSession(u, s.chatId, "starting");
     const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
     expect(ledger.some((e) => e.detail === "went dark during a turn; recovering it")).toBe(true);
+  });
+
+  it("is looked at as soon as its heartbeats are late, not an idle window on", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    const before = Date.now();
+    await beat(u, s, { activeRuns: 1 });
+    await withSession(u, s.chatId, (r) => {
+      expect(r.idleCheckAt!).toBeLessThanOrEqual(Date.now() + HEARTBEAT_STALE_MS);
+      expect(r.idleCheckAt!).toBeGreaterThanOrEqual(before + HEARTBEAT_STALE_MS);
+    });
+    // Just late: it was active a moment before it went quiet.
+    await boatControl("__set", { sandboxId: s.sandboxId, state: "archived" });
+    await withSession(u, s.chatId, (r) => {
+      r.lastHeartbeatAt = Date.now() - HEARTBEAT_STALE_MS;
+      r.lastActiveAt = Date.now() - HEARTBEAT_STALE_MS;
+      r.idleCheckAt = Date.now() - 1;
+    });
+    const resumed = (await resumes(s.sandboxId)).length;
+    await runDurableObjectAlarm(accountStub(u));
+    await expect.poll(async () => (await resumes(s.sandboxId)).length).toBe(resumed + 1);
   });
 
   it("starts its engine as any wake does, and its timeline shows no send behind it", async () => {

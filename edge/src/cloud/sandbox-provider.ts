@@ -46,6 +46,9 @@ export interface SandboxCapabilities {
   /** How long a stopped sandbox's disk is kept. A resume starts the clock
    * again from the next stop. Absent = kept for good. */
   readonly stoppedRetentionMs?: number;
+  /** What `df` counts on a machine that its size's limit doesn't: the base
+   * image. Absent = nothing, the limit is what `df` reads. */
+  readonly diskOverheadGiB?: number;
 }
 
 /**

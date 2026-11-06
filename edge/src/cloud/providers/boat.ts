@@ -105,6 +105,10 @@ export const boatErrorKind = (status: number, code: string): SandboxErrorKind =>
 /** "This Sandbox needs 118.3 GiB of disk but the largest 'large' machine holds
  * 111.8 GiB. Resume or fork it as a bigger type (--type)." */
 const DISK_NEEDED_RE = /needs\s+(\d+(?:\.\d+)?)\s*GiB\s+of\s+disk/i;
+/** Its other spelling, a 400 `type_too_small` on a resume to a smaller type, in
+ * decimal GB of everything on the disk, base image included: "This sandbox uses
+ * 77.7 GB of disk, which does not fit a 'default' machine (76.0 GB)." */
+const DISK_USES_RE = /uses\s+(\d+(?:\.\d+)?)\s*GB\s+of\s+disk/i;
 /** healthReason/error on an expired sandbox: "This sandbox's data was deleted
  * 14 days after it stopped. …" */
 const DATA_DELETED_RE = /data was deleted/i;
@@ -121,6 +125,11 @@ export const boatFailure = (code: string | undefined, message: string | null | u
   if (needed) {
     const neededGiB = Number(needed[1]);
     return Number.isFinite(neededGiB) ? { kind: "disk_too_small", neededGiB } : { kind: "disk_too_small" };
+  }
+  const uses = message ? DISK_USES_RE.exec(message) : null;
+  if (uses) {
+    const neededGiB = Math.round(((Number(uses[1]) * 1e9) / 2 ** 30 - BOAT_IMAGE_GIB) * 10) / 10;
+    return Number.isFinite(neededGiB) && neededGiB > 0 ? { kind: "disk_too_small", neededGiB } : { kind: "disk_too_small" };
   }
   return code === "type_too_small" ? { kind: "disk_too_small" } : undefined;
 };
@@ -160,6 +169,12 @@ interface BoatSandbox {
  * resume starts the 14 days again from the next stop" (docs.boat.dev). */
 const STOPPED_RETENTION_MS = 14 * 24 * 60 * 60_000;
 
+/** Boat's refusal counts what the machine added, not its base image, which
+ * `df` does. Measured on a hydrated machine: `df` 72.4 GiB, refused at
+ * "needs 51.8 GiB". A fresh machine, with Zeron and a small checkout, reads
+ * 20.7. */
+export const BOAT_IMAGE_GIB = 20.5;
+
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
 const parseTime = (value: string | null | undefined): number | undefined => {
@@ -171,7 +186,12 @@ export class BoatProvider implements SandboxProvider {
   readonly name = PROVIDER;
   // Boat's own cap; a trial account additionally requires auto-stop ≤ 7200 s
   // (CLOUD_TTL_SECONDS), which Boat reports as `trial_auto_stop_required`.
-  readonly capabilities = { ttlRequired: false, maxTtlSeconds: 2_592_000, stoppedRetentionMs: STOPPED_RETENTION_MS };
+  readonly capabilities = {
+    ttlRequired: false,
+    maxTtlSeconds: 2_592_000,
+    stoppedRetentionMs: STOPPED_RETENTION_MS,
+    diskOverheadGiB: BOAT_IMAGE_GIB
+  };
   private readonly base: string;
   private readonly apiKey: string;
   private readonly doFetch: BoatFetch;

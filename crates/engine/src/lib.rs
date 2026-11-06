@@ -1018,17 +1018,23 @@ impl Engine {
 
         let preview_org = profile.org_id().to_string();
         let device_root = profile.device_root().to_path_buf();
+        let registry = Arc::new(default_registry());
+        // Assembly's boot recovery may start a killed turn before the broker
+        // below is attached: it waits for it.
+        if auth.runner_identity().is_some() {
+            registry.expect_run_environment();
+        }
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
                 lock,
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
             )?,
