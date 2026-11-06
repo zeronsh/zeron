@@ -42,6 +42,9 @@ const LINGER_AFTER_PEER: Duration = Duration::from_secs(15);
 /// Direct link attempts, from a chat on screen to its host.
 const LINK_RETRY_MIN: Duration = Duration::from_secs(15);
 const LINK_RETRY_MAX: Duration = Duration::from_secs(300);
+/// Longest a link attempt may take, pairing included. An open on a connection that
+/// has stopped moving would otherwise wait forever and block every later attempt.
+const LINK_OPEN_LIMIT: Duration = Duration::from_secs(45);
 /// A snapshot past this stays on stored rows, or goes back to them. The room takes
 /// checkpoints up to 32 MiB (`MAX_CHECKPOINT_BYTES`), and a chat over that can't
 /// heal, can't bring an old reader up to date and can't let a Cloud machine sleep.
@@ -358,6 +361,12 @@ impl DocHost {
                         let now = Instant::now();
                         let room = lock(&handle.chat2).as_ref().and_then(|c| c.relay_answer());
                         if room != last_room || last_refresh.is_none_or(|at| now - at >= MODE_REFRESH) {
+                            // The room coming back means the network did: try now,
+                            // not at the end of a long backoff.
+                            if room.is_some() && last_room.is_none() {
+                                next_link = now;
+                                link_retry = LINK_RETRY_MIN;
+                            }
                             last_room = room;
                             last_refresh = Some(now);
                             host.refresh_relay_mode(&handle, &state);
@@ -594,12 +603,23 @@ impl DocHost {
         let service = format!("{CHAT_LINK_PREFIX}{}", handle.chat_id);
         let chat = handle.chat_id.clone();
         self.spawn_worker(async move {
-            match previews.open_peer_stream(&host_device, &service).await {
-                Ok(stream) => {
+            match open_within(LINK_OPEN_LIMIT, previews.open_peer_stream(&host_device, &service)).await {
+                LinkOpen::Open(stream) => {
                     tracing::info!(chat = %chat, device = %host_device, "chat link up");
-                    run_link(stream, host_device, state.relay.clone(), stop).await;
+                    run_link(stream, host_device.clone(), state.relay.clone(), stop.clone()).await;
+                    // Nobody asked it to end: the connection under it is dead or stuck.
+                    // It can look open for minutes, and reusing it would stay on the
+                    // room long after the network has recovered.
+                    if !stop.is_cancelled() {
+                        tracing::info!(chat = %chat, device = %host_device, "chat link lost; pairing afresh next time");
+                        previews.reset_peer(&host_device).await;
+                    }
                 }
-                Err(error) => {
+                LinkOpen::Stuck => {
+                    tracing::info!(chat = %chat, device = %host_device, "chat link open stuck; pairing afresh next time");
+                    previews.reset_peer(&host_device).await;
+                }
+                LinkOpen::Refused(error) => {
                     // The room carries this chat. The maintenance tick retries.
                     tracing::debug!(chat = %chat, %error, "chat link unavailable");
                 }
@@ -670,6 +690,26 @@ impl DocHost {
         lock(&handle.relay)
             .clone()
             .ok_or_else(|| anyhow::anyhow!("that chat isn't ready for a link yet"))
+    }
+}
+
+enum LinkOpen<T> {
+    Open(T),
+    /// The connection answered no: this service isn't available there.
+    Refused(anyhow::Error),
+    /// No answer at all in time.
+    Stuck,
+}
+
+async fn open_within<T>(
+    limit: Duration,
+    open: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> LinkOpen<T> {
+    match tokio::time::timeout(limit, open).await {
+        Ok(Ok(stream)) => LinkOpen::Open(stream),
+        Ok(Err(error)) if error.downcast_ref::<tokio::time::error::Elapsed>().is_some() => LinkOpen::Stuck,
+        Ok(Err(error)) => LinkOpen::Refused(error),
+        Err(_) => LinkOpen::Stuck,
     }
 }
 
@@ -801,6 +841,19 @@ mod tests {
         let state = state();
         std::mem::forget(runtime);
         state
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_open_that_never_answers_gives_up() {
+        let open = open_within::<()>(LINK_OPEN_LIMIT, std::future::pending());
+        assert!(matches!(open.await, LinkOpen::Stuck));
+        let elapsed = tokio::time::timeout(Duration::from_millis(1), std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        let timed_out = open_within::<()>(LINK_OPEN_LIMIT, async move { Err(elapsed.into()) });
+        assert!(matches!(timed_out.await, LinkOpen::Stuck), "its ready wait timed out");
+        let refused = open_within::<()>(LINK_OPEN_LIMIT, async { anyhow::bail!("no such chat") });
+        assert!(matches!(refused.await, LinkOpen::Refused(_)));
     }
 
     #[tokio::test]
