@@ -200,6 +200,50 @@ stub_lanes.watch = function(slot: string, id: string?, frozen: boolean?, _chat: 
 		end
 	end
 end
+-- A side chat as the host publishes it mid-turn: running, its queue, what it
+-- asks, what it's at. (`tab1`, the first tab opened.)
+local function side_says(fields: { [string]: any })
+	local session = lanes.view("tab1").session
+	local now = table.clone(session:peek() or {})
+	for k, v in fields do
+		now[k] = v
+	end
+	session:set(now)
+end
+ui.command { id = "side_running", title = "The side chat runs", run = function()
+	side_says({ running = true })
+end }
+ui.command { id = "side_queue_one", title = "A message waits in its queue", run = function()
+	side_says({ queue = { { id = "q1", text = "Queued words" } } })
+end }
+ui.command { id = "side_approval", title = "It asks for approval", run = function()
+	side_says({ ask = { request = "r1", kind = "approval", approval = { title = "Run this command?", command = "rm -rf build", cwd = "/proj" } } })
+end }
+ui.command { id = "side_question", title = "It asks a question", run = function()
+	side_says({ ask = { request = "r2", kind = "question", question = { header = "Question", text = "Which branch?", options = { { value = "main", label = "main" }, { value = "fix", label = "A new branch" } } } } })
+end }
+ui.command { id = "side_todos", title = "It has todos", run = function()
+	side_says({ todos = { { id = "t1", text = "Read the tests", status = "in_progress" } } })
+end }
+stub_store.queue = function(id: string, op: any)
+	note(`queue:{id}:{op.op}:{op.item}`)
+end
+stub_store.queue_edit = function(id: string, item: string): any
+	note(`queue_edit:{id}:{item}`)
+	side_says({ queue = { { id = item, text = "Queued words", editing = true } } })
+	return settled(true, { text = "Queued words" })
+end
+stub_store.queue_finish = function(id: string, item: string, action: string, text: string?): any
+	note(`queue_finish:{id}:{item}:{action}:{text or ""}`)
+	side_says({ queue = { { id = item, text = if action == "commit" then text else "Queued words" } } })
+	return settled(true, nil)
+end
+stub_store.approve = function(id: string, request: string, scope: string)
+	note(`approve:{id}:{request}:{scope}`)
+end
+stub_store.answer = function(id: string, request: string, _answer: any)
+	note(`answer:{id}:{request}`)
+end
 local stub_toast = ds.toast :: any
 stub_toast.show = function(t: any): number
 	note(`toast:{t.title}`)

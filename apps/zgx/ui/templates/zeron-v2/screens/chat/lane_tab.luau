@@ -25,6 +25,7 @@ local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 local Carried = require("@app/screens/chat/carried")
+local Asks = require("@app/screens/chat/asks")
 local Appshots = require("@app/screens/chat/appshots")
 local DropOverlay = require("@ds/drop_overlay")
 
@@ -67,8 +68,36 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	ui.effect(function()
 		carried:set(Shared.cargo_of(chat))
 	end)
+	-- What its chat asks, and its queue, todos and tasks, from its own
+	-- session, as the window's composer shows them.
+	local asks = Asks.bind {
+		id = function(): string?
+			return chat
+		end,
+		session = function(): any
+			return view.session:get()
+		end,
+		chosen = ui.state(`chat_lane_chosen_{chat}`, {} :: { [string]: boolean }),
+		asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+	}
+	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
+	-- A queued message edited in its composer.
+	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string }?)
+	local edits = Asks.queue_edits {
+		id = function(): string?
+			return chat
+		end,
+		text = draft,
+		editing = editing,
+		focus = function()
+			focus:add(1)
+		end,
+		say = function(tone: string, key: string)
+			notice:set({ tone = tone, text = locale.s(key), dismissable = true })
+		end,
+	}
 	local running = ui.computed(function(): boolean
 		local s = session:get()
 		return s ~= nil and s.running == true
@@ -350,6 +379,11 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		branches_empty = where.branches_empty,
 		branch_fixed = branch_fixed,
 		on_send = function(text: string)
+			-- Editing a queued message: Send saves it.
+			if editing:peek() then
+				edits.finish("commit")
+				return
+			end
 			local words = string.match(text, "^%s*(.-)%s*$") or ""
 			if words == "" and #carried:peek() == 0 then
 				return
@@ -370,11 +404,29 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
 			-- that id, so the host's copy is the same row.
-			local mid = store.new_id()
-			local req = picks()
-			req.message_id = mid
+			-- (While a turn runs it's queued instead: it shows in the queue, and
+			-- what's picked waits for the turn it will run in.)
+			local queued = not is_unsent and running:peek()
+			local req: { [string]: any } = if queued then {} else picks()
 			req.attachments = pack.attachments
 			req.appshots = Appshots.of_cargo(chips)
+			local function failed(err: any)
+				draft:set(words)
+				Shared.restore_cargo_of(chat, chips)
+				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
+				notice:set({
+					tone = "danger",
+					text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
+					dismissable = true,
+				})
+			end
+			if queued then
+				req.session, req.text = chat, prompt
+				store.send(req :: any):after(function() end, failed)
+				return
+			end
+			local mid = store.new_id()
+			req.message_id = mid
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
@@ -390,20 +442,40 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				req.session, req.text = chat, prompt
 				sent = store.send(req :: any)
 			end
-			sent:after(function() end, function(err: any)
-				draft:set(words)
-				Shared.restore_cargo_of(chat, chips)
-				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
-				notice:set({
-					tone = "danger",
-					text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
-					dismissable = true,
-				})
-			end)
+			sent:after(function() end, failed)
 		end,
 		on_stop = function()
 			store.interrupt(chat)
 		end,
+		-- (Its chat's own.)
+		question = asks.question,
+		chosen = asks.chosen,
+		on_pick = asks.on_pick,
+		on_answer = asks.on_answer,
+		on_close_question = asks.on_close_question,
+		on_back = asks.on_back,
+		approval = asks.approval,
+		can_always = asks.can_always,
+		on_approve = asks.on_approve,
+		on_deny = asks.on_deny,
+		queue = asks.queue,
+		can_steer = function(): boolean
+			return running:get()
+		end,
+		on_queue_send = asks.on_queue_send,
+		on_queue_edit = edits.on_queue_edit,
+		on_queue_save = edits.on_queue_save,
+		on_queue_cancel = edits.on_queue_cancel,
+		on_queue_remove = asks.on_queue_remove,
+		on_queue_reorder = asks.on_queue_reorder,
+		todos = asks.todos,
+		tasks = asks.tasks,
+		on_stop_task = function(task: string)
+			store.stop_task(chat, task):after(function() end, function()
+				notice:set({ tone = "danger", text = locale.s("chat.composer.couldnt_stop_task"), dismissable = true })
+			end)
+		end,
+		tray = tray,
 	}
 end
 

@@ -588,26 +588,20 @@ local function Composer(): Node
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
 	local editing = ui.state("chat_editing", nil :: { item: string, aside: string }?)
-	local function end_edit(action: string)
-		local e = editing:peek()
-		local id = session_id:peek()
-		if not e or not id then
-			return
-		end
-		local words = shared.text:peek()
-		ui.batch(function()
-			editing:set(nil)
-			shared.text:set(e.aside)
-		end)
-		store.queue_finish(id, e.item, action, if action == "commit" then words else nil):after(function() end, function(err: any)
-			local why = err and err.message
-			own_notice:set {
-				tone = "danger",
-				key = if why == "conflict" then "chat.composer.edit_conflict" else "chat.composer.edit_not_saved",
-				dismissable = true,
-			}
-		end)
-	end
+	local edits = Asks.queue_edits {
+		id = function(): string?
+			return session_id:peek()
+		end,
+		text = shared.text,
+		editing = editing,
+		focus = function()
+			shared.focus:add(1)
+		end,
+		say = function(tone: string, key: string)
+			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
+	}
+	local end_edit = edits.finish
 	-- Moving to another chat: an edit under way is left as it was (its
 	-- displaced draft back in place), then the draft shown is put away
 	-- under the chat left and the next chat's own comes out (shared.show),
@@ -976,29 +970,9 @@ local function Composer(): Node
 				return running:get()
 			end,
 			on_queue_send = asks.on_queue_send,
-			on_queue_edit = function(item: string)
-				local id = session_id:peek()
-				if not id or editing:peek() then
-					return
-				end
-				store.queue_edit(id, item):after(function(got: any)
-					editing:set { item = item, aside = shared.text:peek() }
-					shared.text:set(if got then got.text else "")
-					shared.focus:add(1)
-				end, function(err: any)
-					own_notice:set {
-						tone = "warning",
-						key = if err and err.message == "locked" then "chat.composer.edit_locked" else "chat.composer.edit_unavailable",
-						dismissable = true,
-					}
-				end)
-			end,
-			on_queue_save = function()
-				end_edit("commit")
-			end,
-			on_queue_cancel = function()
-				end_edit("cancel")
-			end,
+			on_queue_edit = edits.on_queue_edit,
+			on_queue_save = edits.on_queue_save,
+			on_queue_cancel = edits.on_queue_cancel,
 			on_queue_remove = asks.on_queue_remove,
 			on_queue_reorder = asks.on_queue_reorder,
 			todos = asks.todos,
