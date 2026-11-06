@@ -368,7 +368,11 @@ impl Harness for MockHarness {
         // Dev/testing knob: `ZERON_MOCK_LONG_TOOL=1` is a runtime with real
         // processes, for timing steers against a blocking command.
         if long_tool_mode() {
-            return Ok(long_tool_run(request.prompt.clone(), controls));
+            return Ok(long_tool_run(
+                request.prompt.clone(),
+                request.attachments.clone(),
+                controls,
+            ));
         }
 
         // Dev/testing knob: a `/fanout N` prompt spawns N subagents at once,
@@ -1086,6 +1090,34 @@ fn background_run(
     .boxed()
 }
 
+/// What the long-tool runtime answers a prompt: its words, and the files it
+/// came with as attachments (the images among them by name), so a test can
+/// see what reached the agent as an attachment and not only as text.
+fn heard(words: &str, attached: &[String]) -> String {
+    if attached.is_empty() {
+        return format!("Heard: {words}\n\n");
+    }
+    let names: Vec<&str> = attached
+        .iter()
+        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p))
+        .collect();
+    let images = attached
+        .iter()
+        .filter(|p| {
+            let p = p.to_ascii_lowercase();
+            [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                .iter()
+                .any(|e| p.ends_with(e))
+        })
+        .count();
+    format!(
+        "Heard: {words}\n\n[attachments: {} ({images} image{}): {}]\n\n",
+        attached.len(),
+        if images == 1 { "" } else { "s" },
+        names.join(", ")
+    )
+}
+
 /// `ZERON_MOCK_LONG_TOOL=1` (Unix: it runs `sleep`).
 fn long_tool_mode() -> bool {
     cfg!(unix)
@@ -1106,6 +1138,7 @@ fn long_tool_mode() -> bool {
 /// and `<first prompt>.fg.pid` there.
 fn long_tool_run(
     first: String,
+    first_attachments: Vec<String>,
     controls: RunControls,
 ) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
     let RunControls {
@@ -1141,12 +1174,12 @@ fn long_tool_run(
         let say = |text: String| AgentEvent::TextDelta { text };
         let mut background: Option<tokio::process::Child> = None;
         let mut calls = 0usize;
-        let mut prompt = Some(first);
+        let mut prompt = Some((first, first_attachments));
         let mut first_turn = true;
         'turns: loop {
             // Parked between turns: the next prompt comes by the mailbox.
-            let words = match prompt.take() {
-                Some(words) => words,
+            let (words, attached) = match prompt.take() {
+                Some(next) => next,
                 None => {
                     tokio::select! {
                         _ = interrupt.cancelled() => break 'turns,
@@ -1156,14 +1189,14 @@ fn long_tool_run(
                                 assistant_message_id: None,
                                 next_assistant_message_id: None,
                             });
-                            message.prompt
+                            (message.prompt, message.attachments)
                         }
                     }
                 }
             };
             let long = first_turn || words.contains("long");
             if !first_turn {
-                let _ = tx.send(say(format!("Heard: {words}\n\n")));
+                let _ = tx.send(say(heard(&words, &attached)));
             }
             if first_turn {
                 first_turn = false;
@@ -1220,7 +1253,7 @@ fn long_tool_run(
             };
             note_pid("fg.pid", child.id());
             // Steers that come while the command runs wait for it.
-            let mut held: Vec<String> = Vec::new();
+            let mut held: Vec<(String, Vec<String>)> = Vec::new();
             let stopped = loop {
                 tokio::select! {
                     _ = interrupt.cancelled() => {
@@ -1233,7 +1266,7 @@ fn long_tool_run(
                     }
                     _ = child.wait() => break false,
                     message = steering.recv() => match message {
-                        Some(message) => held.push(message.prompt),
+                        Some(message) => held.push((message.prompt, message.attachments)),
                         None => {
                             let _ = child.kill().await;
                             break 'turns;
@@ -1258,12 +1291,12 @@ fn long_tool_run(
                 let _ = tx.send(done(DoneStatus::Interrupted));
                 continue;
             }
-            for words in held {
+            for (words, attached) in held {
                 let _ = tx.send(AgentEvent::Steered {
                     assistant_message_id: None,
                     next_assistant_message_id: None,
                 });
-                let _ = tx.send(say(format!("Heard: {words}\n\n")));
+                let _ = tx.send(say(heard(&words, &attached)));
             }
             let _ = tx.send(say("The command finished.".into()));
             let _ = tx.send(done(DoneStatus::Completed));
