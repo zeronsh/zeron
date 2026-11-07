@@ -55,6 +55,16 @@ function M.setup()
 				drop = "alpha({accent}, 0.14)",
 				drop_edge = "alpha({accent}, 0.7)",
 			},
+			-- Where nothing shows through (ds/material.solid_theme): a light
+			-- theme's glass tones are washes of its ink, so over an opaque
+			-- window its page, its hairline and its muted text take these
+			-- instead; they read on the card, where the glass values don't.
+			solid = {
+				card = "{popover.bg}",
+				edge = "{border}",
+				secondary = "alpha({text.primary}, 0.78)",
+				tertiary = "alpha({text.primary}, 0.6)",
+			},
 			-- Between the items of any list (a menu's rows, a sidebar's pages):
 			-- enough that one row's wash (hover, selected) never touches the
 			-- next's, no more.

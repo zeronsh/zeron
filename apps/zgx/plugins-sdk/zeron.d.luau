@@ -274,6 +274,7 @@ export type ImGui = {
 	open_window: (options: WindowOptions) -> ImGuiHandle,
 	is_open: (window: string) -> boolean,
 	draw_list: () -> DrawList,
+	library: (name: string) -> any,
 	mesh: (options: { vertices: { number }, indices: { number } }) -> MeshHandle,
 	texture: (options: { path: string }) -> TextureHandle,
 	texture_size: (handle: TextureHandle) -> (number, number),

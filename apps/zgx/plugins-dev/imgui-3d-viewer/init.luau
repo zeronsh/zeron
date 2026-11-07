@@ -1,5 +1,5 @@
 --!strict
--- A real 3D viewer in a native window: a lattice of cubes drawn by the GPU,
+-- A 3D viewer in a native window: a lattice of cubes drawn by the GPU,
 -- depth-tested and lit, under a title bar the plugin draws itself.
 --
 -- Dear ImGui draws in two dimensions, so the host takes the mesh and the
@@ -10,12 +10,17 @@
 -- plugin's too — `titlebar = "hidden"` leaves no OS chrome, so the bar below
 -- is drawn with buttons and dragged with the window's own drag gesture.
 --
+-- The camera lives in `libs/orbit.luau`, a library of the plugin's own,
+-- reached with `imgui.library("orbit")`: it is handed this plugin's imgui
+-- entry point and is loaded once.
+--
 --   ZERON_ZGX_DEV_PLUGINS=apps/zgx/plugins-dev/imgui-3d-viewer \
 --     apps/zgx/target/debug/zeron-zgx.exe gallery
 
 local zeron = require("./zeron")("imgui-3d-viewer")
 
 local imgui = zeron.imgui
+local orbit = imgui.library("orbit")
 
 local window = imgui.open_window {
 	id = "viewer",
@@ -76,20 +81,11 @@ for x = -1, 1 do
 	end
 end
 
-local yaw = 0.7
-local pitch = -0.42
-local distance = 9.2
-local spin = true
 local frames = 0
 local clock = 0
 local last_tick = os.clock()
 local last_click = 0
 
-local function clamp(value: number, low: number, high: number): number
-	return math.max(low, math.min(high, value))
-end
-
--- Mix two colours, for the cubes' tints.
 local function channels(colour: string): { number }
 	local digits = string.sub(colour, 2, 7)
 	return {
@@ -177,15 +173,11 @@ end
 
 window:on_render(function(ui)
 	local now = os.clock()
-	clock += math.min(now - last_tick, 0.1)
+	local dt = math.min(now - last_tick, 0.1)
 	last_tick = now
+	clock += dt
 	frames += 1
-	if spin then
-		yaw += 0.006
-		if yaw > math.pi * 2 then
-			yaw -= math.pi * 2
-		end
-	end
+	orbit.turn(dt)
 
 	local state = window:state()
 	local width = math.max(420, (tonumber(state.width) or 900) - MARGIN * 2)
@@ -198,20 +190,11 @@ window:on_render(function(ui)
 		id = "lattice",
 		width = width,
 		height = height,
-		camera = { yaw = yaw, pitch = pitch, distance = distance, fov = 42 },
+		camera = orbit.place(),
 		models = models(),
 	}
-	if view.active and ui.is_mouse_dragging() then
-		local dx, dy = ui.mouse_delta()
-		if dx ~= 0 or dy ~= 0 then
-			yaw -= dx * 0.01
-			pitch = clamp(pitch + dy * 0.01, -1.4, 1.4)
-			spin = false
-		end
-	end
-	if view.clicked and not spin then
-		spin = true
-	end
+	orbit.drag(ui, view)
+	orbit.clicked(view)
 
 	-- The scene draws over this frame, so its backdrop and its labels are
 	-- painted here: the cubes land on top of them.
@@ -225,21 +208,18 @@ window:on_render(function(ui)
 		font_size = 16,
 	}
 
-	if ui.button(if spin then "Stop" else "Orbit") then
-		spin = not spin
+	if ui.button(if orbit.spinning then "Stop" else "Orbit") then
+		orbit.spinning = not orbit.spinning
 	end
 	ui.same_line()
 	if ui.button("Reset") then
-		yaw = 0.7
-		pitch = -0.42
-		distance = 9.2
-		spin = true
+		orbit.reset()
 	end
 	ui.same_line()
-	distance = ui.slider_float("distance", distance, { min = 3.5, max = 16 })
+	orbit.distance = ui.slider_float("distance", orbit.distance, { min = 3.5, max = 16 })
 	ui.same_line()
 	ui.text_colored(
-		`{#PLACES} cubes · {string.format("%.2f", yaw)} / {string.format("%.2f", pitch)} · frame {frames}`,
+		`{#PLACES} cubes · {string.format("%.2f", orbit.yaw)} / {string.format("%.2f", orbit.pitch)} · frame {frames}`,
 		"#5c5c68"
 	)
 end)
@@ -248,10 +228,10 @@ zeron.tool {
 	name = "viewer_status",
 	run = function(): any
 		return {
-			yaw = yaw,
-			pitch = pitch,
-			distance = distance,
-			spin = spin,
+			yaw = orbit.yaw,
+			pitch = orbit.pitch,
+			distance = orbit.distance,
+			spin = orbit.spinning,
 			cubes = #PLACES,
 			frames = frames,
 		}

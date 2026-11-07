@@ -1333,6 +1333,9 @@ return function(id: string): any
 	local imgui_font_handles: { [any]: any } = {}
 	-- The meshes `imgui.mesh` handed out, by their handles.
 	local imgui_meshes: { [any]: any } = {}
+	-- Libraries from this plugin's own `libs/` folder, by name, loaded once.
+	local imgui_libraries: { [string]: any } = {}
+	local imgui_library_loaded: { [string]: boolean } = {}
 	-- How many handles of each kind were made, for `imgui.texture#n`.
 	local imgui_made_kind: { [string]: number } = {}
 
@@ -2114,6 +2117,31 @@ return function(id: string): any
 	-- Zeron's look again, on your next frame.
 	function imgui.reset_style()
 		imgui_ask({ op = "reset_style" })
+	end
+
+	-- A library of your own: `libs/<name>.luau` beside your plugin's
+	-- scripts, loaded once and handed this plugin's imgui entry point.
+	-- A module that returns a function is called with it; one that returns
+	-- a table is taken as it is.
+	function imgui.library(name: string): any
+		local key = tostring(name)
+		if not string.find(key, "^[%w_%-]+$") then
+			error(
+				`imgui.library("{key}") isn't a library name: letters, digits, "-" and "_" only, and no folders.`,
+				2
+			)
+		end
+		if imgui_library_loaded[key] then
+			return imgui_libraries[key]
+		end
+		local ok, module = pcall(require, `./libs/{key}`)
+		if not ok then
+			error(`imgui.library("{key}") couldn't load libs/{key}.luau: {tostring(module)}`, 2)
+		end
+		local library = if type(module) == "function" then module(imgui) else module
+		imgui_libraries[key] = library
+		imgui_library_loaded[key] = true
+		return library
 	end
 
 	-- The host pushed a frame request: run the window's on_render against the

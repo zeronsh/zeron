@@ -802,6 +802,47 @@ end)
 
 A mesh is ten numbers a vertex — position, outward normal and colour (0 to 1) — and three indices a triangle; it is uploaded once and drawn by handle. `scene3d` reserves its rect like any other widget and draws the models over it, so the widgets drawn outside it stay visible and the ones inside are covered; paint a backdrop with the draw list and it stays under the cubes. `camera` orbits a target (default the origin): `yaw`, `pitch` (clamped to ±1.55), `distance`, `fov` from 5 to 150. Each model has `position`, `rotation` (radians, x then y then z), `scale` (one number or three) and `color`, which tints the vertices. The answer's `hovered`, `active` and `clicked` are the pointer over the rect, so a drag turns the camera the way `invisible_button` does. Four scenes a frame at most.
 
+### Libraries of your own
+
+`libs/` beside your plugin's scripts is yours. Drop a Luau module in
+`libs/<name>.luau` and `imgui.library("<name>")` loads it once and hands it this
+plugin's `imgui` entry point — the same table your `init.luau` draws with — so
+a widget set, a camera or a layout helper is written once and used in any
+window of the plugin.
+
+```lua
+-- libs/orbit.luau
+return function(imgui)
+	local camera = { yaw = 0.7, pitch = -0.4, distance = 9 }
+	function camera.place()
+		return { yaw = camera.yaw, pitch = camera.pitch, distance = camera.distance, fov = 42 }
+	end
+	return camera
+end
+```
+
+```lua
+local orbit = zeron.imgui.library("orbit")
+
+w:on_render(function(ui)
+	local view = ui.scene3d {
+		id = "model", width = 640, height = 360,
+		camera = orbit.place(),
+		models = { { mesh = cube } },
+	}
+end)
+```
+
+A module that returns a function is called with the entry point; one that
+returns a table is used as it is. A name is letters, digits, `-` and `_` and no
+folders; a library is loaded once per plugin however often it is asked for, and
+a missing file is an error naming `libs/<name>.luau`.
+
+Nothing about the plugin system changes for this: `libs/` is a folder of the
+plugin's own, loaded with the plugin's own `require`, which cannot reach
+outside the plugin's directory. `apps/zgx/plugins-dev/imgui-3d-viewer/libs/orbit.luau`
+is the whole example — its camera is what turns that cube lattice.
+
 ### Style and theme
 
 A plugin window wears the same theme Zeron wears, and can change it for itself alone. Nothing a plugin sets reaches Zeron's own window or another plugin's.

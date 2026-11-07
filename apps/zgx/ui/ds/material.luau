@@ -40,7 +40,10 @@ end
 -- and its edge, and muted text. Nil over glass, and for a theme that doesn't
 -- name its own.
 function M.solid_theme(): { [string]: any }?
-	if M.see_through() or ui.theme.get("zeron.solid.card") == nil then
+	-- A light theme's glass tones are washes of its ink: over an opaque card
+	-- they all but vanish, so its page and its muted text darken there. A
+	-- dark theme's read on either, and keeps its own.
+	if M.see_through() or ui.theme.kind() ~= "light" then
 		return nil
 	end
 	return {

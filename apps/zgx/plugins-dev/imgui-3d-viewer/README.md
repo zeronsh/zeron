@@ -28,6 +28,10 @@ What it shows:
 `viewer_status` answers yaw, pitch, distance, spin, the cube count and the
 frame count as JSON.
 
+`libs/orbit.luau` is the plugin's own library: `imgui.library("orbit")` loads
+it once and hands it this plugin's imgui entry point, and it owns the camera —
+the drag, the click, the auto-spin and the reset all live there.
+
 Run it:
 
 ```

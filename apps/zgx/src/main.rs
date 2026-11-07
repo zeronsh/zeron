@@ -429,6 +429,10 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             // Devtools are one socket a process: the intro keeps them (run
             // `onboarding` to inspect setup).
             let host = script_host(cx, "app.luau");
+            // Development: the same plugins a launched fixture loads, in the
+            // window a person actually works in (`open`'s own call serves
+            // the fixtures; this window is built by hand).
+            plugins::dev_plugins(&host, Some(cx));
             *arriving.borrow_mut() = Some(host.shared("onboarding.arrived", false));
             *epoch_slot.borrow_mut() = Some(host.shared("onboarding.epoch", 0.));
             serve(cx, host, "app.luau", false);
