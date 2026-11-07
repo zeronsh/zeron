@@ -433,6 +433,24 @@ describe("nobody is left waiting on a host that isn't there", () => {
     second.socket.close();
   });
 
+  it("a reader asking a host that has left wakes it again", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const reader = await connect(name, "reader", { relay: true, host: "laptop", gen: 3 });
+    await expect.poll(() => wakeFor(name)).toBe("laptop");
+    await runInDurableObject(room(name), (instance, state) => {
+      state.storage.sql.exec("DELETE FROM chat_wake");
+      (instance as unknown as { hostWokenAt: number }).hostWokenAt = 0;
+    });
+    // Only a request for this chat's host wakes anyone.
+    reader.sendFrame(FRAME.syncReq, { to: "elsewhere" }, bytes(1));
+    await reader.settled();
+    expect(await wakeFor(name)).toBeUndefined();
+    reader.sendFrame(FRAME.syncReq, { to: "laptop" }, bytes(1));
+    await expect.poll(() => wakeFor(name)).toBe("laptop");
+    reader.socket.close();
+  });
+
   it("an old client arriving wakes it too, so it can heal", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);

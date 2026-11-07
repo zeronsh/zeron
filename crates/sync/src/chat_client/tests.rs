@@ -3248,3 +3248,99 @@ async fn review_flag_off_parked_row_reads_a_checkpoint_posted_after_it_parked() 
     client.shutdown().await;
     assert_eq!(cursor, 1, "the parked row never imported: the newer checkpoint was never read");
 }
+
+/// A redial asked for while the socket is already down (the app returning to the
+/// foreground after the OS cut it) is answered by the next dial. It must not end
+/// the session that dial joins: that cost a second dial and about a second.
+#[tokio::test(start_paused = true)]
+async fn a_redial_asked_while_down_doesnt_end_the_next_session() {
+    let _serial = PATH_AND_TIMING.lock().await;
+    let (pipe1, mut end1) = pipe_pair();
+    let (pipe2, mut end2) = pipe_pair();
+    let (pipe3, _end3) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let flaky = FlakyConnector::new(vec![Some(pipe1), None, Some(pipe2), Some(pipe3)]);
+    let s1 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end1, state, &[], vec![], false).await;
+            end1
+        }
+    });
+    let client = ChatClient::connect_with_tuned(flaky.clone(), sink, fetch, "dev-a", 0, ChatTuning::default())
+        .await
+        .expect("first join succeeds");
+    drop(s1.await.unwrap());
+    while flaky.dial_times().len() < 2 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    client.redial();
+    let s2 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end2, state, &[], vec![], true).await;
+            end2
+        }
+    });
+    let _keep = s2.await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(flaky.dial_times().len(), 3, "the join, the refusal, and one recovery");
+    assert_eq!(client.stats().disconnects, 1);
+    assert!(client.stats().connected);
+    client.shutdown().await;
+}
+
+/// The relay layer's frames go out while the row backfill is still running: on a
+/// relay chat they are the catch-up, and a host that has just rejoined waits for
+/// this device's announce.
+#[tokio::test(start_paused = true)]
+async fn relay_frames_go_out_before_the_backfill_finishes() {
+    use crate::chat_relay::{RelayHandle, RelayPolicy};
+    struct Versioned;
+    impl ChatDocSink for Versioned {
+        fn apply_row(&self, _: &[u8], _: u64) -> RowImportOutcome {
+            RowImportOutcome::Applied
+        }
+        fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        fn contains_frontier(&self, _: &[u8]) -> bool {
+            true
+        }
+        fn advance_cursor(&self, _: u64) {}
+        fn relay_version(&self) -> Option<Vec<u8>> {
+            Some(vec![1])
+        }
+    }
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(Versioned);
+    let (fetch, _) = fetcher(b"");
+    let relay = RelayHandle::spawn("phone", sink.clone(), RelayPolicy::default());
+    let server = tokio::spawn(async move {
+        expect_kind(&mut end, frame_type::HELLO).await;
+        send(&end, frame_type::STATE, serde_json::json!({"headSeq": 0, "seqFloor": 0,
+            "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0,
+            "relay": 1, "legacyPeers": 0}), &[]).await;
+        expect_kind(&mut end, frame_type::ROWS_REQ).await;
+        // No ROWS_DONE yet: the announce must still arrive.
+        let announced = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = decode(&end.rx.recv().await.expect("frame")).expect("decodes");
+                if frame.kind == frame_type::ANNOUNCE {
+                    return frame;
+                }
+            }
+        })
+        .await;
+        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 0}), &[]).await;
+        (announced.is_ok(), end)
+    });
+    let join = ChatClient::connect_full(
+        connector(vec![pipe]), sink, fetch, "phone", 0, ChatTuning::default(), None, Some(relay),
+    );
+    let (client, served) = tokio::join!(join, server);
+    let (announced, _end) = served.unwrap();
+    assert!(announced, "the announce waited for the backfill");
+    client.unwrap().shutdown().await;
+}

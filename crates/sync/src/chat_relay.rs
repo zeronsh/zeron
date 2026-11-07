@@ -97,6 +97,8 @@ struct Counters {
     queue_reads_done: AtomicU64,
     /// When a peer's frame last arrived, in ms since this task began.
     last_inbound_ms: AtomicU64,
+    /// When the room last came up, on the same clock.
+    last_room_up_ms: AtomicU64,
     /// What the next hello tells the room.
     knows_relay_gen: AtomicBool,
     relaying: AtomicBool,
@@ -218,6 +220,8 @@ impl RelayHandle {
         // Any earlier read died with its socket. This session asks once.
         let done = self.counters.queue_reads_done.load(Relaxed);
         self.counters.queue_reads_asked.store(done + 1, Relaxed);
+        let since_start = self.counters.started.map_or(0, |at| at.elapsed().as_millis() as u64);
+        self.counters.last_room_up_ms.store(since_start.max(1), Relaxed);
         let _ = self.tx.send(Input::RoomUp(tx));
     }
 
@@ -228,8 +232,15 @@ impl RelayHandle {
     }
 
     /// A peer's frame arrived within `window`: it may be mid-sync with this device.
+    /// Joining counts too. A host woken for a reader joins after that reader's
+    /// announce went by, and the reader only asks once it hears the host's: a
+    /// host that left as soon as it had caught up was gone before the question.
     pub fn recently_active(&self, window: Duration) -> bool {
-        let last = self.counters.last_inbound_ms.load(Relaxed);
+        let last = self
+            .counters
+            .last_inbound_ms
+            .load(Relaxed)
+            .max(self.counters.last_room_up_ms.load(Relaxed));
         let now = self.counters.started.map_or(0, |at| at.elapsed().as_millis() as u64);
         last > 0 && now.saturating_sub(last) < window.as_millis() as u64
     }
@@ -349,6 +360,7 @@ impl Driver {
         match input {
             Input::Local { bytes, to_room } => self.local(bytes, to_room, now),
             Input::RoomUp(tx) => {
+                tracing::debug!(round = ?self.round.as_ref().map(|r| &r.peer), want = ?self.want.as_ref().map(|w| &w.0), "chat relay: room up");
                 self.room = Some(tx);
                 // A round over the old socket won't finish, and waiting out its
                 // stall would turn a brief drop into a minute's delay.
@@ -443,6 +455,9 @@ impl Driver {
     }
 
     fn frame(&mut self, from: String, frame: WireFrame, now: Instant) {
+        if frame.kind != frame_type::RELAY {
+            tracing::debug!(kind = frame.kind, from = %from, round = ?self.round.as_ref().map(|r| &r.peer), "chat relay: frame in");
+        }
         let since_start = self.counters.started.map_or(0, |at| at.elapsed().as_millis() as u64);
         self.counters.last_inbound_ms.store(since_start.max(1), Relaxed);
         match frame.kind {
@@ -522,6 +537,7 @@ impl Driver {
             return;
         };
         self.counters.sync_rounds.fetch_add(1, Relaxed);
+        tracing::debug!(peer = %peer, room_open = self.room_open(), "chat relay: sync round");
         self.round = Some(Round {
             peer: peer.clone(),
             last_progress: now,
@@ -715,6 +731,7 @@ impl Driver {
 
     fn announce(&mut self, hello: bool) {
         let Some(version) = self.sink.relay_version() else {
+            tracing::debug!(hello, "chat relay: no version to announce");
             return;
         };
         let header = if hello { json!({ "hello": true }) } else { json!({}) };
@@ -724,7 +741,8 @@ impl Driver {
     /// To one device, through the room.
     fn direct(&mut self, to: &str, kind: u8, mut header: Value, payload: &[u8]) {
         header["to"] = json!(to);
-        self.to_room(wire::encode(kind, &header, payload));
+        let sent = self.to_room(wire::encode(kind, &header, payload));
+        tracing::debug!(kind, to, sent, "chat relay: direct");
     }
 
     fn to_room(&mut self, frame: Vec<u8>) -> bool {

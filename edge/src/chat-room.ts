@@ -762,9 +762,16 @@ export class ChatRoom implements DurableObject {
     const forwarded = { ...rest, device: state.device };
     if (type === FRAME.syncReq || type === FRAME.syncData) {
       if (typeof to !== "string") return;
+      let delivered = false;
       for (const peer of this.relaySockets(ws)) {
-        if (peer.device === to) send(peer.socket, type, forwarded, payload);
+        if (peer.device === to) {
+          send(peer.socket, type, forwarded, payload);
+          delivered = true;
+        }
       }
+      // A reader asking a host that has already left: bring it back. Its announce
+      // on joining restarts the reader's request.
+      if (!delivered && type === FRAME.syncReq && to === state.hostDevice) this.wakeIfAbsent(state, to);
       return;
     }
     for (const peer of this.relaySockets(ws)) send(peer.socket, type, forwarded, payload);

@@ -843,3 +843,17 @@ async fn a_read_the_task_decided_on_is_counted() {
     assert!(!host.relay.queue_settled(), "the read it just asked for isn't answered");
 }
 
+
+#[tokio::test(start_paused = true)]
+async fn joining_the_room_counts_as_recent_activity() {
+    // A host woken for a reader joins after that reader's announce went by. Until
+    // the reader hears the host and asks, nothing arrives, and a host that read
+    // that as idle left before the question came.
+    let relay = RelayHandle::spawn("host", DocSink::new(LoroDoc::new()), RelayPolicy { confirm_queue: true });
+    assert!(!relay.recently_active(Duration::from_secs(15)), "nothing has happened yet");
+    let (tx, _rx) = mpsc::channel(super::PATH_QUEUE);
+    relay.room_up(tx);
+    assert!(relay.recently_active(Duration::from_secs(15)), "it has just joined");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(!relay.recently_active(Duration::from_millis(5)), "the join is a while ago");
+}

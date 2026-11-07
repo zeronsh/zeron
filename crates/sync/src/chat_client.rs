@@ -276,14 +276,19 @@ impl BinConnector for WsBinConnector {
     fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
         let provider = self.url.clone();
         Box::pin(async move {
+            let budget = crate::budget::shared().stats();
+            tracing::debug!(sockets = budget.sockets, socket_limit = budget.socket_limit, socket_waiting = budget.socket_waiting, "chat2 dial: waiting for a socket slot");
             let socket_permit = crate::budget::shared().socket().await?;
             let dial_permit = crate::budget::shared().dial().await?;
+            tracing::debug!("chat2 dial: slots held; getting the token");
             let url = provider.url().await?;
+            tracing::debug!("chat2 dial: connecting");
             let ws = crate::dial::connect_ws(&url).await.map_err(|e| {
                 crate::budget::shared().observe_error(&e);
                 SyncError::WebSocket(e.to_string())
             })?;
             drop(dial_permit);
+            tracing::debug!("chat2 dial: connected");
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
             tokio::spawn(async move {
@@ -293,6 +298,7 @@ impl BinConnector for WsBinConnector {
                     _ => None,
                 })
                 .await;
+                tracing::debug!("chat2 socket closed; its slot is free");
             });
             Ok(BinPipe {
                 tx: out_tx,
@@ -1131,9 +1137,16 @@ impl Actor {
                 .dial_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
+            // This dial is the fresh socket any redial asked for so far. Left in
+            // the channel, such a request would end the session it joins.
+            while self.redial_rx.try_recv().is_ok() {}
+            tracing::info!(attempt, "chat2 dialing");
             let dial = tokio::select! {
                 result = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()) => result,
-                _ = self.shutdown.changed() => return,
+                _ = self.shutdown.changed() => {
+                    tracing::info!(attempt, "chat2 stopped while dialing");
+                    return;
+                }
             };
             let pipe = match dial {
                 Ok(Ok(pipe)) => pipe,
@@ -1169,6 +1182,7 @@ impl Actor {
                 }
             };
 
+            tracing::info!(attempt, "chat2 dialed; joining");
             let session_started = tokio::time::Instant::now();
             // Cover the whole session, including backpressured sends, HELLO
             // and row backfill. A peer need not close or reach a deadline for
@@ -1181,7 +1195,10 @@ impl Actor {
                 end = self.run_session(pipe, &mut ready) => end,
             };
             match end {
-                SessionEnd::Stop => return,
+                SessionEnd::Stop => {
+                    tracing::info!("chat2 stopped");
+                    return;
+                }
                 SessionEnd::Reconnect => {
                     use std::sync::atomic::Ordering::Relaxed;
                     // Only a session that joined AND stayed healthy for a
@@ -1210,6 +1227,7 @@ impl Actor {
                     if joined && session_started.elapsed() >= STABLE_RESET {
                         backoff = BACKOFF_BASE;
                     }
+                    tracing::info!(joined, backoff_ms = backoff.as_millis() as u64, "chat2 session ended; reconnecting");
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -1235,12 +1253,14 @@ impl Actor {
         // or our own last dial would cut every wait to zero.
         while wake.try_recv().is_ok() {}
         while online.try_recv().is_ok() {}
-        let wait = if crate::wake::path_is_offline() {
+        let offline = crate::wake::path_is_offline();
+        let wait = if offline {
             wait.max(OFFLINE_PARK_RECHECK)
         } else {
             wait
         };
-        tokio::select! {
+        tracing::debug!(wait_ms = wait.as_millis() as u64, offline, "chat2 backing off");
+        let waited = tokio::select! {
             _ = tokio::time::sleep(wait + retry_jitter(wait / 4)) => Waited::Elapsed,
             _ = wake.recv() => { tokio::time::sleep(retry_jitter(BACKOFF_BASE)).await; Waited::Woke },
             _ = online.recv() => { tokio::time::sleep(retry_jitter(BACKOFF_BASE)).await; Waited::Woke },
@@ -1251,7 +1271,9 @@ impl Actor {
                     Waited::Elapsed
                 }
             }
-        }
+        };
+        tracing::debug!(woke = matches!(waited, Waited::Woke), stopped = matches!(waited, Waited::Shutdown), "chat2 backoff over");
+        waited
     }
 
     async fn run_session(
@@ -1377,6 +1399,11 @@ impl Actor {
             &self.cursor_amnesty_done,
         );
         let cursor = lock(&self.shared).cursor;
+        tracing::info!(
+            relay = self.relay.is_some() && lock(&self.shared).relay_session,
+            head_seq = state.head_seq,
+            "chat2 joined"
+        );
         self.flags.connected.store(true, Relaxed);
         if ready.is_none() {
             self.flags.rejoins.fetch_add(1, Relaxed);
@@ -1480,6 +1507,17 @@ impl Actor {
                         return SessionEnd::Reconnect;
                     }
                     _ = self.shutdown.changed() => return SessionEnd::Stop,
+                    // The relay layer's frames don't wait on the checkpoint: on a
+                    // relay chat, they are the catch-up.
+                    out = recv_relay(&mut relay_out) => match out {
+                        Some(frame) => {
+                            log_relay_out(&frame, "checkpoint");
+                            if pipe.tx.send(frame).await.is_err() {
+                                return SessionEnd::Reconnect;
+                            }
+                        }
+                        None => relay_out = None,
+                    },
                     inbound = pipe.rx.recv() => match inbound {
                         Some(raw) => match wire::decode(&raw) {
                             Some(frame) => buffered.push(frame),
@@ -1537,7 +1575,21 @@ impl Actor {
             None => {
                 let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
                     loop {
-                        let bytes = pipe.rx.recv().await?;
+                        // Nor on the backfill: a host that has just rejoined is
+                        // waiting for this device's announce and sync request.
+                        let bytes = tokio::select! {
+                            inbound = pipe.rx.recv() => inbound?,
+                            out = recv_relay(&mut relay_out) => {
+                                match out {
+                                    Some(frame) => {
+                                        log_relay_out(&frame, "backfill");
+                                        pipe.tx.send(frame).await.ok()?
+                                    }
+                                    None => relay_out = None,
+                                }
+                                continue;
+                            }
+                        };
                         let Some(frame) = wire::decode(&bytes) else {
                             return None;
                         };
@@ -1680,6 +1732,7 @@ impl Actor {
                 }
                 frame = recv_relay(&mut relay_out) => {
                     if let Some(frame) = frame
+                        && log_relay_out(&frame, "live")
                         && pipe.tx.send(frame).await.is_err()
                     {
                         return SessionEnd::Reconnect;
@@ -2189,6 +2242,11 @@ impl Actor {
 
     fn handle_frame_with_replay(&self, frame: wire::WireFrame, replay: bool) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
+        if frame.kind == frame_type::RELAY {
+            tracing::trace!(replay, "chat2 frame in: relay");
+        } else {
+            tracing::debug!(kind = frame.kind, replay, "chat2 frame in");
+        }
         match frame.kind {
             frame_type::ROW => {
                 let Ok(row) = serde_json::from_value::<wire::RowHeader>(frame.header) else {
@@ -2365,6 +2423,17 @@ async fn fetch_once(
     }
     let bytes = fetcher.fetch().await?;
     Ok((held, Some(bytes)))
+}
+
+/// Always true, so it can sit in a send's condition.
+fn log_relay_out(frame: &[u8], stage: &str) -> bool {
+    let kind = frame.first().copied().unwrap_or(0);
+    if kind == frame_type::RELAY {
+        tracing::trace!(stage, "chat2 frame out: relay");
+    } else {
+        tracing::debug!(kind, stage, "chat2 frame out");
+    }
+    true
 }
 
 async fn recv_relay(rx: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
