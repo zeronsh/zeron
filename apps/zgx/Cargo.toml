@@ -163,11 +163,7 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "2b6f48e8f651aaa6f
 # 11 (and with Edge on Windows 10); without it, pages are placeholders.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading"] }
-zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "ce91055fba63352fa126a44a5714749d94f2380e", features = ["webview2"] }
-
-# The Windows beta's icon (build.rs), as apps/zeron embeds it.
-[target.'cfg(windows)'.build-dependencies]
-embed-resource = "3.0.11"
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "2b6f48e8f651aaa6fbabc8e3664d9652f33922a1", features = ["webview2"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
