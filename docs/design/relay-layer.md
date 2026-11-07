@@ -215,10 +215,12 @@ one, and they stop needing the nightly backup, since their rooms stop changing.
 
 ### Only a checkpoint that moves forward
 
-A checkpoint can be all the room holds, so a relay-era one can't replace it with less. A host
-posts one only after this process has seen its doc catch up with the room. The DO refuses one
-with an empty version over an existing checkpoint, or one whose version doesn't include the
-stored one (`409 stale`, after which the host reads what the room has). A version vector is the
+A checkpoint can be all the room holds, so while the layer is on no checkpoint can replace it
+with less, relay-era or not: an ordinary one, from a device that isn't the host or from an older
+build, is behind the host's as often as not. On generation 3 only the chat's host posts one at
+all. A host posts one only after this process has seen its doc catch up with the room. The DO
+refuses one with an empty version over an existing checkpoint, or one whose version doesn't
+include the stored one (`409 stale`, after which the host reads what the room has). A version vector is the
 only thing the DO decodes, and only to compare. A chat over the size limit gets a `413`, stops
 being retried against the sleep gate, and logs: refusing to sleep would only keep the machine
 billing, and no checkpoint will ever land.
@@ -253,7 +255,8 @@ The host may set 3 when all of these hold:
   the chat's host, and the host of its parent chat. Other Cloud machines never open
   this chat, so they don't count;
 - no client without the layer has joined the account's registry room in the last 14 days;
-- the chat's saved snapshot is under 24 MiB. A checkpoint has to be able to bring any reader up
+- the chat's snapshot is known to be under 24 MiB: the larger of what was loaded and what the
+  last save wrote. A chat opened from disk is known from its load; one with neither waits. A checkpoint has to be able to bring any reader up
   to date, and the room takes at most 32 MiB. A chat that grows past 24 MiB goes back to stored
   rows while there's still room for its heal.
 
@@ -452,10 +455,14 @@ that can't heal will never store them.
 3. Only then turn the engine flag off, if you want it off. A build from this PR on with the flag off
    still owes a heal for a chat it hosts on generation 3, and moves it back after. That's the only thing
    the flag-off path does, and an account that never ran the layer has no such chat.
-4. **Never go below this PR's code while a room may hold a queue or a chat may be unhealed.** Older edge
-   code can't read the queue, and those senders have retired their outboxes. Older engine code can't
-   heal, so its next stored row parks on every reader. Keep this PR's edge and engine code deployed
-   for at least 14 days after step 1.
+4. **Never go below this PR's edge code while a room may hold a queue or a chat may be unhealed.** Older
+   edge code can't read the queue, and those senders have retired their outboxes. Keep it deployed for at
+   least 14 days after step 1.
+5. An engine can go back further than that, one device at a time: an app downgrade. A host on an older
+   build can't heal, so the room would keep what's queued for good. Instead, when a device without the
+   layer joins and the registry says it hosts the chat, the room moves the queue into rows for it: the
+   host holds every op those messages depend on. Its next stored rows still park on old readers until
+   it upgrades and heals, as they would have anyway.
 
 ## What's built
 
