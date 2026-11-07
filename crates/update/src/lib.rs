@@ -1634,6 +1634,14 @@ impl UpdateStatus {
     }
 }
 
+/// Whether this engine could update itself before it starts work: it applies
+/// updates itself, from a managed install, and something starts it again.
+pub fn can_update_at_boot() -> bool {
+    auto_update_enabled()
+        && matches!(detect_install(), InstallKind::Managed { .. })
+        && UpdateAbility::current().can_apply_remotely
+}
+
 /// `ZERON_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
 fn auto_update_enabled() -> bool {
     std::env::var("ZERON_AUTO_UPDATE")
@@ -1684,6 +1692,8 @@ pub struct Updater {
     /// Set by `zeron headless`: this process is the installed service and may
     /// restart itself into a newer installed binary.
     service: Arc<AtomicBool>,
+    /// A boot's update is under way ([`Updater::hold_background_updates`]).
+    boot_update: Arc<AtomicBool>,
     /// Flips to true exactly once; the check loop selects against it so
     /// cancellation lands at any await point (no tokio-util in this crate).
     shutdown_tx: Arc<watch::Sender<bool>>,
@@ -1731,6 +1741,7 @@ impl Updater {
             wake_tx: Arc::new(wake_tx),
             forced: Arc::new(AtomicBool::new(false)),
             service: Arc::new(AtomicBool::new(false)),
+            boot_update: Arc::new(AtomicBool::new(false)),
             shutdown_tx: Arc::new(shutdown_tx),
             check_task: Arc::new(std::sync::Mutex::new(None)),
         };
@@ -1821,10 +1832,7 @@ impl Updater {
         tokio::select! {
             _ = shutdown.wait_for(|stop| *stop) => {}
             _ = async {
-                tokio::select! {
-                    _ = tokio::time::sleep(initial_delay) => {}
-                    _ = wakes.changed() => {}
-                }
+                wait_out_initial_delay(&mut wakes, &self.forced, initial_delay).await;
                 let mut schedule = Schedule::default();
                 let mut superseded = SupersededRestart::default();
                 loop {
@@ -1833,6 +1841,7 @@ impl Updater {
                         let ok = self.check_once().await;
                         schedule.record(SystemTime::now(), ok);
                         if ok
+                            && !self.boot_update.load(Ordering::SeqCst)
                             && self.status_tx.borrow().update_available
                             && matches!(*self.role, Role::Engine { .. })
                             && auto_update_enabled()
@@ -1843,7 +1852,7 @@ impl Updater {
                             self.auto_apply_when_idle().await;
                         }
                     }
-                    if self.service.load(Ordering::SeqCst) {
+                    if self.service.load(Ordering::SeqCst) && !self.boot_update.load(Ordering::SeqCst) {
                         superseded.poll(|| self.quiescent_now());
                     }
                     let wait = schedule.wait(SystemTime::now());
@@ -1998,6 +2007,117 @@ impl Updater {
                 last.phase == transaction::Phase::RolledBack
                     && latest.as_deref() == Some(last.target.as_str())
             })
+    }
+
+    /// An engine updating before it starts work ([`BootCheck`]) holds the
+    /// background path off meanwhile: the two would stage over one another.
+    pub fn hold_background_updates(&self, hold: bool) {
+        self.boot_update.store(hold, Ordering::SeqCst);
+        if !hold {
+            self.poke();
+        }
+    }
+
+    /// Is there anything to update to, before this engine starts work? Bound it
+    /// from outside: this waits on the network.
+    pub async fn check_at_boot(&self) -> anyhow::Result<BootCheck> {
+        let manifest = fetch_latest(&self.edge_url).await?;
+        let data_dir = channel::data_dir().context("this engine has no data directory")?;
+        let last = transaction::read(data_dir);
+        let skip = read_boot_skip(data_dir);
+        let verdict = boot_verdict(
+            &manifest.version,
+            current_version(),
+            last.as_ref(),
+            skip.as_ref(),
+            now_ms(),
+        );
+        Ok(match verdict {
+            BootVerdict::Current => BootCheck::Current,
+            BootVerdict::Newer => BootCheck::Newer(manifest),
+            BootVerdict::Skip(why) => BootCheck::Skip { version: manifest.version, why },
+        })
+    }
+
+    /// Download, verify and unpack `manifest`'s release, within `limit`.
+    pub async fn install_at_boot(
+        &self,
+        manifest: &Manifest,
+        limit: Duration,
+    ) -> anyhow::Result<PreparedBootUpdate> {
+        let InstallKind::Managed { app_root } = detect_install() else {
+            bail!("only a managed install updates itself at boot");
+        };
+        let data_dir = channel::data_dir()
+            .context("this engine has no data directory")?
+            .to_path_buf();
+        install_release_within(&self.edge_url, manifest, &app_root, &data_dir, limit).await?;
+        let from = installed_version(&InstallKind::Managed {
+            app_root: app_root.clone(),
+        })
+        .unwrap_or_else(|| current_version().to_owned());
+        Ok(PreparedBootUpdate {
+            version: manifest.version.clone(),
+            layout: (from != manifest.version).then_some(transaction::Layout::Versioned { app_root }),
+            from,
+        })
+    }
+
+    /// Record the update and ask for the restart that starts its trial. `Ok`
+    /// means the restart was accepted, and this process is about to stop. A trial
+    /// that hangs gives way after `trial_base`, then the old version answers.
+    pub async fn restart_at_boot(
+        &self,
+        prepared: PreparedBootUpdate,
+        trial_base: Duration,
+    ) -> anyhow::Result<()> {
+        let data_dir = channel::data_dir()
+            .context("this engine has no data directory")?
+            .to_path_buf();
+        let requested = match prepared.layout {
+            None => None,
+            Some(layout) => Some(transaction::request_within(
+                &data_dir,
+                layout,
+                &prepared.from,
+                &prepared.version,
+                transaction::RestartMode::Service { unit: service_unit() },
+                trial_base,
+            )?),
+        };
+        self.refresh_update_report();
+        let restart = tokio::task::spawn_blocking(restart_service)
+            .await
+            .context("asking for the restart")?;
+        if let Err(err) = restart {
+            if let Some(requested) = &requested {
+                transaction::fail_request(
+                    &data_dir,
+                    &requested.id,
+                    "Zeron couldn't restart to install the update, so nothing changed.".into(),
+                );
+                self.refresh_update_report();
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// The restart was accepted and this process carried on regardless: this
+    /// version goes on working, and the update's record mustn't start a trial
+    /// under whatever it's doing by then.
+    pub fn boot_restart_never_came(&self) {
+        let Some(data_dir) = channel::data_dir() else {
+            return;
+        };
+        if let Some(requested) = transaction::read(data_dir).filter(|t| t.phase == transaction::Phase::Requested) {
+            transaction::fail_request(
+                data_dir,
+                &requested.id,
+                "The restart to install the update never happened, so nothing changed.".into(),
+            );
+            self.refresh_update_report();
+        }
     }
 
     /// Publish the update's latest state, after something settled it.
@@ -2190,6 +2310,158 @@ async fn prepare_this_install(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Updating before starting work (a Cloud machine's boot)
+// ---------------------------------------------------------------------------
+
+/// What a boot found. `Skip` is a release not to try now.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BootCheck {
+    Current,
+    Newer(Manifest),
+    Skip { version: String, why: BootSkipReason },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootSkipReason {
+    /// This device already ran that release and went back from it.
+    WentBack,
+    /// This device already tried to install it and couldn't.
+    Failed,
+    /// An attempt on an earlier boot failed recently: the background path keeps
+    /// trying, without making every wake wait.
+    TriedRecently,
+    /// An update is still being settled.
+    InProgress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BootVerdict {
+    Current,
+    Newer,
+    Skip(BootSkipReason),
+}
+
+/// A release is tried at most once per [`BOOT_RETRY_AFTER`] from a boot, and never
+/// again after going back from it: a bad release can't make a machine loop.
+fn boot_verdict(
+    latest: &str,
+    current: &str,
+    last: Option<&transaction::Transaction>,
+    skip: Option<&BootSkip>,
+    now: i64,
+) -> BootVerdict {
+    if !version_newer(latest, current) {
+        return BootVerdict::Current;
+    }
+    if let Some(last) = last {
+        if last.in_progress() {
+            return BootVerdict::Skip(BootSkipReason::InProgress);
+        }
+        if last.target == latest {
+            match last.phase {
+                transaction::Phase::RolledBack => return BootVerdict::Skip(BootSkipReason::WentBack),
+                transaction::Phase::Failed => return BootVerdict::Skip(BootSkipReason::Failed),
+                _ => {}
+            }
+        }
+    }
+    if skip.is_some_and(|skip| skip.version == latest && now < skip.until) {
+        return BootVerdict::Skip(BootSkipReason::TriedRecently);
+    }
+    BootVerdict::Newer
+}
+
+/// Why a boot on `current` wouldn't try `latest`, if it's newer and it wouldn't.
+pub fn boot_skip_reason(data_dir: &Path, latest: &str, current: &str) -> Option<BootSkipReason> {
+    let verdict = boot_verdict(
+        latest,
+        current,
+        transaction::read(data_dir).as_ref(),
+        read_boot_skip(data_dir).as_ref(),
+        now_ms(),
+    );
+    match verdict {
+        BootVerdict::Skip(why) => Some(why),
+        BootVerdict::Current | BootVerdict::Newer => None,
+    }
+}
+
+/// How long a boot leaves a release alone after failing to install it.
+const BOOT_RETRY_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+const BOOT_SKIP_FILE: &str = "update-boot-skip.json";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct BootSkip {
+    version: String,
+    until: i64,
+}
+
+fn read_boot_skip(data_dir: &Path) -> Option<BootSkip> {
+    serde_json::from_slice(&std::fs::read(data_dir.join(BOOT_SKIP_FILE)).ok()?).ok()
+}
+
+/// A boot couldn't install `version`: the next ones don't wait on it for a while.
+pub fn note_boot_update_failed(version: &str) {
+    let Some(data_dir) = channel::data_dir() else {
+        return;
+    };
+    write_boot_skip(data_dir, version, now_ms());
+}
+
+fn write_boot_skip(data_dir: &Path, version: &str, now: i64) {
+    let skip = BootSkip {
+        version: version.to_owned(),
+        until: now.saturating_add(BOOT_RETRY_AFTER.as_millis() as i64),
+    };
+    let written = serde_json::to_vec(&skip)
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| Ok(std::fs::write(data_dir.join(BOOT_SKIP_FILE), bytes)?));
+    if let Err(err) = written {
+        tracing::warn!(error = %format!("{err:#}"), "couldn't record the failed boot update");
+    }
+}
+
+/// A release on disk, ready to restart into.
+#[derive(Debug)]
+pub struct PreparedBootUpdate {
+    version: String,
+    from: String,
+    /// `None`: it's already what's installed, and only needs a restart.
+    layout: Option<transaction::Layout>,
+}
+
+/// [`prepare_install`], cut off at `limit`. It runs apart because unpacking blocks
+/// its thread, which a timeout beside it couldn't interrupt. Cut off, it can't
+/// finish later, and its partial stage is removed once it has really stopped.
+async fn install_release_within(
+    edge_url: &str,
+    manifest: &Manifest,
+    app_root: &Path,
+    data_dir: &Path,
+    limit: Duration,
+) -> anyhow::Result<()> {
+    let task = {
+        let (edge_url, manifest) = (edge_url.to_owned(), manifest.clone());
+        let (app_root, data_dir) = (app_root.to_path_buf(), data_dir.to_path_buf());
+        tokio::spawn(async move { prepare_install(&edge_url, &manifest, &app_root, &data_dir).await })
+    };
+    let abort = task.abort_handle();
+    let mut task = task;
+    match tokio::time::timeout(limit, &mut task).await {
+        Ok(joined) => joined.context("installing the release")?,
+        Err(_) => {
+            abort.abort();
+            let stage = app_root.join(format!(".stage-{}-{}", manifest.version, std::process::id()));
+            tokio::spawn(async move {
+                let _ = task.await;
+                let _ = std::fs::remove_dir_all(&stage);
+            });
+            bail!("installing the release took longer than {}s", limit.as_secs())
+        }
+    }
+}
+
 /// What `ApplyUpdate` answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedUpdate {
@@ -2235,6 +2507,27 @@ struct Schedule {
     /// `None` until the first check: due immediately.
     next_due: Option<SystemTime>,
     failures: usize,
+}
+
+/// The first check waits out `delay`. Only a forced check cuts it short: a poke
+/// asks whether one is due, and `restart_when_superseded` pokes during every
+/// installed engine's boot, which is what the delay is there to stay out of.
+async fn wait_out_initial_delay(
+    wakes: &mut watch::Receiver<u64>,
+    forced: &AtomicBool,
+    delay: Duration,
+) {
+    let forced_check = async {
+        while !forced.load(Ordering::SeqCst) {
+            if wakes.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {}
+        _ = forced_check => {}
+    }
 }
 
 impl Schedule {
@@ -2354,6 +2647,190 @@ mod tests {
     }
 
     /// Cloud runs a system unit of its own; every other install a user one.
+    fn transaction_of(target: &str, phase: &str) -> transaction::Transaction {
+        serde_json::from_value(serde_json::json!({
+            "id": "abc", "from": "1.0.0", "target": target,
+            "layout": {"versioned": {"app_root": "/nowhere"}},
+            "phase": phase,
+            "restart": "relaunch",
+            "requestedAt": 1, "deadlineSecs": 60,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_boot_tries_a_release_once_and_never_one_it_went_back_from() {
+        let verdict = |last: Option<&transaction::Transaction>, skip: Option<&BootSkip>| {
+            boot_verdict("2.0.0", "1.0.0", last, skip, 1_000)
+        };
+        assert_eq!(boot_verdict("1.0.0", "1.0.0", None, None, 0), BootVerdict::Current);
+        assert_eq!(boot_verdict("0.9.0", "1.0.0", None, None, 0), BootVerdict::Current);
+        assert_eq!(verdict(None, None), BootVerdict::Newer);
+
+        let back = transaction_of("2.0.0", "rolledBack");
+        assert_eq!(verdict(Some(&back), None), BootVerdict::Skip(BootSkipReason::WentBack));
+        // Going back from one release says nothing about the next.
+        assert_eq!(
+            boot_verdict("2.0.1", "1.0.0", Some(&back), None, 0),
+            BootVerdict::Newer
+        );
+        assert_eq!(
+            verdict(Some(&transaction_of("2.0.0", "failed")), None),
+            BootVerdict::Skip(BootSkipReason::Failed)
+        );
+        for phase in ["requested", "trial", "restoring"] {
+            assert_eq!(
+                verdict(Some(&transaction_of("3.0.0", phase)), None),
+                BootVerdict::Skip(BootSkipReason::InProgress),
+                "{phase}"
+            );
+        }
+        // An older update that went well doesn't get in the way.
+        assert_eq!(verdict(Some(&transaction_of("1.0.0", "updated")), None), BootVerdict::Newer);
+
+        let recent = BootSkip { version: "2.0.0".into(), until: 2_000 };
+        assert_eq!(verdict(None, Some(&recent)), BootVerdict::Skip(BootSkipReason::TriedRecently));
+        let expired = BootSkip { version: "2.0.0".into(), until: 1_000 };
+        assert_eq!(verdict(None, Some(&expired)), BootVerdict::Newer);
+        let other = BootSkip { version: "1.5.0".into(), until: 2_000 };
+        assert_eq!(verdict(None, Some(&other)), BootVerdict::Newer);
+    }
+
+    #[test]
+    fn a_failed_boot_update_is_left_alone_for_a_while() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_boot_skip(dir.path()), None);
+        write_boot_skip(dir.path(), "2.0.0", 5);
+        let skip = read_boot_skip(dir.path()).unwrap();
+        assert_eq!(skip.version, "2.0.0");
+        assert_eq!(skip.until, 5 + BOOT_RETRY_AFTER.as_millis() as i64);
+    }
+
+    /// What a boot's look for a release costs: `fetch_latest`, client and all. Run by
+    /// hand, with `ZERON_BENCH_EDGE` for a real feed (TLS, and the fallback when a
+    /// feed has no manifest).
+    #[tokio::test]
+    #[ignore = "benchmark"]
+    async fn bench_boot_check() {
+        let (base, server) = serve_forever(br#"{"version":"0.0.1","files":{}}"#.to_vec()).await;
+        let mut targets = vec![base];
+        if let Ok(edge) = std::env::var("ZERON_BENCH_EDGE") {
+            targets.push(edge);
+        }
+        for target in targets {
+            for run in 0..5 {
+                let started = std::time::Instant::now();
+                let found = fetch_latest(&target).await.map(|manifest| manifest.version);
+                println!("{target} run {run}: {:?} {found:?}", started.elapsed());
+            }
+        }
+        server.abort();
+    }
+
+    /// Accepts connections and never answers.
+    async fn serve_nothing() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        (base, server)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_download_that_hangs_is_cut_off_and_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app_root, data) = (tmp.path().join("app"), tmp.path().join("data"));
+        std::fs::create_dir_all(&app_root).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let (base, server) = serve_nothing().await;
+        let manifest = Manifest { version: "9.9.9".into(), ..Manifest::default() };
+        let started = std::time::Instant::now();
+        let error = install_release_within(&base, &manifest, &app_root, &data, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("took longer"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        for _ in 0..200 {
+            if std::fs::read_dir(&app_root).unwrap().count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(std::fs::read_dir(&app_root).unwrap().count(), 0);
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_download_comes_back_as_an_error_and_a_good_one_is_staged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app_root, data) = (tmp.path().join("app"), tmp.path().join("data"));
+        std::fs::create_dir_all(&app_root).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let manifest = |bytes: &[u8]| Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                headless_artifact("9.9.9"),
+                FileMeta { sha256: Some(format!("{:x}", Sha256::digest(bytes))) },
+            )]
+            .into(),
+            ..Manifest::default()
+        };
+        let limit = Duration::from_secs(30);
+        let good = fake_headless_tarball(&tmp.path().join("good"), "9.9.9");
+
+        // Bytes that aren't what the feed promised.
+        let (base, server) = serve_forever(b"truncated".to_vec()).await;
+        assert!(install_release_within(&base, &manifest(&good), &app_root, &data, limit).await.is_err());
+        server.abort();
+        assert!(!app_root.join("9.9.9").exists());
+
+        // Nothing there at all.
+        assert!(install_release_within("http://127.0.0.1:1", &manifest(&good), &app_root, &data, limit).await.is_err());
+
+        let (base, server) = serve_forever(good.clone()).await;
+        install_release_within(&base, &manifest(&good), &app_root, &data, limit).await.unwrap();
+        server.abort();
+        assert!(app_root.join("9.9.9").join("zeron").is_file());
+    }
+
+    #[tokio::test]
+    async fn only_a_forced_check_cuts_the_first_checks_delay_short() {
+        let (tx, mut rx) = watch::channel(0u64);
+        let forced = AtomicBool::new(false);
+
+        // A poke (an installed engine's boot does this) doesn't end the wait.
+        tx.send_modify(|epoch| *epoch += 1);
+        let delay = Duration::from_millis(150);
+        let started = std::time::Instant::now();
+        wait_out_initial_delay(&mut rx, &forced, delay).await;
+        assert!(started.elapsed() >= delay, "a poke ended it after {:?}", started.elapsed());
+
+        // A forced check does, even one that landed before the wait began.
+        forced.store(true, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        wait_out_initial_delay(&mut rx, &forced, Duration::from_secs(30)).await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // And one arriving during it.
+        forced.store(false, Ordering::SeqCst);
+        let forcing = std::sync::Arc::new(AtomicBool::new(false));
+        let waiter = forcing.clone();
+        let task = tokio::spawn(async move {
+            let mut rx = rx;
+            wait_out_initial_delay(&mut rx, &waiter, Duration::from_secs(30)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        forcing.store(true, Ordering::SeqCst);
+        tx.send_modify(|epoch| *epoch += 1);
+        tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+    }
+
     #[test]
     fn a_cloud_machine_restarts_its_own_system_unit() {
         let cloud = resolve_service_unit(None, Some("cloud"));

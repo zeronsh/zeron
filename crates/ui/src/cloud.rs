@@ -171,6 +171,11 @@ pub fn session_settling(state: CloudState) -> bool {
 }
 
 /// Whether any session is settling (the poll's only reason to run).
+/// The machine is installing a release before it answers its waiting message.
+pub fn session_updating(session: &CloudSession) -> bool {
+    session.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_UPDATING)
+}
+
 pub fn any_session_settling(sessions: &CloudSessions) -> bool {
     sessions.sessions.iter().any(|s| session_settling(s.state))
 }
@@ -603,6 +608,17 @@ mod tests {
         assert_eq!(session_for(&sessions, "side", "cloud-s"), Some(&sleeping));
         assert_eq!(session_for(&sessions, "chat", "x"), Some(&sleeping));
         assert_eq!(session_for(&sessions, "other", "x"), None);
+    }
+
+    #[test]
+    fn a_session_reads_as_updating_only_when_its_edge_says_so() {
+        let mut waking = session("a", "s", CloudState::Ready);
+        assert!(!session_updating(&waking));
+        waking.stage = Some(zeron_proto::CLOUD_STAGE_UPDATING.into());
+        assert!(session_updating(&waking));
+        // A stage from a newer edge is just not this one.
+        waking.stage = Some("something-new".into());
+        assert!(!session_updating(&waking));
     }
 
     #[test]

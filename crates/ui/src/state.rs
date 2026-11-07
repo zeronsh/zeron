@@ -2375,6 +2375,7 @@ impl AppState {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
         }) && self.cloud_machine_booting(chat_id).is_none()
+            && !self.cloud_machine_updating(chat_id)
             && !matches!(
                 self.chat_link_at(chat_id, now).sync,
                 LinkSync::Syncing { .. }
@@ -2916,12 +2917,19 @@ impl AppState {
             })
     }
 
+    /// The machine `chat_id` runs on is installing a release before it answers.
+    /// It can read `ready` by then: its engine is up, and a send still waits.
+    pub fn cloud_machine_updating(&self, chat_id: &str) -> bool {
+        self.chat_cloud_session(chat_id)
+            .is_some_and(crate::cloud::session_updating)
+    }
+
     /// Whether a send is waiting on a Cloud machine (keeps the session poll
     /// running until the machine is up).
     fn send_waits_on_cloud(&self) -> bool {
-        self.pending_sends
-            .keys()
-            .any(|chat_id| self.cloud_machine_booting(chat_id).is_some())
+        self.pending_sends.keys().any(|chat_id| {
+            self.cloud_machine_booting(chat_id).is_some() || self.cloud_machine_updating(chat_id)
+        })
     }
 
     /// When `chat_id`'s Cloud machine isn't running: the session to wake

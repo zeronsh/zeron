@@ -310,12 +310,32 @@ impl CredentialBroker {
         }
         let weak: Weak<Inner> = Arc::downgrade(&self.inner);
         *slot = Some(tokio::spawn(async move {
+            let mut first = true;
             loop {
                 let Some(inner) = weak.upgrade() else { return };
-                CredentialBroker { inner }.refresh_due().await;
+                let broker = CredentialBroker { inner };
+                if std::mem::take(&mut first) {
+                    tokio::join!(broker.refresh_due(), broker.prime_for_first_run());
+                } else {
+                    broker.refresh_due().await;
+                }
+                drop(broker);
                 tokio::time::sleep(REFRESH_TICK).await;
             }
         }));
+    }
+
+    /// What the first run after a boot asks for: fetched now, beside the
+    /// engine's boot, so a machine woken by a message doesn't make that run
+    /// wait on one round trip after another. A grant it finds cached within
+    /// [`RUN_REVALIDATE`] is used as it is.
+    async fn prime_for_first_run(&self) {
+        if let Some(grant) = self.github_grant().await {
+            let _ = self.git_identity(&grant).await;
+        }
+        for provider in [VaultProvider::Claude, VaultProvider::Codex] {
+            let _ = self.grant_for_run(provider).await;
+        }
     }
 
     pub fn shutdown(&self) {

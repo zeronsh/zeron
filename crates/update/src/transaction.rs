@@ -717,6 +717,10 @@ fn discard_snapshots(data_dir: &Path) {
 
 /// How long the new version gets, by how much it may have to migrate.
 fn trial_deadline(store_bytes: u64) -> Duration {
+    trial_deadline_from(BASE_DEADLINE, store_bytes)
+}
+
+fn trial_deadline_from(base: Duration, store_bytes: u64) -> Duration {
     if let Some(secs) = std::env::var(DEADLINE_ENV)
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -724,7 +728,7 @@ fn trial_deadline(store_bytes: u64) -> Duration {
         return Duration::from_secs(secs);
     }
     let gib = u32::try_from(store_bytes / GIB).unwrap_or(u32::MAX);
-    (BASE_DEADLINE + DEADLINE_PER_GIB.saturating_mul(gib)).min(MAX_DEADLINE)
+    (base + DEADLINE_PER_GIB.saturating_mul(gib)).min(MAX_DEADLINE)
 }
 
 pub(crate) fn new_id() -> String {
@@ -750,6 +754,20 @@ pub fn request(
     target: &str,
     restart: RestartMode,
 ) -> anyhow::Result<Transaction> {
+    request_within(data_dir, layout, from, target, restart, BASE_DEADLINE)
+}
+
+/// [`request`], when something is waiting on this update: `base` is the trial's
+/// deadline before the databases' size is counted, so a new version that hangs
+/// gives way sooner.
+pub fn request_within(
+    data_dir: &Path,
+    layout: Layout,
+    from: &str,
+    target: &str,
+    restart: RestartMode,
+    base: Duration,
+) -> anyhow::Result<Transaction> {
     if read(data_dir).is_some_and(|existing| existing.in_progress()) {
         bail!("An update is already in progress on this device.");
     }
@@ -764,7 +782,7 @@ pub fn request(
         phase: Phase::Requested,
         restart,
         requested_at: crate::now_ms(),
-        deadline_secs: trial_deadline(store_bytes(data_dir)).as_secs(),
+        deadline_secs: trial_deadline_from(base, store_bytes(data_dir)).as_secs(),
         trial_started_at: None,
         trial_pid: None,
         reason: None,

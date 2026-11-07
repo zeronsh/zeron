@@ -105,6 +105,7 @@ import {
   type WorkflowKind
 } from "./policy";
 import { activeProviderName, sandboxProvider } from "./providers";
+import { WAKE_STAGE_TTL_MS, wakeTiming, type EngineTiming, type WakeStage, type WakeStages, type WakeTrace } from "./wake";
 import {
   CREDIT_PACK,
   PLANS,
@@ -214,6 +215,8 @@ export interface CloudSessionView {
   /** Unix ms the provider deletes its disk, while it sleeps (a refresh pushes
    * this out; past it with `state: "data_expired"` it is gone). */
   readonly expiresAt?: number;
+  /** A longer wake's reason, while it lasts: its engine says what it's doing. */
+  readonly stage?: WakeStage;
 }
 
 export type CloudResult<T> =
@@ -376,6 +379,10 @@ interface SessionRecord {
   /** Set by a wake; the runner's first token or heartbeat clears it and fires
    * the WakeWorkflow's `online` event. */
   awaitingOnline?: boolean;
+  /** The wake in progress, until its engine reports its side of it. */
+  wakeTrace?: WakeTrace;
+  /** What its engine says it's doing before it answers, and since when. */
+  wakeStage?: { stage: WakeStage; at: number };
   lastActiveAt?: number;
   lastHeartbeatAt?: number;
   activeRuns: number;
@@ -727,6 +734,7 @@ export class CloudAccount extends DurableObject<Env> {
       ...(s.provider && s.sandboxId ? { sandbox: { provider: s.provider, id: s.sandboxId } } : {}),
       machine: this.shownMachine(s),
       ...(disk ? { disk } : {}),
+      ...(s.wakeStage && Date.now() - s.wakeStage.at < WAKE_STAGE_TTL_MS ? { stage: s.wakeStage.stage } : {}),
       ...(s.wakeBlocked ? { wakeBlocked: { reason: s.wakeBlocked.reason, neededGiB: s.wakeBlocked.neededGiB } } : {}),
       ...(expiresAt === undefined ? {} : { expiresAt })
     };
@@ -856,6 +864,7 @@ export class CloudAccount extends DurableObject<Env> {
   private markAlive(s: SessionRecord, now: number): void {
     if (s.awaitingOnline) {
       s.awaitingOnline = false;
+      if (s.wakeTrace) s.wakeTrace.online = now;
       this.sendEvent(s, "wake", "online");
     }
     // Sleeping/error but the engine is talking: the sandbox came back without
@@ -1411,6 +1420,10 @@ export class CloudAccount extends DurableObject<Env> {
     s.state = "starting";
     s.awakeSince = Date.now();
     s.awaitingOnline = true;
+    // Not a refresh's: nobody is waiting on it, and it would read as a wake.
+    s.wakeTrace = s.refreshing
+      ? undefined
+      : { requested: Date.now(), ...(s.stoppedAt === undefined ? {} : { asleepMs: Date.now() - s.stoppedAt }) };
     s.pendingWake = false;
     s.error = undefined;
     // It fits the size it's coming back on, or it wouldn't have got here.
@@ -1822,6 +1835,47 @@ export class CloudAccount extends DurableObject<Env> {
     return this.sessionByDevice(deviceId)?.repo.fullName;
   }
 
+  /** `POST /runner/wake-timing` (runner bearer, already verified): the engine's
+   * side of the wake that started it. Counts once per wake, whatever a runner
+   * sends: the first report closes the trace. */
+  async wakeTimingReport(runner: CloudCaller & { deviceId: string }, engine: EngineTiming): Promise<CloudResult<{ ok: true }>> {
+    const s = this.sessionByDevice(runner.deviceId);
+    if (!s || !s.runnerKey || !this.matches(runner)) {
+      return fail(403, "revoked", "This Cloud device is not enrolled.");
+    }
+    // It's answering: whatever it was doing first is over.
+    s.wakeStage = undefined;
+    const trace = s.wakeTrace;
+    if (trace && !trace.engine) {
+      if (trace.stages) {
+        s.wakeTrace = undefined;
+        this.recordWakeTiming(s, trace, engine);
+      } else {
+        // Ahead of the workflow's report: written with it, in one entry.
+        trace.engine = engine;
+      }
+      await this.saveSession(s);
+    }
+    return { ok: true, value: { ok: true } };
+  }
+
+  /** `POST /runner/wake-stage` (runner bearer, already verified). */
+  async wakeStage(runner: CloudCaller & { deviceId: string }, stage: WakeStage | null): Promise<CloudResult<{ ok: true }>> {
+    const s = this.sessionByDevice(runner.deviceId);
+    if (!s || !s.runnerKey || !this.matches(runner)) {
+      return fail(403, "revoked", "This Cloud device is not enrolled.");
+    }
+    s.wakeStage = stage ? { stage, at: Date.now() } : undefined;
+    await this.saveSession(s);
+    return { ok: true, value: { ok: true } };
+  }
+
+  private recordWakeTiming(s: SessionRecord, trace: WakeTrace, engine?: EngineTiming): void {
+    const timing = wakeTiming(trace, engine);
+    this.ledger("wake_timing", s, { detail: JSON.stringify(timing) });
+    console.info(JSON.stringify({ event: "cloud.wake_timing", chatId: s.chatId, complete: engine !== undefined, ...timing }));
+  }
+
   /** `POST /runner/heartbeat` (runner bearer, already verified). */
   async heartbeat(
     runner: CloudCaller & { deviceId: string },
@@ -2231,6 +2285,13 @@ export class CloudAccount extends DurableObject<Env> {
     return this.acct.orgId ? listLedger(this.sql(), limit) : [];
   }
 
+  /** Recent wakes' timelines, newest last (`GET /admin/cloud/wakes`). */
+  wakeTimings(limit = 200): LedgerEntry[] {
+    return this.ledgerEntries(limit * 10)
+      .filter((entry) => entry.event === "wake_timing")
+      .slice(-limit);
+  }
+
   // ── billing (cloud/stripe.ts) ─────────────────────────────────────────────
 
   private subscription(): SubscriptionState | undefined {
@@ -2408,9 +2469,17 @@ export class CloudAccount extends DurableObject<Env> {
     return Boolean(s) && !s!.awaitingOnline;
   }
 
-  async wfReady(chatId: string, generation: number): Promise<boolean> {
+  async wfReady(chatId: string, generation: number, stages?: WakeStages): Promise<boolean> {
     const s = this.current(chatId, generation);
     if (!s) return false;
+    // Written now as well: an engine too old to report (or one no run ever
+    // starts on) must not leave the wake unmeasured. Its report supersedes it.
+    if (stages && s.wakeTrace) {
+      s.wakeTrace.stages = stages;
+      this.recordWakeTiming(s, s.wakeTrace, s.wakeTrace.engine);
+      if (s.wakeTrace.engine) s.wakeTrace = undefined;
+      await this.saveSession(s);
+    }
     if (s.state === "provisioning" || s.state === "starting") {
       const before = s.lastActiveAt;
       this.markReady(s, Date.now());
@@ -2509,6 +2578,8 @@ export class CloudAccount extends DurableObject<Env> {
     if (!s || s.state !== "stopping") return false;
     s.state = "sleeping";
     s.awakeSince = undefined;
+    s.wakeTrace = undefined;
+    s.wakeStage = undefined;
     s.activeRuns = 0;
     s.clients = 0;
     s.idleCheckAt = undefined;

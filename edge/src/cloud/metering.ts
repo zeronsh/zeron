@@ -333,7 +333,9 @@ export type LedgerEvent =
   /** A wake moved the sandbox onto another size. */
   | "resize"
   /** A sleeping machine was resumed only to keep its disk from expiring. */
-  | "refresh";
+  | "refresh"
+  /** A wake's timeline (`detail`: `WakeTiming` JSON, wake.ts). */
+  | "wake_timing";
 
 export interface LedgerEntry {
   readonly at: number;

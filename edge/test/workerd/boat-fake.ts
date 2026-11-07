@@ -222,6 +222,9 @@ export const createBoatFake = () => {
         return reply(202, { ok: true, type: "sandbox.resuming", status: "resuming", sandbox: view(sandbox) });
       case "POST commands": {
         if (sandbox.state === "error") return error(409, "sandbox_not_running", "No machine to run that on.");
+        // Boat holds a command sent during start-up until the machine can run
+        // it, so one that ran means the machine is up.
+        if (sandbox.state === "provisioning") sandbox.state = "idle";
         const quiesce = typeof body?.command === "string" && body.command.includes(" quiesce");
         const exitCode = quiesce ? (sandbox.quiesceExit ?? 0) : 0;
         // As Boat answers a command that ran but failed: ok, not success.

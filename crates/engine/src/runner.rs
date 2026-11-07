@@ -195,6 +195,9 @@ async fn prepare_checkout_with(
     if path.join(".git").exists() {
         // The disk survived a stop: this boot is a wake.
         record_setup("wake", "Woke the machine".into());
+        if let Some(version) = crate::wake_trace::updated_to() {
+            record_setup("update", format!("Updated Zeron to {version}"));
+        }
         return Ok(());
     }
     record_setup("start", "Started a machine".into());
@@ -514,6 +517,10 @@ pub const ENROLL_ENV: &str = "ZERON_RUNNER_ENROLL";
 pub const PLATFORM_ENV: &str = "ZERON_DEVICE_PLATFORM";
 /// How often a runner reports activity to its CloudDevice DO.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+/// How long after boot a Cloud machine keeps its agent CLIs' update checks out of
+/// the way of the message that woke it: a check can start an install, which holds
+/// the run back until it ends.
+pub const CLOUD_BOOT_SETTLE: Duration = Duration::from_secs(120);
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const ENROLL_RETRY_BASE: Duration = Duration::from_secs(1);

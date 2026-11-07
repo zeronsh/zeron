@@ -193,6 +193,8 @@ struct Edge {
     enroll_status: Vec<u16>,
     token_ttl: i64,
     token_reject: bool,
+    /// Token requests still to answer 503 (a restored machine's first tries).
+    token_outages: u32,
     /// provider → (status, body). Absent → 403 not_authorized.
     grants: HashMap<String, (u16, Value)>,
     stale_once: bool,
@@ -229,6 +231,10 @@ fn edge_handler(state: Arc<Mutex<Edge>>) -> impl FnMut(&Req) -> (u16, Value) + S
                         403,
                         json!({"error": "forbidden", "message": "device deleted"}),
                     );
+                }
+                if edge.token_outages > 0 {
+                    edge.token_outages -= 1;
+                    return (503, json!({"error": "unavailable"}));
                 }
                 let device = b["deviceId"].as_str().unwrap();
                 let ts = b["ts"].as_i64().unwrap();
@@ -813,6 +819,107 @@ async fn openai_key_backs_codex_when_no_chatgpt_grant_and_revocation_removes_it(
         .await
         .unwrap();
     assert!(!request.env.contains_key("CODEX_HOME"));
+}
+
+#[tokio::test]
+async fn a_boots_timeline_goes_to_the_edge_once_at_the_runs_first_output() {
+    use zeron_engine::wake_trace::{self, Stage};
+    let reports: Arc<Mutex<Vec<Value>>> = Default::default();
+    let seen = reports.clone();
+    let edge = Stub::start(move |req: &Req| {
+        if req.path == "/runner/wake-timing" {
+            assert_eq!(req.bearer.as_deref(), Some("runner-bearer"));
+            seen.lock().unwrap().push(req.body.clone());
+        }
+        (200, json!({"ok": true}))
+    })
+    .await;
+    struct Bearer;
+    #[async_trait::async_trait]
+    impl TokenSource for Bearer {
+        async fn token(&self) -> Result<String, TokenError> {
+            Ok("runner-bearer".into())
+        }
+    }
+    let data = tempfile::tempdir().unwrap();
+    wake_trace::enable(data.path());
+    wake_trace::report_to(&edge.url(), Arc::new(Bearer));
+    wake_trace::mark(Stage::Token);
+    wake_trace::mark_command(1_000);
+    wake_trace::mark(Stage::AgentSpawn);
+    // The CLI saying it started is not output yet.
+    wake_trace::note_agent_event(true);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(reports.lock().unwrap().is_empty());
+
+    wake_trace::note_agent_event(false);
+    wake_trace::note_agent_event(false);
+    for _ in 0..200 {
+        if !reports.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let reports = reports.lock().unwrap();
+    assert_eq!(reports.len(), 1, "once per boot");
+    let report = &reports[0];
+    assert_eq!(report["sent"], 1_000);
+    // The names edge/src/cloud/wake.ts reads.
+    for stage in ["engineRun", "token", "command", "agentSpawn", "agentStarted", "firstOutput"] {
+        assert!(report[stage].as_i64().is_some(), "{stage}: {report}");
+    }
+}
+
+#[tokio::test]
+async fn a_boot_fetches_what_the_first_run_will_ask_for() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "claude",
+        200,
+        json!({"provider": "claude", "accessToken": "sk-ant-oat-x", "expiresAt": in_ms(4 * 3600), "generation": 2}),
+    );
+    let broker = rig.broker(identity, "http://127.0.0.1:9");
+    broker.start();
+    let requests = |provider: &str| {
+        rig.state.lock().unwrap().grant_requests.get(provider).copied().unwrap_or(0)
+    };
+    for _ in 0..500 {
+        if requests("claude") == 1 && requests("codex") == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(requests("claude"), 1, "fetched without a run asking");
+    assert_eq!(requests("codex"), 1, "either agent may be the one to run");
+    // The run finds it cached: no round trip of its own before the spawn.
+    assert!(broker.credential(HarnessId::ClaudeCode).await.is_some());
+    assert_eq!(requests("claude"), 1);
+    broker.shutdown();
+}
+
+#[tokio::test]
+async fn a_runner_retries_a_failed_first_token_within_a_second() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.state.lock().unwrap().token_outages = 1;
+    let auth = rig.auth(identity);
+    let started = std::time::Instant::now();
+    let refresh = auth.spawn_refresh_loop();
+    let mut tokens = TokenSource::subscribe(&auth).expect("runner tokens change");
+    // Waits out the one failure (its cooldown is what's being measured).
+    tokio::time::timeout(Duration::from_secs(5), tokens.changed())
+        .await
+        .expect("a token arrives")
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "took {:?}: a machine just woken has a message waiting on this",
+        started.elapsed()
+    );
+    assert!(auth.access_token().await.is_ok());
+    refresh.abort();
 }
 
 #[tokio::test]
