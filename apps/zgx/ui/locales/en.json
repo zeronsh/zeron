@@ -2428,6 +2428,8 @@
       "settings_page": "Settings: {title}",
       "go_to": "Go to",
       "frosted_glass": "Frosted glass",
+      "switch_to_dark": "Switch to dark mode",
+      "switch_to_light": "Switch to light mode",
       "search": "Search sessions, commands and files…",
       "app": "App",
       "reload_zeron": "Reload Zeron",
