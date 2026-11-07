@@ -191,7 +191,7 @@ impl ClientInner {
         }
         live.mark_registry_dirty();
         if let Some(presence) = live.presence() {
-            self.workspace.replace_presence(presence);
+            self.adopt_presence(live, presence);
         }
         self.recompute_connectivity();
         self.recompute_workspace();
@@ -220,25 +220,22 @@ impl ClientInner {
     pub(crate) fn presence_changed(self: &Arc<Self>) {
         let Some(live) = self.live() else { return };
         if let Some(presence) = live.presence() {
-            let before = self.workspace.presence();
-            let now = now_ms();
-            let back: Vec<String> = presence
-                .iter()
-                .filter(|(device, at)| {
-                    let was_fresh = before
-                        .get(*device)
-                        .is_some_and(|b| now - b < crate::connectivity::PRESENCE_FRESH_MS);
-                    !was_fresh && now - **at < crate::connectivity::PRESENCE_FRESH_MS
-                })
-                .map(|(device, _)| device.clone())
-                .collect();
-            // Stored first: whatever `peer_alive` wakes reads the new presence.
-            self.workspace.replace_presence(presence);
-            for device in &back {
-                live.relay.peer_alive(device);
-            }
+            self.adopt_presence(live, presence);
         }
         self.recompute_workspace();
+    }
+
+    /// Store new presence, and wake whatever waits on a device that's back. Every
+    /// path that copies presence in goes through here: a registry join or a tick
+    /// can be the first to show a host up (a cold launch, a return from the
+    /// background), and a watch parked on that host would otherwise wait for good.
+    fn adopt_presence(&self, live: &LiveBackend, presence: HashMap<String, i64>) {
+        let back = newly_fresh(&self.workspace.presence(), &presence, now_ms());
+        // Stored first: whatever `peer_alive` wakes reads the new presence.
+        self.workspace.replace_presence(presence);
+        for device in &back {
+            live.relay.peer_alive(device);
+        }
     }
 
     pub(crate) fn connectivity_changed(self: &Arc<Self>) {
@@ -552,7 +549,7 @@ impl ClientInner {
     fn tick(self: &Arc<Self>) {
         if let Some(live) = self.live() {
             if let Some(presence) = live.presence() {
-                self.workspace.replace_presence(presence);
+                self.adopt_presence(live, presence);
             }
             let peers_known = self
                 .workspace
@@ -1823,9 +1820,35 @@ pub struct PushPrefs {
     pub failed: bool,
 }
 
+/// Devices fresh in `after` that weren't in `before`.
+fn newly_fresh(before: &HashMap<String, i64>, after: &HashMap<String, i64>, now: i64) -> Vec<String> {
+    let fresh = |at: i64| now - at < crate::connectivity::PRESENCE_FRESH_MS;
+    after
+        .iter()
+        .filter(|(device, at)| fresh(**at) && !before.get(*device).is_some_and(|b| fresh(*b)))
+        .map(|(device, _)| device.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_counts_as_back_only_when_it_turns_fresh() {
+        let fresh = crate::connectivity::PRESENCE_FRESH_MS;
+        let now = 10 * fresh;
+        let before = HashMap::from([("stale".to_string(), now - 2 * fresh), ("up".to_string(), now - 1)]);
+        let after = HashMap::from([
+            ("stale".to_string(), now),
+            ("up".to_string(), now),
+            ("new".to_string(), now),
+            ("old".to_string(), now - 2 * fresh),
+        ]);
+        let mut back = newly_fresh(&before, &after, now);
+        back.sort();
+        assert_eq!(back, vec!["new".to_string(), "stale".to_string()]);
+    }
 
     #[test]
     fn demo_replica_is_local_only_and_never_queues() {
