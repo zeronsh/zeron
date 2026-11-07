@@ -4381,6 +4381,12 @@ impl DocHost {
             let missing = self.missing_row_attachments(&head);
             if !missing.is_empty() {
                 self.fetch_from_store(&handle.chat_id, &missing);
+                // Nothing on the way: the row fails, with a retry, rather than
+                // wait for bytes that aren't coming.
+                if self.row_bytes_lost(&head, &missing) && self.fail_queued_row(handle, &head) {
+                    self.forget_store_looks(&missing);
+                    continue;
+                }
                 tracing::info!(chat = %handle.chat_id, row = %head.id,
                     "queued row held: attachment bytes in transit");
                 self.arm_attachment_wait(handle);

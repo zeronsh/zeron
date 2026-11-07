@@ -7778,6 +7778,62 @@ impl Transcript {
         }
     }
 
+    /// Remove pressed on a held or failed send: it goes from view at once and
+    /// from the engine's outbox (`RemoveHeldSend`), and never goes out. Should
+    /// the engine refuse, it comes back.
+    fn remove_held_send(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let engine = self.state.read(cx).engine().cloned();
+        let removed = self.state.update(cx, |s, cx| {
+            let id = s.removable_held_send(&chat_id)?.id.clone();
+            let removed = s.remove_held_locally(&id);
+            cx.notify();
+            removed
+        });
+        let (Some(removed), Some(engine)) = (removed, engine) else {
+            return;
+        };
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let params = serde_json::json!({ "chatId": chat_id, "id": removed.id });
+            if let Err(err) = engine
+                .client()
+                .call(zeron_rpc::methods::REMOVE_HELD_SEND, params)
+                .await
+            {
+                tracing::warn!(error = %err, "remove held send RPC failed");
+                state.update(cx, |s, cx| {
+                    let mut held = s.held_sends_snapshot();
+                    held.push(removed);
+                    s.apply_held_sends(held);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Whether this chat's trailer offers Remove: a send the engine still holds
+    /// for it, failed or uploading.
+    fn offers_remove(&self, chat_id: &str, cx: &gpui::App) -> bool {
+        self.doc_override.is_none() && self.state.read(cx).removable_held_send(chat_id).is_some()
+    }
+
+    /// The Remove control beside a held send's state, styled like the line it
+    /// sits on.
+    fn remove_link(&self, id: &'static str, color: gpui::Hsla, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(id)
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(color)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.remove_held_send(cx)))
+            .child(SharedString::from("Remove"))
+            .into_any_element()
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
@@ -7821,19 +7877,30 @@ impl Transcript {
                     Some(why) => format!("Not delivered: {why} — click to retry"),
                     None => "Not delivered — click to retry".to_string(),
                 };
+                let remove = self
+                    .offers_remove(&chat_id, cx)
+                    .then(|| self.remove_link("undelivered-remove", theme.danger, cx));
                 return Some(
                     div()
-                        .id("undelivered-retry")
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(Theme::SPACE_SM))
+                        .gap(px(Theme::SPACE_MD))
                         .pt(px(Theme::SPACE_LG))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                        .child(SharedString::from(label))
+                        .child(
+                            div()
+                                .id("undelivered-retry")
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(Theme::SPACE_SM))
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.danger)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                                .child(SharedString::from(label)),
+                        )
+                        .children(remove)
                         .into_any_element(),
                 );
             }
@@ -7933,6 +8000,13 @@ impl Transcript {
             flavour_word(seed, elapsed_secs)
         };
         let theme = Theme::of(cx).clone();
+        // A send still uploading for its Cloud machine can be removed too.
+        let remove = (sending
+            && self
+                .chat_id
+                .as_deref()
+                .is_some_and(|chat| self.offers_remove(chat, cx)))
+        .then(|| self.remove_link("sending-remove", theme.text_muted, cx));
         Some(
             div()
                 .flex()
@@ -7982,6 +8056,7 @@ impl Transcript {
                             )),
                     )
                 })
+                .children(remove)
                 .into_any_element(),
         )
     }
@@ -17006,6 +17081,44 @@ mod tests {
     /// A chip whose upload is still crossing to the host shows its progress
     /// in place of its icon, as the strip's thumbnail did; once the bytes
     /// land (the ref is rewritten to a local path) the icon comes back.
+    /// A failed send the engine still holds offers Remove beside Retry; Remove
+    /// takes it out of view, and the trailer goes with it.
+    #[gpui::test]
+    fn a_held_failed_send_offers_remove_and_remove_clears_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.begin_pending_send("c", "m-a", chrono::Utc::now());
+            state.apply_held_sends(vec![zeron_proto::HeldSendStatus {
+                id: "a".into(),
+                chat_id: "c".into(),
+                message_id: Some("m-a".into()),
+                prompt: "look".into(),
+                queue_row: false,
+                created_at: 1_000,
+                failure: Some("the file is too large".into()),
+            }]);
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |t, cx| {
+            t.chat_id = Some("c".into());
+            assert!(t.offers_remove("c", cx));
+            assert!(!t.offers_remove("other", cx));
+            assert!(t.render_working_trailer(cx).is_some(), "the failed line shows");
+            t.remove_held_send(cx);
+            assert!(!t.offers_remove("c", cx));
+        });
+        state.update(cx, |state, _| {
+            assert!(state.held_sends_snapshot().is_empty());
+            assert!(!state.send_undelivered("c", chrono::Utc::now()));
+        });
+    }
+
     #[gpui::test]
     fn sent_chips_show_upload_progress_until_their_bytes_land(cx: &mut gpui::TestAppContext) {
         use zeron_proto::attachment_mentions::attachment_mention_link;

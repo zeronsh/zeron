@@ -102,27 +102,34 @@ pass it together. The 32 MiB limit per file is unchanged.
 
 - **After delivery:** the machine deletes the object as soon as its copy is on disk.
 - **Fallback:** an R2 lifecycle rule expires anything left under `attachments/` after
-  **14 days**: the 7 days a message can wait, and a week more for a retry once it has expired
-  A missed delete only costs storage until then.
+  **30 days**. That covers the 7 days a message can wait with room for a retry after it
+  expired, and a queued message on a machine that sleeps for weeks (a machine blocked on a
+  wake, or out of credit, isn't woken to refresh its files). A missed delete only costs
+  storage until then, within the user's quota.
+- **If a file ages out anyway,** the machine doesn't wait for it forever: a message or queued
+  row whose bytes the store no longer has, past the 15-minute cap, fails in its chat with a
+  retry, and the retry uploads the files again from the sender's own copy.
 - **While a send is alive, its files can't age out.** The outbox uploads every file again on
-  each try, so an object is never older than its send's last try. Once a message has gone out
-  it waits at most 7 days, inside the 14. A retry after that, of a message that expired, uploads
-  the files again from the sender's own copy: the desktop engine keeps its staged files, and a
-  phone keeps its copy until the message has run (then lets it go), instead of dropping it at
-  upload. So the rule stays at 14 days.
+  each try, so an object is never older than its send's last try. A retry of a message that
+  expired uploads the files again from the sender's own copy: the desktop engine keeps its
+  staged files, and a phone keeps its copy until the message has run (then lets it go).
 
 The rule is bucket configuration, not code, so it has to be applied once per bucket:
 
 ```sh
-npx wrangler r2 bucket lifecycle add zeron-staging-blobs attachments-expire attachments/ --expire-days 14
-npx wrangler r2 bucket lifecycle add comet-native-blobs attachments-expire attachments/ --expire-days 14
+npx wrangler r2 bucket lifecycle add zeron-staging-blobs attachments-expire attachments/ --expire-days 30
+npx wrangler r2 bucket lifecycle add comet-native-blobs attachments-expire attachments/ --expire-days 30
 ```
+
+(A bucket that already has the rule under that name takes the new age after
+`npx wrangler r2 bucket lifecycle remove <bucket> --id attachments-expire`.)
 
 **Cost.** Objects normally live for minutes. Assuming 1,000 attachments a day at 2 MB:
 about 30,000 writes a month ($0.14), about 30,000 reads ($0.01), deletes free, no egress,
-and storage rounds to nothing. If every delete failed, the 14-day rule caps storage at about
-28 GB ($0.42 a month), and no one user can hold more than their quota. These are estimates from R2's published prices, not measurements. The
-normal case fits inside R2's free allowance.
+and storage rounds to nothing. If every delete failed, the 30-day rule caps storage at about
+60 GB ($0.90 a month), and no one user can hold more than their quota. These are estimates
+from R2's published prices, not measurements. The normal case fits inside R2's free
+allowance.
 
 ## Mobile
 

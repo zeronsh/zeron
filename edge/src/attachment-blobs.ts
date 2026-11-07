@@ -11,10 +11,11 @@
  * chat it hosts (or a delegate it started; runner-access.ts).
  *
  * Retention: the machine's DELETE is the normal end. The bucket's lifecycle
- * rule on `attachments/` (14 days, see docs/design/cloud-attachments.md) catches
+ * rule on `attachments/` (30 days, see docs/design/cloud-attachments.md) catches
  * whatever a machine never collected. A message to a Cloud machine waits at most
- * 7 days before it expires, so an object outlives anything still able to want it,
- * a retry included.
+ * 7 days before it expires, and a queued one for as long as its machine sleeps,
+ * so an object outlives what can still want it. One that ages out anyway fails its
+ * message with a retry, which uploads it again from the sender's copy.
  *
  * Quota: what a user has stored and not yet collected is capped, in bytes and in
  * files (`ATTACHMENT_QUOTA_*`). Collected, deleted and expired files free their

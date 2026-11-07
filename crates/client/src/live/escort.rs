@@ -31,6 +31,10 @@ pub(crate) struct StashMeta {
     pub host_device_id: String,
     pub name: String,
     pub created_at_ms: i64,
+    /// The message it was sent with, through the store: once that's in the
+    /// transcript, this copy is let go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     /// Going through the edge's store (held.rs), not over the peer link: no
     /// escort pushes it, and it doesn't expire with the host's peer window.
     #[serde(default)]
@@ -82,6 +86,39 @@ impl Escorts {
 
     fn load_meta(&self, upload_id: &str) -> Option<StashMeta> {
         serde_json::from_slice(&std::fs::read(self.meta(upload_id)).ok()?).ok()
+    }
+
+    /// Keep this file for `message_id` until that message has run.
+    pub(crate) fn keep_for(&self, upload_id: &str, message_id: &str) {
+        let Some(mut meta) = self.load_meta(upload_id) else {
+            return;
+        };
+        meta.message_id = Some(message_id.to_owned());
+        if let Err(err) = std::fs::write(
+            self.meta(upload_id),
+            serde_json::to_vec(&meta).unwrap_or_default(),
+        ) {
+            tracing::warn!(upload = %upload_id, %err, "attachment stash not updated");
+        }
+    }
+
+    /// `(message, upload)` for each file kept for a message of `chat_id`.
+    pub(crate) fn kept_for_chat(&self, chat_id: &str) -> Vec<(String, String)> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let id = name.strip_suffix(".json")?.to_owned();
+                let meta = self.load_meta(&id)?;
+                (meta.chat_id == chat_id && meta.via_store)
+                    .then_some(meta.message_id)
+                    .flatten()
+                    .map(|message| (message, id))
+            })
+            .collect()
     }
 
     /// Drop a file kept for the store's route, once nothing can need it again:

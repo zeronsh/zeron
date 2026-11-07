@@ -15,6 +15,7 @@
 //! Everything else keeps the peer path: chats on a user's own computers, hosts
 //! too old to look in the store, edges too old to have one.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use zeron_doc::{
@@ -27,8 +28,8 @@ use zeron_sync::attachment_store::{
 };
 
 use super::{
-    DocHost, EngineError, TRANSFER_BACKOFF_BASE, TRANSFER_BACKOFF_CAP, TransferProgressGuard, lock,
-    new_id, now_ms,
+    ChatDocHandle, DocHost, EngineError, TRANSFER_BACKOFF_BASE, TRANSFER_BACKOFF_CAP,
+    TransferProgressGuard, lock, new_id, now_ms,
 };
 use crate::uploads::AttachmentTransfer;
 
@@ -818,7 +819,68 @@ impl DocHost {
             let host = self.clone();
             self.spawn_worker(async move {
                 host.drain_commands(&handle).await;
+                host.drain_queue(&handle).await;
             });
+        }
+    }
+
+    /// A queued row's bytes aren't coming: a Cloud machine past the wait cap,
+    /// and the store says it has nothing (it expired, or was never sent).
+    pub(super) fn row_bytes_lost(&self, row: &QueuedMessage, missing: &[String]) -> bool {
+        self.fetches_from_store()
+            && now_ms().saturating_sub(row.issued_at) >= super::ATTACHMENT_WAIT_MAX_MS
+            && !self.bytes_on_their_way(missing)
+    }
+
+    /// Take the row out of the queue and leave its message as a failed send
+    /// of its sender's, which offers a retry: the retry uploads the files again
+    /// from the sender's own copy. `false` when it couldn't be written (the row
+    /// then stays queued).
+    pub(super) fn fail_queued_row(&self, handle: &Arc<ChatDocHandle>, row: &QueuedMessage) -> bool {
+        let prompt = super::queued_message_prompt(&row.text, &row.attachments);
+        let Some(mut request) = self.request_from_chat_row(&handle.chat_id, &prompt) else {
+            return false;
+        };
+        request.attachments = row.attachments.clone();
+        let now = now_ms();
+        let entry = SessionCommandEntry {
+            id: new_id(),
+            payload: SessionCommandPayload::Run {
+                request,
+                message_id: row.id.clone(),
+            },
+            issued_by: row.issued_by.clone(),
+            issued_at: row.issued_at,
+            based_on: None,
+            expires_at: Some(now + CLOUD_COMMAND_TTL_MS),
+            status: SessionCommandStatus::Rejected,
+            resolution: Some("attachments never arrived".into()),
+        };
+        // The command first: were the take to fail, the row is still queued
+        // and nothing is lost; the other way round, it could be.
+        // (The doc's command write keeps no resolution: it's set after.)
+        let recorded = handle.doc.queue_command(&entry).and_then(|()| {
+            handle.doc.set_command_status(
+                &entry.id,
+                SessionCommandStatus::Rejected,
+                Some("attachments never arrived"),
+            )
+        });
+        if let Err(err) = recorded {
+            tracing::warn!(chat = %handle.chat_id, row = %row.id, %err, "lost row not recorded");
+            return false;
+        }
+        match handle.doc.take_queued(&row.id) {
+            Ok(_) => {
+                handle.publish_queue();
+                tracing::warn!(chat = %handle.chat_id, row = %row.id,
+                    "queued row failed: attachments never arrived");
+                true
+            }
+            Err(err) => {
+                tracing::warn!(chat = %handle.chat_id, row = %row.id, %err, "lost row not taken");
+                false
+            }
         }
     }
 }
