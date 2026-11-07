@@ -189,6 +189,9 @@ final class AppModel {
             for key in [ActivityList.Keys.workingShelf, ActivityList.Keys.archiveAfter, ActivityList.Keys.unarchived, ActivityList.Keys.openShelves] {
                 UserDefaults.standard.removeObject(forKey: key)
             }
+            // A test that says how Activity starts says how the list folds
+            // too: nothing folded.
+            if i != nil { UserDefaults.standard.removeObject(forKey: "collapsedSections") }
         }
         if args.contains("-demo") || args.contains("-route") && Credentials.stored() == nil {
             start(.demo(options: Self.demoOptions()))
@@ -235,6 +238,11 @@ final class AppModel {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = credentials.isDemo ? support.appendingPathComponent("demo", isDirectory: true) : Self.coreDir
         if !credentials.isDemo { Self.claimCoreDir(for: credentials) }
+        // `-fresh-demo`: the demo from its fixtures alone, none of an earlier
+        // run's writes (sleeps, archives) carried over.
+        if credentials.isDemo, ProcessInfo.processInfo.arguments.contains("-fresh-demo") {
+            try? FileManager.default.removeItem(at: dir)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let config = CoreConfig(
             edgeUrl: Self.edgeURL,

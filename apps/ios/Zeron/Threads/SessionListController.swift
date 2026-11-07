@@ -8,6 +8,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         case folder(String)
         case session(String)
         case header(String)
+        /// "Show N more" at a section's foot (Activity's Archived).
+        case more(String)
     }
 
     let app: AppModel
@@ -90,6 +92,19 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             bg.backgroundColor = .clear
             cell.backgroundConfiguration = bg
         }
+        let moreReg = UICollectionView.CellRegistration<UICollectionViewListCell, String> { [weak self] cell, _, id in
+            var c = UIListContentConfiguration.cell()
+            c.text = "Show \(self?.moreCount(id) ?? 0) more"
+            c.textProperties.font = Fonts.ui(.sansMedium, TypeScale.size(14))
+            c.textProperties.color = Palette.secondary
+            c.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 20)
+            cell.contentConfiguration = c
+            var bg = UIBackgroundConfiguration.listCell()
+            bg.backgroundColor = .clear
+            cell.backgroundConfiguration = bg
+            cell.accessibilityIdentifier = "more-\(id)"
+            cell.accessibilityTraits = .button
+        }
         let sectionReg = UICollectionView.CellRegistration<SectionHeaderCell, String> { [weak self] cell, _, id in
             guard let state = self?.headerStates[id] else { return }
             cell.configure(state)
@@ -100,6 +115,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             case let .folder(id): cv.dequeueConfiguredReusableCell(using: folderReg, for: path, item: id)
             case let .header(id) where self?.collapsible == true: cv.dequeueConfiguredReusableCell(using: sectionReg, for: path, item: id)
             case let .header(id): cv.dequeueConfiguredReusableCell(using: headerReg, for: path, item: id)
+            case let .more(id): cv.dequeueConfiguredReusableCell(using: moreReg, for: path, item: id)
             }
         }
         token = app.observe { [weak self] in self?.reload(animated: true) }
@@ -164,6 +180,10 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 nextSessions[r.id] = r
                 items.append(.session(r.id))
             }
+            if moreCount(s.id) > 0 {
+                items.append(.more(s.id))
+                changed.append(.more(s.id))
+            }
             snapshot.appendItems(items, toSection: s.id)
         }
         sessions = nextSessions
@@ -191,6 +211,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             openFolder(id)
         case let .header(id) where collapsible:
             toggleSection(id)
+        case let .more(id):
+            showMore(id)
         default:
             break
         }
@@ -222,6 +244,12 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             UserDefaults.standard.set(Array(collapsed), forKey: "collapsedSections")
         }
     }
+
+    /// How many of section `id`'s sessions aren't shown yet ("Show N more").
+    func moreCount(_ id: String) -> Int { 0 }
+
+    /// "Show N more" tapped: show the next few.
+    func showMore(_ id: String) {}
 
     /// Long-press actions for a collapsible section header.
     func headerMenu(_ id: String) -> UIMenu? { nil }
@@ -292,8 +320,10 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         archive.image = UIImage(systemName: "archivebox.fill")
         archive.backgroundColor = Palette.secondary
         // Activity: Sleep (or, asleep, Wake) where Move stands; it lists no
-        // sections to move into.
+        // sections to move into. A chat under way isn't archived (as the
+        // desktop's Archive: stop it first).
         if app.activityOn, let vm = sessions[id] {
+            let underWay = vm.status == .working
             if vm.sleepUntil != nil {
                 let wake = UIContextualAction(style: .normal, title: "Wake") { [weak self] _, _, done in
                     self?.app.wake(id)
@@ -301,7 +331,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 }
                 wake.image = UIImage(systemName: "sun.max.fill")
                 wake.backgroundColor = .systemOrange
-                return UISwipeActionsConfiguration(actions: [archive, wake])
+                return UISwipeActionsConfiguration(actions: underWay ? [wake] : [archive, wake])
             }
             let sleep = UIContextualAction(style: .normal, title: "Sleep") { [weak self] _, view, done in
                 self?.presentSleepSheet(id, from: view)
@@ -309,7 +339,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             }
             sleep.image = UIImage(systemName: "moon.fill")
             sleep.backgroundColor = .systemIndigo
-            return UISwipeActionsConfiguration(actions: [archive, sleep])
+            return UISwipeActionsConfiguration(actions: underWay ? [sleep] : [archive, sleep])
         }
         let move = UIContextualAction(style: .normal, title: "Move") { [weak self] _, view, done in
             self?.presentMoveMenu(id, from: view)
@@ -346,7 +376,9 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                     UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
                     UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
                     UIMenu(options: .displayInline, children: activity),
-                    UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { _ in self.app.archive(id) },
+                    vm.status == .working
+                        ? UIAction(title: "Archive", subtitle: "Stop it first: its agent is still working", image: UIImage(systemName: "archivebox"), attributes: .disabled) { _ in }
+                        : UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { _ in self.app.archive(id) },
                     self.deleteAction(id),
                 ])
             }
@@ -641,8 +673,26 @@ class SessionsViewController: SessionListController {
         out.append((ActivityList.Section.list, "Activity", [], page.list))
         if !page.working.isEmpty { out.append((ActivityList.Section.working, "Working", [], page.working)) }
         if !page.asleep.isEmpty { out.append((ActivityList.Section.asleep, "Asleep", [], page.asleep)) }
-        if !app.archived.isEmpty { out.append((ActivityList.Section.archived, "Archived", [], app.archived)) }
+        if !app.archived.isEmpty {
+            archivedTotal = app.archived.count
+            out.append((ActivityList.Section.archived, "Archived", [], Array(app.archived.prefix(archivedShown))))
+        }
         return out
+    }
+
+    /// Activity's Archived shows its first 10, then 25 more a tap (the
+    /// desktop's shelf).
+    private var archivedShown = 10
+    private var archivedTotal = 0
+
+    override func moreCount(_ id: String) -> Int {
+        guard id == ActivityList.Section.archived, app.activityOn, !isCollapsed(id) else { return 0 }
+        return max(0, archivedTotal - archivedShown)
+    }
+
+    override func showMore(_ id: String) {
+        archivedShown += 25
+        reload(animated: true)
     }
 
     override func viewDidLayoutSubviews() {

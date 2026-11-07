@@ -12,7 +12,7 @@ final class ActivityFlowTests: XCTestCase {
 
     private func launch(activity: Bool) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-fast", "-activity", activity ? "on" : "off"]
+        app.launchArguments = ["-demo", "-fast", "-fresh-demo", "-activity", activity ? "on" : "off"]
         app.launch()
         return app
     }
@@ -36,6 +36,25 @@ final class ActivityFlowTests: XCTestCase {
         XCTAssertEqual(header.value as? String, "Expanded")
     }
 
+    /// A row, scrolled to: a list's rows below the fold aren't made until
+    /// they're near the screen.
+    @discardableResult
+    private func row(_ app: XCUIApplication, _ id: String, down: Bool = true) -> XCUIElement {
+        let cell = app.cells["session-\(id)"]
+        let list = app.collectionViews.firstMatch
+        // That way first, then back the other way.
+        for step in 0..<14 where !(cell.exists && cell.isHittable) {
+            if (step < 5) == down { list.swipeUp(velocity: .slow) } else { list.swipeDown(velocity: .slow) }
+        }
+        XCTAssertTrue(cell.waitForExistence(timeout: 5), id)
+        return cell
+    }
+
+    /// A menu item by its title (one with a subtitle reads "Title, subtitle").
+    private func item(_ app: XCUIApplication, _ title: String) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", title, title + ",")).firstMatch
+    }
+
     private func menu(_ app: XCUIApplication) {
         let options = app.buttons["sessions-options"].firstMatch
         XCTAssertTrue(options.waitForExistence(timeout: 10))
@@ -46,13 +65,16 @@ final class ActivityFlowTests: XCTestCase {
     /// shelves; the waiting chat reads Working, the woken one doesn't ring.
     func testOffIsTheSessionsPageAsBefore() {
         let app = launch(activity: false)
-        XCTAssertTrue(app.cells["session-chat-deploy"].waitForExistence(timeout: 10))
+        XCTAssertTrue(section(app, "pinned").waitForExistence(timeout: 10))
         XCTAssertFalse(section(app, "activity").exists)
-        XCTAssertTrue(section(app, "recent").exists || app.staticTexts["Recent"].exists)
-        let waiting = app.cells["session-chat-ios-keyboard"]
-        XCTAssertTrue(waiting.label.contains("Working"), waiting.label)
-        XCTAssertFalse(app.cells["session-chat-ios-scroll"].label.contains("Woke"))
         snapshot(app, "activity-off")
+        let woken = row(app, "chat-ios-scroll")
+        XCTAssertFalse(woken.label.contains("Woke"), woken.label)
+        let waiting = row(app, "chat-ios-keyboard")
+        XCTAssertTrue(waiting.label.contains("Working"), waiting.label)
+        // (Recent, or project groups, as this phone groups them.)
+        row(app, "chat-deploy")
+        XCTAssertFalse(section(app, "activity.asleep").exists)
     }
 
     /// The "…" menu turns it on: one list, the shelves folded at its foot.
@@ -67,10 +89,8 @@ final class ActivityFlowTests: XCTestCase {
             XCTAssertTrue(header.waitForExistence(timeout: 5), shelf)
             XCTAssertEqual(header.value as? String, "Collapsed", "\(shelf) starts folded")
         }
-        app.collectionViews.firstMatch.swipeDown()
-        // Woke: at the top of the list, with the alarm.
-        let woke = app.cells["session-chat-ios-scroll"]
-        XCTAssertTrue(woke.waitForExistence(timeout: 5))
+        // Woke: near the top of the list, with the alarm.
+        let woke = row(app, "chat-ios-scroll", down: false)
         XCTAssertTrue(woke.label.contains("Woke"), woke.label)
         // What Activity stands aside from is out of reach.
         menu(app)
@@ -78,8 +98,8 @@ final class ActivityFlowTests: XCTestCase {
         XCTAssertFalse(app.buttons["New Section…"].isEnabled)
         snapshot(app, "activity-menu")
         app.buttons["Activity"].tap()
-        XCTAssertTrue(app.cells["session-chat-deploy"].waitForExistence(timeout: 5))
-        XCTAssertFalse(section(app, "activity").exists, "off again")
+        XCTAssertTrue(section(app, "activity").waitForNonExistence(timeout: 5), "off again")
+        row(app, "chat-deploy")
     }
 
     func testShelvesListWorkingAndAsleep() {
@@ -87,10 +107,11 @@ final class ActivityFlowTests: XCTestCase {
         XCTAssertTrue(section(app, "activity").waitForExistence(timeout: 10))
         snapshot(app, "activity-on")
         open(app, shelf: "activity.working")
-        XCTAssertTrue(app.cells["session-chat-ios-keyboard"].waitForExistence(timeout: 5), "waiting folds into Working")
+        row(app, "chat-ios-keyboard")
         open(app, shelf: "activity.asleep")
-        let blog = app.cells["session-chat-blog"]
-        XCTAssertTrue(blog.waitForExistence(timeout: 5))
+        let blog = row(app, "chat-blog")
+        // Its corner says when it wakes (the demo's: in about 3 hours).
+        XCTAssertTrue(blog.label.contains("Draft the launch post"), blog.label)
         app.collectionViews.firstMatch.swipeUp()
         snapshot(app, "activity-asleep")
     }
@@ -99,17 +120,16 @@ final class ActivityFlowTests: XCTestCase {
     /// system date picker; then Wake from the swipe.
     func testSleepCustomSleepAndWake() {
         let app = launch(activity: true)
-        let deploy = app.cells["session-chat-deploy"]
-        XCTAssertTrue(deploy.waitForExistence(timeout: 10))
+        XCTAssertTrue(section(app, "activity").waitForExistence(timeout: 10))
+        let deploy = row(app, "chat-deploy")
         deploy.press(forDuration: 1.0)
         app.buttons["Sleep"].tap()
-        XCTAssertTrue(app.buttons["Tomorrow"].waitForExistence(timeout: 5))
+        XCTAssertTrue(item(app, "Tomorrow").waitForExistence(timeout: 5))
         snapshot(app, "activity-sleep-menu")
-        app.buttons["In 1 Hour"].tap()
+        item(app, "In 1 Hour").tap()
         XCTAssertTrue(deploy.waitForNonExistence(timeout: 5), "asleep: off the list, onto the folded shelf")
 
-        let home = app.cells["session-chat-home"]
-        XCTAssertTrue(home.waitForExistence(timeout: 5))
+        let home = row(app, "chat-home", down: false)
         home.press(forDuration: 1.0)
         app.buttons["Sleep"].tap()
         app.buttons["Custom…"].tap()
@@ -123,12 +143,15 @@ final class ActivityFlowTests: XCTestCase {
         // The demo's sleeper, and these two.
         open(app, shelf: "activity.asleep")
         XCTAssertEqual(section(app, "activity.asleep").label, "Asleep, 3")
-        let asleep = app.cells["session-chat-deploy"]
-        XCTAssertTrue(asleep.waitForExistence(timeout: 5))
-        if !asleep.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        let asleep = row(app, "chat-deploy")
         snapshot(app, "activity-asleep-shelf")
-        asleep.swipeLeft()
-        app.buttons["Wake"].tap()
+        // (Along its top edge: the list's foot sits under the bottom bar.)
+        asleep.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.2))
+            .press(forDuration: 0.05, thenDragTo: asleep.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.2)))
+        let wake = app.buttons["Wake"]
+        XCTAssertTrue(wake.waitForExistence(timeout: 5))
+        snapshot(app, "activity-wake-swipe")
+        wake.tap()
         // Awake: back on the list; the shelf keeps the others.
         let shelf = section(app, "activity.asleep")
         expectation(for: NSPredicate(format: "label == 'Asleep, 2'"), evaluatedWith: shelf)
@@ -139,9 +162,15 @@ final class ActivityFlowTests: XCTestCase {
     func testStopWaiting() {
         let app = launch(activity: true)
         open(app, shelf: "activity.working")
-        let waiting = app.cells["session-chat-ios-keyboard"]
-        XCTAssertTrue(waiting.waitForExistence(timeout: 5))
+        let waiting = row(app, "chat-ios-keyboard")
+        // Under way: Sleep in its swipe, no Archive (stop it first).
+        waiting.swipeLeft()
+        XCTAssertTrue(app.buttons["Sleep"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Archive"].exists, "a working chat isn't archived")
+        snapshot(app, "activity-working-swipe")
+        waiting.swipeRight()
         waiting.press(forDuration: 1.0)
+        XCTAssertFalse(item(app, "Archive").isEnabled, "Archive waits for it to stop")
         let stop = app.buttons["Stop Waiting"]
         XCTAssertTrue(stop.waitForExistence(timeout: 5))
         snapshot(app, "activity-stop-waiting")
@@ -149,8 +178,7 @@ final class ActivityFlowTests: XCTestCase {
         // Its turn reads as finished: it leaves Working (its only chat, so
         // the shelf goes) for the list.
         XCTAssertTrue(section(app, "activity.working").waitForNonExistence(timeout: 10))
-        let back = app.cells["session-chat-ios-keyboard"]
-        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        let back = row(app, "chat-ios-keyboard", down: false)
         XCTAssertFalse(back.label.contains("Working"), back.label)
     }
 
