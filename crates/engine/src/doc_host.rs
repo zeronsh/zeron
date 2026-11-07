@@ -1568,6 +1568,10 @@ impl DocHost {
     /// Materialize one authoritative local document without acquiring a network
     /// connection. Durable publication is installed before exposing any writer.
     pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        // A chat with no id has no room to sync with: it dialed one forever.
+        if chat_id.is_empty() {
+            return Err(EngineError::Other("a chat needs an id".into()));
+        }
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another
@@ -6948,6 +6952,26 @@ mod publication_eviction_tests {
         let same = host.open("local").unwrap();
         assert!(Arc::ptr_eq(&handle, &same));
         assert!(handle.sync_requested.load(Ordering::Acquire));
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_without_an_id_is_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "writer".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        assert!(host.open("").is_err());
+        assert!(host.open_local("").is_err());
+        let steer = SessionCommandPayload::Steer { prompt: "hi".into(), message_id: None };
+        assert!(host.queue_command_with_transfers("", steer, Vec::new()).is_err());
+        assert!(lock(&host.inner.handles).is_empty());
         host.shutdown_workers().await;
     }
 
