@@ -1,0 +1,1560 @@
+{
+  "status": "implemented, pinned in the app, release build and resource comparison complete",
+  "zgx_base": "88ff58c08b6318eb2e05bb2a22128fefdfca8db9",
+  "zgx_final": "b39a8d285e4bccf234224e3daaade10a3381a13c",
+  "zgx_branch": "https://github.com/jsgrrchg/zgx/tree/zeron/scroll-response-and-resource-usage",
+  "commits": {
+    "preserve_distance": "647e386c",
+    "adaptive_latency": "55881dea",
+    "optional_logging": "b39a8d28"
+  },
+  "validation": {
+    "crate_tests": {
+      "passed": 268,
+      "ignored": 5,
+      "failed": 0
+    },
+    "clippy_lib": "passed, release, -D warnings",
+    "modified_files_rustfmt": "passed",
+    "full_workspace_fmt": "pre-existing formatting difference in crates/zgx/src/reactive.rs:125, left unchanged",
+    "release_app_build": "passed with --locked; 16 existing warnings",
+    "logging_smoke": {
+      "input_120_hz": [
+        {
+          "logging_enabled": false,
+          "received": 0,
+          "applied": 0,
+          "errors": "none",
+          "replay": {
+            "events": 265,
+            "first_frame": 32,
+            "frames": 264,
+            "interval_ms": 16.64,
+            "last_frame": 295,
+            "late": 0,
+            "layout": {
+              "measured": 35253,
+              "micros": 57149,
+              "top": [
+                {
+                  "frames": 505,
+                  "micros": 28309,
+                  "node": 3,
+                  "self_micros": 4444,
+                  "what": "@3 (overlay chat_fixture.luau:1342)"
+                },
+                {
+                  "frames": 491,
+                  "micros": 2418,
+                  "node": 158,
+                  "self_micros": 2418,
+                  "what": "@158 (overlay ds/transcript.luau:1682)"
+                },
+                {
+                  "frames": 448,
+                  "micros": 9411,
+                  "node": 23,
+                  "self_micros": 1928,
+                  "what": "@23 (presence screens/chat/session.luau:193)"
+                },
+                {
+                  "frames": 254,
+                  "micros": 29302,
+                  "node": 0,
+                  "self_micros": 1779,
+                  "what": "@0"
+                },
+                {
+                  "frames": 257,
+                  "micros": 5104,
+                  "node": 103,
+                  "self_micros": 1745,
+                  "what": "@103 (column screens/chat/session.luau:231)"
+                },
+                {
+                  "frames": 318,
+                  "micros": 15193,
+                  "node": 5,
+                  "self_micros": 1586,
+                  "what": "@5 (presence chat_fixture.luau:1349)"
+                },
+                {
+                  "frames": 247,
+                  "micros": 11151,
+                  "node": 22,
+                  "self_micros": 1115,
+                  "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                },
+                {
+                  "frames": 234,
+                  "micros": 20637,
+                  "node": 4,
+                  "self_micros": 920,
+                  "what": "@4 (column chat_fixture.luau:1345)"
+                }
+              ]
+            },
+            "longest_gap_ms": 24.39,
+            "per_event_ms": {
+              "max": 12.113,
+              "mean": 4.943,
+              "p50": 4.406,
+              "p90": 7.25,
+              "p95": 10.091,
+              "p99": 11.561
+            },
+            "phases": [
+              {
+                "instructions": 62542905,
+                "max": 5.627,
+                "mean": 3.661,
+                "name": "present",
+                "p50": 3.644,
+                "p90": 4.023,
+                "p95": 4.174,
+                "p99": 4.788,
+                "total_ms": 966.451
+              },
+              {
+                "instructions": 193698587,
+                "max": 3.683,
+                "mean": 0.379,
+                "name": "script",
+                "p50": 0.121,
+                "p90": 1.48,
+                "p95": 2.419,
+                "p99": 3.225,
+                "total_ms": 100.016
+              },
+              {
+                "instructions": 206905894,
+                "max": 3.142,
+                "mean": 0.343,
+                "name": "update",
+                "p50": 0.083,
+                "p90": 1.404,
+                "p95": 2.336,
+                "p99": 2.611,
+                "total_ms": 90.428
+              },
+              {
+                "instructions": 252854797,
+                "max": 1.55,
+                "mean": 0.247,
+                "name": "layout",
+                "p50": 0.136,
+                "p90": 0.643,
+                "p95": 1.202,
+                "p99": 1.423,
+                "total_ms": 65.312
+              },
+              {
+                "instructions": 239511359,
+                "max": 0.526,
+                "mean": 0.274,
+                "name": "paint",
+                "p50": 0.263,
+                "p90": 0.341,
+                "p95": 0.371,
+                "p99": 0.455,
+                "total_ms": 72.365
+              },
+              {
+                "instructions": 77937072,
+                "max": 0.131,
+                "mean": 0.049,
+                "name": "damage",
+                "p50": 0.045,
+                "p90": 0.067,
+                "p95": 0.078,
+                "p99": 0.112,
+                "total_ms": 12.904
+              },
+              {
+                "instructions": 2508441,
+                "max": 0.078,
+                "mean": 0.009,
+                "name": "input",
+                "p50": 0.009,
+                "p90": 0.011,
+                "p95": 0.011,
+                "p99": 0.017,
+                "total_ms": 2.41
+              }
+            ],
+            "work_median_ms": 4.41,
+            "work_most_frame": 131,
+            "work_most_ms": 12.11,
+            "work_ms": {
+              "max": 12.113,
+              "mean": 4.962,
+              "p50": 4.41,
+              "p90": 7.25,
+              "p95": 10.091,
+              "p99": 11.561
+            }
+          }
+        },
+        {
+          "logging_enabled": true,
+          "received": 481,
+          "applied": 241,
+          "errors": "none",
+          "replay": {
+            "events": 265,
+            "first_frame": 32,
+            "frames": 264,
+            "interval_ms": 16.64,
+            "last_frame": 295,
+            "late": 1,
+            "layout": {
+              "measured": 35248,
+              "micros": 60963,
+              "top": [
+                {
+                  "frames": 502,
+                  "micros": 32125,
+                  "node": 3,
+                  "self_micros": 5093,
+                  "what": "@3 (overlay chat_fixture.luau:1342)"
+                },
+                {
+                  "frames": 487,
+                  "micros": 2753,
+                  "node": 158,
+                  "self_micros": 2753,
+                  "what": "@158 (overlay ds/transcript.luau:1682)"
+                },
+                {
+                  "frames": 437,
+                  "micros": 10995,
+                  "node": 23,
+                  "self_micros": 2278,
+                  "what": "@23 (presence screens/chat/session.luau:193)"
+                },
+                {
+                  "frames": 256,
+                  "micros": 33963,
+                  "node": 0,
+                  "self_micros": 2198,
+                  "what": "@0"
+                },
+                {
+                  "frames": 266,
+                  "micros": 5941,
+                  "node": 103,
+                  "self_micros": 2047,
+                  "what": "@103 (column screens/chat/session.luau:231)"
+                },
+                {
+                  "frames": 316,
+                  "micros": 17805,
+                  "node": 5,
+                  "self_micros": 1868,
+                  "what": "@5 (presence chat_fixture.luau:1349)"
+                },
+                {
+                  "frames": 256,
+                  "micros": 13009,
+                  "node": 22,
+                  "self_micros": 1376,
+                  "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                },
+                {
+                  "frames": 235,
+                  "micros": 24010,
+                  "node": 4,
+                  "self_micros": 1155,
+                  "what": "@4 (column chat_fixture.luau:1345)"
+                }
+              ]
+            },
+            "longest_gap_ms": 25.88,
+            "per_event_ms": {
+              "max": 13.698,
+              "mean": 5.046,
+              "p50": 4.453,
+              "p90": 7.705,
+              "p95": 10.413,
+              "p99": 11.687
+            },
+            "phases": [
+              {
+                "instructions": 62462836,
+                "max": 5.257,
+                "mean": 3.674,
+                "name": "present",
+                "p50": 3.561,
+                "p90": 4.113,
+                "p95": 4.403,
+                "p99": 4.875,
+                "total_ms": 970.029
+              },
+              {
+                "instructions": 194661417,
+                "max": 3.572,
+                "mean": 0.402,
+                "name": "script",
+                "p50": 0.123,
+                "p90": 1.547,
+                "p95": 2.649,
+                "p99": 3.183,
+                "total_ms": 106.026
+              },
+              {
+                "instructions": 207112346,
+                "max": 3.364,
+                "mean": 0.362,
+                "name": "update",
+                "p50": 0.096,
+                "p90": 1.423,
+                "p95": 2.405,
+                "p99": 2.893,
+                "total_ms": 95.628
+              },
+              {
+                "instructions": 252401404,
+                "max": 1.714,
+                "mean": 0.264,
+                "name": "layout",
+                "p50": 0.159,
+                "p90": 0.609,
+                "p95": 1.126,
+                "p99": 1.42,
+                "total_ms": 69.565
+              },
+              {
+                "instructions": 242264358,
+                "max": 0.582,
+                "mean": 0.301,
+                "name": "paint",
+                "p50": 0.293,
+                "p90": 0.409,
+                "p95": 0.448,
+                "p99": 0.523,
+                "total_ms": 79.544
+              },
+              {
+                "instructions": 77849213,
+                "max": 0.123,
+                "mean": 0.052,
+                "name": "damage",
+                "p50": 0.046,
+                "p90": 0.071,
+                "p95": 0.082,
+                "p99": 0.1,
+                "total_ms": 13.63
+              },
+              {
+                "instructions": 2511210,
+                "max": 0.072,
+                "mean": 0.01,
+                "name": "input",
+                "p50": 0.009,
+                "p90": 0.014,
+                "p95": 0.016,
+                "p99": 0.027,
+                "total_ms": 2.713
+              }
+            ],
+            "work_median_ms": 4.46,
+            "work_most_frame": 290,
+            "work_most_ms": 13.7,
+            "work_ms": {
+              "max": 13.698,
+              "mean": 5.065,
+              "p50": 4.454,
+              "p90": 7.705,
+              "p95": 10.413,
+              "p99": 11.687
+            }
+          }
+        }
+      ],
+      "input_60_hz": [
+        {
+          "logging_enabled": false,
+          "received": 0,
+          "applied": 0,
+          "errors": "none",
+          "replay": {
+            "events": 264,
+            "first_frame": 32,
+            "frames": 264,
+            "interval_ms": 16.66,
+            "last_frame": 295,
+            "late": 0,
+            "layout": {
+              "measured": 34392,
+              "micros": 55849,
+              "top": [
+                {
+                  "frames": 499,
+                  "micros": 28680,
+                  "node": 3,
+                  "self_micros": 4523,
+                  "what": "@3 (overlay chat_fixture.luau:1342)"
+                },
+                {
+                  "frames": 492,
+                  "micros": 2484,
+                  "node": 158,
+                  "self_micros": 2484,
+                  "what": "@158 (overlay ds/transcript.luau:1682)"
+                },
+                {
+                  "frames": 456,
+                  "micros": 9638,
+                  "node": 23,
+                  "self_micros": 2011,
+                  "what": "@23 (presence screens/chat/session.luau:193)"
+                },
+                {
+                  "frames": 253,
+                  "micros": 30004,
+                  "node": 0,
+                  "self_micros": 1874,
+                  "what": "@0"
+                },
+                {
+                  "frames": 260,
+                  "micros": 5196,
+                  "node": 103,
+                  "self_micros": 1734,
+                  "what": "@103 (column screens/chat/session.luau:231)"
+                },
+                {
+                  "frames": 302,
+                  "micros": 15484,
+                  "node": 5,
+                  "self_micros": 1535,
+                  "what": "@5 (presence chat_fixture.luau:1349)"
+                },
+                {
+                  "frames": 258,
+                  "micros": 11446,
+                  "node": 22,
+                  "self_micros": 1239,
+                  "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                },
+                {
+                  "frames": 233,
+                  "micros": 21007,
+                  "node": 4,
+                  "self_micros": 946,
+                  "what": "@4 (column chat_fixture.luau:1345)"
+                }
+              ]
+            },
+            "longest_gap_ms": 24.22,
+            "per_event_ms": {
+              "max": 12.071,
+              "mean": 4.907,
+              "p50": 4.38,
+              "p90": 7.191,
+              "p95": 10.03,
+              "p99": 11.701
+            },
+            "phases": [
+              {
+                "instructions": 61842261,
+                "max": 5.319,
+                "mean": 3.645,
+                "name": "present",
+                "p50": 3.567,
+                "p90": 4.053,
+                "p95": 4.313,
+                "p99": 4.696,
+                "total_ms": 962.306
+              },
+              {
+                "instructions": 188256256,
+                "max": 3.874,
+                "mean": 0.364,
+                "name": "script",
+                "p50": 0.12,
+                "p90": 1.433,
+                "p95": 2.393,
+                "p99": 3.061,
+                "total_ms": 96.14
+              },
+              {
+                "instructions": 199911553,
+                "max": 2.852,
+                "mean": 0.324,
+                "name": "update",
+                "p50": 0.083,
+                "p90": 1.324,
+                "p95": 2.256,
+                "p99": 2.604,
+                "total_ms": 85.558
+              },
+              {
+                "instructions": 246544961,
+                "max": 1.507,
+                "mean": 0.242,
+                "name": "layout",
+                "p50": 0.138,
+                "p90": 0.605,
+                "p95": 1.084,
+                "p99": 1.38,
+                "total_ms": 63.984
+              },
+              {
+                "instructions": 237564085,
+                "max": 0.531,
+                "mean": 0.277,
+                "name": "paint",
+                "p50": 0.268,
+                "p90": 0.356,
+                "p95": 0.383,
+                "p99": 0.449,
+                "total_ms": 73.069
+              },
+              {
+                "instructions": 77401152,
+                "max": 0.09,
+                "mean": 0.048,
+                "name": "damage",
+                "p50": 0.045,
+                "p90": 0.066,
+                "p95": 0.078,
+                "p99": 0.089,
+                "total_ms": 12.764
+              },
+              {
+                "instructions": 2512032,
+                "max": 0.08,
+                "mean": 0.01,
+                "name": "input",
+                "p50": 0.009,
+                "p90": 0.012,
+                "p95": 0.015,
+                "p99": 0.02,
+                "total_ms": 2.511
+              }
+            ],
+            "work_median_ms": 4.39,
+            "work_most_frame": 114,
+            "work_most_ms": 12.07,
+            "work_ms": {
+              "max": 12.071,
+              "mean": 4.91,
+              "p50": 4.382,
+              "p90": 7.191,
+              "p95": 10.03,
+              "p99": 11.701
+            }
+          }
+        },
+        {
+          "logging_enabled": true,
+          "received": 241,
+          "applied": 241,
+          "errors": "none",
+          "replay": {
+            "events": 265,
+            "first_frame": 32,
+            "frames": 264,
+            "interval_ms": 16.63,
+            "last_frame": 295,
+            "late": 2,
+            "layout": {
+              "measured": 35252,
+              "micros": 59612,
+              "top": [
+                {
+                  "frames": 502,
+                  "micros": 29850,
+                  "node": 3,
+                  "self_micros": 4629,
+                  "what": "@3 (overlay chat_fixture.luau:1342)"
+                },
+                {
+                  "frames": 508,
+                  "micros": 2721,
+                  "node": 158,
+                  "self_micros": 2721,
+                  "what": "@158 (overlay ds/transcript.luau:1682)"
+                },
+                {
+                  "frames": 450,
+                  "micros": 10141,
+                  "node": 23,
+                  "self_micros": 2096,
+                  "what": "@23 (presence screens/chat/session.luau:193)"
+                },
+                {
+                  "frames": 257,
+                  "micros": 31392,
+                  "node": 0,
+                  "self_micros": 1952,
+                  "what": "@0"
+                },
+                {
+                  "frames": 266,
+                  "micros": 5483,
+                  "node": 103,
+                  "self_micros": 1826,
+                  "what": "@103 (column screens/chat/session.luau:231)"
+                },
+                {
+                  "frames": 317,
+                  "micros": 15966,
+                  "node": 5,
+                  "self_micros": 1697,
+                  "what": "@5 (presence chat_fixture.luau:1349)"
+                },
+                {
+                  "frames": 248,
+                  "micros": 11710,
+                  "node": 22,
+                  "self_micros": 1143,
+                  "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                },
+                {
+                  "frames": 231,
+                  "micros": 21576,
+                  "node": 4,
+                  "self_micros": 978,
+                  "what": "@4 (column chat_fixture.luau:1345)"
+                }
+              ]
+            },
+            "longest_gap_ms": 26,
+            "per_event_ms": {
+              "max": 13.489,
+              "mean": 5.087,
+              "p50": 4.557,
+              "p90": 6.957,
+              "p95": 10.239,
+              "p99": 12.582
+            },
+            "phases": [
+              {
+                "instructions": 62173179,
+                "max": 5.052,
+                "mean": 3.763,
+                "name": "present",
+                "p50": 3.731,
+                "p90": 4.296,
+                "p95": 4.439,
+                "p99": 4.801,
+                "total_ms": 993.446
+              },
+              {
+                "instructions": 194187642,
+                "max": 3.582,
+                "mean": 0.385,
+                "name": "script",
+                "p50": 0.119,
+                "p90": 1.421,
+                "p95": 2.616,
+                "p99": 3.364,
+                "total_ms": 101.667
+              },
+              {
+                "instructions": 207091016,
+                "max": 3.647,
+                "mean": 0.352,
+                "name": "update",
+                "p50": 0.08,
+                "p90": 1.323,
+                "p95": 2.394,
+                "p99": 2.907,
+                "total_ms": 93.028
+              },
+              {
+                "instructions": 252528142,
+                "max": 2.013,
+                "mean": 0.257,
+                "name": "layout",
+                "p50": 0.14,
+                "p90": 0.596,
+                "p95": 1.14,
+                "p99": 1.464,
+                "total_ms": 67.937
+              },
+              {
+                "instructions": 240017824,
+                "max": 0.509,
+                "mean": 0.29,
+                "name": "paint",
+                "p50": 0.283,
+                "p90": 0.382,
+                "p95": 0.409,
+                "p99": 0.48,
+                "total_ms": 76.596
+              },
+              {
+                "instructions": 77636315,
+                "max": 0.101,
+                "mean": 0.049,
+                "name": "damage",
+                "p50": 0.045,
+                "p90": 0.065,
+                "p95": 0.079,
+                "p99": 0.091,
+                "total_ms": 12.958
+              },
+              {
+                "instructions": 2516130,
+                "max": 0.056,
+                "mean": 0.009,
+                "name": "input",
+                "p50": 0.009,
+                "p90": 0.011,
+                "p95": 0.012,
+                "p99": 0.015,
+                "total_ms": 2.409
+              }
+            ],
+            "work_median_ms": 4.56,
+            "work_most_frame": 218,
+            "work_most_ms": 13.49,
+            "work_ms": {
+              "max": 13.489,
+              "mean": 5.106,
+              "p50": 4.558,
+              "p90": 6.957,
+              "p95": 10.239,
+              "p99": 12.582
+            }
+          }
+        }
+      ]
+    },
+    "logging_smoke_notes": "Separate real-window probes: no scroll records with logging disabled; exactly 481/241 received events with logging enabled for 120/60Hz tapes. Both fixtures reported no errors."
+  },
+  "latency_method": "3,072 synthetic phase traces (48 input/display/pattern cases, 64 phases each) exercise original sampler source. Lag is position behind latest received event / velocity; excludes presentation.",
+  "native_runtime_limitations": "Linux Xvfb/software Vulkan; physical macOS presentation was not measured",
+  "baseline_report": "docs/performance/scroll-resources-baseline.json",
+  "consumer_pin_commit": "dbe65517",
+  "initial_baseline_commit": "fcf0c680",
+  "benchmark_script": "scripts/profile-zgx-scroll.py",
+  "benchmark_script_sha256": "4ba9ed63f58e207cbe9b253b64457c82dce9ba1a28c4057bba22c492b7d4b255",
+  "reproduce": {
+    "display": "Xvfb :109 -screen 0 1280x800x24 -nolisten tcp",
+    "command": "python3 scripts/profile-zgx-scroll.py --variant baseline=/path/to/baseline --variant improved=/path/to/improved --ui /path/to/frozen/ui --out /tmp/scroll-comparison --rounds 3",
+    "build": "cargo build --release --locked --bin zeron-zgx (from apps/zgx), with the respective dependency pin. Preserve each binary before building the next."
+  },
+  "resource_method": {
+    "raw_report": "scroll-resources-comparison.json",
+    "launch_order": [
+      "baseline",
+      "improved",
+      "improved",
+      "baseline",
+      "baseline",
+      "improved"
+    ],
+    "launches_per_version": 3,
+    "gesture_replays_per_input_rate_per_launch": 2,
+    "gesture_seconds": 4,
+    "input_hz": [
+      60,
+      120
+    ],
+    "nominal_display_hz": 60,
+    "warmup": "Two 4s replays before measured phases; fresh per-launch data/config directories; same frozen UI hash in every run. No compilation during measurements.",
+    "cpu": "Process utime+stime divided by wall time, all UI/renderer threads. 100% means one core.",
+    "ram": "Process smaps_rollup RSS and PSS every 100ms, MiB. Median and sampled peak saved. Engine and discrete GPU memory excluded.",
+    "logging": "Off during all resource measurements; on only during separate smoke probes."
+  },
+  "resources": {
+    "idle_before": {
+      "cpu_percent_one_core": {
+        "baseline": {
+          "n": 3,
+          "median": 1.6664991035135415,
+          "min": 1.3331761496467163,
+          "max": 1.6665016752130308
+        },
+        "improved": {
+          "n": 3,
+          "median": 1.6665011086738302,
+          "min": 1.666488333515907,
+          "max": 1.666512468144504
+        },
+        "absolute_change": 2.005160288698349e-06,
+        "relative_change_percent": 0.00012032171421427762,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 244.515625,
+          "min": 237.0,
+          "max": 245.12109375
+        },
+        "improved": {
+          "n": 3,
+          "median": 244.34375,
+          "min": 242.78515625,
+          "max": 246.859375
+        },
+        "absolute_change": -0.171875,
+        "relative_change_percent": -0.07029203143971152,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 213.806640625,
+          "min": 206.2607421875,
+          "max": 214.5263671875
+        },
+        "improved": {
+          "n": 3,
+          "median": 213.6142578125,
+          "min": 212.0419921875,
+          "max": 216.015625
+        },
+        "absolute_change": -0.1923828125,
+        "relative_change_percent": -0.08997981163617608,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 245.15625,
+          "min": 239.26953125,
+          "max": 246.796875
+        },
+        "improved": {
+          "n": 3,
+          "median": 247.38671875,
+          "min": 242.78515625,
+          "max": 250.40625
+        },
+        "absolute_change": 2.23046875,
+        "relative_change_percent": 0.9098151688973877,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 214.560546875,
+          "min": 208.5302734375,
+          "max": 216.087890625
+        },
+        "improved": {
+          "n": 3,
+          "median": 216.6552734375,
+          "min": 212.0419921875,
+          "max": 219.5625
+        },
+        "absolute_change": 2.0947265625,
+        "relative_change_percent": 0.9762869236721095,
+        "observed_ranges_overlap": true
+      }
+    },
+    "scroll_60": {
+      "cpu_percent_one_core": {
+        "baseline": {
+          "n": 3,
+          "median": 82.16435373215776,
+          "min": 81.80360125303426,
+          "max": 83.074448375093
+        },
+        "improved": {
+          "n": 3,
+          "median": 82.6629570768512,
+          "min": 81.8244921940666,
+          "max": 84.32189744995418
+        },
+        "absolute_change": 0.4986033446934357,
+        "relative_change_percent": 0.606836568469582,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 246.15625,
+          "min": 240.87109375,
+          "max": 248.796875
+        },
+        "improved": {
+          "n": 3,
+          "median": 249.4375,
+          "min": 244.69921875,
+          "max": 249.9296875
+        },
+        "absolute_change": 3.28125,
+        "relative_change_percent": 1.3329947949727083,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 215.5615234375,
+          "min": 210.1318359375,
+          "max": 218.087890625
+        },
+        "improved": {
+          "n": 3,
+          "median": 218.70703125,
+          "min": 213.955078125,
+          "max": 219.0859375
+        },
+        "absolute_change": 3.1455078125,
+        "relative_change_percent": 1.459215801753233,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 254.1484375,
+          "min": 245.75390625,
+          "max": 255.8671875
+        },
+        "improved": {
+          "n": 3,
+          "median": 253.515625,
+          "min": 249.21484375,
+          "max": 253.921875
+        },
+        "absolute_change": -0.6328125,
+        "relative_change_percent": -0.24899326795979615,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 223.5537109375,
+          "min": 215.0146484375,
+          "max": 225.158203125
+        },
+        "improved": {
+          "n": 3,
+          "median": 222.7861328125,
+          "min": 218.4716796875,
+          "max": 223.078125
+        },
+        "absolute_change": -0.767578125,
+        "relative_change_percent": -0.34335288901314875,
+        "observed_ranges_overlap": true
+      }
+    },
+    "scroll_120": {
+      "cpu_percent_one_core": {
+        "baseline": {
+          "n": 3,
+          "median": 84.6318397738841,
+          "min": 83.17195926038181,
+          "max": 85.45824227004516
+        },
+        "improved": {
+          "n": 3,
+          "median": 83.56982555484765,
+          "min": 82.10724246353229,
+          "max": 85.39782409606987
+        },
+        "absolute_change": -1.0620142190364419,
+        "relative_change_percent": -1.2548636799978419,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 259.55078125,
+          "min": 253.0390625,
+          "max": 260.6953125
+        },
+        "improved": {
+          "n": 3,
+          "median": 257.765625,
+          "min": 251.50390625,
+          "max": 260.2109375
+        },
+        "absolute_change": -1.78515625,
+        "relative_change_percent": -0.6877868914139551,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 228.9560546875,
+          "min": 222.2998046875,
+          "max": 229.986328125
+        },
+        "improved": {
+          "n": 3,
+          "median": 227.0361328125,
+          "min": 220.7607421875,
+          "max": 229.3671875
+        },
+        "absolute_change": -1.919921875,
+        "relative_change_percent": -0.8385547513126368,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 270.27734375,
+          "min": 264.28515625,
+          "max": 273.34765625
+        },
+        "improved": {
+          "n": 3,
+          "median": 260.0625,
+          "min": 259.78515625,
+          "max": 271.58984375
+        },
+        "absolute_change": -10.21484375,
+        "relative_change_percent": -3.779393273691667,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 239.6826171875,
+          "min": 233.5458984375,
+          "max": 242.6376953125
+        },
+        "improved": {
+          "n": 3,
+          "median": 229.3330078125,
+          "min": 229.0419921875,
+          "max": 240.74609375
+        },
+        "absolute_change": -10.349609375,
+        "relative_change_percent": -4.318047548230696,
+        "observed_ranges_overlap": true
+      }
+    },
+    "idle_after": {
+      "cpu_percent_one_core": {
+        "baseline": {
+          "n": 3,
+          "median": 1.6664694711114851,
+          "min": 1.666465660358118,
+          "max": 1.6664928881275312
+        },
+        "improved": {
+          "n": 3,
+          "median": 1.6664634281185602,
+          "min": 1.3332103655599785,
+          "max": 1.6664791688723015
+        },
+        "absolute_change": -6.042992924948365e-06,
+        "relative_change_percent": -0.0003626224800212796,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 260.6328125,
+          "min": 254.2734375,
+          "max": 262.20703125
+        },
+        "improved": {
+          "n": 3,
+          "median": 261.1796875,
+          "min": 257.69140625,
+          "max": 264.7578125
+        },
+        "absolute_change": 0.546875,
+        "relative_change_percent": 0.20982584454902753,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_median": {
+        "baseline": {
+          "n": 3,
+          "median": 230.0380859375,
+          "min": 223.5341796875,
+          "max": 231.498046875
+        },
+        "improved": {
+          "n": 3,
+          "median": 230.4501953125,
+          "min": 226.9482421875,
+          "max": 233.9140625
+        },
+        "absolute_change": 0.412109375,
+        "relative_change_percent": 0.17914832377450285,
+        "observed_ranges_overlap": true
+      },
+      "rss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 269.68359375,
+          "min": 264.3515625,
+          "max": 273.390625
+        },
+        "improved": {
+          "n": 3,
+          "median": 264.80859375,
+          "min": 257.7578125,
+          "max": 270.0625
+        },
+        "absolute_change": -4.875,
+        "relative_change_percent": -1.8076739234345829,
+        "observed_ranges_overlap": true
+      },
+      "pss_mib_peak": {
+        "baseline": {
+          "n": 3,
+          "median": 239.0888671875,
+          "min": 233.6123046875,
+          "max": 242.681640625
+        },
+        "improved": {
+          "n": 3,
+          "median": 233.96484375,
+          "min": 227.0146484375,
+          "max": 239.3330078125
+        },
+        "absolute_change": -5.1240234375,
+        "relative_change_percent": -2.143145976546701,
+        "observed_ranges_overlap": true
+      }
+    }
+  },
+  "resource_conclusion": "Small mixed changes with overlapping observed ranges in every phase; no consistent resource deterioration or demonstrated resource saving in this Linux virtual-display workload. This is not a statistical equivalence claim or a long-duration leak test.",
+  "latency": {
+    "zgx_base": "88ff58c08b6318eb2e05bb2a22128fefdfca8db9",
+    "zgx_improved": "b39a8d285e4bccf234224e3daaade10a3381a13c",
+    "cases": 48,
+    "phases_per_case": 64,
+    "traces": 3072,
+    "method": "Actual Rust sampler with simulated timestamps; 1200 points/s. Extra lag is (latest received position - sampled position)/velocity at each frame, averaged from 0.5 to 2.5 seconds. This excludes presentation.",
+    "distance_error_max_points": 0.0,
+    "cases_with_worse_delta_cv_above_0_001": 0,
+    "results": [
+      {
+        "display_hz": 60,
+        "input_hz": 60,
+        "pattern": "regular",
+        "before_extra_lag_ms": 8.4625,
+        "after_extra_lag_ms": 2.1476,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 60,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 8.3613,
+        "after_extra_lag_ms": 8.3613,
+        "before_delta_cv": 0.192,
+        "after_delta_cv": 0.192
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 60,
+        "pattern": "batch",
+        "before_extra_lag_ms": 8.5309,
+        "after_extra_lag_ms": 8.5309,
+        "before_delta_cv": 0.4552,
+        "after_delta_cv": 0.4552
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 100,
+        "pattern": "regular",
+        "before_extra_lag_ms": 5.0163,
+        "after_extra_lag_ms": 5.0163,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 100,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.9828,
+        "after_extra_lag_ms": 4.9828,
+        "before_delta_cv": 0.1318,
+        "after_delta_cv": 0.1318
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 100,
+        "pattern": "batch",
+        "before_extra_lag_ms": 5.1772,
+        "after_extra_lag_ms": 5.1772,
+        "before_delta_cv": 0.2433,
+        "after_delta_cv": 0.2433
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 120,
+        "pattern": "regular",
+        "before_extra_lag_ms": 4.2963,
+        "after_extra_lag_ms": 1.1064,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 120,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.2395,
+        "after_extra_lag_ms": 4.2395,
+        "before_delta_cv": 0.0955,
+        "after_delta_cv": 0.0955
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 120,
+        "pattern": "batch",
+        "before_extra_lag_ms": 4.4414,
+        "after_extra_lag_ms": 4.4414,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 240,
+        "pattern": "regular",
+        "before_extra_lag_ms": 2.2133,
+        "after_extra_lag_ms": 0.5857,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 240,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 2.1814,
+        "after_extra_lag_ms": 2.1814,
+        "before_delta_cv": 0.0472,
+        "after_delta_cv": 0.0472
+      },
+      {
+        "display_hz": 60,
+        "input_hz": 240,
+        "pattern": "batch",
+        "before_extra_lag_ms": 2.5946,
+        "after_extra_lag_ms": 2.5946,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 60,
+        "pattern": "regular",
+        "before_extra_lag_ms": 8.3979,
+        "after_extra_lag_ms": 8.3979,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 60,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 8.3377,
+        "after_extra_lag_ms": 8.3377,
+        "before_delta_cv": 0.2434,
+        "after_delta_cv": 0.2434
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 60,
+        "pattern": "batch",
+        "before_extra_lag_ms": 8.5181,
+        "after_extra_lag_ms": 8.5181,
+        "before_delta_cv": 0.9022,
+        "after_delta_cv": 0.9022
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 100,
+        "pattern": "regular",
+        "before_extra_lag_ms": 5.0081,
+        "after_extra_lag_ms": 5.0081,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 100,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.9752,
+        "after_extra_lag_ms": 4.9752,
+        "before_delta_cv": 0.2076,
+        "after_delta_cv": 0.2076
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 100,
+        "pattern": "batch",
+        "before_extra_lag_ms": 5.1787,
+        "after_extra_lag_ms": 5.1787,
+        "before_delta_cv": 0.5123,
+        "after_delta_cv": 0.5123
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 120,
+        "pattern": "regular",
+        "before_extra_lag_ms": 4.2315,
+        "after_extra_lag_ms": 1.074,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 120,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.1804,
+        "after_extra_lag_ms": 4.1804,
+        "before_delta_cv": 0.1919,
+        "after_delta_cv": 0.1919
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 120,
+        "pattern": "batch",
+        "before_extra_lag_ms": 4.3625,
+        "after_extra_lag_ms": 4.3625,
+        "before_delta_cv": 0.4414,
+        "after_delta_cv": 0.4414
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 240,
+        "pattern": "regular",
+        "before_extra_lag_ms": 2.1483,
+        "after_extra_lag_ms": 0.5533,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 240,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 2.1214,
+        "after_extra_lag_ms": 2.1214,
+        "before_delta_cv": 0.0956,
+        "after_delta_cv": 0.0956
+      },
+      {
+        "display_hz": 120,
+        "input_hz": 240,
+        "pattern": "batch",
+        "before_extra_lag_ms": 2.5137,
+        "after_extra_lag_ms": 2.5137,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 60,
+        "pattern": "regular",
+        "before_extra_lag_ms": 8.3437,
+        "after_extra_lag_ms": 8.3437,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 60,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 8.3064,
+        "after_extra_lag_ms": 8.3064,
+        "before_delta_cv": 0.2594,
+        "after_delta_cv": 0.2594
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 60,
+        "pattern": "batch",
+        "before_extra_lag_ms": 8.496,
+        "after_extra_lag_ms": 8.496,
+        "before_delta_cv": 1.0413,
+        "after_delta_cv": 1.0413
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 100,
+        "pattern": "regular",
+        "before_extra_lag_ms": 5.0019,
+        "after_extra_lag_ms": 5.0019,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 100,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.9731,
+        "after_extra_lag_ms": 4.9731,
+        "before_delta_cv": 0.2183,
+        "after_delta_cv": 0.2183
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 100,
+        "pattern": "batch",
+        "before_extra_lag_ms": 5.1759,
+        "after_extra_lag_ms": 5.1759,
+        "before_delta_cv": 0.654,
+        "after_delta_cv": 0.654
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 120,
+        "pattern": "regular",
+        "before_extra_lag_ms": 4.1773,
+        "after_extra_lag_ms": 4.1773,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 120,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.1551,
+        "after_extra_lag_ms": 4.1551,
+        "before_delta_cv": 0.2073,
+        "after_delta_cv": 0.2073
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 120,
+        "pattern": "batch",
+        "before_extra_lag_ms": 4.351,
+        "after_extra_lag_ms": 4.351,
+        "before_delta_cv": 0.5105,
+        "after_delta_cv": 0.5105
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 240,
+        "pattern": "regular",
+        "before_extra_lag_ms": 2.0941,
+        "after_extra_lag_ms": 2.0941,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 240,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 2.0843,
+        "after_extra_lag_ms": 2.0843,
+        "before_delta_cv": 0.1319,
+        "after_delta_cv": 0.1319
+      },
+      {
+        "display_hz": 144,
+        "input_hz": 240,
+        "pattern": "batch",
+        "before_extra_lag_ms": 2.4898,
+        "after_extra_lag_ms": 2.4898,
+        "before_delta_cv": 0.2357,
+        "after_delta_cv": 0.2357
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 60,
+        "pattern": "regular",
+        "before_extra_lag_ms": 8.3656,
+        "after_extra_lag_ms": 8.3656,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 60,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 8.3258,
+        "after_extra_lag_ms": 8.3258,
+        "before_delta_cv": 0.3199,
+        "after_delta_cv": 0.3199
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 60,
+        "pattern": "batch",
+        "before_extra_lag_ms": 8.5117,
+        "after_extra_lag_ms": 8.5117,
+        "before_delta_cv": 1.4689,
+        "after_delta_cv": 1.4689
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 100,
+        "pattern": "regular",
+        "before_extra_lag_ms": 5.0041,
+        "after_extra_lag_ms": 5.0041,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 100,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.9748,
+        "after_extra_lag_ms": 4.9748,
+        "before_delta_cv": 0.2596,
+        "after_delta_cv": 0.2596
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 100,
+        "pattern": "batch",
+        "before_extra_lag_ms": 5.1795,
+        "after_extra_lag_ms": 5.1795,
+        "before_delta_cv": 1.0375,
+        "after_delta_cv": 1.0375
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 120,
+        "pattern": "regular",
+        "before_extra_lag_ms": 4.1991,
+        "after_extra_lag_ms": 4.1991,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 120,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 4.1687,
+        "after_extra_lag_ms": 4.1687,
+        "before_delta_cv": 0.2434,
+        "after_delta_cv": 0.2434
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 120,
+        "pattern": "batch",
+        "before_extra_lag_ms": 4.3558,
+        "after_extra_lag_ms": 4.3558,
+        "before_delta_cv": 0.8977,
+        "after_delta_cv": 0.8977
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 240,
+        "pattern": "regular",
+        "before_extra_lag_ms": 2.1158,
+        "after_extra_lag_ms": 0.5371,
+        "before_delta_cv": 0.0,
+        "after_delta_cv": 0.0
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 240,
+        "pattern": "jitter",
+        "before_extra_lag_ms": 2.092,
+        "after_extra_lag_ms": 2.092,
+        "before_delta_cv": 0.1922,
+        "after_delta_cv": 0.1922
+      },
+      {
+        "display_hz": 240,
+        "input_hz": 240,
+        "pattern": "batch",
+        "before_extra_lag_ms": 2.5059,
+        "after_extra_lag_ms": 2.5059,
+        "before_delta_cv": 0.3268,
+        "after_delta_cv": 0.3268
+      }
+    ]
+  },
+  "latency_limitations": "Synthetic latency numbers exclude rendering/compositor/scanout. Input arrivals in the virtual software-rendered window are irregular, so the adaptive policy can retain its conservative margin there. No end-to-end macOS/physical 60Hz vs 120Hz latency result is claimed."
+}
