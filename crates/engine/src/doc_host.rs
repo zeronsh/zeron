@@ -1212,8 +1212,10 @@ impl DocHost {
         self.inner.quiesced.store(true, Ordering::SeqCst);
     }
 
-    /// End a quiesce and run everything that queued meanwhile.
+    /// End a quiesce and run everything that queued meanwhile. A boot that held
+    /// work has done its recovery by now, whatever it was holding for.
     pub fn lift_quiesce(&self) {
+        self.inner.boot_recovery_finished.store(true, Ordering::Release);
         if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
             return;
         }
