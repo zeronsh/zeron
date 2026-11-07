@@ -1503,6 +1503,7 @@ impl Actor {
                     // relay chat, they are the catch-up.
                     out = recv_relay(&mut relay_out) => match out {
                         Some(frame) => {
+                            log_relay_out(&frame, "checkpoint");
                             if pipe.tx.send(frame).await.is_err() {
                                 return SessionEnd::Reconnect;
                             }
@@ -1572,7 +1573,10 @@ impl Actor {
                             inbound = pipe.rx.recv() => inbound?,
                             out = recv_relay(&mut relay_out) => {
                                 match out {
-                                    Some(frame) => pipe.tx.send(frame).await.ok()?,
+                                    Some(frame) => {
+                                        log_relay_out(&frame, "backfill");
+                                        pipe.tx.send(frame).await.ok()?
+                                    }
                                     None => relay_out = None,
                                 }
                                 continue;
@@ -1720,6 +1724,7 @@ impl Actor {
                 }
                 frame = recv_relay(&mut relay_out) => {
                     if let Some(frame) = frame
+                        && log_relay_out(&frame, "live")
                         && pipe.tx.send(frame).await.is_err()
                     {
                         return SessionEnd::Reconnect;
@@ -2226,6 +2231,11 @@ impl Actor {
 
     fn handle_frame_with_replay(&self, frame: wire::WireFrame, replay: bool) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
+        if frame.kind == frame_type::RELAY {
+            tracing::trace!(replay, "chat2 frame in: relay");
+        } else {
+            tracing::debug!(kind = frame.kind, replay, "chat2 frame in");
+        }
         match frame.kind {
             frame_type::ROW => {
                 let Ok(row) = serde_json::from_value::<wire::RowHeader>(frame.header) else {
@@ -2402,6 +2412,17 @@ async fn fetch_once(
     }
     let bytes = fetcher.fetch().await?;
     Ok((held, Some(bytes)))
+}
+
+/// Always true, so it can sit in a send's condition.
+fn log_relay_out(frame: &[u8], stage: &str) -> bool {
+    let kind = frame.first().copied().unwrap_or(0);
+    if kind == frame_type::RELAY {
+        tracing::trace!(stage, "chat2 frame out: relay");
+    } else {
+        tracing::debug!(kind, stage, "chat2 frame out");
+    }
+    true
 }
 
 async fn recv_relay(rx: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
