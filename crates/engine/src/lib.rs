@@ -274,6 +274,9 @@ impl EngineCore {
         // engine data dir — per-device, like the CLI installs it gates.
         registry.load_prefs(data_dir);
         let store = Arc::new(DocsStore::open(profile.store_root())?);
+        if store.recovery().is_some() {
+            runner::note_store_recovered(chrono::Utc::now().timestamp_millis());
+        }
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
@@ -741,6 +744,9 @@ impl EngineCore {
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
         self.workspace.shutdown();
+        // Last: the WAL into the database file, so a stopped engine leaves one
+        // self-contained file (a Cloud machine's disk is snapshotted next).
+        self.doc_host.checkpoint_store();
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
         self.sessions.clear_doc_host();
@@ -781,7 +787,18 @@ impl RpcService for HeadlessRpc {
                     // Asleep it can't make room: leave it fitting its size.
                     // Bounded, and never in the sleep's way.
                     cloud_disk::pre_sleep_cleanup(&self.data_dir).await;
-                    serde_json::json!({ "quiesced": true })
+                    // The provider snapshots the disk from outside once the
+                    // engine stops: the docs written so far go into the store,
+                    // and the store's WAL into its file, now. The stop does it
+                    // again, and the stop command flushes the disk after.
+                    let doc_host = self.doc_host.clone();
+                    let checkpointed = tokio::task::spawn_blocking(move || {
+                        doc_host.flush_all();
+                        doc_host.checkpoint_store()
+                    })
+                    .await
+                    .unwrap_or(false);
+                    serde_json::json!({ "quiesced": true, "checkpointed": checkpointed })
                 }
                 Err(busy) => serde_json::json!({ "quiesced": false, "busy": busy }),
             });
@@ -1089,6 +1106,7 @@ impl Engine {
                 Arc::new(cloud_disk::machine_usage),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
+                runner::HEARTBEAT_BUSY_INTERVAL,
             );
             // A session machine can stop without warning (a provider
             // auto-stop, a crash) after accepting a send: the message is in
@@ -1289,6 +1307,10 @@ impl Engine {
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
         update_trial::prove_and_commit(runtime.core(), &config);
         wake_update::start(runtime.core());
+        let corruption_watch = watch_store_corruption(
+            runtime.core().doc_host.store().path().to_path_buf(),
+            runner::session().is_some(),
+        );
 
         tokio::select! {
             result = shutdown_signal() => {
@@ -1312,6 +1334,7 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        corruption_watch.abort();
         server.abort();
         // No token refresh mid-exchange when the next engine takes over the
         // session file (a refresh token is single-use).
@@ -1324,6 +1347,32 @@ impl Engine {
         Ok(())
     }
 }
+
+/// A docs store that reports corruption while running can't be trusted with
+/// another write, and every chat it holds is stuck behind it. Its next open
+/// checks it in full and rebuilds it ([`zeron_sync::DocsStore::open`]). A
+/// Cloud machine restarts at once for that (its unit starts it again in a
+/// second): nobody is there to restart it, and a waiting message would wait for
+/// good. Elsewhere the next start does it.
+fn watch_store_corruption(store: PathBuf, restart: bool) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if zeron_sync::corruption_seen() {
+                zeron_sync::request_store_check(&store);
+                if restart {
+                    tracing::error!("the docs store is damaged; restarting to rebuild it");
+                    std::process::exit(STORE_DAMAGED_EXIT);
+                }
+                tracing::error!("the docs store is damaged; it's rebuilt on the next start");
+                return;
+            }
+        }
+    })
+}
+
+/// A Cloud engine restarting to rebuild a damaged store.
+const STORE_DAMAGED_EXIT: i32 = 70;
 
 /// Whether a stopping engine's cut-off turns stay ended rather than revive on
 /// the next boot ([`EngineCore::shutdown`] asks): a synced engine whose

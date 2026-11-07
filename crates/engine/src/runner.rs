@@ -521,6 +521,13 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// the way of the message that woke it: a check can start an install, which holds
 /// the run back until it ends.
 pub const CLOUD_BOOT_SETTLE: Duration = Duration::from_secs(120);
+/// How often while a turn runs. The edge counts a machine as gone three of these
+/// (at least 45 s) after its last beat, so a machine stopped mid-turn is brought
+/// back to resume it within about a minute rather than three.
+pub const HEARTBEAT_BUSY_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the heartbeat looks at whether a turn started or ended: a change is
+/// reported at once, so the edge's idea of the cadence is never a beat behind.
+const HEARTBEAT_LOOK: Duration = Duration::from_secs(2);
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const ENROLL_RETRY_BASE: Duration = Duration::from_secs(1);
@@ -1011,6 +1018,24 @@ struct HeartbeatBody {
     disk_used_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disk_total_bytes: Option<u64>,
+    /// How often it beats from here on, in seconds. Older edges ignore it.
+    every_secs: u64,
+    /// When this run found its chat store damaged and rebuilt it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_recovered_at: Option<i64>,
+}
+
+/// Unix ms this process rebuilt a damaged chat store at its start (0: it didn't).
+static STORE_RECOVERED_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// The store's open found it damaged and rebuilt it: every heartbeat says so,
+/// for the edge to record and show.
+pub fn note_store_recovered(at_ms: i64) {
+    STORE_RECOVERED_AT.store(at_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn store_recovered_at() -> Option<i64> {
+    Some(STORE_RECOVERED_AT.load(std::sync::atomic::Ordering::SeqCst)).filter(|at| *at > 0)
 }
 
 /// The edge's answer: what this machine's size holds, when it says.
@@ -1034,6 +1059,25 @@ pub struct RunCounts {
     /// Chats whose turn ended with background work still running (a parked
     /// chat's subagents, background shells).
     pub background: usize,
+}
+
+impl RunCounts {
+    /// A turn working (not parked on a question) or background work running:
+    /// what the edge waits on, and watches for going quiet.
+    pub fn working(&self) -> bool {
+        self.active > self.waiting || self.background > 0
+    }
+}
+
+/// Whether to beat now: the first time, when work started or stopped since the
+/// last beat, or once the cadence for what's running has passed.
+fn beat_due(last: Option<(Duration, bool)>, working: bool, idle: Duration, busy: Duration) -> bool {
+    match last {
+        None => true,
+        Some((since, was_working)) => {
+            was_working != working || since >= if working { busy } else { idle }
+        }
+    }
 }
 
 /// Reads [`RunCounts`] for the heartbeat.
@@ -1127,8 +1171,9 @@ pub fn passive(method: &str) -> bool {
 }
 
 /// Post `{activeRuns, clients, backgroundRuns, waitingRuns, diskUsedBytes,
-/// diskTotalBytes}` to `{edge}/runner/heartbeat` every `every` (first beat
-/// immediately).
+/// diskTotalBytes, everySecs}` to `{edge}/runner/heartbeat` every `every`, or
+/// every `busy_every` while work runs (first beat immediately, and again as soon
+/// as work starts or stops). `everySecs` says which cadence follows.
 ///
 /// - `activeRuns`: chats with a turn in flight right now; `waitingRuns`, the
 ///   ones among them parked on a question.
@@ -1148,14 +1193,24 @@ pub fn spawn_heartbeat(
     disk: DiskReader,
     activity: RelayActivity,
     every: Duration,
+    busy_every: Duration,
 ) -> tokio::task::JoinHandle<()> {
     let url = format!("{}/runner/heartbeat", edge_url.trim_end_matches('/'));
+    let look = HEARTBEAT_LOOK.min(busy_every).min(every);
     tokio::spawn(async move {
         let http = http_client();
-        let mut ticker = tokio::time::interval(every);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last: Option<(tokio::time::Instant, bool)> = None;
         loop {
-            ticker.tick().await;
+            let runs = active_runs();
+            let working = runs.working();
+            let since = last.map(|(at, was)| (at.elapsed(), was));
+            if !beat_due(since, working, every, busy_every) {
+                tokio::time::sleep(look).await;
+                continue;
+            }
+            // Counted as a beat whether or not it lands: a failed one is tried
+            // again at the cadence, not every look.
+            last = Some((tokio::time::Instant::now(), working));
             let token = match tokens.token().await {
                 Ok(token) => token,
                 Err(err) => {
@@ -1163,7 +1218,7 @@ pub fn spawn_heartbeat(
                     continue;
                 }
             };
-            let runs = active_runs();
+            let cadence = if working { busy_every } else { every };
             let usage = disk();
             let body = HeartbeatBody {
                 disk_used_bytes: usage.map(|usage| usage.used_bytes),
@@ -1172,6 +1227,8 @@ pub fn spawn_heartbeat(
                 clients: activity.take(),
                 background_runs: runs.background,
                 waiting_runs: runs.waiting,
+                every_secs: cadence.as_secs().max(1),
+                store_recovered_at: store_recovered_at(),
             };
             match http.post(&url).bearer_auth(token).json(&body).send().await {
                 Ok(res) if res.status().is_success() => {
@@ -1245,6 +1302,33 @@ impl Drop for CloudRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn beats_fast_while_work_runs_and_at_once_when_it_starts_or_stops() {
+        let (idle, busy) = (Duration::from_secs(60), Duration::from_secs(15));
+        let after = |secs, was| Some((Duration::from_secs(secs), was));
+        assert!(beat_due(None, false, idle, busy), "the first beat");
+        assert!(!beat_due(after(14, true), true, idle, busy));
+        assert!(beat_due(after(15, true), true, idle, busy), "busy cadence");
+        assert!(!beat_due(after(59, false), false, idle, busy));
+        assert!(beat_due(after(60, false), false, idle, busy), "idle cadence");
+        assert!(beat_due(after(1, false), true, idle, busy), "a turn started");
+        assert!(beat_due(after(1, true), false, idle, busy), "it ended");
+    }
+
+    #[test]
+    fn a_turn_parked_on_a_question_isnt_work_but_background_work_is() {
+        let counts = |active, waiting, background| RunCounts {
+            active,
+            waiting,
+            background,
+        };
+        assert!(!counts(0, 0, 0).working());
+        assert!(counts(1, 0, 0).working());
+        assert!(!counts(1, 1, 0).working());
+        assert!(counts(2, 1, 0).working());
+        assert!(counts(0, 0, 1).working());
+    }
 
     fn session_vars(name: &str) -> Option<String> {
         match name {

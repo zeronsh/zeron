@@ -67,6 +67,7 @@ case "$url" in
 esac`);
   stub(bin, "sudo", `"$@"`);
   stub(bin, "systemctl", `echo "systemctl $*" >> "${log}"`);
+  stub(bin, "sync", `echo "sync" >> "${log}"`);
   stub(bin, "flock", "exit 0");
   stub(bin, "uname", `[ "$1" = "-m" ] && echo x86_64 || /usr/bin/uname "$@"`);
   const script = join(root, "install.sh");
@@ -203,19 +204,21 @@ describe("cloud install script", { timeout: 60_000 }, () => {
         "systemctl daemon-reload",
         "systemctl enable zeron-cloud-boot.service",
         "systemctl start zeron-cloud-boot.service",
-        "systemctl stop zeron-cloud.service"
+        "systemctl stop zeron-cloud.service",
+        // Written out before the provider's snapshot.
+        "sync"
       ]);
-      // Run again: same files, and the engine still stops last.
+      // Run again: same files, and the engine still stops last, then the flush.
       stop({ ZERON_CLOUD_UNIT_DIR: units });
       expect(readFileSync(path, "utf8")).toBe(fresh);
-      expect(calls().at(-1)).toBe("systemctl stop zeron-cloud.service");
+      expect(calls().slice(-2)).toEqual(["systemctl stop zeron-cloud.service", "sync"]);
     });
 
     it("still stops the engine when nothing can be upgraded, and answers with the stop's status", () => {
       const { units, calls, clearCalls } = setup();
       clearCalls();
       stop({ ZERON_CLOUD_UNIT_DIR: units }); // no unit file at all
-      expect(calls()).toEqual(["systemctl stop zeron-cloud.service"]);
+      expect(calls()).toEqual(["systemctl stop zeron-cloud.service", "sync"]);
 
       // A unit whose rewrite would lose its command is left as it is.
       const path = join(units, "zeron-cloud.service");
@@ -223,10 +226,13 @@ describe("cloud install script", { timeout: 60_000 }, () => {
       clearCalls();
       stop({ ZERON_CLOUD_UNIT_DIR: units });
       expect(readFileSync(path, "utf8")).toBe("[Unit]\nDescription=Zeron Cloud engine\n");
-      expect(calls().at(-1)).toBe("systemctl stop zeron-cloud.service");
+      expect(calls().slice(-2)).toEqual(["systemctl stop zeron-cloud.service", "sync"]);
 
       writeFileSync(join(root, "bin", "systemctl"), `#!/bin/sh\ncase "$1" in stop) exit 3;; *) exit 0;; esac\n`);
+      clearCalls();
       expect(() => stop({ ZERON_CLOUD_UNIT_DIR: units })).toThrow();
+      // A failed stop still flushes, and still answers with the stop's status.
+      expect(calls().at(-1)).toBe("sync");
     });
   });
 

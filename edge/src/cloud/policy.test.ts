@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   DISK_CRITICAL,
   DISK_WARN,
+  FAST_STALE_MIN_MS,
   HEARTBEAT_STALE_MS,
   MACHINES,
   REFRESH_MARGIN_MS,
   diskLevel,
+  heartbeatStaleMs,
   idleDecision,
   machineName,
   machineSpec,
@@ -112,5 +114,16 @@ describe("TTL extension and config parsing", () => {
     expect(workflowInstanceId("sleep", "cloud-abc", 4)).toBe(workflowInstanceId("sleep", "cloud-abc", 4));
     // Cloudflare caps instance ids at 100 chars; a uuid device id leaves room.
     expect(workflowInstanceId("provision", `cloud-${crypto.randomUUID()}`, 1_000_000).length).toBeLessThanOrEqual(64);
+  });
+});
+
+describe("heartbeatStaleMs", () => {
+  it("is three fast beats, never under 45 s, and 3 min for the idle pace or an engine that doesn't say", () => {
+    expect(heartbeatStaleMs(15_000)).toBe(FAST_STALE_MIN_MS);
+    expect(heartbeatStaleMs(5_000)).toBe(FAST_STALE_MIN_MS);
+    expect(heartbeatStaleMs(20_000)).toBe(60_000);
+    expect(heartbeatStaleMs(60_000)).toBe(HEARTBEAT_STALE_MS);
+    expect(heartbeatStaleMs(undefined)).toBe(HEARTBEAT_STALE_MS);
+    expect(heartbeatStaleMs(0)).toBe(HEARTBEAT_STALE_MS);
   });
 });
