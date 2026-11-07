@@ -3578,6 +3578,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-vt"
+version = "0.7.0+ghostty.1.3.2-main.b40acce"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e38023027f5e63501fadf2d21484d1bf43ff3e5da9ffc032a246eeb86e7e038b"
+dependencies = [
+ "bitflags 2.13.1",
+ "dirs 6.0.0",
+ "ghostty-vt-sys",
+ "int-enum",
+]
+
+[[package]]
+name = "ghostty-vt-sys"
+version = "0.7.2+ghostty.1.3.2-main.b40acce"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5599fff58e2568607cb42f1fa4309fa604b2065db5271ff47b2fc6964e0ffb3"
+dependencies = [
+ "flate2",
+ "sha2",
+ "tar",
+ "ureq",
+]
+
+[[package]]
 name = "gif"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4968,6 +4992,18 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "int-enum"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e366a1634cccc76b4cfd3e7580de9b605e4d93f1edac48d786c1f867c0def495"
+dependencies = [
+ "proc-macro2",
+ "proc-macro2-diagnostics",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -7887,6 +7923,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro2-diagnostics"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af066a9c399a26e020ada66a034357a868728e72cd426f3adcd35f80d88d88c8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "version_check",
+]
+
+[[package]]
 name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9111,6 +9159,7 @@ version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -11532,11 +11581,13 @@ dependencies = [
  "log",
  "native-tls",
  "percent-encoding",
+ "rustls",
  "rustls-pki-types",
  "socks",
  "ureq-proto",
  "utf8-zero",
  "webpki-root-certs",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -13999,6 +14050,7 @@ name = "zeron-term"
 version = "0.2.137"
 dependencies = [
  "alacritty_terminal",
+ "ghostty-vt",
 ]
 
 [[package]]
@@ -14054,7 +14106,6 @@ dependencies = [
 name = "zeron-ui"
 version = "0.2.137"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "ashpd",
  "async-io",
@@ -14069,6 +14120,7 @@ dependencies = [
  "fontdb",
  "foreign-types 0.5.0",
  "futures",
+ "ghostty-vt",
  "gpui",
  "gpui-base",
  "gpui_platform",
@@ -14096,6 +14148,7 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror 2.0.20",
+ "tiny-skia",
  "tokio",
  "tokio-util",
  "tracing",

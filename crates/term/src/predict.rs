@@ -28,6 +28,24 @@ use std::time::{Duration, Instant};
 
 use crate::emulator::{CursorSnapshot, Emulator};
 
+/// The live grid a prediction checks its echo against; both emulators have
+/// one ([`crate::emulator`] for the mobile apps, `ghostty` for the desktop).
+pub trait LiveScreen {
+    /// The cursor in live viewport coordinates.
+    fn live_cursor(&self) -> CursorSnapshot;
+    /// The character in a live viewport cell.
+    fn live_char(&self, row: usize, col: usize) -> Option<char>;
+}
+
+impl LiveScreen for Emulator {
+    fn live_cursor(&self) -> CursorSnapshot {
+        Emulator::live_cursor(self)
+    }
+    fn live_char(&self, row: usize, col: usize) -> Option<char> {
+        Emulator::live_char(self, row, col)
+    }
+}
+
 /// Echo time above which predictions start showing…
 const SHOW_ABOVE: Duration = Duration::from_millis(30);
 /// …and below which they stop.
@@ -123,7 +141,7 @@ impl Predictor {
     }
 
     /// Host output landed in `emulator`: measure, then confirm or refute.
-    pub fn output(&mut self, emulator: &Emulator, now: Instant) {
+    pub fn output(&mut self, emulator: &impl LiveScreen, now: Instant) {
         if let Some(sent) = self.awaiting_since.take() {
             let sample = now.saturating_duration_since(sent);
             let srtt = match self.srtt {

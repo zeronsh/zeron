@@ -618,6 +618,24 @@ impl TerminalPanel {
         }
     }
 
+    /// Feed PTY output to a tab directly, as the engine stream would; for
+    /// offscreen fixtures that render a terminal without an engine. Returns
+    /// the terminal's replies (DSR, DA, …) for the caller to write back.
+    pub fn feed_tab(
+        &mut self,
+        chat: &str,
+        key: u64,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) -> Vec<u8> {
+        let Some(tab) = self.tab_mut(chat, key) else {
+            return Vec::new();
+        };
+        let replies = tab.emulator.feed(bytes);
+        cx.notify();
+        replies
+    }
+
     /// Make `key` the rendered tab of the selected chat.
     pub fn select_tab_by_key(&mut self, key: u64, cx: &mut Context<Self>) {
         let chat = self.selected_chat(cx);
@@ -1085,11 +1103,11 @@ impl TerminalPanel {
             cx.stop_propagation();
             return;
         }
-        let app_cursor = self
+        let route = self
             .active_tab(cx)
-            .map(|tab| tab.emulator.app_cursor_mode())
-            .unwrap_or(false);
-        match route_key(&ks.key, ks.key_char.as_deref(), mods, app_cursor) {
+            .map(|tab| route_key(&ks.key, ks.key_char.as_deref(), mods, &tab.emulator));
+        let Some(route) = route else { return };
+        match route {
             // A plain space is typing, not an interruption: the predictor
             // keeps the run (and its trust) going across words.
             KeyRoute::Bytes(bytes) if bytes == b" " => {

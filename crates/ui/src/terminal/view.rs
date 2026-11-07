@@ -1,25 +1,32 @@
 //! Terminal paint + input encoding.
 //!
 //! - theme-owned background/ANSI16 plus the xterm 256-color cube/grayscale;
-//! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
-//!   escape sequences, Ctrl- combos, Alt prefixing);
+//! - keystroke routing: typed text through the platform text input, other
+//!   keys through Ghostty's encoder ([`super::keys`]);
 //! - the ordered input queue and the 80 ms resize debounce constant (the
 //!   panel drives the writes and timers; the buffer logic here is pure);
 //! - [`TerminalElement`] — a custom gpui element that measures cell metrics
 //!   from the real mono font (the "font probe"), reports the resulting
 //!   cols×rows back to the panel, and paints the grid: background quads for
-//!   non-default cells, one `ShapedLine` per row (same font whatever the
-//!   colors — paint never changes layout), and the cursor block.
+//!   non-default cells, shaped segments whose glyphs sit on their cells'
+//!   columns (ligatures on, see [`shape_row`]), Ghostty's sprite glyphs for
+//!   box drawing, blocks and Powerline, and the cursor.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, Modifiers, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative, size,
+    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, Modifiers, PaintQuad, Pixels,
+    RenderImage, ShapedLine, SharedString, Style, TextRun, Window, fill, font, outline, point, px,
+    relative, size,
 };
 
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
-use super::emulator::{CellColor, CellSnapshot, CursorShape, Side};
+use super::emulator::{CellColor, CellSnapshot, CursorShape, Emulator, Side};
+use super::keys;
 use super::panel::TerminalPanel;
+use super::sprite;
 
 /// Default terminal font metrics; the rendered values come from the theme.
 pub const TERM_FONT_SIZE: f32 = 13.0;
@@ -27,6 +34,12 @@ pub const TERM_LINE_HEIGHT: f32 = 18.0;
 /// Line height as a multiple of the font size, so a user-chosen size keeps the
 /// default's row rhythm.
 const TERM_LINE_HEIGHT_RATIO: f32 = TERM_LINE_HEIGHT / TERM_FONT_SIZE;
+// ponytail: a fixed list of common Nerd Font families; a setting when someone uses another.
+const NERD_FALLBACKS: [&str; 3] = [
+    "Symbols Nerd Font Mono",
+    "IoskeleyMonoNL Nerd Font Mono",
+    "FiraCode Nerd Font Mono",
+];
 /// Inner padding of the grid area.
 pub const TERM_PADDING: f32 = 12.0;
 
@@ -192,94 +205,6 @@ pub fn cell_at(x: f32, y: f32, cell_w: f32, line_h: f32, cols: usize, rows: usiz
 // Keyboard → bytes
 // ---------------------------------------------------------------------------
 
-/// Encode a keystroke as PTY bytes. `None` means "not ours" — the event should
-/// fall through (e.g. the platform-primary shortcuts that drive app actions).
-///
-/// `app_cursor` switches arrows/home/end from CSI to SS3 per DECCKM.
-pub fn keystroke_bytes(
-    key: &str,
-    key_char: Option<&str>,
-    mods: &Modifiers,
-    app_cursor: bool,
-) -> Option<Vec<u8>> {
-    // Platform-primary combos (Cmd on macOS, the super key elsewhere) belong to
-    // the app keymap, never the PTY.
-    if mods.platform {
-        return None;
-    }
-    if mods.alt {
-        // ESC-prefix the same keystroke without alt.
-        let inner = keystroke_bytes(
-            key,
-            key_char,
-            &Modifiers {
-                alt: false,
-                ..*mods
-            },
-            app_cursor,
-        )?;
-        let mut out = vec![0x1b];
-        out.extend(inner);
-        return Some(out);
-    }
-    if mods.control {
-        return control_bytes(key);
-    }
-
-    let seq = |csi: &[u8], ss3: &[u8]| {
-        Some(if app_cursor {
-            ss3.to_vec()
-        } else {
-            csi.to_vec()
-        })
-    };
-    match key {
-        "enter" => Some(b"\r".to_vec()),
-        "backspace" => Some(vec![0x7f]),
-        "tab" => Some(if mods.shift {
-            b"\x1b[Z".to_vec()
-        } else {
-            b"\t".to_vec()
-        }),
-        "escape" => Some(vec![0x1b]),
-        "space" => Some(b" ".to_vec()),
-        "up" => seq(b"\x1b[A", b"\x1bOA"),
-        "down" => seq(b"\x1b[B", b"\x1bOB"),
-        "right" => seq(b"\x1b[C", b"\x1bOC"),
-        "left" => seq(b"\x1b[D", b"\x1bOD"),
-        "home" => seq(b"\x1b[H", b"\x1bOH"),
-        "end" => seq(b"\x1b[F", b"\x1bOF"),
-        "insert" => Some(b"\x1b[2~".to_vec()),
-        "delete" => Some(b"\x1b[3~".to_vec()),
-        "pageup" => Some(b"\x1b[5~".to_vec()),
-        "pagedown" => Some(b"\x1b[6~".to_vec()),
-        "f1" => Some(b"\x1bOP".to_vec()),
-        "f2" => Some(b"\x1bOQ".to_vec()),
-        "f3" => Some(b"\x1bOR".to_vec()),
-        "f4" => Some(b"\x1bOS".to_vec()),
-        "f5" => Some(b"\x1b[15~".to_vec()),
-        "f6" => Some(b"\x1b[17~".to_vec()),
-        "f7" => Some(b"\x1b[18~".to_vec()),
-        "f8" => Some(b"\x1b[19~".to_vec()),
-        "f9" => Some(b"\x1b[20~".to_vec()),
-        "f10" => Some(b"\x1b[21~".to_vec()),
-        "f11" => Some(b"\x1b[23~".to_vec()),
-        "f12" => Some(b"\x1b[24~".to_vec()),
-        _ => {
-            // Printable: prefer the typed character (IME/shift-aware).
-            let text = key_char.filter(|c| !c.is_empty()).or({
-                // Fall back to single-char key names ("a", "/", …).
-                if key.chars().count() == 1 {
-                    Some(key)
-                } else {
-                    None
-                }
-            })?;
-            Some(text.as_bytes().to_vec())
-        }
-    }
-}
-
 /// How a keydown reaches the PTY.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyRoute {
@@ -293,7 +218,9 @@ pub enum KeyRoute {
 }
 
 /// Route a keydown. Printable text goes through the platform text input;
-/// named keys and modified keys are encoded here.
+/// named keys and modified keys are encoded by Ghostty's key encoder against
+/// `emulator`'s modes (cursor keys, modifyOtherKeys, the kitty keyboard
+/// protocol), after Ghostty's macOS line-editing keybinds.
 ///
 /// Option follows the layout: where Option types an ASCII symbol (`@`, `|`,
 /// `\` on many European layouts) that symbol is typed; where it would type
@@ -303,11 +230,18 @@ pub fn route_key(
     key: &str,
     key_char: Option<&str>,
     mods: &Modifiers,
-    app_cursor: bool,
+    emulator: &Emulator,
 ) -> KeyRoute {
+    if let Some(bytes) = keys::macos_keybind(key, mods) {
+        return KeyRoute::Bytes(bytes);
+    }
     if mods.platform {
         return KeyRoute::NotOurs;
     }
+    let encode = |text: Option<&str>| {
+        keys::encode(emulator.terminal(), key, text, mods)
+            .map_or(KeyRoute::NotOurs, KeyRoute::Bytes)
+    };
     let printable = key_char.filter(|c| !c.is_empty() && !c.chars().any(char::is_control));
     if mods.alt && !mods.control {
         if let Some(text) = printable
@@ -317,7 +251,7 @@ pub fn route_key(
         {
             return KeyRoute::Text;
         }
-        // Meta: ESC + the key as typed without Option.
+        // Meta: the key as typed without Option.
         let base = (key.chars().count() == 1).then(|| {
             if mods.shift {
                 key.to_uppercase()
@@ -325,13 +259,12 @@ pub fn route_key(
                 key.to_string()
             }
         });
-        return keystroke_bytes(key, base.as_deref(), mods, app_cursor)
-            .map_or(KeyRoute::NotOurs, KeyRoute::Bytes);
+        return encode(base.as_deref());
     }
     if !mods.control && !mods.function && printable.is_some() && !is_named_key(key) {
         return KeyRoute::Text;
     }
-    keystroke_bytes(key, key_char, mods, app_cursor).map_or(KeyRoute::NotOurs, KeyRoute::Bytes)
+    encode(key_char)
 }
 
 fn is_named_key(key: &str) -> bool {
@@ -353,31 +286,6 @@ fn is_named_key(key: &str) -> bool {
             | "pageup"
             | "pagedown"
     ) || (key.len() >= 2 && key.starts_with('f') && key[1..].chars().all(|c| c.is_ascii_digit()))
-}
-
-/// Ctrl-key encoding (caret notation).
-fn control_bytes(key: &str) -> Option<Vec<u8>> {
-    let mut chars = key.chars();
-    let (c, rest) = (chars.next()?, chars.next());
-    if rest.is_some() {
-        return match key {
-            "space" => Some(vec![0x00]),
-            "backspace" => Some(vec![0x08]),
-            "enter" => Some(b"\r".to_vec()),
-            _ => None,
-        };
-    }
-    match c {
-        'a'..='z' => Some(vec![c as u8 - b'a' + 1]),
-        '@' => Some(vec![0x00]),
-        '[' => Some(vec![0x1b]),
-        '\\' => Some(vec![0x1c]),
-        ']' => Some(vec![0x1d]),
-        '^' => Some(vec![0x1e]),
-        '_' | '/' => Some(vec![0x1f]),
-        '?' => Some(vec![0x7f]),
-        _ => None,
-    }
 }
 
 /// Wrap pasted text for the PTY (bracketed-paste aware; strips the one control
@@ -593,12 +501,20 @@ pub struct TerminalPrepaint {
     /// Per row, its top edge and the shaped segments with the grid COLUMN
     /// each one starts at. Not one line per row: see [`shape_row`].
     lines: Vec<(Pixels, Vec<(usize, ShapedLine)>)>,
+    /// Per row, its top edge and the cells drawn by [`sprite`] instead of the
+    /// font.
+    glyphs: Vec<(Pixels, Vec<CustomGlyph>)>,
+    /// Light line width for sprite glyphs, in logical pixels.
+    stroke: f32,
     /// Grid cell advance, so paint can place segments by column.
     cell_w: Pixels,
     /// Grid row height, so paint places rows on the same baselines prepaint
     /// measured the grid with.
     line_h: Pixels,
     cursor: Option<PaintQuad>,
+    /// The focused block cursor is opaque, so it goes under the text (whose
+    /// cell flips to the background color); bars and outlines go over it.
+    cursor_under_text: bool,
     /// In-progress input-method composition at the cursor: its backdrop and
     /// shaped text.
     marked: Option<(PaintQuad, gpui::Point<Pixels>, ShapedLine)>,
@@ -653,21 +569,15 @@ impl gpui::Element for TerminalElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let theme = Theme::of(cx).clone();
-        // Ligatures OFF. A terminal is a fixed grid: the shaper must emit one
-        // cell-width advance per character, and a contextual substitution
-        // (Geist Mono ligates `--`, `->`, …) collapses several cells into
-        // fewer glyphs, so the row renders SHORT while the cursor — a quad at
-        // `cell_w * col` — stays on the true column. That is the `codex
-        // --yolo` → `codex--yolo` report: the space is in the grid and went
-        // to the pty (the command runs), only the painted run lost a cell.
-        // The landing page disables the same three features on its ASCII art
-        // for the same reason.
+        // Ligatures stay on: `shape_row` puts every glyph back on its cell's
+        // column, so a ligature narrower than its cells no longer pulls the
+        // rest of the row off the grid.
         let mut mono = font(theme.font_terminal.clone());
-        mono.features = gpui::FontFeatures(std::sync::Arc::new(vec![
-            ("liga".into(), 0),
-            ("calt".into(), 0),
-            ("dlig".into(), 0),
-        ]));
+        // Nerd Font icons (eza, prompts) are missing from Geist Mono; borrow
+        // them from installed Nerd Fonts.
+        mono.fallbacks = Some(gpui::FontFallbacks::from_fonts(
+            NERD_FALLBACKS.iter().map(|f| f.to_string()).collect(),
+        ));
         // Font probe: measure the actual advance of the resolved mono font so
         // cols/rows track real glyph metrics, not a guessed aspect ratio.
         let font_size = px(theme.terminal_font_size);
@@ -711,9 +621,12 @@ impl gpui::Element for TerminalElement {
                 bg_quads: Vec::new(),
                 sel_quads: Vec::new(),
                 lines: Vec::new(),
+                glyphs: Vec::new(),
+                stroke: 1.0,
                 cell_w,
                 line_h,
                 cursor: None,
+                cursor_under_text: false,
                 marked: None,
             };
         };
@@ -734,6 +647,19 @@ impl gpui::Element for TerminalElement {
         let mut selection = theme.terminal.selection;
         selection.a = (selection.a + COPY_FLASH_ALPHA * snapshot.copy_flash).min(0.9);
         let radius = px(SELECTION_RADIUS.min(f32::from(line_h) / 4.0));
+        let mut glyphs = Vec::with_capacity(rows.len());
+        // Ghostty's block cursor: an opaque block under the text, whose cell
+        // takes the background color.
+        let block_cursor = snapshot
+            .cursor
+            .filter(|_| {
+                snapshot.cursor_on && self.focused && snapshot.cursor_shape == CursorShape::Block
+            })
+            .map(|c| (c.row, c.col));
+        let cursor_text = Hsla {
+            a: 1.0,
+            ..theme.terminal.background
+        };
 
         for (row_ix, row) in rows.iter().copied().enumerate() {
             let y = origin.y + shift + line_h * (first_row + row_ix as i32) as f32;
@@ -803,7 +729,25 @@ impl gpui::Element for TerminalElement {
                     _ => {}
                 }
             }
-            lines.push((y, shape_row(row, &theme, &mono, font_size, window)));
+            let viewport_row = row_ix as i32 + first_row;
+            let cursor_col = block_cursor
+                .filter(|&(r, _)| r as i32 == viewport_row)
+                .map(|(_, c)| (c, cursor_text));
+            let mut row_glyphs = Vec::new();
+            lines.push((
+                y,
+                shape_row(
+                    row,
+                    &theme,
+                    &mono,
+                    font_size,
+                    cell_w,
+                    cursor_col,
+                    &mut row_glyphs,
+                    window,
+                ),
+            ));
+            glyphs.push((y, row_glyphs));
         }
 
         let cursor = snapshot.cursor.filter(|_| snapshot.cursor_on).map(|c| {
@@ -815,19 +759,18 @@ impl gpui::Element for TerminalElement {
                 size(cell_w, line_h),
             );
             let bar = px(CURSOR_BAR);
+            let color = cursor_color(&theme);
             match (self.focused, snapshot.cursor_shape) {
                 (false, _) | (true, CursorShape::HollowBlock) => {
-                    outline(cell, theme.cursor, gpui::BorderStyle::Solid)
+                    outline(cell, color, gpui::BorderStyle::Solid)
                 }
-                // Translucent block: the glyph underneath stays legible.
-                (true, CursorShape::Block) => fill(cell, theme.cursor),
-                (true, CursorShape::Beam) => fill(
-                    Bounds::new(cell.origin, size(bar, line_h)),
-                    theme.cursor.opacity(1.0),
-                ),
+                (true, CursorShape::Block) => fill(cell, color),
+                (true, CursorShape::Beam) => {
+                    fill(Bounds::new(cell.origin, size(bar, line_h)), color)
+                }
                 (true, CursorShape::Underline) => fill(
                     Bounds::new(point(cell.left(), cell.bottom() - bar), size(cell_w, bar)),
-                    theme.cursor.opacity(1.0),
+                    color,
                 ),
             }
         });
@@ -872,9 +815,15 @@ impl gpui::Element for TerminalElement {
             bg_quads,
             sel_quads,
             lines,
+            glyphs,
+            // The font's underline thickness is ~0.05em; Ghostty strokes box
+            // lines with it. ponytail: gpui doesn't expose the real metric, so
+            // approximate it.
+            stroke: theme.terminal_font_size * 0.05,
             cell_w,
             line_h,
             cursor,
+            cursor_under_text: block_cursor.is_some(),
             marked,
         }
     }
@@ -901,6 +850,11 @@ impl gpui::Element for TerminalElement {
             for quad in prepaint.sel_quads.drain(..) {
                 window.paint_quad(quad);
             }
+            if prepaint.cursor_under_text
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
             let cell_w = prepaint.cell_w;
             for (y, segments) in &prepaint.lines {
                 let y = *y;
@@ -913,6 +867,16 @@ impl gpui::Element for TerminalElement {
                         window,
                         cx,
                     );
+                }
+            }
+            for (y, row) in &prepaint.glyphs {
+                for glyph in row {
+                    let left = origin.x + cell_w * glyph.col as f32;
+                    let bounds = Bounds::from_corners(
+                        point(left, *y),
+                        point(left + cell_w * glyph.cells as f32, *y + line_h),
+                    );
+                    paint_custom_glyph(glyph, bounds, prepaint.stroke, window, cx);
                 }
             }
             if let Some(cursor) = prepaint.cursor.take() {
@@ -938,76 +902,50 @@ impl gpui::Element for TerminalElement {
     }
 }
 
-/// Shape one grid row into COLUMN-PINNED segments.
+/// The cursor block, opaque as Ghostty draws it: the theme's accent.
+fn cursor_color(theme: &Theme) -> Hsla {
+    Hsla {
+        a: 1.0,
+        ..theme.accent
+    }
+}
+
+/// Shape one grid row into segments placed by column.
 ///
 /// A terminal is a fixed grid, but a shaped line places glyphs by their font
-/// advances. Those agree only while every glyph is monospace-width — the row's
-/// `cell_w` IS the mono font's em advance. The moment a glyph resolves through
-/// FONT FALLBACK (box drawing `│─╭`, arrows `→`, emoji, CJK) its advance is
-/// whatever that other font uses, and the whole rest of the line slides out of
-/// the grid: box borders land a few pixels off (user report: "one of the pipes
-/// is broken"), and a double-width glyph whose fallback advances only one cell
-/// swallows the column after it (user report: `codex --yolo` rendering as
-/// `codex--yolo`). Backgrounds, selection and the cursor never drifted because
-/// those are quads placed at `cell_w * col`.
+/// advances, and those drift off it: a glyph from FONT FALLBACK (arrows `→`,
+/// emoji, CJK) advances by whatever its own font says, and a ligature (Geist
+/// Mono's `--`, `->`) covers several cells with one narrower glyph. Laid out
+/// as shaped, the rest of the row slides (user reports: "one of the pipes is
+/// broken", `codex --yolo` rendering as `codex--yolo`), while backgrounds,
+/// selection and the cursor stay put as quads at `cell_w * col`.
 ///
-/// So: runs of ASCII shape together (guaranteed cell-width in a mono font),
-/// and every other glyph is its own segment pinned at its own column. Wide
-/// spacers are still skipped — the wide glyph covers both columns, and the
-/// NEXT segment re-pins regardless.
+/// So, as Ghostty, kitty and WezTerm do, every glyph moves to the column of
+/// the cell it came from (its cluster): a glyph narrower than its cells leaves
+/// a gap, and nothing after it slides. Own segments remain only for sprite
+/// glyphs (drawn by paint), right-to-left runs (CoreText reorders and joins
+/// their glyphs, so they cannot be placed letter by letter) and the cursor
+/// cell, which splits a ligature under the cursor as Ghostty does.
+#[allow(clippy::too_many_arguments)]
 fn shape_row(
     row: &[CellSnapshot],
     theme: &Theme,
     mono: &gpui::Font,
     font_size: Pixels,
+    cell_w: Pixels,
+    cursor: Option<(usize, Hsla)>,
+    glyphs: &mut Vec<CustomGlyph>,
     window: &Window,
 ) -> Vec<(usize, ShapedLine)> {
-    fn flush(
-        segments: &mut Vec<(usize, ShapedLine)>,
-        text: &mut String,
-        runs: &mut Vec<TextRun>,
-        seg_col: usize,
-        font_size: Pixels,
-        window: &Window,
-    ) {
-        if text.is_empty() {
-            return;
-        }
-        let shaped = window.text_system().shape_line(
-            SharedString::from(std::mem::take(text)),
-            font_size,
-            runs,
-            None,
-        );
-        segments.push((seg_col, shaped));
-        runs.clear();
-    }
-
     let mut segments: Vec<(usize, ShapedLine)> = Vec::new();
-    let mut text = String::with_capacity(row.len());
-    let mut runs: Vec<TextRun> = Vec::new();
-    let mut seg_col = 0usize;
+    let mut seg = Segment::default();
+    let mut rtl_run = false;
 
     for (col, cell) in row.iter().enumerate() {
         if cell.wide_spacer {
             continue;
         }
         let ch = if cell.hidden { ' ' } else { cell.ch };
-        // Anything that can leave the mono font gets its own pinned segment.
-        let pinned = !ch.is_ascii() || cell.wide;
-        if pinned {
-            flush(
-                &mut segments,
-                &mut text,
-                &mut runs,
-                seg_col,
-                font_size,
-                window,
-            );
-        }
-        if text.is_empty() {
-            seg_col = col;
-        }
         let (fg, bg) = cell.display_colors();
         let mut color = resolve_color(fg, theme);
         // The theme's own default pair is already tuned; anything the
@@ -1018,13 +956,41 @@ fn shape_row(
         if cell.dim {
             color.a *= 0.6;
         }
-        let mut cell_font = mono.clone();
-        cell_font.weight = if cell.bold {
+        let at_cursor = cursor.is_some_and(|(c, _)| c == col);
+        if let Some((_, cursor_text)) = cursor.filter(|_| at_cursor) {
+            color = cursor_text;
+        }
+        // An RTL run ending here fits into the cells it spans.
+        let rtl_fit = rtl_run.then(|| cell_w * (col - seg.col) as f32);
+        if !ch.is_ascii() && sprite::has_char(ch) {
+            // Drawn to the cell by paint, not shaped.
+            seg.flush(rtl_fit, &mut segments, font_size, cell_w, window);
+            rtl_run = false;
+            glyphs.push(CustomGlyph {
+                col,
+                ch,
+                cells: if cell.wide { 2 } else { 1 },
+                color,
+            });
+            continue;
+        }
+        // Arabic/Hebrew letters (and the spaces between them) shape as ONE
+        // segment: alone, each letter gets its isolated form and the words
+        // read left to right; together CoreText joins and reorders them.
+        let rtl = is_rtl(ch) && !cell.wide;
+        let joins = rtl_run && (rtl || ch == ' ');
+        if !joins && (at_cursor || rtl || rtl_run) {
+            seg.flush(rtl_fit, &mut segments, font_size, cell_w, window);
+        }
+        if seg.text.is_empty() {
+            seg.col = col;
+        }
+        let weight = if cell.bold {
             gpui::FontWeight::BOLD
         } else {
             gpui::FontWeight::NORMAL
         };
-        cell_font.style = if cell.italic {
+        let style = if cell.italic {
             gpui::FontStyle::Italic
         } else {
             gpui::FontStyle::Normal
@@ -1039,48 +1005,219 @@ fn shape_row(
             })
         } else {
             cell.underline.then_some(gpui::UnderlineStyle {
-                color: Some(color),
+                color: Some(
+                    cell.underline_color
+                        .filter(|_| !at_cursor)
+                        .map_or(color, |c| resolve_color(c, theme)),
+                ),
                 thickness: px(1.0),
-                wavy: false,
+                wavy: cell.undercurl,
             })
         };
-        let len = ch.len_utf8();
-        text.push(ch);
-        match runs.last_mut() {
+        let strikethrough = cell.strikethrough.then_some(gpui::StrikethroughStyle {
+            color: Some(color),
+            thickness: px(1.0),
+        });
+        // A cell's whole grapheme cluster (a flag, a skin tone, a letter and
+        // its marks) shapes together, on its column.
+        let mut buf = [0; 4];
+        let text = cell
+            .cluster
+            .as_deref()
+            .filter(|_| !cell.hidden)
+            .unwrap_or_else(|| ch.encode_utf8(&mut buf));
+        let len = text.len();
+        seg.text.push_str(text);
+        seg.cols.extend(std::iter::repeat_n(col, len));
+        // Every run is `mono` but for weight and style: comparing those spares
+        // a font clone and compare per cell.
+        match seg.runs.last_mut() {
             Some(last)
-                if last.color == color && last.font == cell_font && last.underline == underline =>
+                if last.color == color
+                    && last.font.weight == weight
+                    && last.font.style == style
+                    && last.underline == underline
+                    && last.strikethrough == strikethrough =>
             {
                 last.len += len;
             }
-            _ => runs.push(TextRun {
+            _ => seg.runs.push(TextRun {
                 len,
-                font: cell_font,
+                font: gpui::Font {
+                    weight,
+                    style,
+                    ..mono.clone()
+                },
                 color,
                 background_color: None,
                 underline,
-                strikethrough: None,
+                strikethrough,
             }),
         }
-        if pinned {
-            flush(
-                &mut segments,
-                &mut text,
-                &mut runs,
-                seg_col,
-                font_size,
-                window,
-            );
+        rtl_run = rtl || joins;
+        if at_cursor && !rtl_run {
+            seg.flush(None, &mut segments, font_size, cell_w, window);
         }
     }
-    flush(
-        &mut segments,
-        &mut text,
-        &mut runs,
-        seg_col,
-        font_size,
-        window,
-    );
+    let rtl_fit = rtl_run.then(|| cell_w * (row.len() - seg.col) as f32);
+    seg.flush(rtl_fit, &mut segments, font_size, cell_w, window);
     segments
+}
+
+/// The row text being gathered into one shaped segment, with the grid column
+/// of each of its bytes.
+#[derive(Default)]
+struct Segment {
+    text: String,
+    cols: Vec<usize>,
+    runs: Vec<TextRun>,
+    col: usize,
+}
+
+impl Segment {
+    /// Shape the gathered text into `out`. `rtl_fit` marks a right-to-left
+    /// run and the width of its cells.
+    fn flush(
+        &mut self,
+        rtl_fit: Option<Pixels>,
+        out: &mut Vec<(usize, ShapedLine)>,
+        font_size: Pixels,
+        cell_w: Pixels,
+        window: &Window,
+    ) {
+        if self.text.is_empty() {
+            return;
+        }
+        let text = SharedString::from(std::mem::take(&mut self.text));
+        let system = window.text_system();
+        let mut shaped = system.shape_line(text.clone(), font_size, &self.runs, None);
+        match rtl_fit {
+            // A joined RTL run wider than its cells shrinks to fit them.
+            // Spacing glyphs apart instead would break the joins between
+            // letters.
+            // ponytail: narrower runs stay as they are; Arabic stretches with
+            // kashida (U+0640), not by spacing.
+            Some(fit) if shaped.width > fit => {
+                shaped =
+                    system.shape_line(text, font_size * (fit / shaped.width), &self.runs, None);
+            }
+            Some(_) => {}
+            None => snap_to_cells(&mut shaped, &self.cols, self.col, cell_w),
+        }
+        out.push((self.col, shaped));
+        self.runs.clear();
+        self.cols.clear();
+    }
+}
+
+/// Move every glyph of `line` to the column its cluster starts at. Glyphs of
+/// one cluster (a letter and its combining marks) keep their offsets from the
+/// cluster's first glyph.
+fn snap_to_cells(line: &mut ShapedLine, cols: &[usize], seg_col: usize, cell_w: Pixels) {
+    let mut runs = line.runs.clone();
+    let mut cluster = (usize::MAX, px(0.));
+    for glyph in runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
+        // A combining mark is its own glyph at its own index, but on its
+        // letter's column.
+        let col = cols.get(glyph.index).copied().unwrap_or(seg_col);
+        if col != cluster.0 {
+            cluster = (col, glyph.position.x);
+        }
+        glyph.position.x = cell_w * (col - seg_col) as f32 + (glyph.position.x - cluster.1);
+    }
+    **line = Arc::new(gpui::LineLayout {
+        font_size: line.font_size,
+        width: line.width,
+        ascent: line.ascent,
+        descent: line.descent,
+        runs,
+        len: line.len,
+    });
+}
+
+/// Hebrew and Arabic blocks (letters, marks, presentation forms).
+fn is_rtl(ch: char) -> bool {
+    matches!(ch, '\u{0590}'..='\u{08FF}' | '\u{FB1D}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFC}')
+}
+
+struct CustomGlyph {
+    col: usize,
+    ch: char,
+    cells: usize,
+    color: Hsla,
+}
+
+/// Drawn sprite glyphs, keyed by char, device-pixel cell size, line thickness
+/// and color (images are full color, so the color is baked in).
+#[derive(Default)]
+struct CustomGlyphCache(HashMap<(char, u32, u32, u32, [u8; 4]), (Arc<RenderImage>, u32, u32)>);
+
+impl gpui::Global for CustomGlyphCache {}
+
+/// Paint one sprite glyph drawn at the exact device-pixel size of its cell, so
+/// neighbouring cells tile without seams or resampling. The sprite is padded
+/// on every side (a glyph may spill past its cell), so it is placed up-left of
+/// the cell by the padding.
+fn paint_custom_glyph(
+    glyph: &CustomGlyph,
+    bounds: Bounds<Pixels>,
+    stroke: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let scale = window.scale_factor();
+    let device = |v: Pixels| (f32::from(v) * scale).round();
+    let (left, top) = (device(bounds.left()), device(bounds.top()));
+    let w = (device(bounds.right()) - left) as u32;
+    let h = (device(bounds.bottom()) - top) as u32;
+    let thickness = (stroke * scale).ceil().max(1.0) as u32;
+    let rgba = gpui::Rgba::from(glyph.color);
+    let color = [rgba.r, rgba.g, rgba.b, rgba.a].map(|c| (c * 255.0).round() as u8);
+    let key = (glyph.ch, w, h, thickness, color);
+
+    let cache = cx.default_global::<CustomGlyphCache>();
+    let (image, pad_x, pad_y) = match cache.0.get(&key) {
+        Some(hit) => hit.clone(),
+        None => {
+            let metrics = sprite::Metrics {
+                cell_width: w / glyph.cells as u32,
+                cell_height: h,
+                box_thickness: thickness,
+            };
+            let Some(drawn) = sprite::render(glyph.ch, w, h, &metrics) else {
+                return;
+            };
+            // Coverage → straight-alpha BGRA in the glyph color.
+            let [r, g, b, a] = color;
+            let bgra: Vec<u8> = drawn
+                .alpha
+                .iter()
+                .flat_map(|&cov| [b, g, r, (cov as u16 * a as u16 / 255) as u8])
+                .collect();
+            let Some(buffer) = image::RgbaImage::from_raw(drawn.width, drawn.height, bgra) else {
+                return;
+            };
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+            // ponytail: drop everything past a cap (old sizes after a zoom,
+            // truecolor gradients); an LRU if that ever thrashes. Images live
+            // in this window's atlas, so other windows may keep stale copies.
+            if cache.0.len() >= 4096 {
+                for (_, (old, _, _)) in cache.0.drain() {
+                    let _ = window.drop_image(old);
+                }
+            }
+            let hit = (image, drawn.padding_x, drawn.padding_y);
+            cache.0.insert(key, hit.clone());
+            hit
+        }
+    };
+    let size = image.size(0);
+    let logical = |v: f32| px(v / scale);
+    let bounds = Bounds::new(
+        point(logical(left - pad_x as f32), logical(top - pad_y as f32)),
+        gpui::size(logical(size.width.0 as f32), logical(size.height.0 as f32)),
+    );
+    let _ = window.paint_image(bounds, Default::default(), image, 0, false);
 }
 
 #[cfg(test)]
@@ -1091,152 +1228,10 @@ mod tests {
         Modifiers::default()
     }
 
-    #[test]
-    fn printables_prefer_key_char() {
-        assert_eq!(
-            keystroke_bytes("a", Some("a"), &mods(), false),
-            Some(b"a".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes(
-                "a",
-                Some("A"),
-                &Modifiers {
-                    shift: true,
-                    ..mods()
-                },
-                false
-            ),
-            Some(b"A".to_vec())
-        );
-        // Multi-byte characters pass through as UTF-8.
-        assert_eq!(
-            keystroke_bytes("e", Some("é"), &mods(), false),
-            Some("é".as_bytes().to_vec())
-        );
-        // Named single-char keys fall back to the key name.
-        assert_eq!(
-            keystroke_bytes("/", None, &mods(), false),
-            Some(b"/".to_vec())
-        );
-        // Unknown multi-char keys are not ours.
-        assert_eq!(keystroke_bytes("capslock", None, &mods(), false), None);
-    }
-
-    #[test]
-    fn control_keys_and_sequences() {
-        assert_eq!(
-            keystroke_bytes("enter", None, &mods(), false),
-            Some(b"\r".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes("backspace", None, &mods(), false),
-            Some(vec![0x7f])
-        );
-        assert_eq!(
-            keystroke_bytes("tab", None, &mods(), false),
-            Some(b"\t".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes(
-                "tab",
-                None,
-                &Modifiers {
-                    shift: true,
-                    ..mods()
-                },
-                false
-            ),
-            Some(b"\x1b[Z".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes("escape", None, &mods(), false),
-            Some(vec![0x1b])
-        );
-        assert_eq!(
-            keystroke_bytes("delete", None, &mods(), false),
-            Some(b"\x1b[3~".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes("pageup", None, &mods(), false),
-            Some(b"\x1b[5~".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes("f5", None, &mods(), false),
-            Some(b"\x1b[15~".to_vec())
-        );
-    }
-
-    #[test]
-    fn arrows_respect_app_cursor_mode() {
-        assert_eq!(
-            keystroke_bytes("up", None, &mods(), false),
-            Some(b"\x1b[A".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes("up", None, &mods(), true),
-            Some(b"\x1bOA".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes("home", None, &mods(), false),
-            Some(b"\x1b[H".to_vec())
-        );
-        assert_eq!(
-            keystroke_bytes("end", None, &mods(), true),
-            Some(b"\x1bOF".to_vec())
-        );
-    }
-
-    #[test]
-    fn ctrl_combos_map_to_control_bytes() {
-        let ctrl = Modifiers {
-            control: true,
-            ..mods()
-        };
-        assert_eq!(
-            keystroke_bytes("c", Some("c"), &ctrl, false),
-            Some(vec![0x03])
-        );
-        assert_eq!(keystroke_bytes("z", None, &ctrl, false), Some(vec![0x1a]));
-        assert_eq!(
-            keystroke_bytes("space", None, &ctrl, false),
-            Some(vec![0x00])
-        );
-        assert_eq!(keystroke_bytes("[", None, &ctrl, false), Some(vec![0x1b]));
-        assert_eq!(keystroke_bytes("_", None, &ctrl, false), Some(vec![0x1f]));
-        // Ctrl+1 has no caret encoding — not ours.
-        assert_eq!(keystroke_bytes("1", Some("1"), &ctrl, false), None);
-    }
-
-    #[test]
-    fn alt_prefixes_escape() {
-        let alt = Modifiers {
-            alt: true,
-            ..mods()
-        };
-        assert_eq!(
-            keystroke_bytes("b", Some("b"), &alt, false),
-            Some(vec![0x1b, b'b'])
-        );
-        let alt_ctrl = Modifiers {
-            alt: true,
-            control: true,
-            ..mods()
-        };
-        assert_eq!(
-            keystroke_bytes("c", None, &alt_ctrl, false),
-            Some(vec![0x1b, 0x03])
-        );
-    }
-
-    #[test]
-    fn platform_primary_combos_fall_through() {
-        let cmd = Modifiers {
-            platform: true,
-            ..mods()
-        };
-        assert_eq!(keystroke_bytes("j", Some("j"), &cmd, false), None);
-        assert_eq!(keystroke_bytes("enter", None, &cmd, false), None);
+    fn emu(setup: &[u8]) -> Emulator {
+        let mut e = Emulator::new(20, 4);
+        e.feed(setup);
+        e
     }
 
     #[test]
@@ -1245,14 +1240,16 @@ mod tests {
             shift: true,
             ..mods()
         };
-        assert_eq!(route_key("a", Some("a"), &mods(), false), KeyRoute::Text);
-        assert_eq!(route_key("a", Some("A"), &shift, false), KeyRoute::Text);
+        let e = emu(b"");
+        assert_eq!(route_key("a", Some("a"), &mods(), &e), KeyRoute::Text);
+        assert_eq!(route_key("a", Some("A"), &shift, &e), KeyRoute::Text);
+        assert_eq!(route_key("ж", Some("ж"), &mods(), &e), KeyRoute::Text);
         assert_eq!(
-            route_key("enter", Some("\r"), &mods(), false),
+            route_key("enter", Some("\r"), &mods(), &e),
             KeyRoute::Bytes(b"\r".to_vec())
         );
         assert_eq!(
-            route_key("up", None, &mods(), true),
+            route_key("up", None, &mods(), &emu(b"\x1b[?1h")),
             KeyRoute::Bytes(b"\x1bOA".to_vec())
         );
         assert_eq!(
@@ -1263,7 +1260,7 @@ mod tests {
                     control: true,
                     ..mods()
                 },
-                false
+                &e
             ),
             KeyRoute::Bytes(vec![0x03])
         );
@@ -1275,7 +1272,7 @@ mod tests {
                     platform: true,
                     ..mods()
                 },
-                false
+                &e
             ),
             KeyRoute::NotOurs
         );
@@ -1287,21 +1284,43 @@ mod tests {
             alt: true,
             ..mods()
         };
+        let e = emu(b"");
         // US layout: Option-B would type `∫` — Meta-b for word motion.
         assert_eq!(
-            route_key("b", Some("∫"), &alt, false),
+            route_key("b", Some("∫"), &alt, &e),
             KeyRoute::Bytes(vec![0x1b, b'b'])
         );
         assert_eq!(
-            route_key("b", Some("ı"), &Modifiers { shift: true, ..alt }, false),
+            route_key("b", Some("ı"), &Modifiers { shift: true, ..alt }, &e),
             KeyRoute::Bytes(vec![0x1b, b'B'])
         );
         // German layout: Option-L types `@`, which is what the user meant.
-        assert_eq!(route_key("l", Some("@"), &alt, false), KeyRoute::Text);
-        // Named keys keep their Meta prefix.
+        assert_eq!(route_key("l", Some("@"), &alt, &e), KeyRoute::Text);
+        // Named keys carry Alt as a modifier, as Ghostty sends them; on macOS
+        // Option+Left/Right are a word back and forward (Ghostty's keybinds).
         assert_eq!(
-            route_key("left", None, &alt, false),
-            KeyRoute::Bytes(b"\x1b\x1b[D".to_vec())
+            route_key("up", None, &alt, &e),
+            KeyRoute::Bytes(b"\x1b[1;3A".to_vec())
+        );
+        let left = if cfg!(target_os = "macos") {
+            b"\x1bb".to_vec()
+        } else {
+            b"\x1b[1;3D".to_vec()
+        };
+        assert_eq!(route_key("left", None, &alt, &e), KeyRoute::Bytes(left));
+    }
+
+    /// The program's keyboard protocol reaches the encoder: Claude Code's
+    /// Shift+Enter is a newline once it pushes kitty's flags.
+    #[test]
+    fn keys_follow_the_programs_keyboard_protocol() {
+        let shift = Modifiers {
+            shift: true,
+            ..mods()
+        };
+        assert_eq!(
+            route_key("enter", Some("\r"), &shift, &emu(b"\x1b[>1u")),
+            KeyRoute::Bytes(b"\x1b[13;2u".to_vec())
         );
     }
 
@@ -1575,5 +1594,32 @@ mod tests {
     #[test]
     fn drag_threshold_matches_the_gpui_default() {
         assert_eq!(SELECTION_DRAG_THRESHOLD, 2.0);
+    }
+
+    #[test]
+    fn glyphs_snap_to_their_cluster_column() {
+        let glyph = |index, x: f32| gpui::ShapedGlyph {
+            id: gpui::GlyphId(0),
+            position: point(px(x), px(0.)),
+            index,
+            is_emoji: false,
+        };
+        // `->x` from col 3: a ligature 7px wide for `->`, a combining mark 2px
+        // into its base `x`.
+        let mut line = ShapedLine::default();
+        *line = Arc::new(gpui::LineLayout {
+            runs: vec![gpui::ShapedRun {
+                font_id: gpui::FontId(0),
+                glyphs: vec![glyph(0, 0.), glyph(2, 7.), glyph(2, 9.)],
+            }],
+            ..Default::default()
+        });
+        snap_to_cells(&mut line, &[3, 4, 5, 5], 3, px(10.));
+        let xs: Vec<f32> = line.runs[0]
+            .glyphs
+            .iter()
+            .map(|g| f32::from(g.position.x))
+            .collect();
+        assert_eq!(xs, [0., 20., 22.]);
     }
 }

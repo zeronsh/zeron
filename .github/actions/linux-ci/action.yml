@@ -31,6 +31,11 @@ runs:
     - name: Rust toolchain
       shell: bash
       run: rustup show active-toolchain || rustup toolchain install
+    # libghostty-vt (the terminal emulator) builds from Ghostty's source with Zig 0.16.
+    - name: Zig 0.16
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      with:
+        version: 0.16.0
 
     # apt mirrors on hosted runners occasionally stall for minutes; apt-install.sh
     # bounds and retries the download and uses a directory of .debs that main

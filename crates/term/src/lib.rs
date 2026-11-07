@@ -3,4 +3,6 @@
 //! ahead of a remote host's echo once the host has proven it echoes.
 
 pub mod emulator;
+#[cfg(feature = "ghostty")]
+pub mod ghostty;
 pub mod predict;
