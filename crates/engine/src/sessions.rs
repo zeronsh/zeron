@@ -256,6 +256,8 @@ struct Inner {
     /// Per chat: the recovery re-dispatch on its way (see
     /// [`SessionsEngine::recover_stale`]), claimed by its message's dispatch.
     revivals: Mutex<HashMap<String, Revival>>,
+    /// Chats whose revival hasn't returned from its dispatch yet.
+    revivals_starting: Mutex<std::collections::HashSet<String>>,
     /// Per chat: messages a Stop cancelled while they were still on their
     /// way (see [`SessionsEngine::cancel_sent_messages`]).
     cancelled_sends: Mutex<HashMap<String, std::collections::HashSet<String>>>,
@@ -343,6 +345,7 @@ impl SessionsEngine {
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 revive_after_shutdown: std::sync::atomic::AtomicBool::new(true),
                 revivals: Mutex::new(HashMap::new()),
+                revivals_starting: Mutex::new(std::collections::HashSet::new()),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
@@ -1558,9 +1561,11 @@ impl SessionsEngine {
         lock(&self.inner.runs).contains_key(chat_id)
     }
 
-    /// Boot recovery means to bring this chat's killed turn back, and hasn't yet.
+    /// Boot recovery means to bring this chat's killed turn back, and hasn't got
+    /// as far as a run holding the chat. (Not `revivals`: dispatch takes its entry
+    /// before the run is in place, and a row sent in that moment overtakes it.)
     pub(crate) fn revival_pending(&self, chat_id: &str) -> bool {
-        lock(&self.inner.revivals).contains_key(chat_id)
+        lock(&self.inner.revivals_starting).contains(chat_id)
     }
 
     /// Fold an engine-made event (a `show_visual` page, a `show_image` image)
@@ -1798,11 +1803,13 @@ impl SessionsEngine {
                     continuation,
                 },
             );
+            lock(&self.inner.revivals_starting).insert(chat_id.clone());
             request.resume = None; // dispatch re-injects the remembered session
             request.attachments = Vec::new();
             let sessions = self.clone();
             tokio::spawn(async move {
                 let Some(host) = sessions.inner.doc_host() else {
+                    lock(&sessions.inner.revivals_starting).remove(&chat_id);
                     return;
                 };
                 // A message sent since boot owns the chat now: reviving the
@@ -1811,6 +1818,8 @@ impl SessionsEngine {
                 if sessions.has_run(&chat_id) {
                     sessions.inner.drop_revival(&chat_id, &user_id);
                     tracing::info!(chat = %chat_id, "auto-resume skipped: the chat moved on");
+                    lock(&sessions.inner.revivals_starting).remove(&chat_id);
+                    host.kick_drains();
                     return;
                 }
                 match host
@@ -1835,6 +1844,7 @@ impl SessionsEngine {
                 }
                 // Whatever waited behind this revival: a turn it started holds it
                 // again until it ends, and one that didn't start doesn't.
+                lock(&sessions.inner.revivals_starting).remove(&chat_id);
                 host.kick_drains();
             });
         }
