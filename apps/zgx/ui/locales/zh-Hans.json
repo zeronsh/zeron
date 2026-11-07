@@ -2381,6 +2381,7 @@
         "shell_previous_session": "上一个会话",
         "session_n": "会话 {i}",
         "shell_palette": "搜索",
+        "shell_check_updates": "检查更新…",
         "shell_settings": "设置",
         "shell_find": "查找",
         "shell_close": "关闭",

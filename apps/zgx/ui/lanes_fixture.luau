@@ -214,6 +214,9 @@ end
 ui.command { id = "side_running", title = "The side chat runs", run = function()
 	side_says({ running = true })
 end }
+ui.command { id = "side_queue_with_file", title = "A message with a file waits in its queue", run = function()
+	side_says({ queue = { { id = "q2", text = "Queued words" } } })
+end }
 ui.command { id = "side_queue_one", title = "A message waits in its queue", run = function()
 	side_says({ queue = { { id = "q1", text = "Queued words" } } })
 end }
@@ -291,10 +294,24 @@ end
 stub_store.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
 	side_says({ queue = { { id = item, text = "Queued words", editing = true } } })
-	return settled(true, { text = "Queued words" })
+	-- (`q2`: a message with a file, as the host hands it to an edit.)
+	return settled(true, {
+		text = "Queued words",
+		attachments = if item == "q2"
+			then { { path = "/host/uploads/ea958e1e-note.txt", name = "note.txt", kind = "file", on_host = true } }
+			else nil,
+	})
 end
-stub_store.queue_finish = function(id: string, item: string, action: string, text: string?): any
-	note(`queue_finish:{id}:{item}:{action}:{text or ""}`)
+stub_store.queue_finish = function(id: string, item: string, action: string, text: string?, attachments: { any }?): any
+	local files = ""
+	if attachments then
+		local paths = {}
+		for _, a in attachments do
+			table.insert(paths, `{a.path}{if a.on_host then "@host" else ""}`)
+		end
+		files = `:files={table.concat(paths, ",")}`
+	end
+	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
 	side_says({ queue = { { id = item, text = if action == "commit" then text else "Queued words" } } })
 	return settled(true, nil)
 end

@@ -2381,6 +2381,7 @@
         "shell_previous_session": "Previous session",
         "session_n": "Session {i}",
         "shell_palette": "Search",
+        "shell_check_updates": "Check for Updates…",
         "shell_settings": "Settings",
         "shell_find": "Find",
         "shell_close": "Close",
