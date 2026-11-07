@@ -1065,7 +1065,11 @@ local function Composer(): Node
 			on_queue_send = function(item: string)
 				local id = session_id:peek()
 				if id then
-					store.queue(id, { op = "send", item = item })
+					-- Its prompt glides to the top and holds the runway, as a
+					-- sent one does (the host's copy has the queued row's id).
+					T.steer(function()
+						store.queue(id, { op = "send", item = item })
+					end, item)
 				end
 			end,
 			on_queue_edit = function(item: string)

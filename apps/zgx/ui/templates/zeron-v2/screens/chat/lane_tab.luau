@@ -95,6 +95,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		chosen = ui.state(`chat_lane_chosen_{chat}`, {} :: { [string]: boolean }),
 		asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		-- (A steer glides in its own transcript, as its sends do.)
+		name = name,
 	}
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
