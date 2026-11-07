@@ -2643,8 +2643,10 @@ async fn a_send_for_the_queue_still_goes_over_https_on_a_network_with_no_sockets
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(pushes.lock().unwrap().is_empty(), "one failed dial isn't a network without sockets");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(client.stats().pending_pushes > 0);
+    assert!(pushes.lock().unwrap().is_empty(), "ten seconds of failed dials isn't a network without sockets");
+    assert!(!client.socketless(), "a network coming back answers HTTPS first");
     tokio::time::sleep(Duration::from_secs(120)).await;
     assert!(client.socketless());
     assert_eq!(*pushes.lock().unwrap(), vec!["outbox-1".to_string()], "and it's never lost");

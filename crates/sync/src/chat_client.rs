@@ -545,6 +545,8 @@ struct Flags {
     dial_seq: std::sync::atomic::AtomicU64,
     /// Dials failed since the last hello answer.
     failed_dials: std::sync::atomic::AtomicU64,
+    /// When the first of those failed dials was noticed.
+    failing_since: Mutex<Option<tokio::time::Instant>>,
     /// This session's room's answer about the relay layer (`ROOM_*`).
     room_answer: std::sync::atomic::AtomicU8,
     /// Dials keep failing while HTTPS works: this network has no sockets.
@@ -557,6 +559,10 @@ struct Flags {
 /// without sockets. A brief drop isn't one, and nor is a laptop asleep: there
 /// HTTPS fails too.
 const FALLBACK_AFTER_FAILED_DIALS: u64 = 3;
+/// And for this long. Three dials can fail in two seconds, and a network coming back
+/// answers HTTPS first. Calling that socketless tells the room to treat this device as an
+/// old reader, which moves the chat off relaying for every device for ten minutes.
+const FALLBACK_AFTER_FAILING_FOR: Duration = Duration::from_secs(30);
 
 const ROOM_NO_ANSWER: u8 = 0;
 const ROOM_NO_LAYER: u8 = 1;
@@ -1779,8 +1785,19 @@ impl Actor {
         let events = self.events.clone();
         let busy = self.sync_busy.clone();
         let amnesty = self.cursor_amnesty_done.clone();
+        let failed_dials = self.flags.failed_dials.load(Relaxed);
+        let failing_for = {
+            let mut since = lock(&self.flags.failing_since);
+            if failed_dials == 0 {
+                *since = None;
+            } else {
+                since.get_or_insert_with(tokio::time::Instant::now);
+            }
+            since.map_or(Duration::ZERO, |at| at.elapsed())
+        };
         let dials_failing = self.relay.is_some()
-            && self.flags.failed_dials.load(Relaxed) >= FALLBACK_AFTER_FAILED_DIALS;
+            && failed_dials >= FALLBACK_AFTER_FAILED_DIALS
+            && failing_for >= FALLBACK_AFTER_FAILING_FOR;
         let socketless = self.flags.socketless.load(Relaxed);
         // These belong in the room's queue, and a socket is the only way in. A
         // stored row here could depend on ops only peers hold, and it would park on
