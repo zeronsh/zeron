@@ -139,8 +139,8 @@ impl DemoHost {
         }
     }
 
-    /// Heartbeats: device presence + live session rows (so demo Working
-    /// never goes stale behind the 45s gate).
+    /// Heartbeats: device presence + live session rows (so demo Working,
+    /// and a wait, never go stale behind the 45s gate).
     pub(crate) fn start(self: &Arc<Self>, client: &Arc<ClientInner>, cancel: CancellationToken) {
         *lock(&self.cancel) = Some(cancel.clone());
         let host = Arc::downgrade(self);
@@ -163,7 +163,7 @@ impl DemoHost {
                         matches!(
                             s.status,
                             SessionStatus::Working | SessionStatus::AwaitingInput
-                        )
+                        ) || s.waiting.is_some()
                     })
                     .cloned()
                     .collect();
@@ -995,6 +995,28 @@ impl DemoHost {
                     .registry_write(|doc| doc.upsert_chat(&chat))
                     .map_err(|e| ClientError::Internal(e.to_string()))?;
                 serde_json::to_value(&chat).unwrap_or_default()
+            }
+            // The agent stops waiting on its background work: its turn
+            // reads as finished.
+            m::STOP_WAITING => {
+                let chat_id = params["chatId"].as_str().unwrap_or_default();
+                let session = client
+                    .workspace
+                    .state()
+                    .0
+                    .sessions
+                    .iter()
+                    .find(|s| s.chat_id == chat_id && s.waiting.is_some())
+                    .cloned();
+                let stopped = session.is_some();
+                if let Some(mut session) = session {
+                    session.waiting = None;
+                    session.updated_at = Utc::now();
+                    client
+                        .registry_write(|doc| doc.upsert_session(&session))
+                        .map_err(|e| ClientError::Internal(e.to_string()))?;
+                }
+                serde_json::json!({ "stopped": stopped })
             }
             _ => return Ok(None),
         }))
