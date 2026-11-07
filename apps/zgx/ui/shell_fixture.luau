@@ -1163,6 +1163,29 @@ ui.command {
 		publish()
 	end,
 }
+-- Fix the build's side chats as the engine tells their kind, one of them
+-- working, and a subagent's chat beside them (not a side chat); and a side
+-- chat whose chat isn't listed (archived, or gone), in Atlas: the sidebar's
+-- nesting of side chats (tests/sidebar_side_chats).
+ui.command {
+	id = "side_chat_kinds",
+	title = "Fix the build has side chats, a subagent's chat, and one without its chat",
+	run = function()
+		(model :: any).children = {
+			a1 = {
+				{ id = "s1", parent = "a1", kind = "side", title = "Look into the flake", device = "mac", status = "working", updated = NOW - 30, created = NOW - 5 * HOUR, agent = "claude" },
+				{ id = "s2", parent = "a1", kind = "side", title = "Write the changelog", device = "mac", updated = NOW - 2 * HOUR, created = NOW - HOUR, agent = "openai" },
+				{ id = "s3", parent = "a1", kind = "subagent", title = "Run the linter", device = "mac", updated = NOW - 3 * HOUR, created = NOW - 4 * HOUR, agent = "claude" },
+			},
+			archived_parent = {
+				{ id = "s4", parent = "archived_parent", kind = "side", title = "Left behind", project = "atlas", device = "mac", updated = NOW - 4 * HOUR, created = NOW - 6 * HOUR, agent = "claude" },
+			},
+		}
+		-- (What its row says of them: how many work.)
+		find("a1").working_side_chats = 1
+		publish()
+	end,
+}
 -- Atlas crowded: six more sessions under its three, older than them
 -- ("Atlas 1" the newest), so it shows its first five and "Show 4 more".
 ui.command {

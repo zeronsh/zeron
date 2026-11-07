@@ -494,7 +494,8 @@
         "projects_first": "Projects first",
         "empty_projects": "Empty projects",
         "activity": "Activity",
-        "activity_settings": "Activity settings…"
+        "activity_settings": "Activity settings…",
+        "side_chats": "Nest side chats"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
@@ -503,7 +504,9 @@
       "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}",
       "activity": "Activity",
       "working": "Working",
-      "asleep": "Asleep"
+      "asleep": "Asleep",
+      "side_chats_fold": "Fold side chats",
+      "side_chats_unfold": "Show side chats"
     },
     "git": {
       "pull_request": "Pull request",
