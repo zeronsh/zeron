@@ -7846,7 +7846,10 @@ impl Transcript {
                 // turn begins.
                 if let Some(sent) = state.cloud_setup_turn_started() {
                     let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
-                    (false, false, elapsed, sent, None, false)
+                    // A woken machine installing a release says so under
+                    // its steps, in place of the working word.
+                    let updating = state.send_waits_on_update(&chat_id, now);
+                    (false, false, elapsed, sent, None, updating)
                 } else {
                     // During the send→turn window the session row's `started_at`
                     // still belongs to the PREVIOUS turn — a timer based on the
@@ -7883,7 +7886,7 @@ impl Transcript {
                     } else {
                         None
                     };
-                    let updating = sending && state.cloud_machine_updating(&chat_id);
+                    let updating = sending && state.send_waits_on_update(&chat_id, now);
                     (sending, queued, elapsed, turn, booting, updating)
                 }
             };
