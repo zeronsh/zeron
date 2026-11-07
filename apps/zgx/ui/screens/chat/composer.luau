@@ -471,8 +471,7 @@ local function Composer(): Node
 			table.insert(out, {
 				id = Held.PREFIX .. h.id,
 				text = h.text,
-				waiting = if reason then CloudMachine.held_label(reason) else nil,
-				age = if now - h.at > CloudMachine.LONG_WAIT then CloudMachine.age_words(now - h.at) else nil,
+				waiting = CloudMachine.held_label(reason),
 			})
 		end
 		return out
@@ -490,18 +489,14 @@ local function Composer(): Node
 		end)
 	end
 	-- The machine can take them now (a size picked, a fresh machine): what's
-	-- held goes, in order, unless it waited so long it's said first (its row's
-	-- Send, then).
+	-- held goes, in order, however long it waited.
 	ui.effect(function()
 		local chat = session_id:get()
 		if not chat or machine.hold_reason() ~= nil or machine.session() == nil then
 			return
 		end
-		local now = machine.now()
 		for _, e in Held.of(chat) do
-			if now - e.at <= CloudMachine.LONG_WAIT then
-				release(chat, e.id)
-			end
+			release(chat, e.id)
 		end
 	end)
 	local notice = ui.computed(function(): any
@@ -1013,16 +1008,11 @@ local function Composer(): Node
 			can_steer = function(): boolean
 				return running:get()
 			end,
-			-- (A held row is the hold's: sent, or let go, from there.)
+			-- (A held row is the hold's: it goes on its own, or is let go.)
 			on_queue_send = function(row: string)
-				local held, chat = Held.id_of(row), session_id:peek()
-				if held then
-					if chat and not machine.hold_reason() then
-						release(chat, held)
-					end
-					return
+				if not Held.id_of(row) then
+					asks.on_queue_send(row)
 				end
-				asks.on_queue_send(row)
 			end,
 			on_queue_edit = function(row: string)
 				if not Held.id_of(row) then

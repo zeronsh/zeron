@@ -2869,14 +2869,12 @@
       "ago_minutes": "{n, plural, other {# 分钟前}}",
       "ago_hours": "{n, plural, other {# 小时前}}",
       "ago_days": "{n, plural, other {# 天前}}",
-      "held_ready_title": "{n, plural, other {# 条消息等待发送}}",
-      "held_ready_summary": "写于{ago}",
-      "held_ready_body": "写于{ago}，当时此对话的机器还无法运行它。时间太久，它不会自动发送：请从队列中发送或移除。",
       "queued_old_title": "{n, plural, other {# 条排队消息将在唤醒时发送}}",
       "queued_old_summary": "排队于{ago}",
       "queued_old_body": "排队于{ago}，此对话的机器一唤醒就会发送。不再需要的请先从队列中移除。",
       "send_failed_title": "有一条消息未发送",
-      "store_full": "等待 Cloud 机器取走的文件太多。等其中一台取走后再试。"
+      "store_full": "等待 Cloud 机器取走的文件太多。等其中一台取走后再试。",
+      "held_sending": "正在发送…"
     },
     "turn_state": {
       "interrupted": "已中断",

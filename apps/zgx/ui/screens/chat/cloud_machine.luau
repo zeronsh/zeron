@@ -31,7 +31,8 @@ end
 
 export type Notice = { text: string, tone: string?, spinner: boolean?, action: string?, quiet: boolean? }
 
--- How long a message may wait before it's said, and never sent on its own.
+-- How long a queued message may wait before it's said, before a waking machine
+-- runs it.
 M.LONG_WAIT = 3600
 
 -- ── Numbers ────────────────────────────────────────────────────────────────
@@ -153,8 +154,12 @@ function M.hold_reason(s: any?): string?
 	return nil
 end
 
--- What a held message's row says in its action's place.
-function M.held_label(reason: string): string
+-- What a held message's row says in its action's place: why it waits, or
+-- (nil: its machine can take it now) that it's going.
+function M.held_label(reason: string?): string
+	if not reason then
+		return say("held_sending", "Sending…")
+	end
 	return if reason == "fresh" then say("held_fresh_short", "Waits for a fresh machine") else say("held_size_short", "Waits for a size")
 end
 
@@ -243,7 +248,7 @@ function M.percent_full(disk: any): number
 end
 
 export type Alert = {
-	-- wake_blocked, wake_failed, failed, data_expired, send_failed, held_ready, queued_old,
+	-- wake_blocked, wake_failed, failed, data_expired, send_failed, queued_old,
 	-- expiring, disk.
 	kind: string,
 	-- What dismissal compares: a kind that can be put away has one.
@@ -286,13 +291,11 @@ end
 -- Opts: `now` (Unix seconds), `failure` (the last wake's word), `dismissed`
 -- (`level -> bool`, whether a kind at a level is put away). `send_failed`: a
 -- message on its way that stopped trying (the engine's waiting messages): why,
--- and another go. `held_ready`: held
--- messages whose machine can take them now but that waited past LONG_WAIT, so
--- they don't send without a word (`{ count, age }`, age in seconds, the
--- oldest's). `queued_old`: the same of its own queue, which its machine sends
+-- and another go. `queued_old`: messages queued or on their way that waited
+-- past LONG_WAIT, which its machine sends
 -- as it wakes.
 export type Waiting = { count: number, age: number }
-function M.alert(s: any, opts: { now: number, failure: string?, dismissed: ((kind: string, level: string) -> boolean)?, send_failed: { failure: string }?, held_ready: Waiting?, queued_old: Waiting? }): Alert?
+function M.alert(s: any, opts: { now: number, failure: string?, dismissed: ((kind: string, level: string) -> boolean)?, send_failed: { failure: string }?, queued_old: Waiting? }): Alert?
 	local function put_away(kind: string, level: string): boolean
 		return opts.dismissed ~= nil and opts.dismissed(kind, level)
 	end
@@ -360,18 +363,7 @@ function M.alert(s: any, opts: { now: number, failure: string?, dismissed: ((kin
 			action_label = say("retry", "Try again"),
 		}
 	end
-	-- Messages that waited long, before they go: a word first, not a surprise.
-	local held = opts.held_ready
-	if held and held.count > 0 then
-		local ago = M.age_words(held.age)
-		return {
-			kind = "held_ready",
-			tone = "info",
-			title = say("held_ready_title", if held.count == 1 then "A message is waiting to send" else `{held.count} messages are waiting to send`, { n = held.count }),
-			summary = say("held_ready_summary", `Written {ago}`, { ago = ago }),
-			body = say("held_ready_body", `Written {ago}, before this chat's machine could run it. It doesn't send on its own after so long: send it from the queue, or remove it.`, { ago = ago }),
-		}
-	end
+	-- Messages queued long ago that a waking machine runs: a word first.
 	local queued = opts.queued_old
 	local wakes = s.state == "sleeping" or s.state == "stopping" or s.state == "starting" or s.state == "provisioning"
 	if queued and queued.count > 0 and wakes then

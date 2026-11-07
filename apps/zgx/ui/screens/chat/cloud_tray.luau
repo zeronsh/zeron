@@ -123,11 +123,6 @@ function M.bind(c: Bind): any
 		return logic.alert(s, {
 			now = HOUR:get() * 3600,
 			failure = b.wake_state().failure,
-			-- Held ones the machine can take now, but that waited long: a word
-			-- before they go. (Still held back: the alert that holds them says so.)
-			held_ready = if logic.hold_reason(s) then nil else waited(Held.of(s.chat), function(e: any): number?
-				return e.at
-			end),
 			send_failed = sent_failed(),
 			queued_old = waited(about_to_go(), function(q: any): number?
 				return q.at

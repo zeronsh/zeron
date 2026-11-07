@@ -2869,14 +2869,12 @@
       "ago_minutes": "{n, plural, one {# minute ago} other {# minutes ago}}",
       "ago_hours": "{n, plural, one {# hour ago} other {# hours ago}}",
       "ago_days": "{n, plural, one {# day ago} other {# days ago}}",
-      "held_ready_title": "{n, plural, one {A message is waiting to send} other {# messages are waiting to send}}",
-      "held_ready_summary": "Written {ago}",
-      "held_ready_body": "Written {ago}, before this chat's machine could run it. It doesn't send on its own after so long: send it from the queue, or remove it.",
       "queued_old_title": "{n, plural, one {A queued message sends when it wakes} other {# queued messages send when it wakes}}",
       "queued_old_summary": "Queued {ago}",
       "queued_old_body": "Queued {ago}, they send as soon as this chat's machine wakes. Remove any you no longer want from the queue first.",
       "send_failed_title": "A message didn't send",
-      "store_full": "Too many files are waiting for Cloud machines to collect them. Try again once one has."
+      "store_full": "Too many files are waiting for Cloud machines to collect them. Try again once one has.",
+      "held_sending": "Sending…"
     },
     "turn_state": {
       "interrupted": "Interrupted",
