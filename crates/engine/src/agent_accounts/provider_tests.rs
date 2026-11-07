@@ -140,6 +140,7 @@ fn mocked(base: &str) -> ProbeEndpoints {
         openai_auth: base.to_string(),
         openai_port: 0,
         nous_portal: base.to_string(),
+        nan_quota: format!("{base}/api/usage/quota"),
         allow_slot_refresh: true,
         allow_loopback_http: true,
     }
@@ -1203,6 +1204,174 @@ async fn keyed_logins_probe_the_vendor_behind_them() {
     assert!((usage.windows[0].used_fraction - 0.1).abs() < 1e-6);
 }
 
+const NAN_QUOTA: &str = r#"{"periodStart":"2030-01-02","models":[
+    {"model":"deepseek-v4-flash","tokensUsed":250000000,"cap":1000000000,"remaining":750000000,"periodEnd":"2030-02-02T23:32:43Z","extraTokens":0,"extraUsable":true},
+    {"model":"glm5.3-flash","tokensUsed":50000000,"cap":500000000,"remaining":450000000,"periodEnd":"2030-02-02T23:32:43Z","extraTokens":0,"extraUsable":true}]}"#;
+
+#[test]
+fn nan_usage_reads_each_models_share_of_its_cap() {
+    let body: serde_json::Value = serde_json::from_str(NAN_QUOTA).unwrap();
+    let snapshot = nan_usage_snapshot(&body).unwrap();
+    let labels: Vec<_> = snapshot.windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["deepseek-v4-flash", "glm5.3-flash"]);
+    assert!((snapshot.windows[0].used_fraction - 0.25).abs() < 1e-6);
+    assert!((snapshot.windows[1].used_fraction - 0.1).abs() < 1e-6);
+    assert_eq!(
+        snapshot.windows[0].resets_at,
+        Some("2030-02-02T23:32:43Z".parse().unwrap())
+    );
+    assert_eq!(snapshot.plan_label, None);
+
+    let uncapped = serde_json::json!({ "models": [
+        { "model": "free", "tokensUsed": 10, "cap": 0 },
+        { "model": "over", "tokensUsed": 30, "cap": 20 },
+    ]});
+    let snapshot = nan_usage_snapshot(&uncapped).unwrap();
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].used_fraction, 1.0);
+    assert!(
+        nan_usage_snapshot(&serde_json::json!({ "models": [] }))
+            .unwrap()
+            .windows
+            .is_empty()
+    );
+    assert!(nan_usage_snapshot(&serde_json::json!({ "error": "invalid session" })).is_none());
+}
+
+#[test]
+fn nan_is_recognized_by_its_https_host_and_literal_keys_only() {
+    assert!(is_nan_base_url("https://api.nan.builders/v1"));
+    assert!(is_nan_base_url(" https://API.nan.builders/v1/ "));
+    assert!(!is_nan_base_url("http://api.nan.builders/v1"));
+    assert!(!is_nan_base_url("https://api.nan.builders.example.com/v1"));
+    assert!(!is_nan_base_url("https://example.com/api.nan.builders"));
+    assert!(!is_nan_base_url("api.nan.builders"));
+    assert_eq!(
+        literal_api_key(" test-nan-key ").as_deref(),
+        Some("test-nan-key")
+    );
+    for reference in [
+        "{env:NAN_API_KEY}",
+        "{file:~/.nan}",
+        "$NAN_API_KEY",
+        "${NAN}",
+        "!pass nan",
+        "",
+    ] {
+        assert_eq!(literal_api_key(reference), None, "{reference}");
+    }
+}
+
+#[tokio::test]
+async fn nan_keys_in_opencode_and_pi_configs_list_read_only_rows_with_quota_usage() {
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("GET", "/api/usage/quota") => (200, NAN_QUOTA.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let opencode_config = config.opencode_config_dir.join("opencode.json");
+    let opencode = serde_json::json!({
+        "provider": {
+            "nan": { "npm": "@ai-sdk/openai-compatible", "options": {
+                "baseURL": "https://api.nan.builders/v1", "apiKey": "test-nan-key-0001" } },
+            "nan-login": { "options": { "baseURL": "https://api.nan.builders/v1" } },
+            "nan-env": { "options": {
+                "baseURL": "https://api.nan.builders/v1", "apiKey": "{env:NAN_API_KEY}" } },
+            "other": { "options": {
+                "baseURL": "https://api.example.com/v1", "apiKey": "test-other-key" } },
+        }
+    })
+    .to_string();
+    write(&opencode_config, &opencode);
+    let opencode_auth = serde_json::json!({
+        "nan-login": { "type": "api", "key": "test-nan-key-0002" },
+    })
+    .to_string();
+    write(&config.opencode_auth_file, &opencode_auth);
+    let pi_models = config.pi_agent_dir.join("models.json");
+    let models = serde_json::json!({
+        "providers": {
+            "nan": { "baseUrl": "https://api.nan.builders/v1", "api": "openai-completions",
+                     "apiKey": "test-nan-key-0003", "models": [{ "id": "glm5.3-flash" }] },
+            "copy": { "baseUrl": "https://api.nan.builders/v1", "apiKey": "test-nan-key-0003" },
+        }
+    })
+    .to_string();
+    write(&pi_models, &models);
+
+    let snapshot = accounts.list(true).await.unwrap();
+    let opencode_rows = rows(&snapshot, HarnessId::Opencode);
+    let emails: Vec<_> = opencode_rows
+        .iter()
+        .map(|a| a.email.clone().unwrap())
+        .collect();
+    assert_eq!(emails, ["API key ·…0001", "API key ·…0002"]);
+    let pi_rows = rows(&snapshot, HarnessId::Pi);
+    assert_eq!(pi_rows.len(), 1);
+    assert_eq!(pi_rows[0].email.as_deref(), Some("API key ·…0003"));
+    for row in opencode_rows.iter().chain(&pi_rows) {
+        assert!(row.active && !row.switchable && row.saved_at.is_none());
+        assert_eq!(row.provider.as_deref(), Some("nan"));
+        assert_eq!(row.plan_label.as_deref(), Some("NaN"));
+        assert_eq!(row.auth_kind, Some(AgentAuthKind::ApiKey));
+        assert_eq!(row.usage_error, None);
+        let used: Vec<_> = row.usage_windows.iter().map(|w| w.used_fraction).collect();
+        assert_eq!(used, [0.25, 0.1]);
+    }
+    assert_eq!(server.hits("GET /api/usage/quota"), 3);
+
+    let nan_row = &opencode_rows[0];
+    assert!(
+        accounts
+            .activate(HarnessId::Opencode, &nan_row.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        accounts
+            .forget(HarnessId::Opencode, &nan_row.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        accounts
+            .forget(HarnessId::Pi, &pi_rows[0].id)
+            .await
+            .is_err()
+    );
+    assert!(accounts.read_slots(HarnessId::Opencode).is_empty());
+    assert!(accounts.read_slots(HarnessId::Pi).is_empty());
+    assert_eq!(std::fs::read_to_string(&opencode_config).unwrap(), opencode);
+    assert_eq!(
+        std::fs::read_to_string(&config.opencode_auth_file).unwrap(),
+        opencode_auth
+    );
+    assert_eq!(std::fs::read_to_string(&pi_models).unwrap(), models);
+    let cache = std::fs::read_to_string(config.usage_cache_file()).unwrap();
+    assert!(!cache.contains("test-nan-key"));
+}
+
+#[tokio::test]
+async fn a_rejected_nan_key_says_so_instead_of_asking_for_a_sign_in() {
+    let server = MockServer::start(|_, _, _| (401, r#"{"error":"invalid session"}"#.into())).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    write(
+        &config.pi_agent_dir.join("models.json"),
+        &serde_json::json!({ "providers": { "nan": {
+            "baseUrl": "https://api.nan.builders/v1", "apiKey": "test-nan-key-0004" } } })
+        .to_string(),
+    );
+    let pi = rows(&accounts.list(true).await.unwrap(), HarnessId::Pi);
+    assert!(pi[0].usage_windows.is_empty());
+    assert_eq!(
+        pi[0].usage_error.as_deref(),
+        Some("NaN rejected this API key")
+    );
+}
+
 // ── Hermes ──────────────────────────────────────────────────────────────────
 
 fn hermes_auth() -> serde_json::Value {
@@ -1426,8 +1595,21 @@ fn usage_reasons_name_each_providers_vendor_and_cli() {
         "Rate limited by xAI"
     );
     assert_eq!(
-        reason(HarnessId::Opencode, Some("github-copilot"), false, limited),
+        reason(
+            HarnessId::Opencode,
+            Some("github-copilot"),
+            false,
+            limited.clone()
+        ),
         "Rate limited by GitHub"
+    );
+    assert_eq!(
+        reason(HarnessId::Pi, Some("nan"), true, limited),
+        "Rate limited by NaN"
+    );
+    assert_eq!(
+        reason(HarnessId::Opencode, Some("nan"), true, rejected.clone()),
+        "NaN rejected this API key"
     );
     assert_eq!(
         reason(HarnessId::Grok, None, true, rejected.clone()),

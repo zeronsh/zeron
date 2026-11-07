@@ -22,13 +22,14 @@
 //! it to refresh" / "refreshes next time" instead.
 
 use super::stores::{
-    DEVIN_SERVERS, GROK_ISSUERS, NOUS_PORTALS, Upstream, copilot_api_base, devin_api_key,
-    trusted_base, upstream_of,
+    DEVIN_SERVERS, GROK_ISSUERS, NAN_STORE_KEY, NOUS_PORTALS, Upstream, copilot_api_base,
+    devin_api_key, trusted_base, upstream_of,
 };
 use super::*;
 
 pub(super) const GROK_USAGE_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 pub(super) const NOUS_PORTAL: &str = "https://portal.nousresearch.com";
+pub(super) const NAN_QUOTA_URL: &str = "https://cloud-api.nan.builders/api/usage/quota";
 const DEVIN_STATUS_RPC: &str = "exa.seat_management_pb.SeatManagementService/GetUserStatus";
 const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
 /// The CLI version the status call identifies as (the server wants one).
@@ -283,6 +284,10 @@ impl AgentAccounts {
                 .ok_or(ProbeError::UntrustedEndpoint)?;
                 self.copilot_usage(&api, &token).await
             }
+            None if key == NAN_STORE_KEY => {
+                let api_key = str_field(creds, "key").ok_or(missing)?;
+                self.nan_usage(&api_key).await
+            }
             None => Err(ProbeError::NoCredentials {
                 why: NoCredentials::Unsupported,
             }),
@@ -346,6 +351,43 @@ impl AgentAccounts {
         .await?;
         nous_usage_snapshot(&body).ok_or_else(|| schema_error("nous", &body))
     }
+
+    async fn nan_usage(&self, api_key: &str) -> Result<UsageSnapshot, ProbeError> {
+        let body = probe_json(
+            "nan",
+            "usage",
+            self.inner
+                .http
+                .get(&self.inner.endpoints.nan_quota)
+                .bearer_auth(api_key)
+                .header("Accept", "application/json"),
+        )
+        .await?;
+        nan_usage_snapshot(&body).ok_or_else(|| schema_error("nan", &body))
+    }
+}
+
+pub(super) fn nan_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
+    let models = body.get("models")?.as_array()?;
+    let windows = models
+        .iter()
+        .filter_map(|model| {
+            let cap = model
+                .get("cap")
+                .and_then(json_f64)
+                .filter(|cap| *cap > 0.0)?;
+            let used = model.get("tokensUsed").and_then(json_f64)?;
+            Some(AgentUsageWindow {
+                label: str_field(model, "model")?,
+                used_fraction: (used / cap).clamp(0.0, 1.0) as f32,
+                resets_at: parse_when(model.get("periodEnd")),
+            })
+        })
+        .collect();
+    Some(UsageSnapshot {
+        windows,
+        plan_label: None,
+    })
 }
 
 /// Grok's `/billing?format=credits`: the current period, with the Grok Build

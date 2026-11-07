@@ -212,6 +212,7 @@ pub struct AgentAccountsConfig {
     /// OpenCode's `auth.json` (`$XDG_DATA_HOME/opencode/`, default
     /// `~/.local/share/opencode/`).
     pub opencode_auth_file: PathBuf,
+    pub opencode_config_dir: PathBuf,
     /// Pi's agent dir (`$PI_CODING_AGENT_DIR`, default `~/.pi/agent`) —
     /// holds `auth.json`.
     pub pi_agent_dir: PathBuf,
@@ -254,6 +255,7 @@ impl AgentAccountsConfig {
             grok_home: stores::default_grok_home(),
             devin_credentials_file: stores::default_devin_credentials_file(),
             opencode_auth_file: stores::default_opencode_auth_file(),
+            opencode_config_dir: stores::default_opencode_config_dir(),
             pi_agent_dir: stores::default_pi_agent_dir(),
             hermes_home: stores::default_hermes_home(),
             muse_config_root: std::env::var_os("XDG_CONFIG_HOME")
@@ -279,6 +281,7 @@ impl AgentAccountsConfig {
             grok_home: root.join("grok"),
             devin_credentials_file: root.join("devin").join("credentials.toml"),
             opencode_auth_file: root.join("opencode").join("auth.json"),
+            opencode_config_dir: root.join("opencode-config"),
             pi_agent_dir: root.join("pi"),
             hermes_home: root.join("hermes"),
             muse_config_root: root.join("xdg-config"),
@@ -730,6 +733,7 @@ struct ProbeEndpoints {
     openai_port: u16,
     /// The Nous portal (`/api/oauth/account`).
     nous_portal: String,
+    nan_quota: String,
     allow_slot_refresh: bool,
     /// Test seam: admit `http://127.0.0.1` for credential-DEFINED endpoints
     /// (Grok issuer, Devin server, …) so mock servers can stand in. Always
@@ -753,6 +757,7 @@ impl Default for ProbeEndpoints {
             openai_auth: oauth::OPENAI_AUTH.into(),
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
+            nan_quota: usage::NAN_QUOTA_URL.into(),
             allow_slot_refresh: true,
             allow_loopback_http: false,
         }
@@ -1015,6 +1020,15 @@ impl AgentAccounts {
         .into_iter()
         .map(|harness| (harness, self.read_slots(harness)))
         .collect();
+        for (harness, slots) in providers.iter_mut() {
+            for slot in self.nan_slots(*harness) {
+                active_keys
+                    .entry(*harness)
+                    .or_default()
+                    .insert(slot.account_key.clone());
+                slots.push(slot);
+            }
+        }
         // Muse: the zeron-kept account runs use (none: Muse's own login).
         if let Some(slot) = self.muse_active() {
             active_keys
@@ -1058,6 +1072,8 @@ impl AgentAccounts {
                 let active = active_set.is_some_and(|keys| keys.contains(&slot.account_key));
                 let entry = usage.get(&usage_key(harness, &slot.account_key));
                 let snapshot = entry.and_then(|entry| entry.usage.as_ref());
+                let read_only = harness == HarnessId::Hermes
+                    || stores::is_config_login(harness, slot.store_key.as_deref());
                 accounts.push(AgentAccount {
                     id: slot.id.clone(),
                     harness,
@@ -1089,8 +1105,8 @@ impl AgentAccounts {
                     organization: slot.profile.organization.clone(),
                     auth_kind: Some(slot.profile.auth_kind),
                     // Hermes' pool is Hermes' to order (see module docs).
-                    switchable: harness != HarnessId::Hermes,
-                    saved_at: (harness != HarnessId::Hermes).then_some(slot.saved_at),
+                    switchable: !read_only,
+                    saved_at: (!read_only).then_some(slot.saved_at),
                     provider: provider_group(harness, slot.store_key.as_deref()),
                 });
             }
@@ -1505,6 +1521,12 @@ impl AgentAccounts {
             .find(|a| a.harness == harness && a.id == account_id);
         // Per-provider agents (OpenCode, Pi): the store entry this row is.
         let store_key = row.and_then(|a| a.provider.clone());
+        if stores::is_config_login(harness, store_key.as_deref()) {
+            return Err(EngineError::Other(format!(
+                "This API key lives in {}'s own config — remove it there.",
+                stores::cli_name(harness)
+            )));
+        }
         if row.is_some_and(|a| a.active) {
             // Removing the live login signs the CLI out — dropping only the
             // slot would re-detect (and re-snapshot) it on the next list, and
@@ -4291,6 +4313,9 @@ fn usage_error_message(
         // revoked, whichever login it is.
         ProbeError::Unauthorized { .. } if harness == HarnessId::Devin => {
             "Signed out — sign in again".to_string()
+        }
+        ProbeError::Unauthorized { .. } if stores::is_config_login(harness, store_key) => {
+            format!("{provider} rejected this API key")
         }
         ProbeError::Unauthorized { .. } if active => {
             // The CLI owns (and refreshes) the live token; it just hasn't yet.
