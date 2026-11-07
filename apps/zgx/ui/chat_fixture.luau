@@ -1059,6 +1059,41 @@ ui.command {
 		}
 	end,
 }
+-- A long chat: many long messages, landing at once (a chat of a day's
+-- work), for what the transcript asks of each as it's listed and scrolled.
+ui.command {
+	id = "many_long_messages",
+	title = "Many long messages",
+	run = function()
+		local words = string.rep("A line of a long message, about what was done and why. ", 120)
+		for i = 1, 400 do
+			local mine = i % 2 == 1
+			store.messages:push {
+				id = `many{i}`,
+				role = if mine then "user" else "assistant",
+				text = `Message {i}: {words}`,
+				model = if mine then nil else "Opus",
+				blocks = if mine then nil else { { id = "t", kind = "text", text = `Message {i}: {words}` } },
+			}
+		end
+	end,
+}
+-- The long reply goes on: a part more at its end, as a reply streaming
+-- grows (its earlier runs stay as they are).
+ui.command {
+	id = "long_reply_grows",
+	title = "The long reply grows",
+	run = function()
+		local n = store.messages:len()
+		local m = store.messages:peek()[n]
+		if not m or m.id ~= "long1" then
+			return
+		end
+		local text = m.text .. "\n\nAnd one part more, at its end."
+		store.messages:set_key({ n, "text" }, text)
+		store.messages:set_key({ n, "blocks" }, { { id = "t", kind = "text", text = text } })
+	end,
+}
 -- The shell's ⌘/: the composer's model picker opened.
 ui.command {
 	id = "open_model_picker",
