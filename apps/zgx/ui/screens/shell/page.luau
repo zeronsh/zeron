@@ -924,16 +924,18 @@ return function(props: Props): Node
 		local moved = now.owner ~= seen.owner
 		local was = seen
 		seen = now
-		-- What comes or goes with it drifts with its edge and fades: its
-		-- content as it opens or closes (toward the window's right), the
-		-- page's as the panel expands over it (toward the sidebar). The route
-		-- moving shows each as it is there, at once.
+		-- What comes or goes with it stands still under its edge and only
+		-- fades a little (ds/motion `content`): its content as it opens or
+		-- closes, the page's as the panel expands over it. The route moving
+		-- shows each as it is there, at once.
 		if now.shown ~= was.shown and content_el then
-			anime.animate(content_el, motion.content(now.shown, 1, moved))
+			anime.animate(content_el, motion.content(now.shown, moved))
 		end
 		if now.expanded ~= was.expanded then
 			if page_el then
-				anime.animate(page_el, motion.content(not now.expanded, -1, moved))
+				-- (Given back from rest, where it stood hidden under the panel, it
+				-- comes from the floor, not from nothing.)
+				anime.animate(page_el, motion.content(not now.expanded, moved, not now.expanded and easing == nil))
 			end
 			-- (Measured before this step changes anything: the page's room now,
 			-- and the row it shares with the panel.)
@@ -994,6 +996,11 @@ return function(props: Props): Node
 					easing = nil
 					stepping:set(false)
 					holding:set(false)
+					-- (The page under the panel expanded: hidden, not left at the
+					-- fade's floor as a sliver of its edge.)
+					if page_el and shown:peek() and shell_view.expanded:peek() then
+						anime.animate(page_el, { opacity = 0, duration = 0 } :: any)
+					end
 					-- (The page given back: its own width again, the one it was
 					-- held at.)
 					if not (shown:peek() and shell_view.expanded:peek()) and page_hold:peek() ~= nil then
@@ -1123,7 +1130,7 @@ return function(props: Props): Node
 							self = "end",
 							on_mount = function(el: any)
 								content_el = el
-								anime.animate(el, motion.content(shown:peek(), 1, true))
+								anime.animate(el, motion.content(shown:peek(), true))
 							end,
 						},
 					}
@@ -1506,12 +1513,11 @@ return function(props: Props): Node
 						return near:get()
 					end, card_ref),
 				}
-				-- (Made as it's added to the split: it comes in from the gap
-				-- it opens out of, faded in, as its edge reveals it.)
+				-- (Made as it's added to the split: it stands where it lands as
+				-- the gap it opens out of reveals it, only fading in a little.)
 				lane.on_mount = function(el: any)
-					local x, y = splits.opening_from(id)
-					if x ~= nil then
-						anime.animate(el, motion.arrive(x, y :: number))
+					if splits.just_added(id) then
+						anime.animate(el, motion.content(true, false, true))
 					end
 				end
 				tracks_near(lane, near)
@@ -1786,11 +1792,11 @@ return function(props: Props): Node
 			pointer_events = function(): any
 				return if grouped() then "none" else "auto"
 			end,
-			-- (Its drift and fade as the panel expands over it: ds/motion
-			-- `content`. Gone, it takes no clicks.)
+			-- (Its fade as the panel expands over it: ds/motion `content`.
+			-- Gone, it takes no clicks.)
 			on_mount = function(el: any)
 				page_el = el
-				anime.animate(el, motion.content(not expanded(), -1, true))
+				anime.animate(el, { opacity = if expanded() then 0 else 1, duration = 0 } :: any)
 			end,
 			-- (The split's panes, under the page's card: in a split, their cards
 			-- are the chats, and the page's card is the composer's frame over

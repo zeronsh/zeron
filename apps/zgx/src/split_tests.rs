@@ -147,10 +147,12 @@ fn a_chat_dragged_to_a_chat_s_edge_sits_beside_it_and_is_focused() {
 }
 
 /// A chat dropped beside another opens out of the gap at the page's right:
-/// what's in its pane fades in a step at a time as it drifts in from there
-/// (ds/motion `arrive`), and the pane it splits from never fades.
+/// what's in its pane stands where it lands in its pane as the gap opens
+/// (never drifting in) and only fades in a little, from the floor (0.3), a
+/// step at a time (ds/motion `content`); the pane it splits from never
+/// fades.
 #[test]
-fn a_pane_just_added_fades_in_from_its_gap() {
+fn a_pane_just_added_only_fades_in_a_little_where_it_lands() {
     let mut app = mount(&scratch("arrive"));
     open(&mut app, "Fix the build");
     let page = app.bounds("shell-page");
@@ -166,14 +168,27 @@ fn a_pane_just_added_fades_in_from_its_gap() {
     app.frames(4);
     pointer(&mut app, InputEvent::PointerUp { x, y, button });
     app.ui.input.forget_clicks();
+    // (Where it's painted in its pane, across.)
+    let off = |app: &mut TestApp| -> f32 {
+        let lane = app.find("#split-lane-a3").expect("its lane");
+        app.ui.prepare_frame();
+        let scene = app.ui.scene.borrow();
+        let pane = scene.parent(lane).expect("its pane");
+        scene.transformed_bounds(lane).x - scene.transformed_bounds(pane).x
+    };
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
     let seen: Vec<(f32, f32)> = (0..24)
         .map(|_| {
             app.frames(1);
+            let at = off(&mut app);
+            (lo, hi) = (lo.min(at), hi.max(at));
             (app.opacity("split-lane-a3"), app.opacity("split-lane-a1"))
         })
         .collect();
+    assert!(hi - lo <= 0.011, "it stands where it lands: {lo} to {hi} in its pane");
     let between = seen.iter().filter(|s| s.0 > 0.02 && s.0 < 0.98).count();
     assert!(between >= 3, "fades in: {seen:?}");
+    assert!(seen.iter().all(|s| s.0 >= 0.29), "a little, from the floor: {seen:?}");
     assert!(seen.windows(2).all(|w| w[1].0 >= w[0].0 - 1e-3), "only in: {seen:?}");
     assert!(seen.iter().all(|s| (s.1 - 1.).abs() < 1e-3), "the pane beside it stays: {seen:?}");
     let last = seen.last().unwrap();

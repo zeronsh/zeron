@@ -281,7 +281,7 @@ local UNKNOWN = "Unknown device"
 local FLY_ROOM = 400
 -- How everything moves: one ease.
 local SLIDE = { duration = 260, ease = "out(3)" }
-local FADE = motion.fade
+local FADE = { duration = 160 }
 -- Rows moving aside for a dragged one, and closing up after it (Zeron's
 -- TAB_SLIDE: 150 ms, easing out).
 local DRAG_SLIDE = { duration = 150, ease = "out(3)" }
