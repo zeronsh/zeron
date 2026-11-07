@@ -1,7 +1,7 @@
 -- A seam: a column's edge or a split's divider, dragged to resize what's
 -- beside it (Zeron's resize handle, crates/ui shell.rs `resize_handle`).
 -- It takes the pointer `REACH` points each side of its middle, under the
--- top bar; its gap lights under the pointer and as it's dragged, fading
+-- top bar (the sidebar's edge, under the page, on its own side only); its gap lights under the pointer and as it's dragged, fading
 -- (ds/motion `hover`); dragged past its limit it bounces (ds/motion
 -- `bounce`) and its gap dims while the drag is held there. A double click
 -- puts it back (each seam says where).

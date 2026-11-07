@@ -116,6 +116,9 @@ function M.toggle_expanded()
 	end
 	M.expanded_panels:set_key(id, if M.expanded:peek() then nil else true)
 end
+-- Counts the sidebar's edge double-clicked (its width put back): the page
+-- splits the chat and the panel again then.
+M.seam_reset = ui.state("shell_seam_reset", 0)
 -- The command palette (⌘K), open.
 M.palette = ui.state("shell_palette_open", false)
 -- New project's palette, open (screens/shell/add_project).

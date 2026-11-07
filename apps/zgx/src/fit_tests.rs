@@ -588,9 +588,12 @@ fn double_click(app: &mut TestApp, (x, y): (f32, f32)) {
 }
 
 /// Double-clicking a seam puts it back, easing there as a toggle does: the
-/// sidebar's edge to its default width, the panel's to its share (the width
-/// dragged forgotten), as Zeron's `reset_panel_widths`. Each seam takes the
-/// pointer 10 points either side of its middle, under the top bar.
+/// sidebar's edge to its default width, the chat and the panel splitting
+/// again with it, and the panel's to its share (either forgetting a width
+/// dragged), as Zeron's `reset_panel_widths`. The panel's seam takes the pointer 10 points
+/// either side of its middle, under the top bar; the sidebar's, 10 inside
+/// its gap's middle to the gap's far side (on its own side: the top bar's
+/// first tabs reach over its head).
 #[test]
 fn double_clicking_a_seam_puts_it_back() {
     let mut app = mount();
@@ -602,25 +605,34 @@ fn double_clicking_a_seam_puts_it_back() {
     app.frames(60);
     for label in ["Resize sidebar", "Resize files"] {
         let b = app.bounds(&format!("\"{label}\""));
-        assert!((b.width - 20.).abs() < 0.5, "{label} takes the pointer 10 either side: {}", b.width);
+        if label == "Resize files" {
+            assert!((b.width - 20.).abs() < 0.5, "{label} takes the pointer 10 either side: {}", b.width);
+        } else {
+            assert!(b.width > 10. && b.width < 20., "{label} takes the pointer on its own side: {}", b.width);
+        }
         assert!(b.y >= 42. - 0.5, "{label} starts under the top bar: {}", b.y);
     }
     let sidebar = |app: &mut TestApp| app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
     let panel = |app: &mut TestApp| app.bounds("#shell-files").width;
+    let share = content_split(1500. - 256.);
+    // (The panel's width chosen first: the sidebar's reset forgets it too.)
+    drag(&mut app, "\"Resize files\"", 100.);
+    app.frames(30);
+    assert!(panel(&mut app) < share - 60., "dragged to {}", panel(&mut app));
     drag(&mut app, "\"Resize sidebar\"", 90.);
     app.frames(30);
     assert!((sidebar(&mut app) - 346.).abs() < 0.5, "dragged to {}", sidebar(&mut app));
-    // (Near the reach's end, in the chat's side.)
-    let at = seam_at(&mut app, "Resize sidebar", 9.);
-    double_click(&mut app, at);
+    // (Near the reach's end, in the sidebar's side.)
+    let b = app.bounds("\"Resize sidebar\"");
+    double_click(&mut app, (b.x + 1., b.y + b.height / 2.));
     app.frames(3);
     let mid = sidebar(&mut app);
     assert!(mid > 256.5 && mid < 345.5, "it eases back: {mid} on the way");
     app.frames(60);
     assert!((sidebar(&mut app) - 256.).abs() < 0.5, "back to its default: {}", sidebar(&mut app));
+    assert!((panel(&mut app) - share).abs() < 0.5, "the panel back to its share {share}: {}", panel(&mut app));
     drag(&mut app, "\"Resize files\"", -150.);
     app.frames(30);
-    let share = content_split(1500. - 256.);
     let dragged = panel(&mut app);
     assert!(dragged > share + 100., "dragged to {dragged}");
     let at = seam_at(&mut app, "Resize files", -9.);
