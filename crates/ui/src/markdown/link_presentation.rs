@@ -642,6 +642,7 @@ mod tests {
                 chat: Some("chat".into()),
                 root: "/repo".into(),
                 local: true,
+                own: true,
             }])),
             handler: Rc::new(|_, _, _| LinkOutcome::Rejected),
         });
