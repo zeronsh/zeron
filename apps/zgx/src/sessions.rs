@@ -14,9 +14,10 @@
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
 //!                 updated, created, harness?, agent?, model?,
 //!                 running_subagents, side_chats, working_side_chats } },
-//!     children = { [parent id] = { { id, parent, title, device, status?,
-//!                 updated, created, harness?, agent? } } } (its side chats,
-//!                 newest first),
+//!     children = { [parent id] = { { id, parent, kind?, title, device, project?,
+//!                 branch?, status?, updated, created, harness?, agent? } } }
+//!                 (its side chats, newest first; `kind`: "side" or
+//!                 "subagent", as newer engines say, else nil),
 //!     places = { pinned = { id }, sections = { { id, name, sessions = { id },
 //!                collapsed } } },
 //!     archived = { chat, … } (as `chats`, the most recently moved first),
@@ -642,6 +643,9 @@ impl Sessions {
                 *working_children.entry(parent.to_owned()).or_default() += 1;
             }
             let harness = c["config"]["harness"].as_str();
+            // (As a top-level chat's: a project that isn't known leaves it
+            // in none.)
+            let project = c["spaceId"].as_str().filter(|s| known_spaces.contains(s));
             let with = RowWith {
                 status,
                 waiting: None,
@@ -649,7 +653,7 @@ impl Sessions {
                 running_subagents: 0,
                 side_chats: 0,
                 working_side_chats: 0,
-                known_project: false,
+                known_project: project.is_some(),
                 agent_icon: harness.and_then(crate::agents::registry_icon),
             };
             if let Some(row) = rows.get(id).filter(|row| row.with == with) {
@@ -672,8 +676,13 @@ impl Sessions {
             let value = Value::record([
                 ("id", Value::from(id)),
                 ("parent", Value::from(parent)),
+                ("kind", opt(c["childKind"].as_str())),
                 ("title", Value::from(title)),
                 ("device", Value::from(c["deviceId"].as_str().unwrap_or_default())),
+                // Where it stands where it has no parent to stand under (the
+                // sidebar's nesting of side chats): its project and branch.
+                ("project", opt(project)),
+                ("branch", opt(c["branch"].as_str())),
                 ("status", status.map_or(Value::Nil, Value::from)),
                 ("updated", Value::from(updated as f64)),
                 ("created", Value::from(created as f64)),
@@ -1731,7 +1740,7 @@ mod tests {
         let s = super::Sessions::default();
         *s.chats.borrow_mut() = serde_json::json!([
             { "id": "p", "title": "Parent", "deviceId": "d", "createdAt": "2026-11-01T10:00:00Z", "config": { "harness": "claude-code" } },
-            { "id": "a", "parentChatId": "p", "title": "", "lastMessagePreview": "Looking at the tests", "deviceId": "d",
+            { "id": "a", "parentChatId": "p", "childKind": "side", "branch": "side-work", "title": "", "lastMessagePreview": "Looking at the tests", "deviceId": "d",
               "createdAt": "2026-11-01T10:05:00Z", "lastMessageAt": "2026-11-01T10:06:00Z", "config": { "harness": "codex" } },
             { "id": "b", "parentChatId": "p", "deviceId": "d", "createdAt": "2026-11-01T10:07:00Z" },
             { "id": "gone", "parentChatId": "p", "archived": true, "deviceId": "d", "createdAt": "2026-11-01T10:08:00Z" },
@@ -1762,6 +1771,10 @@ mod tests {
         assert_eq!(kids[0].field("title").map(crate::auth::text).as_deref(), Some("New side chat"));
         assert_eq!(kids[1].field("status").map(crate::auth::text).as_deref(), Some("working"));
         assert_eq!(kids[1].field("parent").map(crate::auth::text).as_deref(), Some("p"));
+        // What kind it is, where the engine says (else nil), and its branch.
+        assert_eq!(kids[1].field("kind").map(crate::auth::text).as_deref(), Some("side"));
+        assert!(matches!(kids[0].field("kind"), None | Some(zgx_script::Value::Nil)));
+        assert_eq!(kids[1].field("branch").map(crate::auth::text).as_deref(), Some("side-work"));
         let p = chat(&v, "p");
         assert_eq!(p.field("side_chats").and_then(|n| n.as_f64()), Some(2.));
         assert_eq!(p.field("working_side_chats").and_then(|n| n.as_f64()), Some(1.));
