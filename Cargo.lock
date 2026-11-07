@@ -14096,6 +14096,7 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror 2.0.20",
+ "tiny-skia",
  "tokio",
  "tokio-util",
  "tracing",

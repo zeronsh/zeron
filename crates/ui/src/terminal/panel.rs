@@ -618,6 +618,15 @@ impl TerminalPanel {
         }
     }
 
+    /// Feed PTY output to a tab directly, as the engine stream would; for
+    /// offscreen fixtures that render a terminal without an engine.
+    pub fn feed_tab(&mut self, chat: &str, key: u64, bytes: &[u8], cx: &mut Context<Self>) {
+        if let Some(tab) = self.tab_mut(chat, key) {
+            tab.emulator.feed(bytes);
+            cx.notify();
+        }
+    }
+
     /// Make `key` the rendered tab of the selected chat.
     pub fn select_tab_by_key(&mut self, key: u64, cx: &mut Context<Self>) {
         let chat = self.selected_chat(cx);
