@@ -469,12 +469,21 @@ Rules:
   (`github_account_needs_reconnect:`). They never move to another login that reaches the
   repository, since that would change who authors the commits. Refreshes are single-flighted per
   login, so one login's rotation can't touch another's.
-- **Disconnecting one** (`DELETE accounts/github/{slot}`) deletes its token. Its sessions stay on
-  it: the next grant refuses with `github_account_disconnected:` and how to reconnect, and the
-  engine ends the run there saying so, removing the git credentials. A token already handed out
-  lives out its hour (at most) unless the machine asks again first, and a run always asks. The
-  same login connected again resumes them, as sessions hold its identity rather than its row. New
-  sessions use whichever logins are left. `DELETE credentials/github` still wipes every login.
+- **Disconnecting one** (`DELETE accounts/github/{slot}`) deletes its token and revokes its
+  tokens with GitHub at once: its user token (`DELETE /applications/{client_id}/token`, with the
+  App's client id and secret) and every installation token minted for its sessions
+  (`DELETE /installation/token`, as the token itself), so a token already on a machine stops
+  working mid-turn. Installation tokens are recorded with the login they were minted for
+  (`github_tokens`, kept until they expire) and never shared between logins, so this never
+  touches another login's sessions. The disconnect succeeds whether or not GitHub answers: what
+  it didn't revoke waits in `github_revocations` and is retried on the object's alarm (1, 2,
+  4… minutes, at most an hour apart) until GitHub answers, or until the token would have expired
+  anyway. A token GitHub no longer knows counts as revoked. One minted while its login was being
+  disconnected is revoked and never handed out. The sessions stay on the login: the next grant
+  refuses with `github_account_disconnected:` and how to reconnect, and the engine ends the run
+  there saying so, removing the git credentials. The same login connected again resumes them, as
+  sessions hold its identity rather than its row. New sessions use whichever logins are left.
+  `DELETE credentials/github` still wipes every login, revoking all of theirs.
 - **A session's login that lost the repository** refuses with `github_account_no_access:`, again
   without moving.
 - **Installing the App**: `githubInstallUrl` is GitHub's chooser for the browser's account; a

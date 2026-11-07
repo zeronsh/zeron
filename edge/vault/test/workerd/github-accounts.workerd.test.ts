@@ -4,7 +4,7 @@
  * proves WHICH login's token asked.
  */
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VaultCaller } from "../../src/api";
 import { accountStub } from "../../src/names";
@@ -31,6 +31,8 @@ interface FakeLogin {
   down?: boolean;
   /** GitHub doesn't answer `/user` for it (a login lookup that fails). */
   anonymous?: boolean;
+  /** Revoked with GitHub: its user token no longer works. */
+  userTokenRevoked?: boolean;
   readonly installations: { id: number; target: string; type?: string }[];
   /** `owner/name` → may this login push. */
   repos: Record<string, boolean>;
@@ -52,12 +54,33 @@ const sees = (who: FakeLogin, repo: string): boolean | undefined =>
 const fakeGithub = (...people: FakeLogin[]) => {
   const pending: FakeLogin[] = [];
   const asked: { url: string; token: string | undefined; method: string }[] = [];
+  /** Installation tokens GitHub revoked, and user tokens. */
+  const revoked = { installation: new Set<string>(), user: new Set<string>() };
+  /** While true, GitHub doesn't answer revocations. */
+  const outage = { revoke: false };
+  /** Called as GitHub mints an installation token (a test's hook into the middle of a grant). */
+  const hooks: { onMint?: () => Promise<void> } = {};
   let minted = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "");
     const method = init?.method ?? "GET";
     asked.push({ url, token, method });
+    if (url === `${API}/installation/token` && method === "DELETE") {
+      if (outage.revoke) return json({ message: "boom" }, 502);
+      if (!token || revoked.installation.has(token)) return json({ message: "Bad credentials" }, 401);
+      revoked.installation.add(token);
+      return new Response(null, { status: 204 });
+    }
+    if (url === `${API}/applications/Iv1.testclient/token` && method === "DELETE") {
+      if (outage.revoke) throw new Error("network down");
+      const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { access_token?: string };
+      const owner = people.find((p) => p.token === body.access_token);
+      if (!owner || owner.userTokenRevoked) return json({ message: "Not Found" }, 404);
+      owner.userTokenRevoked = true;
+      revoked.user.add(owner.login);
+      return new Response(null, { status: 204 });
+    }
     if (url === GITHUB_DEVICE_CODE_URL) {
       return json({ device_code: "dc", user_code: "ABCD-EFGH", verification_uri: "https://github.com/login/device", expires_in: 900, interval: 5 });
     }
@@ -85,7 +108,9 @@ const fakeGithub = (...people: FakeLogin[]) => {
     const who = people.find((p) => p.token === token);
     const mint = url.match(/\/app\/installations\/(\d+)\/access_tokens$/);
     if (mint) {
-      return json({ token: `ghs_inst${mint[1]}_${++minted}`, expires_at: new Date(Date.now() + HOUR).toISOString() }, 201);
+      const n = ++minted;
+      await hooks.onMint?.();
+      return json({ token: `ghs_inst${mint[1]}_${n}`, expires_at: new Date(Date.now() + HOUR).toISOString() }, 201);
     }
     if (!who) throw new Error(`unexpected upstream call ${url}`);
     if (who.revoked) return json({ message: "Bad credentials" }, 401);
@@ -133,6 +158,9 @@ const fakeGithub = (...people: FakeLogin[]) => {
   });
   return {
     asked,
+    revoked,
+    outage,
+    hooks,
     approveAs: (who: FakeLogin) => pending.push(who),
     tokensAsking: (fragment: string) => asked.filter((a) => a.url.includes(fragment)).map((a) => a.token)
   };
@@ -581,7 +609,7 @@ describe("disconnecting one login", () => {
     expect(listing.repos.map((r) => r.fullName)).toEqual(["home-user/blog"]);
     expect(listing.installations.map((i) => i.id)).toEqual([200]);
     const cached = await runInDurableObject(accountStub(env, userId, "github"), (_instance, state) =>
-      state.storage.sql.exec<{ installation_id: number }>("SELECT installation_id FROM repo_tokens").toArray()
+      state.storage.sql.exec<{ installation_id: number }>("SELECT installation_id FROM github_tokens").toArray()
     );
     expect(cached.map((row) => row.installation_id)).toEqual([200]);
 
@@ -803,5 +831,145 @@ describe("installing the App", () => {
     const refused = await grant(await session(), "nameless/app");
     expect(refused).toMatchObject({ ok: false, error: "not_found" });
     expect(!refused.ok && refused.message).toContain("install it at https://github.com/apps/zeron-test/installations/new,");
+  });
+});
+
+describe("revoking a disconnected login's tokens", () => {
+  const queued = (userId: string) =>
+    runInDurableObject(accountStub(env, userId, "github"), (_instance, state) =>
+      state.storage.sql.exec<{ kind: string; attempts: number; next_at: number }>("SELECT kind, attempts, next_at FROM github_revocations").toArray()
+    );
+  const alarmAt = (userId: string) =>
+    runInDurableObject(accountStub(env, userId, "github"), (_instance, state) => state.storage.getAlarm());
+  /** Make every queued revocation due now, then run the object's alarm. */
+  const alarmNow = async (userId: string) => {
+    await runInDurableObject(accountStub(env, userId, "github"), (_instance, state) => {
+      state.storage.sql.exec("UPDATE github_revocations SET next_at = ?", Date.now() - 1);
+    });
+    return runDurableObjectAlarm(accountStub(env, userId, "github"));
+  };
+  const slotOf = async (caller: VaultCaller, login: string) =>
+    value(await vault().accounts(caller, "github")).find((a) => a.account === login)!.slot;
+
+  it("revokes its user token and every installation token minted for its sessions, and no one else's", async () => {
+    const { caller, userId, parent, session, grant } = await cloudUser();
+    const work = person("work-me", 1, [sharedInstall], { "shared-org/app": true });
+    const home = person("home-me", 2, [sharedInstall], { "shared-org/app": true });
+    const github = fakeGithub(work, home);
+    await connect(caller, github, work, [parent]);
+    const onWork = await session();
+    const onWork2 = await session();
+    const workTokens = [value(await grant(onWork, "shared-org/app")).accessToken];
+    // A second token for the same repository (the first nearly spent).
+    await runInDurableObject(accountStub(env, userId, "github"), (_instance, state) => {
+      state.storage.sql.exec("UPDATE github_tokens SET expires_at = ?", Date.now() + 10 * 60_000);
+    });
+    workTokens.push(value(await grant(onWork2, "shared-org/app")).accessToken);
+    expect(new Set(workTokens).size).toBe(2);
+    await connect(caller, github, home, [parent]);
+    const onHome = await session();
+    const homeToken = value(await grant(onHome, "shared-org/app")).accessToken;
+    // Never one token for two logins, even on one repository.
+    expect(workTokens).not.toContain(homeToken);
+
+    value(await vault().forgetAccount(caller, "github", await slotOf(caller, "work-me")));
+    expect([...github.revoked.installation].sort()).toEqual([...workTokens].sort());
+    expect([...github.revoked.user]).toEqual(["work-me"]);
+    expect(await queued(userId)).toEqual([]);
+
+    // The other login's session keeps its very token; the disconnected one's says why.
+    expect(value(await grant(onHome, "shared-org/app")).accessToken).toBe(homeToken);
+    const refused = await grant(onWork, "shared-org/app");
+    expect(refused).toMatchObject({ ok: false, error: "needs_reconnect" });
+    expect(!refused.ok && refused.message).toContain("github_account_disconnected");
+  });
+
+  it("disconnects even when GitHub can't be reached, and revokes on the alarm once it can", async () => {
+    const { caller, userId, parent, session, grant } = await cloudUser();
+    const work = person("work-me", 1, [workInstall], { "work-org/api": true });
+    const github = fakeGithub(work);
+    await connect(caller, github, work, [parent]);
+    const token = value(await grant(await session(), "work-org/api")).accessToken;
+
+    github.outage.revoke = true;
+    const left = await vault().forgetAccount(caller, "github", await slotOf(caller, "work-me"));
+    expect(value(left)).toEqual([]);
+    expect(github.revoked.installation.size + github.revoked.user.size).toBe(0);
+    const waiting = await queued(userId);
+    expect(waiting.map((r) => r.kind).sort()).toEqual(["installation", "user"]);
+    expect(waiting.every((r) => r.attempts === 1 && r.next_at > Date.now())).toBe(true);
+    expect(await alarmAt(userId)).not.toBeNull();
+
+    // Still down: tried again, later still.
+    expect(await alarmNow(userId)).toBe(true);
+    expect((await queued(userId)).every((r) => r.attempts === 2)).toBe(true);
+
+    github.outage.revoke = false;
+    expect(await alarmNow(userId)).toBe(true);
+    expect([...github.revoked.installation]).toEqual([token]);
+    expect([...github.revoked.user]).toEqual(["work-me"]);
+    expect(await queued(userId)).toEqual([]);
+  });
+
+  it("a revocation past its token's end is dropped, not sent", async () => {
+    const { caller, userId, parent, session, grant } = await cloudUser();
+    const work = person("work-me", 1, [workInstall], { "work-org/api": true });
+    const github = fakeGithub(work);
+    await connect(caller, github, work, [parent]);
+    value(await grant(await session(), "work-org/api"));
+    github.outage.revoke = true;
+    value(await vault().forgetAccount(caller, "github", await slotOf(caller, "work-me")));
+    await runInDurableObject(accountStub(env, userId, "github"), (_instance, state) => {
+      state.storage.sql.exec("UPDATE github_revocations SET give_up_at = ?", Date.now() - 1);
+    });
+    github.outage.revoke = false;
+    const before = github.asked.length;
+    await alarmNow(userId);
+    expect(github.asked.slice(before).filter((a) => a.method === "DELETE")).toEqual([]);
+    expect(await queued(userId)).toEqual([]);
+  });
+
+  it("a token GitHub mints while its login is being disconnected is revoked, never handed out", async () => {
+    const { caller, userId, parent, session, grant } = await cloudUser();
+    const work = person("work-me", 1, [workInstall], { "work-org/api": true });
+    const github = fakeGithub(work);
+    await connect(caller, github, work, [parent]);
+    const slot = await slotOf(caller, "work-me");
+    github.hooks.onMint = async () => {
+      github.hooks.onMint = undefined;
+      value(await vault().forgetAccount(caller, "github", slot));
+    };
+    const raced = await grant(await session(), "work-org/api");
+    expect(raced).toMatchObject({ ok: false, error: "needs_reconnect" });
+    expect(github.revoked.installation.size).toBe(1);
+    expect(await queued(userId)).toEqual([]);
+  });
+
+  it("disconnecting all of GitHub revokes every login's tokens", async () => {
+    const { caller, parent, session, grant } = await cloudUser();
+    const work = person("work-me", 1, [workInstall], { "work-org/api": true });
+    const home = person("home-me", 2, [homeInstall], { "home-user/blog": true });
+    const github = fakeGithub(work, home);
+    await connect(caller, github, work, [parent]);
+    await connect(caller, github, home, [parent]);
+    const tokens = [
+      value(await grant(await session(), "work-org/api")).accessToken,
+      value(await grant(await session(), "home-user/blog")).accessToken
+    ];
+    value(await vault().disconnect(caller, "github"));
+    expect([...github.revoked.installation].sort()).toEqual(tokens.sort());
+    expect([...github.revoked.user].sort()).toEqual(["home-me", "work-me"]);
+  });
+
+  it("a token GitHub has already forgotten counts as revoked", async () => {
+    const { caller, userId, parent, session, grant } = await cloudUser();
+    const work = person("work-me", 1, [workInstall], { "work-org/api": true });
+    const github = fakeGithub(work);
+    await connect(caller, github, work, [parent]);
+    const token = value(await grant(await session(), "work-org/api")).accessToken;
+    github.revoked.installation.add(token);
+    work.userTokenRevoked = true;
+    value(await vault().forgetAccount(caller, "github", await slotOf(caller, "work-me")));
+    expect(await queued(userId)).toEqual([]);
   });
 });

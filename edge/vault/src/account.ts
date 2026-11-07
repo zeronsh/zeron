@@ -27,7 +27,11 @@
  *
  * GitHub differs: every login stays in use at once, so nothing depends on one
  * being active (it only comes first when choosing, see `rankedLogins`), and
- * forgetting it hands that place to the next. Repository access is recorded
+ * forgetting it hands that place to the next. Forgetting one also revokes its
+ * tokens with GitHub: its user token and every installation token minted for
+ * its sessions (`github_tokens` records whose they are). Those revocations
+ * wait in `github_revocations` and are retried on the object's alarm until
+ * GitHub answers or the token would have expired anyway. Repository access is recorded
  * apart from logins: `github_installations` are the App's installations,
  * `github_login_installations` says which login reaches which, and
  * `github_sessions` holds, per session device and repository, BOTH the login
@@ -74,7 +78,10 @@ import {
   installUrl,
   manageInstallationUrl,
   mintInstallationToken,
-  repoAccess
+  repoAccess,
+  revokeInstallationToken,
+  revokeUserToken,
+  type Revocation
 } from "./providers/github-app";
 import {
   filterRepos,
@@ -110,6 +117,14 @@ const MAX_GITHUB_LOGINS = 10;
 const MAX_GITHUB_SESSIONS = 2000;
 /** A merged listing's bound: twice one login's. */
 const MAX_LISTED_REPOS = 2000;
+/** A revocation GitHub didn't answer is tried again after 1, 2, 4… minutes, at
+ * most an hour apart. */
+const REVOKE_RETRY_MS = 60_000;
+const REVOKE_RETRY_MAX_MS = 60 * 60_000;
+/** A user token with no known end is retried this long. */
+const REVOKE_USER_TOKEN_FOR_MS = 7 * 24 * 60 * 60_000;
+/** Revocations tried in one pass; the rest follow on the alarm. */
+const REVOKE_BATCH = 50;
 const PROFILE_FIELD_MAX = 200;
 
 type AccountKind = VaultAccountView["kind"];
@@ -154,6 +169,8 @@ type GithubSessionRow = {
 type RepoProbe =
   | {
       readonly kind: "reach";
+      /** The login's key (`loginKey`): whose tokens are minted. */
+      readonly login: string;
       readonly account: string | undefined;
       readonly generation: number;
       readonly material: GrantMaterial;
@@ -233,7 +250,20 @@ const flowAad = (userId: string, flowId: string): string => `${userId}|github|fl
 /** A cached token is for one repository at one access level. */
 const repoTokenKey = (installationId: number, repo: string, readOnly: boolean): string =>
   `${installationId}:${repo.toLowerCase()}:${readOnly ? "read" : "write"}`;
-const repoTokenAad = (userId: string, key: string): string => `${userId}|github|repo-token:${key}`;
+/** Each minted token is sealed to its own id. */
+const mintedTokenAad = (userId: string, id: string): string => `${userId}|github|installation-token:${id}`;
+
+type RevocationRow = {
+  id: string;
+  /** `user`: a login's user token (`envelope` is its account's). `installation`. */
+  kind: string;
+  envelope: string;
+  aad: string;
+  login: string | null;
+  give_up_at: number;
+  attempts: number;
+  next_at: number;
+};
 
 /** Why a session can't reach `owner`, in words the engine shows the user. */
 const notInstalled = (owner: string, slug: string | undefined, targetId?: number): string =>
@@ -320,14 +350,31 @@ export class VaultAccount extends DurableObject<Env> {
     this.sql.exec(
       "CREATE TABLE IF NOT EXISTS canary (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, ok INTEGER NOT NULL, status TEXT NOT NULL)"
     );
-    // Whole-installation tokens are no longer minted; drop any still cached.
+    // Whole-installation tokens are no longer minted, and repository tokens
+    // are now kept with the login they were minted for; drop the old caches
+    // (what they held expires within the hour).
     this.sql.exec("DROP TABLE IF EXISTS installation_tokens");
+    this.sql.exec("DROP TABLE IF EXISTS repo_tokens");
     this.sql.exec(
-      `CREATE TABLE IF NOT EXISTS repo_tokens (
-        key TEXT PRIMARY KEY,
+      `CREATE TABLE IF NOT EXISTS github_tokens (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        login TEXT NOT NULL,
         installation_id INTEGER NOT NULL,
         envelope TEXT NOT NULL,
         expires_at INTEGER NOT NULL
+      )`
+    );
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS github_revocations (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        envelope TEXT NOT NULL,
+        aad TEXT NOT NULL,
+        login TEXT,
+        give_up_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_at INTEGER NOT NULL
       )`
     );
     this.sql.exec(
@@ -492,16 +539,19 @@ export class VaultAccount extends DurableObject<Env> {
     return ok(this.accountViews());
   }
 
-  /** Delete one account. The active one leaves none active. Idempotent. */
-  forget(
+  /** Delete one account. The active one leaves none active. Idempotent. A
+   * GitHub login's tokens are revoked with GitHub (now, or on the alarm when
+   * GitHub doesn't answer): the account is gone either way. */
+  async forget(
     userId: string,
     provider: VaultProviderId,
     slot: string
-  ): VaultResult<{ readonly removed: boolean; readonly accounts: VaultAccountView[] }> {
+  ): Promise<VaultResult<{ readonly removed: boolean; readonly accounts: VaultAccountView[] }>> {
     const owner = this.claim(userId, provider);
     if (owner) return owner;
     const row = this.row(slot);
     const removed = row !== undefined;
+    if (provider === "github" && row) this.queueLoginRevocations(row);
     this.sql.exec("DELETE FROM accounts WHERE slot = ?", slot);
     if (this.getMeta("active") === slot) {
       // GitHub's logins are all in use: the next one simply comes first.
@@ -514,24 +564,33 @@ export class VaultAccount extends DurableObject<Env> {
       // says this login is gone, and they resume if it comes back.
       this.sql.exec("DELETE FROM github_login_installations WHERE login = ?", loginKey(row));
       this.dropUnreachedInstallations();
+      await this.revokeDue();
     }
-    if (this.rows().length === 0) this.sql.exec("DELETE FROM repo_tokens");
     return ok({ removed, accounts: this.accountViews() });
   }
 
   /** Wipe every account (and pending flows). Idempotent. The generation
    * counter survives, so a later upload never reuses an old generation's AAD. */
-  disconnect(userId: string, provider: VaultProviderId): VaultResult<{ readonly removed: boolean }> {
+  async disconnect(userId: string, provider: VaultProviderId): Promise<VaultResult<{ readonly removed: boolean }>> {
     const owner = this.claim(userId, provider);
     if (owner) return owner;
     const removed = this.rows().length > 0;
+    if (provider === "github") for (const row of this.rows()) this.queueLoginRevocations(row);
     this.sql.exec("DELETE FROM accounts");
     this.sql.exec("DELETE FROM github_flows");
-    this.sql.exec("DELETE FROM repo_tokens");
     this.sql.exec("DELETE FROM github_login_installations");
     this.sql.exec("DELETE FROM github_installations");
     this.deleteMeta("active");
+    if (provider === "github") await this.revokeDue();
     return ok({ removed });
+  }
+
+  /** The alarm: revocations GitHub didn't answer before, tried again. */
+  async alarm(): Promise<void> {
+    // (No call claimed the object this time: who it belongs to is stored.)
+    this.userId = this.getMeta("owner") ?? "";
+    this.provider = (this.getMeta("provider") as VaultProviderId | undefined) ?? this.provider;
+    await this.revokeDue();
   }
 
   /** Issue a grant to an already-authenticated device (VaultDevices verified
@@ -950,16 +1009,19 @@ export class VaultAccount extends DurableObject<Env> {
       case "ok":
         break;
     }
-    this.noteInstallation(loginKey(this.row(row.slot) ?? row), account, found);
-    return { kind: "reach", account, generation, material, installation: found, push: access.push };
+    const login = loginKey(this.row(row.slot) ?? row);
+    this.noteInstallation(login, account, found);
+    return { kind: "reach", login, account, generation, material, installation: found, push: access.push };
   }
 
   /**
    * An App installation token for `repo` alone: the App JWT mints for that one
-   * repository, never the whole installation. A minted token is cached sealed
-   * (per repository and access level, whichever login asked: it acts as the
-   * App, and the probe already checked this login) and reused while it has more
-   * than `INSTALLATION_TOKEN_REUSE_MS` left.
+   * repository, never the whole installation. Every minted token is kept sealed
+   * with the login it was minted for, until it expires: reused for that login's
+   * grants on the same repository and access level while it has more than
+   * `INSTALLATION_TOKEN_REUSE_MS` left, and revoked if the login is
+   * disconnected. Logins never share one, so revoking one login's never
+   * touches another's sessions.
    */
   private async mintRepoGrant(probe: RepoProbe & { kind: "reach" }, repo: string): Promise<VaultResult<Grant>> {
     const clientId = this.env.GITHUB_APP_CLIENT_ID;
@@ -980,7 +1042,7 @@ export class VaultAccount extends DurableObject<Env> {
         ...(account ? { account } : {})
       });
 
-    const cached = await this.cachedRepoToken(key);
+    const cached = await this.cachedRepoToken(key, probe.login);
     if (cached) return grant(cached.token, cached.expiresAt);
 
     let jwt: string;
@@ -994,7 +1056,7 @@ export class VaultAccount extends DurableObject<Env> {
     const minted = await mintInstallationToken(jwt, found.id, { repository: name, readOnly }, this.fetchFn);
     switch (minted.kind) {
       case "gone":
-        this.sql.exec("DELETE FROM repo_tokens WHERE installation_id = ?", found.id);
+        this.sql.exec("DELETE FROM github_tokens WHERE installation_id = ?", found.id);
         return fail("not_found", notInstalled(owner, this.env.GITHUB_APP_SLUG));
       case "rejected":
         // Our App credentials, never the user's: page someone, don't
@@ -1006,15 +1068,25 @@ export class VaultAccount extends DurableObject<Env> {
       case "ok":
         break;
     }
-    const envelope = await sealJson(await this.keyring(), minted.token, repoTokenAad(this.userId, key));
+    const id = randomId(12);
+    const envelope = await sealJson(await this.keyring(), minted.token, mintedTokenAad(this.userId, id));
+    this.sql.exec("DELETE FROM github_tokens WHERE expires_at <= ?", Date.now());
     this.sql.exec(
-      `INSERT INTO repo_tokens (key, installation_id, envelope, expires_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET envelope = excluded.envelope, expires_at = excluded.expires_at`,
+      "INSERT INTO github_tokens (id, key, login, installation_id, envelope, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+      id,
       key,
+      probe.login,
       found.id,
       envelope,
       minted.expiresAt
     );
+    // The login was disconnected while GitHub was minting: the token is
+    // revoked with the rest of its, never handed out.
+    if (!this.rows().some((row) => loginKey(row) === probe.login)) {
+      this.queueMintedRevocations(probe.login);
+      await this.revokeDue();
+      return fail("needs_reconnect", wasDisconnected(account));
+    }
     await this.audit({
       event: "github_installation_token",
       provider: "github",
@@ -1156,11 +1228,117 @@ export class VaultAccount extends DurableObject<Env> {
   }
 
   /** An installation no connected login reaches is no longer the user's to
-   * know about, and neither are the tokens cached from it. */
+   * know about. (Tokens minted from it stay recorded until they expire, so a
+   * disconnect can still revoke them.) */
   private dropUnreachedInstallations(): void {
     const reached = "(SELECT installation_id FROM github_login_installations)";
     this.sql.exec(`DELETE FROM github_installations WHERE installation_id NOT IN ${reached}`);
-    this.sql.exec(`DELETE FROM repo_tokens WHERE installation_id NOT IN ${reached}`);
+  }
+
+  /** A login's user token and the installation tokens minted for it, queued
+   * for revocation; the account row itself is the caller's to delete. */
+  private queueLoginRevocations(row: AccountRow): void {
+    const now = Date.now();
+    this.sql.exec(
+      `INSERT INTO github_revocations (id, kind, envelope, aad, login, give_up_at, attempts, next_at)
+       VALUES (?, 'user', ?, ?, ?, ?, 0, ?)`,
+      randomId(12),
+      row.envelope,
+      recordAad(this.userId, "github", row.generation),
+      row.account,
+      now + REVOKE_USER_TOKEN_FOR_MS,
+      now
+    );
+    this.queueMintedRevocations(loginKey(row));
+  }
+
+  private queueMintedRevocations(login: string): void {
+    const now = Date.now();
+    const minted = this.sql
+      .exec<{ id: string; envelope: string; expires_at: number }>(
+        "SELECT id, envelope, expires_at FROM github_tokens WHERE login = ? AND expires_at > ?",
+        login,
+        now
+      )
+      .toArray();
+    for (const token of minted) {
+      this.sql.exec(
+        `INSERT INTO github_revocations (id, kind, envelope, aad, login, give_up_at, attempts, next_at)
+         VALUES (?, 'installation', ?, ?, ?, ?, 0, ?)`,
+        token.id,
+        token.envelope,
+        mintedTokenAad(this.userId, token.id),
+        login,
+        token.expires_at,
+        now
+      );
+    }
+    this.sql.exec("DELETE FROM github_tokens WHERE login = ?", login);
+  }
+
+  /**
+   * Revoke what's due with GitHub. Revoked, or unknown to GitHub already: done.
+   * No answer: tried again later on the alarm, until the token would have
+   * expired anyway (then nothing is left to revoke). A token that can't be
+   * opened any more (its key retired) can't be sent, so it's dropped; one whose
+   * key is merely unavailable now waits.
+   */
+  private async revokeDue(): Promise<void> {
+    const now = Date.now();
+    const due = this.sql
+      .exec<RevocationRow>("SELECT * FROM github_revocations WHERE next_at <= ? ORDER BY next_at LIMIT ?", now, REVOKE_BATCH)
+      .toArray();
+    let revoked = 0;
+    let waiting = 0;
+    for (const row of due) {
+      if (row.give_up_at <= now) {
+        this.sql.exec("DELETE FROM github_revocations WHERE id = ?", row.id);
+        continue;
+      }
+      let outcome: Revocation;
+      try {
+        outcome = await this.revokeOne(row);
+      } catch (error) {
+        if (!(error instanceof VaultUnavailable)) {
+          console.error(JSON.stringify({ event: "vault.github.revoke_unreadable", kind: row.kind }));
+          this.sql.exec("DELETE FROM github_revocations WHERE id = ?", row.id);
+          continue;
+        }
+        outcome = "retry";
+      }
+      if (outcome === "retry") {
+        waiting++;
+        const backoff = Math.min(REVOKE_RETRY_MS * 2 ** row.attempts, REVOKE_RETRY_MAX_MS);
+        this.sql.exec(
+          "UPDATE github_revocations SET attempts = attempts + 1, next_at = ? WHERE id = ?",
+          Date.now() + backoff,
+          row.id
+        );
+      } else {
+        revoked++;
+        this.sql.exec("DELETE FROM github_revocations WHERE id = ?", row.id);
+      }
+    }
+    if (due.length > 0) {
+      console.log(JSON.stringify({ event: "vault.github.revoke", revoked, waiting }));
+      await this.audit({ event: "github_revoke", provider: "github", detail: `revoked ${revoked}, retrying ${waiting}` });
+    }
+    const next = this.sql.exec<{ at: number | null }>("SELECT MIN(next_at) AS at FROM github_revocations").toArray()[0]?.at;
+    if (next !== null && next !== undefined) await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 1000));
+  }
+
+  private async revokeOne(row: RevocationRow): Promise<Revocation> {
+    const keyring = await this.keyring();
+    if (row.kind === "installation") {
+      const token = (await openJson<string>(keyring, row.envelope, row.aad)).value;
+      return revokeInstallationToken(token, this.fetchFn);
+    }
+    const secret = (await openJson<{ accessToken?: unknown }>(keyring, row.envelope, row.aad)).value;
+    const clientId = this.env.GITHUB_APP_CLIENT_ID;
+    const clientSecret = this.env.GITHUB_APP_CLIENT_SECRET;
+    if (typeof secret?.accessToken !== "string") return "gone";
+    if (!clientId || !clientSecret) return "retry";
+    return revokeUserToken(clientId, clientSecret, secret.accessToken, this.fetchFn);
   }
 
   private installationViews(): GithubInstallationView[] {
@@ -1184,13 +1362,20 @@ export class VaultAccount extends DurableObject<Env> {
       });
   }
 
-  private async cachedRepoToken(key: string): Promise<{ readonly token: string; readonly expiresAt: number } | undefined> {
+  private async cachedRepoToken(
+    key: string,
+    login: string
+  ): Promise<{ readonly token: string; readonly expiresAt: number } | undefined> {
     const row = this.sql
-      .exec<{ envelope: string; expires_at: number }>("SELECT envelope, expires_at FROM repo_tokens WHERE key = ?", key)
+      .exec<{ id: string; envelope: string; expires_at: number }>(
+        "SELECT id, envelope, expires_at FROM github_tokens WHERE key = ? AND login = ? ORDER BY expires_at DESC LIMIT 1",
+        key,
+        login
+      )
       .toArray()[0];
     if (!row || row.expires_at - Date.now() <= INSTALLATION_TOKEN_REUSE_MS) return undefined;
     try {
-      const opened = await openJson<string>(await this.keyring(), row.envelope, repoTokenAad(this.userId, key));
+      const opened = await openJson<string>(await this.keyring(), row.envelope, mintedTokenAad(this.userId, row.id));
       return { token: opened.value, expiresAt: row.expires_at };
     } catch (error) {
       if (error instanceof VaultUnavailable) throw error;

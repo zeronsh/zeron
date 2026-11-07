@@ -220,6 +220,44 @@ export const accountId = async (userToken: string, login: string, fetchFn: Fetch
   return isObject(body) && typeof body.id === "number" ? body.id : undefined;
 };
 
+/** What revoking a token came to. `gone`: GitHub no longer knows it (expired,
+ * revoked already): as good as revoked. `retry`: GitHub didn't say. */
+export type Revocation = "revoked" | "gone" | "retry";
+
+/** Revoke an installation token, authenticated as itself: GitHub's one way to
+ * end one before its hour is up. */
+export const revokeInstallationToken = async (token: string, fetchFn: FetchFn): Promise<Revocation> => {
+  const response = await upstream(fetchFn, `${GITHUB_API}/installation/token`, { method: "DELETE", headers: headers(token) });
+  if (!response) return "retry";
+  if (response.status === 204 || response.ok) return "revoked";
+  return response.status === 401 || response.status === 404 ? "gone" : "retry";
+};
+
+/** Revoke a user token of the App's (`DELETE /applications/{client_id}/token`,
+ * authenticated with the App's client id and secret). A 401/403 is our App's
+ * credentials, so another try later. */
+export const revokeUserToken = async (
+  clientId: string,
+  clientSecret: string,
+  accessToken: string,
+  fetchFn: FetchFn
+): Promise<Revocation> => {
+  const response = await upstream(fetchFn, `${GITHUB_API}/applications/${encodeURIComponent(clientId)}/token`, {
+    method: "DELETE",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+      "content-type": "application/json",
+      "user-agent": "zeron-vault",
+      "x-github-api-version": "2022-11-28"
+    },
+    body: JSON.stringify({ access_token: accessToken })
+  });
+  if (!response) return "retry";
+  if (response.status === 204 || response.ok) return "revoked";
+  return response.status === 404 || response.status === 422 ? "gone" : "retry";
+};
+
 /** Canary: do the App credentials still sign in? (`GET /app` with the JWT.) */
 export const checkApp = async (clientId: string, pem: string, fetchFn: FetchFn): Promise<boolean> => {
   let jwt: string;
