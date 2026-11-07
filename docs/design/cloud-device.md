@@ -418,6 +418,16 @@ Nothing running is cut off. Nothing starts a turn while work is held, and a term
 ends the attempt. Past the wake, an update arriving mid-turn goes to the background path, which
 waits until no run or terminal is live and, on Cloud, no message is waiting.
 
+**Only the running version stays.** Each release is a folder of its own (`~/.zeron/app/<version>`,
+about 270 MB), and a resume copies the whole disk back in, all at once, while the engine starts:
+every old version kept was read in beside the one starting, and on staging a machine three updates
+in answered in about 39 s instead of 18 (send to first output, n=8 each), its release check alone
+taking 7 to 23 s. So once an update settles (committed, or given up), and on every start after,
+`prune_installed_versions` removes the older versions and the one an update gave up on. A Cloud
+machine (`ZERON_DEVICE_PLATFORM=cloud`) keeps none of them: going back there is a reinstall, which
+downloads anyway. Other Linux installs keep the newest older one, to go back to by hand. Never
+`current`, the running executable's folder, or a newer version (an update being staged).
+
 A longer wake reads as updating: the engine says so (`POST /runner/wake-stage`), `CloudSession.stage`
 is `updating` while it lasts (a stage nobody clears stops showing after 10 minutes), the desktop's
 waiting word follows it, and the answer's setup steps include "Updated Zeron to X".
@@ -432,7 +442,7 @@ agent in under 5 s; today's floor is below.
 | Send → nudge → `autoWake` → workflow | us | sender polls its durable job every 100 ms; the rest is a Worker and a DO |
 | Resume accepted, machine `ready` | Boat | "a few seconds"; every resume lands on a new machine and is a reboot (no memory, no processes) |
 | Engine started | us | `zeron-cloud-boot.service` (active through the snapshot, so it starts on any resume) races the exec; the unit no longer waits on `network-online.target` |
-| Binary loads | Boat's lazy disk | `~/.zeron/app` isn't in the base image, so it downloads on every resume; Boat's playbook (`~/.ascii/playbook.json`) fetches what we opened first, first |
+| Binary loads | Boat's lazy disk | `~/.zeron/app` isn't in the base image, so it downloads on every resume; Boat's playbook (`~/.ascii/playbook.json`) fetches what we opened first, first; everything else on the disk downloads at the same time, so old engine versions are removed ("Engine updates on Cloud") |
 | First token, room joined | us | connect timeout 3 s and 250 ms retries (a restored machine often loses its first connection) |
 | Release check | us | one small request beside the rest of the boot; a newer release is installed first ("Engine updates on Cloud") |
 | Command → agent running | us | grants and git identity primed at boot; for 2 minutes after boot no agent CLI check (its install would hold the run) |

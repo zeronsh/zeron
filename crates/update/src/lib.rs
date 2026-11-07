@@ -1143,6 +1143,109 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     }
 }
 
+/// How many versions older than `current` a managed install keeps once an update
+/// has settled: one, to go back to by hand, except on a Cloud machine. Its disk
+/// is copied back in on every wake, and everything on it is read in alongside
+/// the engine that's starting, so each version kept (about 270 MB) slowed every
+/// wake by seconds. Going back there is a reinstall, which downloads anyway.
+pub fn older_versions_kept() -> usize {
+    older_versions_kept_on(std::env::var("ZERON_DEVICE_PLATFORM").ok().as_deref())
+}
+
+fn older_versions_kept_on(platform: Option<&str>) -> usize {
+    if platform == Some("cloud") { 0 } else { 1 }
+}
+
+/// Remove what a managed install no longer needs from `app_root`: version folders
+/// older than the one `current` names, past the newest `older_kept` of them;
+/// `abandoned`, a version an update gave up on, unless it's `current`; and
+/// downloads (`.stage-*`) whose process is gone. Never `current`, the folder this
+/// executable runs from, a newer version (it may be one being staged), or
+/// anything not named like a version. Returns the versions removed.
+pub fn prune_installed_versions(
+    app_root: &Path,
+    older_kept: usize,
+    abandoned: Option<&str>,
+) -> Vec<String> {
+    let Some(current) = std::fs::read_link(app_root.join("current"))
+        .ok()
+        .and_then(|target| Some(target.file_name()?.to_str()?.to_owned()))
+        .filter(|name| app_root.join(name).join("zeron").is_file())
+    else {
+        // No working install to measure against: leave everything alone.
+        return Vec::new();
+    };
+    let Some(current_version) = parse_version(&current) else {
+        return Vec::new();
+    };
+    let running = std::env::current_exe()
+        .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
+        .and_then(|exe| Some(exe.parent()?.file_name()?.to_str()?.to_owned()));
+    let Ok(entries) = std::fs::read_dir(app_root) else {
+        return Vec::new();
+    };
+    let mut older = Vec::new();
+    let mut doomed = Vec::new();
+    for entry in entries.flatten() {
+        // A symlink (`current` among them) is never a version's folder.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Some(rest) = name.strip_prefix(".stage-") {
+            if stage_is_abandoned(rest) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+            continue;
+        }
+        if name == current || running.as_deref() == Some(name.as_str()) {
+            continue;
+        }
+        let Some(version) = parse_version(&name) else {
+            continue;
+        };
+        if abandoned == Some(name.as_str()) {
+            doomed.push(name);
+        } else if version < current_version {
+            older.push((version, name));
+        }
+    }
+    older.sort_by(|a, b| b.0.cmp(&a.0));
+    doomed.extend(older.into_iter().skip(older_kept).map(|(_, name)| name));
+    // Linux is fine with a running image's file gone; macOS isn't (#1037).
+    doomed.retain(|name| {
+        let dir = app_root.join(name);
+        !process_runs_from(&dir) && std::fs::remove_dir_all(dir).is_ok()
+    });
+    if !doomed.is_empty() {
+        let _ = std::fs::File::open(app_root).and_then(|dir| dir.sync_all());
+        tracing::info!(removed = ?doomed, %current, "removed engine versions no longer needed");
+    }
+    doomed
+}
+
+/// `.stage-<version>-<pid>`, left by a download whose process is gone (a stop
+/// mid-download kills it before it can clean up).
+fn stage_is_abandoned(rest: &str) -> bool {
+    let Some(pid) = rest.rsplit_once('-').and_then(|(_, pid)| pid.parse::<u32>().ok()) else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        !Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 type ManagedRestart = Box<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
 
 static MANAGED_RESTART: std::sync::OnceLock<ManagedRestart> = std::sync::OnceLock::new();
@@ -3333,6 +3436,110 @@ mod tests {
         );
         // Unstaged version refuses.
         assert!(apply_headless(&app_root, "0.2.0").is_err());
+    }
+
+    #[cfg(unix)]
+    fn versions_installed(app_root: &Path, versions: &[&str]) {
+        for ver in versions {
+            std::fs::create_dir_all(app_root.join(ver)).unwrap();
+            std::fs::write(app_root.join(ver).join("zeron"), ver).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn folders(app_root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(app_root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settled_install_keeps_current_and_the_one_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.9", "0.2.10", "0.2.11", "0.2.12", "0.2.13"]);
+        // Not versions, so not ours to judge.
+        std::fs::create_dir_all(app_root.join("notes")).unwrap();
+        std::fs::write(app_root.join("README"), "hi").unwrap();
+        apply_headless(&app_root, "0.2.12").unwrap();
+
+        let removed = prune_installed_versions(&app_root, 1, None);
+
+        assert_eq!(removed.len(), 2, "{removed:?}");
+        // 0.2.13 is newer than current: an update staged and waiting, kept.
+        assert_eq!(folders(&app_root), ["0.2.11", "0.2.12", "0.2.13", "README", "current", "notes"]);
+        assert_eq!(std::fs::read_link(app_root.join("current")).unwrap(), app_root.join("0.2.12"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cloud_machine_keeps_only_the_version_it_runs() {
+        assert_eq!(older_versions_kept_on(Some("cloud")), 0);
+        assert_eq!(older_versions_kept_on(Some("linux")), 1);
+        assert_eq!(older_versions_kept_on(None), 1);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.155", "0.2.156", "0.2.157", "0.2.158"]);
+        apply_headless(&app_root, "0.2.158").unwrap();
+
+        prune_installed_versions(&app_root, older_versions_kept_on(Some("cloud")), None);
+
+        assert_eq!(folders(&app_root), ["0.2.158", "current"]);
+        // Again: nothing more to do, and nothing breaks.
+        assert!(prune_installed_versions(&app_root, 0, None).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_an_update_gave_up_on_goes_but_current_never_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10", "0.2.11"]);
+        apply_headless(&app_root, "0.2.10").unwrap();
+
+        assert_eq!(prune_installed_versions(&app_root, 1, Some("0.2.11")), ["0.2.11"]);
+        assert_eq!(folders(&app_root), ["0.2.10", "current"]);
+        // Named as abandoned while it's current (a reinstall since): kept.
+        assert!(prune_installed_versions(&app_root, 0, Some("0.2.10")).is_empty());
+        assert_eq!(folders(&app_root), ["0.2.10", "current"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_a_working_current_nothing_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10", "0.2.11"]);
+        assert!(prune_installed_versions(&app_root, 0, None).is_empty());
+        // `current` names a folder with no engine in it.
+        std::fs::create_dir_all(app_root.join("0.2.12")).unwrap();
+        std::os::unix::fs::symlink(app_root.join("0.2.12"), app_root.join("current")).unwrap();
+        assert!(prune_installed_versions(&app_root, 0, None).is_empty());
+        assert_eq!(folders(&app_root), ["0.2.10", "0.2.11", "0.2.12", "current"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_download_whose_process_is_gone_is_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10"]);
+        apply_headless(&app_root, "0.2.10").unwrap();
+        // A pid that can't be running (above the kernel's pid_max ceiling).
+        let gone = app_root.join(".stage-0.2.11-4194305");
+        let live = app_root.join(format!(".stage-0.2.11-{}", std::process::id()));
+        for stage in [&gone, &live] {
+            std::fs::create_dir_all(stage.join("unpacked")).unwrap();
+        }
+        prune_installed_versions(&app_root, 0, None);
+        assert!(!gone.exists());
+        assert!(live.exists());
     }
     #[test]
     fn schedule_is_wall_clock_with_failure_backoff() {
