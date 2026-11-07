@@ -6,7 +6,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { listLedger, listSandboxes } from "../../src/cloud/metering";
-import { cloudAccountName, HEARTBEAT_STALE_MS } from "../../src/cloud/policy";
+import { cloudAccountName, FAST_STALE_MIN_MS, HEARTBEAT_STALE_MS } from "../../src/cloud/policy";
 import { BOAT_IMAGE_GIB } from "../../src/cloud/providers/boat";
 import {
   boatControl,
@@ -744,6 +744,67 @@ describe("a machine that goes dark during a turn", () => {
     const resumed = (await resumes(s.sandboxId)).length;
     await runDurableObjectAlarm(accountStub(u));
     await expect.poll(async () => (await resumes(s.sandboxId)).length).toBe(resumed + 1);
+  });
+
+  it("is looked at three of its fast beats after the last, when it says it beats fast", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    const before = Date.now();
+    await beat(u, s, { activeRuns: 1, everySecs: 15 });
+    await withSession(u, s.chatId, (r) => {
+      expect(r.beatEveryMs).toBe(15_000);
+      expect(r.idleCheckAt!).toBeGreaterThanOrEqual(before + FAST_STALE_MIN_MS);
+      expect(r.idleCheckAt!).toBeLessThanOrEqual(Date.now() + FAST_STALE_MIN_MS);
+    });
+    // Hard-stopped mid-turn: 45 s without a beat is enough.
+    await boatControl("__set", { sandboxId: s.sandboxId, state: "archived" });
+    await withSession(u, s.chatId, (r) => {
+      r.lastHeartbeatAt = Date.now() - FAST_STALE_MIN_MS - 1;
+      r.idleCheckAt = Date.now() - 1;
+    });
+    const calls = (await boatState()).calls.length;
+    const resumed = (await resumes(s.sandboxId)).length;
+    await runDurableObjectAlarm(accountStub(u));
+    await expect.poll(async () => (await resumes(s.sandboxId)).length).toBe(resumed + 1);
+    // Already stopped: nothing was sent to a machine that can't answer.
+    const since = (await boatState()).calls.slice(calls);
+    expect(since.filter((c) => c.sandboxId === s.sandboxId && c.path.endsWith("/commands") && since.indexOf(c) < since.findIndex((r) => r.path.endsWith("/resume")))).toEqual([]);
+  });
+
+  it("isn't dark 45 s after a beat at the idle pace, or from an engine that doesn't say", async () => {
+    for (const body of [{ activeRuns: 1, everySecs: 60 }, { activeRuns: 1 }]) {
+      const u = newUser();
+      const s = await readySession(u);
+      await beat(u, s, body);
+      await withSession(u, s.chatId, (r) => {
+        expect(r.idleCheckAt!).toBeGreaterThanOrEqual(Date.now() + HEARTBEAT_STALE_MS - 5_000);
+        r.lastHeartbeatAt = Date.now() - FAST_STALE_MIN_MS - 1;
+        r.idleCheckAt = Date.now() - 1;
+      });
+      const resumed = (await resumes(s.sandboxId)).length;
+      await runDurableObjectAlarm(accountStub(u));
+      expect((await session(u, s.chatId))?.state).toBe("ready");
+      expect((await resumes(s.sandboxId)).length).toBe(resumed);
+    }
+  });
+
+  it("records once, and shows, that its engine rebuilt a damaged chat store", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    const at = Date.now() - 5_000;
+    await beat(u, s, { activeRuns: 0, storeRecoveredAt: at });
+    await beat(u, s, { activeRuns: 0, storeRecoveredAt: at });
+    expect(await session(u, s.chatId)).toMatchObject({ storeRecoveredAt: at });
+    const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
+    expect(ledger.filter((e) => e.event === "store_recovered")).toHaveLength(1);
+  });
+
+  it("forgets a fast cadence once asleep", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    await beat(u, s, { activeRuns: 0, everySecs: 15 });
+    await putToSleep(u, s.chatId);
+    await withSession(u, s.chatId, (r) => expect(r.beatEveryMs).toBeUndefined());
   });
 
   it("just sleeps when it had nothing running", async () => {

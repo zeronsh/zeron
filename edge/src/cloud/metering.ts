@@ -367,7 +367,9 @@ export type LedgerEvent =
   /** A wake moved the sandbox onto another size. */
   | "resize"
   /** A sleeping machine was resumed only to keep its disk from expiring. */
-  | "refresh";
+  | "refresh"
+  /** Its engine found its chat store damaged on a start and rebuilt it. */
+  | "store_recovered";
 
 export interface LedgerEntry {
   readonly at: number;

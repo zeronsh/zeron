@@ -440,6 +440,24 @@ export class SleepWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
     const account = accountStub(this.env, p);
     try {
       const provider = requireProvider(this.env, p.provider);
+      // Already down (stopped behind our back, or mid-stop): there's no engine to
+      // ask or stop, and the snapshot that counts is taken. Asking anyway only
+      // waits out the commands' timeouts before the stop, and a turn that machine
+      // was running waits as long to resume.
+      const before = await step.do("state-before", PROVIDER_STEP, async (): Promise<SandboxState | null> => {
+        try {
+          return (await provider.get(p.sandboxId)).state;
+        } catch {
+          return null;
+        }
+      });
+      if (before === "stopped" || before === "stopping") {
+        if ((await stopSandbox(step, provider, p.sandboxId, "put Cloud to sleep")) === "error") {
+          throw new NonRetryableError("The Cloud sandbox is in an error state.");
+        }
+        await step.do("mark-sleeping", DO_STEP, () => account.wfStopped(p.chatId, p.generation));
+        return;
+      }
       const quiesce = await step.do(
         "quiesce-engine",
         { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "2 minutes" },

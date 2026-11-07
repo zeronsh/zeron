@@ -5750,7 +5750,20 @@ impl DocHost {
                 // client, another device's switch) waits for the turn: the
                 // provider never changes by killing a turn mid-flight.
                 let other_provider = sessions.live_harness(chat_id).is_some_and(|live| live != harness);
-                if other_provider || sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                // Sent before the turn now running had started: the sender never
+                // saw that turn, so it can't be a steer into it. Two messages sent
+                // to a sleeping Cloud machine (or an offline host) start one turn
+                // each; steering the second into the first cut the first off with
+                // an empty reply.
+                // Only when an earlier send started that turn: nothing else changes.
+                let sent_before_turn = sessions
+                    .turn_started_ms(chat_id)
+                    .is_some_and(|started| entry.issued_at < started)
+                    && self.live_turn_sent_earlier(handle, entry, message_id);
+                if other_provider
+                    || sent_before_turn
+                    || sessions.defers_to_turn_end(chat_id, Some((harness, &request)))
+                {
                     self.hold_until_turn_end(
                         handle,
                         message_id,
@@ -5911,6 +5924,36 @@ impl DocHost {
     /// Park a prompt for a turn-boundary agent in the visible queue instead
     /// of its mailbox, keeping the message id so the transcript entry written
     /// at delivery is the same message. Steers lead ordinary rows.
+    /// The running turn is the latest message in the transcript, sent as a run no
+    /// later than `entry` and not `entry`'s own: a second send that went out while
+    /// the host was away, now arriving behind the first.
+    fn live_turn_sent_earlier(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        entry: &SessionCommandEntry,
+        message_id: &str,
+    ) -> bool {
+        let Some(live) = handle.doc.read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| e.role == MessageRole::User)
+                .map(|e| e.id.clone())
+        }) else {
+            return false;
+        };
+        if live == message_id {
+            return false;
+        }
+        handle.doc.read_commands().is_ok_and(|commands| {
+            commands.iter().any(|c| {
+                c.id != entry.id
+                    && c.issued_at <= entry.issued_at
+                    && matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if *message_id == live)
+            })
+        })
+    }
+
     fn hold_until_turn_end(
         &self,
         handle: &Arc<ChatDocHandle>,
@@ -6285,6 +6328,17 @@ impl DocHost {
     }
 
     /// Persist every open doc now (shutdown path; bypasses the debounce).
+    /// The store's WAL folded into its file ([`DocsStore::flush_for_sleep`]):
+    /// before a Cloud sleep's snapshot, and at shutdown.
+    pub fn checkpoint_store(&self) -> bool {
+        self.inner.store.flush_for_sleep()
+    }
+
+    /// The store this host writes (its path, and what its open recovered).
+    pub fn store(&self) -> &Arc<DocsStore> {
+        &self.inner.store
+    }
+
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
