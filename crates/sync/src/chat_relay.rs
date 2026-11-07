@@ -97,6 +97,8 @@ struct Counters {
     queue_reads_done: AtomicU64,
     /// When a peer's frame last arrived, in ms since this task began.
     last_inbound_ms: AtomicU64,
+    /// When the room last came up, on the same clock.
+    last_room_up_ms: AtomicU64,
     /// What the next hello tells the room.
     knows_relay_gen: AtomicBool,
     relaying: AtomicBool,
@@ -218,6 +220,8 @@ impl RelayHandle {
         // Any earlier read died with its socket. This session asks once.
         let done = self.counters.queue_reads_done.load(Relaxed);
         self.counters.queue_reads_asked.store(done + 1, Relaxed);
+        let since_start = self.counters.started.map_or(0, |at| at.elapsed().as_millis() as u64);
+        self.counters.last_room_up_ms.store(since_start.max(1), Relaxed);
         let _ = self.tx.send(Input::RoomUp(tx));
     }
 
@@ -228,8 +232,15 @@ impl RelayHandle {
     }
 
     /// A peer's frame arrived within `window`: it may be mid-sync with this device.
+    /// Joining counts too. A host woken for a reader joins after that reader's
+    /// announce went by, and the reader only asks once it hears the host's: a
+    /// host that left as soon as it had caught up was gone before the question.
     pub fn recently_active(&self, window: Duration) -> bool {
-        let last = self.counters.last_inbound_ms.load(Relaxed);
+        let last = self
+            .counters
+            .last_inbound_ms
+            .load(Relaxed)
+            .max(self.counters.last_room_up_ms.load(Relaxed));
         let now = self.counters.started.map_or(0, |at| at.elapsed().as_millis() as u64);
         last > 0 && now.saturating_sub(last) < window.as_millis() as u64
     }
