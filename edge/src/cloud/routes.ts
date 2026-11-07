@@ -283,6 +283,10 @@ export const handleCloudRoute = async (
     const backgroundRuns = count(body.backgroundRuns) ?? 0;
     const waitingRuns = Math.min(count(body.waitingRuns) ?? 0, activeRuns);
     const diskUsedBytes = byteCount(body.diskUsedBytes);
+    // How often it beats from here on (newer engines): how late a beat may be
+    // before the machine counts as gone.
+    const every = count(body.everySecs);
+    const everySecs = every !== undefined && every >= 1 && every <= 3600 ? every : undefined;
     const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
     return rpc(() =>
       accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, {
@@ -290,7 +294,8 @@ export const handleCloudRoute = async (
         clients,
         backgroundRuns,
         waitingRuns,
-        ...(diskUsedBytes === undefined ? {} : { diskUsedBytes })
+        ...(diskUsedBytes === undefined ? {} : { diskUsedBytes }),
+        ...(everySecs === undefined ? {} : { everySecs })
       })
     );
   }

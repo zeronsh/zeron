@@ -1091,6 +1091,7 @@ impl Engine {
                 Arc::new(cloud_disk::machine_usage),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
+                runner::HEARTBEAT_BUSY_INTERVAL,
             );
             // A session machine can stop without warning (a provider
             // auto-stop, a crash) after accepting a send: the message is in
