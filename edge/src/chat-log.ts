@@ -114,7 +114,7 @@ export function* rowsAfter(
 
 export type CheckpointOutcome =
   | { ok: true; seqFloor: number; pruned: number }
-  | { ok: false; error: "floor_regression" | "ahead_of_head" | "empty" };
+  | { ok: false; error: "floor_regression" | "ahead_of_head" | "empty" | "incomplete" };
 
 /** Commit a client-built checkpoint covering rows `seq <= seqCovered`.
  *
