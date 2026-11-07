@@ -244,6 +244,38 @@ impl Disk {
         self.boot_with(|_| {})
     }
 
+    /// The disk a bad snapshot or restore leaves: the chat's own pages intact,
+    /// a page further on (the outbox's) torn, so every check of the file fails.
+    fn boot_damaged(&self) -> (EngineCore, RequestLog) {
+        let store = DocsStore::open(self.store_dir()).unwrap();
+        store
+            .save_snapshot(CHAT, &self.doc.export_snapshot().unwrap())
+            .unwrap();
+        for i in 0..400 {
+            store
+                .enqueue_chat_update("other-chat", &format!("batch-{i}"), &[7u8; 900])
+                .unwrap();
+        }
+        assert!(store.flush_for_sleep());
+        drop(store);
+        let path = self.store_dir().join("docs.sqlite3");
+        let pages = std::fs::metadata(&path).unwrap().len() / 4096;
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at = ((pages - 5) * 4096) as usize;
+        for (i, byte) in bytes[at..at + 4096].iter_mut().enumerate() {
+            *byte = byte.wrapping_mul(31).wrapping_add(i as u8) ^ 0x5a;
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let requests: RequestLog = Arc::default();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(Recording {
+            requests: requests.clone(),
+        }));
+        let core = EngineCore::assemble(&self.dir, Arc::new(registry), HarnessId::Mock, None)
+            .expect("an engine over a damaged store still assembles");
+        (core, requests)
+    }
+
     fn boot_with(&self, set_up: impl FnOnce(&HarnessRegistry)) -> (EngineCore, RequestLog) {
         let store = DocsStore::open(self.store_dir()).unwrap();
         store
@@ -589,5 +621,53 @@ async fn consumed_but_unresolved_is_rejected_where_the_sender_sees_it() {
     )
     .await;
     assert!(requests.lock().unwrap().is_empty());
+    core.shutdown().await;
+}
+
+// ── a damaged store ──────────────────────────────────────────────────────────
+
+/// Seen on staging: a machine's store came back from a sleep with torn pages,
+/// every read of the chat failed, and the message sent to it waited for good
+/// while the machine read "ready". The store is rebuilt at open, and the
+/// message runs, once.
+#[tokio::test]
+async fn a_damaged_store_is_rebuilt_and_the_waiting_message_runs_once() {
+    on_a_cloud_machine();
+    let now = now_ms();
+    let disk = Disk::new()
+        .user_message("m1", now - 60_000)
+        .run_command("c1", "m1", SessionCommandStatus::Pending);
+    let (core, requests) = disk.boot_damaged();
+    let recovery = core
+        .doc_host
+        .store()
+        .recovery()
+        .cloned()
+        .expect("the damage was found");
+    assert!(recovery.kept_at.exists(), "the damaged file is kept");
+    core.doc_host.open(CHAT).unwrap();
+    wait_for(|| !requests.lock().unwrap().is_empty(), "the waiting message to run").await;
+    settle().await;
+    assert_eq!(requests.lock().unwrap().len(), 1, "ran exactly once");
+    assert_eq!(requests.lock().unwrap()[0].prompt, "long task");
+    core.shutdown().await;
+}
+
+/// A command the damaged store's ledger had already marked handled stays
+/// handled: the rebuilt store keeps every ledger row it could read.
+#[tokio::test]
+async fn a_rebuilt_store_never_runs_a_handled_command_again() {
+    on_a_cloud_machine();
+    let now = now_ms();
+    let disk = Disk::new()
+        .user_message("m1", now - 60_000)
+        .run_command("c1", "m1", SessionCommandStatus::Pending)
+        .processed("c1");
+    let (core, requests) = disk.boot_damaged();
+    assert!(core.doc_host.store().recovery().is_some());
+    core.doc_host.open(CHAT).unwrap();
+    settle().await;
+    settle().await;
+    assert!(requests.lock().unwrap().is_empty(), "the ledger came across");
     core.shutdown().await;
 }

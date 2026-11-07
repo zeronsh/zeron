@@ -212,6 +212,9 @@ export interface CloudSessionView {
   readonly disk?: { readonly usedGiB: number; readonly capacityGiB: number; readonly level: DiskLevel };
   /** Its disk doesn't fit: it waits for the user to pick a bigger size. */
   readonly wakeBlocked?: { readonly reason: "disk_too_small"; readonly neededGiB: number };
+  /** Unix ms its engine last found its chat store damaged on a start and
+   * rebuilt it (from the rooms, and what could still be read). */
+  readonly storeRecoveredAt?: number;
   /** Unix ms the provider deletes its disk, while it sleeps (a refresh pushes
    * this out; past it with `state: "data_expired"` it is gone). */
   readonly expiresAt?: number;
@@ -295,6 +298,8 @@ export interface Heartbeat {
   readonly diskUsedBytes?: number;
   /** How often it beats from here on, in seconds. Older engines don't say. */
   readonly everySecs?: number;
+  /** When this run of the engine found its chat store damaged and rebuilt it. */
+  readonly storeRecoveredAt?: number;
 }
 
 /** The GitHub repository a new session runs on (its project's origin). */
@@ -422,6 +427,8 @@ interface SessionRecord {
   /** A resume was refused for want of disk. Never retried on its own and
    * never upsized on its own: credits change, so the user picks. */
   wakeBlocked?: { reason: "disk_too_small"; neededGiB: number };
+  /** See {@link CloudSessionView.storeRecoveredAt}. */
+  storeRecoveredAt?: number;
   /** The disk's high-water mark and when it was last raised or settled. */
   disk?: { usedGiB: number; at: number };
   /** Resumed, and its disk may still be copying in: a lower reading means
@@ -734,6 +741,7 @@ export class CloudAccount extends DurableObject<Env> {
       machine: this.shownMachine(s),
       ...(disk ? { disk } : {}),
       ...(s.wakeBlocked ? { wakeBlocked: { reason: s.wakeBlocked.reason, neededGiB: s.wakeBlocked.neededGiB } } : {}),
+      ...(s.storeRecoveredAt === undefined ? {} : { storeRecoveredAt: s.storeRecoveredAt }),
       ...(expiresAt === undefined ? {} : { expiresAt })
     };
   }
@@ -1853,6 +1861,10 @@ export class CloudAccount extends DurableObject<Env> {
     s.backgroundRuns = backgroundRuns;
     s.waitingRuns = waitingRuns;
     s.beatEveryMs = beat.everySecs === undefined ? undefined : beat.everySecs * 1000;
+    if (beat.storeRecoveredAt !== undefined && beat.storeRecoveredAt !== s.storeRecoveredAt) {
+      s.storeRecoveredAt = beat.storeRecoveredAt;
+      this.ledger("store_recovered", s, { detail: new Date(beat.storeRecoveredAt).toISOString() });
+    }
     s.lastHeartbeatAt = now;
     if (busy || changed) s.lastActiveAt = now;
     this.markAlive(s, now);

@@ -6328,6 +6328,17 @@ impl DocHost {
     }
 
     /// Persist every open doc now (shutdown path; bypasses the debounce).
+    /// The store's WAL folded into its file ([`DocsStore::flush_for_sleep`]):
+    /// before a Cloud sleep's snapshot, and at shutdown.
+    pub fn checkpoint_store(&self) -> bool {
+        self.inner.store.flush_for_sleep()
+    }
+
+    /// The store this host writes (its path, and what its open recovered).
+    pub fn store(&self) -> &Arc<DocsStore> {
+        &self.inner.store
+    }
+
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {

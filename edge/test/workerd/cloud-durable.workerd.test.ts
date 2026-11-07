@@ -788,6 +788,17 @@ describe("a machine that goes dark during a turn", () => {
     }
   });
 
+  it("records once, and shows, that its engine rebuilt a damaged chat store", async () => {
+    const u = newUser();
+    const s = await readySession(u);
+    const at = Date.now() - 5_000;
+    await beat(u, s, { activeRuns: 0, storeRecoveredAt: at });
+    await beat(u, s, { activeRuns: 0, storeRecoveredAt: at });
+    expect(await session(u, s.chatId)).toMatchObject({ storeRecoveredAt: at });
+    const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
+    expect(ledger.filter((e) => e.event === "store_recovered")).toHaveLength(1);
+  });
+
   it("forgets a fast cadence once asleep", async () => {
     const u = newUser();
     const s = await readySession(u);
