@@ -62,7 +62,24 @@ const WINDOW_OPS: &[&str] = &[
 /// The widgets a plugin may draw, applied to the open frame synchronously.
 const WIDGET_OPS: &[&str] = &[
     "text",
+    "text_colored",
+    "separator",
     "button",
+    "small_button",
+    "checkbox",
+    "radio_button",
+    "input_text",
+    "input_text_multiline",
+    "input_int",
+    "input_float",
+    "slider_int",
+    "slider_float",
+    "drag_int",
+    "drag_float",
+    "progress_bar",
+    "combo",
+    "selectable",
+    "bullet_text",
     "invisible_button",
     "is_item_hovered",
     "is_item_active",
@@ -201,7 +218,7 @@ impl ImGuiWindows {
         }
         if !WINDOW_OPS.contains(&op.as_str()) {
             return failed(&format!(
-                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, is_maximized, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text, button, invisible_button, is_item_hovered, is_item_active, mouse_delta and is_mouse_dragging."
+                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, is_maximized, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text, text_colored, separator, button, small_button, checkbox, radio_button, input_text, input_text_multiline, input_int, input_float, slider_int, slider_float, drag_int, drag_float, progress_bar, combo, selectable, bullet_text, invisible_button, is_item_hovered, is_item_active, mouse_delta and is_mouse_dragging."
             ));
         }
         if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {

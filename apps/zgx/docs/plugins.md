@@ -642,6 +642,31 @@ local right = ui.is_mouse_dragging("right")
 
 `invisible_button` draws no label and no pixel and reserves exactly its requested rect in the layout (the next item sits `height` points lower, no extra gap). It answers `{ hovered, active, clicked }` like Dear ImGui's `InvisibleButton`: hovered while the pointer is over it, active while the pointer stays down on it, clicked once on the release inside it. `is_item_hovered()` and `is_item_active()` agree with the last item in the same frame; `mouse_delta()` is that frame's pointer movement; `is_mouse_dragging(button?)` is Dear ImGui's drag test. Unknown keys and wrong types are refused with a sentence naming them.
 
+### Basic widgets
+
+The remaining widgets follow Dear ImGui's immediate-mode shape: value in, value (or the click) back, the plugin keeps the state and passes it in again next frame.
+
+```lua
+ui.text_colored("Alert", "#ff0000")        -- "#rrggbb" or "#rrggbbaa"
+ui.separator()
+ui.bullet_text("Item one")
+local clicked = ui.small_button("x")          -- true on the release frame
+local on = ui.checkbox("Enabled", on)         -- the new ticked state
+local picked = ui.radio_button("a", picked == "a")
+local row = ui.selectable("Row A", row == "A")
+local name = ui.input_text("name", name, { hint = "Ada", password = true })
+local notes = ui.input_text_multiline("notes", notes, { width = 300, height = 90 })
+local count = ui.input_int("count", count, { min = 0, max = 100 })
+local ratio = ui.input_float("ratio", ratio, { min = 0, max = 1 })
+local level = ui.slider_int("level", level, { min = 0, max = 100 })
+local speed = ui.slider_float("speed", speed, { min = 0, max = 10 })
+local gain = ui.drag_float("gain", gain, { speed = 0.1, min = 0, max = 100 })
+ui.progress_bar(0.75)
+local theme = ui.combo("theme", theme, { "dark", "light", "system" })
+```
+
+`input_int` and `input_float` clamp the edited value to their `min`/`max`; `slider_int`/`slider_float` read the pointer across that range; `drag_int`/`drag_float` move by pointer delta times `speed` (`1` by default). `input_text` and `input_text_multiline` return the edited string and keep newlines; multiline needs `width` and `height`. `progress_bar` takes a fraction from 0 to 1, or it refuses the call. `combo` takes the current option and a list and returns the chosen value, never its index. Options have no other keys; a wrong type or an unknown key raises in `on_render`, the window stays open, and the earlier calls in that frame still draw.
+
 ### A custom title bar
 
 `apps/zgx/plugins-dev/imgui-custom-chrome` is the whole recipe: a `titlebar = "hidden"` window that draws its own bar and buttons out of `invisible_button`, and uses `mouse_delta` and `is_mouse_dragging` for the drag. Its core:

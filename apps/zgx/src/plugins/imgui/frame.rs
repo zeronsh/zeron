@@ -510,6 +510,271 @@ impl FrameState {
                     ("max", point(max)),
                 ]))
             }
+            "text_colored" => {
+                let text = string_arg(arg, "text", op)?;
+                let colour = colour_arg(arg, op)?;
+                ui.text_colored(colour, text.as_str());
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "separator" => {
+                ui.separator();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "small_button" => {
+                let label = string_arg(arg, "label", op)?;
+                let clicked = ui.small_button(label.as_str());
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::Bool(clicked)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "checkbox" => {
+                let label = string_arg(arg, "label", op)?;
+                let mut value = bool_arg(arg, "value", op)?;
+                ui.checkbox(label.as_str(), &mut value);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::Bool(value)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "radio_button" => {
+                let label = string_arg(arg, "label", op)?;
+                let active = bool_arg(arg, "active", op)?;
+                let clicked = ui.radio_button(label.as_str(), active);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::Bool(clicked)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "input_text" => {
+                let label = string_arg(arg, "label", op)?;
+                let mut value = string_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["hint", "password"])?;
+                let hint = opt_string(options, "hint", op)?;
+                let password = opt_bool(options, "password", op, false)?;
+                ui.input_text(label.as_str(), &mut value)
+                    .hint(hint.as_deref().unwrap_or(""))
+                    .password(password)
+                    .build();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(value.as_str())),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "input_text_multiline" => {
+                let label = string_arg(arg, "label", op)?;
+                let mut value = string_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["width", "height"])?;
+                let width = required_number(options, "width", op)? as f32;
+                let height = required_number(options, "height", op)? as f32;
+                ui.input_text_multiline(label.as_str(), &mut value, [width, height])
+                    .build();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(value.as_str())),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "input_int" => {
+                let label = string_arg(arg, "label", op)?;
+                let value = number_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["min", "max"])?;
+                let min = required_number(options, "min", op)?;
+                let max = required_number(options, "max", op)?;
+                let mut edited = value.round() as i32;
+                ui.input_int(label.as_str(), &mut edited);
+                let clamped = (edited as f64).clamp(min, max);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(clamped)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "input_float" => {
+                let label = string_arg(arg, "label", op)?;
+                let value = number_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["min", "max"])?;
+                let min = required_number(options, "min", op)?;
+                let max = required_number(options, "max", op)?;
+                let mut edited = value as f32;
+                ui.input_float(label.as_str(), &mut edited);
+                let clamped = (edited as f64).clamp(min, max);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(clamped)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "slider_int" => {
+                let label = string_arg(arg, "label", op)?;
+                let value = number_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["min", "max"])?;
+                let min = required_number(options, "min", op)?;
+                let max = required_number(options, "max", op)?;
+                let mut edited = value.round() as i32;
+                ui.slider_i32(
+                    label.as_str(),
+                    &mut edited,
+                    min.round() as i32,
+                    max.round() as i32,
+                );
+                let (track_min, track_max) = slider_rect(ui, true, min, max);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(edited as f64)),
+                    ("min", point(track_min)),
+                    ("max", point(track_max)),
+                ]))
+            }
+            "slider_float" => {
+                let label = string_arg(arg, "label", op)?;
+                let value = number_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["min", "max"])?;
+                let min = required_number(options, "min", op)?;
+                let max = required_number(options, "max", op)?;
+                let mut edited = value as f32;
+                ui.slider_f32(label.as_str(), &mut edited, min as f32, max as f32);
+                let (track_min, track_max) = slider_rect(ui, false, min, max);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(edited as f64)),
+                    ("min", point(track_min)),
+                    ("max", point(track_max)),
+                ]))
+            }
+            "drag_int" => {
+                let label = string_arg(arg, "label", op)?;
+                let value = number_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["speed", "min", "max"])?;
+                let speed = opt_number(options, "speed", op)?.unwrap_or(1.0) as f32;
+                let min = opt_number(options, "min", op)?;
+                let max = opt_number(options, "max", op)?;
+                let mut edited = value.round() as i32;
+                let mut drag = ui.drag_config(label.as_str());
+                if let (Some(min), Some(max)) = (min, max) {
+                    drag = drag.range(min.round() as i32, max.round() as i32);
+                }
+                drag.speed(speed).build(ui, &mut edited);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(edited as f64)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "drag_float" => {
+                let label = string_arg(arg, "label", op)?;
+                let value = number_arg(arg, "value", op)?;
+                let options = option_map(arg, op, &["speed", "min", "max"])?;
+                let speed = opt_number(options, "speed", op)?.unwrap_or(1.0) as f32;
+                let min = opt_number(options, "min", op)?;
+                let max = opt_number(options, "max", op)?;
+                let mut edited = value as f32;
+                let mut drag = ui.drag_config(label.as_str());
+                if let (Some(min), Some(max)) = (min, max) {
+                    drag = drag.range(min as f32, max as f32);
+                }
+                drag.speed(speed).build(ui, &mut edited);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(edited as f64)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "progress_bar" => {
+                let fraction = number_arg(arg, "fraction", op)?;
+                if !(0.0..=1.0).contains(&fraction) {
+                    return Err(format!(
+                        "ui.{op} needs a fraction from 0 to 1, not {fraction}."
+                    ));
+                }
+                ui.progress_bar(fraction as f32).build();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "combo" => {
+                let label = string_arg(arg, "label", op)?;
+                let value = string_arg(arg, "value", op)?;
+                let items = string_list_arg(arg, op)?;
+                let mut current = items.iter().position(|item| *item == value).unwrap_or(0);
+                let mut chosen = items.get(current).cloned().unwrap_or(value.clone());
+                let token = ui.begin_combo(label.as_str(), chosen.as_str());
+                let combo_min = ui.item_rect_min();
+                let combo_max = ui.item_rect_max();
+                let mut option_rects = Vec::new();
+                if let Some(token) = token {
+                    for (index, item) in items.iter().enumerate() {
+                        let clicked = ui
+                            .selectable_config(item.as_str())
+                            .selected(index == current)
+                            .build();
+                        if clicked {
+                            current = index;
+                            chosen = item.clone();
+                        }
+                        option_rects.push(Value::record([
+                            ("label", Value::from(item.as_str())),
+                            ("min", point(ui.item_rect_min())),
+                            ("max", point(ui.item_rect_max())),
+                        ]));
+                    }
+                    token.end();
+                }
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::from(chosen.as_str())),
+                    ("open", Value::Bool(!option_rects.is_empty())),
+                    ("items", crate::plugins::vlist(option_rects)),
+                    ("min", point(combo_min)),
+                    ("max", point(combo_max)),
+                ]))
+            }
+            "selectable" => {
+                let label = string_arg(arg, "label", op)?;
+                let selected = bool_arg(arg, "selected", op)?;
+                let clicked = ui
+                    .selectable_config(label.as_str())
+                    .selected(selected)
+                    .build();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::Bool(clicked)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "bullet_text" => {
+                let text = string_arg(arg, "text", op)?;
+                ui.bullet_text(text.as_str());
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
             "invisible_button" => {
                 if let Some(key) = unknown_key(
                     arg,
@@ -892,11 +1157,34 @@ fn panic_sentence(window: &str, payload: &(dyn std::any::Any + Send)) -> String 
     format!("Window \"{window}\"'s render callback panicked: {message}")
 }
 
+fn point(at: [f32; 2]) -> Value {
+    Value::record([
+        ("x", Value::from(f64::from(at[0]))),
+        ("y", Value::from(f64::from(at[1]))),
+    ])
+}
+
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Nil => "nil",
+        Value::Bool(_) => "a boolean",
+        Value::Num(_) => "a number",
+        Value::Str(_) | Value::Text(_) => "a string",
+        Value::List(_) => "a list",
+        Value::Map(_) | Value::Folded(_) => "a table",
+        Value::Element(_) => "an element",
+        Value::Image(_) => "an image",
+        _ => "a value",
+    }
+}
+
 fn string_arg(arg: &Value, field: &str, op: &str) -> Result<String, String> {
     match arg.field(field) {
         Some(Value::Str(text)) => Ok(text.to_string()),
-        Some(_) => Err(format!(
-            "ui.{op} needs {field} to be text, like ui.{op}(\"Hello\")."
+        Some(Value::Text(text)) => Ok(text.to_string()),
+        Some(other) => Err(format!(
+            "ui.{op} needs {field} to be text, not {}.",
+            type_name(other)
         )),
         None => Err(format!(
             "ui.{op} needs {field} to draw, like ui.{op}(\"Hello\")."
@@ -904,11 +1192,193 @@ fn string_arg(arg: &Value, field: &str, op: &str) -> Result<String, String> {
     }
 }
 
-fn point(at: [f32; 2]) -> Value {
-    Value::record([
-        ("x", Value::from(f64::from(at[0]))),
-        ("y", Value::from(f64::from(at[1]))),
-    ])
+fn number_arg(arg: &Value, field: &str, op: &str) -> Result<f64, String> {
+    match arg.field(field) {
+        Some(Value::Num(value)) if value.is_finite() => Ok(*value),
+        Some(Value::Num(_)) => Err(format!("ui.{op} needs {field} to be a finite number.")),
+        Some(other) => Err(format!(
+            "ui.{op} needs {field} to be a number, not {}.",
+            type_name(other)
+        )),
+        None => Err(format!("ui.{op} needs {field} to be a number.")),
+    }
+}
+
+fn bool_arg(arg: &Value, field: &str, op: &str) -> Result<bool, String> {
+    match arg.field(field) {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(other) => Err(format!(
+            "ui.{op} needs {field} to be true or false, not {}.",
+            type_name(other)
+        )),
+    }
+}
+
+fn colour_arg(arg: &Value, op: &str) -> Result<[f32; 4], String> {
+    match arg.field("colour") {
+        Some(Value::Str(text)) => parse_colour(op, text),
+        Some(Value::Text(text)) => parse_colour(op, &text.to_string()),
+        Some(other) => Err(format!(
+            "ui.{op} needs colour to be \"#rrggbb\" or \"#rrggbbaa\", not {}.",
+            type_name(other)
+        )),
+        None => Err(format!(
+            "ui.{op} needs a colour, like ui.{op}(\"Alert\", \"#ff0000\")."
+        )),
+    }
+}
+
+fn parse_colour(op: &str, text: &str) -> Result<[f32; 4], String> {
+    let Some(digits) = text.strip_prefix('#') else {
+        return Err(format!(
+            "ui.{op} can't use colour \"{text}\": colour must be \"#rrggbb\" or \"#rrggbbaa\"."
+        ));
+    };
+    if (digits.len() != 6 && digits.len() != 8)
+        || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "ui.{op} can't use colour \"{text}\": colour must be \"#rrggbb\" or \"#rrggbbaa\"."
+        ));
+    }
+    let component = |at: usize| {
+        u8::from_str_radix(&digits[at..at + 2], 16).expect("two hex digits") as f32 / 255.0
+    };
+    let alpha = if digits.len() == 8 { component(6) } else { 1.0 };
+    Ok([component(0), component(2), component(4), alpha])
+}
+
+fn is_empty_map(value: &Value) -> bool {
+    matches!(value, Value::List(items) if items.is_empty())
+}
+
+fn option_map<'a>(arg: &'a Value, op: &str, allowed: &[&str]) -> Result<Option<&'a Value>, String> {
+    match arg.field("options") {
+        None => Ok(None),
+        Some(options) if matches!(options, Value::Map(_)) || is_empty_map(options) => {
+            if let Some(key) = unknown_key(options, allowed) {
+                return Err(format!(
+                    "ui.{op} can't use option \"{key}\": {op} accepts {}.",
+                    accepted_keys(allowed)
+                ));
+            }
+            Ok(Some(options))
+        }
+        Some(other) => Err(format!(
+            "ui.{op} can't use options: options must be a table, not {}.",
+            type_name(other)
+        )),
+    }
+}
+
+fn opt_string(options: Option<&Value>, key: &str, op: &str) -> Result<Option<String>, String> {
+    match options.and_then(|options| options.field(key)) {
+        None => Ok(None),
+        Some(Value::Str(text)) => Ok(Some(text.to_string())),
+        Some(Value::Text(text)) => Ok(Some(text.to_string())),
+        Some(other) => Err(format!(
+            "ui.{op} can't use {key}: {key} must be text, not {}.",
+            type_name(other)
+        )),
+    }
+}
+
+fn opt_bool(options: Option<&Value>, key: &str, op: &str, default: bool) -> Result<bool, String> {
+    match options.and_then(|options| options.field(key)) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(other) => Err(format!(
+            "ui.{op} can't use {key}: {key} must be true or false, not {}.",
+            type_name(other)
+        )),
+    }
+}
+
+fn opt_number(options: Option<&Value>, key: &str, op: &str) -> Result<Option<f64>, String> {
+    match options.and_then(|options| options.field(key)) {
+        None => Ok(None),
+        Some(Value::Num(value)) if value.is_finite() => Ok(Some(*value)),
+        Some(Value::Num(_)) => Err(format!(
+            "ui.{op} can't use {key}: {key} must be a finite number."
+        )),
+        Some(other) => Err(format!(
+            "ui.{op} can't use {key}: {key} must be a number, not {}.",
+            type_name(other)
+        )),
+    }
+}
+
+fn required_number(options: Option<&Value>, key: &str, op: &str) -> Result<f64, String> {
+    match opt_number(options, key, op)? {
+        Some(value) => Ok(value),
+        None => Err(format!(
+            "ui.{op} needs {key} in its options, like {{ {key} = 0 }}."
+        )),
+    }
+}
+
+fn string_list_arg(arg: &Value, op: &str) -> Result<Vec<String>, String> {
+    match arg.field("options") {
+        Some(Value::List(items)) if !items.is_empty() => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(text) => Ok(text.to_string()),
+                Value::Text(text) => Ok(text.to_string()),
+                other => Err(format!(
+                    "ui.{op} needs every option to be text, not {}.",
+                    type_name(other)
+                )),
+            })
+            .collect(),
+        Some(Value::List(_)) => Err(format!(
+            "ui.{op} needs at least one option, like ui.{op}(\"theme\", current, {{ \"dark\", \"light\" }})."
+        )),
+        Some(other) => Err(format!(
+            "ui.{op} needs options to be a list of text, not {}.",
+            type_name(other)
+        )),
+        None => Err(format!(
+            "ui.{op} needs options, like ui.{op}(\"theme\", current, {{ \"dark\", \"light\" }})."
+        )),
+    }
+}
+
+fn accepted_keys(allowed: &[&str]) -> String {
+    match allowed {
+        [] => "no options".to_string(),
+        [only] => format!("\"{only}\""),
+        [head @ .., last] => {
+            let mut keys = head
+                .iter()
+                .map(|key| format!("\"{key}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            keys.push_str(&format!(" and \"{last}\""));
+            keys
+        }
+    }
+}
+
+fn slider_rect(ui: &Ui, is_int: bool, min: f64, max: f64) -> ([f32; 2], [f32; 2]) {
+    const GRAB_PADDING: f32 = 2.0;
+    let frame_min = ui.item_rect_min();
+    let frame_max_x = frame_min[0] + ui.calc_item_width();
+    let mut grab = ui.clone_style().grab_min_size();
+    let slider_sz = (frame_max_x - frame_min[0]) - 2.0 * GRAB_PADDING;
+    if is_int {
+        let range = (max - min).abs() as f32;
+        if range >= 0.0 {
+            grab = grab.max(slider_sz / (range + 1.0));
+        }
+    }
+    grab = grab.min(slider_sz).max(0.0);
+    let usable_min = frame_min[0] + GRAB_PADDING + grab * 0.5;
+    let usable_max = frame_max_x - GRAB_PADDING - grab * 0.5;
+    (
+        [usable_min, frame_min[1]],
+        [usable_max, ui.item_rect_max()[1]],
+    )
 }
 
 fn unknown_key(value: &Value, allowed: &[&str]) -> Option<String> {

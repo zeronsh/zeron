@@ -1354,6 +1354,70 @@ return function(id: string): any
 			local answer = call("button", { label = tostring(label) })
 			return answer.value == true
 		end
+		function view.text_colored(value: any, colour: string)
+			call("text_colored", { text = tostring(value), colour = colour })
+		end
+		function view.separator()
+			call("separator", {})
+		end
+		function view.small_button(label: any): boolean
+			local answer = call("small_button", { label = tostring(label) })
+			return answer.value == true
+		end
+		function view.checkbox(label: any, on: boolean?): boolean
+			local answer = call("checkbox", { label = tostring(label), value = on })
+			return answer.value == true
+		end
+		function view.radio_button(label: any, active: boolean?): boolean
+			local answer = call("radio_button", { label = tostring(label), active = active })
+			return answer.value == true
+		end
+		function view.input_text(label: any, value: any, options: { [string]: any }?): string
+			local answer = call("input_text", { label = tostring(label), value = value, options = options })
+			return tostring(answer.value)
+		end
+		function view.input_text_multiline(label: any, value: any, options: { [string]: any }?): string
+			local answer = call("input_text_multiline", { label = tostring(label), value = value, options = options })
+			return tostring(answer.value)
+		end
+		function view.input_int(label: any, value: any, options: { [string]: any }?): number
+			local answer = call("input_int", { label = tostring(label), value = value, options = options })
+			return answer.value
+		end
+		function view.input_float(label: any, value: any, options: { [string]: any }?): number
+			local answer = call("input_float", { label = tostring(label), value = value, options = options })
+			return answer.value
+		end
+		function view.slider_int(label: any, value: any, options: { [string]: any }?): number
+			local answer = call("slider_int", { label = tostring(label), value = value, options = options })
+			return answer.value
+		end
+		function view.slider_float(label: any, value: any, options: { [string]: any }?): number
+			local answer = call("slider_float", { label = tostring(label), value = value, options = options })
+			return answer.value
+		end
+		function view.drag_int(label: any, value: any, options: { [string]: any }?): number
+			local answer = call("drag_int", { label = tostring(label), value = value, options = options })
+			return answer.value
+		end
+		function view.drag_float(label: any, value: any, options: { [string]: any }?): number
+			local answer = call("drag_float", { label = tostring(label), value = value, options = options })
+			return answer.value
+		end
+		function view.progress_bar(fraction: number)
+			call("progress_bar", { fraction = fraction })
+		end
+		function view.combo(label: any, value: any, options: { string }): string
+			local answer = call("combo", { label = tostring(label), value = value, options = options })
+			return tostring(answer.value)
+		end
+		function view.selectable(label: any, selected: boolean?): boolean
+			local answer = call("selectable", { label = tostring(label), selected = selected })
+			return answer.value == true
+		end
+		function view.bullet_text(value: any)
+			call("bullet_text", { text = tostring(value) })
+		end
 		function view.invisible_button(...)
 			local first = ...
 			local second = select(2, ...)

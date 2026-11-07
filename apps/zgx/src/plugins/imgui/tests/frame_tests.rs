@@ -13,7 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use dear_imgui_rs::{Io, MouseButton};
+use dear_imgui_rs::{Io, Key, MouseButton};
 use zgx::input::{InputEvent, PointerButton};
 use zgx_gpu::wgpu;
 use zgx_script::Value;
@@ -1532,4 +1532,1405 @@ fn a_draw_panic_fails_the_window_and_the_pump_keeps_going() {
         .is_none(),
         "a closed window asks for no frames"
     );
+}
+fn flag_of(value: &Value, field: &str) -> bool {
+    matches!(value.field(field), Some(Value::Bool(true)))
+}
+
+fn num_of(value: &Value, field: &str) -> f64 {
+    match value.field(field) {
+        Some(Value::Num(number)) => *number,
+        other => panic!("{field} is not a number: {other:?}"),
+    }
+}
+
+fn str_of(value: &Value, field: &str) -> String {
+    match value.field(field) {
+        Some(Value::Str(text)) => text.to_string(),
+        Some(Value::Text(text)) => text.to_string(),
+        other => panic!("{field} is not text: {other:?}"),
+    }
+}
+
+fn str_list(items: &[&str]) -> Value {
+    Value::List(
+        items
+            .iter()
+            .map(|item| Value::from(*item))
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+fn move_pointer(probe: &Rc<Probe>, x: f32, y: f32) {
+    probe.edit_io(|io| io.add_mouse_pos_event([x, y]));
+}
+
+fn press_pointer(probe: &Rc<Probe>) {
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+}
+
+fn release_pointer(probe: &Rc<Probe>) {
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+}
+
+fn select_all(probe: &Rc<Probe>) {
+    probe.edit_io(|io| io.add_key_event(Key::ModCtrl, true));
+    probe.edit_io(|io| io.add_key_event(Key::A, true));
+    probe.edit_io(|io| io.add_key_event(Key::A, false));
+    probe.edit_io(|io| io.add_key_event(Key::ModCtrl, false));
+}
+
+fn tap_key(probe: &Rc<Probe>, key: Key) {
+    probe.edit_io(|io| io.add_key_event(key, true));
+    probe.edit_io(|io| io.add_key_event(key, false));
+}
+
+fn ink_colour(
+    image: &Snapshot,
+    background: &Snapshot,
+    area: (u32, u32, u32, u32),
+) -> (usize, f64, f64) {
+    let (left, top, right, bottom) = area;
+    let mut count = 0_usize;
+    let mut reds = 0_u64;
+    let mut greens = 0_u64;
+    for y in top..bottom.min(image.height()) {
+        for x in left..right.min(image.width()) {
+            let (Some(here), Some(was)) = (image.pixel(x, y), background.pixel(x, y)) else {
+                continue;
+            };
+            if here
+                .iter()
+                .zip(was.iter())
+                .take(3)
+                .any(|(a, b)| a.abs_diff(*b) >= 16)
+            {
+                count += 1;
+                reds += u64::from(here[0]);
+                greens += u64::from(here[1]);
+            }
+        }
+    }
+    let mean = |sum: u64| {
+        if count == 0 {
+            0.0
+        } else {
+            sum as f64 / count as f64
+        }
+    };
+    (count, mean(reds), mean(greens))
+}
+
+fn ink_count(image: &Snapshot, background: &Snapshot, area: (u32, u32, u32, u32)) -> usize {
+    ink_colour(image, background, area).0
+}
+
+fn row_span(
+    image: &Snapshot,
+    background: &Snapshot,
+    y: u32,
+    left: u32,
+    right: u32,
+    threshold: u8,
+) -> (u32, u32, usize) {
+    let mut min_x = None::<u32>;
+    let mut max_x = None::<u32>;
+    let mut count = 0;
+    for x in left..right.min(image.width()) {
+        let (Some(here), Some(was)) = (image.pixel(x, y), background.pixel(x, y)) else {
+            continue;
+        };
+        if here
+            .iter()
+            .zip(was.iter())
+            .take(3)
+            .any(|(a, b)| a.abs_diff(*b) >= threshold)
+        {
+            min_x = Some(min_x.map_or(x, |m| m.min(x)));
+            max_x = Some(max_x.map_or(x, |m| m.max(x)));
+            count += 1;
+        }
+    }
+    (min_x.unwrap_or(0), max_x.unwrap_or(0), count)
+}
+
+fn filled_fraction(image: &Snapshot, rect: (f32, f32, f32, f32)) -> f64 {
+    let area = window_rect(rect);
+    let unfilled = image
+        .pixel(area.0 + (area.2 - area.0) * 9 / 10, (area.1 + area.3) / 2)
+        .expect("a sample pixel");
+    let mut filled = 0;
+    let mut total = 0;
+    for y in area.1..area.3.min(image.height()) {
+        for x in area.0..area.2.min(image.width()) {
+            let here = image.pixel(x, y).expect("a bar pixel");
+            total += 1;
+            if here
+                .iter()
+                .zip(unfilled.iter())
+                .take(3)
+                .any(|(a, b)| a.abs_diff(*b) >= 40)
+            {
+                filled += 1;
+            }
+        }
+    }
+    filled as f64 / total as f64
+}
+
+#[test]
+fn text_colored_draws_the_same_glyphs_in_red() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+
+    let empty = Probe::new("coloured-empty");
+    run_frame(&empty, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("empty");
+    let background = raster(&gpu, &empty);
+
+    let plain_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let plain = Probe::new("coloured-plain");
+    {
+        let rect = plain_rect.clone();
+        run_frame(&plain, move |probe, seq| {
+            let answer = probe
+                .frame_widget(
+                    "text",
+                    seq,
+                    &Value::record([("text", Value::from("Alert"))]),
+                )
+                .expect("text");
+            *rect.borrow_mut() = rect_of(&answer);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("plain");
+    }
+    let plain_image = raster(&gpu, &plain);
+
+    let coloured_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let coloured = Probe::new("coloured-red");
+    {
+        let rect = coloured_rect.clone();
+        run_frame(&coloured, move |probe, seq| {
+            let answer = probe
+                .frame_widget(
+                    "text_colored",
+                    seq,
+                    &Value::record([
+                        ("text", Value::from("Alert")),
+                        ("colour", Value::from("#ff0000")),
+                    ]),
+                )
+                .expect("text_colored");
+            *rect.borrow_mut() = rect_of(&answer);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("coloured");
+    }
+    let coloured_image = raster(&gpu, &coloured);
+
+    let plain_area = window_rect(*plain_rect.borrow());
+    let coloured_area = window_rect(*coloured_rect.borrow());
+    let (plain_ink, plain_r, plain_g) = ink_colour(&plain_image, &background, plain_area);
+    let (red_ink, red_r, red_g) = ink_colour(&coloured_image, &background, coloured_area);
+
+    assert!(plain_ink > 0 && red_ink > 0, "both drew ink");
+    let ratio = red_ink as f64 / plain_ink as f64;
+    assert!(
+        (ratio - 1.0).abs() <= 0.15,
+        "same glyph count: {red_ink} vs {plain_ink}"
+    );
+    assert!(
+        red_r - red_g >= 80.0,
+        "red ink: mean red {red_r}, green {red_g}"
+    );
+    assert!(
+        plain_r - plain_g <= 20.0,
+        "neutral ink: mean red {plain_r}, green {plain_g}"
+    );
+
+    let (a, b) = (*plain_rect.borrow(), *coloured_rect.borrow());
+    assert!(
+        (a.0 - b.0).abs() <= 1.0
+            && (a.1 - b.1).abs() <= 1.0
+            && (a.2 - b.2).abs() <= 1.0
+            && (a.3 - b.3).abs() <= 1.0,
+        "same bounding box: {a:?} vs {b:?}"
+    );
+}
+#[test]
+fn separator_draws_a_full_width_divider() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+
+    let sep_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let probe = Probe::new("separator");
+    {
+        let rect = sep_rect.clone();
+        run_frame(&probe, move |probe, seq| {
+            probe
+                .frame_widget("text", seq, &Value::record([("text", Value::from("top"))]))
+                .expect("top");
+            let answer = probe
+                .frame_widget(
+                    "separator",
+                    seq,
+                    &Value::record(std::iter::empty::<(&str, Value)>()),
+                )
+                .expect("separator");
+            *rect.borrow_mut() = rect_of(&answer);
+            probe
+                .frame_widget(
+                    "text",
+                    seq,
+                    &Value::record([("text", Value::from("bottom"))]),
+                )
+                .expect("bottom");
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("with separator");
+    }
+    let with_image = raster(&gpu, &probe);
+
+    let control = Probe::new("separator-control");
+    run_frame(&control, |probe, seq| {
+        probe
+            .frame_widget("text", seq, &Value::record([("text", Value::from("top"))]))
+            .expect("top");
+        probe
+            .frame_widget(
+                "text",
+                seq,
+                &Value::record([("text", Value::from("bottom"))]),
+            )
+            .expect("bottom");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("control");
+    let control_image = raster(&gpu, &control);
+
+    let empty = Probe::new("separator-empty");
+    run_frame(&empty, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("empty");
+    let background = raster(&gpu, &empty);
+
+    let (_, top, _, bottom) = *sep_rect.borrow();
+    let centre = ((top + bottom) / 2.0).round() as i32;
+    let content_left = 8_u32;
+    let content_right = with_image.width().saturating_sub(8);
+    let mut tall = 0;
+    let mut spanned = false;
+    for y in (centre - 2)..=(centre + 2) {
+        let (min_x, max_x, count) = row_span(
+            &with_image,
+            &background,
+            y as u32,
+            content_left,
+            content_right,
+            8,
+        );
+        if count > 0 {
+            tall += 1;
+        }
+        if max_x >= min_x
+            && (max_x - min_x + 1) as f64 >= (content_right - content_left) as f64 * 0.9
+        {
+            spanned = true;
+        }
+    }
+    assert!(spanned, "separator spans at least 90% of the content width");
+    assert!(
+        (1..=3).contains(&tall),
+        "separator is 1..3 px tall, got {tall}"
+    );
+    let (_, _, control_count) = row_span(
+        &control_image,
+        &background,
+        centre as u32,
+        content_left,
+        content_right,
+        2,
+    );
+    assert_eq!(control_count, 0, "no divider without the separator call");
+}
+
+#[test]
+fn small_button_clicks_on_release_only() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("small");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let hits = Rc::new(Cell::new(0));
+    let draw = {
+        let (rect, hits) = (rect.clone(), hits.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "small_button",
+                    seq,
+                    &Value::record([("label", Value::from("x"))]),
+                )
+                .expect("small_button");
+            *rect.borrow_mut() = rect_of(&answer);
+            if flag_of(&answer, "value") {
+                hits.set(hits.get() + 1);
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("down");
+    assert_eq!(hits.get(), 0, "press alone is not a click");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("up");
+    assert_eq!(hits.get(), 1, "release is the click");
+    for _ in 0..5 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    assert_eq!(hits.get(), 1, "one click total");
+}
+
+#[test]
+fn checkbox_toggles_once_per_click() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("checkbox");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let on = Rc::new(Cell::new(false));
+    let changes = Rc::new(RefCell::new(Vec::<bool>::new()));
+    let draw = {
+        let (rect, on, changes) = (rect.clone(), on.clone(), changes.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "checkbox",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("Enabled")),
+                        ("value", Value::Bool(on.get())),
+                    ]),
+                )
+                .expect("checkbox");
+            *rect.borrow_mut() = rect_of(&answer);
+            let now = flag_of(&answer, "value");
+            if now != on.get() {
+                changes.borrow_mut().push(now);
+            }
+            on.set(now);
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("down");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("up");
+    for _ in 0..3 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    assert_eq!(
+        *changes.borrow(),
+        vec![true],
+        "exactly one false->true change on the release frame"
+    );
+
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover 2");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("down 2");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("up 2");
+    for _ in 0..3 {
+        run_frame(&probe, draw.clone()).expect("idle 2");
+    }
+    assert_eq!(
+        *changes.borrow(),
+        vec![true, false],
+        "second click records exactly one true->false"
+    );
+}
+
+#[test]
+fn radio_button_reports_the_clicked_radio_once() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("radio");
+    let rect_b = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let kind = Rc::new(RefCell::new(String::from("a")));
+    let writes = Rc::new(RefCell::new(Vec::<String>::new()));
+    let both = Rc::new(Cell::new(false));
+    let draw = {
+        let (rect_b, kind, writes, both) =
+            (rect_b.clone(), kind.clone(), writes.clone(), both.clone());
+        move |probe: &Probe, seq: u64| {
+            let a = probe
+                .frame_widget(
+                    "radio_button",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("a")),
+                        ("active", Value::Bool(kind.borrow().as_str() == "a")),
+                    ]),
+                )
+                .expect("a");
+            let a_hit = flag_of(&a, "value");
+            if a_hit {
+                *kind.borrow_mut() = "a".into();
+            }
+            let b = probe
+                .frame_widget(
+                    "radio_button",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("b")),
+                        ("active", Value::Bool(kind.borrow().as_str() == "b")),
+                    ]),
+                )
+                .expect("b");
+            *rect_b.borrow_mut() = rect_of(&b);
+            let b_hit = flag_of(&b, "value");
+            if a_hit && b_hit {
+                both.set(true);
+            }
+            if b_hit {
+                if kind.borrow().as_str() != "b" {
+                    writes.borrow_mut().push("b".to_string());
+                }
+                *kind.borrow_mut() = "b".into();
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect_b.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("down");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("up");
+    for _ in 0..3 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    assert_eq!(
+        *writes.borrow(),
+        vec!["b".to_string()],
+        "one write of kind b"
+    );
+    assert!(!both.get(), "never both radios true in one frame");
+    assert_eq!(kind.borrow().as_str(), "b");
+}
+
+#[test]
+fn input_text_reports_typed_characters_in_order() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("input_text");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let name = Rc::new(RefCell::new(String::new()));
+    let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+    let draw = {
+        let (rect, name, seen) = (rect.clone(), name.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "input_text",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("name")),
+                        ("value", Value::from(name.borrow().as_str())),
+                    ]),
+                )
+                .expect("input_text");
+            *rect.borrow_mut() = rect_of(&answer);
+            let now = str_of(&answer, "value");
+            *name.borrow_mut() = now.clone();
+            seen.borrow_mut().push(now);
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("down");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("up");
+    for ch in ["a", "b", "c"] {
+        probe.edit_io(|io| io.add_input_characters_utf8(ch));
+        run_frame(&probe, draw.clone()).expect("type");
+    }
+    for _ in 0..2 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    assert_eq!(
+        seen.borrow().last().cloned(),
+        Some("abc".to_string()),
+        "final value abc"
+    );
+    let mut runs: Vec<String> = Vec::new();
+    for item in seen.borrow().iter() {
+        if runs.last() != Some(item) {
+            runs.push(item.clone());
+        }
+    }
+    let wanted = ["", "a", "ab", "abc"]
+        .iter()
+        .map(|item| item.to_string())
+        .collect::<Vec<_>>();
+    assert!(runs.ends_with(&wanted), "typed in order: {runs:?}");
+}
+
+#[test]
+fn input_text_multiline_preserves_newlines() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("multiline");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let notes = Rc::new(RefCell::new(String::from("one\ntwo")));
+    let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+    let draw = {
+        let (rect, notes, seen) = (rect.clone(), notes.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "input_text_multiline",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("notes")),
+                        ("value", Value::from(notes.borrow().as_str())),
+                        (
+                            "options",
+                            Value::record([
+                                ("width", Value::from(300.0)),
+                                ("height", Value::from(90.0)),
+                            ]),
+                        ),
+                    ]),
+                )
+                .expect("input_text_multiline");
+            *rect.borrow_mut() = rect_of(&answer);
+            let now = str_of(&answer, "value");
+            *notes.borrow_mut() = now.clone();
+            seen.borrow_mut().push(now);
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) * 0.75);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("focus");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release");
+    for ch in "\nthree".chars() {
+        let mut buffer = [0; 4];
+        probe.edit_io(|io| io.add_input_characters_utf8(ch.encode_utf8(&mut buffer)));
+        run_frame(&probe, draw.clone()).expect("type");
+    }
+    for _ in 0..2 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    assert_eq!(
+        seen.borrow().last().cloned(),
+        Some("one\ntwo\nthree".to_string()),
+        "two newlines preserved, none substituted"
+    );
+}
+#[test]
+fn input_int_clamps_to_min_and_max() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("input_int");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let value = Rc::new(Cell::new(5.0));
+    let seen = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let draw = {
+        let (rect, value, seen) = (rect.clone(), value.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "input_int",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("count")),
+                        ("value", Value::from(value.get())),
+                        (
+                            "options",
+                            Value::record([("min", Value::from(0.0)), ("max", Value::from(100.0))]),
+                        ),
+                    ]),
+                )
+                .expect("input_int");
+            *rect.borrow_mut() = rect_of(&answer);
+            value.set(num_of(&answer, "value"));
+            seen.borrow_mut().push(value.get());
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("focus");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release");
+    select_all(&probe);
+    run_frame(&probe, draw.clone()).expect("select all");
+    for ch in ["9", "9", "9"] {
+        probe.edit_io(|io| io.add_input_characters_utf8(ch));
+        run_frame(&probe, draw.clone()).expect("type");
+    }
+    tap_key(&probe, Key::Enter);
+    run_frame(&probe, draw.clone()).expect("enter");
+    assert_eq!(seen.borrow().last().copied(), Some(100.0), "clamped to max");
+    assert!(
+        !seen.borrow().iter().any(|value| *value == 999.0),
+        "999 never recorded"
+    );
+    for value in seen.borrow().iter() {
+        assert!(
+            (0.0..=100.0).contains(value) && value.fract() == 0.0,
+            "value in 0..100: {value}"
+        );
+    }
+
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover 2");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("focus 2");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release 2");
+    select_all(&probe);
+    run_frame(&probe, draw.clone()).expect("select all 2");
+    for ch in ["-", "4"] {
+        probe.edit_io(|io| io.add_input_characters_utf8(ch));
+        run_frame(&probe, draw.clone()).expect("type 2");
+    }
+    tap_key(&probe, Key::Enter);
+    run_frame(&probe, draw.clone()).expect("enter 2");
+    assert_eq!(seen.borrow().last().copied(), Some(0.0), "clamped to min");
+    for value in seen.borrow().iter() {
+        assert!((0.0..=100.0).contains(value), "value in 0..100: {value}");
+    }
+}
+
+#[test]
+fn input_float_clamps_to_min_and_max() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("input_float");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let value = Rc::new(Cell::new(0.5));
+    let seen = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let draw = {
+        let (rect, value, seen) = (rect.clone(), value.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "input_float",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("ratio")),
+                        ("value", Value::from(value.get())),
+                        (
+                            "options",
+                            Value::record([("min", Value::from(0.0)), ("max", Value::from(1.0))]),
+                        ),
+                    ]),
+                )
+                .expect("input_float");
+            *rect.borrow_mut() = rect_of(&answer);
+            value.set(num_of(&answer, "value"));
+            seen.borrow_mut().push(value.get());
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("focus");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release");
+    select_all(&probe);
+    run_frame(&probe, draw.clone()).expect("select all");
+    for ch in ["9", ".", "5"] {
+        probe.edit_io(|io| io.add_input_characters_utf8(ch));
+        run_frame(&probe, draw.clone()).expect("type");
+    }
+    tap_key(&probe, Key::Enter);
+    run_frame(&probe, draw.clone()).expect("enter");
+    let now = seen.borrow()[seen.borrow().len() - 1];
+    assert!((now - 1.0).abs() <= 1e-4, "clamped to max, got {now}");
+    assert!(
+        !seen
+            .borrow()
+            .iter()
+            .any(|value| (*value - 9.5).abs() <= 1e-4),
+        "9.5 never recorded"
+    );
+    for value in seen.borrow().iter() {
+        assert!((0.0..=1.0).contains(value), "value in 0..1: {value}");
+    }
+
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover 2");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("focus 2");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release 2");
+    select_all(&probe);
+    run_frame(&probe, draw.clone()).expect("select all 2");
+    for ch in ["0", ".", "2", "5"] {
+        probe.edit_io(|io| io.add_input_characters_utf8(ch));
+        run_frame(&probe, draw.clone()).expect("type 2");
+    }
+    tap_key(&probe, Key::Enter);
+    run_frame(&probe, draw.clone()).expect("enter 2");
+    let now = seen.borrow()[seen.borrow().len() - 1];
+    assert!(
+        (now - 0.25).abs() <= 1e-4,
+        "fractional value kept, got {now}"
+    );
+}
+
+#[test]
+fn slider_int_drags_through_the_track() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("slider_int");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let value = Rc::new(Cell::new(0.0));
+    let seen = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let draw = {
+        let (rect, value, seen) = (rect.clone(), value.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "slider_int",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("level")),
+                        ("value", Value::from(value.get())),
+                        (
+                            "options",
+                            Value::record([("min", Value::from(0.0)), ("max", Value::from(100.0))]),
+                        ),
+                    ]),
+                )
+                .expect("slider_int");
+            *rect.borrow_mut() = rect_of(&answer);
+            value.set(num_of(&answer, "value"));
+            seen.borrow_mut().push(value.get());
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let y = (top + bottom) / 2.0;
+    let width = right - left;
+
+    move_pointer(&probe, left + width * 0.10, y);
+    run_frame(&probe, draw.clone()).expect("hover 10%");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("press 10%");
+    for step in [20, 30, 40, 50, 60, 70, 80, 90] {
+        move_pointer(&probe, left + width * (step as f32 / 100.0), y);
+        run_frame(&probe, draw.clone()).expect("move");
+    }
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release");
+    for _ in 0..3 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+
+    let values = seen.borrow();
+    assert!(
+        values.len() >= 13,
+        "full interaction recorded: {:?}",
+        values
+    );
+    for index in 2..10 {
+        assert!(
+            values[index] < values[index + 1],
+            "held frames increase: {values:?}"
+        );
+    }
+    assert!(
+        (values[10] - 90.0).abs() <= 1.0,
+        "90% is 90, got {}",
+        values[10]
+    );
+    for index in 10..seen.borrow().len() {
+        assert!(
+            (values[index] - values[10]).abs() <= 0.5,
+            "stable after release"
+        );
+    }
+}
+
+#[test]
+fn slider_float_resolves_fractional_positions() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("slider_float");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let value = Rc::new(Cell::new(0.0));
+    let seen = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let draw = {
+        let (rect, value, seen) = (rect.clone(), value.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "slider_float",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("speed")),
+                        ("value", Value::from(value.get())),
+                        (
+                            "options",
+                            Value::record([("min", Value::from(0.0)), ("max", Value::from(10.0))]),
+                        ),
+                    ]),
+                )
+                .expect("slider_float");
+            *rect.borrow_mut() = rect_of(&answer);
+            value.set(num_of(&answer, "value"));
+            seen.borrow_mut().push(value.get());
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let y = (top + bottom) / 2.0;
+    let width = right - left;
+
+    move_pointer(&probe, left + width * 0.10, y);
+    run_frame(&probe, draw.clone()).expect("hover 10%");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("press 10%");
+    move_pointer(&probe, left + width * 0.25, y);
+    run_frame(&probe, draw.clone()).expect("move 25%");
+    move_pointer(&probe, left + width * 0.50, y);
+    run_frame(&probe, draw.clone()).expect("move 50%");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release");
+    for _ in 0..3 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+
+    let values = seen.borrow();
+    assert!(
+        (values[3] - 2.5).abs() <= 0.05,
+        "25% is 2.5, got {}",
+        values[3]
+    );
+    assert!(
+        (values[4] - 5.0).abs() <= 0.05,
+        "50% is 5.0, got {}",
+        values[4]
+    );
+    for index in 4..seen.borrow().len() {
+        assert!(
+            (values[index] - values[4]).abs() <= 0.05,
+            "stable after release"
+        );
+    }
+}
+
+#[test]
+fn drag_int_moves_by_pointer_delta_times_speed() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("drag_int");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let value = Rc::new(Cell::new(10.0));
+    let seen = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let draw = {
+        let (rect, value, seen) = (rect.clone(), value.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "drag_int",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("count")),
+                        ("value", Value::from(value.get())),
+                        (
+                            "options",
+                            Value::record([
+                                ("speed", Value::from(1.0)),
+                                ("min", Value::from(0.0)),
+                                ("max", Value::from(1000.0)),
+                            ]),
+                        ),
+                    ]),
+                )
+                .expect("drag_int");
+            *rect.borrow_mut() = rect_of(&answer);
+            value.set(num_of(&answer, "value"));
+            seen.borrow_mut().push(value.get());
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("press");
+    for step in 1..=4 {
+        let dx = step * 5;
+        move_pointer(&probe, x + dx as f32, y);
+        run_frame(&probe, draw.clone()).expect("move");
+    }
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release");
+    for _ in 0..3 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+
+    let values = seen.borrow();
+    let reached = *values.last().expect("a value");
+    assert!(
+        (reached - 30.0).abs() <= 1.0,
+        "20px times speed 1: {reached}"
+    );
+    assert!(
+        values[3] < values[4] && values[4] < values[5] && values[5] < values[6],
+        "held frames change the value: {values:?}"
+    );
+}
+
+#[test]
+fn drag_float_moves_linear_and_back() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("drag_float");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let value = Rc::new(Cell::new(1.0));
+    let seen = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let draw = {
+        let (rect, value, seen) = (rect.clone(), value.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "drag_float",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("gain")),
+                        ("value", Value::from(value.get())),
+                        (
+                            "options",
+                            Value::record([
+                                ("speed", Value::from(0.1)),
+                                ("min", Value::from(0.0)),
+                                ("max", Value::from(100.0)),
+                            ]),
+                        ),
+                    ]),
+                )
+                .expect("drag_float");
+            *rect.borrow_mut() = rect_of(&answer);
+            value.set(num_of(&answer, "value"));
+            seen.borrow_mut().push(value.get());
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("press");
+    for step in 1..=3 {
+        let dx = step * 10;
+        move_pointer(&probe, x + dx as f32, y);
+        run_frame(&probe, draw.clone()).expect("move right");
+    }
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release");
+    let reached = *seen.borrow().last().expect("a value");
+    assert!((reached - 4.0).abs() <= 0.02, "30px times 0.1: {reached}");
+
+    move_pointer(&probe, x + 10.0, y);
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("press back");
+    for step in 0..3 {
+        let dx = step * 10;
+        move_pointer(&probe, x - dx as f32, y);
+        run_frame(&probe, draw.clone()).expect("move left");
+    }
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("release back");
+    let back = *seen.borrow().last().expect("a value");
+    assert!((back - 1.0).abs() <= 0.02, "back to 1.0: {back}");
+}
+#[test]
+fn progress_bar_fills_the_fraction_given() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let rect_a = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let rect_b = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let probe = Probe::new("bars");
+    {
+        let (a, b) = (rect_a.clone(), rect_b.clone());
+        run_frame(&probe, move |probe, seq| {
+            let answer = probe
+                .frame_widget(
+                    "progress_bar",
+                    seq,
+                    &Value::record([("fraction", Value::from(0.25))]),
+                )
+                .expect("bar a");
+            *a.borrow_mut() = rect_of(&answer);
+            let answer = probe
+                .frame_widget(
+                    "progress_bar",
+                    seq,
+                    &Value::record([("fraction", Value::from(0.75))]),
+                )
+                .expect("bar b");
+            *b.borrow_mut() = rect_of(&answer);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("bars");
+    }
+    let image = raster(&gpu, &probe);
+    let (a, b) = (*rect_a.borrow(), *rect_b.borrow());
+    let (fa, fb) = (filled_fraction(&image, a), filled_fraction(&image, b));
+    assert!((fa - 0.25).abs() <= 0.08, "0.25 bar filled {fa}");
+    assert!((fb - 0.75).abs() <= 0.08, "0.75 bar filled {fb}");
+    assert!(
+        ((fb - fa) - 0.5).abs() <= 0.04,
+        "lengths differ by half the bar: {fa} vs {fb}"
+    );
+}
+
+#[test]
+fn combo_returns_the_chosen_value_not_its_index() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("combo");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let popup = Rc::new(RefCell::new(Vec::<((f32, f32, f32, f32), String)>::new()));
+    let theme = Rc::new(RefCell::new(String::from("dark")));
+    let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+    let draw = {
+        let (rect, popup, theme, seen) = (rect.clone(), popup.clone(), theme.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "combo",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("theme")),
+                        ("value", Value::from(theme.borrow().as_str())),
+                        ("options", str_list(&["dark", "light", "system"])),
+                    ]),
+                )
+                .expect("combo");
+            *rect.borrow_mut() = rect_of(&answer);
+            let now = str_of(&answer, "value");
+            *theme.borrow_mut() = now.clone();
+            seen.borrow_mut().push(now);
+            let items = answer
+                .field("items")
+                .map(|items| items.list().to_vec())
+                .unwrap_or_default();
+            *popup.borrow_mut() = items
+                .iter()
+                .map(|item| (rect_of(item), str_of(item, "label")))
+                .collect();
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("open down");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("open up");
+    run_frame(&probe, draw.clone()).expect("popup");
+
+    let light = popup
+        .borrow()
+        .iter()
+        .find(|(_, label)| label == "light")
+        .map(|(rect, _)| *rect)
+        .expect("light option rect");
+    let (lx, ly) = ((light.0 + light.2) / 2.0, (light.1 + light.3) / 2.0);
+    move_pointer(&probe, lx, ly);
+    run_frame(&probe, draw.clone()).expect("pick hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("pick down");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("pick up");
+    for _ in 0..2 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    assert_eq!(
+        seen.borrow().last().cloned(),
+        Some("light".to_string()),
+        "chosen value, not index"
+    );
+    assert!(
+        !seen
+            .borrow()
+            .iter()
+            .any(|value| value == "1" || value == "2"),
+        "no index was ever returned"
+    );
+}
+
+#[test]
+fn selectable_reports_the_clicked_row_once() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("selectable");
+    let rect_b = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let sel = Rc::new(RefCell::new(String::new()));
+    let writes = Rc::new(RefCell::new(Vec::<String>::new()));
+    let both = Rc::new(Cell::new(false));
+    let draw = {
+        let (rect_b, sel, writes, both) =
+            (rect_b.clone(), sel.clone(), writes.clone(), both.clone());
+        move |probe: &Probe, seq: u64| {
+            let a = probe
+                .frame_widget(
+                    "selectable",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("Row A")),
+                        ("selected", Value::Bool(sel.borrow().as_str() == "A")),
+                    ]),
+                )
+                .expect("selectable a");
+            let a_clicked = flag_of(&a, "value");
+            let b = probe
+                .frame_widget(
+                    "selectable",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("Row B")),
+                        ("selected", Value::Bool(sel.borrow().as_str() == "B")),
+                    ]),
+                )
+                .expect("selectable b");
+            *rect_b.borrow_mut() = rect_of(&b);
+            let b_clicked = flag_of(&b, "value");
+            if a_clicked && b_clicked {
+                both.set(true);
+            }
+            if a_clicked {
+                *sel.borrow_mut() = "A".into();
+            }
+            if b_clicked {
+                if sel.borrow().as_str() != "B" {
+                    writes.borrow_mut().push("B".to_string());
+                }
+                *sel.borrow_mut() = "B".into();
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect_b.borrow();
+    let (x, y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+    move_pointer(&probe, x, y);
+    run_frame(&probe, draw.clone()).expect("hover");
+    press_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("down");
+    assert!(writes.borrow().is_empty(), "no write on the down frame");
+    release_pointer(&probe);
+    run_frame(&probe, draw.clone()).expect("up");
+    for _ in 0..3 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    assert_eq!(
+        *writes.borrow(),
+        vec!["B".to_string()],
+        "one write for row B"
+    );
+    assert!(!both.get(), "never both rows true in one frame");
+}
+
+#[test]
+fn bullet_text_draws_a_bullet_before_its_words() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let probe = Probe::new("bullet");
+    {
+        let saved = rect.clone();
+        run_frame(&probe, move |probe, seq| {
+            probe
+                .frame_widget(
+                    "text",
+                    seq,
+                    &Value::record([("text", Value::from("Heading"))]),
+                )
+                .expect("heading");
+            let answer = probe
+                .frame_widget(
+                    "bullet_text",
+                    seq,
+                    &Value::record([("text", Value::from("Item one"))]),
+                )
+                .expect("bullet_text");
+            *saved.borrow_mut() = rect_of(&answer);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("bullet");
+    }
+    let image = raster(&gpu, &probe);
+
+    let empty = Probe::new("bullet-empty");
+    run_frame(&empty, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("empty");
+    let background = raster(&gpu, &empty);
+
+    let (left, top, right, bottom) = *rect.borrow();
+    let (left, top) = (left as u32, top as u32);
+    let (right, bottom) = (right.ceil() as u32, bottom.ceil() as u32);
+    let bullet_band = (left + 16).min(image.width());
+    let first = ink_count(&image, &background, (left, top, bullet_band, bottom));
+    let rest = ink_count(&image, &background, (bullet_band, top, right, bottom));
+    assert!(first >= 12, "bullet blob before the words: {first}");
+    assert!(rest >= 40, "word ink right of the bullet: {rest}");
+}
+
+#[test]
+fn an_unknown_option_key_is_refused_naming_it() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("unknown-option");
+    run_frame(&probe, |probe, seq| {
+        probe
+            .frame_widget(
+                "text",
+                seq,
+                &Value::record([("text", Value::from("before"))]),
+            )
+            .expect("before");
+        let error = probe
+            .frame_widget(
+                "input_int",
+                seq,
+                &Value::record([
+                    ("label", Value::from("count")),
+                    ("value", Value::from(5.0)),
+                    (
+                        "options",
+                        Value::record([("min", Value::from(0.0)), ("maxx", Value::from(100.0))]),
+                    ),
+                ]),
+            )
+            .expect_err("an unknown key must be refused");
+        assert!(error.contains("input_int"), "{error}");
+        assert!(error.contains("maxx"), "{error}");
+        assert!(error.contains("min"), "{error}");
+        assert!(error.contains("max"), "{error}");
+        let _ = probe.frame_script_end(seq, Some(error), true);
+    })
+    .expect("the frame ended as a refusal");
+}
+
+#[test]
+fn a_wrong_argument_type_is_refused_naming_them() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("wrong-type");
+    run_frame(&probe, |probe, seq| {
+        probe
+            .frame_widget(
+                "text",
+                seq,
+                &Value::record([("text", Value::from("before"))]),
+            )
+            .expect("before");
+        let error = probe
+            .frame_widget(
+                "drag_float",
+                seq,
+                &Value::record([
+                    ("label", Value::from("gain")),
+                    ("value", Value::from("fast")),
+                ]),
+            )
+            .expect_err("a wrong type must be refused");
+        assert!(error.contains("drag_float"), "{error}");
+        assert!(error.contains("value"), "{error}");
+        assert!(error.contains("number"), "{error}");
+        assert!(error.contains("string"), "{error}");
+        let _ = probe.frame_script_end(seq, Some(error), true);
+    })
+    .expect("the frame ended as a refusal");
+}
+
+#[test]
+fn widget_options_and_colours_are_checked() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("checks");
+    let messages = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let messages = messages.clone();
+        run_frame(&probe, move |probe, seq| {
+            messages.borrow_mut().push(
+                probe
+                    .frame_widget(
+                        "text_colored",
+                        seq,
+                        &Value::record([
+                            ("text", Value::from("x")),
+                            ("colour", Value::from("red")),
+                        ]),
+                    )
+                    .expect_err("a colour without hex must be refused"),
+            );
+            messages.borrow_mut().push(
+                probe
+                    .frame_widget(
+                        "progress_bar",
+                        seq,
+                        &Value::record([("fraction", Value::from(1.5))]),
+                    )
+                    .expect_err("an out-of-range fraction must be refused"),
+            );
+            let under = probe
+                .frame_widget(
+                    "progress_bar",
+                    seq,
+                    &Value::record([("fraction", Value::from(-0.1))]),
+                )
+                .expect_err("a negative fraction must be refused");
+            messages.borrow_mut().push(under.clone());
+            let _ = probe.frame_script_end(seq, Some(under), true);
+        })
+        .expect("the frame ended as a refusal");
+    }
+    let messages = messages.borrow();
+    assert!(messages[0].contains("colour"), "{}", messages[0]);
+    assert!(messages[1].contains("progress_bar"), "{}", messages[1]);
+    assert!(messages[1].contains("1.5"), "{}", messages[1]);
+    assert!(messages[2].contains("0 to 1"), "{}", messages[2]);
 }
