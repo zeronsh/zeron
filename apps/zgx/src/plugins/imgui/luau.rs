@@ -98,6 +98,44 @@ const WIDGET_OPS: &[&str] = &[
     "begin_group",
     "end_group",
     "set_next_item_width",
+    "begin_table",
+    "table_setup_column",
+    "table_headers_row",
+    "table_next_row",
+    "table_next_column",
+    "table_sort_specs",
+    "end_table",
+    "begin_tab_bar",
+    "begin_tab_item",
+    "end_tab_item",
+    "end_tab_bar",
+    "begin_menu_bar",
+    "end_menu_bar",
+    "begin_menu",
+    "end_menu",
+    "menu_item",
+    "open_popup",
+    "begin_popup",
+    "begin_popup_modal",
+    "begin_popup_context_item",
+    "end_popup",
+    "set_tooltip",
+    "tree_node",
+    "tree_pop",
+    "collapsing_header",
+    "begin_list_box",
+    "end_list_box",
+    "color_edit3",
+    "color_button",
+    "begin_drag_drop_source",
+    "set_drag_drop_payload",
+    "end_drag_drop_source",
+    "begin_drag_drop_target",
+    "accept_drag_drop_payload",
+    "end_drag_drop_target",
+    "shortcut",
+    "date_picker",
+    "time_picker",
 ];
 
 /// Ends the frame the render callback was given.
@@ -231,7 +269,7 @@ impl ImGuiWindows {
         }
         if !WINDOW_OPS.contains(&op.as_str()) {
             return failed(&format!(
-                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, is_maximized, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text, text_colored, separator, button, small_button, checkbox, radio_button, input_text, input_text_multiline, input_int, input_float, slider_int, slider_float, drag_int, drag_float, progress_bar, combo, selectable, bullet_text, invisible_button, is_item_hovered, is_item_active, mouse_delta, is_mouse_dragging, same_line, new_line, spacing, dummy, indent, unindent, begin_child, end_child, columns, next_column, begin_group, end_group and set_next_item_width."
+                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, is_maximized, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text, text_colored, separator, button, small_button, checkbox, radio_button, input_text, input_text_multiline, input_int, input_float, slider_int, slider_float, drag_int, drag_float, progress_bar, combo, selectable, bullet_text, invisible_button, is_item_hovered, is_item_active, mouse_delta, is_mouse_dragging, same_line, new_line, spacing, dummy, indent, unindent, begin_child, end_child, columns, next_column, begin_group, end_group, set_next_item_width, begin_table, table_setup_column, table_headers_row, table_next_row, table_next_column, table_sort_specs, end_table, begin_tab_bar, begin_tab_item, end_tab_item, end_tab_bar, begin_menu_bar, end_menu_bar, begin_menu, end_menu, menu_item, open_popup, begin_popup, begin_popup_modal, begin_popup_context_item, end_popup, set_tooltip, tree_node, tree_pop, collapsing_header, begin_list_box, end_list_box, color_edit3, color_button, begin_drag_drop_source, set_drag_drop_payload, end_drag_drop_source, begin_drag_drop_target, accept_drag_drop_payload, end_drag_drop_target, shortcut, date_picker and time_picker."
             ));
         }
         if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {

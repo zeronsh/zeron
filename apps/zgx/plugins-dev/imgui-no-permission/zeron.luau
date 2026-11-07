@@ -1411,8 +1411,18 @@ return function(id: string): any
 			local answer = call("combo", { label = tostring(label), value = value, options = options })
 			return tostring(answer.value)
 		end
-		function view.selectable(label: any, selected: boolean?): boolean
-			local answer = call("selectable", { label = tostring(label), selected = selected })
+		function view.selectable(label: any, selected: boolean?, options: { [string]: any }?): boolean
+			local fields: { [string]: any } = {}
+			if type(label) == "table" and (label.label ~= nil or label.span_all_columns ~= nil) then
+				fields = table.clone(label)
+			else
+				fields.label = tostring(label)
+				fields.selected = selected
+				if options then
+					fields.options = options
+				end
+			end
+			local answer = call("selectable", fields)
 			return answer.value == true
 		end
 		function view.bullet_text(value: any)
@@ -1493,6 +1503,141 @@ return function(id: string): any
 		end
 		function view.set_next_item_width(width)
 			call("set_next_item_width", { width = width })
+		end
+		function view.begin_table(fields: { [string]: any }): boolean
+			local answer = call("begin_table", table.clone(fields))
+			return answer.open == true
+		end
+		function view.table_setup_column(fields: { [string]: any })
+			call("table_setup_column", table.clone(fields))
+		end
+		function view.table_headers_row()
+			call("table_headers_row", {})
+		end
+		function view.table_next_row()
+			call("table_next_row", {})
+		end
+		function view.table_next_column()
+			call("table_next_column", {})
+		end
+		function view.table_sort_specs(): { column: string, sort: string }?
+			local answer = call("table_sort_specs", {})
+			return if type(answer.value) == "table" then answer.value else nil
+		end
+		function view.end_table()
+			call("end_table", {})
+		end
+		function view.begin_tab_bar(id: any): boolean
+			local answer = call("begin_tab_bar", { id = tostring(id) })
+			return answer.open == true
+		end
+		function view.begin_tab_item(label: any): boolean
+			local answer = call("begin_tab_item", { label = tostring(label) })
+			return answer.open == true
+		end
+		function view.end_tab_item()
+			call("end_tab_item", {})
+		end
+		function view.end_tab_bar()
+			call("end_tab_bar", {})
+		end
+		function view.begin_menu_bar(): boolean
+			local answer = call("begin_menu_bar", {})
+			return answer.open == true
+		end
+		function view.end_menu_bar()
+			call("end_menu_bar", {})
+		end
+		function view.begin_menu(label: any): boolean
+			local answer = call("begin_menu", { label = tostring(label) })
+			return answer.open == true
+		end
+		function view.end_menu()
+			call("end_menu", {})
+		end
+		function view.menu_item(label: any): boolean
+			local answer = call("menu_item", { label = tostring(label) })
+			return answer.value == true
+		end
+		function view.open_popup(id: any)
+			call("open_popup", { id = tostring(id) })
+		end
+		function view.begin_popup(id: any): boolean
+			local answer = call("begin_popup", { id = tostring(id) })
+			return answer.open == true
+		end
+		function view.begin_popup_modal(id: any, options: { [string]: any }?): boolean
+			local answer = call("begin_popup_modal", { id = tostring(id), options = options })
+			return answer.open == true
+		end
+		function view.begin_popup_context_item(id: any): boolean
+			local answer = call("begin_popup_context_item", { id = tostring(id) })
+			return answer.open == true
+		end
+		function view.end_popup()
+			call("end_popup", {})
+		end
+		function view.set_tooltip(text: any)
+			call("set_tooltip", { text = tostring(text) })
+		end
+		function view.tree_node(label: any): boolean
+			local answer = call("tree_node", { label = tostring(label) })
+			return answer.open == true
+		end
+		function view.tree_pop()
+			call("tree_pop", {})
+		end
+		function view.collapsing_header(label: any): boolean
+			local answer = call("collapsing_header", { label = tostring(label) })
+			return answer.open == true
+		end
+		function view.begin_list_box(id: any, size: { width: number, height: number }?): boolean
+			local fields = table.clone(size or {})
+			fields.id = tostring(id)
+			local answer = call("begin_list_box", fields)
+			return answer.open == true
+		end
+		function view.end_list_box()
+			call("end_list_box", {})
+		end
+		function view.color_edit3(label: any, colour: { r: number, g: number, b: number }, options: { [string]: any }?): { r: number, g: number, b: number }
+			local answer = call("color_edit3", { label = tostring(label), value = colour, options = options })
+			return answer.value
+		end
+		function view.color_button(fields: { [string]: any }): boolean
+			local answer = call("color_button", table.clone(fields))
+			return answer.clicked == true
+		end
+		function view.begin_drag_drop_source(): boolean
+			local answer = call("begin_drag_drop_source", {})
+			return answer.open == true
+		end
+		function view.set_drag_drop_payload(kind: string, payload: any)
+			call("set_drag_drop_payload", { ["type"] = kind, payload = if payload == nil then ui.null else payload })
+		end
+		function view.end_drag_drop_source()
+			call("end_drag_drop_source", {})
+		end
+		function view.begin_drag_drop_target(): boolean
+			local answer = call("begin_drag_drop_target", {})
+			return answer.open == true
+		end
+		function view.accept_drag_drop_payload(kind: string): any
+			local answer = call("accept_drag_drop_payload", { ["type"] = kind })
+			return if answer.accepted == true then answer.value else nil
+		end
+		function view.end_drag_drop_target()
+			call("end_drag_drop_target", {})
+		end
+		function view.shortcut(fields: { [string]: any }): boolean
+			local answer = call("shortcut", table.clone(fields))
+			return answer.value == true
+		end
+		function view.date_picker(fields: { [string]: any })
+			call("date_picker", table.clone(fields or {}))
+		end
+		function view.time_picker(fields: { [string]: any })
+			call("time_picker", table.clone(fields or {}))
 		end
 		return view
 	end

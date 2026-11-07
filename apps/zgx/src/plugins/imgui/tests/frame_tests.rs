@@ -4099,3 +4099,340 @@ fn an_unclosed_child_region_is_reported_once() {
         "the next frame lays out like a balanced run: {recovered:?} vs {benchmark:?}"
     );
 }
+fn point_of(value: &Value, field: &str) -> (f32, f32) {
+    let point = value.field(field).expect("the point field");
+    (
+        match point.field("x") {
+            Some(Value::Num(number)) => *number as f32,
+            _ => panic!("{field}.x is not a number"),
+        },
+        match point.field("y") {
+            Some(Value::Num(number)) => *number as f32,
+            _ => panic!("{field}.y is not a number"),
+        },
+    )
+}
+
+fn draw_probe_table(probe: &Probe, seq: u64) -> (Value, Value) {
+    let begin = probe
+        .frame_widget(
+            "begin_table",
+            seq,
+            &Value::record([
+                ("id", Value::from("files")),
+                ("columns", Value::from(3.0)),
+                (
+                    "flags",
+                    Value::List(
+                        ["borders", "row_bg", "resizable"]
+                            .iter()
+                            .map(|flag| Value::from(*flag))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    ),
+                ),
+            ]),
+        )
+        .expect("begin_table");
+    probe
+        .frame_widget(
+            "table_setup_column",
+            seq,
+            &Value::record([
+                ("label", Value::from("Name")),
+                ("width", Value::from(200.0)),
+            ]),
+        )
+        .expect("column Name");
+    probe
+        .frame_widget(
+            "table_setup_column",
+            seq,
+            &Value::record([
+                ("label", Value::from("Size")),
+                ("width", Value::from(90.0)),
+            ]),
+        )
+        .expect("column Size");
+    probe
+        .frame_widget(
+            "table_setup_column",
+            seq,
+            &Value::record([("label", Value::from("Modified"))]),
+        )
+        .expect("column Modified");
+    let headers = probe
+        .frame_widget("table_headers_row", seq, &no_arg())
+        .expect("headers row");
+    (begin, headers)
+}
+
+fn end_probe_table(probe: &Probe, seq: u64) {
+    probe
+        .frame_widget("end_table", seq, &no_arg())
+        .expect("end_table");
+}
+
+#[test]
+fn a_table_draws_headers_columns_rows_and_borders() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+
+    let empty = Probe::new("table-empty");
+    run_frame(&empty, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("empty frame");
+    let background = raster(&gpu, &empty);
+
+    let origin = Rc::new(RefCell::new((0.0_f32, 0.0_f32)));
+    let probe = Probe::new("table");
+    {
+        let origin = origin.clone();
+        run_frame(&probe, move |probe, seq| {
+            let (begin, _headers) = draw_probe_table(probe, seq);
+            *origin.borrow_mut() = point_of(&begin, "min");
+            for row in 0..3 {
+                probe
+                    .frame_widget("table_next_row", seq, &no_arg())
+                    .expect("next row");
+                for column in 0..3 {
+                    probe
+                        .frame_widget("table_next_column", seq, &no_arg())
+                        .expect("next column");
+                    probe.text(seq, &format!("r{row}c{column}"));
+                }
+            }
+            end_probe_table(probe, seq);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("table frame");
+    }
+    let painted = raster(&gpu, &probe);
+
+    let (x0, y0) = *origin.borrow();
+    assert!(x0 > 0.0 && y0 > 0.0, "the table has an origin: {x0},{y0}");
+    for border_x in [200.0_f32, 290.0_f32] {
+        let x = (x0 + border_x).round() as u32;
+        let mut ink = 0;
+        for y in (y0 as u32 + 4)..(y0 as u32 + 90) {
+            if let (Some(here), Some(was)) = (painted.pixel(x, y), background.pixel(x, y))
+                && here
+                    .iter()
+                    .zip(was.iter())
+                    .take(3)
+                    .any(|(a, b)| a.abs_diff(*b) >= 16)
+            {
+                ink += 1;
+            }
+        }
+        assert!(ink > 4, "the border at x={x} is missing");
+    }
+    let cells = [
+        (x0 + 8.0, y0 + 26.0),
+        (x0 + 208.0, y0 + 26.0),
+        (x0 + 300.0, y0 + 26.0),
+        (x0 + 8.0, y0 + 46.0),
+    ];
+    for (cell_x, cell_y) in cells {
+        let area = window_rect((cell_x, cell_y, cell_x + 60.0, cell_y + 18.0));
+        assert!(
+            differing(&painted, &background, area) >= 4,
+            "the cell at {cell_x},{cell_y} is empty"
+        );
+    }
+}
+
+#[test]
+fn a_clicked_table_row_selectable_reports_once() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("row-select");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let clicks = Rc::new(Cell::new(0));
+
+    let draw = {
+        let (rect, clicks) = (rect.clone(), clicks.clone());
+        move |probe: &Probe, seq: u64| {
+            probe
+                .frame_widget(
+                    "begin_table",
+                    seq,
+                    &Value::record([
+                        ("id", Value::from("rows")),
+                        ("columns", Value::from(2.0)),
+                    ]),
+                )
+                .expect("begin_table");
+            probe
+                .frame_widget(
+                    "table_setup_column",
+                    seq,
+                    &Value::record([("label", Value::from("name"))]),
+                )
+                .expect("column");
+            probe
+                .frame_widget(
+                    "table_setup_column",
+                    seq,
+                    &Value::record([("label", Value::from("kind"))]),
+                )
+                .expect("column");
+            probe
+                .frame_widget("table_headers_row", seq, &no_arg())
+                .expect("headers");
+            probe
+                .frame_widget("table_next_row", seq, &no_arg())
+                .expect("row");
+            probe
+                .frame_widget("table_next_column", seq, &no_arg())
+                .expect("column");
+            let answer = probe
+                .frame_widget(
+                    "selectable",
+                    seq,
+                    &Value::record([
+                        ("label", Value::from("row.two")),
+                        ("selected", Value::Bool(true)),
+                        ("span_all_columns", Value::Bool(true)),
+                    ]),
+                )
+                .expect("selectable");
+            *rect.borrow_mut() = rect_of(&answer);
+            if matches!(answer.field("value"), Some(Value::Bool(true))) {
+                clicks.set(clicks.get() + 1);
+            }
+            end_probe_table(probe, seq);
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    let centre = [(left + right) / 2.0, (top + bottom) / 2.0];
+
+    probe.edit_io(|io| io.add_mouse_pos_event(centre));
+    run_frame(&probe, draw.clone()).expect("hover");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release");
+    run_frame(&probe, draw.clone()).expect("settle");
+
+    assert_eq!(clicks.get(), 1, "one click is one selectable hit");
+}
+
+#[test]
+fn a_menu_opens_on_click_and_its_item_fires_once() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("menu");
+    let file = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let item_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let open = Rc::new(RefCell::new(false));
+    let fired = Rc::new(Cell::new(0));
+
+    let draw = {
+        let (file, item_rect, open, fired) = (file.clone(), item_rect.clone(), open.clone(), fired.clone());
+        move |probe: &Probe, seq: u64| {
+            probe.frame_widget("begin_menu_bar", seq, &no_arg()).expect("menu bar");
+            let menu = probe
+                .frame_widget("begin_menu", seq, &Value::record([("label", Value::from("File"))]))
+                .expect("File menu");
+            *file.borrow_mut() = rect_of(&menu);
+            let was_open = matches!(menu.field("open"), Some(Value::Bool(true)));
+            *open.borrow_mut() = was_open;
+            if was_open {
+                let item = probe
+                    .frame_widget("menu_item", seq, &Value::record([("label", Value::from("Open"))]))
+                    .expect("menu item");
+                *item_rect.borrow_mut() = rect_of(&item);
+                if matches!(item.field("value"), Some(Value::Bool(true))) {
+                    fired.set(fired.get() + 1);
+                }
+            }
+            probe.frame_widget("end_menu", seq, &no_arg()).expect("end menu");
+            probe.frame_widget("end_menu_bar", seq, &no_arg()).expect("end menu bar");
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    assert!(!*open.borrow(), "the menu starts closed");
+
+    let (left, top, right, bottom) = *file.borrow();
+    let centre = [(left + right) / 2.0, (top + bottom) / 2.0];
+    probe.edit_io(|io| io.add_mouse_pos_event(centre));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press File");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release File");
+    assert!(*open.borrow(), "the click opens the menu");
+
+    let (item_left, item_top, item_right, item_bottom) = *item_rect.borrow();
+    let item_centre = [
+        (item_left + item_right) / 2.0,
+        (item_top + item_bottom) / 2.0,
+    ];
+    probe.edit_io(|io| io.add_mouse_pos_event(item_centre));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press item");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release item");
+    assert_eq!(fired.get(), 1, "the menu item fired exactly once");
+}
+
+#[test]
+fn a_list_box_selects_the_clicked_row() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("listbox");
+    let chosen = Rc::new(RefCell::new(String::new()));
+    let rows = ["alpha", "gamma", "delta"];
+    let rects = Rc::new(RefCell::new(Vec::<(f32, f32, f32, f32)>::new()));
+
+    let draw = {
+        let (chosen, rects) = (chosen.clone(), rects.clone());
+        move |probe: &Probe, seq: u64| {
+            probe
+                .frame_widget(
+                    "begin_list_box",
+                    seq,
+                    &Value::record([
+                        ("id", Value::from("##kinds")),
+                        ("width", Value::from(180.0)),
+                        ("height", Value::from(120.0)),
+                    ]),
+                )
+                .expect("list box");
+            let mut captured = Vec::new();
+            for row in rows {
+                let listed = chosen.borrow().clone();
+                let answer = probe
+                    .frame_widget(
+                        "selectable",
+                        seq,
+                        &Value::record([
+                            ("label", Value::from(row)),
+                            ("selected", Value::Bool(listed == *row)),
+                        ]),
+                    )
+                    .expect("selectable");
+                captured.push(rect_of(&answer));
+                if matches!(answer.field("value"), Some(Value::Bool(true))) {
+                    *chosen.borrow_mut() = row.to_string();
+                }
+            }
+            *rects.borrow_mut() = captured;
+            probe.frame_widget("end_list_box", seq, &no_arg()).expect("end list box");
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let third = rects.borrow()[2];
+    let centre = [(third.0 + third.2) / 2.0, (third.1 + third.3) / 2.0];
+    probe.edit_io(|io| io.add_mouse_pos_event(centre));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release");
+    assert_eq!(&*chosen.borrow(), "delta", "the third row became chosen");
+}

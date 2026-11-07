@@ -56,7 +56,8 @@
 //! withdraws the plugin.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::CString;
+use std::collections::HashMap;
+use std::ffi::{CString, c_char};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -294,6 +295,28 @@ struct LiveFrame {
     child_open: bool,
     group_open: bool,
     columns_open: bool,
+    tables: Vec<TableState>,
+    tab_bar_open: bool,
+    tab_item_open: bool,
+    menu_bar_open: bool,
+    menu_open: bool,
+    popup_open: bool,
+    list_box_open: bool,
+    tree_depth: u32,
+    drag_source_open: bool,
+    drag_target_open: bool,
+}
+
+/// One open table region: which columns the plugin declared, for a sort spec
+/// to come back with the column's own label.
+struct TableState {
+    open: bool,
+    columns: Vec<TableColumnInfo>,
+}
+
+struct TableColumnInfo {
+    label: String,
+    sortable: bool,
 }
 
 /// One window's frame bookkeeping: the live frame, the counters and the last
@@ -312,6 +335,9 @@ pub struct FrameState {
     first_error: RefCell<Option<String>>,
     last_ms: Cell<f64>,
     last_started: Cell<Option<Instant>>,
+    /// The payloads a drag source set, by their type, kept across frames
+    /// until a target accepts them (or a new source replaces them).
+    drag_payloads: RefCell<HashMap<String, Value>>,
     /// The end of the last finished frame, for the pump to report.
     pending: RefCell<Option<FrameEnd>>,
 }
@@ -419,6 +445,16 @@ impl FrameState {
             child_open: false,
             group_open: false,
             columns_open: false,
+            tables: Vec::new(),
+            tab_bar_open: false,
+            tab_item_open: false,
+            menu_bar_open: false,
+            menu_open: false,
+            popup_open: false,
+            list_box_open: false,
+            tree_depth: 0,
+            drag_source_open: false,
+            drag_target_open: false,
         });
         Ok((seq, spec))
     }
@@ -450,7 +486,7 @@ impl FrameState {
     }
 
     pub fn close_regions(&self, ui: *const Ui) -> Option<String> {
-        let (child_open, group_open, columns_open, error_absent) = {
+        let (child_open, group_open, columns_open, tables, tree_depth, list_box_open, popup_open, menu_open, menu_bar_open, tab_item_open, tab_bar_open, drag_source_open, drag_target_open, error_absent) = {
             let live = self.live.borrow();
             let Some(frame) = live.as_ref() else {
                 return None;
@@ -459,14 +495,82 @@ impl FrameState {
                 frame.child_open,
                 frame.group_open,
                 frame.columns_open,
+                frame.tables.len(),
+                frame.tree_depth,
+                frame.list_box_open,
+                frame.popup_open,
+                frame.menu_open,
+                frame.menu_bar_open,
+                frame.tab_item_open,
+                frame.tab_bar_open,
+                frame.drag_source_open,
+                frame.drag_target_open,
                 frame.error.is_none(),
             )
+        };
+        let unbalanced = if child_open {
+            Some(unbalanced_region_sentence("begin_child", "end_child"))
+        } else if group_open {
+            Some(unbalanced_region_sentence("begin_group", "end_group"))
+        } else if columns_open {
+            Some(unbalanced_region_sentence("columns", "next_column"))
+        } else if tables > 0 {
+            Some(unbalanced_region_sentence("begin_table", "end_table"))
+        } else if tree_depth > 0 {
+            Some(unbalanced_region_sentence("tree_node", "tree_pop"))
+        } else if list_box_open {
+            Some(unbalanced_region_sentence("begin_list_box", "end_list_box"))
+        } else if popup_open {
+            Some(unbalanced_region_sentence("begin_popup", "end_popup"))
+        } else if menu_open {
+            Some(unbalanced_region_sentence("begin_menu", "end_menu"))
+        } else if menu_bar_open {
+            Some(unbalanced_region_sentence("begin_menu_bar", "end_menu_bar"))
+        } else if tab_item_open {
+            Some(unbalanced_region_sentence(
+                "begin_tab_item",
+                "end_tab_item",
+            ))
+        } else if tab_bar_open {
+            Some(unbalanced_region_sentence("begin_tab_bar", "end_tab_bar"))
+        } else {
+            None
         };
         if !ui.is_null() {
             // SAFETY: the ui points into the frame that is still open here,
             // on this thread, inside the same turn that began it.
             let ui = unsafe { &*ui };
             ui.with_bound_context(|| {
+                if drag_target_open {
+                    unsafe { dear_imgui_rs::sys::igEndDragDropTarget() };
+                }
+                if drag_source_open {
+                    unsafe { dear_imgui_rs::sys::igEndDragDropSource() };
+                }
+                for _ in 0..tree_depth {
+                    unsafe { dear_imgui_rs::sys::igTreePop() };
+                }
+                if list_box_open {
+                    unsafe { dear_imgui_rs::sys::igEndListBox() };
+                }
+                if popup_open {
+                    unsafe { dear_imgui_rs::sys::igEndPopup() };
+                }
+                if menu_open {
+                    unsafe { dear_imgui_rs::sys::igEndMenu() };
+                }
+                if menu_bar_open {
+                    unsafe { dear_imgui_rs::sys::igEndMenuBar() };
+                }
+                if tab_item_open {
+                    unsafe { dear_imgui_rs::sys::igEndTabItem() };
+                }
+                if tab_bar_open {
+                    unsafe { dear_imgui_rs::sys::igEndTabBar() };
+                }
+                for _ in 0..tables {
+                    unsafe { dear_imgui_rs::sys::igEndTable() };
+                }
                 if child_open {
                     unsafe { dear_imgui_rs::sys::igEndChild() };
                 }
@@ -484,13 +588,23 @@ impl FrameState {
                 frame.child_open = false;
                 frame.group_open = false;
                 frame.columns_open = false;
-                if child_open && error_absent {
+                frame.tables.clear();
+                frame.tab_bar_open = false;
+                frame.tab_item_open = false;
+                frame.menu_bar_open = false;
+                frame.menu_open = false;
+                frame.popup_open = false;
+                frame.list_box_open = false;
+                frame.tree_depth = 0;
+                frame.drag_source_open = false;
+                frame.drag_target_open = false;
+                if unbalanced.is_some() && error_absent {
                     frame.refused = true;
-                    frame.error = Some(unbalanced_child_sentence());
+                    frame.error = unbalanced.clone();
                 }
             }
         }
-        child_open.then(unbalanced_child_sentence)
+        unbalanced
     }
 
     /// Applies one widget call to the open frame.
@@ -866,11 +980,40 @@ impl FrameState {
                 ]))
             }
             "selectable" => {
+                if let Some(key) = unknown_key(
+                    arg,
+                    &[
+                        "op",
+                        "window",
+                        "seq",
+                        "label",
+                        "selected",
+                        "options",
+                        "span_all_columns",
+                    ],
+                ) {
+                    return Err(format!(
+                        "ui.{op} can't use {key}: selectable takes label, selected and span_all_columns, like ui.selectable({{ label = \"Row A\", selected = true }})"
+                    ));
+                }
                 let label = string_arg(arg, "label", op)?;
                 let selected = bool_arg(arg, "selected", op)?;
+                let options = option_map(arg, op, &["span_all_columns"])?;
+                let span = opt_bool(options, "span_all_columns", op, false)?
+                    || match arg.field("span_all_columns") {
+                        Some(Value::Bool(value)) => *value,
+                        None => false,
+                        Some(other) => {
+                            return Err(format!(
+                                "ui.{op} can't use span_all_columns: it must be true or false, not {}.",
+                                type_name(other)
+                            ));
+                        }
+                    };
                 let clicked = ui
                     .selectable_config(label.as_str())
                     .selected(selected)
+                    .span_all_columns(span)
                     .build();
                 Ok(Value::record([
                     ("ok", Value::Bool(true)),
@@ -938,6 +1081,43 @@ impl FrameState {
                     ("value", Value::Bool(ui.is_mouse_dragging(button))),
                 ]))
             }
+            "begin_table" => begin_table(ui, frame, arg, op),
+            "table_setup_column" => table_setup_column(ui, frame, arg, op),
+            "table_headers_row" => table_headers_row(ui, frame, op),
+            "table_next_row" => table_next_row(ui, frame, op),
+            "table_next_column" => table_next_column(ui, frame, op),
+            "table_sort_specs" => table_sort_specs(ui, frame, op),
+            "end_table" => end_table(ui, frame, op),
+            "begin_tab_bar" => begin_tab_bar(ui, frame, arg, op),
+            "begin_tab_item" => begin_tab_item(ui, frame, arg, op),
+            "end_tab_item" => end_tab_item(ui, frame, op),
+            "end_tab_bar" => end_tab_bar(ui, frame, op),
+            "begin_menu_bar" => begin_menu_bar(ui, frame, op),
+            "end_menu_bar" => end_menu_bar(ui, frame, op),
+            "begin_menu" => begin_menu(ui, frame, arg, op),
+            "end_menu" => end_menu(ui, frame, op),
+            "menu_item" => menu_item(ui, arg, op),
+            "open_popup" => open_popup(ui, arg, op),
+            "begin_popup" => begin_popup(ui, frame, arg, op),
+            "begin_popup_modal" => begin_popup_modal(ui, frame, arg, op),
+            "begin_popup_context_item" => begin_popup_context_item(ui, frame, arg, op),
+            "end_popup" => end_popup(ui, frame, op),
+            "set_tooltip" => set_tooltip(ui, arg, op),
+            "tree_node" => tree_node(ui, frame, arg, op),
+            "tree_pop" => tree_pop(ui, frame, op),
+            "collapsing_header" => collapsing_header(ui, arg, op),
+            "begin_list_box" => begin_list_box(ui, frame, arg, op),
+            "end_list_box" => end_list_box(ui, frame, op),
+            "color_edit3" => color_edit3(ui, arg, op),
+            "color_button" => color_button(ui, arg, op),
+            "begin_drag_drop_source" => begin_drag_drop_source(ui, frame, op),
+            "set_drag_drop_payload" => set_drag_drop_payload(self, ui, frame, arg, op),
+            "end_drag_drop_source" => end_drag_drop_source(ui, frame, op),
+            "begin_drag_drop_target" => begin_drag_drop_target(ui, frame, op),
+            "accept_drag_drop_payload" => accept_drag_drop_payload(self, ui, frame, arg, op),
+            "end_drag_drop_target" => end_drag_drop_target(ui, frame, op),
+            "shortcut" => shortcut(ui, arg, op),
+            "date_picker" | "time_picker" => Err(unavailable_widget(op)),
             _ => Err(format!("zeron.imgui has no widget \"{op}\".")),
         }
     }
@@ -1607,9 +1787,10 @@ fn child_id(arg: &Value, op: &str) -> Result<String, String> {
     }
 }
 
-fn unbalanced_child_sentence() -> String {
-    "ui.begin_child was called without ui.end_child; close the child before the callback returns."
-        .to_string()
+fn unbalanced_region_sentence(open: &str, close: &str) -> String {
+    format!(
+        "ui.{open} was called without ui.{close}; close the region before the callback returns."
+    )
 }
 
 fn begin_child(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
@@ -1746,4 +1927,962 @@ fn end_group(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> 
         ("min", point(ui.item_rect_min())),
         ("max", point(ui.item_rect_max())),
     ]))
+}
+
+fn c_label(value: &str) -> Result<CString, String> {
+    CString::new(value)
+        .map_err(|_| format!("zeron.imgui can't use a label with a NUL byte in it"))
+}
+
+fn table_flags(arg: &Value, op: &str) -> Result<i32, String> {
+    let mut flags = 0_i32;
+    let Some(items) = arg.field("flags") else {
+        return Ok(flags);
+    };
+    let Value::List(items) = items else {
+        return Err(format!(
+            "ui.{op} can't use flags: flags must be a list of text, not {}.",
+            type_name(items)
+        ));
+    };
+    for item in items.iter() {
+        let name = match item {
+            Value::Str(text) => text.to_string(),
+            Value::Text(text) => text.to_string(),
+            _ => {
+                return Err(format!(
+                    "ui.{op} can't use flags: every flag must be text, like \"borders\"."
+                ));
+            }
+        };
+        let bit = match name.as_str() {
+            "borders" => dear_imgui_rs::sys::ImGuiTableFlags_Borders,
+            "row_bg" => dear_imgui_rs::sys::ImGuiTableFlags_RowBg,
+            "resizable" => dear_imgui_rs::sys::ImGuiTableFlags_Resizable,
+            "sortable" => dear_imgui_rs::sys::ImGuiTableFlags_Sortable,
+            "borders_outer_v" => dear_imgui_rs::sys::ImGuiTableFlags_BordersOuterV,
+            "borders_inner_v" => dear_imgui_rs::sys::ImGuiTableFlags_BordersInnerV,
+            "borders_outer_h" => dear_imgui_rs::sys::ImGuiTableFlags_BordersOuterH,
+            "borders_inner_h" => dear_imgui_rs::sys::ImGuiTableFlags_BordersInnerH,
+            "no_pad_outer_x" => dear_imgui_rs::sys::ImGuiTableFlags_NoPadOuterX,
+            other => {
+                return Err(format!(
+                    "ui.{op} can't use flag \"{other}\": {op} accepts borders, row_bg, resizable, sortable and the border_* flags."
+                ));
+            }
+        };
+        flags |= bit;
+    }
+    Ok(flags)
+}
+
+fn begin_table(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "id", "columns", "flags"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes id, columns and flags, like ui.begin_table({{ id = \"files\", columns = 3, flags = {{ \"borders\" }} }})"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    let columns = number_arg(arg, "columns", op)?;
+    if columns.fract() != 0.0 || !(1.0..=64.0).contains(&columns) {
+        return Err(format!(
+            "ui.{op} needs columns to be a whole number from 1 to 64, not {columns}."
+        ));
+    }
+    let flags = table_flags(arg, op)?;
+    if !frame.tables.is_empty() && frame.tables.last().is_some_and(|table| table.open) {
+        return Err(format!(
+            "ui.{op} was called inside another table; end it with ui.end_table first."
+        ));
+    }
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginTable(
+            id.as_ptr(),
+            columns as i32,
+            flags,
+            dear_imgui_rs::sys::ImVec2_c { x: 0.0, y: 0.0 },
+            0.0,
+        )
+    });
+    let min = ui.cursor_pos();
+    frame.tables.push(TableState {
+        open,
+        columns: Vec::new(),
+    });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+        ("min", point(min)),
+    ]))
+}
+
+fn current_table_open(frame: &LiveFrame) -> bool {
+    frame.tables.last().is_some_and(|table| table.open)
+}
+
+fn table_setup_column(
+    ui: &Ui,
+    frame: &mut LiveFrame,
+    arg: &Value,
+    op: &str,
+) -> Result<Value, String> {
+    if let Some(key) = unknown_key(
+        arg,
+        &["op", "window", "seq", "label", "width", "sortable"],
+    ) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes label, width and sortable, like ui.table_setup_column({{ label = \"Name\", width = 200 }})"
+        ));
+    }
+    let label = string_arg(arg, "label", op)?;
+    let sortable = match arg.field("sortable") {
+        Some(Value::Bool(value)) => *value,
+        None => true,
+        Some(other) => {
+            return Err(format!(
+                "ui.{op} can't use sortable: sortable must be true or false, not {}.",
+                type_name(other)
+            ));
+        }
+    };
+    let width = match arg.field("width") {
+        Some(Value::Num(number)) if number.is_finite() && *number > 0.0 => Some(*number as f32),
+        Some(Value::Num(_)) => {
+            return Err(format!(
+                "ui.{op} can't use width: width must be more than zero"
+            ));
+        }
+        Some(other) => {
+            return Err(format!(
+                "ui.{op} can't use width: width must be a number, not {}.",
+                type_name(other)
+            ));
+        }
+        None => None,
+    };
+    if !current_table_open(frame) {
+        return Ok(Value::record([("ok", Value::Bool(true))]));
+    }
+    let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
+    let index = frame.tables.last().map_or(0, |table| table.columns.len());
+    let flags = if sortable {
+        0
+    } else {
+        dear_imgui_rs::sys::ImGuiTableColumnFlags_NoSort
+    } | if width.is_some() {
+        dear_imgui_rs::sys::ImGuiTableColumnFlags_WidthFixed
+    } else {
+        dear_imgui_rs::sys::ImGuiTableColumnFlags_WidthStretch
+    };
+    ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igTableSetupColumn(
+            label_c.as_ptr(),
+            flags,
+            width.unwrap_or(0.0),
+            index as u32,
+        )
+    });
+    if let Some(table) = frame.tables.last_mut() {
+        table.columns.push(TableColumnInfo { label, sortable });
+    }
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn table_headers_row(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if !current_table_open(frame) {
+        return Ok(Value::record([("ok", Value::Bool(true))]));
+    }
+    let min = ui.cursor_pos();
+    ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igTableHeadersRow() });
+    let height = ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igTableGetHeaderRowHeight() });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("min", point(min)),
+        ("height", Value::from(f64::from(height))),
+    ]))
+}
+
+fn table_next_row(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if !current_table_open(frame) {
+        return Ok(Value::record([("ok", Value::Bool(true))]));
+    }
+    ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igTableNextRow(
+            dear_imgui_rs::sys::ImGuiTableRowFlags_None,
+            0.0,
+        )
+    });
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn table_next_column(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if !current_table_open(frame) {
+        return Ok(Value::record([("ok", Value::Bool(true))]));
+    }
+    ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igTableNextColumn() });
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn table_sort_specs(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if !current_table_open(frame) {
+        return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)]));
+    }
+    let Some((column_index, direction)) = ui.with_bound_context(|| {
+        let specs = unsafe { dear_imgui_rs::sys::igTableGetSortSpecs() };
+        if specs.is_null() {
+            return None;
+        }
+        let count = unsafe { (*specs).SpecsCount };
+        if count <= 0 {
+            return None;
+        }
+        let spec = unsafe { &*(*specs).Specs };
+        Some((spec.ColumnUserID as usize, spec.SortDirection as u8))
+    }) else {
+        return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)]));
+    };
+    let Some(label) = frame
+        .tables
+        .last()
+        .and_then(|table| table.columns.get(column_index))
+        .map(|column| column.label.clone())
+    else {
+        return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)]));
+    };
+    let direction = match direction {
+        value if value == dear_imgui_rs::sys::ImGuiSortDirection_Ascending as u8 => "ascending",
+        value if value == dear_imgui_rs::sys::ImGuiSortDirection_Descending as u8 => "descending",
+        _ => return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)])),
+    };
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        (
+            "value",
+            Value::record([
+                ("column", Value::from(label.to_lowercase().as_str())),
+                ("sort", Value::from(direction)),
+            ]),
+        ),
+    ]))
+}
+
+fn end_table(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    let was_open = frame.tables.pop().is_some_and(|table| table.open);
+    if was_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndTable() });
+    }
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn begin_tab_bar(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "id"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes an id, like ui.begin_tab_bar(\"tabs\")"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    if frame.tab_bar_open {
+        return Err(format!(
+            "ui.{op} was called while another tab bar is open; close it with ui.end_tab_bar first."
+        ));
+    }
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginTabBar(
+            id.as_ptr(),
+            dear_imgui_rs::sys::ImGuiTabBarFlags_None,
+        )
+    });
+    frame.tab_bar_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn begin_tab_item(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "label"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes a label, like ui.begin_tab_item(\"Alpha\")"
+        ));
+    }
+    let label = string_arg(arg, "label", op)?;
+    let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginTabItem(
+            label_c.as_ptr(),
+            std::ptr::null_mut(),
+            dear_imgui_rs::sys::ImGuiTabItemFlags_None,
+        )
+    });
+    frame.tab_item_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+        ("min", point(ui.item_rect_min())),
+        ("max", point(ui.item_rect_max())),
+    ]))
+}
+
+fn end_tab_item(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.tab_item_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndTabItem() });
+    }
+    frame.tab_item_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn end_tab_bar(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.tab_bar_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndTabBar() });
+    }
+    frame.tab_bar_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn begin_menu_bar(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> {
+    if frame.menu_bar_open {
+        return Err(format!(
+            "ui.{op} was called while a menu bar is open; close it with ui.end_menu_bar first."
+        ));
+    }
+    let open = ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igBeginMenuBar() });
+    frame.menu_bar_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn end_menu_bar(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.menu_bar_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndMenuBar() });
+    }
+    frame.menu_bar_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn begin_menu(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "label"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes a label, like ui.begin_menu(\"File\")"
+        ));
+    }
+    let label = string_arg(arg, "label", op)?;
+    let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginMenu(label_c.as_ptr(), true)
+    });
+    frame.menu_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+        ("min", point(ui.item_rect_min())),
+        ("max", point(ui.item_rect_max())),
+    ]))
+}
+
+fn end_menu(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.menu_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndMenu() });
+    }
+    frame.menu_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn menu_item(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "label"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes a label, like ui.menu_item(\"New\")"
+        ));
+    }
+    let label = string_arg(arg, "label", op)?;
+    let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
+    let clicked = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igMenuItemEx(
+            label_c.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            false,
+            true,
+        )
+    });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("value", Value::Bool(clicked)),
+        ("min", point(ui.item_rect_min())),
+        ("max", point(ui.item_rect_max())),
+    ]))
+}
+
+fn open_popup(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "id"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes an id, like ui.open_popup(\"confirm\")"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id_c = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    let opened = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igOpenPopup_Str(id_c.as_ptr(), dear_imgui_rs::sys::ImGuiPopupFlags_None)
+    });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("opened", Value::Bool(opened)),
+    ]))
+}
+
+fn begin_popup(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "id"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes an id, like ui.begin_popup(\"ctx\")"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id_c = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginPopup(id_c.as_ptr(), dear_imgui_rs::sys::ImGuiWindowFlags_None)
+    });
+    frame.popup_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn popup_flags(options: Option<&Value>, op: &str) -> Result<i32, String> {
+    let Some(options) = options else {
+        return Ok(dear_imgui_rs::sys::ImGuiWindowFlags_None);
+    };
+    let always_auto_resize = match options.field("always_auto_resize") {
+        Some(Value::Bool(value)) => *value,
+        None => false,
+        Some(other) => {
+            return Err(format!(
+                "ui.{op} can't use always_auto_resize: it must be true or false, not {}.",
+                type_name(other)
+            ));
+        }
+    };
+    Ok(if always_auto_resize {
+        dear_imgui_rs::sys::ImGuiWindowFlags_AlwaysAutoResize
+    } else {
+        dear_imgui_rs::sys::ImGuiWindowFlags_None
+    })
+}
+
+fn begin_popup_modal(
+    ui: &Ui,
+    frame: &mut LiveFrame,
+    arg: &Value,
+    op: &str,
+) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "id", "options"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes id and options, like ui.begin_popup_modal(\"confirm\", {{ always_auto_resize = true }})"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id_c = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    let options = option_map(arg, op, &["always_auto_resize"])?;
+    let flags = popup_flags(options, op)?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginPopupModal(id_c.as_ptr(), std::ptr::null_mut(), flags)
+    });
+    frame.popup_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn begin_popup_context_item(
+    ui: &Ui,
+    frame: &mut LiveFrame,
+    arg: &Value,
+    op: &str,
+) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "id"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes an id, like ui.begin_popup_context_item(\"ctx\")"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id_c = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginPopupContextItem(
+            id_c.as_ptr(),
+            dear_imgui_rs::sys::ImGuiPopupFlags_MouseButtonRight,
+        )
+    });
+    frame.popup_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn end_popup(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.popup_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndPopup() });
+    }
+    frame.popup_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn set_tooltip(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "text"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes text, like ui.set_tooltip(\"Writes the file\")"
+        ));
+    }
+    let text = string_arg(arg, "text", op)?;
+    ui.set_tooltip(text.as_str());
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn tree_node(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "label"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes a label, like ui.tree_node(\"src\")"
+        ));
+    }
+    let label = string_arg(arg, "label", op)?;
+    let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igTreeNodeEx_Str(label_c.as_ptr(), dear_imgui_rs::sys::ImGuiTreeNodeFlags_None)
+    });
+    if open {
+        frame.tree_depth += 1;
+    }
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn tree_pop(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> {
+    if frame.tree_depth == 0 {
+        return Err(format!("ui.{op} was called without a ui.tree_node open."));
+    }
+    frame.tree_depth -= 1;
+    ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igTreePop() });
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn collapsing_header(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "label"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes a label, like ui.collapsing_header(\"Advanced\")"
+        ));
+    }
+    let label = string_arg(arg, "label", op)?;
+    let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igCollapsingHeader_TreeNodeFlags(
+            label_c.as_ptr(),
+            dear_imgui_rs::sys::ImGuiTreeNodeFlags_None,
+        )
+    });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn begin_list_box(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(
+        arg,
+        &["op", "window", "seq", "id", "width", "height"],
+    ) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes id, width and height, like ui.begin_list_box(\"##kinds\", {{ width = 180, height = 120 }})"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id_c = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    let size = size_fields(
+        arg,
+        op,
+        "ui.begin_list_box(\"##kinds\", { width = 180, height = 120 })",
+    )?;
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginListBox(
+            id_c.as_ptr(),
+            dear_imgui_rs::sys::ImVec2_c {
+                x: size[0],
+                y: size[1],
+            },
+        )
+    });
+    frame.list_box_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn end_list_box(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.list_box_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndListBox() });
+    }
+    frame.list_box_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn color_table(arg: &Value, op: &str) -> Result<[f32; 3], String> {
+    let component = |name: &str| -> Result<f32, String> {
+        match arg.field(name) {
+            Some(Value::Num(number)) if number.is_finite() => Ok(*number as f32),
+            Some(Value::Num(_)) => Err(format!(
+                "ui.{op} can't use {name}: {name} must be a finite number"
+            )),
+            Some(other) => Err(format!(
+                "ui.{op} can't use {name}: {name} must be a number, not {}.",
+                type_name(other)
+            )),
+            None => Err(format!(
+                "ui.{op} can't use the colour: it needs r, g and b, so {name} is missing"
+            )),
+        }
+    };
+    Ok([component("r")?, component("g")?, component("b")?])
+}
+
+fn color_edit3(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "label", "value", "options"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes a label, a colour and options, like ui.color_edit3(\"Tint\", tint, {{ display_mode = \"rgb\" }})"
+        ));
+    }
+    let label = string_arg(arg, "label", op)?;
+    let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
+    let value = match arg.field("value") {
+        Some(value) => color_table(value, op)?,
+        None => return Err(format!("ui.{op} needs a colour value, like {{ r = 0.2, g = 0.4, b = 0.9 }}.")),
+    };
+    let options = option_map(arg, op, &["display_mode"])?;
+    let mode = opt_string(options, "display_mode", op)?.unwrap_or_else(|| "rgb".to_string());
+    let flags = if mode == "rgb" {
+        dear_imgui_rs::sys::ImGuiColorEditFlags_DisplayRGB
+    } else {
+        return Err(format!(
+            "ui.{op} can't use display_mode \"{mode}\": {op} accepts \"rgb\"."
+        ));
+    };
+    let mut edited = value;
+    let changed = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igColorEdit3(label_c.as_ptr(), edited.as_mut_ptr(), flags)
+    });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("changed", Value::Bool(changed)),
+        ("value", Value::record([
+            ("r", Value::from(f64::from(edited[0]))),
+            ("g", Value::from(f64::from(edited[1]))),
+            ("b", Value::from(f64::from(edited[2]))),
+        ])),
+    ]))
+}
+
+fn color_button(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(
+        arg,
+        &["op", "window", "seq", "id", "value", "width", "height"],
+    ) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes id, a colour and a size, like ui.color_button({{ id = \"swatch\", value = colour, width = 40, height = 40 }})"
+        ));
+    }
+    let id = string_arg(arg, "id", op)?;
+    let id_c = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
+    let colour = match arg.field("value") {
+        Some(value) => color_table(value, op)?,
+        None => return Err(format!("ui.{op} needs a colour, like {{ r = 0.2, g = 0.4, b = 0.9 }}.")),
+    };
+    let width = match arg.field("width") {
+        Some(Value::Num(number)) if number.is_finite() && *number >= 0.0 => *number as f32,
+        None => 0.0,
+        Some(other) => {
+            return Err(format!(
+                "ui.{op} can't use width: width must be a number, not {}.",
+                type_name(other)
+            ));
+        }
+    };
+    let height = match arg.field("height") {
+        Some(Value::Num(number)) if number.is_finite() && *number >= 0.0 => *number as f32,
+        None => 0.0,
+        Some(other) => {
+            return Err(format!(
+                "ui.{op} can't use height: height must be a number, not {}.",
+                type_name(other)
+            ));
+        }
+    };
+    let clicked = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igColorButton(
+            id_c.as_ptr(),
+            dear_imgui_rs::sys::ImVec4_c {
+                x: colour[0],
+                y: colour[1],
+                z: colour[2],
+                w: 1.0,
+            },
+            dear_imgui_rs::sys::ImGuiColorEditFlags_None,
+            dear_imgui_rs::sys::ImVec2_c {
+                x: width,
+                y: height,
+            },
+        )
+    });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("clicked", Value::Bool(clicked)),
+        ("min", point(ui.item_rect_min())),
+        ("max", point(ui.item_rect_max())),
+    ]))
+}
+
+fn begin_drag_drop_source(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginDragDropSource(dear_imgui_rs::sys::ImGuiDragDropFlags_None)
+    });
+    frame.drag_source_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn set_drag_drop_payload(
+    state: &FrameState,
+    ui: &Ui,
+    frame: &mut LiveFrame,
+    arg: &Value,
+    op: &str,
+) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "type", "payload"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes type and payload, like ui.set_drag_drop_payload(\"FILE\", {{ name = row.name }})"
+        ));
+    }
+    let kind = string_arg(arg, "type", op)?;
+    if kind.is_empty() {
+        return Err(format!("ui.{op} can't use type: type can't be empty"));
+    }
+    let kind_c = c_label(&kind).map_err(|error| format!("ui.{op} can't use type: {error}"))?;
+    let payload = arg.field("payload").cloned().unwrap_or(Value::Nil);
+    if !frame.drag_source_open {
+        return Err(format!(
+            "ui.{op} must be called inside ui.begin_drag_drop_source."
+        ));
+    }
+    let set = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igSetDragDropPayload(
+            kind_c.as_ptr(),
+            1_usize as *const std::os::raw::c_void,
+            0,
+            dear_imgui_rs::sys::ImGuiCond_None,
+        )
+    });
+    if set {
+        state
+            .drag_payloads
+            .borrow_mut()
+            .insert(kind, payload);
+    }
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("set", Value::Bool(set)),
+    ]))
+}
+
+fn end_drag_drop_source(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.drag_source_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndDragDropSource() });
+    }
+    frame.drag_source_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn begin_drag_drop_target(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    let open = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginDragDropTarget()
+    });
+    frame.drag_target_open = open;
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("open", Value::Bool(open)),
+    ]))
+}
+
+fn accept_drag_drop_payload(
+    state: &FrameState,
+    ui: &Ui,
+    frame: &mut LiveFrame,
+    arg: &Value,
+    op: &str,
+) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "type"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes a type, like ui.accept_drag_drop_payload(\"FILE\")"
+        ));
+    }
+    let kind = string_arg(arg, "type", op)?;
+    let kind_c = c_label(&kind).map_err(|error| format!("ui.{op} can't use type: {error}"))?;
+    if !frame.drag_target_open {
+        return Ok(Value::record([
+            ("ok", Value::Bool(true)),
+            ("value", Value::Nil),
+        ]));
+    }
+    let accepted = ui.with_bound_context(|| unsafe {
+        !dear_imgui_rs::sys::igAcceptDragDropPayload(
+            kind_c.as_ptr(),
+            dear_imgui_rs::sys::ImGuiDragDropFlags_None,
+        )
+        .is_null()
+    });
+    let payload = if accepted {
+        state.drag_payloads.borrow().get(&kind).cloned().unwrap_or(Value::Nil)
+    } else {
+        Value::Nil
+    };
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("accepted", Value::Bool(accepted)),
+        ("value", payload),
+    ]))
+}
+
+fn end_drag_drop_target(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
+    if frame.drag_target_open {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndDragDropTarget() });
+    }
+    frame.drag_target_open = false;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn shortcut_key(value: &str, op: &str) -> Result<dear_imgui_rs::Key, String> {
+    if value.len() == 1 {
+        let ch = value.chars().next().expect("one character");
+        return match ch.to_ascii_uppercase() {
+            'A' => Ok(dear_imgui_rs::Key::A),
+            'B' => Ok(dear_imgui_rs::Key::B),
+            'C' => Ok(dear_imgui_rs::Key::C),
+            'D' => Ok(dear_imgui_rs::Key::D),
+            'E' => Ok(dear_imgui_rs::Key::E),
+            'F' => Ok(dear_imgui_rs::Key::F),
+            'G' => Ok(dear_imgui_rs::Key::G),
+            'H' => Ok(dear_imgui_rs::Key::H),
+            'I' => Ok(dear_imgui_rs::Key::I),
+            'J' => Ok(dear_imgui_rs::Key::J),
+            'K' => Ok(dear_imgui_rs::Key::K),
+            'L' => Ok(dear_imgui_rs::Key::L),
+            'M' => Ok(dear_imgui_rs::Key::M),
+            'N' => Ok(dear_imgui_rs::Key::N),
+            'O' => Ok(dear_imgui_rs::Key::O),
+            'P' => Ok(dear_imgui_rs::Key::P),
+            'Q' => Ok(dear_imgui_rs::Key::Q),
+            'R' => Ok(dear_imgui_rs::Key::R),
+            'S' => Ok(dear_imgui_rs::Key::S),
+            'T' => Ok(dear_imgui_rs::Key::T),
+            'U' => Ok(dear_imgui_rs::Key::U),
+            'V' => Ok(dear_imgui_rs::Key::V),
+            'W' => Ok(dear_imgui_rs::Key::W),
+            'X' => Ok(dear_imgui_rs::Key::X),
+            'Y' => Ok(dear_imgui_rs::Key::Y),
+            'Z' => Ok(dear_imgui_rs::Key::Z),
+            '0' => Ok(dear_imgui_rs::Key::Key0),
+            '1' => Ok(dear_imgui_rs::Key::Key1),
+            '2' => Ok(dear_imgui_rs::Key::Key2),
+            '3' => Ok(dear_imgui_rs::Key::Key3),
+            '4' => Ok(dear_imgui_rs::Key::Key4),
+            '5' => Ok(dear_imgui_rs::Key::Key5),
+            '6' => Ok(dear_imgui_rs::Key::Key6),
+            '7' => Ok(dear_imgui_rs::Key::Key7),
+            '8' => Ok(dear_imgui_rs::Key::Key8),
+            '9' => Ok(dear_imgui_rs::Key::Key9),
+            _ => Err(format!(
+                "ui.{op} can't use key \"{value}\": a shortcut key is a letter, digit or F1..F24."
+            )),
+        };
+    }
+    if let Some(number) = value.strip_prefix('F').and_then(|rest| rest.parse::<u8>().ok()) {
+        return match number {
+            1 => Ok(dear_imgui_rs::Key::F1),
+            2 => Ok(dear_imgui_rs::Key::F2),
+            3 => Ok(dear_imgui_rs::Key::F3),
+            4 => Ok(dear_imgui_rs::Key::F4),
+            5 => Ok(dear_imgui_rs::Key::F5),
+            6 => Ok(dear_imgui_rs::Key::F6),
+            7 => Ok(dear_imgui_rs::Key::F7),
+            8 => Ok(dear_imgui_rs::Key::F8),
+            9 => Ok(dear_imgui_rs::Key::F9),
+            10 => Ok(dear_imgui_rs::Key::F10),
+            11 => Ok(dear_imgui_rs::Key::F11),
+            12 => Ok(dear_imgui_rs::Key::F12),
+            _ => Err(format!(
+                "ui.{op} can't use key \"{value}\": a shortcut key is a letter, digit or F1..F12."
+            )),
+        };
+    }
+    Err(format!(
+        "ui.{op} can't use key \"{value}\": a shortcut key is a letter, digit or F1..F12."
+    ))
+}
+
+fn shortcut(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "mods", "key"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: {op} takes mods and key, like ui.shortcut({{ mods = {{ \"ctrl\" }}, key = \"K\" }})"
+        ));
+    }
+    let key = string_arg(arg, "key", op)?;
+    let key = shortcut_key(&key, op)?;
+    let mut modifiers = dear_imgui_rs::KeyMods::empty();
+    if let Some(mods) = arg.field("mods") {
+        let Value::List(mods) = mods else {
+            return Err(format!(
+                "ui.{op} can't use mods: mods must be a list of text, not {}.",
+                type_name(mods)
+            ));
+        };
+        for item in mods.iter() {
+            let name = match item {
+                Value::Str(text) => text.to_string(),
+                Value::Text(text) => text.to_string(),
+                _ => {
+                    return Err(format!(
+                        "ui.{op} can't use mods: every modifier must be text, like \"ctrl\"."
+                    ));
+                }
+            };
+            match name.as_str() {
+                "ctrl" => modifiers |= dear_imgui_rs::KeyMods::CTRL,
+                "shift" => modifiers |= dear_imgui_rs::KeyMods::SHIFT,
+                "alt" => modifiers |= dear_imgui_rs::KeyMods::ALT,
+                "super" => modifiers |= dear_imgui_rs::KeyMods::SUPER,
+                other => {
+                    return Err(format!(
+                        "ui.{op} can't use modifier \"{other}\": modifiers are ctrl, shift, alt and super."
+                    ));
+                }
+            }
+        }
+    }
+    let chord = dear_imgui_rs::KeyChord::new(key).with_mods(modifiers);
+    let pressed = ui.shortcut(chord);
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("value", Value::Bool(pressed)),
+    ]))
+}
+
+fn unavailable_widget(op: &str) -> String {
+    format!(
+        "ui.{op} is not available in Dear ImGui 1.93.1; Zeron has no {op} widget. Track the value yourself with ui.input_text or a calendar of your own."
+    )
 }
