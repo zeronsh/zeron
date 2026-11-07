@@ -1147,6 +1147,16 @@ fn intro_window() -> WindowOptions {
     }
 }
 
+/// The glass under Zeron's window: the under-window blur alone, untinted
+/// (`plain`), which the theme's `background` tints. On Windows, the
+/// material's own backdrop: plain glass there is the blur of whatever is
+/// behind the window with no system backdrop (zgx #1495/#1496, gpui's
+/// `Blurred`), and Zeron's window would show straight through it.
+fn zeron_glass() -> Glass {
+    let glass = Glass::new(GlassMaterial::UnderWindowBackground);
+    if cfg!(windows) { glass } else { glass.plain() }
+}
+
 /// Zeron's window: an inset title bar over the colourless under-window
 /// blur, which the theme's `background` tints (the shipping app's glass).
 fn zeron_window(width: f64, height: f64) -> WindowOptions {
@@ -1156,7 +1166,7 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         height,
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
-        glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
+        glass: Some(zeron_glass()),
         // (Windows: the caption buttons keep to the title row at any zoom.)
         caption_height: Some(32.),
         ..Default::default()
@@ -1250,6 +1260,19 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod glass_tests {
+    /// The window's glass is the under-window blur alone, except on
+    /// Windows, where plain glass shows whatever is behind the window: there
+    /// it is the material's own backdrop.
+    #[test]
+    fn the_window_s_glass_is_plain_except_on_windows() {
+        let glass = super::zeron_glass();
+        assert_eq!(glass.material, super::GlassMaterial::UnderWindowBackground);
+        assert_eq!(glass.plain, !cfg!(windows));
+    }
 }
 
 #[cfg(test)]
