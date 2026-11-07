@@ -293,7 +293,7 @@ local function service(id: string): any
 	-- Each asks the engine, which checks this device's grants for this
 	-- plugin ("usage.read", "accounts.read", "accounts.switch",
 	-- "models.read", "models.set"). Each is a promise; a refusal fails it
-	-- with "<reason>: <words>" (paced, busy, not_allowed, …).
+	-- with "<reason>: <words>" (paced, loop, not_allowed, …).
 
 	-- `fn(data, event)` for each `event` on this device (usage.threshold,
 	-- turn.finished, …), with no window open: Zeron starts the service to
@@ -336,9 +336,9 @@ local function service(id: string): any
 		return agents("accounts", opts)
 	end
 
-	-- Make a saved account the active one ("accounts.switch"). Refused
-	-- (busy) while a chat on that provider runs here, unless `when_idle`,
-	-- which switches once they've finished (within 30 minutes).
+	-- Make a saved account the active one ("accounts.switch"), at once;
+	-- with `when_idle`, once that provider's chats here have finished
+	-- (within 30 minutes).
 	function M.switch_account(s: { provider: string, account: string, when_idle: boolean? }): any
 		return agents("switch_account", s)
 	end

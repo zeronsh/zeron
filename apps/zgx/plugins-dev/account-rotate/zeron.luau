@@ -1181,7 +1181,7 @@ return function(id: string): any
 	-- another of yours) allowed this plugin: "usage.read", "accounts.read",
 	-- "accounts.switch", "models.read", "models.set". Each is a promise; a
 	-- refusal fails it with "<reason>: <words>" (`zeron.reason(err)`:
-	-- not_allowed, paced, busy, already, not_found, offline, …).
+	-- not_allowed, paced, already, loop, not_found, offline, …).
 	local function agents(op: string, args: any?, device: string?): any
 		return ui.call(`{prefix}.agents`, {
 			op = op,
@@ -1211,8 +1211,8 @@ return function(id: string): any
 	end
 
 	-- Make a saved account the active one ("accounts.switch"), on this
-	-- device or `device`. Refused (busy) while a chat on that provider runs
-	-- there, unless `when_idle`: then it switches once they're done.
+	-- device or `device`, at once; with `when_idle`, once that provider's
+	-- chats there are done.
 	function M.switch_account(s: { provider: string, account: string, when_idle: boolean?, device: string? }): any
 		return agents("switch_account", { provider = s.provider, account = s.account, when_idle = s.when_idle }, s.device)
 	end

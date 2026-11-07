@@ -5,8 +5,7 @@
 //! Consent stays the app's. Installing records a decision only for a plugin
 //! signed by this device's own key, and even then only for what runs inside
 //! the plugin's sandbox (`capability::inside_sandbox`): native, commands,
-//! service, devices, ui.replace and the agent controls (accounts.switch,
-//! models.set) are always asked. Anyone else's (another of your
+//! service, devices and ui.replace are always asked. Anyone else's (another of your
 //! devices' included) is listed `pending`, and the app's consent window
 //! asks. An update signed by the same key keeps what you allowed; one that
 //! grows its capability record waits for you again (`status::decide`). An
