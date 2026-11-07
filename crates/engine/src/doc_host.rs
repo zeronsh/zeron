@@ -633,6 +633,9 @@ pub struct ChatDocHandle {
     /// A threshold checkpoint POST is in flight (review H1: the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
     checkpointing: Arc<AtomicBool>,
+    /// The edge refused this chat's last checkpoint as too large: not
+    /// posted again until `Refused::allows` (chat2_checkpoint).
+    checkpoint_refused: Arc<Mutex<Option<crate::chat2_checkpoint::Refused>>>,
     /// Set when a chat2 seed replaced this handle's lineage on disk: every
     /// further snapshot save from this handle is a stale FAT doc that would
     /// clobber the thin one — retired handles never persist again (unless no
@@ -1794,6 +1797,7 @@ impl DocHost {
             room_gen,
             retired: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
+            checkpoint_refused: Arc::default(),
             chat2: Mutex::new(None),
             sync_started: AtomicBool::new(false),
             sync_requested: AtomicBool::new(false),
@@ -3098,6 +3102,12 @@ impl DocHost {
             None => return,
         };
         let chat_id = handle.chat_id.clone();
+        // Refused as too large lately: not again yet (before the snapshot
+        // is even made: that alone is most of a big chat's cost).
+        let ops = handle.doc.doc().len_ops();
+        if lock(&handle.checkpoint_refused).is_some_and(|r| !r.allows(std::time::Instant::now(), ops)) {
+            return;
+        }
         if handle
             .checkpointing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -3105,6 +3115,7 @@ impl DocHost {
         {
             return;
         }
+        let refused = handle.checkpoint_refused.clone();
         let in_flight = handle.checkpointing.clone();
         let publication_store = self.inner.store.clone();
         let snapshot_doc = handle.doc.clone();
@@ -3141,6 +3152,7 @@ impl DocHost {
             let parts = chat2_checkpoint_parts(snapshot.len());
             match post_chat2_checkpoint(&http, &edge.url, &chat_id, &bearer, seq_covered, &frontier, snapshot).await {
                 Ok(()) => {
+                    lock(&refused).take();
                     tracing::info!(chat = %chat_id, seq_covered, reason, size, parts, "chat2 checkpoint posted");
                     for batch_id in &covered_rejections {
                         if let Err(err) = publication_store.acknowledge_chat_update(&chat_id,batch_id) {
@@ -3152,6 +3164,20 @@ impl DocHost {
                         && let Some(client) = &*lock(&handle.chat2)
                     {
                         client.note_checkpoint(seq_covered, size);
+                    }
+                }
+                Err(CheckpointPost::Rejected(413)) => {
+                    let mut slot = lock(&refused);
+                    let before = *slot;
+                    let next = crate::chat2_checkpoint::Refused::after(before, std::time::Instant::now(), ops);
+                    *slot = Some(next);
+                    // (Said once, as it starts; each try after, quietly.)
+                    if before.is_none() {
+                        tracing::warn!(chat = %chat_id, size, parts, wait_secs = next.wait.as_secs(),
+                            "chat2 checkpoint too large for the edge; trying again less often");
+                    } else {
+                        tracing::debug!(chat = %chat_id, size, parts, wait_secs = next.wait.as_secs(),
+                            "chat2 checkpoint too large again");
                     }
                 }
                 Err(CheckpointPost::Rejected(status)) => {

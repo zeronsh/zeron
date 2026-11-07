@@ -17,6 +17,41 @@ pub(crate) fn chat2_checkpoint_parts(len: usize) -> usize {
     if len <= CHAT2_CHECKPOINT_SINGLE_MAX { 1 } else { len.div_ceil(CHAT2_CHECKPOINT_PART_BYTES) }
 }
 
+/// A checkpoint the edge refused as too large (413): when, how much the
+/// doc held then (its operations, a measure that costs nothing to read),
+/// and how long to leave it. An edge or engine from before checkpoint
+/// parts refuses a long chat's every whole post, and it was posted again
+/// at the next tick, its whole snapshot each time (35 MB and more, every
+/// few seconds). Refused, the chat isn't posted again until the wait is
+/// over (a minute, doubling to half an hour) or its doc has grown by a
+/// quarter: then it's worth trying again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Refused {
+    pub at: std::time::Instant,
+    pub ops: usize,
+    pub wait: std::time::Duration,
+}
+
+/// The first wait after a refusal.
+pub(crate) const REFUSED_FIRST_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The longest.
+pub(crate) const REFUSED_MOST_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+impl Refused {
+    /// Refused (again) at `at`, the doc holding `ops`: the wait doubles
+    /// from the one before, to its most.
+    pub(crate) fn after(before: Option<Refused>, at: std::time::Instant, ops: usize) -> Refused {
+        let wait = before.map_or(REFUSED_FIRST_WAIT, |b| (b.wait * 2).min(REFUSED_MOST_WAIT));
+        Refused { at, ops, wait }
+    }
+
+    /// Whether to post again at `now`, the doc holding `ops`: the wait is
+    /// over, or the doc has grown by a quarter since.
+    pub(crate) fn allows(&self, now: std::time::Instant, ops: usize) -> bool {
+        now.saturating_duration_since(self.at) >= self.wait || ops >= self.ops + self.ops / 4
+    }
+}
+
 /// Why a checkpoint didn't land: the edge said no (its status), or the
 /// request didn't get there.
 #[derive(Debug, PartialEq)]
@@ -67,6 +102,40 @@ pub(crate) async fn post_chat2_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Refused, a chat waits a minute, then two, four… to half an hour
+    /// before its checkpoint is posted again, unless its doc grows by a
+    /// quarter first: an old edge's 413 isn't re-earned every few seconds
+    /// with the whole snapshot.
+    #[test]
+    fn a_refused_checkpoint_waits_longer_each_time_unless_the_doc_grows() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let first = Refused::after(None, t0, 1000);
+        assert_eq!(first.wait, Duration::from_secs(60));
+        assert!(!first.allows(t0 + Duration::from_secs(5), 1000), "the next tick: not again");
+        assert!(!first.allows(t0 + Duration::from_secs(59), 1240), "grown, but not by a quarter");
+        assert!(first.allows(t0 + Duration::from_secs(5), 1250), "grown by a quarter: again");
+        assert!(first.allows(t0 + Duration::from_secs(60), 1000), "the wait over: again");
+        let mut r = first;
+        let mut waits = vec![r.wait.as_secs()];
+        for _ in 0..8 {
+            r = Refused::after(Some(r), r.at + r.wait, 1000);
+            waits.push(r.wait.as_secs());
+        }
+        assert_eq!(waits, vec![60, 120, 240, 480, 960, 1800, 1800, 1800, 1800]);
+        // An hour after a first refusal, a still doc is posted 6 times, not
+        // ~600 (a tick every few seconds).
+        let (mut r, mut posts, mut at) = (Refused::after(None, t0, 1000), 1, t0);
+        while at < t0 + Duration::from_secs(3600) {
+            at += Duration::from_secs(6);
+            if r.allows(at, 1000) {
+                posts += 1;
+                r = Refused::after(Some(r), at, 1000);
+            }
+        }
+        assert!(posts <= 7, "{posts} posts in an hour");
+    }
     use std::sync::{Arc, Mutex};
 
     fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
