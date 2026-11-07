@@ -56,6 +56,7 @@ fn chat() -> Chat {
         room_gen: Some(2),
         parent_chat_id: None,
         child_kind: None,
+        sleep: None,
     }
 }
 
