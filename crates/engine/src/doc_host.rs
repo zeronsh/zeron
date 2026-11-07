@@ -47,6 +47,12 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+/// The largest checkpoint a chat room takes (`MAX_CHECKPOINT_BYTES` in the edge).
+const ROOM_CHECKPOINT_LIMIT: usize = 32 * 1024 * 1024;
+
+fn checkpoint_fits(bytes: usize) -> bool {
+    bytes <= ROOM_CHECKPOINT_LIMIT
+}
 
 /// An edit client renews every 20s. Sixty seconds tolerates two missed
 /// heartbeats without turning a vanished client into an invisible permanent
@@ -3166,7 +3172,7 @@ impl DocHost {
         // have less than what it would replace.
         if relay_era
             && let Some(state) = &relay_state
-            && (!state.checkpoint_may_run() || !state.caught_up())
+            && (!state.checkpoint_may_run() || !state.caught_up() || state.refused_as_too_large())
         {
             return;
         }
@@ -3208,6 +3214,15 @@ impl DocHost {
             let Ok(Some((snapshot, frontier, covered_rejections))) = prepared else {
                 return;
             };
+            // The room refuses it, and only after receiving all of it: a chat past the
+            // limit sent that much on every retry.
+            if !checkpoint_fits(snapshot.len()) {
+                tracing::warn!(chat = %chat_id, bytes = snapshot.len(), reason, "chat2 checkpoint too big for the room; not sent");
+                if let Some(state) = &relay_state {
+                    state.checkpoint_refused(413, "", None);
+                }
+                return;
+            }
 
             let Ok(bearer) = edge.bearer().await else {
                 return;

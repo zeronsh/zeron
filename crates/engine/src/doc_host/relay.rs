@@ -233,6 +233,12 @@ impl ChatRelayState {
         backoff.until = Some(Instant::now() + backoff.wait);
     }
 
+    /// The room refused this chat's checkpoint as too big. A doc only grows, so asking
+    /// again would only send it all again.
+    pub(super) fn refused_as_too_large(&self) -> bool {
+        self.too_large.load(Ordering::Acquire)
+    }
+
     pub(super) fn checkpoint_may_run(&self) -> bool {
         lock(&self.checkpoint_backoff).until.is_none_or(|until| Instant::now() >= until)
     }
@@ -716,6 +722,25 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(posts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_checkpoint_the_room_refused_as_too_big_is_not_sent_again() {
+        let (url, posts) = edge_counting_checkpoints().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _store) = host_on(&url, dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let state = state();
+        state.caught_up.store(true, Ordering::Release);
+        *lock(&handle.relay) = Some(state.clone());
+        state.checkpoint_refused(413, "{\"error\":\"too_large\"}", None);
+        for reason in [HEAL_REASON, "relay-cloud", "relay-sleep"] {
+            host.spawn_chat2_checkpoint(&handle, reason);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+        assert!(crate::doc_host::checkpoint_fits(32 * 1024 * 1024));
+        assert!(!crate::doc_host::checkpoint_fits(32 * 1024 * 1024 + 1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
