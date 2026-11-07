@@ -181,6 +181,11 @@ pub fn session_updating(session: &CloudSession) -> bool {
     session.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_UPDATING)
 }
 
+/// The machine's wake is taking far longer than normal (the edge kicks it).
+pub fn session_slow(session: &CloudSession) -> bool {
+    session.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_SLOW)
+}
+
 /// Whether any session is settling, or its machine says it is updating (it
 /// clears that when done, and the edge drops one nobody cleared): a reason
 /// for the poll to run, besides a send waiting on its machine.
@@ -188,7 +193,7 @@ pub fn any_session_settling(sessions: &CloudSessions) -> bool {
     sessions
         .sessions
         .iter()
-        .any(|s| session_settling(s.state) || session_updating(s))
+        .any(|s| session_settling(s.state) || session_updating(s) || session_slow(s))
 }
 
 /// Account copy for the Settings → Cloud status row.

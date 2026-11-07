@@ -560,6 +560,70 @@ impl ClientInner {
         lock(&self.cloud_stages).updating(device_id)
     }
 
+    /// The edge says this machine's wake is taking far longer than normal.
+    pub(crate) fn cloud_machine_slow(&self, device_id: &str) -> bool {
+        lock(&self.cloud_stages).slow(device_id)
+    }
+
+    /// When the machine `device_id` rebuilt its chat store from the server
+    /// copy, while its chats still show a note about it.
+    pub(crate) fn cloud_store_restored(&self, device_id: &str, now: i64) -> Option<i64> {
+        lock(&self.cloud_stages).restored(device_id, now)
+    }
+
+    fn restored_dismissed_path(&self) -> std::path::PathBuf {
+        self.config.data_dir.join("cloud-restored-dismissed.json")
+    }
+
+    /// Rebuild notes dismissed in an earlier run.
+    fn load_restored_dismissed(&self) {
+        let Ok(bytes) = std::fs::read(self.restored_dismissed_path()) else {
+            return;
+        };
+        if let Ok(dismissed) = serde_json::from_slice(&bytes) {
+            lock(&self.cloud_stages).load_dismissed(dismissed);
+        }
+    }
+
+    /// The chats on `device_id` stop saying it rebuilt its store.
+    pub(crate) fn dismiss_cloud_store_restored(&self, device_id: &str) {
+        let Some(kept) = lock(&self.cloud_stages).dismiss_restored(device_id) else {
+            return;
+        };
+        if let Ok(json) = serde_json::to_vec(&kept)
+            && let Err(error) = std::fs::write(self.restored_dismissed_path(), json)
+        {
+            tracing::debug!(%error, "dismissed restore note not kept");
+        }
+        let workspace = self.workspace.snapshot();
+        for core in self.cores() {
+            if workspace
+                .session(&core.chat_id)
+                .is_some_and(|row| row.device_id == device_id)
+            {
+                core.schedule_refresh();
+            }
+        }
+    }
+
+    /// A Cloud chat opened: read the session list now and then for what it
+    /// says about the machine (a rebuilt store).
+    pub(crate) fn glance_cloud_sessions(self: &Arc<Self>) {
+        if self.live().is_none() || !lock(&self.cloud_stages).wants_glance(crate::now_ms()) {
+            return;
+        }
+        let client = Client {
+            inner: self.clone(),
+        };
+        crate::runtime::shared().spawn(async move {
+            let read = client.cloud_sessions().await;
+            lock(&client.inner.cloud_stages).read_done(None);
+            if let Err(err) = read {
+                tracing::debug!(error = %err, "Cloud session list not read");
+            }
+        });
+    }
+
     /// While a send waits on a Cloud machine, re-read the session list now
     /// and then: the machine says it is updating only there.
     fn follow_cloud_stages(self: &Arc<Self>) {
@@ -712,6 +776,7 @@ impl Client {
             }
             _ => Backend::Live(Box::new({
                 catalog::DiskCatalog::new(&inner.config.data_dir).warm_labels();
+                inner.load_restored_dismissed();
                 LiveBackend::new(
                     &inner,
                     store.ok_or_else(|| ClientError::Internal("docs store missing".into()))?,
@@ -1337,6 +1402,15 @@ impl Client {
         core.ensure_room(&self.inner);
         core.touch();
         core.refresh();
+        let on_cloud = self
+            .inner
+            .workspace
+            .snapshot()
+            .session(chat_id)
+            .is_some_and(|row| zeron_proto::is_cloud_device(&row.device_id, ""));
+        if on_cloud {
+            self.inner.glance_cloud_sessions();
+        }
         // Upgrade recovery: older clients could persist an ACKed command
         // without its wake. Opening that chat must re-arm host discovery.
         if let Some(live) = self.inner.live()

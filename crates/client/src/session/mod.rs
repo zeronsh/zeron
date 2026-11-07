@@ -476,6 +476,8 @@ impl SessionCore {
             .map_or(MachineWait::Up, |row| {
                 if client.cloud_machine_updating(&row.device_id) {
                     MachineWait::Updating
+                } else if client.cloud_machine_slow(&row.device_id) {
+                    MachineWait::Slow
                 } else if !workspace.device(&row.device_id).is_some_and(|d| d.online) {
                     MachineWait::Booting
                 } else {
@@ -483,6 +485,10 @@ impl SessionCore {
                 }
             });
         let cloud_booting = machine == MachineWait::Booting;
+        let restored_at_ms = workspace
+            .session(&self.chat_id)
+            .filter(|row| zeron_proto::is_cloud_device(&row.device_id, ""))
+            .and_then(|row| client.cloud_store_restored(&row.device_id, now));
         drop(workspace);
         let mut transcript_event = None;
         let send_before;
@@ -502,7 +508,7 @@ impl SessionCore {
                 st.context_usage = self.doc.context_usage();
             }
             // A send its machine is updating for isn't late: it gets there.
-            let held = machine == MachineWait::Updating;
+            let held = matches!(machine, MachineWait::Updating | MachineWait::Slow);
             let echoes_changed =
                 derive_pending(&mut st, &client.config.device_id, degraded, held, now);
             if !st.kept.is_empty() {
@@ -527,11 +533,13 @@ impl SessionCore {
                 working: indicator_working || streaming,
                 working_since_ms,
                 cloud_booting,
+                restored_at_ms,
             };
             let placeholder_changed = refresh_setup_placeholder(&mut st, machine);
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
                 || previous.hydrated != st.hydrated
+                || previous.restored_at_ms != live.restored_at_ms
                 || placeholder_changed;
             if change.is_some()
                 || echoes_changed
@@ -1023,6 +1031,8 @@ enum MachineWait {
     Booting,
     /// Up, and installing a release before it answers.
     Updating,
+    /// Its wake is taking far longer than normal (the edge kicks it meanwhile).
+    Slow,
 }
 
 #[derive(Clone, Copy)]
@@ -1032,6 +1042,8 @@ struct LiveFlags {
     /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
     #[allow(dead_code)]
     cloud_booting: bool,
+    /// Its Cloud machine rebuilt its chat store then (a note until dismissed).
+    restored_at_ms: Option<i64>,
 }
 
 /// While a Cloud chat's machine is being started or woken for the latest
@@ -1062,6 +1074,8 @@ fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
             let waking = transcript.iter().any(|e| e.role() == MessageRole::Assistant);
             let name = if machine == MachineWait::Updating {
                 "Updating the machine"
+            } else if machine == MachineWait::Slow {
+                "Waking the machine is taking longer than usual"
             } else if waking {
                 "Waking the machine"
             } else {
@@ -1152,6 +1166,7 @@ fn build_snapshot(
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
+        restored_at_ms: live.restored_at_ms,
         delta: SnapshotDelta::default(),
         index: Arc::new(index),
     };
@@ -1200,6 +1215,21 @@ impl SessionHandle {
     /// The current transcript (O(1): an `Arc` clone).
     pub fn snapshot(&self) -> Arc<SessionSnapshot> {
         self.core.snapshot()
+    }
+
+    /// Stop showing that the chat's Cloud machine rebuilt its chat store
+    /// ([`SessionSnapshot::restored_at_ms`]), for every chat on it, until it
+    /// rebuilds again. Kept across launches.
+    pub fn dismiss_restored_note(&self) {
+        let Ok(client) = self.core.client() else { return };
+        let device_id = client
+            .workspace
+            .snapshot()
+            .session(&self.core.chat_id)
+            .map(|row| row.device_id.clone());
+        if let Some(device_id) = device_id {
+            client.dismiss_cloud_store_restored(&device_id);
+        }
     }
 
     /// Transcript subscription for Rust consumers (the layout engine). The
@@ -2025,6 +2055,18 @@ mod setup_placeholder_tests {
         assert_eq!(step_name(&st).as_deref(), Some("Updating the machine"));
         assert!(!refresh_setup_placeholder(&mut st, MachineWait::Updating));
         // Done: the machine's own steps take over.
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
+        assert!(st.setup_placeholder.is_none());
+    }
+
+    #[test]
+    fn a_wake_taking_longer_than_usual_says_so() {
+        let mut st = state_with_pending_send();
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Slow));
+        assert_eq!(
+            step_name(&st).as_deref(),
+            Some("Waking the machine is taking longer than usual")
+        );
         assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
         assert!(st.setup_placeholder.is_none());
     }

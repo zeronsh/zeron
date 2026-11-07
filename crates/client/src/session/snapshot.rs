@@ -107,6 +107,10 @@ pub struct SessionSnapshot {
     /// Content is present (local snapshot loaded or first sync landed). False
     /// = show a loader, not an empty chat.
     pub hydrated: bool,
+    /// The chat's Cloud machine rebuilt its chat store from the server copy
+    /// at this Unix ms: show a quiet, dismissable note
+    /// ([`crate::SessionHandle::dismiss_restored_note`]).
+    pub restored_at_ms: Option<i64>,
     pub delta: SnapshotDelta,
     pub(crate) index: Arc<HashMap<String, usize>>,
 }

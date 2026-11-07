@@ -19,6 +19,18 @@ import { SandboxError, type SandboxFailure, type SandboxMachine, type SandboxPro
 /** Give up on the fast path after this long; WakeWorkflow's slow poll takes
  * over (a restore this slow is not one a tight poll would help). */
 export const FAST_WAKE_DEADLINE_MS = 45_000;
+/** A resume that hasn't reached ready by the fast path's end is far past any
+ * normal one (machine ready: p50 about 10 s, slowest of 179 staging wakes 27 s,
+ * one at 4 min 46 s; earlier resumes sat in provisioning 7 to 11 min). It is
+ * stopped and resumed again, at most this many times, before the slow poll. */
+export const MAX_WAKE_KICKS = 2;
+
+/** `CLOUD_WAKE_SLOW_SECONDS`: the fast path's deadline, past which a wake reads
+ * `slow` and its resume is kicked (tests shorten it). */
+export const slowWakeMs = (raw: string | undefined): number => {
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : FAST_WAKE_DEADLINE_MS;
+};
 /** How long past "ready" to wait for the engine's start command to answer. */
 export const ENGINE_START_GRACE_MS = 3_000;
 const CALL_RETRY_MS = 500;
@@ -41,6 +53,13 @@ export interface WakeStages {
   engineExit?: number | null;
   /** Ran a second time in its own step (the first didn't get through). */
   engineRetried?: number;
+  /** The wake was taking much longer than normal (the stage `slow`). */
+  slow?: number;
+  /** Why, in a few words: what it was stuck on. */
+  slowReason?: string;
+  /** Stopped and resumed again because the resume was stuck; the last time. */
+  kickedAt?: number;
+  kicks?: number;
 }
 
 export interface FastWake {
@@ -207,7 +226,7 @@ export interface EngineTiming {
 }
 
 /** The stage a machine can report while it wakes (`CloudSession.stage`). */
-export const WAKE_STAGES = ["updating"] as const;
+export const WAKE_STAGES = ["updating", "slow"] as const;
 export type WakeStage = (typeof WAKE_STAGES)[number];
 /** A stage nobody cleared (an engine that died mid-update) stops showing. */
 export const WAKE_STAGE_TTL_MS = 10 * 60_000;
@@ -270,6 +289,8 @@ const timeline = (trace: WakeTrace, engine: EngineTiming | undefined): readonly 
   ["requested", trace.requested],
   ["workflowStarted", trace.stages?.started],
   ["resumed", trace.stages?.resumed],
+  ["slow", trace.stages?.slow],
+  ["kicked", trace.stages?.kickedAt],
   ["machineBoot", engine?.machineBoot],
   ["ready", trace.stages?.ready],
   ["engineStarted", trace.stages?.engineStarted],
@@ -300,6 +321,9 @@ export interface WakeTiming {
   readonly asleepMs?: number;
   readonly engineExit?: number | null;
   readonly engineRetried?: boolean;
+  /** Why the wake read `slow`, and how often its resume was kicked. */
+  readonly slowReason?: string;
+  readonly kicks?: number;
   /** The version that answered, and what happened about a newer one. */
   readonly version?: string;
   readonly updatedFrom?: string;
@@ -339,6 +363,8 @@ export const wakeTiming = (trace: WakeTrace, engine?: EngineTiming): WakeTiming 
     ...(trace.asleepMs === undefined ? {} : { asleepMs: trace.asleepMs }),
     ...(trace.stages?.engineExit === undefined ? {} : { engineExit: trace.stages.engineExit }),
     ...(trace.stages?.engineRetried === undefined ? {} : { engineRetried: true }),
+    ...(trace.stages?.slowReason === undefined ? {} : { slowReason: trace.stages.slowReason }),
+    ...(trace.stages?.kicks === undefined ? {} : { kicks: trace.stages.kicks }),
     ...(engine?.version === undefined ? {} : { version: engine.version }),
     ...(engine?.updatedFrom === undefined ? {} : { updatedFrom: engine.updatedFrom }),
     ...(engine?.updatedTo === undefined ? {} : { updatedTo: engine.updatedTo }),

@@ -7,6 +7,10 @@
 //! machine, the list is read every [`POLL_MS`], and for [`WATCH_MS`] after
 //! the machine last read as starting, waking or updating: it says it updates
 //! only once its engine is up. Nothing waiting, nothing read.
+//!
+//! The list also says when a machine rebuilt its chat store from the server
+//! copy (`store_recovered_at`): its chats show a quiet note until dismissed.
+//! Opening a Cloud chat reads the list at most every [`GLANCE_MS`] for it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,6 +21,10 @@ pub(crate) const POLL_MS: i64 = 5_000;
 /// How long it is still read after the machine last read as getting to the
 /// send. Its look for a release takes seconds; this covers it with room.
 pub(crate) const WATCH_MS: i64 = 60_000;
+/// Opening a Cloud chat reads the list if it wasn't read this recently.
+pub(crate) const GLANCE_MS: i64 = 5 * 60_000;
+/// How long after a machine rebuilt its store its chats say so.
+pub(crate) const RESTORED_NOTE_MS: i64 = 7 * 24 * 60 * 60_000;
 
 /// One chat with a send waiting on its Cloud machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +42,12 @@ pub(crate) struct MachineWait {
 pub(crate) struct CloudStages {
     /// Machines (session devices) that said they are updating, as last read.
     updating: HashSet<String>,
+    /// Machines whose wake the edge says is taking far longer than normal.
+    slow: HashSet<String>,
+    /// Per machine: when it last rebuilt its chat store from the server copy.
+    restored: HashMap<String, i64>,
+    /// Per machine: the rebuild whose note was dismissed (kept on disk).
+    dismissed: HashMap<String, i64>,
     /// Per waiting chat: when its machine last read as getting to the send.
     waited: HashMap<String, i64>,
     last_read_ms: Option<i64>,
@@ -45,6 +59,45 @@ impl CloudStages {
         self.updating.contains(device_id)
     }
 
+    pub(crate) fn slow(&self, device_id: &str) -> bool {
+        self.slow.contains(device_id)
+    }
+
+    /// When the machine rebuilt its chat store, while its chats still say so:
+    /// recent, and not dismissed.
+    pub(crate) fn restored(&self, device_id: &str, now: i64) -> Option<i64> {
+        let at = *self.restored.get(device_id)?;
+        let dismissed = self.dismissed.get(device_id).is_some_and(|d| *d >= at);
+        (!dismissed && now - at <= RESTORED_NOTE_MS).then_some(at)
+    }
+
+    /// Stop saying the machine rebuilt its store (until it does again). The
+    /// dismissed rebuilds to keep, or `None` when nothing changed.
+    pub(crate) fn dismiss_restored(&mut self, device_id: &str) -> Option<HashMap<String, i64>> {
+        let at = *self.restored.get(device_id)?;
+        if self.dismissed.get(device_id).is_some_and(|d| *d >= at) {
+            return None;
+        }
+        self.dismissed.insert(device_id.to_owned(), at);
+        Some(self.dismissed.clone())
+    }
+
+    /// Rebuilds dismissed before (from disk).
+    pub(crate) fn load_dismissed(&mut self, dismissed: HashMap<String, i64>) {
+        self.dismissed = dismissed;
+    }
+
+    /// A Cloud chat opened: whether to read the list for what it says about
+    /// its machine (counts as being read until [`Self::read_done`]).
+    pub(crate) fn wants_glance(&mut self, now: i64) -> bool {
+        if self.reading || self.last_read_ms.is_some_and(|at| now - at < GLANCE_MS) {
+            return false;
+        }
+        self.reading = true;
+        self.last_read_ms = Some(now);
+        true
+    }
+
     /// Note what the sends wait on now; whether to read the list again (and
     /// if so, it counts as being read until [`Self::read_done`]).
     pub(crate) fn wants_read(&mut self, waits: &[MachineWait], now: i64) -> bool {
@@ -53,10 +106,11 @@ impl CloudStages {
         if waits.is_empty() {
             // Nothing shows it, and it would be stale by the next send.
             self.updating.clear();
+            self.slow.clear();
         }
         let mut watching = false;
         for wait in waits {
-            let held = wait.booting || self.updating(&wait.device_id);
+            let held = wait.booting || self.updating(&wait.device_id) || self.slow(&wait.device_id);
             let waited = self
                 .waited
                 .entry(wait.chat_id.clone())
@@ -92,8 +146,21 @@ impl CloudStages {
             .filter(|s| s.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_UPDATING))
             .map(|s| s.device_id.clone())
             .collect();
-        let changed = updating != self.updating;
+        let slow: HashSet<String> = sessions
+            .sessions
+            .iter()
+            .filter(|s| s.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_SLOW))
+            .map(|s| s.device_id.clone())
+            .collect();
+        let restored: HashMap<String, i64> = sessions
+            .sessions
+            .iter()
+            .filter_map(|s| Some((s.device_id.clone(), s.store_recovered_at? as i64)))
+            .collect();
+        let changed = updating != self.updating || slow != self.slow || restored != self.restored;
         self.updating = updating;
+        self.slow = slow;
+        self.restored = restored;
         changed
     }
 }
@@ -110,6 +177,51 @@ mod tests {
             sent_at_ms: 0,
             booting,
         }
+    }
+
+    fn restored_at(at: Option<f64>) -> CloudSessions {
+        let mut list = sessions(None);
+        list.sessions[0].store_recovered_at = at;
+        list
+    }
+
+    #[test]
+    fn a_machine_that_rebuilt_its_store_says_so_until_dismissed() {
+        let mut stages = CloudStages::default();
+        // An older edge says nothing about it: no note.
+        assert!(!stages.record(Some(&sessions(None))));
+        assert_eq!(stages.restored("cloud-s1", 0), None);
+        // Rebuilt at 1 000: its chats say so.
+        assert!(stages.record(Some(&restored_at(Some(1_000.0)))));
+        assert_eq!(stages.restored("cloud-s1", 2_000), Some(1_000));
+        assert_eq!(stages.restored("cloud-other", 2_000), None);
+        // Dismissed: gone, and dismissing again changes nothing.
+        let kept = stages.dismiss_restored("cloud-s1").expect("dismissed");
+        assert_eq!(kept.get("cloud-s1"), Some(&1_000));
+        assert_eq!(stages.restored("cloud-s1", 2_000), None);
+        assert!(stages.dismiss_restored("cloud-s1").is_none());
+        // A later rebuild says so again.
+        assert!(stages.record(Some(&restored_at(Some(5_000.0)))));
+        assert_eq!(stages.restored("cloud-s1", 6_000), Some(5_000));
+        // A dismissal kept from before still holds after a restart.
+        let mut restarted = CloudStages::default();
+        restarted.load_dismissed(kept);
+        restarted.record(Some(&restored_at(Some(1_000.0))));
+        assert_eq!(restarted.restored("cloud-s1", 2_000), None);
+        // An old rebuild isn't news.
+        let mut stages = CloudStages::default();
+        stages.record(Some(&restored_at(Some(0.0))));
+        assert_eq!(stages.restored("cloud-s1", RESTORED_NOTE_MS + 1), None);
+    }
+
+    #[test]
+    fn opening_a_cloud_chat_glances_at_the_list_now_and_then() {
+        let mut stages = CloudStages::default();
+        assert!(stages.wants_glance(0));
+        assert!(!stages.wants_glance(1_000), "still reading");
+        stages.read_done(None);
+        assert!(!stages.wants_glance(1_000), "just read");
+        assert!(stages.wants_glance(GLANCE_MS + 1));
     }
 
     fn sessions(stage: Option<&str>) -> CloudSessions {
@@ -200,6 +312,18 @@ mod tests {
         assert!(stages.updating("cloud-s1"));
         assert!(!stages.wants_read(&[], 20_000));
         assert!(!stages.updating("cloud-s1"));
+    }
+
+    #[test]
+    fn a_wake_the_edge_says_is_slow_is_noted_and_followed() {
+        let mut stages = CloudStages::default();
+        assert!(poll(&mut stages, &[wait(true)], 1_000, Some(zeron_proto::CLOUD_STAGE_SLOW)));
+        assert!(stages.slow("cloud-s1"));
+        assert!(!stages.updating("cloud-s1"));
+        // Its heartbeat back but still slow (no engine yet): still followed.
+        assert!(poll(&mut stages, &[wait(false)], 90_000, Some(zeron_proto::CLOUD_STAGE_SLOW)));
+        assert!(poll(&mut stages, &[wait(false)], 95_000, None));
+        assert!(!stages.slow("cloud-s1"));
     }
 
     #[test]
