@@ -714,6 +714,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 
@@ -1000,6 +1001,7 @@ mod composer_tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 

@@ -267,6 +267,7 @@ fn transcript_pull_request_links_open_where_settings_send_them(cx: &mut TestAppC
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             }]);
             cx.notify();
         });

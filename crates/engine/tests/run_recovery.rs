@@ -376,6 +376,7 @@ fn manufacture_crash(
         status: Some(status),
         continuation_of: None,
         duration_ms: None,
+        finished_at: None,
     };
     doc.push_message(&entry(
         "msg-user-1",

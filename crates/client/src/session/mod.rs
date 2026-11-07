@@ -826,6 +826,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                             status: Some(MessageStatus::Complete),
                             continuation_of: None,
                             duration_ms: None,
+                            finished_at: None,
                         }),
                         echo: Some(LocalEcho {
                             state: pending.state,
@@ -917,6 +918,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             }),
             echo: None,
             append: None,
@@ -1604,6 +1606,7 @@ mod setup_placeholder_tests {
                     status: Some(MessageStatus::Complete),
                     continuation_of: None,
                     duration_ms: None,
+                    finished_at: None,
                 }),
                 echo: Some(LocalEcho { state: pending.state, sent_at_ms: 1_000 }),
                 append: None,
