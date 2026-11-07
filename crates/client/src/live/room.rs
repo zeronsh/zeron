@@ -42,6 +42,12 @@ pub(crate) struct LocalDoc {
     pub journaled: i64,
 }
 
+/// The journal key for relayed updates that arrived ahead of their history (the
+/// engine uses the same key).
+pub(crate) fn parked_inbox(chat_id: &str) -> String {
+    format!("{chat_id}#parked")
+}
+
 /// Restore a chat doc from disk: the chat2 snapshot (epoch ≥ 2 only — a
 /// retired s2 lineage is never imported), any unacknowledged own writes, and what
 /// came by relay since the last save, which nothing on the edge can give back.
@@ -87,6 +93,22 @@ pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
             }
         }
         Err(err) => tracing::warn!(chat = %chat_id, error = %err, "relay journal load failed"),
+    }
+    // Updates that came ahead of their history. Once all are in, none is needed again.
+    let parked_key = parked_inbox(chat_id);
+    if let Ok((parked, newest)) = store.pending_chat_inbox(&parked_key)
+        && !parked.is_empty()
+    {
+        let mut waiting = false;
+        for bytes in &parked {
+            match raw.import(bytes) {
+                Ok(status) => waiting |= status.pending.is_some(),
+                Err(err) => tracing::warn!(chat = %chat_id, error = %err, "couldn't replay a parked relay update"),
+            }
+        }
+        if !waiting {
+            let _ = store.retire_chat_inbox(&parked_key, newest);
+        }
     }
     LocalDoc {
         doc: SessionDoc::from_doc(raw),
@@ -327,11 +349,22 @@ impl ChatDocSink for ViewerSink {
     fn acknowledge_update(&self, batch_id: &str) -> Result<(), String> {
         // The outbox row is this send's only local copy until a save holds it. A
         // kill right after the ack would otherwise lose it from the phone's own
-        // transcript, and offline there's nowhere to read it back from.
-        self.persister.flush();
-        self.store
-            .acknowledge_chat_update(&self.chat_id, batch_id)
-            .map_err(|e| e.to_string())
+        // transcript, and offline there's nowhere to read it back from. So the row
+        // goes only after a save, and both happen off this call: it runs under the
+        // chat client's lock, and an export can commit a pending transaction whose
+        // local-update hook queues a push, which takes that lock again. Until then
+        // the row stays, and a restart sends it again, which the room dedupes.
+        let persister = self.persister.clone();
+        let store = self.store.clone();
+        let chat_id = self.chat_id.clone();
+        let batch_id = batch_id.to_owned();
+        crate::runtime::shared().spawn_blocking(move || {
+            persister.flush();
+            if let Err(err) = store.acknowledge_chat_update(&chat_id, &batch_id) {
+                tracing::warn!(chat = %chat_id, error = %err, "outbox retirement failed");
+            }
+        });
+        Ok(())
     }
 
     fn reject_update(&self, batch_id: &str) -> Result<(), String> {
@@ -403,8 +436,9 @@ impl ChatDocSink for ViewerSink {
     /// goes in the journal until a save covers it. Only what moved the doc, so a
     /// repeat delivery writes nothing.
     fn relay_import(&self, bytes: &[u8], history: bool) -> RelayImport {
+        // Gone: nothing took it in, so it mustn't count as read.
         let Some(doc) = self.doc.upgrade() else {
-            return RelayImport::Applied;
+            return RelayImport::Unreadable;
         };
         let before = doc.doc().oplog_vv();
         let status = match doc.doc().import(bytes) {
@@ -414,14 +448,22 @@ impl ChatDocSink for ViewerSink {
                 return RelayImport::Unreadable;
             }
         };
-        if doc.doc().oplog_vv() != before {
+        if status.pending.is_some() {
+            // Held in memory until its history arrives, and a save doesn't hold it:
+            // kept apart from the journal a save retires, and replayed on load.
+            if let Err(err) = self.store.journal_chat_inbox(&parked_inbox(&self.chat_id), bytes) {
+                tracing::warn!(chat = %self.chat_id, error = %err, "parked relay journal write failed")
+            }
+        } else if doc.doc().oplog_vv() != before {
             match self.store.journal_chat_inbox(&self.chat_id, bytes) {
                 Ok(ordinal) => self.persister.note_journaled(ordinal),
                 Err(err) => {
                     tracing::warn!(chat = %self.chat_id, error = %err, "relay journal write failed")
                 }
             }
-            // A catch-up can be the whole chat: save it now, not in a second.
+        }
+        // A catch-up can be the whole chat: save it now, not in a second.
+        if doc.doc().oplog_vv() != before {
             self.persister.dirty(history);
             (self.on_applied)();
         }
@@ -1060,13 +1102,63 @@ mod tests {
         remote.get_text("t").insert(0, "second ").unwrap();
         remote.commit();
         let later = remote.export(loro::ExportMode::updates(&at)).unwrap();
-        // Its history hasn't come: nothing moved, so nothing's kept, and it says so.
+        // Its history hasn't come: it says so, and it's kept apart from what a save
+        // retires, since a save doesn't hold it.
         assert_eq!(sink.relay_import(&later, false), RelayImport::Parked);
         assert!(store.pending_chat_inbox("chat").unwrap().0.is_empty());
-        // It lands with its history, and both are kept.
+        assert_eq!(store.pending_chat_inbox(&parked_inbox("chat")).unwrap().0, vec![later.clone()]);
+        // A restart now still has it, waiting.
+        let reloaded = load_local(&store, "chat");
+        assert_eq!(reloaded.doc.doc().get_text("t").to_string(), "");
+        assert_eq!(store.pending_chat_inbox(&parked_inbox("chat")).unwrap().0.len(), 1, "still waiting");
+        // It lands with its history.
         assert_eq!(sink.relay_import(&first, false), RelayImport::Applied);
         assert_eq!(store.pending_chat_inbox("chat").unwrap().0.len(), 1);
         assert_eq!(doc.doc().get_text("t").to_string(), "second first");
+        // Once a load finds it complete, the parked copy goes.
+        let complete = load_local(&store, "chat");
+        assert_eq!(complete.doc.doc().get_text("t").to_string(), "second first");
+        assert!(store.pending_chat_inbox(&parked_inbox("chat")).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn a_relayed_update_for_a_doc_thats_gone_isnt_taken_as_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store, &doc, "chat");
+        drop(doc);
+        let (_, bytes) = update("x");
+        assert_eq!(sink.relay_import(&bytes, false), RelayImport::Unreadable);
+    }
+
+    #[test]
+    fn an_ack_never_exports_the_doc_on_the_callers_thread() {
+        // The client calls this under its lock. An export commits a pending
+        // transaction, and its local-update hook queues a push, which takes that lock.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store.clone(), &doc, "chat");
+        store.enqueue_chat_update("chat", "sent", &[1]).unwrap();
+        let caller = std::thread::current().id();
+        let hooked_here = Arc::new(AtomicBool::new(false));
+        let flag = hooked_here.clone();
+        let _hook = doc.doc().subscribe_local_update(Box::new(move |_| {
+            if std::thread::current().id() == caller {
+                flag.store(true, Ordering::SeqCst);
+            }
+            true
+        }));
+        doc.doc().get_text("t").insert(0, "typed, not committed").unwrap();
+        sink.persister.dirty(false);
+        sink.acknowledge_update("sent").unwrap();
+        assert!(!hooked_here.load(Ordering::SeqCst), "exported under the caller's lock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !store.pending_chat_updates("chat").unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the outbox row was never retired");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
