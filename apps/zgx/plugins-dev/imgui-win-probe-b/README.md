@@ -28,7 +28,7 @@ in `ZERON_ZGX_DEV_PLUGINS`.)
 The main probe's `inspector` is `Probe Inspector`, 720 × 480 at (120, 80): the
 same id, a different plugin, and geometry neither can share. `remember = true`
 lets each plugin's inspector come back at its own size after a restart
-(`VAL-LIFE-008`).
+(`VAL-LIFE-009`).
 
 It draws `window inspector`, `plugin B`, `frame <n>`, `clicks <n>` and a
 `Ping` button; `frame` is the count of render callbacks, so a probe can see B
@@ -44,7 +44,7 @@ Menu items (`Probe B: …`) and `probe_run { action = "…" }` calls:
 | `reopen` | closes, then reopens `inspector` after 300 ms | VAL-WIN-006, VAL-LIFE-005 |
 | `retitle_inspector` | `set_title("Inspector")`, so no title distinguishes the two windows | VAL-WIN-006 second run |
 | `retitle_b` | `set_title("B Inspector")` | VAL-WIN-006 |
-| `resize_1100` | `set_size(1100 × 800)` | VAL-LIFE-008 |
+| `resize_1100` | `set_size(1100 × 800)` | VAL-LIFE-009 |
 | `bump` | increments B's counter | VAL-CROSS-003 |
 
 ## Tools

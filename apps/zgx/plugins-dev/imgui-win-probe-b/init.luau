@@ -2,7 +2,7 @@
 -- The validation contract's second plugin (apps/zgx/plugins-dev/imgui-win-probe-b).
 --
 -- It opens a window with the *same* id the main probe uses (`inspector`) at
--- a different size and position, so `VAL-WIN-006` and `VAL-LIFE-008` can see
+-- a different size and position, so `VAL-WIN-006` and `VAL-LIFE-009` can see
 -- that a window id is scoped to the plugin that opened it: the two windows
 -- are two native windows, and closing, hiding or resizing one leaves the
 -- other untouched. Its own counter and frame count let a probe see it keeps
@@ -48,7 +48,7 @@ local function open(titled: string, width: number, height: number)
 			-- B's own place: far enough from A's inspector that the two can
 			-- never be mistaken for one window sharing geometry.
 			position = { x = 500, y = 300 },
-			-- `VAL-LIFE-008`: each plugin's inspector comes back at its own
+			-- `VAL-LIFE-009`: each plugin's inspector comes back at its own
 			-- size after a restart.
 			remember = true,
 		}
@@ -130,7 +130,7 @@ actions.retitle_b = function()
 	end
 end
 
--- `VAL-LIFE-008` names 1100x800 for B's inspector.
+-- `VAL-LIFE-009` names 1100x800 for B's inspector.
 actions.resize_1100 = function()
 	local handle = window
 	if handle then

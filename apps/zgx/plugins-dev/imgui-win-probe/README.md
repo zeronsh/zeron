@@ -48,13 +48,16 @@ Nothing else opens until an action asks for it.
 
 Each action opens with a plain `open_window` and no close first: the four free
 slots absorb it, and two-window actions still fit under the live cap. Every
-action is a menu item (`Probe: …`) and is also callable by name through the
-`probe_run` tool.
+action is an item in Zeron's one `Probe Actions` menu bar menu, titled by the
+action's own name, and is also callable by name through the `probe_run` tool.
 
 | id | title | size | options | action |
 | --- | --- | --- | --- | --- |
 | `bounds` | `Probe Bounds` | 600 × 400 | `min_size` 400 × 300, `max_size` 900 × 600, resizable | `open_bounds` |
 | `drag` | `Probe Drag` | 640 × 420 | `titlebar = "hidden"`, `decorations = false`, resizable | `open_drag` |
+| `size` | `Probe Size` | 720 × 480 | resizable | `open_size` |
+| `pos` | `Probe Pos` | 400 × 300 | at (100, 120) | `open_pos` |
+| `pos2` | `Probe Pos Two` | 400 × 300 | at (600, 420) | `open_pos2` |
 | `quiet` | `Probe Quiet` | 480 × 360 | `visible` from `imgui.windows.quiet.visible` (false) | `open_quiet` |
 | `left` | `Probe Left` | 500 × 400 | `remember = true` | `open_left`, `open_both_sides` |
 | `right` | `Probe Right` | 900 × 700 | `remember = true` | `open_right`, `open_both_sides` |
@@ -68,8 +71,9 @@ Every other window opens at the size its request names.
 
 ## Probe actions
 
-All of these are menu items and `probe_run { action = "…" }` calls. The tool
-returns `{ action, ok }`; an unknown name raises a sentence naming it.
+All of these are items in the `Probe Actions` menu (each titled by its action
+name) and `probe_run { action = "…" }` calls. The tool returns `{ action, ok }`;
+an unknown name raises a sentence naming it.
 
 | action | what it does | rows |
 | --- | --- | --- |
@@ -85,6 +89,9 @@ returns `{ action, ok }`; an unknown name raises a sentence naming it.
 | `hide_inspector` / `show_inspector` / `focus_inspector` / `minimize_inspector` / `restore_inspector` | the five window controls | VAL-WIN-011, VAL-WIN-017 |
 | `open_bounds` | opens `bounds` | VAL-WIN-004 |
 | `open_drag` | opens `drag` | VAL-WIN-019…022 |
+| `open_size` | opens `size` (720 × 480, resizable) | VAL-WIN-002 |
+| `open_pos` | opens `pos` at (100, 120) | VAL-WIN-003 |
+| `open_pos2` | opens `pos2` at (600, 420) | VAL-WIN-003 |
 | `open_quiet` | opens `quiet` hidden | VAL-LIFE-016 |
 | `open_left` / `open_right` / `open_both_sides` | opens the remembered side windows | VAL-LIFE-009, VAL-DOCK-003…005 |
 | `open_dup` | opens `dup`, then attempts `dup` again and records the refusal | VAL-WIN-007 |

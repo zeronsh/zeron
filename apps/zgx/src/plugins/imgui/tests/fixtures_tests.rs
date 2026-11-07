@@ -40,6 +40,44 @@ const FIXTURES: &[&str] = &[
 /// every other contract window opens via a probe action with no close first.
 const LAUNCH: &[&str] = &["a", "b", "inspector", "bare"];
 
+/// Every probe action the main fixture advertises, in its `init.luau` order.
+/// Each must be an item in the one "Probe Actions" menu bar menu, titled by
+/// the action's own name, and callable through `probe_run`.
+const ACTIONS: &[&str] = &[
+    "reopen",
+    "blow_up",
+    "close_inspector",
+    "inspector_as_a",
+    "inspector_unnamed",
+    "inspector_700",
+    "hide_inspector",
+    "show_inspector",
+    "focus_inspector",
+    "minimize_inspector",
+    "restore_inspector",
+    "rename_inspector",
+    "resize_inspector",
+    "bump_inspector",
+    "open_bounds",
+    "open_drag",
+    "open_quiet",
+    "open_size",
+    "open_pos",
+    "open_pos2",
+    "open_left",
+    "open_right",
+    "open_both_sides",
+    "open_dup",
+    "open_reuse",
+    "reuse_cycle",
+    "n_loop",
+    "n_more",
+    "close_all_windows",
+    "open_a",
+    "open_b",
+    "open_c",
+];
+
 fn folder(id: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("plugins-dev")
@@ -549,43 +587,26 @@ fn the_main_probe_opens_the_four_windows_the_rows_need() {
 /// without closing anything first.
 #[test]
 fn the_main_probe_offers_the_probe_actions_the_rows_drive() {
-    // The menu lists every action by its probe-<name> id; it is published at
-    // load, so one harness is enough for this part.
-    let (app, fake) = harness("imgui-win-probe", 0);
+    // Every advertised action is an item in the one "Probe Actions" menu bar
+    // menu, titled by the action's own name, at its `<plugin>/<action>` id;
+    // `probe_run` is the tool route to the same table.
+    let (app, _fake) = harness("imgui-win-probe", 0);
     app.frames(30);
-    let published = fake.menus.borrow().last().cloned().unwrap_or(Json::Null);
-    let items = published.as_array().cloned().unwrap_or_default();
-    let ids: Vec<&str> = items
-        .iter()
-        .filter_map(|item| item["id"].as_str())
+    let probe_menus: Vec<(String, String)> = app
+        .host
+        .commands()
+        .get()
+        .into_iter()
+        .filter(|command| command.menu == "Probe Actions")
+        .map(|command| (command.id.clone(), command.title.clone()))
         .collect();
-    for expected in [
-        "probe-reopen",
-        "probe-blow_up",
-        "probe-close_inspector",
-        "probe-inspector_as_a",
-        "probe-inspector_unnamed",
-        "probe-rename_inspector",
-        "probe-resize_inspector",
-        "probe-hide_inspector",
-        "probe-show_inspector",
-        "probe-focus_inspector",
-        "probe-minimize_inspector",
-        "probe-restore_inspector",
-        "probe-open_bounds",
-        "probe-open_drag",
-        "probe-open_quiet",
-        "probe-open_left",
-        "probe-open_right",
-        "probe-open_both_sides",
-        "probe-open_dup",
-        "probe-open_reuse",
-        "probe-reuse_cycle",
-        "probe-n_loop",
-        "probe-n_more",
-        "probe-close_all_windows",
-    ] {
-        assert!(ids.contains(&expected), "no menu item {expected}: {ids:?}");
+    for action in ACTIONS {
+        assert!(
+            probe_menus
+                .iter()
+                .any(|(id, title)| id == &format!("imgui-win-probe/{action}") && title == *action),
+            "no Probe Actions item for {action}: {probe_menus:?}"
+        );
     }
 
     // VAL-WIN-004: the bounds window, both bounds stated, no close first.
@@ -617,6 +638,53 @@ fn the_main_probe_offers_the_probe_actions_the_rows_drive() {
         assert!(
             ops(&fake, "close").is_empty(),
             "open_drag closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
+
+    // VAL-WIN-002/003: size, pos and pos2 are one action away, with the
+    // exact geometry each row measures and no close first.
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_size");
+        let size = &opened(&fake, "size")[0];
+        assert_eq!(size["title"], Json::from("Probe Size"), "{size}");
+        assert_eq!(number(&size["size"]["width"]), 720.0, "{size}");
+        assert_eq!(number(&size["size"]["height"]), 480.0, "{size}");
+        assert_eq!(size["resizable"], Json::Bool(true), "{size}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_size closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_pos");
+        let pos = &opened(&fake, "pos")[0];
+        assert_eq!(pos["title"], Json::from("Probe Pos"), "{pos}");
+        assert_eq!(number(&pos["size"]["width"]), 400.0, "{pos}");
+        assert_eq!(number(&pos["size"]["height"]), 300.0, "{pos}");
+        assert_eq!(number(&pos["position"]["x"]), 100.0, "{pos}");
+        assert_eq!(number(&pos["position"]["y"]), 120.0, "{pos}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_pos closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_pos2");
+        let pos2 = &opened(&fake, "pos2")[0];
+        assert_eq!(pos2["title"], Json::from("Probe Pos Two"), "{pos2}");
+        assert_eq!(number(&pos2["size"]["width"]), 400.0, "{pos2}");
+        assert_eq!(number(&pos2["size"]["height"]), 300.0, "{pos2}");
+        assert_eq!(number(&pos2["position"]["x"]), 600.0, "{pos2}");
+        assert_eq!(number(&pos2["position"]["y"]), 420.0, "{pos2}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_pos2 closed a window first: {:?}",
             fake.ops.borrow()
         );
     }

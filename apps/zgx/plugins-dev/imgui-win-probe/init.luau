@@ -3,9 +3,10 @@
 --
 -- It opens the native windows the contract's window, lifecycle, input and
 -- docking rows name, by id and with the options each row measures, and it
--- offers one probe action per row: the menu items below, and the same
--- actions through the `probe_run` tool for a scripted probe that cannot
--- click a menu.
+-- offers one probe action per row: each action is an item in the one
+-- "Probe Actions" menu (Zeron's menu bar, titled by the action's name) and
+-- a `probe_run` tool call, so a person clicking and a scripted probe both
+-- reach every row.
 --
 -- The host allows eight native windows per plugin (contract §5). Four open
 -- at launch — Probe A, Probe B, the inspector and the bare window — leaving
@@ -484,6 +485,32 @@ actions.open_c = function()
 	open("c", "Probe C", { size = { width = 560, height = 340 } })
 end
 
+-- `VAL-WIN-002`: the requested initial size is the client area, so `size`
+-- opens at 720x480 and stays resizable, with no close first.
+actions.open_size = function()
+	open("size", "Probe Size", {
+		size = { width = 720, height = 480 },
+		resizable = true,
+	})
+end
+
+-- `VAL-WIN-003`: the requested initial position is honoured. `pos` and
+-- `pos2` open at their own origins, 500 and 300 points apart, no close
+-- first.
+actions.open_pos = function()
+	open("pos", "Probe Pos", {
+		size = { width = 400, height = 300 },
+		position = { x = 100, y = 120 },
+	})
+end
+
+actions.open_pos2 = function()
+	open("pos2", "Probe Pos Two", {
+		size = { width = 400, height = 300 },
+		position = { x = 600, y = 420 },
+	})
+end
+
 local function run_action(action: string)
 	local one = actions[action]
 	if not one then
@@ -493,50 +520,54 @@ local function run_action(action: string)
 	one()
 end
 
--- The same actions as menu items, so a person or a probe with a pointer can
--- drive them the way the rows describe ("the probe triggers the fixture's
--- menu action `reopen`"). `probe_run` is the scripted route to the same
--- table.
-local function menu(action: string, label: string)
-	zeron.menu {
-		kind = "session",
-		id = `probe-{action}`,
-		label = `Probe: {label}`,
+-- The same actions as items in Zeron's one "Probe Actions" menu bar menu,
+-- each titled by the action's own name, so a person or a probe with a
+-- pointer can drive them the way the rows describe ("the probe triggers the
+-- fixture's menu action `reopen`") without an engine. `probe_run` is the
+-- scripted route to the same table.
+local function menu(action: string)
+	ui.command {
+		id = action,
+		title = action,
+		menu = "Probe Actions",
 		run = function()
 			run_action(action)
 		end,
 	}
 end
 
-menu("reopen", "reopen inspector")
-menu("blow_up", "raise in the next frame")
-menu("close_inspector", "close inspector")
-menu("inspector_as_a", "inspector as A Inspector 400x300")
-menu("inspector_unnamed", "inspector titled Inspector")
-menu("inspector_700", "inspector 700x500")
-menu("rename_inspector", "rename inspector")
-menu("resize_inspector", "resize inspector 1000x640")
-menu("bump_inspector", "bump inspector counter")
-menu("hide_inspector", "hide inspector")
-menu("show_inspector", "show inspector")
-menu("focus_inspector", "focus inspector")
-menu("minimize_inspector", "minimize inspector")
-menu("restore_inspector", "restore inspector")
-menu("open_bounds", "open bounds")
-menu("open_drag", "open drag")
-menu("open_quiet", "open quiet")
-menu("open_left", "open left")
-menu("open_right", "open right")
-menu("open_both_sides", "open left and right")
-menu("open_dup", "open dup and try it twice")
-menu("open_reuse", "open reuse")
-menu("reuse_cycle", "close and reopen reuse")
-menu("n_loop", "open up to the window cap")
-menu("n_more", "close one and open one more")
-menu("close_all_windows", "close every window")
-menu("open_a", "open a")
-menu("open_b", "open b")
-menu("open_c", "open c")
+menu("reopen")
+menu("blow_up")
+menu("close_inspector")
+menu("inspector_as_a")
+menu("inspector_unnamed")
+menu("inspector_700")
+menu("rename_inspector")
+menu("resize_inspector")
+menu("bump_inspector")
+menu("hide_inspector")
+menu("show_inspector")
+menu("focus_inspector")
+menu("minimize_inspector")
+menu("restore_inspector")
+menu("open_bounds")
+menu("open_drag")
+menu("open_quiet")
+menu("open_size")
+menu("open_pos")
+menu("open_pos2")
+menu("open_left")
+menu("open_right")
+menu("open_both_sides")
+menu("open_dup")
+menu("open_reuse")
+menu("reuse_cycle")
+menu("n_loop")
+menu("n_more")
+menu("close_all_windows")
+menu("open_a")
+menu("open_b")
+menu("open_c")
 
 zeron.tool {
 	name = "probe_status",
