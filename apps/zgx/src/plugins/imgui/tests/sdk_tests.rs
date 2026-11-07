@@ -6,13 +6,15 @@
 //! `plugin.p.imgui_end` records how each frame closed. The frame requests go
 //! through `plugin.p.calls`, exactly the channel the production pump uses.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use serde_json::Value as Json;
 use zgx_script::testing::TestApp;
 use zgx_script::{Plugin, ScriptHost, Value};
 
+use crate::plugins::Item;
+use crate::plugins::imgui::permission;
 use crate::plugins::vlist;
 
 /// What the fake host heard, as JSON strings, in order.
@@ -328,5 +330,217 @@ fn the_sdk_hands_a_close_to_the_window_s_on_close_once() {
         app.text("said").ends_with("closed:w"),
         "the second call is not a second close: {}",
         app.text("said")
+    );
+}
+
+// -- A plugin the `imgui.windows` gate turned away -------------------------
+//
+// The VM refuses `plugin.<id>.imgui` before the host action runs, so the
+// plugin would otherwise be handed zgx's capability name
+// (`Named("zeron.imgui.windows")`). The SDK asks
+// `plugin.<id>.imgui_refused` for the host's sentence — recorded once for
+// the plugin's diagnostics — and raises that in its place. These tests
+// expose both actions the way `imgui::luau::serve` does.
+
+/// The sentence the host uses for a plugin that may not open windows.
+const SENTENCE: &str = "This plugin wasn't allowed to open native application windows. Allow \"imgui.windows\" for it in Zeron.";
+
+/// A plugin that asks for a window twice, keeping what each attempt said.
+const DENIED: &str = r#"
+local zeron = require("./zeron")("p")
+
+local said = ui.state("said", "")
+local function say(words: string)
+	local old = said:peek()
+	said:set(if old == "" then words else old .. "|" .. words)
+end
+ui.contribute("bar", ui.text { id = "said", function() return said:get() end })
+
+local function attempt()
+	local ok, why = pcall(function()
+		zeron.imgui.open_window { id = "x", title = "Denied" }
+	end)
+	say(tostring(ok) .. "|" .. tostring(why))
+end
+attempt()
+attempt()
+"#;
+
+/// What the fake host heard of a refused plugin: the sentences it was asked
+/// for, and whether the gated ImGui action was reached at all.
+#[derive(Clone, Default)]
+struct Refused {
+    recorded: Rc<RefCell<Vec<String>>>,
+    reached: Rc<Cell<usize>>,
+}
+
+/// A plugin VM holding `granted`, listed as `listing`, with both actions
+/// exposed as production exposes them.
+fn refused_harness(name: &str, listing: Item, granted: &[&str]) -> (TestApp, Refused) {
+    let dir = std::env::temp_dir().join(format!("zgx-imgui-refused-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sdk = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins-sdk")
+            .join("zeron.luau"),
+    )
+    .expect("the SDK file");
+    std::fs::write(dir.join("zeron.luau"), sdk).unwrap();
+    let entry = dir.join("init.luau");
+    std::fs::write(&entry, DENIED).unwrap();
+
+    let heard = Refused::default();
+    let asked: Vec<String> = granted
+        .iter()
+        .map(|permission| permission.to_string())
+        .collect();
+    let grants = crate::plugins::grants::capabilities("p", &asked, &[], &[]);
+    let host_side = heard.clone();
+    let host_listing = listing.clone();
+    let app = TestApp::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", r#"return ui.column { ui.slot("bar") }"#);
+        for (key, _) in crate::plugins::grants::SHARED_READ {
+            host.expose_shared_read(*key, None);
+            host.shared(key, Value::Nil);
+        }
+        for name in crate::plugins::grants::OWN_SHARED {
+            host.expose_shared_read(format!("plugin.p.{name}"), None);
+            let empty = match *name {
+                "calls" | "inbox" | "menu_items" | "locales" | "composed" => vlist(Vec::new()),
+                _ => Value::record(std::iter::empty::<(&str, Value)>()),
+            };
+            host.shared(&format!("plugin.p.{name}"), Value::Nil)
+                .set(empty);
+        }
+        for name in crate::plugins::grants::OWN_ACTIONS {
+            host.expose_action(format!("plugin.p.{name}"), None);
+        }
+        // The gated action: a VM without the capability never reaches it.
+        permission::expose_action(&host, "plugin.p.imgui");
+        {
+            let (reached, listing) = (host_side.reached.clone(), host_listing.clone());
+            host.function("plugin.p.imgui", move |_| {
+                reached.set(reached.get() + 1);
+                match permission::open_window(Some(&listing)) {
+                    Ok(()) => Value::record([("ok", Value::Bool(true))]),
+                    Err(sentence) => Value::record([
+                        ("ok", Value::Bool(false)),
+                        ("error", Value::from(sentence.as_str())),
+                    ]),
+                }
+            });
+        }
+        // The reporter, exposed without the capability: the host's own
+        // sentence, recorded once for the plugin's diagnostics.
+        host.expose_action("plugin.p.imgui_refused", None);
+        {
+            let (recorded, listing) = (host_side.recorded.clone(), host_listing.clone());
+            host.function("plugin.p.imgui_refused", move |_| {
+                let sentence = permission::open_window_refusal(Some(&listing));
+                recorded.borrow_mut().push(sentence.clone());
+                Value::record([
+                    ("ok", Value::Bool(false)),
+                    ("error", Value::from(sentence.as_str())),
+                ])
+            });
+        }
+        host.set_plugins(vec![Plugin {
+            name: "p".into(),
+            entry,
+            grants,
+        }]);
+        host
+    });
+    (app, heard)
+}
+
+fn plugin_listing(permissions: &[&str], allowed: Option<&[&str]>) -> Item {
+    let mut json = serde_json::json!({ "id": "p", "status": "on", "permissions": permissions });
+    if let Some(allowed) = allowed {
+        json["allowed"] = serde_json::json!(allowed);
+    }
+    Item { json }
+}
+
+#[test]
+fn a_vm_without_the_grant_raises_the_hosts_sentence() {
+    let (mut app, refused) = refused_harness("denied", plugin_listing(&[], None), &[]);
+    app.frames(20);
+    assert_eq!(
+        app.error(),
+        None,
+        "a refused permission is not a script error: {:?}",
+        app.error()
+    );
+    let said = app.text("said");
+    assert_eq!(
+        said.matches(SENTENCE).count(),
+        2,
+        "both attempts raise the host's sentence: {said}"
+    );
+    assert_eq!(
+        said.matches("false|").count(),
+        2,
+        "open_window failed both times: {said}"
+    );
+    assert!(
+        !said.contains("Named("),
+        "the VM's capability words never reach the plugin: {said}"
+    );
+    assert_eq!(
+        refused.reached.get(),
+        0,
+        "a VM without the capability never reaches the host action"
+    );
+    assert_eq!(
+        refused.recorded.borrow().len(),
+        1,
+        "one diagnostics error for two attempts: {:?}",
+        refused.recorded.borrow()
+    );
+}
+
+#[test]
+fn the_per_call_gate_s_sentence_reaches_the_plugin_as_itself() {
+    // The VM holds the capability, but the engine no longer allows the
+    // permission: the call reaches the host and its per-call gate refuses.
+    let listing = plugin_listing(&["imgui.windows"], Some(&[]));
+    let (mut app, refused) = refused_harness("revoked", listing, &["imgui.windows"]);
+    app.frames(20);
+    assert_eq!(
+        app.error(),
+        None,
+        "the plugin stays loaded: {:?}",
+        app.error()
+    );
+    let said = app.text("said");
+    assert_eq!(
+        said.matches(SENTENCE).count(),
+        2,
+        "the host's per-call sentence is the error: {said}"
+    );
+    assert_eq!(refused.reached.get(), 2, "every attempt reached the gate");
+    assert!(
+        refused.recorded.borrow().is_empty(),
+        "the host answered with the sentence itself, so nothing had to be asked for"
+    );
+}
+
+/// `Bridge::widget_refused` and a dev plugin's log both say each distinct
+/// sentence once: a fixture retrying a refused call reads one error.
+#[test]
+fn a_retried_refusal_is_reported_once() {
+    let heard: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = heard.clone();
+    let report = crate::plugins::imgui::luau::once(move |sentence: &str| {
+        sink.borrow_mut().push(sentence.to_string());
+    });
+    report(SENTENCE);
+    report(SENTENCE);
+    report("another sentence");
+    assert_eq!(
+        *heard.borrow(),
+        vec![SENTENCE.to_string(), "another sentence".to_string()]
     );
 }

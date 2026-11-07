@@ -79,6 +79,20 @@ pub fn open_window(item: Option<&Item>) -> Result<(), String> {
     allowed(item, "open native application windows")
 }
 
+/// What [`open_window`] would refuse with, for a plugin whose VM refused the
+/// call before the host action was reached: the VM's own error names the
+/// capability, and this is the sentence a person needs instead — which
+/// permission, and that it can be asked for in Zeron.
+///
+/// A listing the gate would let through still gets the missing-grant
+/// sentence: its VM refused the call, so it did not hold the capability.
+pub fn open_window_refusal(item: Option<&Item>) -> String {
+    match open_window(item) {
+        Err(sentence) => sentence,
+        Ok(()) => not_allowed("open native application windows"),
+    }
+}
+
 /// What a plugin's own listing says the engine allowed, when it says
 /// (`Item::permissions` is what it asked). Absent in a dev plugin's made-up
 /// listing, which then falls back to its asked permissions alone.

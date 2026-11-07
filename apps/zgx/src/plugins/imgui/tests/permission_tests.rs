@@ -189,6 +189,43 @@ fn every_refusal_names_the_permission_and_where_to_allow_it() {
     );
 }
 
+/// What the SDK asks for when the VM's capability gate refused the call is
+/// the host's own sentence, for every way a plugin can be outside the gate:
+/// naming the permission, and saying it can be asked for in Zeron.
+#[test]
+fn the_sentence_for_a_vm_that_missed_the_grant_names_the_permission() {
+    for item in [
+        listing("on", &[], None),
+        listing("on", &["windows"], None),
+        listing("off", &["imgui.windows"], Some(&["imgui.windows"])),
+        Item::default(),
+    ] {
+        let sentence = permission::open_window_refusal(Some(&item));
+        assert!(sentence.contains("imgui.windows"), "{sentence}");
+        assert!(
+            sentence.contains("Zeron"),
+            "it says where to allow it: {sentence}"
+        );
+        assert!(
+            !sentence.contains("Named("),
+            "never the VM's capability words: {sentence}"
+        );
+    }
+    let absent = permission::open_window_refusal(None);
+    assert!(
+        absent.contains("imgui.windows") && absent.contains("Zeron"),
+        "{absent}"
+    );
+
+    // A listing the gate would allow still gets the missing-grant sentence:
+    // its VM refused the call, so it did not hold the capability.
+    let allowed = listing("on", &["imgui.windows"], Some(&["imgui.windows"]));
+    assert!(
+        permission::open_window_refusal(Some(&allowed)).contains("wasn't allowed"),
+        "the sentence a VM's refusal is translated to"
+    );
+}
+
 #[test]
 fn the_capability_is_the_imgui_one_and_not_zgx_s_windows() {
     use zgx_script::Capability;

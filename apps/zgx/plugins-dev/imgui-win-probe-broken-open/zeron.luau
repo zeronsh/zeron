@@ -1264,10 +1264,44 @@ return function(id: string): any
 	-- refuses records its sentence.
 	local imgui_refusal: { [string]: any }? = nil
 
+	-- The host's own sentence for a plugin its VM's capability gate refused,
+	-- asked for once: `plugin.<id>.imgui_refused` answers it and records the
+	-- refusal in the plugin's diagnostics. Later refusals raise the same
+	-- sentence without asking again, so a plugin that keeps retrying adds one
+	-- error to its diagnostics, not one per attempt.
+	local imgui_denied: string? = nil
+
+	-- Whether `why` is the VM refusing the call because this plugin's VM
+	-- wasn't granted `zeron.imgui.windows`, not an error of the plugin's own.
+	-- zgx's words name the capability (`Named("zeron.imgui.windows")`).
+	local function imgui_vm_refused(why: string): boolean
+		return string.find(why, "zeron.imgui.windows", 1, true) ~= nil
+	end
+
+	-- The person-facing sentence for a refusal the VM made: naming the
+	-- permission and saying where to allow it, rather than zgx's capability
+	-- name. The host keeps that wording; if it can't be asked, the VM's own
+	-- words stand rather than a sentence invented here.
+	local function imgui_host_refusal(fallback: string): string
+		if imgui_denied then
+			return imgui_denied
+		end
+		local ok, answer = pcall(ui.call_sync, `{prefix}.imgui_refused`, ui.null)
+		if ok and type(answer) == "table" and type(answer.error) == "string" then
+			imgui_denied = answer.error
+			return answer.error
+		end
+		return fallback
+	end
+
 	local function imgui_ask(fields: { [string]: any }): any
 		local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, fields)
 		if not ok then
-			error(tostring(answer), 3)
+			local why = tostring(answer)
+			if imgui_vm_refused(why) then
+				why = imgui_host_refusal(why)
+			end
+			error(why, 3)
 		end
 		if type(answer) ~= "table" or answer.ok ~= true then
 			local why = if type(answer) == "table" then answer.error else nil

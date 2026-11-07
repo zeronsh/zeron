@@ -914,9 +914,13 @@ pub fn dev_plugins(host: &ScriptHost, cx: Option<&mut WindowContext>) {
                 Some(calls),
                 {
                     let said = id.clone();
-                    move |sentence| {
+                    // One line per distinct sentence, as the bridge's
+                    // `widget_refused` does for an installed plugin: a
+                    // fixture retrying a refused call reads once, not once
+                    // per attempt.
+                    imgui::luau::once(move |sentence| {
                         eprintln!("zeron-zgx: dev plugin {said}: {sentence}");
-                    }
+                    })
                 },
             );
         }

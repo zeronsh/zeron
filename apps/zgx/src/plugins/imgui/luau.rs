@@ -13,6 +13,12 @@
 //! A refusal never creates a window and never takes the plugin down; that is
 //! the plugin author's fix, not a crash.
 //!
+//! A VM the capability gate turned away never reaches that function, so its
+//! error is zgx's capability name rather than the host's sentence. The SDK
+//! detects that refusal and asks `plugin.<id>.imgui_refused` — exposed
+//! without the capability — for the sentence: it is recorded once for the
+//! plugin's diagnostics and raised in its place.
+//!
 //! The frame pump's widget ops are here too: the pump opens a frame and asks
 //! the plugin for it through `plugin.<id>.calls`; the plugin's SDK draws with
 //! [`Windows`] through `text` and `button`, and closes the frame with
@@ -21,6 +27,7 @@
 //! line.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use zgx_script::{ScriptHost, Shared, Value};
@@ -129,6 +136,40 @@ pub fn serve(
             let _ = action.frame_end(&arg);
         }
     });
+    // What the SDK asks for when the VM's own capability gate refused the
+    // call before this host was reached: the sentence the person needs, in
+    // the host's words, recorded once for diagnostics.
+    //
+    // It is deliberately exposed without the capability — nothing here can
+    // create a window or draw, and a VM the gate turned away could not hear
+    // the host's sentence otherwise. The sentence is the host's own, never
+    // text the plugin chose, so a plugin can neither soften nor fake it.
+    let denied = format!("plugin.{id}.imgui_refused");
+    host.expose_action(denied.clone(), None);
+    host.function(denied, {
+        let (item, refused) = (item.clone(), refusal.clone());
+        move |_| {
+            let sentence = permission::open_window_refusal(item().as_ref());
+            refused(&sentence);
+            Value::record([
+                ("ok", Value::Bool(false)),
+                ("error", Value::from(sentence.as_str())),
+            ])
+        }
+    });
+}
+
+/// A refusal reporter that says each distinct sentence once: a plugin that
+/// retries a refused call adds one error to its diagnostics, not one per
+/// attempt (`Bridge::widget_refused` dedupes the installed path the same
+/// way; this is what a dev plugin's log gets).
+pub fn once(report: impl Fn(&str) + 'static) -> impl Fn(&str) + 'static {
+    let seen: Rc<RefCell<HashSet<String>>> = Rc::default();
+    move |sentence: &str| {
+        if seen.borrow_mut().insert(sentence.to_string()) {
+            report(sentence);
+        }
+    }
 }
 
 impl ImGuiWindows {
@@ -151,7 +192,7 @@ impl ImGuiWindows {
             ));
         }
         if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {
-            return failed(&error);
+            return self.refuse(error);
         }
         let Some(id) = text(arg, "window") else {
             return failed("zeron.imgui needs a window id, like \"inspector\"");
@@ -220,7 +261,7 @@ impl ImGuiWindows {
     /// Nothing exists until both pass.
     fn open_window(&self, arg: &Value) -> Value {
         if let Err(error) = permission::open_window(self.item().as_ref()) {
-            return failed(&error);
+            return self.refuse(error);
         }
         let spec = match WindowSpec::parse(&self.plugin, arg) {
             Ok(spec) => spec,
@@ -239,13 +280,6 @@ impl ImGuiWindows {
     /// Applies one widget call from the plugin's render callback to the open
     /// frame. The refusal reaches the plugin as `ui.text` raising at its
     /// line; nothing is drawn and nothing crashes.
-    /// A widget call the host turned down: reported once, naming the widget,
-    /// and handed back to the plugin to raise at its own line.
-    fn refuse(&self, error: String) -> Value {
-        (self.refused)(&error);
-        failed(&error)
-    }
-
     fn widget(&self, op: &str, arg: &Value) -> Value {
         if let Err(error) = permission::allowed(self.item().as_ref(), "draw in its plugin windows")
         {
@@ -268,12 +302,21 @@ impl ImGuiWindows {
         }
     }
 
+    /// A call the host turned down — a widget drawn outside its frame, or an
+    /// ImGui call the `imgui.windows` gate refused: reported once, in the
+    /// sentence the person needs, and handed back to the plugin to raise at
+    /// its own line. Nothing is created or drawn.
+    fn refuse(&self, error: String) -> Value {
+        (self.refused)(&error);
+        failed(&error)
+    }
+
     /// Ends the frame the render callback was given, painting it or throwing
     /// it away with the reason. The pump reports what comes of it.
     fn frame_end(&self, arg: &Value) -> Value {
         if let Err(error) = permission::allowed(self.item().as_ref(), "draw in its plugin windows")
         {
-            return failed(&error);
+            return self.refuse(error);
         }
         let Some(id) = text(arg, "window") else {
             return failed("zeron.imgui.frame_end needs the window it belongs to");
