@@ -1551,6 +1551,11 @@ M.Sidebar = ui.component(function(props: Props): Node
 		details = shared.details,
 		places = shared.places :: any,
 		width = shared.width,
+		-- (Its edge double-clicked: the chat and the panel split again, as
+		-- Zeron's `reset_panel_widths`.)
+		on_reset = function()
+			view.seam_reset:set(view.seam_reset:peek() + 1)
+		end,
 		collapsed = props.collapsed,
 		limit = props.limit,
 		direct = props.direct,

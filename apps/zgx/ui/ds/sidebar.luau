@@ -178,6 +178,9 @@ export type Props = {
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
+	-- Its edge double-clicked, after its width is back to its default: the
+	-- app re-splits what's beside it.
+	on_reset: (() -> ())?,
 	selected: State<string?>,
 	pinned: Live<{ Session }>?,
 	card: boolean?,
@@ -5048,14 +5051,17 @@ fn layer(input:LayerInput)->vec4<f32> {
 	-- easing there. (Pressed itself, so it keeps the pointer as it's dragged.)
 	-- A card's is the gap beside it, which lights as it does between the panel
 	-- and the page, over the card's height; `gap`: how wide that is. It takes
-	-- the pointer `seam.REACH` each side of the gap's middle.
+	-- the pointer from `seam.REACH` inside the gap's middle to the gap's far
+	-- side: on its own side only, as it lies under the page (raised over it,
+	-- its head would take the presses of the top bar's first tabs, which
+	-- reach over it).
 	local function edge_handle(gap: number, top: number, bottom: number): Node
 		return ui.div {
 			absolute = true,
-			right = ui.raw(-gap / 2 - seam.REACH, "the seam's reach past the gap's middle"),
+			right = ui.raw(-gap, "over the gap beside it"),
 			top = top,
 			bottom = bottom,
-			w = ui.raw(2 * seam.REACH, "the seam's reach either side"),
+			w = ui.raw(seam.REACH + gap / 2, "the seam's reach inside the gap's middle, and the gap"),
 			cursor = "col_resize",
 			label = locale.t("ds.sidebar.resize"),
 			pointer_events = function()
@@ -5067,6 +5073,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 			on_press = function(e)
 				if e.clicks == 2 then
 					wide:set(WIDE)
+					if props.on_reset then
+						props.on_reset()
+					end
 					return
 				end
 				from_x, from_w = e.x, wide:peek()

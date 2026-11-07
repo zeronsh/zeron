@@ -834,6 +834,24 @@ return function(props: Props): Node
 			end
 		end
 	end)
+	-- The sidebar's edge double-clicked (its width put back): the chat and
+	-- this split again, the width chosen forgotten, as Zeron's
+	-- `reset_panel_widths` (a seam's reset restores the whole layout).
+	local resets = shell_view.seam_reset:peek()
+	ui.effect(function()
+		local n = shell_view.seam_reset:get()
+		if n == resets then
+			return
+		end
+		resets = n
+		if not shown:peek() or shell_view.expanded:peek() then
+			return
+		end
+		if chosen:peek() then
+			chosen:set(false)
+		end
+		resplit()
+	end)
 	-- (Before what follows, so a panel arriving with the route lands where this puts it.)
 	-- The width it rests at, open; closing, the last it rested at (its
 	-- content keeps that as its edge clips it).
