@@ -2124,6 +2124,9 @@ return function(id: string): any
 		local ok, why = true, nil
 		local refused = {}
 		imgui_refusal = refused
+		-- The host says what this frame may spend: its first one is excused
+		-- (the atlas and the theme are the host's work, not the plugin's).
+		imgui_budget = tonumber(call.budget) or imgui_budget
 		imgui_frame_live = true
 		local state = if handle then imgui_window_state[handle] else nil
 		if state and state.render and not state.closed then

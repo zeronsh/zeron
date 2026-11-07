@@ -551,10 +551,12 @@ pub fn app_dark() -> bool {
     APP_DARK.with(Cell::get)
 }
 
-/// Drops the palette cache: the theme library changed
-/// (`crate::themes::publish`).
-pub fn invalidate() {
+/// Drops the palette cache and reads it again: the theme library changed
+/// (`crate::themes::publish`). Read here, off any plugin's frame, so the
+/// first `imgui.style()` in a window is a lookup and not a disk read.
+pub fn refresh() {
     PALETTES.with(|palettes| *palettes.borrow_mut() = None);
+    palettes();
 }
 
 /// The two palettes the app can wear, from the worn theme.

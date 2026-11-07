@@ -379,6 +379,15 @@ impl FrameState {
         Self::default()
     }
 
+    /// Whether the frame in flight is excused the callback budget (a
+    /// window's first attempt, or one that uploads a newly built atlas).
+    pub fn exempt(&self) -> bool {
+        self.live
+            .borrow()
+            .as_ref()
+            .is_some_and(|frame| frame.exempt)
+    }
+
     pub fn live_ui(&self) -> Option<*const Ui> {
         self.live
             .borrow()
@@ -1405,6 +1414,7 @@ pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
         }
     };
     let call = format!("imgui-frame-{}-{seq}", window.frame_id());
+    let exempt = window.frame_state().exempt();
     // A panic inside the draw (which includes the script's `on_render` and
     // any host code it reaches) must not kill the pump: the pump is one task
     // for every plugin window, so an escaping panic would freeze them all
@@ -1420,7 +1430,13 @@ pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
                 vec![
                     ("window", Value::from(window.frame_id())),
                     ("seq", Value::from(seq as f64)),
-                    ("budget", Value::from(BUDGET_MS)),
+                    // The plugin's own watch is the same number, except on a
+                    // frame the host already excuses: that one pays for the
+                    // atlas and the first look at the theme.
+                    (
+                        "budget",
+                        Value::from(if exempt { BUDGET_MS * 30.0 } else { BUDGET_MS }),
+                    ),
                 ],
             );
             if let Some(error) = window.frame_close_regions(ui) {
