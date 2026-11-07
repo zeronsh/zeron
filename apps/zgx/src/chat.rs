@@ -109,6 +109,10 @@ struct Chats {
     /// Which look at `remote` is the latest (`reload_remote`): an older one's
     /// answers, for this device or another, change nothing.
     remote_turn: Cell<u64>,
+    /// The look at `remote` settled before all its answers came
+    /// (`settle_remote`): its catalog stands complete with what it has, and
+    /// answers still to come fill it in without its going back to looking.
+    remote_settled: Cell<u64>,
     /// The chat a view has just let go of, kept a moment: a chat on its own
     /// that becomes a split is opened again at once, in its pane, and has
     /// what it had rather than reading and building it all again.
@@ -379,6 +383,11 @@ const RETRY_AFTER: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(8),
     std::time::Duration::from_secs(15),
 ];
+/// How long a look at another device's catalog may go unanswered before it
+/// settles with what it has (`settle_remote`): an offline device's list
+/// never comes, and the model picker shouldn't wait on it forever.
+const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// How many times an agent's models are asked again on another device
 /// before it's left out (one signed out fails every time).
 const MODEL_RETRIES: usize = 2;
@@ -1060,7 +1069,40 @@ impl Chats {
         let turn = self.remote_turn.get() + 1;
         self.remote_turn.set(turn);
         let me = self.clone();
-        engine::get().spawn(async move { me.load_remote(device, turn).await });
+        let look = device.clone();
+        engine::get().spawn(async move { me.load_remote(look, turn).await });
+        // Unanswered by then (the device offline, or slow), it settles.
+        let me = self.clone();
+        engine::get().spawn(async move {
+            zgx::timer::sleep(SETTLE_AFTER).await;
+            me.settle_remote(&device, turn);
+        });
+    }
+
+    /// The look `turn` at `device`'s catalog settles with what it has: the
+    /// catalog kept from its last whole look, or nothing listed, never this
+    /// device's in its place. It stands complete (the picker names what it
+    /// knows, and stops waiting), and its answers still to come fill it in.
+    fn settle_remote(&self, device: &str, turn: u64) {
+        if !self.on_remote(device, turn) {
+            return;
+        }
+        self.remote_settled.set(turn);
+        let changed = match self.remote.borrow_mut().as_mut() {
+            Some(r) if !r.ready => {
+                r.ready = true;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.publish_catalog();
+        }
+    }
+
+    /// Whether the look `turn` has settled (`settle_remote`).
+    fn settled(&self, turn: u64) -> bool {
+        self.remote_settled.get() == turn
     }
 
     /// Whether the look `turn` is still the composer's, on `device`.
@@ -1082,9 +1124,11 @@ impl Chats {
             match list {
                 Ok(list) => break list,
                 Err(error) => {
-                    // (Unreachable for now: its catalog stays looking, never
-                    // this device's in its place, and it's asked again.)
+                    // (Unreachable for now: its catalog settles with what it
+                    // has, never this device's in its place, and it's asked
+                    // again.)
                     eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
+                    self.settle_remote(&device, turn);
                     zgx::timer::sleep(RETRY_AFTER[tries.min(RETRY_AFTER.len() - 1)]).await;
                     tries += 1;
                     if !self.on_remote(&device, turn) {
@@ -1108,7 +1152,7 @@ impl Chats {
         if let Some(r) = self.remote.borrow_mut().as_mut() {
             crate::agents::remember_icons(&harnesses);
             r.harnesses = harnesses;
-            r.ready = ids.is_empty();
+            r.ready = ids.is_empty() || self.settled(turn);
         }
         self.publish_catalog();
         let left = Rc::new(Cell::new(ids.len()));
@@ -1151,8 +1195,9 @@ impl Chats {
                         // (What it had before, if anything, stays.)
                         None => whole.set(false),
                     }
-                    r.ready = left.get() == 0;
-                    if r.ready {
+                    let all = left.get() == 0;
+                    r.ready = all || me.settled(turn);
+                    if all {
                         // Kept short, it isn't ready: moving to it shows it
                         // while it's looked at again.
                         let mut kept = r.clone();
@@ -5124,6 +5169,36 @@ mod tests {
         assert!(!chats.on_remote("linux", 2), "another device's");
         chats.remote.borrow_mut().take();
         assert!(!chats.on_remote("laptop", 2), "back here");
+    }
+
+    /// A look at another device's catalog that goes unanswered (the device
+    /// offline) settles: complete with what it has, nothing listed here, never
+    /// this device's in its place, so the picker stops waiting on it. Only
+    /// the latest look settles, and once settled it stays complete.
+    #[test]
+    fn an_unanswered_look_at_a_devices_catalog_settles_with_what_it_has() {
+        let chats = Chats::default();
+        *chats.here.borrow_mut() = Some("mac".into());
+        *chats.harnesses.borrow_mut() = vec![json!({ "id": "codex", "name": "Codex" })];
+        chats.models.borrow_mut().insert("codex".into(), vec![json!({ "id": "gpt", "label": "GPT" })]);
+        *chats.remote.borrow_mut() = Some(Remote {
+            device: "box".into(),
+            harnesses: Vec::new(),
+            models: HashMap::new(),
+            ready: false,
+        });
+        chats.remote_turn.set(2);
+        let complete = |chats: &Chats| matches!(chats.catalog_value().field("complete"), Some(Value::Bool(true)));
+        assert!(!complete(&chats), "looking");
+        chats.settle_remote("box", 1);
+        assert!(!complete(&chats), "an earlier look settles nothing");
+        chats.settle_remote("box", 2);
+        assert!(complete(&chats), "settled");
+        let settled = chats.catalog_value();
+        assert!(matches!(settled.field("device"), Some(Value::Str(s)) if s.as_ref() == "box"));
+        let Some(Value::List(harnesses)) = settled.field("harnesses") else { panic!("harnesses") };
+        assert!(harnesses.is_empty(), "nothing listed: never this device's in its place");
+        assert!(chats.settled(2) && !chats.settled(3));
     }
 
     /// One looked at ahead of time without all its agents' models is kept as
