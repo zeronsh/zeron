@@ -497,6 +497,19 @@ pub mod methods {
     /// with a reason unless the plugin is installed, on and allowed here,
     /// in the same version, by the same author. A peer may call it.
     pub const SERVE_PLUGIN_CALL: &str = "ServePluginCall";
+    /// The app (a plugin's window): `{plugin, op, args?, device?}` →
+    /// `{ok: true, value}` | `{ok: false, reason, message}`. The agents'
+    /// usage, accounts and models as that plugin was allowed them on this
+    /// device, or on `device` (sent there as [`SERVE_PLUGIN_AGENTS`]).
+    /// `op: "listen"` with `listeners: [{key, event, opts}]` says what its
+    /// windows here listen for (`zeron.on`).
+    pub const PLUGIN_AGENTS: &str = "PluginAgents";
+    /// Peer to peer over the device link: `{plugin, version, authorKey?,
+    /// op, args?}` → as `PluginAgents`. Refused unless the caller is a
+    /// device the link verified and the plugin is installed and on here,
+    /// in the same version, by the same author; then what this device
+    /// allowed it decides. A peer may call it.
+    pub const SERVE_PLUGIN_AGENTS: &str = "ServePluginAgents";
     /// `{}` → stream (the app) of `{plugin, from: {id, name}, data, at}`.
     pub const WATCH_PLUGIN_CHANNEL: &str = "WatchPluginChannel";
     /// `{}` → `{key, registered}`.
@@ -640,6 +653,7 @@ pub fn local_only(method: &str) -> bool {
             | methods::PLUGIN_TOOL_RESULT
             | methods::PLUGIN_SEND
             | methods::CALL_PLUGIN_SERVICE
+            | methods::PLUGIN_AGENTS
             | methods::WATCH_PLUGIN_CHANNEL
             | methods::PLUGIN_SIGNING_KEY
             | methods::LIST_TEMPLATES
@@ -979,6 +993,10 @@ mod tests {
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));
         assert!(!local_only(methods::SERVE_PLUGIN_CALL));
+        assert!(local_only(methods::PLUGIN_AGENTS));
+        assert!(!local_only(methods::SERVE_PLUGIN_AGENTS));
+        // Never an agent's: a plugin's grants are its own.
+        assert!(!agent_allowed(methods::PLUGIN_AGENTS) && !agent_allowed(methods::SERVE_PLUGIN_AGENTS));
         // Your other devices manage this one's plugins (Settings → Plugins).
         for method in [
             methods::LIST_PLUGINS,

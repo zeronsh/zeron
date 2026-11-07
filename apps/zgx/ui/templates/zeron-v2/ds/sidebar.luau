@@ -163,6 +163,8 @@ export type Props = {
 	-- Whether a change of width now should follow at once, not ease (the
 	-- window being resized).
 	direct: (() -> boolean)?,
+	-- The sessions haven't been heard yet: none isn't "none" until they have.
+	loading: (() -> boolean)?,
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
@@ -1027,13 +1029,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 	end
 	-- A session's agent: its mark, faint unless the session asks to be seen.
-	local function agent(s: Session, strong: () -> boolean): Node
-		return SessionRow.mark(now_of(s), strong)
+	-- (`cur`: its row's own `now_of`, where the row has one: one computed a
+	-- row, not one for each of its parts, each woken by any session's change.)
+	local function agent(s: Session, strong: () -> boolean, cur: (() -> Session)?): Node
+		return SessionRow.mark(cur or now_of(s), strong)
 	end
 	-- A session's slot: its agent; collapsed, its state (if it has one, its
 	-- corner unseen).
-	local function session_glyph(s: Session, strong: () -> boolean): Node
-		local cur = now_of(s)
+	local function session_glyph(s: Session, strong: () -> boolean, row: (() -> Session)?): Node
+		local cur = row or now_of(s)
 		-- (On the rail, its state's glyph, one of its kind.)
 		return ui.div {
 			-- (Its glyph follows its state in place: ds/status.)
@@ -1050,7 +1054,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			),
 			ui.show(function(): boolean
 				return not railed() or cur().status == nil
-			end, agent(s, strong)),
+			end, agent(s, strong, cur)),
 		}
 	end
 	-- A session's corner: its state (a glyph of its kind), else its time.
@@ -1342,7 +1346,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			wide = in_flyout,
 			hovered = hovered,
-			lead = if in_flyout then agent(s, strong) else session_glyph(s, strong),
+			lead = if in_flyout then agent(s, strong, cur) else session_glyph(s, strong, cur),
 			words = ui.column {
 				w_full = true,
 				gap = "$zeron.space.hair",
@@ -1455,7 +1459,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						color = "$text.secondary",
 						agent(s, function(): boolean
 							return true
-						end),
+						end, cur),
 					},
 					line(label(cur().title)),
 				}
@@ -4973,7 +4977,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 		ui.show(function(): boolean
 			local ix = index:get()
 			local grouped = SessionRow.levels(organize:get())[1] == "project" and #ix.projects > 0
-			return not is_island and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
+			local loading = props.loading ~= nil and props.loading()
+			return not is_island and not loading and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
 		end, ui.text {
 			locale.t("ds.sidebar.empty"),
 			id = "sidebar-empty",

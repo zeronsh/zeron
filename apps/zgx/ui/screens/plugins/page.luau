@@ -64,7 +64,7 @@ end
 
 local function shown_device(): sessions.Device?
 	local id = device()
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if (id and d.id == id) or (not id and d.here) then
 			return d
 		end

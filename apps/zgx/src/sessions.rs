@@ -71,7 +71,7 @@ use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
 
 use crate::auth::text;
-use crate::engine::{self, rpc::Watch};
+use crate::engine::{self, lists, rpc::Watch};
 
 /// A live state older than this belongs to an engine that has gone (the
 /// shipping app's `SESSION_STALE_MS`).
@@ -125,6 +125,8 @@ struct Sessions {
     queue: RefCell<VecDeque<Json>>,
     sending: Cell<bool>,
     watches: RefCell<Vec<Watch>>,
+    /// The engine's chat, device and live session lists, heard as changes.
+    listening: RefCell<Vec<lists::Listening>>,
     /// When states are looked at again: as the soonest one showing goes
     /// stale, so it stops showing. None while nothing would change.
     due: Cell<Option<i64>>,
@@ -237,12 +239,19 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let weak = Rc::downgrade(&s);
         engine::get().on_connect(move |rpc| {
             let Some(s) = weak.upgrade() else { return };
+            let mut listening = Vec::new();
+            for (method, slot) in [("WatchChats", Slot::Chats), ("WatchDevices", Slot::Devices), ("WatchSessions", Slot::Live)] {
+                let heard = Rc::downgrade(&s);
+                listening.push(lists::listen(rpc, method, move |frame| {
+                    if let Some(s) = heard.upgrade() {
+                        s.heard_list(slot, frame);
+                    }
+                }));
+            }
+            *s.listening.borrow_mut() = listening;
             let mut watches = Vec::new();
             for (method, slot) in [
-                ("WatchChats", Slot::Chats),
                 ("WatchSpaces", Slot::Spaces),
-                ("WatchDevices", Slot::Devices),
-                ("WatchSessions", Slot::Live),
                 ("WatchSidebarPreferences", Slot::Places),
                 ("WatchConnectivity", Slot::Connectivity),
             ] {
@@ -413,6 +422,35 @@ enum Slot {
 }
 
 impl Sessions {
+    /// A frame of the chat, device or live session list: as `heard`, with
+    /// only the rows it says changed looked at again (the engine sent the
+    /// whole list for one row's change, and each was gone over in full).
+    fn heard_list(&self, slot: Slot, frame: &lists::Frame) {
+        let Some(touched) = frame.touched() else {
+            return self.heard(slot, frame.list.clone());
+        };
+        match slot {
+            Slot::Chats => {
+                let mut rows = self.rows.borrow_mut();
+                for id in touched {
+                    rows.remove(id);
+                }
+                drop(rows);
+                frame.apply_to_list(&mut self.chats.borrow_mut());
+            }
+            Slot::Devices | Slot::Live => {
+                let list = if matches!(slot, Slot::Devices) { &self.devices } else { &self.live };
+                frame.apply_to_list(&mut list.borrow_mut());
+                if self.shows_the_same() {
+                    self.look_again();
+                    return;
+                }
+            }
+            Slot::Spaces | Slot::Places | Slot::Connectivity => return self.heard(slot, frame.list.clone()),
+        }
+        self.publish();
+    }
+
     fn heard(&self, slot: Slot, item: Json) {
         match slot {
             Slot::Chats => {

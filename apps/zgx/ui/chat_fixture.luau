@@ -156,6 +156,29 @@ end
 -- runs again on one; the host's transcript doesn't start over).
 local kept_open = ui.state("fixture_opened", nil :: string?)
 local opened: string? = kept_open:peek()
+-- `tail_first`: a chat opens as the engine opens one it no longer holds
+-- (`openingTail`): its newest rows first, its whole history (`history`)
+-- a moment later, the session ready from the first.
+local TAIL_FIRST = ui.state("fixture_tail_first", 0)
+ui.command {
+	id = "tail_first",
+	title = "Chats open with their newest rows first",
+	run = function()
+		TAIL_FIRST:set(16)
+	end,
+}
+local pending_history: { any }? = nil
+ui.command {
+	id = "history",
+	title = "The open chat's whole history arrives",
+	run = function()
+		local whole = pending_history
+		pending_history = nil
+		if whole then
+			store.messages:set(whole)
+		end
+	end,
+}
 stub.open = function(id: string?)
 	-- (As the host: the chat open already, nothing changes.)
 	if id == opened then
@@ -167,7 +190,15 @@ stub.open = function(id: string?)
 	if not id then
 		return
 	end
-	store.messages:set(TRANSCRIPTS[id] or {})
+	local whole = TRANSCRIPTS[id] or {}
+	local tail = TAIL_FIRST:peek()
+	if tail > 0 and #whole > tail then
+		pending_history = whole
+		store.messages:set(table.move(whole, #whole - tail + 1, #whole, 1, {}))
+	else
+		pending_history = nil
+		store.messages:set(whole)
+	end
 	store.draft:set { id = "", text = "" }
 	publish(id)
 end
@@ -179,8 +210,25 @@ local function settled(value: any): any
 		end,
 	}
 end
+-- `send_fails`: the next message doesn't go (an engine that refuses it).
+local SEND_FAILS = ui.state("fixture_send_fails", false)
+ui.command {
+	id = "send_fails",
+	title = "The next send doesn't go",
+	run = function()
+		SEND_FAILS:set(true)
+	end,
+}
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	if SEND_FAILS:peek() then
+		SEND_FAILS:set(false)
+		return {
+			after = function(_self: any, _ok: any, err: (any) -> ())
+				err({ message = "failed" })
+			end,
+		}
+	end
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end
@@ -325,6 +373,19 @@ stub.queue = function(id: string, op: any, failed: (() -> ())?)
 		end
 	end
 end
+-- The engine's copy of a steered message landing (a moment after the
+-- steer): the queued row's id is its prompt's in the transcript, and it
+-- leaves the queue.
+ui.command {
+	id = "steer_lands",
+	title = "The steered message joins the transcript",
+	run = function()
+		store.messages:push { id = "q1", role = "user", text = "Queued words", attachments = {} }
+		if opened then
+			publish(opened, { queue = {} })
+		end
+	end,
+}
 ui.command {
 	id = "steer_fails",
 	title = "The next steer doesn't go",
@@ -1029,6 +1090,41 @@ ui.command {
 		}
 	end,
 }
+-- A long chat: many long messages, landing at once (a chat of a day's
+-- work), for what the transcript asks of each as it's listed and scrolled.
+ui.command {
+	id = "many_long_messages",
+	title = "Many long messages",
+	run = function()
+		local words = string.rep("A line of a long message, about what was done and why. ", 120)
+		for i = 1, 400 do
+			local mine = i % 2 == 1
+			store.messages:push {
+				id = `many{i}`,
+				role = if mine then "user" else "assistant",
+				text = `Message {i}: {words}`,
+				model = if mine then nil else "Opus",
+				blocks = if mine then nil else { { id = "t", kind = "text", text = `Message {i}: {words}` } },
+			}
+		end
+	end,
+}
+-- The long reply goes on: a part more at its end, as a reply streaming
+-- grows (its earlier runs stay as they are).
+ui.command {
+	id = "long_reply_grows",
+	title = "The long reply grows",
+	run = function()
+		local n = store.messages:len()
+		local m = store.messages:peek()[n]
+		if not m or m.id ~= "long1" then
+			return
+		end
+		local text = m.text .. "\n\nAnd one part more, at its end."
+		store.messages:set_key({ n, "text" }, text)
+		store.messages:set_key({ n, "blocks" }, { { id = "t", kind = "text", text = text } })
+	end,
+}
 -- The shell's ⌘/: the composer's model picker opened.
 ui.command {
 	id = "open_model_picker",
@@ -1320,6 +1416,14 @@ for _, id in { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9" } do
 		end,
 	}
 end
+-- A new chat with no project asked of it (⌘N, the sidebar's New chat).
+ui.command {
+	id = "go_new",
+	title = "New chat",
+	run = function()
+		route.new_chat()
+	end,
+}
 ui.command {
 	id = "go_home",
 	title = "A new chat",
@@ -1361,6 +1465,63 @@ ui.command {
 	title = "No agents",
 	run = function()
 		store.catalog:set { state = "ready", harnesses = {}, models = {} }
+	end,
+}
+-- The box's catalog come, as the host sends it (`device`: whose).
+ui.command {
+	id = "catalog_of_box",
+	title = "The box's catalog comes",
+	run = function()
+		local c = table.clone(store.catalog:peek()) :: any
+		c.device = "box"
+		store.catalog:set(c)
+	end,
+}
+-- The open session names no model (made without one: its agent runs its
+-- own), the host naming that one.
+ui.command {
+	id = "session_names_no_model",
+	title = "The open session names no model",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			local next = table.clone(META[s.id] or {}) :: any
+			next.id = s.id
+			next.state = "ready"
+			next.harness = "claude-code"
+			next.model = nil
+			next.effort = nil
+			next.model_label = "Its own model"
+			META[s.id] = next
+			store.session:set(next)
+		end
+	end,
+}
+-- Every agent here has said, and none offers Opus.
+ui.command {
+	id = "catalog_complete_without_opus",
+	title = "The catalog is complete, without Opus",
+	run = function()
+		local c = store.catalog:peek()
+		local models: { any } = {}
+		for _, m in c.models do
+			if m.value ~= "opus" then
+				table.insert(models, m)
+			end
+		end
+		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)
+	end,
+}
+-- The open session runs a model no catalog shown lists (Pi's, on a device
+-- not looked at yet), named by the host.
+ui.command {
+	id = "session_model_elsewhere",
+	title = "The open session runs a model the catalog doesn't list",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { model = "pi/kimi-k3", model_label = "Kimi K3" })
+		end
 	end,
 }
 

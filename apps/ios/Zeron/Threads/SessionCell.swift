@@ -8,6 +8,9 @@ struct SessionRowVM: Hashable {
         case working
         case awaiting
         case errored
+        /// Activity's: woken from sleep and not looked at since. Set only
+        /// while Activity is on (`ActivityList.decorate`).
+        case woke
     }
 
     enum PR: Hashable {
@@ -29,6 +32,17 @@ struct SessionRowVM: Hashable {
     var unseen: Bool
     var pinned: Bool
     var sendFailed: Bool
+    /// Waiting on background work that will wake its agent (drawn as
+    /// Working: `status` reads `.working`).
+    var waiting = false
+    /// …on a process its agent said it waits on: Stop Waiting is offered.
+    var canStopWaiting = false
+    /// Asleep until then (Activity's Asleep).
+    var sleepUntil: Date?
+    /// Woke from sleep then, and not seen since.
+    var wokeAt: Date?
+    /// Its last move (the recency sort key).
+    var lastActivity = Date(timeIntervalSince1970: 0)
 }
 
 /// Folder row ("Pinned 2 ›", "P0 3 ›").
@@ -99,6 +113,7 @@ final class SessionCell: UICollectionViewListCell {
         case .awaiting: return ("Input", StatusTone.input, .dot(StatusTone.input))
         case .errored: return ("Failed", StatusTone.failed, .dot(StatusTone.failed))
         case .completed: return vm.unseen ? ("Done", StatusTone.done, .check(StatusTone.done)) : nil
+        case .woke: return ("Woke", StatusTone.input, .symbol("alarm", StatusTone.input))
         case .idle: return nil
         }
     }

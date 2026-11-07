@@ -401,6 +401,11 @@ struct Inner {
 pub struct Rpc(Rc<Inner>);
 
 impl Rpc {
+    /// Whether `other` is this very connection.
+    pub fn same(&self, other: &Rpc) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
     fn send(&self, method: &str, params: Value) -> u64 {
         let id = self.0.next_id.get();
         self.0.next_id.set(id + 1);

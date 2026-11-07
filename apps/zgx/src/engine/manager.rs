@@ -242,15 +242,23 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 pub struct Spawner {
     last: Option<Instant>,
     said_missing: bool,
+    said_held: bool,
 }
 
 impl Spawner {
     pub fn new() -> Self {
-        Self { last: None, said_missing: false }
+        Self { last: None, said_missing: false, said_held: false }
+    }
+
+    /// Whether the last look found another engine holding the data dir.
+    pub fn held(&self) -> bool {
+        self.said_held
     }
 
     /// Nothing answers on the port: start an engine, if this app may and
-    /// it's been long enough since the last. Whether one was started.
+    /// it's been long enough since the last. Whether one was started. An
+    /// engine that holds the data dir without serving yet is on its way in or
+    /// out: none is started beside it, and one follows once it has let go.
     pub fn start_if_due(&mut self, config: &Config) -> bool {
         if !config.spawn || self.last.is_some_and(|at| at.elapsed() < SPAWN_SPACING) {
             return false;
@@ -271,6 +279,14 @@ impl Spawner {
             }
             return false;
         };
+        if zeron_launch::data_dir_held(&config.data_dir) {
+            if !self.said_held {
+                self.said_held = true;
+                eprintln!("zeron-zgx: engine: another holds {} and isn't serving; waiting for it", config.data_dir.display());
+            }
+            return false;
+        }
+        self.said_held = false;
         self.last = Some(Instant::now());
         let started = if config.managed { launch(config) } else { spawn(config, bin) };
         match started {
@@ -436,6 +452,37 @@ mod tests {
         assert!(config_of(&[("ZERON_DATA_DIR", "/Users/someone/.zeron-staging")], home, Some(&exe), &prod.edge).is_err());
         assert!(config_of(&[], home, Some(&exe), "https://staging.zeron.sh").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An engine holding the data dir is on its way in or out: no second one
+    /// is started beside it (it would only queue for the lock), and one is
+    /// started as soon as it lets go.
+    #[cfg(unix)]
+    #[test]
+    fn no_engine_starts_while_one_holds_the_data_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("engine");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = Config {
+            port: 1,
+            data_dir: dir.path().join("data"),
+            bin: Some(bin),
+            home: None,
+            spawn: true,
+            edge: String::new(),
+            client: String::new(),
+            callback_port: 0,
+            managed: false,
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let lock = std::fs::File::create(config.data_dir.join("engine.lock")).unwrap();
+        lock.try_lock().unwrap();
+        let mut spawner = Spawner::new();
+        assert!(!spawner.start_if_due(&config), "held: nothing started");
+        lock.unlock().unwrap();
+        assert!(spawner.start_if_due(&config), "let go: started at once");
     }
 
     #[test]

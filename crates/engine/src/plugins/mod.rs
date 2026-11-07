@@ -14,6 +14,7 @@
 //! [`snapshot`], [`broker`], [`scaffold`]; [`templates`] stores whole-app
 //! templates for agents. This file does the IO around them.
 
+pub mod agents;
 pub mod broker;
 pub mod capability;
 pub mod files;
@@ -125,6 +126,8 @@ pub fn handles(method: &str) -> bool {
             | methods::PLUGIN_DELIVER
             | methods::CALL_PLUGIN_SERVICE
             | methods::SERVE_PLUGIN_CALL
+            | methods::PLUGIN_AGENTS
+            | methods::SERVE_PLUGIN_AGENTS
             | methods::WATCH_PLUGIN_CHANNEL
             | methods::PLUGIN_SIGNING_KEY
             | methods::CHECK_PLUGIN_KEY
@@ -220,6 +223,9 @@ struct Inner {
     builtin_watch: Mutex<Option<crate::fs_watch::FsWatch>>,
     /// Plugins' services (plugins/service).
     services: Services,
+    /// The agents' usage, accounts and models, as plugins reach them
+    /// (plugins/agents), and their events.
+    agents: agents::Agents,
     /// Devices whose windows watch this device's service events, by plugin:
     /// each until it renews.
     watchers: Mutex<HashMap<String, HashMap<String, Instant>>>,
@@ -495,6 +501,7 @@ impl Plugins {
                 builtin_dir: Mutex::new(None),
                 builtin_watch: Mutex::new(None),
                 services: Services::new(&storage, config),
+                agents: agents::Agents::default(),
                 watchers: Mutex::new(HashMap::new()),
                 watching: Mutex::new(HashSet::new()),
                 notifier: Mutex::new(None),
@@ -506,6 +513,9 @@ impl Plugins {
             }),
         };
         plugins.inner.services.set_hooks(Arc::new(ServiceHooks {
+            inner: Arc::downgrade(&plugins.inner),
+        }));
+        plugins.inner.agents.set_sink(Arc::new(AgentSink {
             inner: Arc::downgrade(&plugins.inner),
         }));
         plugins.publish_tools();
@@ -524,6 +534,23 @@ impl Plugins {
     /// `zeron.folders()` (the engine's workspace; a test's own).
     pub fn set_folders(&self, folders: impl Fn() -> Vec<String> + Send + Sync + 'static) {
         *lock(&self.inner.folders) = Some(Arc::new(folders));
+    }
+
+    /// Plugins' agent ops and events (the engine sets their host and feeds).
+    pub fn agents(&self) -> &agents::Agents {
+        &self.inner.agents
+    }
+
+    /// Follow what the engine learns of accounts, sessions and chats, for
+    /// plugins' events, while the plugins service runs.
+    pub fn follow_agents(
+        &self,
+        accounts: watch::Receiver<Option<zeron_proto::AgentAccountsSnapshot>>,
+        sessions: watch::Receiver<Vec<zeron_proto::Session>>,
+        chats: watch::Receiver<Vec<zeron_proto::Chat>>,
+    ) {
+        let tasks = agents::follow(&self.inner.agents, accounts, sessions, chats);
+        lock(&self.inner.tasks).extend(tasks);
     }
 
     pub fn plugins_dir(&self) -> &Path {
@@ -1925,6 +1952,15 @@ impl Plugins {
                 p.from = self.trusted_from(p.from, &mut p.unverified_from);
                 RpcReply::value(&self.serve_call(p).await)
             }
+            methods::PLUGIN_AGENTS => {
+                let p: AgentsParams = parse_params(params)?;
+                RpcReply::value(&self.plugin_agents(p).await)
+            }
+            methods::SERVE_PLUGIN_AGENTS => {
+                let mut p: ServeAgentsParams = parse_params(params)?;
+                p.from = self.trusted_from(p.from, &mut p.unverified_from);
+                RpcReply::value(&self.serve_agents(p).await)
+            }
             methods::WATCH_PLUGIN_CHANNEL => {
                 Ok(RpcReply::Stream(self.inner.channel.subscribe(|| {})))
             }
@@ -2151,6 +2187,12 @@ impl Plugins {
                 if entry.item.service.is_some() {
                     let status = self.inner.services.status(&entry.item.id);
                     out["service"] = if status.is_null() { serde_json::json!({ "running": false }) } else { status };
+                }
+                // What it did to your agents' accounts and models here, and
+                // what its row says (a listener failing, a loop stopped).
+                let agents = self.inner.agents.status(&entry.item.id);
+                if !agents.is_null() {
+                    out["agents"] = agents;
                 }
                 // The window's account: where the plugin's nodes are, and
                 // what its row says (the app answers this call itself).
@@ -2573,6 +2615,23 @@ impl service::Hooks for ServiceHooks {
         folders.map(|f| f()).unwrap_or_default()
     }
 
+    fn agents(&self, plugin: &str, args: serde_json::Value, done: service::vm::Done) {
+        let (Some(inner), Ok(runtime)) = (self.inner.upgrade(), tokio::runtime::Handle::try_current()) else {
+            return done(Err("Zeron is stopping".into()));
+        };
+        let (agents, plugin) = (inner.agents.clone(), plugin.to_owned());
+        drop(inner);
+        runtime.spawn(async move {
+            done(agents.call(&plugin, args).await.map_err(|refused| refused.text()));
+        });
+    }
+
+    fn listeners(&self, plugin: &str, listeners: &[(String, String, serde_json::Value)]) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.agents.listen(plugin, agents::Target::Service, listeners);
+        }
+    }
+
     /// R11: the snapshot a service loads from is the version allowed, or it
     /// isn't loaded: it's removed, and a rescan makes it again from the
     /// plugin's (checked) folder.
@@ -2589,7 +2648,217 @@ impl service::Hooks for ServiceHooks {
     }
 }
 
+/// Where plugins' agent events go, and what each plugin was allowed here.
+struct AgentSink {
+    inner: Weak<Inner>,
+}
+
+impl agents::Sink for AgentSink {
+    fn grants(&self, plugin: &str) -> Option<agents::Grant> {
+        let entry = Plugins { inner: self.inner.upgrade()? }.entry(plugin)?;
+        (entry.item.status == Status::On).then(|| agents::Grant {
+            name: entry.item.name.clone(),
+            allowed: entry.item.allowed.clone(),
+        })
+    }
+
+    fn to_window(&self, plugin: &str, listener: &str, event: &str, data: serde_json::Value) {
+        let Some(inner) = self.inner.upgrade() else { return };
+        let plugins = Plugins { inner };
+        // As a service's event to this device's windows, named `zeron:…`
+        // (no service's event can be: `zeron.emit` names are its own).
+        plugins.inner.channel.push(serde_json::json!({
+            "plugin": plugin,
+            "from": plugins.here(),
+            "event": format!("zeron:{event}"),
+            "here": true,
+            "data": { "listener": listener, "data": data },
+            "at": crate::now_ms(),
+        }));
+    }
+
+    fn to_service(
+        &self,
+        plugin: &str,
+        listener: &str,
+        event: &str,
+        data: serde_json::Value,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let plan = self
+            .inner
+            .upgrade()
+            .and_then(|inner| Some((inner.services.clone(), service_plan(&Plugins { inner }.entry(plugin)?)?)));
+        let (listener, event) = (listener.to_owned(), event.to_owned());
+        Box::pin(async move {
+            let Some((services, plan)) = plan else {
+                return Err("its service isn't running here".into());
+            };
+            let call = serde_json::json!({ "kind": "event", "event": event });
+            services
+                .call(&plan, service::Kind::Event, &listener, data, call, AGENT_EVENT_TIMEOUT)
+                .await
+                .map(|_| ())
+                .map_err(|refusal| refusal.message)
+        })
+    }
+}
+
+/// How long a service's listener may take over one event.
+const AGENT_EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `PluginAgents`' params (the app's window).
+#[derive(Deserialize)]
+struct AgentsParams {
+    plugin: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    args: serde_json::Value,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    listeners: Vec<ListenerParam>,
+}
+
+#[derive(Deserialize)]
+struct ListenerParam {
+    key: String,
+    event: String,
+    #[serde(default)]
+    opts: serde_json::Value,
+}
+
+/// `ServePluginAgents`' params (another device of yours).
+#[derive(Deserialize, serde::Serialize)]
+struct ServeAgentsParams {
+    plugin: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default, rename = "authorKey", alias = "author_key")]
+    author_key: Option<String>,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    args: serde_json::Value,
+    #[serde(skip)]
+    unverified_from: bool,
+}
+
+fn agents_reply(result: Result<serde_json::Value, agents::Refused>) -> serde_json::Value {
+    match result {
+        Ok(value) => serde_json::json!({ "ok": true, "value": value }),
+        Err(refused) => serde_json::json!({ "ok": false, "reason": refused.reason, "message": refused.message }),
+    }
+}
+
 impl Plugins {
+    /// `PluginAgents`: a window's op, here or on the device it names.
+    async fn plugin_agents(&self, p: AgentsParams) -> serde_json::Value {
+        self.ensure_scanned().await;
+        let here = self.device_name(&self.inner.device_id);
+        let Some(entry) = self.entry(&p.plugin) else {
+            return Refusal::new(reason::NOT_INSTALLED, format!("There's no plugin {} on {here}", p.plugin)).to_json();
+        };
+        if p.op == "listen" {
+            let listeners: Vec<(String, String, serde_json::Value)> =
+                p.listeners.into_iter().map(|l| (l.key, l.event, l.opts)).collect();
+            self.inner.agents.listen(&p.plugin, agents::Target::Window, &listeners);
+            return serde_json::json!({ "ok": true, "value": null });
+        }
+        let mut args = if p.args.is_object() { p.args } else { serde_json::json!({}) };
+        args["op"] = serde_json::json!(p.op);
+        let target = p.device.map(|d| d.trim().to_owned()).filter(|d| !d.is_empty() && *d != self.inner.device_id);
+        let Some(target) = target else {
+            return agents_reply(self.inner.agents.call(&p.plugin, args).await);
+        };
+        let call = ServeAgentsParams {
+            plugin: p.plugin,
+            version: entry.item.version.clone(),
+            author_key: author_identity(&entry),
+            from: self.inner.device_id.clone(),
+            op: p.op,
+            args,
+            unverified_from: false,
+        };
+        let name = self.device_name(&target);
+        let Some(links) = lock(&self.inner.links).clone() else {
+            return Refusal::new(reason::OFFLINE, format!("{name} can't be reached: this device isn't connected")).to_json();
+        };
+        let params = serde_json::to_value(&call).unwrap_or_default();
+        let reply = tokio::time::timeout(service::DEFAULT_TIMEOUT + LINK_SLACK, async {
+            links.client(&target).await?.call(methods::SERVE_PLUGIN_AGENTS, params).await
+        })
+        .await;
+        match reply {
+            Ok(Ok(value)) => value,
+            Ok(Err(RpcError::UnknownMethod(_))) => Refusal::new(
+                reason::OLD_ENGINE,
+                format!("{name} runs a Zeron from before plugins could read usage: update Zeron there"),
+            )
+            .to_json(),
+            Ok(Err(error)) => {
+                if matches!(error, RpcError::Closed | RpcError::Transport(_)) {
+                    links.invalidate(&target);
+                }
+                Refusal::new(reason::OFFLINE, format!("{name} can't be reached right now ({error})")).to_json()
+            }
+            Err(_) => {
+                links.invalidate(&target);
+                Refusal::new(reason::TIMEOUT, format!("{name} didn't answer in time")).to_json()
+            }
+        }
+    }
+
+    /// `ServePluginAgents`: another of your devices asking for its plugin's
+    /// op here. The plugin must be installed and on here, the same version
+    /// by the same author, and what this device allowed it decides.
+    async fn serve_agents(&self, p: ServeAgentsParams) -> serde_json::Value {
+        self.ensure_scanned().await;
+        let here = self.device_name(&self.inner.device_id);
+        if p.unverified_from || p.from.is_empty() {
+            return Refusal::new(reason::BAD_CALL, "Only another of your devices may ask this").to_json();
+        }
+        let Some(entry) = self.entry(&p.plugin) else {
+            return Refusal::new(reason::NOT_INSTALLED, format!("{} isn't installed on {here}", p.plugin)).to_json();
+        };
+        let name = entry.item.name.clone();
+        match entry.item.status {
+            Status::On => {}
+            Status::Off => return Refusal::new(reason::OFF, format!("{name} is turned off on {here}")).to_json(),
+            Status::Pending => {
+                return Refusal::new(reason::NOT_APPROVED, format!("{name} is waiting to be allowed on {here}")).to_json();
+            }
+            Status::Tampered | Status::Broken => {
+                return Refusal::new(reason::BROKEN, format!("{name} can't run on {here}")).to_json();
+            }
+        }
+        if entry.item.version != p.version {
+            return Refusal::new(
+                reason::VERSION_MISMATCH,
+                format!("{here} has {name} {}, the caller {}", entry.item.version, p.version),
+            )
+            .to_json();
+        }
+        if !self.same_author(&entry, p.author_key.as_deref()).await {
+            return Refusal::new(reason::OTHER_AUTHOR, format!("The {name} on {here} is someone else's plugin by the same name"))
+                .to_json();
+        }
+        if serde_json::to_vec(&p.args).map_or(usize::MAX, |b| b.len()) > MAX_CALL_BYTES {
+            return Refusal::new(reason::BAD_CALL, "That call's arguments are too big").to_json();
+        }
+        // A window's own (the default for new chats is that window's), or
+        // only the window here says what it listens for.
+        if matches!(p.op.as_str(), "set_default_model" | "listen") {
+            return Refusal::new(reason::BAD_CALL, format!("\"{}\" is a window's own, on its device", p.op)).to_json();
+        }
+        let mut args = if p.args.is_object() { p.args } else { serde_json::json!({}) };
+        args["op"] = serde_json::json!(p.op);
+        tracing::info!(plugin = %p.plugin, from = %p.from, op = %p.op, "plugins: another device asked for an agent op");
+        agents_reply(self.inner.agents.call(&p.plugin, args).await)
+    }
+
     /// This device, as `{ id, name }`.
     fn here(&self) -> serde_json::Value {
         let id = &self.inner.device_id;
@@ -2598,7 +2867,19 @@ impl Plugins {
 
     /// Run what should run, after a scan.
     fn sync_services(&self) {
-        let plans: Vec<Plan> = lock(&self.inner.entries).iter().filter_map(service_plan).collect();
+        let (plans, on): (Vec<Plan>, HashSet<String>) = {
+            let entries = lock(&self.inner.entries);
+            let on = entries.iter().filter(|e| e.item.status == Status::On).map(|e| e.item.id.clone()).collect();
+            (entries.iter().filter_map(service_plan).collect(), on)
+        };
+        // Listeners of plugins no longer on here are forgotten; a service
+        // that may no longer run here hears nothing.
+        self.inner.agents.retain(&on);
+        for id in &on {
+            if !plans.iter().any(|p| p.plugin == *id) {
+                self.inner.agents.listen(id, agents::Target::Service, &[]);
+            }
+        }
         self.inner.services.sync(plans);
     }
 
@@ -2889,5 +3170,7 @@ mod tests;
 mod identity_tests;
 #[cfg(test)]
 mod service_tests;
+#[cfg(test)]
+mod agents_service_tests;
 #[cfg(all(test, unix))]
 mod git_service_tests;

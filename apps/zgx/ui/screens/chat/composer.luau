@@ -5,7 +5,8 @@
 -- is made once and follows where the shell is: the draft and what it
 -- carries are each chat's own (screens/chat/shared), its model, effort
 -- and access the session's (changed there, they change the session) or,
--- on a new chat, those the last new chat used.
+-- on a new chat, the new chat's own: those last chosen there, never a
+-- chat's.
 --
 -- In a session it sends to that session (queued while a turn runs, which
 -- Stop ends), and shows what the agent asks (an approval, a question) in
@@ -46,18 +47,34 @@ local DOCK: SpringOptions = { stiffness = 730, damping = 54 }
 -- column's).
 local FOOT = require("@app/screens/chat/dock").GAP
 
--- What a new chat starts with: what the last one used.
+-- What a new chat starts with: what was last chosen on the new-chat page
+-- (its settings, its own: a chat shown or made never changes them), kept
+-- across launches. Each is put back as it was, none included, as the page
+-- is come back to.
 local defaults = ui.persist("chat_new_defaults", {
 	model = nil :: string?,
 	effort = nil :: string?,
 	fast = false,
+	options = nil :: { [string]: string }?,
 	access = "full" :: string?,
 	plan = false,
 	checkout = "worktree" :: string?,
 	device = nil :: string?,
+	-- Where (nil: none picked yet; screens/chat/where picks one).
+	project = nil :: string?,
+	branch = nil :: string?,
 })
+-- A new chat's own value of each choice where its default is none: what
+-- the composer shows then.
+local NONE: { [string]: any } = { fast = false, options = {}, plan = false }
+
+-- The last default a plugin chose that was taken (its time, ms): one is
+-- taken once, across restarts, never again over a pick made since.
+local plugin_default_seen = ui.persist("chat_new_defaults_plugin", 0)
 
 local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
+-- Where a new chat is made, kept with them.
+local WHERE = { "checkout", "device", "project", "branch" }
 -- Those a session takes only with a message sent (shared.picks keeps them
 -- meanwhile); the rest change it as they're picked.
 local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
@@ -154,18 +171,26 @@ local function Composer(): Node
 		ui.batch(function()
 			if id == nil then
 				if was:peek() ~= nil then
+					-- Its own settings, each as it was left (none too: never
+					-- what the chat just shown had).
 					local d = defaults:peek()
 					for _, k in FIELDS do
 						local v = (d :: any)[k]
-						if v ~= nil and not equal(locals[k]:peek(), v) then
+						if v == nil then
+							v = NONE[k]
+						end
+						if not equal(locals[k]:peek(), v) then
 							locals[k]:set(v)
 						end
 					end
 					checkout:set(d.checkout)
+					branch:set(d.branch)
 					-- (A device asked of this new chat, a device's "+" in the
-					-- sidebar, over the one last used.)
+					-- sidebar, over the one last used; a project asked of it,
+					-- a project's "+", over the one last picked here.)
 					device:set(route.take_device() or d.device)
-					project:set(route.current:peek().project)
+					local asked = route.take_project()
+					project:set(if asked then asked.project elseif d.project ~= nil then d.project else route.current:peek().project)
 				end
 			elseif s then
 				-- (Its own pick, unsent, over what the session runs with.)
@@ -177,6 +202,11 @@ local function Composer(): Node
 					end
 					if v ~= nil and not equal(locals[k]:peek(), v) then
 						locals[k]:set(v)
+					elseif v == nil and (k == "model" or k == "effort") and locals[k]:peek() ~= nil then
+						-- A session that names none runs its agent's own: never
+						-- the last chat's model (another agent's, maybe one
+						-- this device doesn't have), sent along as a pick.
+						locals[k]:set(nil)
 					end
 					applied[k] = if v ~= nil then v else locals[k]:peek()
 				end
@@ -192,19 +222,45 @@ local function Composer(): Node
 			was:set(id)
 		end
 	end)
-	-- A new chat's project follows the route's: as the route comes home, or
-	-- its project changes there. (Kept, so a reload, the route as it was,
-	-- leaves a project picked in the composer alone.)
-	local route_was = ui.state("chat_composer_route", "")
+	-- What a new chat starts with, as a plugin allowed "models.set" chose it
+	-- (screens/plugins publishes it once the engine allowed it): kept as a
+	-- pick made here would be, and shown at once on a new chat.
+	local plugin_default = ui.shared("plugins.new_chat_model", nil :: any)
 	ui.effect(function()
-		local now = route.current:get()
-		local key = `{now.name}:{now.project or ""}`
-		if route_was:peek() == key then
+		local asked = plugin_default:get()
+		if type(asked) ~= "table" or type(asked.model) ~= "string" then
 			return
 		end
-		route_was:set(key)
-		if now.name == "home" and project:peek() ~= now.project then
-			project:set(now.project)
+		local seq = tonumber(asked.seq) or 0
+		if seq <= plugin_default_seen:peek() then
+			return
+		end
+		plugin_default_seen:set(seq)
+		local d = table.clone(defaults:peek()) :: any
+		d.model = asked.model
+		d.effort = asked.effort
+		defaults:set(d)
+		if session_id:peek() == nil then
+			ui.batch(function()
+				locals.model:set(asked.model)
+				if asked.effort ~= nil then
+					locals.effort:set(asked.effort)
+				end
+			end)
+		end
+	end)
+	-- A project asked of a new chat already showing (a project's "+", the
+	-- palette's New chat in…): picked. (One asked on the way here is the
+	-- arrival's, above; a project picked here is otherwise the page's own,
+	-- whatever the route last asked for.)
+	ui.effect(function()
+		local pick = route.project_pick:get()
+		if pick == nil or session_id:peek() ~= nil or was:peek() ~= nil then
+			return
+		end
+		local asked = route.take_project()
+		if asked and project:peek() ~= asked.project then
+			project:set(asked.project)
 		end
 	end)
 	-- A device asked of a new chat already showing (a device's "+" in the
@@ -234,20 +290,32 @@ local function Composer(): Node
 		for _, k in FIELDS do
 			picked[k] = locals[k]:get()
 		end
-		local where: { [string]: any } = { checkout = checkout:get(), device = device:get() }
+		local where: { [string]: any } = {
+			checkout = checkout:get(),
+			device = device:get(),
+			project = project:get(),
+			branch = branch:get(),
+		}
 		local id = session_id:peek()
 		if id == nil then
+			-- (Only once the page's own are out: never the chat left's, on
+			-- their way out.)
+			if was:peek() ~= nil then
+				return
+			end
 			local d = table.clone(defaults:peek()) :: any
 			local changed = false
-			for k, v in picked do
+			for _, k in FIELDS do
+				local v = picked[k]
 				if not equal(d[k], v) then
 					d[k] = v
 					changed = true
 				end
 			end
-			for k, v in where do
-				if d[k] ~= v then
-					d[k] = v
+			-- (By name: a choice of none is a nil a table's loop skips.)
+			for _, k in WHERE do
+				if d[k] ~= where[k] then
+					d[k] = where[k]
 					changed = true
 				end
 			end
@@ -315,12 +383,23 @@ local function Composer(): Node
 	-- the model picker lists that device's agents and models, as the
 	-- shipping app's does. (nil: this one, or not known yet.)
 	local catalog_device = ui.state("chat_catalog_device", nil :: string?)
-	ui.effect(function()
+	local function run_device(): string?
 		local d = device:get()
 		if d == nil and session_id:get() == nil then
 			local p = route.project:get()
 			d = if p then p.device else nil
 		end
+		return d
+	end
+	-- Whether the catalog shown is `d`'s (one of this device's says none).
+	local function shows_catalog_of(d: string?): boolean
+		local shown = (store.catalog:get() :: any).device
+		return shown == d or (shown == nil and (d == nil or d == sessions.now:get().here))
+	end
+	-- (Asked once per device: the host keeps a look current itself, a late
+	-- answer to an older one changing nothing, src/chat.rs `reload_remote`.)
+	ui.effect(function()
+		local d = run_device()
 		if d ~= catalog_device:peek() then
 			catalog_device:set(d)
 			store.catalog_on(d)
@@ -328,10 +407,21 @@ local function Composer(): Node
 	end)
 	-- A new chat moved onto Cloud runs only the agents Cloud has accounts
 	-- for: a model it doesn't run gives way to Cloud's first, as the
-	-- shipping app drops one on the switch.
+	-- shipping app drops one on the switch. So does one the last new chat
+	-- used that its device doesn't offer (once all its agents have said: a
+	-- model still on its way isn't dropped), so a chat isn't made on a
+	-- device for an agent it doesn't have.
 	ui.effect(function()
 		local cat = store.catalog:get()
-		if session_id:get() ~= nil or device:get() ~= Where.CLOUD or (cat :: any).device ~= Where.CLOUD then
+		if session_id:get() ~= nil then
+			return
+		end
+		local d = run_device()
+		if d == Where.CLOUD then
+			if (cat :: any).device ~= Where.CLOUD then
+				return
+			end
+		elseif (cat :: any).complete ~= true or not shows_catalog_of(d) then
 			return
 		end
 		local picked = model:peek()
@@ -444,17 +534,16 @@ local function Composer(): Node
 			return s.notice
 		end
 		-- The connection: this device's, then the chat's host.
-		local now = sessions.now:get()
 		local host_unreachable, host = false, nil
-		if s and s.device and s.device ~= now.here then
-			for _, d in now.devices or {} do
+		if s and s.device and s.device ~= sessions.here:get() then
+			for _, d in sessions.devices:get() or {} do
 				if d.id == s.device then
 					host_unreachable, host = d.online == false, d.name
 				end
 			end
 		end
 		return LinkNotice.of {
-			connection = now.connection,
+			connection = sessions.connection:get(),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
@@ -471,10 +560,12 @@ local function Composer(): Node
 		end
 	end)
 	-- A new chat with no model yet: the catalog's first. (Never a session's:
-	-- its model is its own.)
+	-- its model is its own.) Whenever that's so: the catalog come, or the
+	-- new page come back to with none chosen there, so what shows is what a
+	-- reload shows too.
 	ui.effect(function()
 		local c = store.catalog:get()
-		if session_id:peek() == nil and c.state == "ready" and model:peek() == nil and #c.models > 0 then
+		if session_id:get() == nil and c.state == "ready" and model:get() == nil and #c.models > 0 then
 			model:set(c.models[1].value)
 			effort:set(c.models[1].effort)
 		end
@@ -626,6 +717,8 @@ local function Composer(): Node
 					if shared.text:peek() == "" then
 						shared.text:set(text_out)
 					end
+					-- Its files too, before any added since.
+					shared.restore_cargo_of(id, carried)
 				end)
 			end
 			if running:peek() then
@@ -786,7 +879,7 @@ local function Composer(): Node
 			return nil
 		end
 		local path: string?, project: string? = nil, nil
-		for _, p in sessions.now:get().projects do
+		for _, p in sessions.projects:get() do
 			if p.id == s.project then
 				path, project = p.path, p.name
 			end
@@ -794,7 +887,7 @@ local function Composer(): Node
 		local lb = live_branch:get()
 		local name = if lb.key:sub(1, #s.id + 1) == `{s.id}|` then lb.name else (s :: any).branch
 		local on: string? = nil
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if d.id == (s :: any).device then
 				on = d.name
 			end
@@ -846,6 +939,32 @@ local function Composer(): Node
 			end,
 			models_loading = function(): boolean
 				return store.catalog:get().complete ~= true
+			end,
+			-- The session's model named by the host (its catalog's name, else
+			-- its id), for the chip while the catalog shown doesn't list it.
+			-- (Not a pick of another: that one's in the catalog. A session
+			-- naming none: its agent's own default, by name.)
+			model_label = function(): string?
+				local s = open()
+				if s and s.model == model:get() then
+					return s.model_label
+				end
+				return nil
+			end,
+			-- A session naming no model runs its agent's own: the catalog's
+			-- first of that agent (the host's `model_label` names it too),
+			-- shown with its mark and reasoning, never sent as a pick.
+			default_model = function(): string?
+				local s = open()
+				if not s or s.model ~= nil or s.harness == nil then
+					return nil
+				end
+				for _, m in store.catalog:get().models do
+					if m.harness == s.harness then
+						return m.value
+					end
+				end
+				return nil
 			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models

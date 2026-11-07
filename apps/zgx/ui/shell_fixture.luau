@@ -235,6 +235,8 @@ local model = {
 	places = { pinned = {}, sections = {} } :: any,
 }
 
+-- (`fixture.sessions_loading`: an engine that hasn't answered yet, nothing heard.)
+local unheard = false
 local function publish()
 	local chats = {}
 	for _, c in model.chats do
@@ -249,7 +251,7 @@ local function publish()
 		table.insert(sections, { id = s.id, name = s.name, sessions = table.clone(s.sessions), collapsed = s.collapsed == true })
 	end
 	sessions.now:set({
-		state = "ready",
+		state = if unheard then "loading" else "ready",
 		here = model.here,
 		devices = model.devices,
 		projects = model.projects,
@@ -456,6 +458,28 @@ local icons_refused: string? = nil
 -- Cloud's machines among the devices, as the engine lists them: two
 -- sessions' (their platform, id and capability say Cloud's), never a device
 -- to pick.
+ui.command {
+	id = "fixture.sessions_loading",
+	title = "Fixture: an engine that hasn't answered, no chats heard",
+	run = function()
+		unheard = true
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.no_sessions",
+	title = "Fixture: an engine that answered, with no chats",
+	run = function()
+		unheard = false
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
 ui.command {
 	id = "fixture.cloud_machines",
 	title = "Fixture: Cloud sessions' machines among the devices",
@@ -916,6 +940,30 @@ ui.command {
 		publish()
 	end,
 }
+-- A message in a chat that's running: the third most recent comes to the
+-- top, as the engine's list says once a reply moves (src/slide_bench_tests.rs
+-- sends one every two seconds). Its time by a count, not the clock, so every
+-- run moves the same rows at the same frames.
+local messages = 0
+ui.command {
+	id = "message",
+	title = "A message lands in a running chat",
+	run = function()
+		local live = {}
+		for _, c in model.chats do
+			table.insert(live, c)
+		end
+		table.sort(live, function(a: any, b: any): boolean
+			return a.updated > b.updated
+		end)
+		local c = live[math.min(3, #live)]
+		if c then
+			messages += 1
+			c.updated = NOW + messages
+			publish()
+		end
+	end,
+}
 ui.command {
 	id = "arrive",
 	title = "A new session arrives",
@@ -1297,6 +1345,13 @@ local function editor(): any
 end
 ui.command { id = "fixture.edit_project", title = "Fixture: edit project", menu = "Fixture", run = function()
 	editor().open("borealis")
+end }
+-- (Each copy of Atlas after `atlas_cloned_on_box`: tests/project_default.)
+ui.command { id = "fixture.edit_project_atlas", title = "Fixture: edit Atlas", menu = "Fixture", run = function()
+	editor().open("atlas")
+end }
+ui.command { id = "fixture.edit_project_atlas_clone", title = "Fixture: edit Atlas's clone", menu = "Fixture", run = function()
+	editor().open("atlas-clone")
 end }
 ui.command { id = "fixture.edit_project_emoji", title = "Fixture: edit project, emoji", menu = "Fixture", run = function()
 	editor().open("borealis", { kind = "emoji", emoji = "🚀", hue = "amber" })

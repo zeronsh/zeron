@@ -165,6 +165,22 @@ pub fn spawn_detached(command: &mut Command) -> std::io::Result<Child> {
     command.spawn()
 }
 
+/// Whether an engine holds `data_dir` (its `engine.lock`, crates/engine's
+/// `InstanceLock`): one starting up, or one still shutting down.
+///
+/// Asked by trying it, and letting go at once. An engine that finds it taken
+/// for that moment tries again.
+pub fn data_dir_held(data_dir: &Path) -> bool {
+    let Ok(lock) = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(data_dir.join("engine.lock"))
+    else {
+        return false;
+    };
+    matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
 /// Reap `child` whenever it exits, so a background engine that stops while
 /// the app runs never lingers as a zombie.
 pub fn reap(mut child: Child) {
@@ -246,6 +262,20 @@ mod tests {
             app_path(Path::new("/home/me/.zeron/app/current/zeron")),
             PathBuf::from("/home/me/.zeron/app/current/zeron")
         );
+    }
+
+    #[test]
+    fn a_data_dir_is_held_while_its_lock_is() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!data_dir_held(dir.path()), "no lock file: nobody holds it");
+        let lock = std::fs::File::create(dir.path().join("engine.lock")).unwrap();
+        assert!(!data_dir_held(dir.path()), "a lock file nobody locks");
+        lock.try_lock().unwrap();
+        assert!(data_dir_held(dir.path()));
+        lock.unlock().unwrap();
+        assert!(!data_dir_held(dir.path()));
+        // Asking lets go at once: the engine can take it after.
+        lock.try_lock().unwrap();
     }
 
     #[test]

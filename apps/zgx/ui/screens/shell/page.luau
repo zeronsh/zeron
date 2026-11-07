@@ -166,7 +166,12 @@ return function(props: Props): Node
 		return 8
 	end
 
-	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
+	-- (Where the pointer is, only while a wallpaper reads it: a plugin's.
+	-- Your picture, or none, never does, and its writes on every move
+	-- went nowhere.)
+	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, function(): boolean
+		return home() and string.find(appearance.showing:peek(), "^plugin:") ~= nil
+	end)
 	pane.ref = box
 	pane.id = "shell-page"
 	pane.hook = "shell.page"
@@ -1744,6 +1749,8 @@ return function(props: Props): Node
 					tooltip_side = "bottom",
 					w = EXPAND,
 					h = EXPAND,
+					-- (One of the title bar's: its glyph held under the pointer.)
+					tone = "bar",
 					on_click = function()
 						shell_view.toggle_expanded()
 					end,

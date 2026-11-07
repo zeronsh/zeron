@@ -95,6 +95,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		chosen = ui.state(`chat_lane_chosen_{chat}`, {} :: { [string]: boolean }),
 		asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		-- (A steer glides in its own transcript, as its sends do.)
+		name = name,
 	}
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
@@ -299,7 +301,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		local s = session:get()
 		local function project_row(id: string?): any?
-			for _, p in sessions.now:get().projects do
+			for _, p in sessions.projects:get() do
 				if p.id == id then
 					return p
 				end
@@ -320,7 +322,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		local p = project_row(s.project)
 		local on: string? = nil
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if d.id == s.device then
 				on = d.name
 			end
@@ -703,7 +705,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		if not s then
 			return nil
 		end
-		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
 	end)
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.

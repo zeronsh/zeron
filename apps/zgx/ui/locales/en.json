@@ -3179,6 +3179,30 @@
           "title": "Send you notifications",
           "detail": "Like any other notification, set in Settings → Notifications."
         },
+        "usage_read": {
+          "title": "See how much of your agents' plans you've used",
+          "detail": "Each account's usage, its plan and when it resets. Not who the account is."
+        },
+        "accounts_read": {
+          "title": "See your agents' saved accounts",
+          "detail": "Which is active, and each one's email and name. Never a password or a sign-in."
+        },
+        "accounts_switch": {
+          "title": "Switch which account your agents use",
+          "detail": "It can make another saved account the active one. It can't sign in or remove an account."
+        },
+        "models_read": {
+          "title": "See your agents' models",
+          "detail": "The models, efforts and options each offers, and what a chat uses."
+        },
+        "models_set": {
+          "title": "Change the model your chats use",
+          "detail": "A chat's model, effort and options for its next turn, and what new chats start with."
+        },
+        "messages_send": {
+          "title": "Send messages to your agents as you",
+          "detail": "It can send any chat a message, start new chats and answer their questions, as if you'd typed it. Your agents then do what it says."
+        },
         "links_open": {
           "title": "Open links",
           "detail": "Where you open links: Settings → Links."

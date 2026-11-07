@@ -220,6 +220,12 @@ end }
 ui.command { id = "side_queue_one", title = "A message waits in its queue", run = function()
 	side_says({ queue = { { id = "q1", text = "Queued words" } } })
 end }
+-- The engine's copy of its steered message landing: the queued row's id is
+-- its prompt's, and it leaves the queue.
+ui.command { id = "side_steer_lands", title = "Its steered message joins its transcript", run = function()
+	lanes.view("tab1").messages:push({ id = "q1", role = "user", text = "Queued words" })
+	side_says({ queue = {} })
+end }
 ui.command { id = "side_approval", title = "It asks for approval", run = function()
 	side_says({ ask = { request = "r1", kind = "approval", approval = { title = "Run this command?", command = "rm -rf build", cwd = "/proj" } } })
 end }
