@@ -22,6 +22,12 @@ use crate::http_error::describe_http_error;
 /// thin docs are lineage epoch 2; M3 readers discard-and-adopt below it).
 pub const CHAT2_DOC_EPOCH: u32 = 2;
 
+/// The journal key for relayed updates that arrived ahead of their history. Kept
+/// apart from the chat's own journal, which a save retires, and replayed with it.
+pub(crate) fn parked_inbox(chat_id: &str) -> String {
+    format!("{chat_id}#parked")
+}
+
 /// [`ChatDocSink`] over a live [`SessionDoc`] + the cursor-bearing store.
 ///
 /// Loro import of a remote row/checkpoint fires the doc's root subscription,
@@ -267,8 +273,9 @@ impl ChatDocSink for EngineChatSink {
     fn relay_import(&self, bytes: &[u8], history: bool) -> zeron_sync::chat_relay::RelayImport {
         use zeron_sync::chat_relay::RelayImport;
         let import = || {
+            // An evicted handle: nothing took it in, so it must not count as read.
             let Some(doc) = self.doc.upgrade() else {
-                return RelayImport::Applied;
+                return RelayImport::Unreadable;
             };
             let origin = if history {
                 crate::transcript_history::REPLAY_ORIGIN
@@ -277,7 +284,14 @@ impl ChatDocSink for EngineChatSink {
             };
             let before = doc.doc().oplog_vv();
             match doc.doc().import_with(bytes, origin) {
-                Ok(status) if status.pending.is_some() => return RelayImport::Parked,
+                Ok(status) if status.pending.is_some() => {
+                    // Held in memory until its history arrives. Kept on disk too, apart
+                    // from the journal a save retires: a save doesn't hold what's parked.
+                    if let Err(err) = self.store.journal_chat_inbox(&parked_inbox(&self.chat_id), bytes) {
+                        tracing::warn!(chat = %self.chat_id, %err, "chat relay: parked journal write failed");
+                    }
+                    return RelayImport::Parked;
+                }
                 Ok(_) => {}
                 Err(err) => {
                     tracing::warn!(chat = %self.chat_id, error = %err, "chat relay: import failed");
@@ -576,6 +590,47 @@ impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
                 .await
                 .map_err(|e| SyncError::WebSocket(describe_http_error(e)))
         })
+    }
+}
+
+#[cfg(test)]
+mod relay_sink_tests {
+    use super::*;
+    use std::sync::Arc;
+    use zeron_sync::chat_client::ChatDocSink as _;
+    use zeron_sync::chat_relay::RelayImport;
+
+    fn sink() -> (EngineChatSink, Arc<SessionDoc>, Arc<DocsStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("chat").unwrap());
+        (EngineChatSink::new(&doc, store.clone(), "chat"), doc, store, dir)
+    }
+
+    #[tokio::test]
+    async fn a_relayed_update_for_an_evicted_doc_is_not_taken_as_read() {
+        let (sink, doc, _store, _dir) = sink();
+        drop(doc);
+        let other = loro::LoroDoc::new();
+        other.get_text("t").insert(0, "x").unwrap();
+        other.commit();
+        let bytes = other.export(loro::ExportMode::all_updates()).unwrap();
+        assert_eq!(sink.relay_import(&bytes, false), RelayImport::Unreadable);
+    }
+
+    #[tokio::test]
+    async fn a_relayed_update_that_arrives_ahead_of_its_history_is_kept() {
+        let (sink, _doc, store, _dir) = sink();
+        let author = loro::LoroDoc::new();
+        author.get_text("t").insert(0, "first").unwrap();
+        author.commit();
+        let before = author.oplog_vv();
+        author.get_text("t").insert(5, " second").unwrap();
+        author.commit();
+        let later = author.export(loro::ExportMode::updates(&before)).unwrap();
+        assert_eq!(sink.relay_import(&later, false), RelayImport::Parked);
+        let (kept, _) = store.pending_chat_inbox(&parked_inbox("chat")).unwrap();
+        assert_eq!(kept, vec![later], "lost with this process otherwise");
     }
 }
 

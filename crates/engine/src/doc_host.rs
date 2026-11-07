@@ -1760,6 +1760,22 @@ impl DocHost {
                     tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a kept update");
                 }
             }
+            // Updates that came ahead of their history. Once all of them are in, none
+            // is needed again; until then all stay.
+            let parked_key = crate::chat2_host::parked_inbox(chat_id);
+            let (parked, newest) = self.inner.store.pending_chat_inbox(&parked_key)?;
+            if !parked.is_empty() {
+                let mut waiting = false;
+                for bytes in &parked {
+                    match doc.doc().import(bytes) {
+                        Ok(status) => waiting |= status.pending.is_some(),
+                        Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a parked update"),
+                    }
+                }
+                if !waiting {
+                    self.inner.store.retire_chat_inbox(&parked_key, newest)?;
+                }
+            }
         }
         let doc = Arc::new(doc);
         let persistence = (room_gen >= 2 && !deferred_adoption).then(|| {
@@ -3157,6 +3173,14 @@ impl DocHost {
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
+        // On a relayed chat only its host stores a checkpoint: a viewer's is behind
+        // the host's as often as not, and the room may hold nothing else.
+        if let Some(workspace) = self.workspace()
+            && let Ok(Some(chat)) = workspace.chat(&handle.chat_id)
+            && !relay::posts_checkpoint(reason, chat.room_gen.unwrap_or(1), workspace.is_host(&handle.chat_id))
+        {
+            return;
+        }
         // A relaying host's socket closes when idle, and it still owes checkpoints.
         let relay_state = lock(&handle.relay).clone();
         // So does a build with the layer off, healing what one with it on left.
