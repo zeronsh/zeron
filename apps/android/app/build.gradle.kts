@@ -126,6 +126,7 @@ dependencies {
     implementation("${libs.jna.get()}@aar")
     implementation(libs.webrtc)
     debugImplementation(libs.compose.ui.tooling)
+    testImplementation(libs.junit)
 }
 
 kotlin {
@@ -135,4 +136,13 @@ kotlin {
             "androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
         )
     }
+}
+
+composeCompiler {
+    stabilityConfigurationFiles.add(layout.projectDirectory.file("compose-stability.conf"))
+}
+
+// ComposeStabilityConfigTest reads the config: rerun it when the config changes.
+tasks.withType<Test>().configureEach {
+    inputs.file(layout.projectDirectory.file("compose-stability.conf"))
 }
