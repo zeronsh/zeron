@@ -13,7 +13,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{RelayEvent, RelayHandle, RelayImport, RelayPolicy, run_link};
+use super::{RelayEvent, RelayHandle, RelayImport, RelayPolicy};
 use crate::chat_client::{ChatDocSink, RowImportOutcome};
 use crate::chat_frames::{self as wire, frame_type};
 
@@ -622,107 +622,6 @@ async fn a_queue_row_that_parks_is_held_until_its_history_arrives() {
     until("m1 to be confirmed", || room.queue_len() == 0).await;
 }
 
-// ── a direct link ───────────────────────────────────────────────────────────
-
-fn link(a: &Device, b: &Device) -> (CancellationToken, CancellationToken) {
-    let (one, two) = tokio::io::duplex(1024 * 1024);
-    let (stop_a, stop_b) = (CancellationToken::new(), CancellationToken::new());
-    tokio::spawn(run_link(one, b.name.clone(), a.relay.clone(), stop_a.clone()));
-    tokio::spawn(run_link(two, a.name.clone(), b.relay.clone(), stop_b.clone()));
-    (stop_a, stop_b)
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_direct_link_carries_the_stream_and_the_room_stays_out_of_it() {
-    let room = Room::default();
-    let host = Device::host("host");
-    let viewer = Device::viewer("viewer");
-    let _sockets = (room.join("host", &host.relay), room.join("viewer", &viewer.relay));
-    let _link = link(&host, &viewer);
-    let mut events = host.relay.events();
-    until("the link to come up", || host.relay.stats().links == 1).await;
-    assert_eq!(events.recv().await.unwrap(), RelayEvent::LinksChanged);
-    let room_before = viewer.relay.stats().room_frames_received;
-    for i in 0..20 {
-        host.stream(&format!("{i} "));
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    converged(&[&host, &viewer]).await;
-    let stats = viewer.relay.stats();
-    assert!(stats.direct_frames_received >= 20, "{stats:?}");
-    assert_eq!(
-        stats.room_frames_received, room_before,
-        "skip kept the stream off the room: {stats:?}"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_link_with_no_room_still_converges_both_ways() {
-    let host = Device::host("host");
-    let viewer = Device::viewer("viewer");
-    let _link = link(&host, &viewer);
-    until("the link to come up", || viewer.relay.stats().links == 1).await;
-    host.stream("from the host ");
-    viewer.relay.local_update(viewer.commit("from the viewer"), false);
-    converged(&[&host, &viewer]).await;
-    assert!(host.body().contains("from the viewer"));
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_late_joiner_can_catch_up_over_a_link() {
-    let host = Device::host("host");
-    let mut text = String::new();
-    for i in 0..200_000u64 {
-        text.push_str(&format!("{:x}", i.wrapping_mul(0x9E3779B97F4A7C15)));
-    }
-    host.commit(&text);
-    let late = Device::viewer("late");
-    let _link = link(&host, &late);
-    converged(&[&host, &late]).await;
-    assert_eq!(late.body().len(), text.len());
-}
-
-#[tokio::test(start_paused = true)]
-async fn when_a_link_dies_the_room_takes_over_with_nothing_lost() {
-    let room = Room::default();
-    let host = Device::host("host");
-    let viewer = Device::viewer("viewer");
-    let _sockets = (room.join("host", &host.relay), room.join("viewer", &viewer.relay));
-    let (stop, _other) = link(&host, &viewer);
-    until("the link to come up", || host.relay.stats().links == 1).await;
-    host.stream("over the link ");
-    converged(&[&host, &viewer]).await;
-    stop.cancel();
-    until("the link to go down", || host.relay.stats().links == 0).await;
-    for i in 0..20 {
-        host.stream(&format!("over the room {i} "));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    converged(&[&host, &viewer]).await;
-    assert!(viewer.body().contains("over the room 19"));
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_silent_link_is_declared_dead_and_its_lost_frames_recovered() {
-    let room = Room::default();
-    let host = Device::host("host");
-    let viewer = Device::viewer("viewer");
-    let _sockets = (room.join("host", &host.relay), room.join("viewer", &viewer.relay));
-    // The far end stops reading and writing, as a dead path does: no close.
-    let (near, far) = tokio::io::duplex(1024 * 1024);
-    let stop = CancellationToken::new();
-    tokio::spawn(run_link(near, "viewer".into(), host.relay.clone(), stop.clone()));
-    let hold_open = far;
-    until("the link to come up", || host.relay.stats().links == 1).await;
-    host.stream("into the void ");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(viewer.body(), "", "skip kept it off the room");
-    until("the link to be given up on", || host.relay.stats().links == 0).await;
-    converged(&[&host, &viewer]).await;
-    assert_eq!(viewer.body(), "into the void ");
-    drop(hold_open);
-}
-
 #[tokio::test(start_paused = true)]
 async fn a_legacy_peer_reaches_the_engine() {
     let host = Device::host("host");
@@ -733,23 +632,6 @@ async fn a_legacy_peer_reaches_the_engine() {
         payload: Vec::new(),
     });
     assert_eq!(events.recv().await.unwrap(), RelayEvent::LegacyPeer);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_new_link_survives_its_predecessor_timing_out() {
-    let host = Device::host("host");
-    let viewer = Device::viewer("viewer");
-    // The first link's far end goes silent; the viewer dials a second.
-    let (near, far) = tokio::io::duplex(1024 * 1024);
-    let hold_open = far;
-    tokio::spawn(run_link(near, "viewer".into(), host.relay.clone(), CancellationToken::new()));
-    until("the first link to come up", || host.relay.stats().links == 1).await;
-    let _second = link(&host, &viewer);
-    tokio::time::sleep(Duration::from_secs(30)).await; // the first has timed out by now
-    assert_eq!(host.relay.stats().links, 1, "the replacement stays");
-    host.stream("still direct");
-    converged(&[&host, &viewer]).await;
-    drop(hold_open);
 }
 
 #[tokio::test(start_paused = true)]
@@ -844,70 +726,6 @@ async fn a_queue_row_this_build_cant_read_is_never_confirmed() {
     room.enqueue("phone", "unreadable", vec![0xff; 32]);
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(room.queue_len(), 1, "kept: a newer build may read it");
-}
-
-/// What an accepted link's task holds after its host evicts the chat's handle:
-/// `EngineChatSink` keeps a Weak doc, and `connect_from` runs the link with a
-/// token nothing cancels, so the old Driver lives on behind a dead doc.
-struct EvictedDocSink;
-impl ChatDocSink for EvictedDocSink {
-    fn apply_row(&self, _: &[u8], _: u64) -> RowImportOutcome {
-        RowImportOutcome::Applied
-    }
-    fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
-        Ok(())
-    }
-    fn contains_frontier(&self, _: &[u8]) -> bool {
-        true
-    }
-    fn advance_cursor(&self, _: u64) {}
-    fn relay_version(&self) -> Option<Vec<u8>> {
-        None
-    }
-    fn relay_export(&self, _: &[u8]) -> Option<Vec<u8>> {
-        None
-    }
-    fn relay_import(&self, _: &[u8], _: bool) -> RelayImport {
-        RelayImport::Applied
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_link_to_an_evicted_handle_doesnt_block_catch_up() {
-    let room = Room::default();
-    let zombie = RelayHandle::spawn("host", Arc::new(EvictedDocSink), RelayPolicy { confirm_queue: true });
-    let viewer = Device::viewer("viewer");
-    let (one, two) = tokio::io::duplex(1024 * 1024);
-    tokio::spawn(run_link(one, "viewer".into(), zombie.clone(), CancellationToken::new()));
-    tokio::spawn(run_link(two, "host".into(), viewer.relay.clone(), CancellationToken::new()));
-    until("the link", || viewer.relay.stats().links == 1).await;
-    // The host reopens the chat: a new handle, a new Driver, the same device.
-    let host = Device::host("host");
-    let _sockets = (room.join("viewer", &viewer.relay), room.join("host", &host.relay));
-    room.0.lock().unwrap().drop_relay = 1;
-    host.stream("lost relay frame ");
-    converged(&[&host, &viewer]).await;
-}
-
-/// A round started over a link that goes silent ends when the link is declared
-/// dead, not when the round stalls a minute later.
-#[tokio::test(start_paused = true)]
-async fn a_silent_link_recovers_in_about_ten_seconds() {
-    let room = Room::default();
-    let host = Device::host("host");
-    let viewer = Device::viewer("viewer");
-    let _sockets = (room.join("host", &host.relay), room.join("viewer", &viewer.relay));
-    // A silent path, seen from the viewer: the round goes down it and vanishes.
-    let (near, far) = tokio::io::duplex(1024 * 1024);
-    tokio::spawn(run_link(near, "host".into(), viewer.relay.clone(), CancellationToken::new()));
-    let _hold_open = far;
-    until("the link", || viewer.relay.stats().links == 1).await;
-    let started = tokio::time::Instant::now();
-    room.0.lock().unwrap().drop_relay = 1;
-    host.stream("after the link went quiet ");
-    converged(&[&host, &viewer]).await;
-    let took = started.elapsed();
-    assert!(took < Duration::from_secs(15), "took {took:?}");
 }
 
 #[tokio::test(start_paused = true)]

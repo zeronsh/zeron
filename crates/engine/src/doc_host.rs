@@ -237,7 +237,7 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
 }
 
 mod relay;
-pub use relay::{CHAT_LINK_PREFIX, ChatLinkService, relay_layer_enabled};
+pub use relay::relay_layer_enabled;
 
 #[derive(Debug, Clone)]
 pub struct DocHostConfig {
@@ -251,7 +251,6 @@ pub struct DocHostConfig {
 
 struct DocHostInner {
     /// Opens direct links to other devices. Set only with the relay layer on.
-    chat_links: std::sync::OnceLock<zeron_preview::PreviewService>,
     store: Arc<DocsStore>,
     config: DocHostConfig,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
@@ -1081,7 +1080,6 @@ impl DocHost {
                 store,
                 config,
                 sessions: Mutex::new(None),
-                chat_links: std::sync::OnceLock::new(),
                 quiesced: AtomicBool::new(false),
                 quiesce_generation: AtomicU64::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
@@ -2383,9 +2381,6 @@ impl DocHost {
 
     async fn stop_sync(&self, handle: &ChatDocHandle) {
         lock(&handle.sync_cancel).cancel();
-        if let Some(state) = &*lock(&handle.relay) {
-            state.stop_link();
-        }
         let client = lock(&handle.chat2).take();
         if let Some(client) = client {
             client.shutdown().await;
@@ -3371,7 +3366,7 @@ impl DocHost {
         if handle.messages_tx.receiver_count() > 0 || handle.queue_tx.receiver_count() > 0 {
             return true;
         }
-        if !handle.relay_lets_socket_close() || handle.relay_has_links() {
+        if !handle.relay_lets_socket_close() {
             return true;
         }
         // The handle itself holds one doc ref; more means a live writer.
