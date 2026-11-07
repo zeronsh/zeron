@@ -292,30 +292,211 @@ const HELPER: &str = if cfg!(windows) {
 /// 1, version 0.159 or later), resolved from its `codex` executable. Zeron never
 /// redistributes this runtime; npm installations do not contain it. The helper
 /// only initializes from a `codex-resources/voice` directory.
+///
+/// A version-manager shim (mise's `shims` and `command-wrappers`, asdf's
+/// `shims`) is not itself inside that package. The package is the release the
+/// shim launches, under `{data}/installs/<tool>/<version>`.
 pub fn installed_helper(codex_executable: &Path) -> Result<PathBuf, VoiceRejection> {
-    let binary = codex_executable
-        .canonicalize()
-        .map_err(|_| VoiceRejection::NativeRuntimeUnavailable)?;
-    let root = binary
-        .parent()
-        .and_then(Path::parent)
-        .ok_or(VoiceRejection::NativeRuntimeUnavailable)?;
-    let manifest: Value = std::fs::read(root.join("codex-package.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .ok_or(VoiceRejection::NativeRuntimeUnavailable)?;
-    let version = manifest["version"]
+    match package_beside(codex_executable) {
+        Beside::Found(path) => Ok(path),
+        Beside::Reject(reason) => Err(reason),
+        Beside::Absent => helper_from_version_manager(codex_executable),
+    }
+}
+
+enum Beside {
+    Found(PathBuf),
+    /// This executable sits in a standalone package that cannot host voice.
+    Reject(VoiceRejection),
+    /// No standalone package next to this executable.
+    Absent,
+}
+
+fn package_beside(codex_executable: &Path) -> Beside {
+    let Ok(binary) = codex_executable.canonicalize() else {
+        return Beside::Reject(VoiceRejection::NativeRuntimeUnavailable);
+    };
+    let Some(root) = binary.parent().and_then(Path::parent) else {
+        return Beside::Reject(VoiceRejection::NativeRuntimeUnavailable);
+    };
+    let Ok(bytes) = std::fs::read(root.join("codex-package.json")) else {
+        return Beside::Absent;
+    };
+    let Some(manifest) = serde_json::from_slice::<Value>(&bytes).ok() else {
+        return Beside::Reject(VoiceRejection::NativeRuntimeUnavailable);
+    };
+    let Some(version) = manifest["version"]
         .as_str()
         .and_then(|v| semver::Version::parse(v).ok())
-        .ok_or(VoiceRejection::Unsupported)?;
+    else {
+        return Beside::Reject(VoiceRejection::Unsupported);
+    };
     if manifest["layoutVersion"] != 1 || version < semver::Version::new(0, 159, 0) {
-        return Err(VoiceRejection::Unsupported);
+        return Beside::Reject(VoiceRejection::Unsupported);
     }
     let path = root.join("codex-resources/voice").join(HELPER);
     if path.canonicalize().ok().as_ref() != Some(&path) || !path.is_file() {
+        return Beside::Reject(VoiceRejection::NativeRuntimeUnavailable);
+    }
+    Beside::Found(path)
+}
+
+/// `{data}/shims/<tool>` (mise, asdf) or `{data}/command-wrappers/bin/<tool>`
+/// (mise), when `{data}/installs` exists.
+fn version_manager_data(executable: &Path) -> Option<PathBuf> {
+    let bin_dir = executable.parent()?;
+    if bin_dir.file_name() == Some("shims".as_ref()) {
+        let data = bin_dir.parent()?;
+        return data.join("installs").is_dir().then(|| data.to_path_buf());
+    }
+    if bin_dir.file_name() == Some("bin".as_ref()) {
+        let wrappers = bin_dir.parent()?;
+        if wrappers.file_name() == Some("command-wrappers".as_ref()) {
+            let data = wrappers.parent()?;
+            return data.join("installs").is_dir().then(|| data.to_path_buf());
+        }
+    }
+    None
+}
+
+fn tool_stem(executable: &Path) -> Option<String> {
+    let name = executable.file_name()?.to_str()?;
+    let stem = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".cmd"))
+        .unwrap_or(name);
+    let ok = !stem.is_empty()
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
+    ok.then(|| stem.to_owned())
+}
+
+fn package_executable(root: &Path, stem: &str) -> PathBuf {
+    let file = if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_owned()
+    };
+    root.join("bin").join(file)
+}
+
+fn version_dirs(installs: &Path) -> Vec<(semver::Version, PathBuf)> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(installs) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Ok(version) = semver::Version::parse(&name) else {
+            continue;
+        };
+        found.push((version, entry.path()));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found
+}
+
+fn dispatches_with_mise(executable: &Path, installs: &Path) -> bool {
+    if installs.join(".mise.backend.toml").is_file() {
+        return true;
+    }
+    let mut file = match std::fs::File::open(executable) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 512];
+    let Ok(n) = std::io::Read::read(&mut file, &mut buf) else {
+        return false;
+    };
+    String::from_utf8_lossy(&buf[..n]).contains("mise")
+}
+
+/// `mise which <tool>`, accepted only when the binary is inside `installs`.
+/// A result from some other machine-wide install must not satisfy a fixture
+/// or a different data directory. A stuck mise must not hold voice open.
+fn mise_which(tool: &str, installs: &Path) -> Option<PathBuf> {
+    let mut child = std::process::Command::new("mise")
+        .arg("which")
+        .arg(tool)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < Duration::from_millis(1500) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut()?, &mut text).ok()?;
+    let path = PathBuf::from(text.trim());
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let binary = path.canonicalize().ok()?;
+    let installs = installs.canonicalize().ok()?;
+    binary.starts_with(&installs).then_some(binary)
+}
+
+fn helper_from_version_manager(executable: &Path) -> Result<PathBuf, VoiceRejection> {
+    let data = version_manager_data(executable).ok_or(VoiceRejection::NativeRuntimeUnavailable)?;
+    let stem = tool_stem(executable).ok_or(VoiceRejection::NativeRuntimeUnavailable)?;
+    let installs = data.join("installs").join(&stem);
+    if !installs.is_dir() {
         return Err(VoiceRejection::NativeRuntimeUnavailable);
     }
-    Ok(path)
+    let versions: Vec<PathBuf> = version_dirs(&installs)
+        .into_iter()
+        .map(|(_, root)| root)
+        .filter(|root| package_executable(root, &stem).is_file())
+        .collect();
+    if versions.is_empty() {
+        return Err(VoiceRejection::NativeRuntimeUnavailable);
+    }
+    let chosen = if versions.len() == 1 {
+        package_executable(&versions[0], &stem)
+    } else if dispatches_with_mise(executable, &installs) {
+        if let Some(binary) = mise_which(&stem, &installs) {
+            binary
+        } else {
+            preferred_install(&installs, &stem, &versions)
+        }
+    } else {
+        preferred_install(&installs, &stem, &versions)
+    };
+    match package_beside(&chosen) {
+        Beside::Found(path) => Ok(path),
+        Beside::Reject(reason) => Err(reason),
+        Beside::Absent => Err(VoiceRejection::NativeRuntimeUnavailable),
+    }
+}
+
+/// `latest`, then `global`, then the highest version directory. `mise which`
+/// is the source of truth when it answers; these cover a data dir it cannot.
+fn preferred_install(installs: &Path, stem: &str, versions: &[PathBuf]) -> PathBuf {
+    for name in ["latest", "global"] {
+        let bin = package_executable(&installs.join(name), stem);
+        if bin.is_file() {
+            return bin;
+        }
+    }
+    package_executable(&versions[0], stem)
 }
 
 /// Client media for a remote call: an explicit development runtime
@@ -422,6 +603,154 @@ mod tests {
         std::fs::remove_file(npm.join("codex-package.json")).unwrap();
         assert_eq!(
             installed_helper(&codex).unwrap_err(),
+            VoiceRejection::NativeRuntimeUnavailable
+        );
+    }
+
+    fn mise_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A mise/asdf shim is not inside the package it launches. The helper
+    /// comes from `{data}/installs/<tool>/<version>`.
+    #[test]
+    fn helper_follows_a_version_manager_shim_to_its_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().canonicalize().unwrap().join("mise");
+        let current = data.join("installs/codex/0.165.0");
+        let codex = codex_package(&current, "0.165.0", true);
+        let shim = data.join("shims/codex");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, "#!/bin/sh\nexec mise \"$@\"\n").unwrap();
+        assert_eq!(
+            installed_helper(&shim).unwrap(),
+            codex
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("codex-resources/voice")
+                .join(HELPER)
+        );
+
+        let wrapped = data.join("command-wrappers/bin/codex");
+        std::fs::create_dir_all(wrapped.parent().unwrap()).unwrap();
+        std::fs::write(&wrapped, "#!/bin/sh\nexec mise \"$@\"\n").unwrap();
+        assert_eq!(
+            installed_helper(&wrapped).unwrap(),
+            installed_helper(&codex).unwrap()
+        );
+
+        // One release, and it is too old to host voice: say so, rather than
+        // pretending the runtime is merely missing.
+        let only = tempfile::tempdir().unwrap();
+        let data = only.path().canonicalize().unwrap().join("mise");
+        let old = codex_package(&data.join("installs/codex/0.158.0"), "0.158.0", true);
+        let _ = old;
+        let shim = data.join("shims/codex");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, "").unwrap();
+        assert_eq!(
+            installed_helper(&shim).unwrap_err(),
+            VoiceRejection::Unsupported
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_prefers_the_latest_symlink_over_a_newer_unused_release() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().canonicalize().unwrap().join("mise");
+        let installs = data.join("installs/codex");
+        let pinned = codex_package(&installs.join("0.160.0"), "0.160.0", true);
+        codex_package(&installs.join("0.165.0"), "0.165.0", true);
+        symlink("0.160.0", installs.join("latest")).unwrap();
+        let shim = data.join("command-wrappers/bin/codex");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        // The script names mise, so resolution asks `mise which`. That answer
+        // is this machine's own Codex, outside the fixture, and is ignored.
+        // `latest` is the active release inside this data dir.
+        std::fs::write(&shim, "#!/bin/sh\nexec mise \"$@\"\n").unwrap();
+        let helper = pinned
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("codex-resources/voice")
+            .join(HELPER);
+        let _guard = mise_env_lock();
+        assert_eq!(installed_helper(&shim).unwrap(), helper);
+    }
+
+    /// Several releases, and `mise which` names one of them. That release's
+    /// helper wins over `latest`.
+    #[cfg(unix)]
+    #[test]
+    fn helper_follows_mise_which_inside_the_data_dir() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let _guard = mise_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().canonicalize().unwrap().join("mise");
+        let installs = data.join("installs/codex");
+        let pinned = codex_package(&installs.join("0.160.0"), "0.160.0", true);
+        codex_package(&installs.join("0.165.0"), "0.165.0", true);
+        symlink("0.165.0", installs.join("latest")).unwrap();
+        std::fs::write(installs.join(".mise.backend.toml"), "short = \"codex\"\n").unwrap();
+        let bindir = temp.path().join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        let mise = bindir.join("mise");
+        std::fs::write(&mise, format!("#!/bin/sh\necho '{}'\n", pinned.display())).unwrap();
+        std::fs::set_permissions(&mise, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shim = data.join("command-wrappers/bin/codex");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+        let previous = std::env::var_os("PATH");
+        let joined = match &previous {
+            Some(path) => {
+                let mut next = bindir.into_os_string();
+                next.push(":");
+                next.push(path);
+                next
+            }
+            None => bindir.into_os_string(),
+        };
+        unsafe { std::env::set_var("PATH", &joined) };
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(path) => std::env::set_var("PATH", path),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        let helper = pinned
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("codex-resources/voice")
+            .join(HELPER);
+        assert_eq!(installed_helper(&shim).unwrap(), helper);
+    }
+
+    #[test]
+    fn helper_ignores_a_package_that_the_executable_does_not_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        // An npm-style bin with no package of its own, and a real package
+        // elsewhere in the tree. The package is not this executable's install.
+        let npm = root.join("npm/bin/codex");
+        std::fs::create_dir_all(npm.parent().unwrap()).unwrap();
+        std::fs::write(&npm, "#!/usr/bin/env node\n").unwrap();
+        codex_package(&root.join("installs/codex/0.165.0"), "0.165.0", true);
+        assert_eq!(
+            installed_helper(&npm).unwrap_err(),
             VoiceRejection::NativeRuntimeUnavailable
         );
     }
