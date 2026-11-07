@@ -341,6 +341,80 @@ fn journal(dir: &Path, chat: &str) -> usize {
     DocsStore::open(dir).unwrap().pending_chat_inbox(chat).unwrap().0.len()
 }
 
+// ── a real edge without the layer ────────────────────────────────────────────
+
+/// A release ships ahead of any edge flag, so a phone with the layer on must work against
+/// an edge with it off, and against one from before the layer existed. Needs that edge:
+///
+/// ```sh
+/// (cd edge && npx wrangler dev --port 27653 --var AUTH_MODE:dev)
+/// ZERON_PLAIN_EDGE=http://127.0.0.1:27653 cargo test -p zeron-client --test relay -- --ignored
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live edge without the layer: set ZERON_PLAIN_EDGE"]
+async fn a_phone_with_the_layer_works_on_an_edge_without_it() {
+    let _serial = SERIAL.lock().await;
+    let edge = std::env::var("ZERON_PLAIN_EDGE").expect("ZERON_PLAIN_EDGE");
+    let user = format!("plain-{}", uuid::Uuid::new_v4().simple());
+    let chat = uuid::Uuid::new_v4().to_string();
+    let token = format!("{user}@org1");
+    let stats = || async {
+        let reply = reqwest::Client::new()
+            .get(format!("{edge}/chat2/{chat}/stats"))
+            .bearer_auth(&token)
+            .send()
+            .await;
+        match reply {
+            Ok(reply) if reply.status().is_success() => reply.json::<serde_json::Value>().await.ok(),
+            _ => None,
+        }
+    };
+
+    // A chat its row says is relayed, as a downgraded edge could leave it.
+    let host = Arc::new(Mutex::new(RegistryDoc::new(HOST)));
+    {
+        let mut doc = host.lock().unwrap();
+        doc.upsert_device(&device_row(true)).unwrap();
+        doc.upsert_chat(&chat_row(&chat, 3, false)).unwrap();
+    }
+    let url = format!(
+        "{}/registry/org1/ws?token={token}&device={HOST}",
+        edge.replacen("http", "ws", 1)
+    );
+    let registry = RegistryClient::connect(&url, host, HOST).await.expect("the host joins");
+    registry.nudge();
+    registry.set_presence(Utc::now().timestamp_millis());
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = ClientConfig::new(&edge, dir.path());
+    config.device_id = PHONE.into();
+    config.relay_layer = true;
+    let client = Client::new(
+        config,
+        Credentials::Dev { user_id: user.clone(), org_id: "org1".into() },
+        Arc::new(NullListener),
+    )
+    .unwrap();
+    registered(&client, &chat).await;
+    eventually("the host's row", 15, || {
+        client.workspace().device(HOST).is_some_and(|d| !d.capabilities.is_empty())
+    })
+    .await;
+    let session = client.open_session(&chat).unwrap();
+    session.set_view_attached(true);
+    eventually("the room", 15, || session.composer().room.connected).await;
+
+    // The room has no queue, so it's a stored row, the same as ever.
+    session.send(SendRequest::text("no layer on this edge")).unwrap();
+    eventually("the outbox to let go", 15, || outbox(dir.path(), &chat) == 0).await;
+    let state = stats().await.expect("the room's stats");
+    assert!(state["headSeq"].as_u64().unwrap_or(0) >= 1, "a stored row: {state}");
+    assert!(state["relayQueue"].as_u64().unwrap_or(0) == 0, "nothing queued: {state}");
+    assert!(session.composer().room.connected, "and the socket stays up");
+    registry.shutdown().await;
+    leave(client);
+}
+
 // ── saying what it runs ──────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

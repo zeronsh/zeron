@@ -313,7 +313,9 @@ and the phone's own `docs.sqlite3` and the room's `/stats` read directly.
 | Fresh install, room has a checkpoint, host away | Loads it with one read, and three relaunches read nothing more. Then opens with no network |
 
 **Tests only:** a Cloud machine's checkpoint and sleep as a phone sees them (`a_sleeping_machines_checkpoint…`, `a_chat_off_screen…`,
-with a checkpoint a host posted, not a real sandbox), and a host losing the capability.
+with a checkpoint a host posted, not a real sandbox), and a host losing the capability. A phone with the layer on against a real
+edge with the flag off, and against `main`'s edge from before the layer, passes `a_phone_with_the_layer_works_on_an_edge_without_it`
+with the real `Client` and real workerd, but not on a simulator.
 
 **Not run at all, and needs a real device:**
 
