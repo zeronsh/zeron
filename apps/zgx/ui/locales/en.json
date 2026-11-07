@@ -47,7 +47,9 @@
       "done": "Done",
       "done_long": "Completed",
       "failed": "Failed",
-      "limited": "Limited"
+      "limited": "Limited",
+      "woke": "Woke",
+      "woke_long": "Woke from sleep"
     },
     "file_tree": {
       "status": {
@@ -490,13 +492,18 @@
         "keep_active": "Active when collapsed",
         "devices_first": "Devices first",
         "projects_first": "Projects first",
-        "empty_projects": "Empty projects"
+        "empty_projects": "Empty projects",
+        "activity": "Activity",
+        "activity_settings": "Activity settings…"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
       "show_less": "Show less",
       "empty_projects_word": "Empty",
-      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}",
+      "activity": "Activity",
+      "working": "Working",
+      "asleep": "Asleep"
     },
     "git": {
       "pull_request": "Pull request",
@@ -803,6 +810,12 @@
     "composer_dock": {
       "fold": "Fold {title}",
       "open": "Open {title}",
+      "open_all": "Show what's waiting",
+      "waiting": "What's waiting",
+      "subagents": "Subagents",
+      "alerts": "Alerts",
+      "dismiss_alert": "Dismiss {title}",
+      "fold_all": "Fold what's waiting",
       "rest": "{n} more: {names}",
       "send_now": "Send now",
       "steer": "Steer",
@@ -828,6 +841,13 @@
       "more_running": "{n} more",
       "stop_all": "Stop all",
       "running": "Running",
+      "finished": "Finished",
+      "agents": "{n, plural, one {# agent} other {# agents}}",
+      "processes": "{n, plural, one {# process} other {# processes}}",
+      "open_agent": "Open {name}",
+      "n_finished": "{n} finished",
+      "show_finished": "Show {n} finished",
+      "hide_finished": "Hide {n} finished",
       "queued_messages": "Queued messages",
       "queued": "Queued"
     },
@@ -1041,6 +1061,14 @@
       "cut": "Cut",
       "paste": "Paste",
       "label": "Text"
+    },
+    "date_picker": {
+      "label": "Days",
+      "month_year": "{m, select, 1 {January} 2 {February} 3 {March} 4 {April} 5 {May} 6 {June} 7 {July} 8 {August} 9 {September} 10 {October} 11 {November} 12 {December} other {}} {year}",
+      "previous_month": "Previous month",
+      "next_month": "Next month",
+      "time": "Time",
+      "first_weekday": "1"
     }
   },
   "settings": {
@@ -2124,6 +2152,35 @@
       "yesterday": "Yesterday",
       "empty_title": "No history yet",
       "off": "Keep history is off, so pages you visit aren’t kept."
+    },
+    "activity": {
+      "title": "Activity",
+      "terms": "activity inbox sidebar working sleep asleep snooze archive auto-archive idle",
+      "description": "One list of the chats that need you, the latest at the top. Working, asleep and archived chats fold away at its end.",
+      "view": {
+        "label": "Activity sidebar",
+        "description": "Show the sidebar as Activity instead of grouped by project or device. Also in the sidebar's … menu.",
+        "terms": "inbox view sidebar mode"
+      },
+      "list_section": "Activity",
+      "working": {
+        "label": "Fold working chats into Working",
+        "description": "A chat moves into Working while its agent runs, or waits on work that will wake it, and comes back to the top when it's done or needs you.",
+        "terms": "running agent shelf"
+      },
+      "sleep": {
+        "label": "Sleep",
+        "description": "Right-click a chat and choose Sleep to put it in Asleep until a time you pick, on every device. It wakes early if it asks you something, needs an approval or fails, and comes back to the top.",
+        "terms": "snooze later remind wake"
+      },
+      "archive_section": "Archiving",
+      "archive_after": {
+        "label": "Archive idle chats",
+        "description": "Chats with nothing new for this long move to Archived. Pinned, working and asleep chats stay, as do chats waiting on you.",
+        "terms": "auto archive idle old clean up",
+        "never": "Never",
+        "days": "{n, plural, one {After # day} other {After # days}}"
+      }
     }
   },
   "common": {
@@ -2324,6 +2381,7 @@
         "shell_previous_session": "Previous session",
         "session_n": "Session {i}",
         "shell_palette": "Search",
+        "shell_check_updates": "Check for Updates…",
         "shell_settings": "Settings",
         "shell_find": "Find",
         "shell_close": "Close",
@@ -2477,6 +2535,26 @@
       "skipped_body": "You'll see it again when there's a newer version",
       "undo": "Undo",
       "skip_hint": "Hide until there's a newer version"
+    },
+    "activity": {
+      "wake": "Wake",
+      "sleep": {
+        "title": "Sleep",
+        "choice": "{name} · {when}",
+        "in_hour": "In 1 hour",
+        "in_hours": "In 3 hours",
+        "evening": "This evening",
+        "tomorrow": "Tomorrow",
+        "next_week": "Next week",
+        "custom": "Custom…",
+        "custom_title": "Sleep until",
+        "failed": "Couldn't put this chat to sleep",
+        "needs_update": "Zeron on this chat's device needs an update for Sleep.",
+        "until_when": "{day}, {date} at {time}"
+      },
+      "stop_waiting": "Stop waiting",
+      "stop_waiting_failed": "Couldn't stop waiting",
+      "wake_failed": "Couldn't wake this chat"
     }
   },
   "onboarding": {
@@ -3099,6 +3177,30 @@
         "notifications": {
           "title": "Send you notifications",
           "detail": "Like any other notification, set in Settings → Notifications."
+        },
+        "usage_read": {
+          "title": "See how much of your agents' plans you've used",
+          "detail": "Each account's usage, its plan and when it resets. Not who the account is."
+        },
+        "accounts_read": {
+          "title": "See your agents' saved accounts",
+          "detail": "Which is active, and each one's email and name. Never a password or a sign-in."
+        },
+        "accounts_switch": {
+          "title": "Switch which account your agents use",
+          "detail": "It can make another saved account the active one. It can't sign in or remove an account."
+        },
+        "models_read": {
+          "title": "See your agents' models",
+          "detail": "The models, efforts and options each offers, and what a chat uses."
+        },
+        "models_set": {
+          "title": "Change the model your chats use",
+          "detail": "A chat's model, effort and options for its next turn, and what new chats start with."
+        },
+        "messages_send": {
+          "title": "Send messages to your agents as you",
+          "detail": "It can send any chat a message, start new chats and answer their questions, as if you'd typed it. Your agents then do what it says."
         },
         "links_open": {
           "title": "Open links",

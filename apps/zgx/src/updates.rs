@@ -113,7 +113,10 @@ struct Updates {
     rpc: RefCell<Option<Rpc>>,
     /// Bumped with each connection: a retry from an old one does nothing.
     connection: Cell<u64>,
-    list: RefCell<Option<Watch>>,
+    list: RefCell<Option<crate::engine::lists::Listening>>,
+    /// Publishes so far (for tests).
+    #[cfg(test)]
+    published: Cell<u32>,
 }
 
 thread_local! {
@@ -153,9 +156,9 @@ impl Updates {
             device.retries = 0;
         }
         let weak = Rc::downgrade(self);
-        let list = rpc.watch("WatchDevices", json!({}), move |item| {
+        let list = crate::engine::lists::listen(rpc, "WatchDevices", move |frame| {
             if let Some(updates) = weak.upgrade() {
-                updates.heard_devices(&item);
+                updates.heard_devices(frame.list);
             }
         });
         *self.list.borrow_mut() = Some(list);
@@ -172,6 +175,9 @@ impl Updates {
         let now = crate::sessions::now_seconds();
         let here = self.here.borrow().clone();
         let mut start = Vec::new();
+        // Whether anything the rows are made from moved: the list comes again
+        // with every device's heartbeat, which moves none of it.
+        let mut changed = false;
         {
             let mut devices = self.devices.borrow_mut();
             let wanted: Vec<&Json> = list
@@ -180,10 +186,16 @@ impl Updates {
                 .flatten()
                 .filter(|d| !crate::sessions::is_cloud(d) && d["id"].as_str().is_some())
                 .collect();
+            let before = devices.len();
             devices.retain(|id, _| wanted.iter().any(|d| d["id"].as_str() == Some(id)));
+            changed |= devices.len() != before;
             for d in wanted {
                 let id = d["id"].as_str().unwrap_or_default();
-                let device = devices.entry(id.to_owned()).or_default();
+                let device = devices.entry(id.to_owned()).or_insert_with(|| {
+                    changed = true;
+                    Device::default()
+                });
+                let was = (device.name.clone(), device.platform.clone(), device.reports_agents, device.online, device.connected);
                 device.name = d["name"].as_str().unwrap_or("Device").to_owned();
                 device.platform = d["platform"].as_str().unwrap_or_default().to_owned();
                 device.reports_agents = here.as_deref() == Some(id)
@@ -199,12 +211,15 @@ impl Updates {
                 } else if device.watches.is_empty() {
                     start.push(id.to_owned());
                 }
+                changed |= was != (device.name.clone(), device.platform.clone(), device.reports_agents, device.online, device.connected);
             }
         }
         for id in start {
             self.watch_device(&id);
         }
-        self.publish();
+        if changed {
+            self.publish();
+        }
     }
 
     /// `params` for a call to `device`: this Mac's engine takes them as they are.
@@ -395,6 +410,8 @@ impl Updates {
     }
 
     fn publish(&self) {
+        #[cfg(test)]
+        self.published.set(self.published.get() + 1);
         let value = self.value();
         for shared in self.shared.borrow().iter() {
             shared.set(value.clone());
@@ -648,6 +665,34 @@ mod tests {
             "installed_version": "1.0", "latest_version": "1.1",
         }))
         .unwrap()
+    }
+
+    /// The device list comes again with every device's heartbeat: a beat
+    /// that leaves each device as it was (online still) publishes nothing; a
+    /// device renamed, gone quiet or gone does.
+    #[test]
+    fn a_device_s_heartbeat_publishes_nothing() {
+        let updates = Rc::new(Updates::default());
+        *updates.here.borrow_mut() = Some("mac".into());
+        let now = crate::sessions::now_seconds();
+        let at = crate::sessions::rfc3339;
+        let list = |box_name: &str, box_seen: i64| json!([
+            { "id": "mac", "name": "Mac", "platform": "macos", "lastSeenAt": at(now) },
+            { "id": "box", "name": box_name, "platform": "linux", "lastSeenAt": at(box_seen) },
+        ]);
+        updates.heard_devices(&list("Box", now - 3));
+        let first = updates.published.get();
+        assert_eq!(first, 1);
+        updates.heard_devices(&list("Box", now));
+        updates.heard_devices(&list("Box", now));
+        assert_eq!(updates.published.get(), first, "a beat moves nothing");
+        updates.heard_devices(&list("Build box", now));
+        assert_eq!(updates.published.get(), first + 1);
+        updates.heard_devices(&list("Build box", now - 600));
+        assert_eq!(updates.published.get(), first + 2, "gone quiet");
+        assert!(!updates.devices.borrow()["box"].online);
+        updates.heard_devices(&json!([{ "id": "mac", "name": "Mac", "platform": "macos", "lastSeenAt": at(now) }]));
+        assert_eq!(updates.published.get(), first + 3, "gone");
     }
 
     #[test]

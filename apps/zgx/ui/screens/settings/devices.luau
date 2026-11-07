@@ -160,7 +160,7 @@ function M.view(): Node
 				"devices",
 				ds.Settings.Section {
 					ui.show(function(): boolean
-						return #list:get() == 0
+						return #list:get() == 0 and sessions.now:get().state == "ready"
 					end, ds.EmptyState {
 						icon = "laptop",
 						title = ui.t("settings.devices.empty_title"),

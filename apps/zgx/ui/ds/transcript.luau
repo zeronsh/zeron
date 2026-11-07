@@ -128,6 +128,12 @@ export type Props = {
 	-- arrives: this says where they go instead of the next control's, which
 	-- may be another chat's.)
 	on_jump: (() -> ())?,
+	-- The way back's pill: its width while it shows, nil once it goes (the
+	-- composer's own pill moves aside for it).
+	on_jump_width: ((w: number?) -> ())?,
+	-- The composer's own pill beside it: its width while it shows. The two
+	-- are then a centred pair, the way back on the left.
+	beside: (() -> number?)?,
 	-- Kept outside the view (shared state), it brings a view made again
 	-- back where it was: the message at the view's top, and how far above
 	-- the top it started, written as the view goes; nil at the end.
@@ -794,6 +800,8 @@ local PAST_END = 1e9
 -- steps first, so it doesn't follow the new rows to the end at once.
 local GLIDE_MS = 380
 local GLIDE_CLEAR = 1
+-- How long a steer's glide waits for the host's copy of its prompt.
+local LANDING_MS = 2000
 local function to_end(list: Ref, offset: State<number>, rows: number)
 	local el = list:peek()
 	if el and rows > 0 then
@@ -818,11 +826,12 @@ local function mark_sent(id: string)
 	SENT:set(all)
 end
 -- The transcript shown last, for `latest` and `send`.
+-- (`landing`: the id of a prompt the host adds after `push`, a steer's.)
 local shown: (() -> ())? = nil
-local sending: ((push: () -> ()) -> ())? = nil
+local sending: ((push: () -> (), landing: string?) -> ())? = nil
 -- A named transcript's (`name`: a side chat's), by its name.
 local named_shown: { [string]: () -> () } = {}
-local named_sending: { [string]: (push: () -> ()) -> () } = {}
+local named_sending: { [string]: (push: () -> (), landing: string?) -> () } = {}
 
 local function Transcript(props: Props): Node
 	opened_at = ui.now()
@@ -953,8 +962,10 @@ local function Transcript(props: Props): Node
 	-- A send's glide under way (from its step off the end to its landing).
 	local gliding = ui.state(`transcript_gliding{kept}`, false)
 	local glide: any = nil
-	local glide_from: (push: () -> (), from: number, last: Message, r: any) -> ()
-	local function send_here(push: () -> ())
+	-- (Each send's turn: a later one takes over from one still on its way.)
+	local glides = 0
+	local glide_from: (push: () -> (), from: number, last: Message, r: any, landing: string?) -> ()
+	local function send_here(push: () -> (), landing: string?)
 		local n = count:peek()
 		local from = offset:peek()
 		local last = if n > 0 then messages:at(n) else nil
@@ -965,7 +976,7 @@ local function Transcript(props: Props): Node
 			return
 		end
 		if from < PAST_END / 2 then
-			glide_from(push, from, last, r)
+			glide_from(push, from, last, r, landing)
 			return
 		end
 		-- At the end by the sentinel alone (as a conversation opens): the
@@ -980,7 +991,7 @@ local function Transcript(props: Props): Node
 				push()
 				to_end(list, offset, count:peek())
 			else
-				glide_from(push, real, last :: Message, r)
+				glide_from(push, real, last :: Message, r, landing)
 			end
 		end)
 	end
@@ -989,10 +1000,12 @@ local function Transcript(props: Props): Node
 	else
 		sending = send_here
 	end
-	glide_from = function(push: () -> (), from: number, last: Message, r: any)
+	glide_from = function(push: () -> (), from: number, last: Message, r: any, landing: string?)
 		if glide then
 			glide:pause()
 		end
+		glides += 1
+		local turn = glides
 		-- First a step clear of the end (the old last reply holding its
 		-- runway meanwhile, so nothing above moves): the list then no
 		-- longer rests at its end, and doesn't follow the new rows there.
@@ -1005,31 +1018,26 @@ local function Transcript(props: Props): Node
 			held:set { id = last.id, h = r.need() }
 			offset:set(start)
 		end)
-		ui.after(16, function()
-			push()
-			-- The prompt sent: the newest of the person's.
-			local prompt: Message? = nil
-			for i = count:peek(), 1, -1 do
-				local m = messages:at(i)
-				if m and m.role == "user" then
-					prompt = m
-					break
-				end
-			end
-			-- A frame later the new rows are laid out under the old end: the
-			-- glide goes to where the prompt's row really starts, the list's
-			-- end now its runway is under it. It lands on that end exactly,
-			-- so the list follows a reply that outgrows the view; a scroll
-			-- taken meanwhile stays where it went.
+		-- Nothing to glide to: the old reply lets go of its room, and the
+		-- view goes to the end.
+		local function let_go()
+			ui.batch(function()
+				held:set { id = "", h = 0 }
+				gliding:set(false)
+			end)
+			to_end(list, offset, count:peek())
+		end
+		-- A frame later the new rows are laid out under the old end: the
+		-- glide goes to where the prompt's row really starts, the list's
+		-- end now its runway is under it. It lands on that end exactly,
+		-- so the list follows a reply that outgrows the view; a scroll
+		-- taken meanwhile stays where it went.
+		local function rise(prompt: Message?)
 			ui.after(16, function()
 				local row_el = prompt and tops[prompt.id] and tops[prompt.id]:peek()
 				local list_el = list:peek()
 				if not row_el or not list_el or row_el.y == nil or list_el.y == nil then
-					ui.batch(function()
-						held:set { id = "", h = 0 }
-						gliding:set(false)
-					end)
-					to_end(list, offset, count:peek())
+					let_go()
 					return
 				end
 				local target = offset:peek() + (row_el.y :: number) - (list_el.y :: number)
@@ -1055,9 +1063,54 @@ local function Transcript(props: Props): Node
 					end,
 				})
 			end)
+		end
+		ui.after(16, function()
+			push()
+			-- A steer's prompt: the host adds it (its copy, under the queued
+			-- message's id) a moment after it's handed over, the view held
+			-- clear of the end meanwhile; it rises once it's there. One that
+			-- doesn't come (it didn't go, or waits for the turn's end) lets
+			-- the view go back to the end; it holds its runway when it comes.
+			if landing then
+				local waited = 0
+				local function look()
+					if glides ~= turn then
+						return
+					end
+					local at = messages:index_of("id", landing)
+					if at then
+						rise(messages:at(at))
+					elseif waited >= LANDING_MS then
+						let_go()
+					else
+						waited += 16
+						ui.after(16, look)
+					end
+				end
+				look()
+				return
+			end
+			-- The prompt sent: the newest of the person's.
+			local prompt: Message? = nil
+			for i = count:peek(), 1, -1 do
+				local m = messages:at(i)
+				if m and m.role == "user" then
+					prompt = m
+					break
+				end
+			end
+			rise(prompt)
 		end)
 	end
 	local away = ui.state(`transcript_away{kept}`, false)
+	-- The way back's width, as last laid out; said while it shows.
+	local jump_w: number? = nil
+	ui.effect(function()
+		local shown = away:get()
+		if props.on_jump_width then
+			props.on_jump_width(if shown then jump_w else nil)
+		end
+	end)
 	-- Each mounted row, by id: what a place in the window is part of.
 	local rows: { [string]: { outer: Ref, inner: Ref, index: State<number>, m: Message } } = {}
 	-- A find's current match in a message that isn't laid out (the list
@@ -1882,6 +1935,12 @@ local function Transcript(props: Props): Node
 			pb = ui.raw(6, "Zeron's: the pill floats six above the composer"),
 			justify = "center",
 			pointer_events = "none",
+			-- (The composer's pill beside it: half its width and the gap between
+			-- them to the left, the two centred together.)
+			x = motion.spring(ui.computed(function(): number
+				local other = if props.beside then props.beside() else nil
+				return if other and other > 0 then -(other + 8) / 2 else 0
+			end), { stiffness = 380, damping = 30 }),
 			ui.presence(function()
 				return if away:get() then "away" else nil
 			end, function()
@@ -1904,6 +1963,12 @@ local function Transcript(props: Props): Node
 				pill.shadow = "$shadow.md"
 				local pill_ref = ui.ref()
 				pill.ref = pill_ref
+				pill.on_resize = function(size: { w: number, h: number })
+					jump_w = size.w
+					if props.on_jump_width and away:peek() then
+						props.on_jump_width(size.w)
+					end
+				end
 				pill.on_click = function()
 					-- (It leaves as the view arrives: the keys go where it's
 					-- told, not on to the next control.)
@@ -1960,6 +2025,19 @@ return {
 			go(push)
 		else
 			push()
+		end
+	end,
+	-- A queued message sent on (steered in, or sent now), as a send is: the
+	-- transcript shown steps clear of the end, `deliver` hands it to the
+	-- host, and its prompt glides to the top as the host's copy of it (its
+	-- id, `id`, the queued message's) joins, then holds the runway.
+	steer = function(deliver: () -> (), id: string, name: string?)
+		mark_sent(id)
+		local go = if name then named_sending[name] else sending
+		if go then
+			go(deliver, id)
+		else
+			deliver()
 		end
 	end,
 }

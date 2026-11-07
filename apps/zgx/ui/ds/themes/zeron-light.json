@@ -192,10 +192,12 @@
 				"working": "{text.secondary}", "connecting": "{palette.blue.600}", "waiting": "{palette.gray.600}",
 				"input": "{palette.indigo.600}", "approval": "{palette.amber.600}", "plan": "{palette.violet.600}",
 				"done": "{palette.emerald.600}", "failed": "{palette.red.600}", "limited": "{palette.orange.600}",
+				"woke": "{palette.yellow.600}",
 				"dot": {
 					"working": "{text.secondary}", "connecting": "{palette.blue.500}", "waiting": "{palette.gray.500}",
 					"input": "{palette.indigo.500}", "approval": "{palette.amber.500}", "plan": "{palette.violet.500}",
-					"done": "{palette.emerald.500}", "failed": "{palette.red.500}", "limited": "{palette.orange.500}"
+					"done": "{palette.emerald.500}", "failed": "{palette.red.500}", "limited": "{palette.orange.500}",
+					"woke": "{palette.yellow.500}"
 				}
 			},
 			"slider": { "tint": 0.3, "ring": 0.45 },

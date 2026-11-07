@@ -136,6 +136,14 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	-- Check for Updates…: Settings' About & updates, checking now.
+	runs["shell.check_updates"] = function()
+		route.settings("about")
+		local about: any = boundary.load("@app/screens/settings/about")
+		if about and about.check then
+			about.check()
+		end
+	end
 	runs["shell.toggle_sidebar"] = function()
 		fit.toggle_sidebar()
 	end
@@ -145,16 +153,12 @@ return function(): Node
 			fit.toggle_panel()
 		end
 	end
-	-- ⌘W: the panel's active tab, while the panel has the keyboard (as
-	-- × closes it: a file with changes, a busy terminal, ask first). Else
-	-- the window, as Zeron's closes it, and with it the app: what's kept is
-	-- saved as it closes (src/main.rs), the engine and its terminals go on.
-	-- (In a split, else the pane in front: the focused chat out of it, its
-	-- neighbour focused, the last left alone. A chat alone closes the
-	-- window, as it always has.)
+	-- ⌘W closes the visible right panel's active tab first, regardless of
+	-- keyboard focus, through the same unsaved-file / busy-terminal gate as ×.
+	-- Without a tab to close, close the focused split chat or the window.
 	runs["shell.close"] = function()
 		local panel: any = boundary.load("@app/screens/panel")
-		if panel and panel.close_focused_tab and (panel.close_focused_tab :: any)() then
+		if panel and panel.close_active_tab and (panel.close_active_tab :: any)() then
 			return
 		end
 		if route.current:peek().name == "session" then
@@ -334,6 +338,9 @@ return function(): Node
 					run()
 				end,
 			}
+			if k.rule then
+				ui.command { separator = true, menu = k.menu }
+			end
 		end
 	end
 

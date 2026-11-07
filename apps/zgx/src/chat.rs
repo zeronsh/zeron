@@ -84,7 +84,11 @@ struct Chats {
     catalog: RefCell<Vec<Shared>>,
     catalog_state: Cell<CatalogState>,
     views: RefCell<Vec<Weak<View>>>,
-    watches: RefCell<Vec<Watch>>,
+    /// The engine's live session and chat lists, heard as changes.
+    listening: RefCell<Vec<engine::lists::Listening>>,
+    /// Chats this window made that the engine's list may not have yet
+    /// (`made`): its next list replaces them, or lets them go.
+    made_here: RefCell<Vec<String>>,
     rpc: RefCell<Option<Rpc>>,
     /// What each chat waiting on its person asks: "approval" or
     /// "question", by chat (`chat.asks`, for the sidebar's rows).
@@ -422,6 +426,9 @@ struct View {
     draft: Shared,
     rpc: RefCell<Option<Rpc>>,
     open: RefCell<Option<Open>>,
+    /// Prompts not yet in the engine's transcript, by chat. They outlive
+    /// the open view: a send can still be in flight while another chat shows.
+    pending: RefCell<HashMap<String, Vec<Pending>>>,
     /// Moves on every open: an older watch's frames are dropped.
     generation: Cell<u64>,
     /// A finished subagent's transcript, read whole from its uploaded blob
@@ -501,8 +508,6 @@ struct Open {
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
     queue: Vec<Json>,
-    /// Sent, not yet in the transcript: shown under it meanwhile.
-    pending: Vec<Pending>,
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
@@ -552,6 +557,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         draft: host.shared("chat.draft", draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
+        pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
     });
@@ -561,6 +567,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         engine::get().on_connect(move |rpc| {
             if let Some(chats) = weak.upgrade() {
                 chats.connected(rpc);
+            }
+        });
+        let weak = Rc::downgrade(&chats);
+        engine::get().on_unreachable(move || {
+            if let Some(chats) = weak.upgrade() {
+                chats.publish_views();
             }
         });
     }
@@ -632,6 +644,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // A background process of the chat's stopped, on its host (the shipping
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
+    host.async_action("chat.stop_waiting", move |id| async move { stop_waiting(text(&id)).await.map_err(String::from) });
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -703,6 +716,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         draft: host.shared(&format!("chat.lane.{slot}.draft"), draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
+        pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
     });
@@ -756,20 +770,15 @@ fn refs_value(found: &Json) -> Value {
 /// A frame's list, its items by `field`. Taken, not copied: these lists come whole
 /// for every change in any chat, a chat's every field, and a copy made here would
 /// be blocks by the thousand among the window's own, where they'd stay till the next.
-fn by_field(list: Json, field: &str) -> HashMap<String, Json> {
-    let Json::Array(list) = list else { return HashMap::new() };
-    list.into_iter().filter_map(|item| Some((item[field].as_str()?.to_owned(), item))).collect()
-}
-
 impl Chats {
     fn connected(self: &Rc<Self>, rpc: &Rpc) {
         let me = self.clone();
         engine::get().spawn(async move { me.look_ahead().await });
-        let mut watches = Vec::new();
+        let mut listening = Vec::new();
         let weak = Rc::downgrade(self);
-        watches.push(rpc.watch("WatchSessions", json!({}), move |item| {
+        listening.push(engine::lists::listen(rpc, "WatchSessions", move |frame| {
             let Some(me) = weak.upgrade() else { return };
-            *me.sessions.borrow_mut() = by_field(item, "chatId");
+            frame.apply_to_map(&mut me.sessions.borrow_mut());
             me.follow_asks();
             me.publish_views();
             // A turn starting or ending: the newest prompt's line follows.
@@ -789,13 +798,24 @@ impl Chats {
             }
         }));
         let weak = Rc::downgrade(self);
-        watches.push(rpc.watch("WatchChats", json!({}), move |item| {
+        listening.push(engine::lists::listen(rpc, "WatchChats", move |frame| {
             let Some(me) = weak.upgrade() else { return };
-            *me.chats.borrow_mut() = by_field(item, "id");
+            {
+                let mut chats = me.chats.borrow_mut();
+                frame.apply_to_map(&mut chats);
+                // (One made here and still not in the list goes, as it did
+                // when each list replaced them all.)
+                for id in me.made_here.borrow_mut().drain(..) {
+                    let listed = frame.list.as_array().is_some_and(|rows| rows.iter().any(|r| r["id"].as_str() == Some(&id)));
+                    if !listed && frame.changes.is_some() {
+                        chats.remove(&id);
+                    }
+                }
+            }
             me.chats_heard.set(true);
             me.publish_views();
         }));
-        *self.watches.borrow_mut() = watches;
+        *self.listening.borrow_mut() = listening;
         *self.rpc.borrow_mut() = Some(rpc.clone());
         self.ask_looks.borrow_mut().clear();
         let me = self.clone();
@@ -1200,11 +1220,23 @@ impl Chats {
         self.chats.borrow().get(id).cloned()
     }
 
+    /// Whether opening chat `id` marks it seen: when that changes what it
+    /// shows (`seen_would_change`), or its row isn't known yet.
+    fn marks_seen(&self, id: &str) -> bool {
+        let chats = self.chats.borrow();
+        let Some(chat) = chats.get(id) else { return true };
+        let session = self.sessions.borrow().get(id).cloned().unwrap_or(Json::Null);
+        seen_would_change(chat, &session, chrono::Utc::now())
+    }
+
     /// A chat this window just made (`sessions.create`), known before the
     /// engine's list says so: its first message, sent at once, goes where
     /// and how it was made (a side chat in its parent's folder, with its
     /// parent's agent and model). The engine's next list replaces it.
     fn made(&self, id: &str, row: Json) {
+        if !self.chats.borrow().contains_key(id) {
+            self.made_here.borrow_mut().push(id.to_owned());
+        }
         self.chats.borrow_mut().entry(id.to_owned()).or_insert(row);
     }
 
@@ -1469,9 +1501,12 @@ impl View {
         }
         self.draft.set(draft_value("", ""));
         self.subscribe();
+        self.publish_messages();
         self.publish_session();
-        if let Some(id) = self.open_id() {
-            // Its finished state seen, as the shipping app marks it.
+        // Its finished state seen, as the shipping app marks it: only while
+        // there's something to see (opening a chat looked at already writes
+        // nothing, so it doesn't send every window the chat list again).
+        if let Some(id) = self.open_id().filter(|id| chats.marks_seen(id)) {
             engine::get().spawn(async move {
                 let _ = engine::get().call("Mutate", json!({ "op": "markChatSeen", "chatId": id })).await;
             });
@@ -1619,7 +1654,13 @@ impl View {
             if result.is_ok() {
                 open.heard = true;
                 let ids: Vec<&str> = open.entries.iter().map(|e| &*e.id).collect();
-                open.pending.retain(|p| !ids.contains(&p.id.as_str()));
+                let mut pending = self.pending.borrow_mut();
+                if let Some(prompts) = pending.get_mut(&open.id) {
+                    prompts.retain(|p| !ids.contains(&p.id.as_str()));
+                    if prompts.is_empty() {
+                        pending.remove(&open.id);
+                    }
+                }
             }
             result
         };
@@ -1869,14 +1910,18 @@ impl View {
                     _ if running || fresh => Some(("sending", sent)),
                     _ => None,
                 };
-                if let (Some((waiting, since)), Some(shown)) = (waiting, list.pop()) {
+                if let Some((waiting, since)) = waiting
+                    && let Some(shown) = list.pop()
+                {
                     list.push(with_fields(
                         shown,
                         [("waiting", Value::from(waiting)), ("since", Value::Num(since))],
                     ));
                 }
             }
-            list.extend(open.pending.iter().map(Pending::value));
+            if let Some(pending) = self.pending.borrow().get(&open.id) {
+                list.extend(pending.iter().map(Pending::value));
+            }
             list
         };
         // The list first: a reply that ended takes its words into its row
@@ -1908,7 +1953,8 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let value = {
             let open = self.open.borrow();
-            let offline = self.rpc.borrow().as_ref().is_none_or(Rpc::is_closed);
+            let no_connection = self.rpc.borrow().as_ref().is_none_or(Rpc::is_closed);
+            let offline = chat_offline(no_connection, engine::get().unreachable());
             match open.as_ref() {
                 None => Value::Nil,
                 Some(open) => session_value(&chats, open, offline),
@@ -1935,18 +1981,15 @@ impl View {
             .unwrap_or_else(new_id);
         // Shown until the transcript has it (the page's own copy kept in
         // step as the list is published again meanwhile), sending.
-        if self.open_id().as_deref() == Some(&id)
-            && let Some(open) = self.open.borrow_mut().as_mut()
-        {
-            open.pending.push(Pending {
-                id: message_id.clone(),
-                words: words.clone(),
-                paths: local_paths(&req),
-                waiting: "sending",
-                retry: None,
-                at: stamp(now_seconds()),
-            });
-        }
+        self.pending.borrow_mut().entry(id.clone()).or_default().push(Pending {
+            id: message_id.clone(),
+            words: words.clone(),
+            paths: local_paths(&req),
+            waiting: "sending",
+            retry: None,
+            at: stamp(now_seconds()),
+        });
+        self.publish_messages();
         // What it carries, uploaded to the chat's host.
         let mut paths = Vec::new();
         let mut images = 0;
@@ -1975,7 +2018,7 @@ impl View {
                 }
                 Err(why) => {
                     // Failed before it could go: the prompt says so.
-                    self.mark_failed(&message_id, None);
+                    self.mark_failed(&id, &message_id, None);
                     return Err(why);
                 }
             }
@@ -2002,14 +2045,9 @@ impl View {
             .collect();
         let words = crate::appshots::with_appshots(&words, &shots);
         let prompt = with_attachments(&words, &paths, images);
-        let forget = |me: &Rc<Self>| {
-            if let Some(open) = me.open.borrow_mut().as_mut() {
-                open.pending.retain(|p| p.id != message_id);
-            }
-        };
         if !fresh && chats.running(&id) {
             // Queued: it shows in the queue, not the transcript.
-            forget(self);
+            self.forget_pending(&id, &message_id);
             self.publish_messages();
             let mut params = json!({ "chatId": id, "text": words, "holdForTurnEnd": true });
             if !paths.is_empty() {
@@ -2028,7 +2066,7 @@ impl View {
         // parent's.)
         if fresh && config["harness"].is_null() {
             eprintln!("zeron-zgx: chat: {id}: no agent to send with (the chat isn't known here yet)");
-            self.mark_failed(&message_id, None);
+            self.mark_failed(&id, &message_id, None);
             return Err("missing");
         }
         if fresh {
@@ -2037,6 +2075,7 @@ impl View {
                 .await
                 .map_err(|e| {
                     eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
+                    self.mark_failed(&id, &message_id, None);
                     engine::outcome(&e)
                 })?;
         }
@@ -2075,7 +2114,7 @@ impl View {
         let sent = command(&id, run.clone()).await;
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
-            self.mark_failed(&message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run));
         } else if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
             // composer's pick, kept as a draft until now): the chat takes
@@ -2099,9 +2138,9 @@ impl View {
 
     /// A pending prompt that didn't go: failed, with the command that sends
     /// it again (none: it never got that far, and is sent again whole).
-    fn mark_failed(&self, message_id: &str, retry: Option<Json>) {
-        if let Some(open) = self.open.borrow_mut().as_mut()
-            && let Some(p) = open.pending.iter_mut().find(|p| p.id == message_id)
+    fn mark_failed(&self, id: &str, message_id: &str, retry: Option<Json>) {
+        if let Some(pending) = self.pending.borrow_mut().get_mut(id)
+            && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
         {
             p.waiting = "failed";
             p.retry = retry;
@@ -2109,14 +2148,27 @@ impl View {
         self.publish_messages();
     }
 
+    fn forget_pending(&self, id: &str, message_id: &str) {
+        let mut pending = self.pending.borrow_mut();
+        if let Some(prompts) = pending.get_mut(id) {
+            prompts.retain(|p| p.id != message_id);
+            if prompts.is_empty() {
+                pending.remove(id);
+            }
+        }
+    }
+
     /// A failed prompt sent again (its run as it was), sending meanwhile.
     async fn retry(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("id").map(text).unwrap_or_default();
         let message_id = args.field("message").map(text).unwrap_or_default();
+        if self.open_id().as_deref() != Some(&id) {
+            return Err("missing");
+        }
         let run = {
-            let mut slot = self.open.borrow_mut();
-            let open = slot.as_mut().filter(|o| o.id == id).ok_or("missing")?;
-            let p = open.pending.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
+            let mut pending = self.pending.borrow_mut();
+            let prompts = pending.get_mut(&id).ok_or("missing")?;
+            let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
             p.retry.clone()
         };
@@ -2124,15 +2176,13 @@ impl View {
         let Some(run) = run else {
             // It never got as far as a run (an upload failed): the composer
             // has the words; the row goes.
-            if let Some(open) = self.open.borrow_mut().as_mut() {
-                open.pending.retain(|p| p.id != message_id);
-            }
+            self.forget_pending(&id, &message_id);
             self.publish_messages();
             return Err("failed");
         };
         let sent = command(&id, run.clone()).await;
         if sent.is_err() {
-            self.mark_failed(&message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run));
         }
         self.publish_messages();
         sent
@@ -2275,7 +2325,20 @@ impl View {
         }
         self.publish_session();
         self.keep_lease(id, lease, answer["expiresAtMs"].as_f64());
-        Ok(Value::record([("text", Value::from(answer["text"].as_str().unwrap_or_default()))]))
+        // Its files too, as the composer's chips: already on the chat's
+        // host (they went with the message), so saving names them again
+        // rather than sending them up a second time.
+        let attachments: Vec<Value> = answer["attachments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+            .map(queued_attachment)
+            .collect();
+        Ok(Value::record([
+            ("text", Value::from(answer["text"].as_str().unwrap_or_default())),
+            ("attachments", Value::List(attachments.into())),
+        ]))
     }
 
     /// Renews the lease halfway to each expiry, while it is still held.
@@ -2336,11 +2399,31 @@ impl View {
             "leaseId": lease.lease,
             "action": action,
         });
+        let target = chats.target(&chat);
         if action == "commit" {
             params["text"] = json!(args.field("text").map(text).unwrap_or_default());
             params["expectedTextHash"] = lease.hash.clone();
+            // The files it carries now (the composer's chips): the ones it
+            // had by their paths on the host, any added sent up first. (None
+            // given: it keeps the ones it had.)
+            if let Some(list) = args.field("attachments") {
+                let mut paths = Vec::new();
+                for a in list.list() {
+                    let path = a.field("path").map(text).unwrap_or_default();
+                    if path.is_empty() {
+                        continue;
+                    }
+                    if a.field("on_host").is_some_and(Value::truthy) {
+                        paths.push(path);
+                        continue;
+                    }
+                    let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
+                    paths.push(upload(&path, &name, target.as_deref()).await?);
+                }
+                params["attachments"] = json!(paths);
+            }
         }
-        if let Some(t) = chats.target(&chat) {
+        if let Some(t) = &target {
             params["targetDeviceId"] = json!(t);
         }
         let answer = engine::get()
@@ -2393,6 +2476,32 @@ impl View {
     }
 }
 
+/// A queued message's file as the composer's chip: its path on the chat's
+/// host (or the `pending://` ref it travels by from another device), named
+/// as it was attached (an upload's id prefix off), a picture shown as one
+/// where it can be read.
+fn queued_attachment(path: &str) -> Value {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let name = match base.split_once('-') {
+        Some((id, rest)) if id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()) && !rest.is_empty() => rest,
+        _ => base,
+    };
+    let lower = name.to_ascii_lowercase();
+    let image = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff"]
+        .iter()
+        .any(|e| lower.ends_with(e));
+    let mut fields = vec![
+        ("path", Value::from(path)),
+        ("name", Value::from(name)),
+        ("kind", Value::from(if image { "image" } else { "file" })),
+        ("on_host", Value::Bool(true)),
+    ];
+    if image && !path.starts_with("pending://") {
+        fields.push(("src", Value::from(path)));
+    }
+    Value::record(fields)
+}
+
 /// A command for a chat (`QueueCommand`): a run, an interrupt, an answer.
 /// `StopBackgroundTask` for `{ session, task }`, routed to the chat's host.
 async fn stop_task(args: Value) -> Result<Value, Outcome> {
@@ -2411,6 +2520,24 @@ async fn stop_task(args: Value) -> Result<Value, Outcome> {
         .await
         .map_err(|e| engine::outcome(&e))?;
     Ok(Value::Bool(answer["stopping"].as_bool() == Some(true)))
+}
+
+/// The person's Stop waiting for a chat (`StopWaiting`), routed to its host:
+/// what its agent said it waits on no longer holds it.
+async fn stop_waiting(id: String) -> Result<Value, Outcome> {
+    if id.is_empty() {
+        return Err("missing");
+    }
+    let chats = CHATS.with(Rc::clone);
+    let mut params = json!({ "chatId": id });
+    if let Some(t) = chats.chat(&id).and_then(|c| chats.target(&c)) {
+        params["targetDeviceId"] = json!(t);
+    }
+    let answer = engine::get()
+        .call("StopWaiting", params)
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Bool(answer["stopped"].as_bool() == Some(true)))
 }
 
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
@@ -4219,6 +4346,11 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     ]))
 }
 
+/// Whether the open chat is said as offline.
+fn chat_offline(no_connection: bool, unreachable: bool) -> bool {
+    no_connection && unreachable
+}
+
 fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let chat = chats.chat(&open.id);
     // Ready once its transcript has come and the chat itself (its config)
@@ -4447,6 +4579,42 @@ fn stale(updated: &Json) -> bool {
     seconds(updated).is_some_and(|at| now_seconds() - at > STALE_SECONDS)
 }
 
+/// Whether marking `chat` seen at `now` changes anything a viewport reads
+/// from it (`session`: its live state, or null). Every reader of a chat's
+/// `lastSeenAt` compares it with one of three stamps (zeron_proto's status
+/// and sleep rules): its last message, its terminal activity's report, and
+/// when its sleep ended. Once the mark is at or past all three, a newer one
+/// changes nothing on any device, yet it is a synced write: every window
+/// everywhere is sent the whole chat list again for it. Unknown (no row,
+/// a stamp that doesn't read): marked, as before.
+fn seen_would_change(chat: &Json, session: &Json, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let at = |v: &Json| -> Option<Option<chrono::DateTime<chrono::Utc>>> {
+        match v {
+            Json::Null => Some(None),
+            Json::String(s) => chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| Some(t.to_utc())),
+            Json::Number(n) => n.as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(Some),
+            _ => None,
+        }
+    };
+    if chat.is_null() {
+        return true;
+    }
+    let Some(Some(seen)) = at(&chat["lastSeenAt"]) else { return true };
+    let sleep = &chat["sleep"];
+    // (A sleep still to end: a mark now is before it, and changes nothing.)
+    let woke = match (at(&sleep["wokeAt"]), at(&sleep["until"])) {
+        (Some(Some(woke)), _) => Some(woke),
+        (Some(None), Some(Some(until))) => Some(until).filter(|until| *until <= now),
+        (Some(None), Some(None)) => None,
+        _ => return true,
+    };
+    let stamps = [at(&chat["lastMessageAt"]), at(&session["terminalActivity"]["updatedAt"]), Some(woke)];
+    stamps.into_iter().any(|stamp| match stamp {
+        None => true,
+        Some(stamp) => stamp.is_some_and(|stamp| stamp >= seen),
+    })
+}
+
 /// "Jul 1, 4:12 PM", in this Mac's time zone (the shipping app's
 /// `format_timestamp`).
 #[cfg(unix)]
@@ -4543,7 +4711,73 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[path = "chat_pending_tests.rs"]
+mod pending_tests;
+
+#[cfg(test)]
 mod tests {
+    /// Opening a chat marks it seen only while that changes something any
+    /// viewport reads (its last message, its terminal's report, the end of
+    /// its sleep): a chat looked at already writes nothing, so its devices'
+    /// windows aren't each sent the whole chat list again for nothing.
+    #[test]
+    fn opening_a_chat_marks_it_seen_only_when_that_changes_something() {
+        use super::seen_would_change as would;
+        use serde_json::{Value as Json, json};
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-07T05:00:00Z").unwrap().to_utc();
+        let none = Json::Null;
+        // Looked at since its last word: nothing to mark.
+        let seen = json!({ "lastMessageAt": "2026-11-07T04:00:00Z", "lastSeenAt": "2026-11-07T04:30:00.250Z" });
+        assert!(!would(&seen, &none, now));
+        // Said something since: marked.
+        let unseen = json!({ "lastMessageAt": "2026-11-07T04:40:00Z", "lastSeenAt": "2026-11-07T04:30:00Z" });
+        assert!(would(&unseen, &none, now));
+        // Never seen, a row not known, or a stamp that doesn't read: marked, as before.
+        assert!(would(&json!({ "lastMessageAt": "2026-11-07T04:00:00Z" }), &none, now));
+        assert!(would(&Json::Null, &none, now));
+        assert!(would(&json!({ "lastMessageAt": "soon", "lastSeenAt": "2026-11-07T04:30:00Z" }), &none, now));
+        // Its terminal reported since it was seen: marked.
+        let terminal = json!({ "terminalActivity": { "updatedAt": "2026-11-07T04:45:00Z" } });
+        assert!(would(&seen, &terminal, now));
+        let earlier = json!({ "terminalActivity": { "updatedAt": "2026-11-07T04:10:00Z" } });
+        assert!(!would(&seen, &earlier, now));
+        // Woke (early, or its time passed) since it was seen: marked.
+        let woke = |sleep: Json| {
+            let mut chat = seen.clone();
+            chat["sleep"] = sleep;
+            chat
+        };
+        let at = "2026-11-07T03:00:00Z";
+        assert!(would(&woke(json!({ "at": at, "until": "2026-11-07T06:00:00Z", "wokeAt": "2026-11-07T04:50:00Z" })), &none, now));
+        assert!(would(&woke(json!({ "at": at, "until": "2026-11-07T04:55:00Z" })), &none, now));
+        // Still asleep (a mark now is before its end), or woke before it was seen: nothing.
+        assert!(!would(&woke(json!({ "at": at, "until": "2026-11-07T06:00:00Z" })), &none, now));
+        assert!(!would(&woke(json!({ "at": at, "until": "2026-11-07T04:10:00Z" })), &none, now));
+        // Milliseconds, as the doc keeps them.
+        let ms = json!({ "lastMessageAt": 1_794_000_000_500_i64, "lastSeenAt": 1_794_000_000_400_i64 });
+        assert!(would(&ms, &none, now));
+    }
+
+    /// A queued message's files come back to an edit as chips named as they
+    /// were attached, already on the host, a picture shown where it can be.
+    #[test]
+    fn a_queued_file_is_a_chip_named_as_it_was_attached() {
+        let chip = super::queued_attachment("/data/uploads/9e97a72f-shot.png");
+        assert_eq!(chip.field("name"), Some(&Value::from("shot.png")));
+        assert_eq!(chip.field("kind"), Some(&Value::from("image")));
+        assert_eq!(chip.field("on_host"), Some(&Value::Bool(true)));
+        assert_eq!(chip.field("src"), Some(&Value::from("/data/uploads/9e97a72f-shot.png")));
+        let file = super::queued_attachment("/repo/notes/design-notes.txt");
+        assert_eq!(file.field("name"), Some(&Value::from("design-notes.txt")), "only an upload's id prefix goes");
+        assert_eq!(file.field("kind"), Some(&Value::from("file")));
+        assert_eq!(file.field("src"), None);
+        let remote = super::queued_attachment("pending://up-1/photo.jpg");
+        assert_eq!(remote.field("name"), Some(&Value::from("photo.jpg")));
+        assert_eq!(remote.field("kind"), Some(&Value::from("image")));
+        assert_eq!(remote.field("src"), None, "nothing here to show yet");
+        assert_eq!(remote.field("path"), Some(&Value::from("pending://up-1/photo.jpg")));
+    }
+
     #[test]
     fn a_reset_keeps_what_it_left_as_it_was() {
         let built_of = |ids: &[&str]| -> std::collections::HashMap<Rc<str>, super::Built> {
@@ -5511,6 +5745,15 @@ mod tests {
         assert!(matches!(apply(&mut entries, &mut frame), Ok(Change::Rows)));
         let ids: Vec<_> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["a", "b", "c"]);
+    }
+
+    /// No connection yet is the chat loading: "can't load" is for an engine
+    /// that can't be reached.
+    #[test]
+    fn a_chat_waiting_on_its_connection_is_loading() {
+        assert!(!super::chat_offline(true, false));
+        assert!(super::chat_offline(true, true));
+        assert!(!super::chat_offline(false, true));
     }
 
     #[test]

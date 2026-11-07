@@ -43,6 +43,9 @@ pub const KIND_PREFERENCES: &str = "preferences";
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+/// A repository's name and icon, shared by its copies; see `repository_looks`.
+pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
+mod repository_looks;
 mod sidebar_pins;
 mod sidebar_sections;
 
@@ -1145,47 +1148,30 @@ impl RegistryDoc {
         Ok(())
     }
 
+    /// A Space as it reads: its repository's name and icon over its own
+    /// (`repository_looks`). Sets of those two go through `rename_space` and
+    /// `set_space_icon`; never write a value read here back with `upsert_space`.
     pub fn space(&self, space_id: &str) -> Result<Option<Space>, DocError> {
-        Ok(self
-            .overlay_row(KIND_SPACES, space_id)
-            .and_then(|row| row_to::<crate::workspace::RawSpace>(&row))
-            .map(Space::from))
+        Ok(self.space_with_look(space_id))
     }
 
     pub fn read_spaces(&self) -> Result<Vec<Space>, DocError> {
-        let mut spaces: Vec<Space> = self
-            .read_kind::<crate::workspace::RawSpace>(KIND_SPACES)
-            .into_iter()
-            .map(Space::from)
-            .collect();
-        spaces.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(spaces)
+        Ok(self.spaces_with_looks())
     }
 
-    /// LWW display-name set from any device; `None` clears back to the derived
-    /// name (basename of path). `false` when no such row.
+    /// LWW display-name set from any device, for every copy of its repository;
+    /// `None` clears back to the derived name (basename of path). `false` when
+    /// no such row.
     pub fn rename_space(&mut self, space_id: &str, name: Option<&str>) -> Result<bool, DocError> {
-        if !self.row_exists(KIND_SPACES, space_id) {
-            return Ok(false);
-        }
-        self.write(
-            KIND_SPACES,
-            space_id,
-            OpKind::Update,
-            fields([("name", opt_str(name))]),
-        );
-        Ok(true)
+        Ok(self.write_look_field(space_id, "name", opt_str(name)))
     }
 
-    /// LWW picture set from any device, whole (emoji, image and hue in one
-    /// field); `None` clears back to the default tile. `false` when no row.
+    /// LWW picture set from any device, for every copy of its repository, whole
+    /// (emoji, image and hue in one field); `None` clears back to the default
+    /// tile. `false` when no row.
     pub fn set_space_icon(&mut self, space_id: &str, icon: Option<&zeron_proto::SpaceIcon>) -> Result<bool, DocError> {
-        if !self.row_exists(KIND_SPACES, space_id) {
-            return Ok(false);
-        }
         let value = icon.map_or(Value::Null, |icon| json!(icon));
-        self.write(KIND_SPACES, space_id, OpKind::Update, fields([("icon", value)]));
-        Ok(true)
+        Ok(self.write_look_field(space_id, "icon", value))
     }
 
     /// Owner-stamped git presence for the space folder (ownership is asserted
@@ -1336,6 +1322,51 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("lastSeenAt", json!(at.timestamp_millis()))]),
+        );
+        Ok(true)
+    }
+
+    /// A chat put to sleep until `until` (`None`: woken, its sleep cleared).
+    /// Each field is its own last write, so a sleep set on one device and an
+    /// early wake on another both land. `false` when no such row.
+    pub fn set_chat_sleep(
+        &mut self,
+        chat_id: &str,
+        until: Option<DateTime<Utc>>,
+        at: DateTime<Utc>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([
+                ("sleepUntil", json!(until.map(|t| t.timestamp_millis()))),
+                ("sleptAt", json!(until.map(|_| at.timestamp_millis()))),
+                ("sleepWokeAt", Value::Null),
+            ]),
+        );
+        Ok(true)
+    }
+
+    /// A sleeping chat woken early by its host (it asked for the person, or
+    /// failed): stamped once, so the first wake is the one shown. `false`
+    /// when it isn't asleep (no row, no sleep, its time passed, or woken
+    /// already).
+    pub fn wake_chat(&mut self, chat_id: &str, at: DateTime<Utc>) -> Result<bool, DocError> {
+        let Some(sleep) = self.chat(chat_id)?.and_then(|c| c.sleep) else {
+            return Ok(false);
+        };
+        if sleep.woke_at.is_some() || sleep.until <= at {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("sleepWokeAt", json!(at.timestamp_millis()))]),
         );
         Ok(true)
     }
@@ -1570,6 +1601,7 @@ impl RegistryDoc {
                 "backgroundTasks",
                 serde_json::to_value(&session.background_tasks)?,
             ),
+            ("waiting", serde_json::to_value(&session.waiting)?),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())

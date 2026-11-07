@@ -58,6 +58,10 @@ local defaults = ui.persist("chat_new_defaults", {
 	device = nil :: string?,
 })
 
+-- The last default a plugin chose that was taken (its time, ms): one is
+-- taken once, across restarts, never again over a pick made since.
+local plugin_default_seen = ui.persist("chat_new_defaults_plugin", 0)
+
 local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
 -- Those a session takes only with a message sent (shared.picks keeps them
 -- meanwhile); the rest change it as they're picked.
@@ -196,6 +200,33 @@ local function Composer(): Node
 		end)
 		if was:peek() ~= id then
 			was:set(id)
+		end
+	end)
+	-- What a new chat starts with, as a plugin allowed "models.set" chose it
+	-- (screens/plugins publishes it once the engine allowed it): kept as a
+	-- pick made here would be, and shown at once on a new chat.
+	local plugin_default = ui.shared("plugins.new_chat_model", nil :: any)
+	ui.effect(function()
+		local asked = plugin_default:get()
+		if type(asked) ~= "table" or type(asked.model) ~= "string" then
+			return
+		end
+		local seq = tonumber(asked.seq) or 0
+		if seq <= plugin_default_seen:peek() then
+			return
+		end
+		plugin_default_seen:set(seq)
+		local d = table.clone(defaults:peek()) :: any
+		d.model = asked.model
+		d.effort = asked.effort
+		defaults:set(d)
+		if session_id:peek() == nil then
+			ui.batch(function()
+				locals.model:set(asked.model)
+				if asked.effort ~= nil then
+					locals.effort:set(asked.effort)
+				end
+			end)
 		end
 	end)
 	-- A new chat's project follows the route's: as the route comes home, or
@@ -792,6 +823,8 @@ local function Composer(): Node
 					if shared.text:peek() == "" then
 						shared.text:set(text_out)
 					end
+					-- Its files too, before any added since.
+					shared.restore_cargo_of(id, carried)
 				end)
 			end
 			if running:peek() then
@@ -985,6 +1018,15 @@ local function Composer(): Node
 			open_model = shared.open_model,
 			model_open = model_open,
 			tray = TRAY,
+			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			aside = function(): number?
+				return shared.jump_width:get()
+			end,
+			on_pill_width = function(w: number?)
+				if shared.pill_width:peek() ~= w then
+					shared.pill_width:set(w)
+				end
+			end,
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
@@ -1109,7 +1151,11 @@ local function Composer(): Node
 			on_queue_send = function(item: string)
 				local id = session_id:peek()
 				if id then
-					store.queue(id, { op = "send", item = item })
+					-- Its prompt glides to the top and holds the runway, as a
+					-- sent one does (the host's copy has the queued row's id).
+					T.steer(function()
+						store.queue(id, { op = "send", item = item })
+					end, item)
 				end
 			end,
 			on_queue_edit = function(item: string)

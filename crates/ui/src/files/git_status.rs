@@ -128,8 +128,9 @@ impl GitStatusSource {
             && self.context.target_device_id == context.target_device_id
             && match (&self.context.checkout_id, &context.checkout_id) {
                 (Some(a), Some(b)) => a == b,
-                (None, None) => self.context.cwd == context.cwd,
-                _ => false,
+                // Unopened chats have no checkout ID yet. They can still
+                // share the viewed chat's source for the same host and path.
+                _ => self.context.cwd == context.cwd,
             }
     }
 

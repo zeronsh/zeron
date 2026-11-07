@@ -1,0 +1,9 @@
+{
+  "id": "account-rotate",
+  "name": "Account rotate",
+  "version": "1.0.0",
+  "description": "Switches Claude Code to your next saved account when the active one drops below 10% remaining, once its running chats finish.",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": ["service", "usage.read", "accounts.read", "accounts.switch"]
+}

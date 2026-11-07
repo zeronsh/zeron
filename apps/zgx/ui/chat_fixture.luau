@@ -117,6 +117,27 @@ ui.command {
 		end
 	end,
 }
+-- The open session with subagents (the host says them, as it does from the
+-- transcript's spawn chips): `subagents_running` has two working and one
+-- done; opening one is noted (`open_subagent:<session>:<doc>`).
+do
+	local lanes = require("@app/screens/chat/lanes") :: any
+	lanes.open_subagent = function(session: string, sub: any)
+		note(`open_subagent:{session}:{sub.ref}`)
+	end
+	local published = ui.shared("chat.subagents", {} :: { any })
+	ui.command {
+		id = "subagents_running",
+		title = "Subagents run: two working, one done",
+		run = function()
+			published:set({
+				{ ref = "d1", title = "scan the repo", status = "running" },
+				{ ref = "d2", title = "read the docs", status = "running" },
+				{ ref = "d3", title = "find the flaky test", status = "done" },
+			})
+		end,
+	}
+end
 -- The open session, as if it ran on the box (a remote device that's up),
 -- or on the old laptop (one gone quiet).
 for _, d in { "box", "old" } do
@@ -158,8 +179,25 @@ local function settled(value: any): any
 		end,
 	}
 end
+-- `send_fails`: the next message doesn't go (an engine that refuses it).
+local SEND_FAILS = ui.state("fixture_send_fails", false)
+ui.command {
+	id = "send_fails",
+	title = "The next send doesn't go",
+	run = function()
+		SEND_FAILS:set(true)
+	end,
+}
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	if SEND_FAILS:peek() then
+		SEND_FAILS:set(false)
+		return {
+			after = function(_self: any, _ok: any, err: (any) -> ())
+				err({ message = "failed" })
+			end,
+		}
+	end
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end
@@ -289,7 +327,46 @@ stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
 stub.answer = function() end
-stub.queue = function() end
+-- A queued message sent on (steered in): noted; `steer_fails` makes the
+-- next one not go.
+local STEER_FAILS = ui.state("fixture_steer_fails", false)
+stub.queue = function(id: string, op: any, failed: (() -> ())?)
+	if op.op ~= "send" then
+		return
+	end
+	note(`queue:{id}:send:{op.item}`)
+	if STEER_FAILS:peek() then
+		STEER_FAILS:set(false)
+		if failed then
+			failed()
+		end
+	end
+end
+-- The engine's copy of a steered message landing (a moment after the
+-- steer): the queued row's id is its prompt's in the transcript, and it
+-- leaves the queue.
+ui.command {
+	id = "steer_lands",
+	title = "The steered message joins the transcript",
+	run = function()
+		store.messages:push { id = "q1", role = "user", text = "Queued words", attachments = {} }
+		if opened then
+			publish(opened, { queue = {} })
+		end
+	end,
+}
+ui.command {
+	id = "steer_fails",
+	title = "The next steer doesn't go",
+	run = function()
+		STEER_FAILS:set(true)
+	end,
+}
+-- A queued message's files, as the host hands them to an edit (`q2`'s).
+local QUEUED_FILES = {
+	{ path = "/host/uploads/9e97a72f-shot.png", name = "shot.png", kind = "image", src = "/host/uploads/9e97a72f-shot.png", on_host = true },
+	{ path = "/host/uploads/ea958e1e-note.txt", name = "note.txt", kind = "file", on_host = true },
+}
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
@@ -301,13 +378,33 @@ stub.queue_edit = function(id: string, item: string): any
 		end
 	end
 	publish(id, { queue = q })
+	if item == "q2" then
+		return settled({ text = "Queued with files", attachments = QUEUED_FILES })
+	end
 	return settled({ text = "Queued words" })
 end
-stub.queue_finish = function(id: string, item: string, action: string, text: string?): any
-	note(`queue_finish:{id}:{item}:{action}:{text or ""}`)
+stub.queue_finish = function(id: string, item: string, action: string, text: string?, attachments: { any }?): any
+	local files = ""
+	if attachments then
+		local names = {}
+		for _, a in attachments do
+			table.insert(names, `{a.path}{if a.on_host then "@host" else ""}`)
+		end
+		files = `:files={table.concat(names, ",")}`
+	end
+	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
 	publish(id, { queue = { { id = item, text = if action == "commit" then text else "Queued words" } } })
 	return settled(nil)
 end
+ui.command {
+	id = "queue_with_files",
+	title = "A message with files waits in the queue",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q2", text = "Queued with files" } } })
+		end
+	end,
+}
 ui.command {
 	id = "queue_one",
 	title = "A message waits in the queue",

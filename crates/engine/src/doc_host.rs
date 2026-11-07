@@ -489,6 +489,17 @@ fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     format!("{body}{trailer}")
 }
 
+/// What a queue row says: its words, or for files with no words, what a run
+/// of them says. A row needs text on every device (one without is refused and
+/// dropped as read), so files alone must not come to an empty one.
+fn queued_row_text(text: &str, has_files: bool) -> &str {
+    if has_files && text.trim().is_empty() {
+        ATTACHMENT_ONLY_PROMPT
+    } else {
+        text
+    }
+}
+
 fn queue_text_hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
@@ -3598,6 +3609,25 @@ impl DocHost {
     /// over the peer link (retry until they land) while the command is
     /// already durably queued. The send is a local write — attachment bytes
     /// chase it, never gate it (2026-08-19 incident).
+    /// The question (or approval) `chat_id` waits on, latest first: its
+    /// request id, or `None` when nothing waits.
+    pub(crate) fn pending_input(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let entries = handle.doc.read_entries()?;
+        Ok(entries.iter().rev().flat_map(|e| e.parts.iter().rev()).find_map(|part| match part {
+            zeron_doc::MessagePart::Input { request_id, resolved: false, .. } => Some(request_id.clone()),
+            _ => None,
+        }))
+    }
+
+    /// Record who sent message (or queued row) `id` of `chat_id`, beside
+    /// its transcript (`SessionDoc::sent_by`; synced with the chat, shown
+    /// nowhere).
+    pub(crate) fn mark_sent_by(&self, chat_id: &str, id: &str, by: serde_json::Value) -> Result<(), EngineError> {
+        self.open(chat_id)?.doc.mark_sent_by(id, by)?;
+        Ok(())
+    }
+
     pub fn queue_command_with_transfers(
         &self,
         chat_id: &str,
@@ -3681,7 +3711,7 @@ impl DocHost {
         let id = new_id();
         handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
-            text: text.to_string(),
+            text: queued_row_text(text, !attachments.is_empty()).to_string(),
             attachments,
             hold_for_turn_end,
             issued_by: self.inner.config.device_id.clone(),
@@ -3975,7 +4005,10 @@ impl DocHost {
             }
 
             let replacement = match action {
-                FinishQueueEditAction::Commit => Some(text.unwrap_or_default()),
+                FinishQueueEditAction::Commit => Some(queued_row_text(
+                    text.unwrap_or_default(),
+                    attachments.map_or(!item.attachments.is_empty(), |kept| !kept.is_empty()),
+                )),
                 FinishQueueEditAction::Cancel | FinishQueueEditAction::ReleaseUnchanged => None,
                 FinishQueueEditAction::Discard => Some(""),
             };
@@ -4149,7 +4182,9 @@ impl DocHost {
     /// Promote one held row without ever interrupting a turn. A live,
     /// steerable turn receives it as steering; if that turn has already ended,
     /// it starts normally as the next turn. Turn-boundary providers retain it
-    /// in their mailbox until ready. Attachment-bearing rows stay untouched.
+    /// in their mailbox until ready. A row's files go with it as the steer's
+    /// attachments (images as images); one whose files from another device
+    /// haven't landed yet stays queued, and the call says why.
     pub async fn steer_queued_now(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         if !self.is_host(chat_id) {
             return Err(EngineError::Other(format!(
@@ -4167,9 +4202,12 @@ impl DocHost {
         else {
             return Ok(false);
         };
-        if !candidate.attachments.is_empty() {
+        // Its files ride the steer, as images where they are. Ones still on
+        // their way from another device can't go yet (the drain waits for
+        // them; a steer says so).
+        if !self.missing_row_attachments(&candidate).is_empty() {
             return Err(EngineError::Other(
-                "messages with attachments cannot be steered mid-turn".into(),
+                "this message's images are still uploading".into(),
             ));
         }
         if candidate.delivery_gate.is_some() {
@@ -4470,7 +4508,13 @@ impl DocHost {
         self.resolve_attachment_refs(&mut prompt, &mut attachments);
         if send == QueueSend::Steer {
             match sessions
-                .steer(chat_id, &prompt, Some(message_id.clone()))
+                .steer_now(
+                    chat_id,
+                    &prompt,
+                    attachments.clone(),
+                    Some(message_id.clone()),
+                    now_ms(),
+                )
                 .await?
             {
                 SteerOutcome::Accepted => return Ok(()),
@@ -5893,8 +5937,10 @@ impl DocHost {
         {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
+        // A steer is read at once: while a command runs, its turn stops in
+        // place first (the runtime and its background work stay).
         match sessions
-            .steer_at(chat_id, &prompt, message_id.clone(), issued_at)
+            .steer_now(chat_id, &prompt, Vec::new(), message_id.clone(), issued_at)
             .await?
         {
             SteerOutcome::Accepted => {

@@ -4,8 +4,38 @@
 pub use std::process::Stdio;
 #[cfg(not(windows))]
 pub use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) mod cmd_shim;
+
+/// The file an npm `.cmd` shim runs (its node script or native `.exe`),
+/// when the shim is one npm's cmd-shim wrote: on Windows the shim is all a
+/// PATH lookup finds, and only its target says which package (and so which
+/// owner) it belongs to.
+pub fn npm_shim_target(shim: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::io::Read as _;
+    let is_shim = shim
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+    if !is_shim {
+        return None;
+    }
+    let file = std::fs::File::open(shim).ok()?;
+    if file.metadata().ok()?.len() > cmd_shim::MAX_SHIM_BYTES {
+        return None;
+    }
+    let mut contents = String::new();
+    file.take(cmd_shim::MAX_SHIM_BYTES)
+        .read_to_string(&mut contents)
+        .ok()?;
+    let relative = match cmd_shim::parse(&contents)? {
+        cmd_shim::ShimTarget::Exe(relative) => relative,
+        cmd_shim::ShimTarget::Node { script, .. } => script,
+    };
+    let mut target = shim.parent()?.to_path_buf();
+    // The shim spells its target with `\`, whatever platform reads it.
+    target.extend(relative.split(['\\', '/']).filter(|part| !part.is_empty()));
+    Some(target)
+}
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
