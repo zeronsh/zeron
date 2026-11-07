@@ -257,6 +257,9 @@ return function(props: Props): Node
 			beside = function(): number
 				return panel_beside()
 			end,
+			picture = function(): any
+				return if appearance.showing:peek() == "image" then appearance.image:peek() else nil
+			end,
 			key = function(): string
 				local showing = appearance.showing:get()
 				if showing == "image" then

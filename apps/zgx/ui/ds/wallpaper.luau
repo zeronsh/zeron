@@ -10,6 +10,7 @@
 --   	shown = fn,                  whether it shows (a new chat's; a session has none)
 --   	key = fn,                    what stands in it now ("" nothing), and
 --   	content = function(key) … end   builds that, filling the art's box
+--   	picture = fn,                the picture standing there (its grid, for the effects)
 --   	width = state, beside = fn,  where the window is (below)
 --   	provide = { … },             what its content reads (`ui.use_context`)
 --   }
@@ -19,12 +20,12 @@
 -- `beside` (what stands between the box and the window's right, a panel),
 -- and the box shows what of it falls inside. A sidebar or a panel sliding
 -- only moves the box's edges: the art, its effect and the effect's grid
--- stay where they are. A window resized lays
+-- (the picture's own pixels) stay where they are. A window resized lays
 -- the art out again, covering it (zgx's `fit`), with no script when
 -- `width` is a state.
 -- Changing what stands in it, or the effect, crossfades (an effect is its
--- layer's shader, given as it is made); `intensity` and `density` change
--- in place.
+-- layer's shader, given as it is made); `intensity`, `density` and `faded`
+-- change in place.
 --
 -- `Picture { src, w, h, x, y, zoom }` is a picture laid in it as Zeron lays
 -- its new-thread background: covering the box, `zoom` times that (1 to 4),
@@ -45,6 +46,10 @@ export type Props = {
 	-- again (crossfading) as the key changes.
 	key: () -> string,
 	content: (key: string) -> Node,
+	-- The picture standing there now, if one does (read as what stands
+	-- there is built): the effects work on its grid of pixels. A plugin's
+	-- art has none: a pixel there is half a point.
+	picture: (() -> Picture?)?,
 	-- What its content reads, by name (on the box that holds it: a node
 	-- that replaces what's in it sees them).
 	provide: { [string]: any }?,
@@ -71,9 +76,14 @@ M.EFFECTS = { "none", "dither", "ascii", "halftone", "scanlines" }
 -- The zoom a picture takes, at least and at most (Zeron's).
 M.MIN_ZOOM, M.MAX_ZOOM = 1, 4
 
--- What each strength and density is, on the effect's shader.
-M.INTENSITY = { subtle = 0.45, medium = 0.75, strong = 1 } :: { [string]: number }
-M.DENSITY = { sparse = 0.38, medium = 0.22, dense = 0.08 } :: { [string]: number }
+-- How strongly an effect draws over the picture: "medium" is Zeron's
+-- whole effect; "subtle" lets some of the picture through, "strong" pushes
+-- past it.
+M.INTENSITY = { subtle = 0.6, medium = 1, strong = 1.3 } :: { [string]: number }
+-- What each density is (ASCII): how much more of the darkest cells (the
+-- lightest, in the light) than "medium" leaves without a character, or
+-- (below 0) less.
+M.DENSITY = { sparse = 0.25, medium = 0, dense = -0.2 } :: { [string]: number }
 
 -- A prop's value now: a function's answer, a state's (followed), or the
 -- value itself.
@@ -159,7 +169,6 @@ end
 local FADE = 320
 
 function M.Wallpaper(props: Props): Node
-	local box = ui.ref()
 	local function effect(): string
 		return read(props.effect, "none")
 	end
@@ -175,15 +184,18 @@ function M.Wallpaper(props: Props): Node
 			return ""
 		end
 		local how = effect()
-		-- (Halftone's and the lines' paper follow the scheme.)
-		local paper = if how == "halftone" or how == "scanlines" then (if light() then ":light" else ":dark") else ""
+		-- (Every effect's paper follows the scheme.)
+		local paper = if how ~= "none" then (if light() then ":light" else ":dark") else ""
 		return `{how}{paper}|{w}`
 	end
 	local function strength(): number
-		return M.INTENSITY[read(props.intensity, "medium")] or 0.75
+		return M.INTENSITY[read(props.intensity, "medium")] or 1
 	end
 	local function threshold(): number
-		return M.DENSITY[read(props.density, "medium")] or 0.22
+		return M.DENSITY[read(props.density, "medium")] or 0
+	end
+	local function faded(): boolean
+		return read(props.faded, true)
 	end
 	-- What stands in it and its effect, made again as either changes (the
 	-- shader is fixed as it's made), crossfading: the new fades in over the
@@ -197,9 +209,19 @@ function M.Wallpaper(props: Props): Node
 		local how, w = string.match(k, "^([^|]*)|(.*)$")
 		how = string.match(how or "", "^[^:]*") or "none"
 		local el = ui.ref()
+		local picture = if props.picture then props.picture() else nil
+		-- What changes in place: set on its layer as it changes.
+		ui.effect(function()
+			local p = effects.params { strength = strength(), threshold = threshold(), faded = faded() }
+			local node: any = el:peek()
+			if node then
+				anime.utils.set(node, { layerParam0 = p[1][1], layerParam1 = p[1][2], layerParam3 = p[1][4] })
+			end
+		end)
 		-- The art's box: the window's width from the box's right edge, moved
-		-- right by what stands beside the box; the effect drawn over it.
-		local scene: { [any]: any } = {
+		-- right by what stands beside the box; the effect drawn over it (on
+		-- the picture's grid: the box is what the picture covers).
+		return ui.div {
 			ref = el,
 			-- (Named, for tests.)
 			id = "wallpaper-layer",
@@ -211,40 +233,17 @@ function M.Wallpaper(props: Props): Node
 			x = props.beside,
 			overflow = "hidden",
 			provide = props.provide,
-			fade = function()
-				return { 0, if read(props.faded, true) then (box.height or 0) else 0 }
-			end,
+			layer_shader = effects.shader(how),
+			layer_params = effects.params {
+				strength = strength(),
+				threshold = threshold(),
+				light = light(),
+				faded = faded(),
+				picture = picture,
+			},
 			props.content(w or ""),
 		}
-		-- (params[0]: the cell, the strength, the threshold; set in place.
-		-- Halftone and the lines draw at a share of it: theirs is the
-		-- picture's whole surface, not its bright cells.)
-		local share = if how == "halftone" then 0.8 elseif how == "scanlines" then 0.64 else 1
-		if how ~= "none" then
-			ui.effect(function()
-				local strong, dense = strength() * share, threshold()
-				local node = el:peek()
-				if node then
-					anime.utils.set(node, { layerParam1 = strong, layerParam2 = dense })
-				end
-			end)
-		end
-		if how == "dither" then
-			scene.layer_shader = effects.dither
-			scene.layer_params = effects.dither_params(2, strength())
-		elseif how == "ascii" then
-			scene.layer_shader = effects.ascii
-			scene.layer_params = effects.ascii_params(1.5, strength(), threshold())
-		elseif how == "halftone" then
-			scene.layer_shader = effects.halftone
-			scene.layer_params = effects.halftone_params(4, strength() * share, light())
-		elseif how == "scanlines" then
-			scene.layer_shader = effects.scanlines
-			scene.layer_params = effects.scanlines_params(3, strength() * share, light())
-		end
-		return ui.div(scene)
 	end, {
-		ref = box,
 		absolute = true,
 		left = 0,
 		right = 0,
