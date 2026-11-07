@@ -55,6 +55,26 @@ export const tokenTimestampCheck = (
  * whatever it last reported (active runs, clients) no longer holds. */
 export const HEARTBEAT_STALE_MS = 3 * 60_000;
 
+/** The slowest cadence counted as a fast one. Newer engines beat every 15 s
+ * while a turn runs, and say so (`everySecs`). */
+export const FAST_BEAT_MAX_MS = 20_000;
+/** However fast it beats, at least this long before it counts as gone: a
+ * machine busy enough to miss a beat or two isn't dead. */
+export const FAST_STALE_MIN_MS = 45_000;
+
+/**
+ * How long a machine may go without a heartbeat before it counts as gone:
+ * three beats at the cadence it last said it keeps, never under
+ * {@link FAST_STALE_MIN_MS}. An engine that never said (an older one), or one
+ * beating at the idle pace, gets {@link HEARTBEAT_STALE_MS}. Read with a turn
+ * in flight, this is how long a killed turn waits before its machine is
+ * brought back to resume it.
+ */
+export const heartbeatStaleMs = (beatEveryMs: number | undefined): number =>
+  beatEveryMs !== undefined && beatEveryMs > 0 && beatEveryMs <= FAST_BEAT_MAX_MS
+    ? Math.max(FAST_STALE_MIN_MS, 3 * beatEveryMs)
+    : HEARTBEAT_STALE_MS;
+
 export interface IdleInput {
   readonly now: number;
   readonly idleMs: number;

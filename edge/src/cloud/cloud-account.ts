@@ -84,6 +84,7 @@ import {
 import {
   AWAKE_STATES,
   HEARTBEAT_STALE_MS,
+  heartbeatStaleMs,
   MACHINES,
   diskLevel,
   idleDecision,
@@ -212,6 +213,9 @@ export interface CloudSessionView {
   readonly disk?: { readonly usedGiB: number; readonly capacityGiB: number; readonly level: DiskLevel };
   /** Its disk doesn't fit: it waits for the user to pick a bigger size. */
   readonly wakeBlocked?: { readonly reason: "disk_too_small"; readonly neededGiB: number };
+  /** Unix ms its engine last found its chat store damaged on a start and
+   * rebuilt it (from the rooms, and what could still be read). */
+  readonly storeRecoveredAt?: number;
   /** Unix ms the provider deletes its disk, while it sleeps (a refresh pushes
    * this out; past it with `state: "data_expired"` it is gone). */
   readonly expiresAt?: number;
@@ -295,6 +299,10 @@ export interface Heartbeat {
   readonly waitingRuns?: number;
   /** Its disk's used bytes, as the machine reads them. */
   readonly diskUsedBytes?: number;
+  /** How often it beats from here on, in seconds. Older engines don't say. */
+  readonly everySecs?: number;
+  /** When this run of the engine found its chat store damaged and rebuilt it. */
+  readonly storeRecoveredAt?: number;
 }
 
 /** The GitHub repository a new session runs on (its project's origin). */
@@ -391,6 +399,9 @@ interface SessionRecord {
   backgroundRuns?: number;
   /** Last heartbeat's runs waiting on an answer. */
   waitingRuns?: number;
+  /** How often its engine said, in its last heartbeat, it beats from then on
+   * (newer engines: every 15 s while a turn runs). */
+  beatEveryMs?: number;
   lastTtlExtendAt?: number;
   /** Throttles the "ready but silent — did the provider auto-stop it?" probe. */
   lastProbeAt?: number;
@@ -423,6 +434,8 @@ interface SessionRecord {
   /** A resume was refused for want of disk. Never retried on its own and
    * never upsized on its own: credits change, so the user picks. */
   wakeBlocked?: { reason: "disk_too_small"; neededGiB: number };
+  /** See {@link CloudSessionView.storeRecoveredAt}. */
+  storeRecoveredAt?: number;
   /** The disk's high-water mark and when it was last raised or settled. */
   disk?: { usedGiB: number; at: number };
   /** Resumed, and its disk may still be copying in: a lower reading means
@@ -736,6 +749,7 @@ export class CloudAccount extends DurableObject<Env> {
       ...(disk ? { disk } : {}),
       ...(s.wakeStage && Date.now() - s.wakeStage.at < WAKE_STAGE_TTL_MS ? { stage: s.wakeStage.stage } : {}),
       ...(s.wakeBlocked ? { wakeBlocked: { reason: s.wakeBlocked.reason, neededGiB: s.wakeBlocked.neededGiB } } : {}),
+      ...(s.storeRecoveredAt === undefined ? {} : { storeRecoveredAt: s.storeRecoveredAt }),
       ...(expiresAt === undefined ? {} : { expiresAt })
     };
   }
@@ -1900,6 +1914,11 @@ export class CloudAccount extends DurableObject<Env> {
     s.clients = beat.clients;
     s.backgroundRuns = backgroundRuns;
     s.waitingRuns = waitingRuns;
+    s.beatEveryMs = beat.everySecs === undefined ? undefined : beat.everySecs * 1000;
+    if (beat.storeRecoveredAt !== undefined && beat.storeRecoveredAt !== s.storeRecoveredAt) {
+      s.storeRecoveredAt = beat.storeRecoveredAt;
+      this.ledger("store_recovered", s, { detail: new Date(beat.storeRecoveredAt).toISOString() });
+    }
     s.lastHeartbeatAt = now;
     if (busy || changed) s.lastActiveAt = now;
     this.markAlive(s, now);
@@ -1911,7 +1930,7 @@ export class CloudAccount extends DurableObject<Env> {
       s.idleCheckAt = (s.lastActiveAt ?? now) + this.idleMs();
       // A turn in flight is looked at as soon as its heartbeats would be late,
       // not a whole idle window on: a chat is waiting on that machine.
-      if (working) s.idleCheckAt = Math.min(s.idleCheckAt, now + HEARTBEAT_STALE_MS);
+      if (working) s.idleCheckAt = Math.min(s.idleCheckAt, now + heartbeatStaleMs(s.beatEveryMs));
     }
     const ttlSeconds = provider ? effectiveTtl(provider.capabilities, parseTtlSeconds(this.env.CLOUD_TTL_SECONDS)) : null;
     // Out of credits, a busy machine is not kept alive past its TTL.
@@ -2089,7 +2108,7 @@ export class CloudAccount extends DurableObject<Env> {
       // hung): nobody may send again for days, and the turn is stuck until
       // something boots it. Sleep it and bring it straight back, so its
       // engine's boot recovery resumes the turn or says why it can't.
-      const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS;
+      const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= heartbeatStaleMs(s.beatEveryMs);
       const working =
         s.activeRuns - (s.waitingRuns ?? 0) > 0 ||
         (s.backgroundRuns ?? 0) > 0 ||
@@ -2582,6 +2601,7 @@ export class CloudAccount extends DurableObject<Env> {
     s.wakeStage = undefined;
     s.activeRuns = 0;
     s.clients = 0;
+    s.beatEveryMs = undefined;
     s.idleCheckAt = undefined;
     // A machine that never came up (a sleep from `error`) didn't stop just now:
     // its clock stands, and the provider's reading settles it.
