@@ -76,8 +76,10 @@ export type Child = {
 -- on a palette hue (each optional; none of them is no icon).
 export type ProjectIcon = { emoji: string?, image: string?, hue: string? }
 export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, repository: string?, created: number?, icon: ProjectIcon? }
--- `online`: its presence heartbeat fresh (this device always); `seen`: its
--- last beat, in unix seconds, to judge that again as time passes.
+-- `online`: its presence heartbeat fresh (this device always), published
+-- again as that changes; `seen`: while it's away, its last beat, in unix
+-- seconds ("last seen …"; online, none: its beat moves every few seconds and
+-- shows nowhere).
 -- `cloud`: one of Cloud's (the account's, or a session's machine): never a
 -- device to pick.
 export type Device = { id: string, name: string, platform: string, here: boolean, online: boolean?, seen: number?, version: string?, cloud: boolean? }
