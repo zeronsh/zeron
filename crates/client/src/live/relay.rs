@@ -345,7 +345,15 @@ impl Relay {
     }
 }
 
-/// One `WatchCheckoutChangeRequest` stream, retried 0.5s→5s forever (last
+/// The longest a change request watch waits between tries. One watch per open
+/// checkout: at a few seconds each, a host that's away kept a phone's radio up.
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(120);
+
+fn next_watch_retry(wait: Duration) -> Duration {
+    (wait * 2).min(WATCH_RETRY_MAX)
+}
+
+/// One `WatchCheckoutChangeRequest` stream, retried 0.5s→2min forever (last
 /// snapshot kept through gaps); an engine without the method marks the
 /// device unsupported.
 fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken) {
@@ -406,7 +414,25 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(backoff) => {}
             }
-            backoff = (backoff * 2).min(Duration::from_secs(5));
+            backoff = next_watch_retry(backoff);
         }
     });
+}
+
+#[cfg(test)]
+mod watch_retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_thats_away_is_retried_ever_more_slowly() {
+        let mut wait = Duration::from_millis(500);
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            wait = next_watch_retry(wait);
+            waits.push(wait);
+        }
+        assert_eq!(waits[0], Duration::from_secs(1));
+        assert_eq!(*waits.last().unwrap(), WATCH_RETRY_MAX);
+        assert!(waits.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
 }
