@@ -515,8 +515,13 @@ from our lifecycle events.
   per day (`GET /cloud/{orgId}/usage?from&to`). Operators bill from
   `GET /admin/cloud/usage?month=YYYY-MM[&format=csv]` (`ADMIN_TOKEN`), and each closed month
   is written to R2 at `usage/{YYYY-MM}.json`.
-- **Credits.** One credit is one minute of a small machine: 60 of Boat's billable seconds
-  (which already carry the machine-size multiplier, so larger machines use more per minute).
+- **Credits.** One credit is one minute of a small machine: 30 of Boat's billable seconds
+  (which already carry the machine-size multiplier, so a minute costs 2 credits on a standard
+  machine, 4 on large and about 11 on xlarge). Balances are worked out from the raw seconds, so
+  the rate goes by the UTC day the usage fell on: days before `CLOUD_CREDIT_RATE_FROM` stay at 60
+  seconds a credit, and from that day on it's `CLOUD_CREDIT_SECONDS`. Without a real day in
+  `CLOUD_CREDIT_RATE_FROM`, every day stays at 60. Set it to a whole UTC day after the deploy, and
+  don't move it once that day has come: that would re-price the days in between.
   The balance is credits granted (a one-time `CLOUD_STARTING_CREDITS` on first enable; operator
   grants via `POST /admin/cloud/credits {orgId, userId, credits, reason}`) minus credits used,
   less awake machines' time since their meters were last read. At zero or below, new sessions

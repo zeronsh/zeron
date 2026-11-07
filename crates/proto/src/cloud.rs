@@ -285,7 +285,7 @@ pub struct CloudUsage {
     pub available: bool,
 }
 
-/// One monthly plan. A credit is a minute of the default machine.
+/// One monthly plan. A credit is a minute of a small machine.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingPlan {

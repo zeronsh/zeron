@@ -44,11 +44,11 @@ import {
 import { isBranch, isCheckoutPath, isRepoUrl } from "./install-script";
 import {
   RECONCILE_EVERY_MS,
-  creditSeconds,
   STARTING_CREDITS,
   addCredits,
   appendLedger,
   creditBreakdown,
+  creditRate,
   creditsGranted,
   creditsPerDay,
   ensureBillingTables,
@@ -73,8 +73,10 @@ import {
   setSandboxType,
   sizeMultiplier,
   summarizeMonth,
+  unmeteredCredits,
   upsertUsage,
   type CloudUsage,
+  type CreditRate,
   type LedgerEntry,
   type MonthUsage,
   type LedgerEvent,
@@ -689,6 +691,7 @@ export class CloudAccount extends DurableObject<Env> {
     if (!this.acct.orgId) return 0;
     const credits = this.breakdown(now);
     let unmetered = 0;
+    const rate = this.rate();
     let sizes: Map<string, string> | undefined;
     for (const s of this.sessions.values()) {
       if (!AWAKE_STATES.has(s.state)) continue;
@@ -697,20 +700,20 @@ export class CloudAccount extends DurableObject<Env> {
       sizes ??= new Map(listSandboxes(this.sql()).map((row) => [row.sandboxId, row.type]));
       // Its live size: a resize moved it off what it was created on.
       const type = s.machine ?? (s.sandboxId ? sizes.get(s.sandboxId) : this.acct.machine);
-      unmetered += (Math.max(0, now - since) / 1000) * sizeMultiplier(type);
+      unmetered += unmeteredCredits(since, now, sizeMultiplier(type), rate);
     }
-    return credits.monthly + credits.extra - unmetered / this.perCredit();
+    return credits.monthly + credits.extra - unmetered;
   }
 
   /** Plan credits this period and credits that never expire. */
   private breakdown(now = Date.now()) {
     const sql = this.sql();
-    return creditBreakdown(creditsGranted(sql), listPeriods(sql), listUsage(sql), now, this.perCredit());
+    return creditBreakdown(creditsGranted(sql), listPeriods(sql), listUsage(sql), now, this.rate());
   }
 
-  /** Billable seconds per credit (`CLOUD_CREDIT_SECONDS`). */
-  private perCredit(): number {
-    return creditSeconds(this.env.CLOUD_CREDIT_SECONDS);
+  /** What a credit costs, by day (`CLOUD_CREDIT_SECONDS`, `CLOUD_CREDIT_RATE_FROM`). */
+  private rate(): CreditRate {
+    return creditRate(this.env.CLOUD_CREDIT_SECONDS, this.env.CLOUD_CREDIT_RATE_FROM);
   }
 
   private outOfCredits(): CloudResult<never> {
@@ -2219,7 +2222,7 @@ export class CloudAccount extends DurableObject<Env> {
   usage(caller: CloudCaller, from: string, to: string, now = Date.now()): CloudResult<CloudUsage> {
     if (this.acct.orgId !== undefined && !this.matches(caller)) return fail(403, "forbidden", "Not your Cloud.");
     const rows = this.acct.orgId ? listUsage(this.sql(), { from, to }) : [];
-    const days = creditsPerDay(from, to, rows, this.perCredit());
+    const days = creditsPerDay(from, to, rows, this.rate());
     return {
       ok: true,
       value: {
