@@ -872,9 +872,12 @@ return function(props: Props): Node
 		-- (The page's room read only while expanded: otherwise the sidebar
 		-- moving would wake this every frame.)
 		if expanded() then
-			-- (The row's room less the window round the cards; the
-			-- page's card gone, there's no gap before the panel's.)
-			local room: number = (row_ref.width or 0) - 2 * INSET
+			-- (The row's room inside its padding, the window round the cards:
+			-- the gap before the page's card and the window's edge at its
+			-- right, where the panel's card ends unexpanded too. The page's
+			-- card gone, there's no gap before the panel's.)
+			local before = if fit.current:get().sidebar then INSET else WINDOW_EDGE
+			local room: number = (row_ref.width or 0) - before - WINDOW_EDGE
 			-- (Settings' list stands where the sidebar does, in this row: as beside the
 			-- sidebar, the panel has what's past it.)
 			if away() and not shell_view.collapsed:get() then
@@ -896,6 +899,10 @@ return function(props: Props): Node
 	-- under the hand.) (The build's own, as the animation is.)
 	local goal = ui.use_state(open_w:peek())
 	local holding = ui.use_state(false)
+	-- (The width its content showed at as it began to close, and its
+	-- content's width as each frame laid it out: `inner_w`'s.)
+	local left_at: number? = nil
+	local showing_w = 0
 	-- What's in it (its tabs and what they show) and the page's own content
 	-- (held under the panel expanded over it: `page_hold`), for their drift
 	-- and fade as they come and go (ds/motion `content`).
@@ -1018,8 +1025,17 @@ return function(props: Props): Node
 				easing:cancel()
 				easing = nil
 			end
-			if opened then
+			-- (Opening or closing, what's in it holds still under its edge. Between
+			-- two open widths (expanding, collapsing), it follows its edge, as
+			-- Zeron's `panel_content_tween` eases it: laid out at the far width
+			-- from the first frame, a home centred in it jumped half the way at
+			-- once, and collapsing left the card empty beside it.)
+			if now.shown ~= was.shown then
+				-- (Closing, at the width it shows now: expanded, the wide one.)
+				left_at = if now.shown then nil else showing_w
 				holding:set(true)
+			elseif opened then
+				holding:set(false)
 			end
 			off:set(showing - to)
 			local params = motion.panel(0)
@@ -1068,16 +1084,21 @@ return function(props: Props): Node
 			open_w:set(w)
 		end
 	end)
-	-- The panel's content width: opening, expanding or collapsing, where its
-	-- width is going, from the step's first frame, its edge sweeping over it
-	-- as it gets there; closing and shut, the width it rested at. Otherwise
-	-- its own, under the hand as it's dragged or the window is resized.
+	-- The panel's content width: opening, where its width is going, from
+	-- the step's first frame, its edge sweeping over it as it gets there;
+	-- closing and shut, the width it rested at. Otherwise its own: under the
+	-- hand as it's dragged or the window is resized, following its edge as
+	-- it expands or collapses.
 	local function inner_w(): number
+		local w: number
 		if not holding:get() and shown:get() then
-			return open_w:get()
+			w = open_w:get()
+		else
+			local g = goal:get()
+			w = if g > 0 then g else left_at or rest_w:get()
 		end
-		local g = goal:get()
-		return if g > 0 then g else rest_w:get()
+		showing_w = w
+		return w
 	end
 	-- The widest it may be asked to be: what leaves the page what it wants.
 	local function most_w(): number
