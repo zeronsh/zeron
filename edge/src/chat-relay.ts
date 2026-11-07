@@ -38,9 +38,7 @@ export const enqueueRow = (
 ): EnqueueOutcome => {
   if (bytes.byteLength === 0) return { ok: false, error: "empty" };
   if (bytes.byteLength > MAX_ROW_BYTES) return { ok: false, error: "too_large" };
-  if ([...sql.exec("SELECT 1 FROM relay_queue WHERE batch_id = ?", batchId)].length > 0) {
-    return { ok: true, dup: true };
-  }
+  if (queueHolds(sql, batchId)) return { ok: true, dup: true };
   sql.exec(
     "INSERT INTO relay_queue (device, batch_id, bytes, received_at) VALUES (?, ?, ?, ?)",
     device,
@@ -50,6 +48,9 @@ export const enqueueRow = (
   );
   return { ok: true, dup: false };
 };
+
+export const queueHolds = (sql: SqlStorage, batchId: string): boolean =>
+  [...sql.exec("SELECT 1 FROM relay_queue WHERE batch_id = ?", batchId)].length > 0;
 
 export function* queueRows(sql: SqlStorage): Generator<QueueRow> {
   for (const raw of sql.exec("SELECT device, batch_id, bytes FROM relay_queue ORDER BY id")) {

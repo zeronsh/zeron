@@ -254,6 +254,28 @@ describe("offline queue", () => {
     phone.socket.close();
   });
 
+  it("reaches a live host once, ahead of the sender's ack, and a replay doesn't go again", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const laptop = await connect(name, "laptop", { relay: true });
+    const phone = await connect(name, "phone", { relay: true, host: "laptop" });
+    phone.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(5));
+    const live = await laptop.nextOf(FRAME.relay);
+    expect(live.header).toEqual({ device: "phone", queued: true, batchId: "m1" });
+    await phone.nextOf(FRAME.queued);
+    phone.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(5));
+    expect((await phone.nextOf(FRAME.queued)).header).toEqual({ batchId: "m1", dup: true });
+    await laptop.settled();
+    expect(laptop.frames.filter(f => f.type === FRAME.relay), "no second copy").toHaveLength(0);
+    // Rejected sends never go early.
+    phone.sendFrame(FRAME.enqueue, { batchId: "empty" }, new Uint8Array(0));
+    await phone.nextOf(FRAME.error);
+    await laptop.settled();
+    expect(laptop.frames.filter(f => f.type === FRAME.relay), "no second copy").toHaveLength(0);
+    expect(await queueCount(name)).toBe(1);
+    for (const client of [laptop, phone]) client.socket.close();
+  });
+
   it("goes live to connected peers and leaves when the host confirms", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);
