@@ -376,7 +376,10 @@ async fn files_with_no_words_queue_and_reach_the_agent() {
         "the drain",
     )
     .await;
-    assert_eq!(read_for(&rig, "See the attached image(s).").unwrap().1, files);
+    assert_eq!(
+        read_for(&rig, "See the attached image(s).").unwrap().1,
+        files
+    );
     rig.core.sessions.shutdown().await;
 }
 
@@ -435,7 +438,14 @@ async fn clearing_the_words_of_a_row_with_files_keeps_it() {
             .unwrap(),
         FinishQueueEditOutcome::Committed
     ));
-    let rows = rig.core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap();
+    let rows = rig
+        .core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap();
     assert_eq!(rows.len(), 1, "the row stays");
     assert_eq!(rows[0].text, "See the attached image(s).");
     assert_eq!(rows[0].attachments, files);
@@ -455,5 +465,77 @@ async fn clearing_the_words_of_a_row_with_files_keeps_it() {
         .await
         .unwrap();
     assert_eq!(queued(&rig), 0, "no words and no files: it goes");
+    rig.core.sessions.shutdown().await;
+}
+
+/// Another Windows user's (or device's) path for an upload this device also
+/// holds: what reached the agent on 2026-11-07 as `C:\Users\ADMIN\…`, from a
+/// chat running as `HP MEDIA`.
+const THEIRS: &str = r"C:\Users\ADMIN\AppData\Local\Zeron\uploads\2fbd2b3b-image.png";
+
+/// The same upload committed on this device: its path here.
+async fn committed_here(rig: &Rig) -> String {
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::UPLOAD_CHUNK,
+            serde_json::json!({
+                "uploadId": "2fbd2b3b-9c1e",
+                "seq": 0,
+                "data": base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+            }),
+        )
+        .await
+        .unwrap();
+    let reply = client
+        .call(
+            zeron_rpc::methods::UPLOAD_COMMIT,
+            serde_json::json!({ "uploadId": "2fbd2b3b-9c1e", "fileName": "image.png" }),
+        )
+        .await
+        .unwrap();
+    reply["path"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn a_row_naming_another_users_path_reaches_the_agent_by_this_devices_copy() {
+    let rig = rig();
+    running(&rig).await;
+    let here = committed_here(&rig).await;
+    // Steered in.
+    let id = queue(&rig, "steered with it", vec![THEIRS.into()]);
+    assert!(rig.core.doc_host.steer_queued_now(CHAT, &id).await.unwrap());
+    wait_for(|| read_for(&rig, "steered with it").is_some(), "the steer").await;
+    let (prompt, got) = read_for(&rig, "steered with it").unwrap();
+    assert_eq!(got, vec![here.clone()]);
+    assert!(
+        prompt.contains(&here) && !prompt.contains("ADMIN"),
+        "got: {prompt}"
+    );
+    // Drained at the turn's end.
+    queue(&rig, "drained with it", vec![THEIRS.into()]);
+    rig.ledger.release.notify_one();
+    wait_for(|| read_for(&rig, "drained with it").is_some(), "the drain").await;
+    let (prompt, got) = read_for(&rig, "drained with it").unwrap();
+    assert_eq!(got, vec![here.clone()]);
+    assert!(
+        prompt.contains(&here) && !prompt.contains("ADMIN"),
+        "got: {prompt}"
+    );
+    rig.core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_path_this_device_cant_place_goes_as_it_was() {
+    let rig = rig();
+    running(&rig).await;
+    // No copy here: nothing to rebase it to.
+    let id = queue(&rig, "nothing here", vec![THEIRS.into()]);
+    assert!(rig.core.doc_host.steer_queued_now(CHAT, &id).await.unwrap());
+    wait_for(|| read_for(&rig, "nothing here").is_some(), "the steer").await;
+    assert_eq!(
+        read_for(&rig, "nothing here").unwrap().1,
+        vec![THEIRS.to_string()]
+    );
     rig.core.sessions.shutdown().await;
 }

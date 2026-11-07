@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
 
-use zeron_doc::SessionCommandPayload;
+use zeron_doc::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
 use zeron_engine::{
     BranchHeadContext, ChangeRequestError, CheckoutChangeRequestLookup, CheckoutChangeRequests,
     CheckoutSourceContext, EngineCore, HarnessRegistry,
@@ -1937,7 +1937,10 @@ async fn files_with_no_words_queued_on_another_device_reach_the_host() {
         )
         .await
         .expect("the upload lands on the host");
-    let on_host = committed["path"].as_str().expect("its path there").to_owned();
+    let on_host = committed["path"]
+        .as_str()
+        .expect("its path there")
+        .to_owned();
 
     // Then the row, on this device's engine: the call that said no.
     client
@@ -1988,13 +1991,153 @@ async fn files_with_no_words_queued_on_another_device_reach_the_host() {
             .find(|e| e.role == zeron_doc::MessageRole::User)
             .map(|e| format!("{:?}", e.parts));
         if let Some(prompt) = prompt {
-            assert!(prompt.contains("See the attached image(s)."), "got: {prompt}");
+            assert!(
+                prompt.contains("See the attached image(s)."),
+                "got: {prompt}"
+            );
             assert!(prompt.contains(&on_host), "got: {prompt}");
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "B never sent it");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+/// A run sent from another device (or another Windows user's engine on the
+/// same PC) names its picture by the sender's own uploads path. Its bytes
+/// went to the host too, under the same upload id: the host's agent must get
+/// the host's copy, never `C:\Users\ADMIN\…` from a chat running as another
+/// user (2026-11-07, "the AI can't read the attached images").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_from_another_device_names_the_hosts_copy_of_its_upload() {
+    const CHAT: &str = "chat-foreign-path";
+    const THEIRS: &str = r"C:\Users\ADMIN\AppData\Local\Zeron\uploads\2fbd2b3b-image.png";
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    for core in [&core_a, &core_b] {
+        core.workspace
+            .create_chat(CHAT, None, Some("device-b"), None, None)
+            .expect("create chat");
+        core.workspace
+            .rename_chat(CHAT, "Pre-titled")
+            .expect("avoid auto-title run");
+    }
+    let _host = core_b.start_host_relay(&relay_url);
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core_a.rpc_service());
+
+    // The bytes reach the host through the relay.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let sent = client
+            .call(
+                methods::UPLOAD_CHUNK,
+                serde_json::json!({
+                    "uploadId": "2fbd2b3b-9c1e",
+                    "seq": 0,
+                    "data": BASE64.encode(b"\x89PNG\r\n\x1a\n"),
+                    "targetDeviceId": "device-b",
+                }),
+            )
+            .await;
+        match sent {
+            Ok(_) => break,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let committed = client
+        .call(
+            methods::UPLOAD_COMMIT,
+            serde_json::json!({
+                "uploadId": "2fbd2b3b-9c1e",
+                "fileName": "image.png",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("the upload lands on the host");
+    let on_host = committed["path"]
+        .as_str()
+        .expect("its path there")
+        .to_owned();
+
+    // The run, as the sender wrote it, arrives over the relay.
+    let prompt = format!(
+        "Can u double check this?\n\nAttached images (local files — open them to view):\n- {THEIRS}"
+    );
+    let entry = SessionCommandEntry {
+        id: "cmd-foreign-1".into(),
+        payload: SessionCommandPayload::Run {
+            request: RunRequest {
+                mcp: None,
+                prompt,
+                harness: None,
+                model: None,
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                cwd: "~".into(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+                auto_approve: true,
+                access: Default::default(),
+                plan: false,
+                attachments: vec![THEIRS.into()],
+                worktree: None,
+                resume: None,
+                env: Default::default(),
+                extra_mcp: Vec::new(),
+            },
+            message_id: "m-foreign-1".into(),
+        },
+        issued_by: "device-a".into(),
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    core_b
+        .doc_host
+        .ingest_relayed_command(CHAT, entry)
+        .await
+        .expect("B takes the relayed run");
+
+    let on_b = core_b.doc_host.open(CHAT).expect("B chat");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let said = loop {
+        let user = on_b
+            .doc()
+            .read_entries()
+            .expect("B transcript")
+            .into_iter()
+            .find(|e| e.id == "m-foreign-1")
+            .map(|e| format!("{:?}", e.parts));
+        if let Some(said) = user {
+            break said;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "B never ran it");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        said.contains(&on_host.replace('\\', "\\\\")) || said.contains(&on_host),
+        "got: {said}"
+    );
+    assert!(
+        !said.contains("ADMIN"),
+        "the sender's path reached the agent: {said}"
+    );
     core_a.shutdown().await;
     core_b.shutdown().await;
 }
@@ -2433,7 +2576,11 @@ async fn update_status_follows_another_device_through_its_restart() {
     let dirs = tempfile::tempdir().expect("tempdir");
     let host = |version: &'static str| {
         HostRelay::spawn(
-            HostRelayConfig::new(&relay_url, "other-device", Arc::new(StaticToken("test-user".into()))),
+            HostRelayConfig::new(
+                &relay_url,
+                "other-device",
+                Arc::new(StaticToken("test-user".into())),
+            ),
             Arc::new(OneStatus(version)),
             Arc::new(|_| true),
         )
@@ -2450,10 +2597,16 @@ async fn update_status_follows_another_device_through_its_restart() {
     let params = serde_json::json!({ "targetDeviceId": "other-device" });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut updates = loop {
-        match client.subscribe_checked(methods::UPDATE_STATUS, params.clone()).await {
+        match client
+            .subscribe_checked(methods::UPDATE_STATUS, params.clone())
+            .await
+        {
             Ok(updates) => break updates,
             Err(error) => {
-                assert!(tokio::time::Instant::now() < deadline, "never reached it: {error}");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "never reached it: {error}"
+                );
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
@@ -2483,7 +2636,8 @@ async fn updating_a_device_that_cannot_be_reached_says_so_plainly() {
     let (relay_url, _relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().expect("tempdir");
     let core = assemble(&dirs.path().join("asker"), "asking-device");
-    let mut link_config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(2);
     core.set_links(LinkCache::new(link_config));
     let client = zeron_rpc::memory_client(core.rpc_service());
