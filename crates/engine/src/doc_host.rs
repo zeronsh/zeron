@@ -320,6 +320,9 @@ struct DocHostInner {
     http: reqwest::Client,
     /// Chats with a worker draining their held sends (doc_host_attachments.rs).
     held_active: Mutex<HashSet<String>>,
+    /// Releasing a held send and removing one exclude each other: a removed
+    /// send never goes out, and a send that went out reads as not removed.
+    held_gate: Mutex<()>,
     /// Cuts a held send's backoff short on the user's retry.
     held_kick: tokio::sync::Notify,
     /// The outbox as the local interface shows it.
@@ -1092,6 +1095,7 @@ impl DocHost {
                 connectivity_started: AtomicBool::new(false),
                 transfers: watch::channel(Vec::new()).0,
                 held_active: Mutex::new(HashSet::new()),
+                held_gate: Mutex::new(()),
                 held_kick: tokio::sync::Notify::new(),
                 held_status: watch::channel(Vec::new()).0,
                 store_looks: Mutex::new(HashMap::new()),

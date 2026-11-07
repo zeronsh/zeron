@@ -187,6 +187,49 @@ fn room_commands(edge: &MockEdge) -> Vec<zeron_doc::SessionCommandEntry> {
         .unwrap_or_default()
 }
 
+/// The host's word on the room's first command: its status, and (when it ran)
+/// the user's message in the transcript.
+fn host_marks(edge: &MockEdge, status: zeron_doc::SessionCommandStatus, ran: bool) {
+    let doc = LoroDoc::new();
+    for row in edge.rows(CHAT) {
+        let _ = doc.import(&row.bytes);
+    }
+    let before = doc.oplog_vv();
+    let session = SessionDoc::from_doc(doc.clone());
+    let command = session.read_commands().unwrap().remove(0);
+    session
+        .set_command_status(&command.id, status, None)
+        .unwrap();
+    if ran
+        && let SessionCommandPayload::Run {
+            message_id,
+            request,
+        } = &command.payload
+    {
+        session
+            .push_message(&zeron_doc::SessionMessageEntry {
+                id: message_id.clone(),
+                role: zeron_doc::MessageRole::User,
+                parts: vec![zeron_doc::MessagePart::Text {
+                    id: "t0".into(),
+                    text: request.prompt.clone(),
+                }],
+                created_at: Utc::now().timestamp_millis(),
+                device_id: "ios-live".into(),
+                status: Some(zeron_doc::MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+    }
+    doc.commit();
+    edge.inject(
+        CHAT,
+        HOST,
+        doc.export(loro::ExportMode::updates(&before)).unwrap(),
+    );
+}
+
 fn upload_of(session: &SessionHandle) -> String {
     let reference = session.snapshot().pending[0].images[0].clone();
     zeron_client::attachments::parse_pending_ref(&reference)
@@ -224,10 +267,11 @@ async fn a_send_waits_for_its_bytes_to_be_stored_and_shows_meanwhile() {
         zeron_doc::CLOUD_COMMAND_TTL_MS,
         "a Cloud machine's message waits a week"
     );
-    wait_for("the escort stash to go", || {
-        !dir.path().join(format!("uploads/{upload}.bin")).exists()
-    })
-    .await;
+    // Kept until the message has run, for a retry after it expired.
+    let stash = dir.path().join(format!("uploads/{upload}.bin"));
+    assert!(stash.exists());
+    host_marks(&edge, zeron_doc::SessionCommandStatus::Applied, true);
+    wait_for("the kept file to go once it ran", || !stash.exists()).await;
     client.shutdown();
 }
 
@@ -360,5 +404,107 @@ async fn an_edge_without_the_store_falls_back_to_the_peer_path() {
     // The bytes stay stashed for the escort to push once the host is up.
     let meta = std::fs::read_to_string(dir.path().join(format!("uploads/{upload}.json"))).unwrap();
     assert!(meta.contains("\"viaStore\":false"), "{meta}");
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removed_send_never_goes_out_and_stays_gone() {
+    let edge = MockEdge::start().await;
+    let _host = host_registry(&edge, store_capable()).await;
+    edge.script_store(&[413]);
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    let session = open(&client, true).await;
+    send_image(&session);
+    let upload = upload_of(&session);
+    wait_for("the failed state", || {
+        session
+            .snapshot()
+            .pending
+            .first()
+            .is_some_and(|p| p.state == zeron_client::SendState::Failed)
+    })
+    .await;
+    let pending = session.snapshot().pending[0].clone();
+    assert!(pending.removable);
+
+    assert!(session.remove_send(&pending.message_id).unwrap());
+    wait_for("the row to go", || session.snapshot().pending.is_empty()).await;
+    assert!(!dir.path().join(format!("uploads/{upload}.bin")).exists());
+    assert!(
+        !session.remove_send(&pending.message_id).unwrap(),
+        "already gone"
+    );
+    session.retry_delivery().unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(room_prompts(&edge).is_empty(), "never sent");
+    client.shutdown();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let client = phone(&edge, dir.path());
+    let session = open(&client, true).await;
+    assert!(
+        session.snapshot().pending.is_empty(),
+        "not back after a relaunch"
+    );
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_month_old_failed_send_is_still_there_to_retry_or_remove() {
+    let edge = MockEdge::start().await;
+    let _host = host_registry(&edge, store_capable()).await;
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+        let payload = zeron_sync::attachment_store::HeldPayload {
+            body: zeron_sync::attachment_store::HeldBody::Command {
+                payload: SessionCommandPayload::Steer {
+                    prompt: "from a month ago".into(),
+                    message_id: Some("m-old".into()),
+                },
+            },
+            uploads: Vec::new(),
+            also_peer: false,
+        };
+        let month_ago = Utc::now().timestamp_millis() - 30 * 24 * 60 * 60 * 1000;
+        store.hold_send("old", CHAT, &payload, month_ago).unwrap();
+        store.fail_held_send("old", "the file was refused").unwrap();
+    }
+    let client = phone(&edge, dir.path());
+    let session = open(&client, true).await;
+    let pending = session.snapshot().pending.clone();
+    assert_eq!(pending.len(), 1, "kept");
+    assert_eq!(pending[0].message_id, "m-old");
+    assert_eq!(pending[0].state, zeron_client::SendState::Failed);
+    assert!(pending[0].removable);
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_expiry_uploads_the_kept_file_again() {
+    let edge = MockEdge::start().await;
+    let _host = host_registry(&edge, store_capable()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    let session = open(&client, true).await;
+    send_image(&session);
+    wait_for("the message", || !room_prompts(&edge).is_empty()).await;
+    assert_eq!(edge.store_puts(), 1);
+
+    // The machine never came back in time.
+    host_marks(&edge, zeron_doc::SessionCommandStatus::Expired, false);
+    wait_for("the failed state", || {
+        session
+            .snapshot()
+            .pending
+            .first()
+            .is_some_and(|p| p.state == zeron_client::SendState::Failed)
+    })
+    .await;
+
+    session.retry_delivery().unwrap();
+    wait_for("the file to go up again", || edge.store_puts() == 2).await;
+    wait_for("a fresh attempt", || room_commands(&edge).len() == 2).await;
     client.shutdown();
 }

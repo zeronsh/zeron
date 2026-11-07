@@ -46,6 +46,9 @@ struct EdgeState {
     corrupt_next_get: bool,
     /// An edge from before the store existed.
     no_route: bool,
+    /// How long a PUT takes to answer, and how many have begun.
+    put_delay: Option<Duration>,
+    puts_begun: usize,
 }
 
 #[derive(Clone)]
@@ -178,6 +181,16 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<EdgeState>>) 
             .unwrap()
             .log
             .push(("NUDGE".into(), path.clone()));
+    }
+    let delay = (method == "PUT" && path.contains("/attachments/"))
+        .then(|| {
+            let mut s = state.lock().unwrap();
+            s.puts_begun += 1;
+            s.put_delay
+        })
+        .flatten();
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
     }
     let (status, reply, sum) = if path.contains("/attachments/") {
         let mut s = state.lock().unwrap();
@@ -1430,5 +1443,150 @@ async fn waiting_messages_say_how_old_each_is() {
     let waiting = core.doc_host.waiting_messages(CHAT).unwrap();
     assert_eq!(waiting.len(), 1);
     assert!(waiting[0].held);
+    core.shutdown().await;
+}
+
+// ---- only its person removes a send
+
+async fn remove_held(core: &EngineCore, id: &str) -> bool {
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            methods::REMOVE_HELD_SEND,
+            serde_json::json!({ "chatId": CHAT, "id": id }),
+        )
+        .await
+        .expect("remove")["removed"]
+        .as_bool()
+        .unwrap()
+}
+
+/// The engine's local store, found on disk after a first start.
+fn store_dir(root: &Path) -> std::path::PathBuf {
+    fn find(dir: &Path) -> Option<std::path::PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.file_name().is_some_and(|n| n == "docs.sqlite3") {
+                return Some(dir.to_path_buf());
+            }
+            if path.is_dir()
+                && let Some(found) = find(&path)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    find(root).expect("the engine's store")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_send_is_removed_by_its_person_and_never_goes_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.fail_puts(&[413]);
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&core, "up-1").await;
+    let id = send(&core, "m1", "up-1").await;
+    wait_for(
+        || held(&core).first().is_some_and(|s| s.failure.is_some()),
+        "the failure",
+    )
+    .await;
+
+    assert!(remove_held(&core, &id).await);
+    assert!(held(&core).is_empty());
+    assert!(core.doc_host.waiting_messages(CHAT).unwrap().is_empty());
+    assert!(!remove_held(&core, &id).await, "already gone");
+    // A retry has nothing to bring back.
+    core.doc_host.retry_delivery(CHAT).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(commands(&core).is_empty());
+    assert_eq!(edge.count("PUT"), 1);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_removed_mid_upload_never_goes_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.state.lock().unwrap().put_delay = Some(Duration::from_millis(800));
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&core, "up-1").await;
+    let id = send(&core, "m1", "up-1").await;
+    wait_for(
+        || edge.state.lock().unwrap().puts_begun == 1,
+        "the upload to start",
+    )
+    .await;
+    assert_eq!(edge.count("PUT"), 0, "still on the wire");
+
+    // Removed while its bytes are on the wire: the upload lands, the send doesn't.
+    assert!(remove_held(&core, &id).await);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(commands(&core).is_empty(), "never goes out");
+    wait_for(|| edge.stored("up-1").is_none(), "its stored copy to go").await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_that_went_out_is_not_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&core, "up-1").await;
+    let id = send(&core, "m1", "up-1").await;
+    wait_for(|| commands(&core).len() == 1, "the message to go out").await;
+    assert!(!remove_held(&core, &id).await);
+    assert_eq!(commands(&core).len(), 1);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sends_weeks_old_are_kept_and_still_tried() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("laptop");
+    let edge = FakeEdge::start().await;
+    let core = sender(&dir, Some(&edge), HOST, true).await;
+    stage(&core, "up-old").await;
+    core.shutdown().await;
+    drop(core);
+
+    // Thirty days in the outbox: one failed, one that never got through.
+    let store = zeron_sync::DocsStore::open(store_dir(&dir)).unwrap();
+    let month_ago = now() - 30 * DAY_MS;
+    let payload = |message: &str, upload: &str| zeron_sync::attachment_store::HeldPayload {
+        body: zeron_sync::attachment_store::HeldBody::Command {
+            payload: run_payload(message, upload),
+        },
+        uploads: vec![zeron_sync::attachment_store::HeldUpload {
+            upload_id: upload.into(),
+            file_name: "photo.png".into(),
+        }],
+        also_peer: false,
+    };
+    store
+        .hold_send("failed", CHAT, &payload("m-failed", "up-gone"), month_ago)
+        .unwrap();
+    store
+        .fail_held_send("failed", "the file was refused")
+        .unwrap();
+    store
+        .hold_send(
+            "trying",
+            CHAT,
+            &payload("m-trying", "up-old"),
+            month_ago + 1,
+        )
+        .unwrap();
+    drop(store);
+
+    let core = assemble(&dir, "laptop", Some(&edge));
+    // The old one still uploads and goes out; the failed one waits, kept.
+    wait_for(|| commands(&core).len() == 1, "the month-old send to go").await;
+    assert_eq!(commands(&core)[0].id, "trying");
+    wait_for(|| held(&core).len() == 1, "its outbox row to go").await;
+    let kept = held(&core);
+    assert_eq!(kept[0].id, "failed");
+    assert_eq!(kept[0].failure.as_deref(), Some("the file was refused"));
     core.shutdown().await;
 }

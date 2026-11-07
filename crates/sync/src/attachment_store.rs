@@ -23,20 +23,26 @@ pub const MAX_STORED_ATTACHMENT_BYTES: u64 = 32 * 1024 * 1024;
 /// Carries the object's hex SHA-256 both ways.
 pub const SHA256_HEADER: &str = "x-zeron-sha256";
 
-/// How long a held send keeps retrying by itself. Past it, sending needs the
-/// user's say-so: the same week a command to a Cloud chat gets before it
-/// expires, and an explicit retry is the consent to send it after all.
-pub const HELD_SEND_AUTO_RETRY_MS: i64 = zeron_doc::CLOUD_COMMAND_TTL_MS;
+/// A held send never stops trying on its own: only its person removes it. After
+/// this long it tries less often ([`held_backoff_cap`]).
+pub const HELD_SEND_SLOW_AFTER_MS: i64 = zeron_doc::CLOUD_COMMAND_TTL_MS;
+/// The longest wait between tries for a send older than [`HELD_SEND_SLOW_AFTER_MS`].
+pub const HELD_SEND_SLOW_BACKOFF: Duration = Duration::from_secs(15 * 60);
+
+/// The longest wait between a held send's tries: `normal` for its first week,
+/// then [`HELD_SEND_SLOW_BACKOFF`]. A network or system wake still cuts a wait short.
+pub fn held_backoff_cap(age_ms: i64, normal: Duration) -> Duration {
+    if age_ms > HELD_SEND_SLOW_AFTER_MS {
+        HELD_SEND_SLOW_BACKOFF.max(normal)
+    } else {
+        normal
+    }
+}
 
 /// What a send says when the store is full. It frees up as machines collect what
 /// they're sent.
 pub const STORE_FULL: &str =
     "too many files are waiting for Cloud machines to collect them; retry once one has";
-
-/// A failed held send the user never retried is dropped after this long, with
-/// its local copy of the bytes. It reads as a failed message in its chat all
-/// that time; there is no other way to dismiss one yet.
-pub const HELD_SEND_FAILED_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 const STREAM_CHUNK: usize = 256 * 1024;
 /// Generous for a slow uplink: 2 minutes plus 16 KB/s (a full-size file gets
@@ -318,6 +324,18 @@ mod tests {
             put_status_error(503),
             Some(PutError::Transient(_))
         ));
+    }
+
+    #[test]
+    fn an_old_held_send_tries_less_often_but_never_stops() {
+        let normal = Duration::from_secs(30);
+        assert_eq!(held_backoff_cap(0, normal), normal);
+        assert_eq!(held_backoff_cap(HELD_SEND_SLOW_AFTER_MS, normal), normal);
+        assert_eq!(
+            held_backoff_cap(HELD_SEND_SLOW_AFTER_MS + 1, normal),
+            HELD_SEND_SLOW_BACKOFF
+        );
+        assert_eq!(held_backoff_cap(i64::MAX, normal), HELD_SEND_SLOW_BACKOFF);
     }
 
     #[test]

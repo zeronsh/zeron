@@ -167,6 +167,8 @@ struct CoreState {
     /// Own sends waiting for their bytes to reach the edge's store. Not in
     /// the doc yet, so they show from here.
     held: Vec<HeldSend>,
+    /// Own commands whose kept files were let go (they ran).
+    swept: HashSet<String>,
     context_usage: Option<ContextUsage>,
     /// Stable echo entries by message id.
     echoes: HashMap<String, Arc<Entry>>,
@@ -248,6 +250,7 @@ impl SessionCore {
                     .live()
                     .and_then(|live| live.store.held_sends_for(chat_id).ok())
                     .unwrap_or_default(),
+                swept: HashSet::new(),
                 context_usage: None,
                 echoes: HashMap::new(),
                 setup_placeholder: None,
@@ -460,6 +463,7 @@ impl SessionCore {
         let mut transcript_event = None;
         let send_before;
         let send_after;
+        let mut ran_uploads: Vec<String> = Vec::new();
         {
             let mut st = lock(&self.state);
             send_before = oldest_state(&st.pending);
@@ -474,6 +478,9 @@ impl SessionCore {
                 st.context_usage = self.doc.context_usage();
             }
             let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
+            if dirty.commands {
+                ran_uploads = settled_uploads(&mut st, &client.config.device_id);
+            }
             send_after = oldest_state(&st.pending);
             let previous = self.snapshot();
             let streaming = st
@@ -505,6 +512,12 @@ impl SessionCore {
         }
         if let Some(revision) = transcript_event {
             client.events.session(&self.chat_id, revision);
+        }
+        // Files kept for a retry are let go once their message has run.
+        if let Some(live) = client.live() {
+            for upload_id in ran_uploads {
+                live.escorts.remove_stored(&upload_id);
+            }
         }
         self.recompute_composer(&client);
         if send_before != send_after {
@@ -786,6 +799,50 @@ fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
     None
 }
 
+/// The `pending://` upload ids a command names.
+fn command_uploads(payload: &SessionCommandPayload) -> Vec<String> {
+    let refs: Vec<String> = match payload {
+        SessionCommandPayload::Run { request, .. } => request.attachments.clone(),
+        SessionCommandPayload::Steer { prompt, .. } => attachments::parse_user_message(prompt)
+            .images
+            .into_iter()
+            .map(|image| image.path)
+            .collect(),
+        _ => Vec::new(),
+    };
+    refs.iter()
+        .filter_map(|r| attachments::parse_pending_ref(r))
+        .map(|(upload_id, _)| upload_id.to_owned())
+        .collect()
+}
+
+/// Own commands that ran (applied, their message in the transcript) since the
+/// last look: the files they named need keeping no longer.
+fn settled_uploads(st: &mut CoreState, device_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for command in &st.commands {
+        if command.issued_by != device_id
+            || command.status != SessionCommandStatus::Applied
+            || st.swept.contains(&command.id)
+        {
+            continue;
+        }
+        let landed = match &command.payload {
+            SessionCommandPayload::Run { message_id, .. } => st.tracker.contains_id(message_id),
+            SessionCommandPayload::Steer {
+                message_id: Some(message_id),
+                ..
+            } => st.tracker.contains_id(message_id),
+            _ => true,
+        };
+        if landed {
+            st.swept.insert(command.id.clone());
+            out.extend(command_uploads(&command.payload));
+        }
+    }
+    out
+}
+
 /// Own run/steer commands whose message hasn't landed = pending echoes.
 /// Returns whether the echo set/states changed.
 fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64) -> bool {
@@ -855,6 +912,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
             images: parsed.images.into_iter().map(|i| i.path).collect(),
             kind: attempt.kind,
             sent_at_ms: attempt.first_issued,
+            removable: false,
         });
     }
     // Held sends aren't on the delivery clock: they're still on their way to
@@ -884,6 +942,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                 _ => PendingKind::Run,
             },
             sent_at_ms: send.created_at,
+            removable: true,
         });
     }
     let live_ids: HashSet<&str> = next.iter().map(|p| p.message_id.as_str()).collect();
@@ -1357,6 +1416,29 @@ impl SessionHandle {
         Ok(())
     }
 
+    /// Remove a send still in this device's outbox, failed or uploading (a
+    /// pending send with `removable`): it never goes out. `false` when it
+    /// already went out, or isn't one of those.
+    pub fn remove_send(&self, message_id: &str) -> Result<bool> {
+        let client = self.core.client()?;
+        let Some(live) = client.live() else {
+            return Ok(false);
+        };
+        let held = live
+            .store
+            .held_sends_for(&self.core.chat_id)
+            .map_err(|err| ClientError::Storage(err.to_string()))?;
+        let Some(send) = held
+            .iter()
+            .find(|send| send.payload.message_id() == Some(message_id) || send.id == message_id)
+        else {
+            return Ok(false);
+        };
+        let removed = live.held.remove(&client, &send.id)?;
+        self.core.reload_held();
+        Ok(removed)
+    }
+
     /// Stop the live turn.
     pub fn interrupt(&self) -> Result<()> {
         let client = self.core.client()?;
@@ -1743,8 +1825,37 @@ impl SessionHandle {
                 continue;
             }
             tracing::info!(chat = %self.core.chat_id, old = %attempt.id, "retry re-issues a dead send attempt");
-            self.core
-                .queue_command(&device_id, attempt.payload.clone())?;
+            // Its files were kept here: they go up again first, since the
+            // edge's copy may be gone by now.
+            let uploads = command_uploads(&attempt.payload);
+            let kept = !uploads.is_empty()
+                && client
+                    .live()
+                    .is_some_and(|live| uploads.iter().all(|id| live.escorts.stored(id)));
+            if kept {
+                let refs: Vec<String> = match &attempt.payload {
+                    SessionCommandPayload::Run { request, .. } => request.attachments.clone(),
+                    SessionCommandPayload::Steer { prompt, .. } => {
+                        attachments::parse_user_message(prompt)
+                            .images
+                            .into_iter()
+                            .map(|image| image.path)
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                self.hold(
+                    &client,
+                    &crate::new_id(),
+                    HeldBody::Command {
+                        payload: attempt.payload.clone(),
+                    },
+                    &refs,
+                )?;
+            } else {
+                self.core
+                    .queue_command(&device_id, attempt.payload.clone())?;
+            }
         }
         self.core.refresh();
         client.after_command(&self.core, true);
@@ -1763,6 +1874,7 @@ mod setup_placeholder_tests {
             queue: Vec::new(),
             commands: Vec::new(),
             held: Vec::new(),
+            swept: HashSet::new(),
             context_usage: None,
             echoes: HashMap::new(),
             setup_placeholder: None,
@@ -1784,6 +1896,7 @@ mod setup_placeholder_tests {
             kind: PendingKind::Run,
             sent_at_ms: 1_000,
             state: crate::connectivity::SendState::Sending,
+            removable: false,
         };
         st.echoes.insert(
             "m1".into(),

@@ -84,6 +84,19 @@ impl Escorts {
         serde_json::from_slice(&std::fs::read(self.meta(upload_id)).ok()?).ok()
     }
 
+    /// Drop a file kept for the store's route, once nothing can need it again:
+    /// its message ran, or its person removed it. Peer escorts clear their own.
+    pub(crate) fn remove_stored(&self, upload_id: &str) {
+        if self.load_meta(upload_id).is_some_and(|meta| meta.via_store) {
+            self.remove(upload_id);
+        }
+    }
+
+    /// Whether this file is kept for the store's route.
+    pub(crate) fn stored(&self, upload_id: &str) -> bool {
+        self.load_meta(upload_id).is_some_and(|meta| meta.via_store)
+    }
+
     /// The edge has no store: this file goes over the peer link after all, on
     /// a fresh window (the message has only just gone out).
     pub(crate) fn send_by_peer(&self, inner: &Arc<ClientInner>, upload_id: &str) {

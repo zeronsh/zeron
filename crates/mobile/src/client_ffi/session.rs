@@ -170,6 +170,9 @@ pub struct PendingSend {
     pub kind: PendingKind,
     pub sent_at_ms: i64,
     pub state: SendState,
+    /// Still on this device, failed or uploading: Remove applies
+    /// (`SessionHandle::remove_send`), and it then never goes out.
+    pub removable: bool,
 }
 
 impl From<&zc::PendingSend> for PendingSend {
@@ -185,6 +188,7 @@ impl From<&zc::PendingSend> for PendingSend {
             },
             sent_at_ms: p.sent_at_ms,
             state: p.state.into(),
+            removable: p.removable,
         }
     }
 }
@@ -644,5 +648,11 @@ impl SessionHandle {
     /// "Not delivered — tap to retry".
     pub fn retry_delivery(&self) -> CoreResult<()> {
         Ok(self.inner.retry_delivery()?)
+    }
+
+    /// Remove a pending send that's `removable`: it never goes out. `false`
+    /// when it already went.
+    pub fn remove_send(&self, message_id: String) -> CoreResult<bool> {
+        Ok(self.inner.remove_send(&message_id)?)
     }
 }

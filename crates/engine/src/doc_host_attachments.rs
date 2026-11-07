@@ -23,8 +23,7 @@ use zeron_doc::{
 };
 use zeron_proto::{HeldSendStatus, WaitingMessage};
 use zeron_sync::attachment_store::{
-    self, Fetched, HELD_SEND_AUTO_RETRY_MS, HELD_SEND_FAILED_RETENTION_MS, HeldBody, HeldPayload,
-    HeldSend, HeldUpload, PutError,
+    self, Fetched, HeldBody, HeldPayload, HeldSend, HeldUpload, PutError,
 };
 
 use super::{
@@ -283,22 +282,9 @@ impl DocHost {
         Ok(())
     }
 
-    /// Engine start: pick up what was still on its way, and let go of failures
-    /// nobody retried in a week.
+    /// Engine start: pick up what was still on its way. A failed send stays,
+    /// however old, until its person retries or removes it.
     pub(super) fn resume_held_sends(&self) {
-        match self
-            .inner
-            .store
-            .purge_failed_held_sends(now_ms() - HELD_SEND_FAILED_RETENTION_MS)
-        {
-            Ok(purged) => {
-                for send in purged {
-                    tracing::warn!(chat = %send.chat_id, send = %send.id,
-                        failure = ?send.failure, "dropping a failed send nobody retried");
-                }
-            }
-            Err(err) => tracing::warn!(%err, "held-send purge failed"),
-        }
         let sends = match self.inner.store.held_sends() {
             Ok(sends) => sends,
             Err(err) => {
@@ -326,6 +312,56 @@ impl DocHost {
         self.inner.held_kick.notify_waiters();
         self.spawn_held_sends(chat_id);
         Ok(())
+    }
+
+    /// Its person removed a send from the outbox, failed or still uploading:
+    /// it never goes out, and what it stored at the edge goes too. `false` when
+    /// it had already gone out (or been removed).
+    pub fn remove_held_send(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        let send = {
+            let _gate = lock(&self.inner.held_gate);
+            let Some(send) = self
+                .inner
+                .store
+                .held_send(id)?
+                .filter(|send| send.chat_id == chat_id)
+            else {
+                return Ok(false);
+            };
+            self.inner.store.remove_held_send(id)?;
+            send
+        };
+        tracing::info!(chat = %chat_id, send = %id, "held send removed by its person");
+        self.publish_held_sends();
+        self.forget_stored(&send);
+        Ok(true)
+    }
+
+    /// Best effort: the edge's copies of a send that won't go out. (The
+    /// lifecycle rule takes whatever this misses.)
+    fn forget_stored(&self, send: &HeldSend) {
+        let (Some(edge), Ok(runtime)) = (
+            self.inner.config.edge.clone(),
+            tokio::runtime::Handle::try_current(),
+        ) else {
+            return;
+        };
+        if send.payload.uploads.is_empty() {
+            return;
+        }
+        let http = self.inner.http.clone();
+        let send = send.clone();
+        self.spawn_worker_on(&runtime, async move {
+            let Ok(bearer) = edge.bearer().await else {
+                return;
+            };
+            for upload in &send.payload.uploads {
+                let url = attachment_store::blob_url(&edge.url, &send.chat_id, &upload.upload_id);
+                if let Err(err) = attachment_store::delete(&http, &url, &bearer).await {
+                    tracing::warn!(send = %send.id, %err, "removed send's file not deleted");
+                }
+            }
+        });
     }
 
     /// Message ids still waiting in this chat's outbox (a retry mustn't mint
@@ -466,13 +502,13 @@ impl DocHost {
                     return;
                 }
             };
-            let outcome = if now_ms().saturating_sub(send.created_at) > HELD_SEND_AUTO_RETRY_MS {
-                Err(PutError::Permanent(
-                    "it couldn't be uploaded in time".to_string(),
-                ))
-            } else {
-                self.store_uploads(&send).await
-            };
+            // Never given up on: only its person removes it. Every try uploads
+            // all its files again, so none ages out at the edge meanwhile.
+            let outcome = self.store_uploads(&send).await;
+            let cap = attachment_store::held_backoff_cap(
+                now_ms().saturating_sub(send.created_at),
+                TRANSFER_BACKOFF_CAP,
+            );
             match outcome {
                 Ok(peer) => {
                     if let Err(err) = self.release_held(&send, peer) {
@@ -508,7 +544,7 @@ impl DocHost {
                 _ = online.recv() => {}
                 _ = self.inner.held_kick.notified() => {}
             }
-            backoff = (backoff * 2).min(TRANSFER_BACKOFF_CAP);
+            backoff = (backoff * 2).min(cap);
         }
     }
 
@@ -570,6 +606,13 @@ impl DocHost {
     /// host sees and wakes for. Safe to repeat after a crash between the two
     /// writes: the doc write checks for its own id.
     fn release_held(&self, send: &HeldSend, peer: bool) -> Result<(), EngineError> {
+        let gate = lock(&self.inner.held_gate);
+        if self.inner.store.held_send(&send.id)?.is_none() {
+            // Removed while it uploaded: it never goes out.
+            drop(gate);
+            self.forget_stored(send);
+            return Ok(());
+        }
         let handle = self.open(&send.chat_id)?;
         let transfers: Vec<AttachmentTransfer> = if peer {
             send.payload
@@ -618,6 +661,7 @@ impl DocHost {
             }
         }
         self.inner.store.remove_held_send(&send.id)?;
+        drop(gate);
         self.publish_held_sends();
         self.nudge_remote_host(&send.chat_id);
         if let Some(entry) = escort {

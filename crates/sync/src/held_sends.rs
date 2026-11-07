@@ -142,28 +142,29 @@ impl DocsStore {
         })
     }
 
-    /// The message is in the chat (or discarded).
-    pub fn remove_held_send(&self, id: &str) -> Result<(), StoreError> {
+    /// The message is in the chat, or its person removed it. `false`: it was
+    /// already gone.
+    pub fn remove_held_send(&self, id: &str) -> Result<bool, StoreError> {
         store_blocking(|| {
-            self.conn()
-                .execute("DELETE FROM held_sends WHERE id=?1", params![id])?;
-            Ok(())
+            Ok(self
+                .conn()
+                .execute("DELETE FROM held_sends WHERE id=?1", params![id])?
+                > 0)
         })
     }
 
-    /// Failed sends older than `failed_before`, removed and returned, so the
-    /// caller can drop their local bytes too.
-    pub fn purge_failed_held_sends(&self, failed_before: i64) -> Result<Vec<HeldSend>, StoreError> {
+    /// One held send by its id.
+    pub fn held_send(&self, id: &str) -> Result<Option<HeldSend>, StoreError> {
         store_blocking(|| {
-            let conn = self.conn();
-            let mut stmt = conn.prepare(
-                "DELETE FROM held_sends WHERE failure IS NOT NULL AND created_at < ?1
-                 RETURNING id,chat_id,payload,created_at,failure",
-            )?;
-            let rows = stmt
-                .query_map(params![failed_before], read_row)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows.into_iter().filter_map(decode).collect())
+            let row = self
+                .conn()
+                .query_row(
+                    "SELECT id,chat_id,payload,created_at,failure FROM held_sends WHERE id=?1",
+                    params![id],
+                    read_row,
+                )
+                .optional()?;
+            Ok(row.and_then(decode))
         })
     }
 }
@@ -248,26 +249,17 @@ mod tests {
     }
 
     #[test]
-    fn only_old_failures_are_purged() {
+    fn a_send_goes_only_when_removed_or_sent() {
         let (_dir, store) = open();
         store.hold_send("old", "c1", &payload("old"), 10).unwrap();
-        store.hold_send("new", "c1", &payload("new"), 500).unwrap();
-        store
-            .hold_send("trying", "c1", &payload("trying"), 10)
-            .unwrap();
         store.fail_held_send("old", "no").unwrap();
-        store.fail_held_send("new", "no").unwrap();
-
-        let purged = store.purge_failed_held_sends(100).unwrap();
-        assert_eq!(purged.len(), 1);
-        assert_eq!(purged[0].id, "old");
-        let left: Vec<_> = store
-            .held_sends()
-            .unwrap()
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(left, ["new", "trying"]);
+        assert_eq!(
+            store.held_send("old").unwrap().unwrap().failure.as_deref(),
+            Some("no")
+        );
+        assert!(store.remove_held_send("old").unwrap());
+        assert!(!store.remove_held_send("old").unwrap(), "already gone");
+        assert!(store.held_send("old").unwrap().is_none());
     }
 
     #[test]

@@ -220,6 +220,9 @@ pub struct PendingSend {
     pub kind: PendingKind,
     pub sent_at_ms: i64,
     pub state: SendState,
+    /// Still in this device's outbox, failed or uploading: it can be removed
+    /// (`SessionHandle::remove_send`), and then never goes out.
+    pub removable: bool,
 }
 
 /// The unresolved question the composer should answer instead of typing.

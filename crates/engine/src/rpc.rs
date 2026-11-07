@@ -3532,6 +3532,20 @@ impl RpcService for EngineRpc {
             methods::WATCH_HELD_SENDS => Ok(RpcReply::Stream(watch_stream(
                 self.doc_host.watch_held_sends(),
             ))),
+            methods::REMOVE_HELD_SEND => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct RemoveHeldSendParams {
+                    chat_id: String,
+                    id: String,
+                }
+                let p: RemoveHeldSendParams = parse_params(params)?;
+                let removed = self
+                    .doc_host
+                    .remove_held_send(&p.chat_id, &p.id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "removed": removed }))
+            }
             methods::WATCH_WAITING_MESSAGES => {
                 let p: ChatParams = parse_params(params)?;
                 let (changes, held) = self

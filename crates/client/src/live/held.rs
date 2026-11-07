@@ -11,9 +11,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use zeron_sync::attachment_store::{
-    self, HELD_SEND_AUTO_RETRY_MS, HELD_SEND_FAILED_RETENTION_MS, HeldSend, PutError,
-};
+use zeron_sync::attachment_store::{self, HeldSend, PutError};
 
 use crate::client::ClientInner;
 use crate::{lock, now_ms};
@@ -25,27 +23,16 @@ const BACKOFF_CAP: Duration = Duration::from_secs(30);
 pub(crate) struct HeldSends {
     active: Mutex<HashSet<String>>,
     kick: Arc<Notify>,
+    /// Releasing a send and removing one exclude each other: a removed send
+    /// never goes out, and a send that went out reads as not removed.
+    gate: Mutex<()>,
 }
 
 impl HeldSends {
-    /// Relaunch: let go of failures nobody retried in a week, resume the rest.
+    /// Relaunch: pick up what was still on its way. A failed send stays, however
+    /// old, until its person retries or removes it.
     pub(crate) fn resume(&self, inner: &Arc<ClientInner>) {
         let Some(live) = inner.live() else { return };
-        match live
-            .store
-            .purge_failed_held_sends(now_ms() - HELD_SEND_FAILED_RETENTION_MS)
-        {
-            Ok(purged) => {
-                for send in purged {
-                    tracing::warn!(chat = %send.chat_id, send = %send.id,
-                        "dropping a failed send nobody retried");
-                    for upload in &send.payload.uploads {
-                        live.escorts.remove(&upload.upload_id);
-                    }
-                }
-            }
-            Err(err) => tracing::warn!(%err, "held-send purge failed"),
-        }
         let sends = live.store.held_sends().unwrap_or_default();
         let mut started = HashSet::new();
         for send in sends {
@@ -53,6 +40,28 @@ impl HeldSends {
                 self.spawn(inner, &send.chat_id);
             }
         }
+    }
+
+    /// Its person removed a send, failed or still uploading: it never goes out,
+    /// and its files go, here and at the edge. `false` when it already went.
+    pub(crate) fn remove(&self, inner: &Arc<ClientInner>, id: &str) -> crate::error::Result<bool> {
+        let Some(live) = inner.live() else {
+            return Ok(false);
+        };
+        let send = {
+            let _gate = lock(&self.gate);
+            let send = live
+                .store
+                .held_send(id)
+                .map_err(|err| crate::error::ClientError::Storage(err.to_string()))?;
+            let Some(send) = send else { return Ok(false) };
+            live.store
+                .remove_held_send(id)
+                .map_err(|err| crate::error::ClientError::Storage(err.to_string()))?;
+            send
+        };
+        forget(inner, &send);
+        Ok(true)
     }
 
     /// The user's retry: anything backing off tries now.
@@ -100,13 +109,13 @@ async fn run(weak: Weak<ClientInner>, chat: &str, cancel: &CancellationToken, ki
                 return;
             }
         };
-        let outcome = if now_ms().saturating_sub(send.created_at) > HELD_SEND_AUTO_RETRY_MS {
-            Err(PutError::Permanent(
-                "it couldn't be uploaded in time".to_string(),
-            ))
-        } else {
-            store_uploads(&inner, &send).await
-        };
+        // Never given up on: only its person removes it. Every try uploads all
+        // its files again, so none ages out at the edge meanwhile.
+        let outcome = store_uploads(&inner, &send).await;
+        let cap = attachment_store::held_backoff_cap(
+            now_ms().saturating_sub(send.created_at),
+            BACKOFF_CAP,
+        );
         match outcome {
             Ok(store_used) => match release(&inner, &send, store_used) {
                 Ok(()) => {
@@ -142,7 +151,7 @@ async fn run(weak: Weak<ClientInner>, chat: &str, cancel: &CancellationToken, ki
             }
             _ = kicked => {}
         }
-        backoff = (backoff * 2).min(BACKOFF_CAP);
+        backoff = (backoff * 2).min(cap);
     }
 }
 
@@ -203,21 +212,65 @@ fn release(
 ) -> crate::error::Result<()> {
     let session = inner.resume_delivery(&send.chat_id)?;
     let core = &session.core;
-    core.release_held(send, &inner.config.device_id)?;
     let Some(live) = inner.live() else {
         return Ok(());
     };
-    live.store
-        .remove_held_send(&send.id)
-        .map_err(|err| crate::error::ClientError::Storage(err.to_string()))?;
-    for upload in &send.payload.uploads {
-        if store_used {
-            live.escorts.remove(&upload.upload_id);
-        } else {
+    {
+        let _gate = lock(&live.held.gate);
+        let still_held = live
+            .store
+            .held_send(&send.id)
+            .map_err(|err| crate::error::ClientError::Storage(err.to_string()))?
+            .is_some();
+        if !still_held {
+            // Removed while it uploaded: it never goes out.
+            forget(inner, send);
+            return Ok(());
+        }
+        core.release_held(send, &inner.config.device_id)?;
+        live.store
+            .remove_held_send(&send.id)
+            .map_err(|err| crate::error::ClientError::Storage(err.to_string()))?;
+    }
+    // Through the store, the file is kept here until its message has run: a
+    // retry after the message expired uploads it again. (SessionCore sweeps it.)
+    if !store_used {
+        for upload in &send.payload.uploads {
             live.escorts.send_by_peer(inner, &upload.upload_id);
         }
     }
     core.reload_held();
     inner.after_command(core, false);
     Ok(())
+}
+
+/// A send that won't go out: its files here, and best effort at the edge (the
+/// lifecycle rule takes whatever this misses).
+fn forget(inner: &Arc<ClientInner>, send: &HeldSend) {
+    let Some(live) = inner.live() else { return };
+    for upload in &send.payload.uploads {
+        live.escorts.remove_stored(&upload.upload_id);
+    }
+    if let Some(core) = inner.session_core(&send.chat_id) {
+        core.reload_held();
+    }
+    if send.payload.uploads.is_empty() {
+        return;
+    }
+    let weak = Arc::downgrade(inner);
+    let send = send.clone();
+    crate::runtime::shared().spawn(async move {
+        let Some(inner) = weak.upgrade() else { return };
+        let Some(live) = inner.live() else { return };
+        let edge = live.edge.clone();
+        let Ok(token) = inner.tokens.bearer().await else {
+            return;
+        };
+        for upload in &send.payload.uploads {
+            let url = attachment_store::blob_url(&edge, &send.chat_id, &upload.upload_id);
+            if let Err(err) = attachment_store::delete(crate::auth::http(), &url, &token).await {
+                tracing::warn!(send = %send.id, %err, "removed send's file not deleted");
+            }
+        }
+    });
 }

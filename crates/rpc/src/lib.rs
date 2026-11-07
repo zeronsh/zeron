@@ -158,6 +158,10 @@ pub mod methods {
     /// (`zeron_proto::WaitingMessage` list), `{chatId}`: current set first, then
     /// every change. IPC-only.
     pub const WATCH_WAITING_MESSAGES: &str = "WatchWaitingMessages";
+    /// Remove a send from this device's outbox, failed or still uploading:
+    /// `{chatId, id}` (the id `WatchHeldSends` / `WatchWaitingMessages` give)
+    /// → `{removed}`. `false`: it already went out, or was already removed.
+    pub const REMOVE_HELD_SEND: &str = "RemoveHeldSend";
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";

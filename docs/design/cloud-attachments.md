@@ -46,13 +46,23 @@ An old message is about to run when its machine comes back, so the composer says
 `expiresAt`, sender, and whether it's still held here uploading. On mobile, a pending send's
 `sent_at_ms` carries the same age.
 
-## Failure
+## Failure, and removing a send
 
-The outbox retries by itself for the same 7 days. It stops on a permanent answer (too large,
-refused, the store full, the staged file gone) or when the week runs out, and the message then shows as failed in its
-chat with the reason and a retry ("Not delivered: … — click to retry"). A failed send
-doesn't hold up later ones. One nobody retries is dropped after a week, since there's no way
-yet to dismiss one.
+A send is only ever lost if its person removes it.
+
+- **Retries never stop on their own.** The outbox keeps trying, with the transfer backoff
+  (up to 30 seconds) for its first week and up to 15 minutes after that; a network or system
+  wake still cuts a wait short.
+- **A permanent answer stops it** (too large, refused, the store full, the staged file gone).
+  The message then shows as failed in its chat with the reason and a retry ("Not delivered: …
+  — click to retry"). A failed send doesn't hold up later ones, and it stays, however old,
+  until it's retried or removed.
+- **Remove.** `RemoveHeldSend {chatId, id}` → `{removed}` takes a send out of the outbox,
+  failed or still uploading, with the `id` that `WatchHeldSends` and `WatchWaitingMessages`
+  give. It never goes out after that, even if its upload was on the wire, and its copies at
+  the edge are deleted (best effort; the lifecycle rule takes what's missed). `false` means
+  it had already gone out. On mobile, a pending send with `removable` takes
+  `SessionHandle::remove_send(message_id)`, the same in the app bindings.
 
 ## What keeps the peer path
 
@@ -93,8 +103,13 @@ pass it together. The 32 MiB limit per file is unchanged.
 - **After delivery:** the machine deletes the object as soon as its copy is on disk.
 - **Fallback:** an R2 lifecycle rule expires anything left under `attachments/` after
   **14 days**: the 7 days a message can wait, and a week more for a retry once it has expired
-  (a phone keeps no copy of its own after the upload, so its retry relies on this one). A missed
-  delete only costs storage until then.
+  A missed delete only costs storage until then.
+- **While a send is alive, its files can't age out.** The outbox uploads every file again on
+  each try, so an object is never older than its send's last try. Once a message has gone out
+  it waits at most 7 days, inside the 14. A retry after that, of a message that expired, uploads
+  the files again from the sender's own copy: the desktop engine keeps its staged files, and a
+  phone keeps its copy until the message has run (then lets it go), instead of dropping it at
+  upload. So the rule stays at 14 days.
 
 The rule is bucket configuration, not code, so it has to be applied once per bucket:
 
@@ -113,7 +128,8 @@ normal case fits inside R2's free allowance.
 
 The iOS and Android apps have no engine: `crates/client` writes to the chat's doc itself. So
 `crates/client/src/live/held.rs` runs the same outbox over the same store and table, with the
-escort stash as its staged bytes. The app's retry and failed state are the existing ones.
+escort stash as its staged bytes. The app's retry and failed state are the existing ones; a
+pending send's `removable` says Remove applies.
 
 ## A row already on the machine's disk
 
