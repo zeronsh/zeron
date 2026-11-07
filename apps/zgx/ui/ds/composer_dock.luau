@@ -1068,6 +1068,12 @@ end
 -- and Stop. A subagent's is its mark (working, or how it ended), its title
 -- and, ended, how; with `on_open_task` the whole row opens it, and it has no
 -- Stop (the host stops a process, not a subagent).
+-- A command as one line: its line breaks as spaces (a script of several
+-- lines would otherwise stand as several rows in a one-line slot).
+local function one_line(text: string): string
+	return (string.gsub(string.gsub(text, "%s*[\r\n]+%s*", " "), "^%s+", ""))
+end
+
 local function task_row(t: Task, row: State<Task>, now: State<number>, props: Props, height: number): Node
 	local function ended(): boolean
 		return row:get().ended ~= nil
@@ -1134,7 +1140,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		-- its own width): a long command beside it would otherwise take the
 		-- larger share of the shrinking and cut the name to a few letters.
 		if t.detail
-			then FadeText { t.detail, literal = true, grow = 1, basis = 0, text_size = "$font.size.sm", color = "$text.tertiary" }
+			then FadeText { one_line(t.detail), literal = true, grow = 1, basis = 0, text_size = "$font.size.sm", color = "$text.tertiary" }
 			else ui.div { grow = 1 },
 		ui.text {
 			function(): string

@@ -1340,6 +1340,51 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// A chat put to sleep until `until` (`None`: woken, its sleep cleared).
+    /// Each field is its own last write, so a sleep set on one device and an
+    /// early wake on another both land. `false` when no such row.
+    pub fn set_chat_sleep(
+        &mut self,
+        chat_id: &str,
+        until: Option<DateTime<Utc>>,
+        at: DateTime<Utc>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([
+                ("sleepUntil", json!(until.map(|t| t.timestamp_millis()))),
+                ("sleptAt", json!(until.map(|_| at.timestamp_millis()))),
+                ("sleepWokeAt", Value::Null),
+            ]),
+        );
+        Ok(true)
+    }
+
+    /// A sleeping chat woken early by its host (it asked for the person, or
+    /// failed): stamped once, so the first wake is the one shown. `false`
+    /// when it isn't asleep (no row, no sleep, its time passed, or woken
+    /// already).
+    pub fn wake_chat(&mut self, chat_id: &str, at: DateTime<Utc>) -> Result<bool, DocError> {
+        let Some(sleep) = self.chat(chat_id)?.and_then(|c| c.sleep) else {
+            return Ok(false);
+        };
+        if sleep.woke_at.is_some() || sleep.until <= at {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("sleepWokeAt", json!(at.timestamp_millis()))]),
+        );
+        Ok(true)
+    }
+
     pub fn chat(&self, chat_id: &str) -> Result<Option<Chat>, DocError> {
         Ok(self
             .overlay_row(KIND_CHATS, chat_id)
@@ -1570,6 +1615,7 @@ impl RegistryDoc {
                 "backgroundTasks",
                 serde_json::to_value(&session.background_tasks)?,
             ),
+            ("waiting", serde_json::to_value(&session.waiting)?),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
