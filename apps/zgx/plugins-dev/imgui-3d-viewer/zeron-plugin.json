@@ -1,0 +1,15 @@
+{
+  "id": "imgui-3d-viewer",
+  "name": "ImGui 3D Viewer",
+  "version": "1.0.0",
+  "description": "A cube in a native window, projected and shaded by the plugin itself: drag the viewport to turn it, and the auto-spin stops when you do.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"],
+  "tools": [
+    {
+      "name": "viewer_status",
+      "description": "The cube's yaw, pitch, zoom, whether it is spinning, and its frame count.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}

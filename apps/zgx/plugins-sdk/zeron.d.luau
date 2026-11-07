@@ -136,6 +136,8 @@ export type InvisibleButtonAnswer = {
 	hovered: boolean,
 	active: boolean,
 	clicked: boolean,
+	min: Point,
+	max: Point,
 }
 
 export type ChildOptions = {

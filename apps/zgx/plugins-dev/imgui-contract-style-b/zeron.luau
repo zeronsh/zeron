@@ -1655,6 +1655,8 @@ return function(id: string): any
 				hovered = answer.hovered == true,
 				active = answer.active == true,
 				clicked = answer.clicked == true,
+				min = answer.min,
+				max = answer.max,
 			}
 		end
 		function view.is_item_hovered(): boolean
