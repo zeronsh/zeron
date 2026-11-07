@@ -165,8 +165,9 @@ async fn run_signing_in_unless_resting(
             }
         };
         catalog.clear_remote();
-        // Open connections were admitted by credentials that may have ended since.
-        if refused || config.tokens.token().await.is_err() {
+        // Open connections were admitted by credentials that may have ended since, and
+        // one kept at rest would keep the radio up.
+        if refused || *resting.borrow() || config.tokens.token().await.is_err() {
             peers.clear().await;
         } else {
             peers.clear_unopened().await;

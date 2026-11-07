@@ -169,8 +169,6 @@ fun SessionScreen(
     // Upload rings on pending thumbnails follow the escort.
     LaunchedEffect(composer.transferProgress) { transcript.uploadProgress = composer.transferProgress }
     val row = remember(workspace, chatId) { model.row(chatId) }
-    // A direct link only exists for a relayed chat on a device of the user's own.
-    RequestLocalNetworkOnce(model, wanted = row != null && !row.isCloud && row.roomGen >= RELAY_ROOM_GEN)
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -465,9 +463,6 @@ fun SessionScreen(
     }
 }
 
-/** `zeron_proto::relay_gen::RELAY_ROOM_GEN`. */
-private const val RELAY_ROOM_GEN = 3u
-
 /** How far above the chips and composer the transcript starts to fade. */
 private val FADE = 44.dp
 
@@ -507,10 +502,10 @@ internal fun bannerText(
     nowMs: Long,
 ): String? = when {
     send == SendState.FAILED -> "Not delivered"
+    connectivity == ConnectivityState.OFFLINE -> "Offline — sends are saved"
     // A Cloud chat's message waits for its machine to start or wake: the transcript's setup step says so.
     send == SendState.QUEUED -> if (isCloud) null else "${hostName ?: "Host"} is offline — will send when it's back"
     send == SendState.SENDING -> "Sending to host…"
-    connectivity == ConnectivityState.OFFLINE -> "Offline — sends are saved"
     !roomConnected && retryAtMs != null -> "Reconnecting in ${maxOf(1L, (retryAtMs - nowMs) / 1000)}s"
     else -> null
 }

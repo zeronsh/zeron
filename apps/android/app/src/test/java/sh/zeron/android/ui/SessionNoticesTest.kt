@@ -49,14 +49,14 @@ class SessionNoticesTest {
     @Test
     fun a_cloud_chats_send_waits_for_its_machine_without_a_banner() {
         assertNull(banner(SendState.QUEUED, cloud = true))
-        // Offline underneath doesn't take its place: the send is what matters.
-        assertNull(banner(SendState.QUEUED, cloud = true, connectivity = ConnectivityState.OFFLINE))
+        assertEquals("Offline — sends are saved", banner(SendState.QUEUED, cloud = true, connectivity = ConnectivityState.OFFLINE))
+        assertEquals("Offline — sends are saved", banner(SendState.QUEUED, connectivity = ConnectivityState.OFFLINE))
     }
 
     @Test
     fun send_state_outranks_the_connection() {
         assertEquals("Not delivered", banner(SendState.FAILED, connectivity = ConnectivityState.OFFLINE))
-        assertEquals("Sending to host…", banner(SendState.SENDING, connectivity = ConnectivityState.OFFLINE))
+        assertEquals("Offline — sends are saved", banner(SendState.SENDING, connectivity = ConnectivityState.OFFLINE))
     }
 
     @Test
