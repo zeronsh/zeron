@@ -1964,6 +1964,70 @@ async fn a_send_during_a_turn_boundary_turn_waits_for_the_turn_end() {
     core.shutdown().await;
 }
 
+/// Two messages sent while the host was away (a Cloud machine asleep): by the
+/// time the second is read, the first has just started a turn. The sender never
+/// saw that turn, so the second waits for it and is a turn of its own, rather
+/// than a steer that cut the first off with an empty reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_issued_before_the_running_turn_started_is_the_next_turn_not_a_steer() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "first, sent while asleep", Vec::new())
+        .expect("queue first");
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the first turn").await;
+    let started = core
+        .sessions
+        .turn_started_ms(CHAT)
+        .expect("a turn is running");
+
+    // Sent two seconds after the first, and long before the machine woke.
+    let mut request = core.sessions.last_request(CHAT).expect("live request");
+    request.prompt = "second, sent while asleep".into();
+    let entry = zeron_doc::SessionCommandEntry {
+        id: "cmd-second".into(),
+        payload: SessionCommandPayload::Run {
+            message_id: "m-second".into(),
+            request,
+        },
+        issued_by: "phone".into(),
+        issued_at: started - 30_000,
+        based_on: None,
+        expires_at: Some(started + 3_600_000),
+        status: zeron_doc::SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    core.doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .queue_command(&entry)
+        .expect("write the command");
+    core.doc_host.enqueue_wakeup(CHAT).expect("wake the host");
+    wait_for(
+        || queue_texts(&core) == vec!["second, sent while asleep"],
+        "the second to wait for the first turn",
+    )
+    .await;
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec!["first, sent while asleep"],
+        "the second was steered into the first turn"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while prompts.lock().unwrap().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the second never ran");
+        let _ = harness.finish.send(());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec!["first, sent while asleep", "second, sent while asleep"]
+    );
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// An agent that reads input mid-turn still gets a plain send immediately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {

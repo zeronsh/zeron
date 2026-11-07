@@ -5750,7 +5750,18 @@ impl DocHost {
                 // client, another device's switch) waits for the turn: the
                 // provider never changes by killing a turn mid-flight.
                 let other_provider = sessions.live_harness(chat_id).is_some_and(|live| live != harness);
-                if other_provider || sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                // Sent before the turn now running had started: the sender never
+                // saw that turn, so it can't be a steer into it. Two messages sent
+                // to a sleeping Cloud machine (or an offline host) start one turn
+                // each; steering the second into the first cut the first off with
+                // an empty reply.
+                let sent_before_turn = sessions
+                    .turn_started_ms(chat_id)
+                    .is_some_and(|started| entry.issued_at < started);
+                if other_provider
+                    || sent_before_turn
+                    || sessions.defers_to_turn_end(chat_id, Some((harness, &request)))
+                {
                     self.hold_until_turn_end(
                         handle,
                         message_id,
