@@ -2421,6 +2421,33 @@ impl AppState {
             .any(|send| send.chat_id == chat_id && send.failure.is_none())
     }
 
+    /// The engine's outbox as last heard.
+    pub fn held_sends_snapshot(&self) -> Vec<zeron_proto::HeldSendStatus> {
+        self.held_sends.clone()
+    }
+
+    /// The chat's send the engine still holds (its files uploading, or failed),
+    /// which Remove applies to: a failed one first, then the oldest.
+    pub fn removable_held_send(&self, chat_id: &str) -> Option<&zeron_proto::HeldSendStatus> {
+        let mut held = self.held_sends.iter().filter(|send| send.chat_id == chat_id);
+        held.clone()
+            .find(|send| send.failure.is_some())
+            .or_else(|| held.next())
+    }
+
+    /// Remove pressed: the send leaves this view at once (its echo and its
+    /// sending overlay), and its leaving the engine's outbox next isn't taken
+    /// for it having gone out. Returns it, to put back if the engine refuses.
+    pub fn remove_held_locally(&mut self, id: &str) -> Option<zeron_proto::HeldSendStatus> {
+        let at = self.held_sends.iter().position(|send| send.id == id)?;
+        let send = self.held_sends.remove(at);
+        if let Some(message_id) = &send.message_id {
+            self.remove_echo(&send.chat_id, message_id);
+            self.end_pending_send(&send.chat_id, message_id);
+        }
+        Some(send)
+    }
+
     /// Why a held send of this chat stopped trying. It waits for a retry.
     pub fn held_send_failure(&self, chat_id: &str) -> Option<&str> {
         self.held_sends
@@ -6649,6 +6676,27 @@ mod tests {
             created_at: 1_000,
             failure: failure.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn remove_takes_the_send_out_of_view_for_good() {
+        let mut s = AppState::new();
+        let now = chrono::Utc::now();
+        s.begin_pending_send("c", "m-a", now);
+        s.apply_held_sends(vec![held_send("a", None), held_send("b", Some("too large"))]);
+        // The failed one is offered first.
+        assert_eq!(s.removable_held_send("c").map(|h| h.id.as_str()), Some("b"));
+        assert_eq!(s.removable_held_send("other"), None);
+
+        let removed = s.remove_held_locally("a").expect("held");
+        assert_eq!(removed.id, "a");
+        assert!(!s.echoes["c"].iter().any(|e| e.id == "m-a"));
+        assert!(!s.pending_sends.contains_key("c"));
+        // The engine's next frame without it doesn't bring a sending state back.
+        s.apply_held_sends(vec![held_send("b", Some("too large"))]);
+        assert!(!s.send_pending("c", now));
+        assert!(!s.echoes["c"].iter().any(|e| e.id == "m-a"));
+        assert!(s.remove_held_locally("a").is_none());
     }
 
     #[test]

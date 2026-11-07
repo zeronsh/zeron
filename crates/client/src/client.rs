@@ -438,6 +438,7 @@ impl ClientInner {
                         host_device_id: device_id.to_owned(),
                         name: name.clone(),
                         created_at_ms: now_ms(),
+                        message_id: None,
                         via_store,
                     };
                     live.escorts

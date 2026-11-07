@@ -167,8 +167,9 @@ struct CoreState {
     /// Own sends waiting for their bytes to reach the edge's store. Not in
     /// the doc yet, so they show from here.
     held: Vec<HeldSend>,
-    /// Own commands whose kept files were let go (they ran).
-    swept: HashSet<String>,
+    /// Files kept for a retry, by the message they were sent with; let go
+    /// once that message is in the transcript.
+    kept: HashMap<String, Vec<String>>,
     context_usage: Option<ContextUsage>,
     /// Stable echo entries by message id.
     echoes: HashMap<String, Arc<Entry>>,
@@ -250,7 +251,15 @@ impl SessionCore {
                     .live()
                     .and_then(|live| live.store.held_sends_for(chat_id).ok())
                     .unwrap_or_default(),
-                swept: HashSet::new(),
+                kept: client
+                    .live()
+                    .map(|live| live.escorts.kept_for_chat(chat_id))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .fold(HashMap::new(), |mut kept, (message, upload)| {
+                        kept.entry(message).or_insert_with(Vec::new).push(upload);
+                        kept
+                    }),
                 context_usage: None,
                 echoes: HashMap::new(),
                 setup_placeholder: None,
@@ -478,8 +487,16 @@ impl SessionCore {
                 st.context_usage = self.doc.context_usage();
             }
             let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
-            if dirty.commands {
-                ran_uploads = settled_uploads(&mut st, &client.config.device_id);
+            if !st.kept.is_empty() {
+                let ran: Vec<String> = st
+                    .kept
+                    .keys()
+                    .filter(|message| st.tracker.contains_id(message))
+                    .cloned()
+                    .collect();
+                for message in ran {
+                    ran_uploads.extend(st.kept.remove(&message).unwrap_or_default());
+                }
             }
             send_after = oldest_state(&st.pending);
             let previous = self.snapshot();
@@ -814,33 +831,6 @@ fn command_uploads(payload: &SessionCommandPayload) -> Vec<String> {
         .filter_map(|r| attachments::parse_pending_ref(r))
         .map(|(upload_id, _)| upload_id.to_owned())
         .collect()
-}
-
-/// Own commands that ran (applied, their message in the transcript) since the
-/// last look: the files they named need keeping no longer.
-fn settled_uploads(st: &mut CoreState, device_id: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for command in &st.commands {
-        if command.issued_by != device_id
-            || command.status != SessionCommandStatus::Applied
-            || st.swept.contains(&command.id)
-        {
-            continue;
-        }
-        let landed = match &command.payload {
-            SessionCommandPayload::Run { message_id, .. } => st.tracker.contains_id(message_id),
-            SessionCommandPayload::Steer {
-                message_id: Some(message_id),
-                ..
-            } => st.tracker.contains_id(message_id),
-            _ => true,
-        };
-        if landed {
-            st.swept.insert(command.id.clone());
-            out.extend(command_uploads(&command.payload));
-        }
-    }
-    out
 }
 
 /// Own run/steer commands whose message hasn't landed = pending echoes.
@@ -1408,6 +1398,24 @@ impl SessionHandle {
                 .collect(),
             also_peer: false,
         };
+        // Kept here until the message has run: a retry after it expired
+        // uploads them again.
+        let message_id = match &payload.body {
+            HeldBody::Row { item } => Some(item.id.clone()),
+            HeldBody::Command { .. } => payload.message_id().map(str::to_owned),
+        };
+        if let Some(message_id) = message_id {
+            for upload in &payload.uploads {
+                live.escorts.keep_for(&upload.upload_id, &message_id);
+            }
+            if !payload.uploads.is_empty() {
+                lock(&self.core.state)
+                    .kept
+                    .entry(message_id)
+                    .or_default()
+                    .extend(payload.uploads.iter().map(|u| u.upload_id.clone()));
+            }
+        }
         live.store
             .hold_send(id, &self.core.chat_id, &payload, now_ms())
             .map_err(|err| ClientError::Storage(err.to_string()))?;
@@ -1874,7 +1882,7 @@ mod setup_placeholder_tests {
             queue: Vec::new(),
             commands: Vec::new(),
             held: Vec::new(),
-            swept: HashSet::new(),
+            kept: HashMap::new(),
             context_usage: None,
             echoes: HashMap::new(),
             setup_placeholder: None,

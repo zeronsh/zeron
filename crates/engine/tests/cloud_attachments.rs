@@ -1590,3 +1590,97 @@ async fn sends_weeks_old_are_kept_and_still_tried() {
     assert_eq!(kept[0].failure.as_deref(), Some("the file was refused"));
     core.shutdown().await;
 }
+
+// ---- a queued row on a machine asleep for weeks
+
+/// A row on a Cloud machine's queue, sent `age_ms` ago.
+fn queue_row_sent(core: &EngineCore, id: &str, upload: &str, age_ms: i64) {
+    core.workspace.set_chat_cwd(CHAT, "~").unwrap();
+    let mut row = QueuedMessage::new(id, "what is this", "laptop");
+    row.attachments = vec![pending_ref(upload)];
+    row.issued_at = now() - age_ms;
+    core.doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .push_queued(&row)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_queued_weeks_ago_still_runs_while_its_file_is_stored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.store("up-weeks", PNG);
+    let core = assemble(&tmp.path().join("machine"), HOST, Some(&edge));
+    create_chat(&core, HOST).await;
+    queue_row_sent(&core, "row-1", "up-weeks", 20 * DAY_MS);
+    wait_for(|| replies(&core) == 1, "the row to run").await;
+    assert!(
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .read_queue()
+            .unwrap()
+            .is_empty()
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_whose_file_aged_out_fails_with_a_retry_that_sends_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    let machine = assemble(&tmp.path().join("machine"), HOST, Some(&edge));
+    create_chat(&machine, HOST).await;
+    // Its file is gone from the store: past the cap, the row isn't left stuck.
+    queue_row_sent(&machine, "row-1", "up-lost", 40 * DAY_MS);
+    wait_for(
+        || {
+            commands(&machine)
+                .iter()
+                .any(|c| c.status == SessionCommandStatus::Rejected)
+        },
+        "the row to fail",
+    )
+    .await;
+    let handle = machine.doc_host.open(CHAT).unwrap();
+    assert!(
+        handle.doc().read_queue().unwrap().is_empty(),
+        "out of the queue"
+    );
+    let failed = commands(&machine).remove(0);
+    assert_eq!(failed.issued_by, "laptop", "its sender's, to retry");
+    assert_eq!(
+        failed.resolution.as_deref(),
+        Some("attachments never arrived")
+    );
+    match &failed.payload {
+        SessionCommandPayload::Run {
+            message_id,
+            request,
+        } => {
+            assert_eq!(message_id, "row-1");
+            assert_eq!(request.attachments, [pending_ref("up-lost")]);
+            assert!(request.prompt.contains(&pending_ref("up-lost")));
+        }
+        other => panic!("expected a run, got {other:?}"),
+    }
+    assert_eq!(replies(&machine), 0);
+    machine.shutdown().await;
+
+    // Its sender sees a failed message and retries: the file goes up again.
+    let laptop = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&laptop, "up-lost").await;
+    arrive(&laptop, &failed);
+    laptop.doc_host.retry_delivery(CHAT).unwrap();
+    wait_for(
+        || edge.stored("up-lost").is_some(),
+        "the file to go up again",
+    )
+    .await;
+    wait_for(|| commands(&laptop).len() == 2, "a fresh attempt").await;
+    assert_eq!(commands(&laptop)[1].status, SessionCommandStatus::Pending);
+    laptop.shutdown().await;
+}
