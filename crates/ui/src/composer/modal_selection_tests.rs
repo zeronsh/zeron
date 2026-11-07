@@ -177,7 +177,12 @@ fn modal_input_copy_does_not_copy_transcript_selection(cx: &mut TestAppContext) 
 
     // A selection made before opening the popup must not become the field's
     // Copy fallback. Seed it independently of the mouse-isolation regression.
-    selection::begin_with_span(BACKGROUND_KEY, BACKGROUND_TEXT, 0..BACKGROUND_TEXT.len());
+    selection::begin_with_span(
+        BACKGROUND_KEY,
+        BACKGROUND_TEXT,
+        0..BACKGROUND_TEXT.len(),
+        selection::Unit::Element,
+    );
     selection::end_active_drag();
     assert_eq!(selection::selected_text().as_deref(), Some(BACKGROUND_TEXT));
     view.update(cx, |view, cx| {

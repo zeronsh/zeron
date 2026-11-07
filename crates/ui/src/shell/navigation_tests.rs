@@ -450,7 +450,12 @@ fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
 /// Settles a transcript selection and seeds the clipboard with a sentinel, so
 /// a keystroke that copies nothing is distinguishable from one that does.
 fn select_transcript_text(cx: &mut VisualTestContext) {
-    crate::markdown::selection::begin_with_span("transcript-row:0", "selected reply", 0..8);
+    crate::markdown::selection::begin_with_span(
+        "transcript-row:0",
+        "selected reply",
+        0..8,
+        crate::markdown::selection::Unit::Word,
+    );
     crate::markdown::selection::end_active_drag();
     cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("sentinel".into())));
 }

@@ -2518,7 +2518,7 @@ mod tests {
         });
         assert!(selection::selected_text().is_none_or(|text| text.is_empty()));
         selection::end_active_drag();
-        selection::begin_with_span(&key, "First paragraph", 0..5);
+        selection::begin_with_span(&key, "First paragraph", 0..5, selection::Unit::Word);
         // Clicking the text focused the reading area, so Cmd+C copies it.
         assert!(
             cx.update(|window, cx| page.read(cx).content_focus.is_focused(window)),
@@ -2550,7 +2550,7 @@ mod tests {
         let other_prefix = other.read_with(cx, |page, _| page.selection_prefix.clone());
         assert_ne!(prefix, other_prefix);
         let other_key = format!("{other_prefix}description:0");
-        selection::begin_with_span(&other_key, "Other PR", 0..5);
+        selection::begin_with_span(&other_key, "Other PR", 0..5, selection::Unit::Word);
         drop(other);
         cx.update(|_, _| {}); // GPUI releases dropped entities after an update.
         cx.run_until_parked();
