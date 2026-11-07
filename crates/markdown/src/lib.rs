@@ -10,6 +10,6 @@ pub mod mend;
 pub mod parser;
 
 pub use parser::{
-    Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, TopBlock, parse_full,
+    Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, TopBlock, bare_urls, parse_full,
     parse_message,
 };
