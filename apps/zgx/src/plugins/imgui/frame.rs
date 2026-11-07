@@ -30,7 +30,10 @@
 //!   plugin windows cannot add up to a stalled main window.
 //! * A callback that spends more than [`BUDGET`] is aborted: its frame
 //!   is thrown away, the last good frame keeps painting, and the reason is
-//!   recorded and logged.
+//!   recorded and logged. Two frames are excused: the window's first
+//!   attempted frame, and one that uploads a newly built font atlas. Both pay
+//!   for the host's atlas work on the UI thread, not for the plugin's drawing;
+//!   every later frame is held to the budget.
 //! * A widget call with no live frame — or one made with another window's
 //!   `ui`, or after the window closed — fails with a sentence naming the
 //!   widget instead of touching Dear ImGui.
@@ -95,6 +98,11 @@ pub fn root_window(ui: &Ui, spec: &FrameSpec, draw: impl FnOnce()) {
 /// it cannot see an 8 ms callback at all.) The SDK watches the same figure
 /// from the script side, so a callback that keeps calling widgets stops
 /// before the host has to abort it.
+///
+/// A window's first attempted frame, and any frame that uploads a newly built
+/// font atlas, are excused: building and uploading the atlas is host work on
+/// the UI thread. The exemption is one frame per window plus its atlas
+/// uploads; every other frame is measured against this budget.
 pub const BUDGET: Duration = Duration::from_millis(8);
 
 /// The same budget as the number the plugin sees.
@@ -170,6 +178,11 @@ pub trait FrameWindow {
     fn frame_scale(&self) -> f64;
     /// The size in device pixels the last painted frame had, when known.
     fn frame_target(&self) -> Option<(u32, u32)>;
+    /// Whether the next frame must carry the font atlas: the window's renderer
+    /// has none yet (the window's first frame), or it dropped its GPU objects
+    /// (a device change). Building and uploading that atlas is host work on
+    /// the UI thread, so such a frame is excused the callback budget.
+    fn frame_needs_atlas(&self) -> bool;
     /// Builds one frame: opens it, runs `draw` inside the full-window ImGui
     /// window the plugin draws into, then ends and copies it.
     fn frame_build(
@@ -249,6 +262,12 @@ struct LiveFrame {
     /// the frame starts, because a window that fails it never paints and so
     /// has no painted frame to compare against later.
     first: bool,
+    /// Whether this frame is excused the wall-clock budget: the window's
+    /// first attempt, or one that uploads a newly built font atlas. That
+    /// work is the host's on the UI thread, not the plugin's callback, so it
+    /// must not cost the plugin its frame. Every other frame is held to
+    /// [`BUDGET`], so the exemption can never buy unbounded work per frame.
+    exempt: bool,
     /// The frame's `Ui`, owned by the context. Valid while the frame is open,
     /// on this thread only; [`FrameState`] never lets it outlive the frame.
     ui: *const Ui,
@@ -357,12 +376,18 @@ impl FrameState {
         let seq = self.seq.get() + 1;
         self.seq.set(seq);
         let first = self.attempted.get() == 0;
+        // The first frame pays for the font atlas, and a frame after a device
+        // change uploads it again. Those costs are the host's, so those frames
+        // are excused the budget; "first" counts attempts, so the window gets
+        // exactly one of them and the atlas case is bounded by device changes.
+        let exempt = first || window.frame_needs_atlas();
         self.attempted.set(self.attempted.get() + 1);
         self.last_started.set(Some(now));
         self.pending.borrow_mut().take();
         *self.live.borrow_mut() = Some(LiveFrame {
             seq,
             first,
+            exempt,
             ui: std::ptr::null(),
             started_wall: now,
             ops: 0,
@@ -443,7 +468,7 @@ impl FrameState {
                 frame.ops
             ));
         }
-        if frame.over_budget || frame.started_wall.elapsed() > BUDGET {
+        if !frame.exempt && (frame.over_budget || frame.started_wall.elapsed() > BUDGET) {
             frame.over_budget = true;
             return Err(budget_sentence(window.frame_id()));
         }
@@ -503,7 +528,16 @@ impl FrameState {
         let ms = frame.started_wall.elapsed().as_secs_f64().max(0.0) * 1000.0;
         let first = frame.first;
         let refused = frame.refused;
-        let failure = if frame.over_budget || frame.started_wall.elapsed() > BUDGET {
+        // The prepared frame is the authority on an atlas upload: a new glyph
+        // bakes one mid-frame, after `frame_needs_atlas` was asked. That copy
+        // is the host's work too, so the frame is excused as well.
+        let uploaded_atlas = prepared
+            .as_ref()
+            .ok()
+            .is_some_and(|prepared| prepared.atlas().is_some());
+        let over_budget = !(frame.exempt || uploaded_atlas)
+            && (frame.over_budget || frame.started_wall.elapsed() > BUDGET);
+        let failure = if over_budget {
             Some(budget_sentence(window.frame_id()))
         } else if !frame.finished {
             Some("The render callback ended without finishing its frame.".to_string())

@@ -125,8 +125,28 @@ slow script delays only its own next frame. Hidden, minimized, and closed window
 request and draw nothing. If `on_render` errors or exceeds its 8 ms CPU budget, the host aborts
 that frame, keeps the last good draw data (or an ImGui-drawn error panel), records the error, and
 stays responsive; three consecutive failures close the window while leaving the plugin loaded.
-The exception is a window's first **attempted** frame: a window that cannot draw at all never
-becomes visible, so that failure is terminal. It is reported once in a sentence naming the window
+
+The budget is measured as wall time on the UI thread across the whole frame build, so it also
+covers host work that is not the plugin's callback. Two frames are therefore excused it:
+
+- a window's **first attempted frame**, which pays for building and uploading the font atlas
+  (and for the frame machinery itself); and
+- any frame that **uploads a newly built atlas** — the frame after a device change, or one that
+  bakes a new glyph.
+
+Uploading that atlas is Zeron's work, not the plugin's drawing: on a loaded machine it alone can
+exceed 8 ms, and cutting those frames would close a window that is merely starting or rebuilding.
+The exemption is bounded. "First" counts attempted frames, so a window gets exactly one; the
+atlas case ends with that upload; every other frame is held strictly to 8 ms. A deliberate
+overrun on a later frame is still cut, reported against the window, and leaves the app and the
+plugin up. `frame_tests::the_first_attempted_frame_is_exempt_from_the_budget` proves the first
+frame paints while the second overrun is cut;
+`frame_tests::a_frame_that_uploads_a_new_atlas_is_exempt_from_the_budget` covers the device-change
+frame, and `frame_tests::frames_from_two_windows_do_not_cross` spends the budget deliberately in
+each window's first frame so it no longer depends on machine load.
+
+Separately, a window that cannot draw at all never becomes visible, so a failure on its first
+**attempted** frame is terminal: it is reported once in a sentence naming the window
 and the script's own error, it withdraws the plugin on the installed route (the dev route has no
 plugin manager to withdraw from), and the window is closed on both routes whether or not a failed
 callback is wired. "First" counts attempts, not painted frames, so a window that never painted is
@@ -164,7 +184,7 @@ These are the shipped defaults, defined in one place and enforced by the host:
 | Window title | 200 bytes |
 | External textures per plugin | 32, each at most 4096 × 4096 |
 | Queued UI operations per frame | 4096 |
-| Render callback CPU budget per frame | 8 ms |
+| Render callback CPU budget per frame | 8 ms (a window's first attempted frame and frames that upload a newly built atlas are exempt — the host's atlas work, see the frame pump) |
 | Plugin VM memory | 32 MiB (the existing per-plugin script limit) |
 
 A hidden window consumes no frame time; a window that exceeds a dimension is clamped to the

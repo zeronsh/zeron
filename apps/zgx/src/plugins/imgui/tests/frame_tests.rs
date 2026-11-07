@@ -37,6 +37,9 @@ struct Probe {
     delivered: RefCell<Vec<PreparedFrame>>,
     closed: Cell<bool>,
     target: Cell<(u32, u32)>,
+    /// Mirrors the live renderer: the next frame must carry the atlas until
+    /// one that does has been delivered, and again after a device change.
+    needs_atlas: Cell<bool>,
 }
 
 impl Probe {
@@ -54,7 +57,14 @@ impl Probe {
             delivered: RefCell::default(),
             closed: Cell::new(false),
             target: Cell::new((720, 480)),
+            needs_atlas: Cell::new(true),
         })
+    }
+
+    /// The GPU view dropped every object, as `Viewport::device_changed` does:
+    /// the next frame must upload the atlas again.
+    fn device_changed(&self) {
+        self.needs_atlas.set(true);
     }
 
     /// One ImGui input event, before the next frame starts (as the host's
@@ -115,16 +125,21 @@ impl FrameWindow for Probe {
         Some(self.target.get())
     }
 
+    fn frame_needs_atlas(&self) -> bool {
+        self.needs_atlas.get()
+    }
+
     fn frame_build(
         &self,
         spec: FrameSpec,
         draw: impl FnOnce(*const dear_imgui_rs::Ui),
     ) -> Result<PreparedFrame, String> {
         self.target.set(spec.target_size);
+        let want_atlas = self.frame_needs_atlas();
         let mut guard = self.context.borrow_mut();
         let context = guard.as_mut().expect("the probe's context");
         context
-            .build_frame(spec, true, |ui| {
+            .build_frame(spec, want_atlas, |ui| {
                 // SAFETY: `build_frame` keeps the frame open for this closure.
                 let root = unsafe { &*ui };
                 frame::root_window(root, &spec, || draw(ui));
@@ -133,6 +148,9 @@ impl FrameWindow for Probe {
     }
 
     fn frame_deliver(&self, frame: PreparedFrame) {
+        if frame.atlas().is_some() {
+            self.needs_atlas.set(false);
+        }
         self.delivered.borrow_mut().push(frame);
     }
 
@@ -195,21 +213,37 @@ fn run_frame_reporting(
     frame::run(probe.as_ref(), &calls)
 }
 
-/// The pixels of the frame `probe` last delivered.
-fn raster(gpu: &TestGpu, probe: &Probe) -> (WgpuRenderer, Snapshot) {
+/// Spends real time inside a frame, standing in for the host's font-atlas
+/// build and upload, which happen on the UI thread and are not the plugin's
+/// callback work.
+fn spend(ms: u64) {
+    let until = Instant::now() + Duration::from_millis(ms);
+    let mut spin = 0_u64;
+    while Instant::now() < until {
+        spin = spin.wrapping_add(1);
+        std::hint::black_box(spin);
+    }
+}
+
+/// The pixels of the frames `probe` delivered.
+///
+/// One renderer replays them in order, as the live view does: the atlas
+/// arrives with the frame that carried it, and later frames reuse what the
+/// renderer already holds.
+fn raster(gpu: &TestGpu, probe: &Probe) -> Snapshot {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = WgpuRenderer::new(gpu.device.clone(), gpu.queue.clone(), format);
     let target = OffscreenTarget::new(&gpu.device, (720, 480), format);
-    let prepared = probe
-        .delivered
-        .borrow()
-        .last()
-        .cloned()
-        .expect("a delivered frame");
-    let (_, snapshot) =
-        snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &prepared)
-            .expect("an offscreen frame");
-    (renderer, snapshot)
+    let delivered = probe.delivered.borrow();
+    assert!(!delivered.is_empty(), "a delivered frame");
+    let mut painted = None;
+    for prepared in delivered.iter() {
+        let (_, snapshot) =
+            snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, prepared)
+                .expect("an offscreen frame");
+        painted = Some(snapshot);
+    }
+    painted.expect("a snapshot")
 }
 
 /// Pixels in `area` (left, top, right, bottom) that differ from `background`
@@ -319,7 +353,7 @@ fn text_draws_inside_its_own_item_rect() {
         let _ = probe.frame_script_end(seq, None, false);
     })
     .expect("the control frame");
-    let (_control_renderer, background) = raster(&gpu, &control);
+    let background = raster(&gpu, &control);
 
     // The run under test: one text call, and its item rect from the binding.
     let probe = Probe::new("text");
@@ -331,7 +365,7 @@ fn text_draws_inside_its_own_item_rect() {
         let _ = probe.frame_script_end(seq, None, false);
     })
     .expect("the text frame");
-    let (_, painted) = raster(&gpu, &probe);
+    let painted = raster(&gpu, &probe);
 
     let rect = *rect.borrow();
     let area = window_rect(rect);
@@ -364,7 +398,7 @@ fn text_draws_inside_its_own_item_rect() {
         let _ = probe.frame_script_end(seq, None, false);
     })
     .expect("the second text frame");
-    let (_, different) = raster(&gpu, &other);
+    let different = raster(&gpu, &other);
     let column = (area.2.saturating_sub(12), area.1, area.2, area.3);
     let changed = differing(&different, &painted, column);
     assert!(
@@ -656,6 +690,127 @@ fn an_overrun_callback_is_aborted_and_reported() {
 }
 
 #[test]
+fn the_first_attempted_frame_is_exempt_from_the_budget() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("warmup");
+    let failed = Rc::new(RefCell::new(None::<String>));
+
+    // A window's first frame pays for the font atlas and the frame machinery
+    // on the UI thread; under load that alone exceeds 8 ms. It must paint
+    // rather than be cut, which would report the window broken and close it.
+    let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+        spend(12);
+        probe.text(seq, "warm");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the first frame");
+    assert!(
+        end.painted,
+        "the first frame must not be cut for the budget: {end:?}"
+    );
+    assert!(end.first, "{end:?}");
+    assert_eq!(probe.delivered.borrow().len(), 1);
+    assert_eq!(probe.frame_state().report().errors, 0);
+    assert!(
+        failed.borrow().is_none(),
+        "the first frame must not report the window broken"
+    );
+
+    // The exemption is the first attempt only. The very next overrun is cut
+    // and reported against the window; the window stays open and the plugin
+    // is never withdrawn.
+    let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+        spend(12);
+        let _ = probe.frame_widget("text", seq, &Value::record([("text", Value::from("warm"))]));
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the second frame");
+    assert!(!end.painted, "a later overrun must be cut: {end:?}");
+    assert!(!end.first, "{end:?}");
+    assert!(
+        end.error
+            .as_deref()
+            .is_some_and(|error| error.contains("too long")),
+        "{end:?}"
+    );
+    assert!(
+        failed.borrow().is_none(),
+        "a later overrun keeps the plugin loaded"
+    );
+    assert!(probe.frame_open(), "a later overrun keeps the window open");
+    assert_eq!(probe.delivered.borrow().len(), 1);
+
+    // The next clean frame draws as if nothing happened.
+    let end = run_frame(&probe, |probe, seq| {
+        probe.text(seq, "warm");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the next clean frame");
+    assert!(end.painted, "{end:?}");
+    assert_eq!(probe.delivered.borrow().len(), 2);
+}
+
+#[test]
+fn a_frame_that_uploads_a_new_atlas_is_exempt_from_the_budget() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("rebuild");
+
+    // A clean first frame: the probe's renderer holds the atlas afterwards.
+    let end = run_frame(&probe, |probe, seq| {
+        probe.text(seq, "steady");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the first frame");
+    assert!(end.painted, "{end:?}");
+    assert!(
+        !probe.frame_needs_atlas(),
+        "the first frame uploaded the atlas"
+    );
+
+    // A device change dropped every GPU object, so this frame uploads the
+    // atlas again. That is host work, not the plugin's callback, and must not
+    // cost the plugin its frame even though it is not the first attempt.
+    probe.device_changed();
+    let end = run_frame(&probe, |probe, seq| {
+        spend(12);
+        probe.text(seq, "steady");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the frame after a device change");
+    assert!(
+        end.painted,
+        "an atlas-uploading frame must not be cut for the budget: {end:?}"
+    );
+    assert!(!end.first, "{end:?}");
+    assert!(!probe.frame_needs_atlas(), "the atlas was uploaded again");
+    assert_eq!(probe.delivered.borrow().len(), 2);
+
+    // The exemption ends with that upload: the next overrun, which carries no
+    // atlas, is still cut.
+    let end = run_frame(&probe, |probe, seq| {
+        spend(12);
+        let _ = probe.frame_widget(
+            "text",
+            seq,
+            &Value::record([("text", Value::from("steady"))]),
+        );
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the frame after the upload");
+    assert!(
+        !end.painted,
+        "an overrun without an atlas is still cut: {end:?}"
+    );
+    assert!(
+        end.error
+            .as_deref()
+            .is_some_and(|error| error.contains("too long")),
+        "{end:?}"
+    );
+    assert!(probe.frame_open(), "the window stays open");
+}
+
+#[test]
 fn a_first_frame_error_reports_the_window_once_and_closes_it() {
     let _guard = imgui_guard();
     let probe = Probe::new("boom");
@@ -937,11 +1092,16 @@ fn frames_from_two_windows_do_not_cross() {
     let a = Probe::new("a");
     let b = Probe::new("b");
     // Two contexts exist; each takes its turn (only one may be active).
+    // Each first frame deliberately spends more than the budget, standing in
+    // for the atlas build and upload it pays for: whether these frames paint
+    // must not depend on how loaded this machine is, because their failure is
+    // terminal and would close the window before its second frame.
     let drawn = Rc::new(RefCell::new(Vec::<&'static str>::new()));
     let seen = drawn.clone();
     run_frame(&a, {
         let seen = seen.clone();
         move |probe, seq| {
+            spend(12);
             probe.text(seq, "A");
             seen.borrow_mut().push("a");
             let _ = probe.frame_script_end(seq, None, false);
@@ -951,6 +1111,7 @@ fn frames_from_two_windows_do_not_cross() {
     run_frame(&b, {
         let seen = seen.clone();
         move |probe, seq| {
+            spend(12);
             probe.text(seq, "B");
             seen.borrow_mut().push("b");
             let _ = probe.frame_script_end(seq, None, false);
@@ -991,7 +1152,7 @@ fn the_view_replays_the_frame_the_pump_prepared() {
         let _ = probe.frame_script_end(seq, None, false);
     })
     .expect("a frame");
-    let (_, painted) = raster(&gpu, &probe);
+    let painted = raster(&gpu, &probe);
     assert!(
         painted.non_background_pixels() > 100,
         "the prepared frame drew nothing: {} non-background pixels",
@@ -1048,7 +1209,7 @@ fn a_draw_panic_fails_the_window_and_the_pump_keeps_going() {
         end.error
     );
     assert_eq!(probe.frame_state().report().consecutive_errors, 0);
-    let (_, image) = raster(&gpu, &probe);
+    let image = raster(&gpu, &probe);
     assert!(
         image.non_background_pixels() > 100,
         "the frame after the panic was blank"

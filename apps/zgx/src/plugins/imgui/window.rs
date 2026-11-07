@@ -788,18 +788,21 @@ impl FrameWindow for PluginWindow {
         self.painter.borrow().last_target_size()
     }
 
+    fn frame_needs_atlas(&self) -> bool {
+        // The view asks for the atlas on its first frame and after a device
+        // rebuild; the context copies it whenever it changed as well.
+        self.painter
+            .borrow()
+            .renderer()
+            .is_none_or(|renderer| renderer.needs_atlas())
+    }
+
     fn frame_build(
         &self,
         spec: FrameSpec,
         draw: impl FnOnce(*const Ui),
     ) -> Result<super::render::PreparedFrame, String> {
-        // The view asks for the atlas on its first frame and after a device
-        // rebuild; the context copies it whenever it changed as well.
-        let want_atlas = self
-            .painter
-            .borrow()
-            .renderer()
-            .is_none_or(|renderer| renderer.needs_atlas());
+        let want_atlas = self.frame_needs_atlas();
         self.with_context(|context| {
             context.build_frame(spec, want_atlas, |ui| {
                 // SAFETY: `build_frame` keeps the context alive and its frame
