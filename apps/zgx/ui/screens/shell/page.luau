@@ -166,7 +166,12 @@ return function(props: Props): Node
 		return 8
 	end
 
-	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
+	-- (Where the pointer is, only while a wallpaper reads it: a plugin's.
+	-- Your picture, or none, never does, and its writes on every move
+	-- went nowhere.)
+	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, function(): boolean
+		return home() and string.find(appearance.showing:peek(), "^plugin:") ~= nil
+	end)
 	pane.ref = box
 	pane.id = "shell-page"
 	pane.hook = "shell.page"
