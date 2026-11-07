@@ -1972,57 +1972,64 @@ async fn a_send_during_a_turn_boundary_turn_waits_for_the_turn_end() {
 async fn a_send_issued_before_the_running_turn_started_is_the_next_turn_not_a_steer() {
     let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
     core.doc_host
-        .queue_message(CHAT, "first, sent while asleep", Vec::new())
-        .expect("queue first");
-    wait_for(|| prompts.lock().unwrap().len() == 1, "the first turn").await;
-    let started = core
-        .sessions
-        .turn_started_ms(CHAT)
-        .expect("a turn is running");
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the opening turn").await;
+    let template = core.sessions.last_request(CHAT).expect("a request");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while core.sessions.turn_in_flight(CHAT) {
+        assert!(tokio::time::Instant::now() < deadline, "the opening turn never ended");
+        let _ = harness.finish.send(());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
-    // Sent two seconds after the first, and long before the machine woke.
-    let mut request = core.sessions.last_request(CHAT).expect("live request");
-    request.prompt = "second, sent while asleep".into();
-    let entry = zeron_doc::SessionCommandEntry {
-        id: "cmd-second".into(),
-        payload: SessionCommandPayload::Run {
-            message_id: "m-second".into(),
-            request,
-        },
-        issued_by: "phone".into(),
-        issued_at: started - 30_000,
-        based_on: None,
-        expires_at: Some(started + 3_600_000),
-        status: zeron_doc::SessionCommandStatus::Pending,
-        resolution: None,
+    // Both sent a minute ago, two seconds apart, while the host was away.
+    let sent = |id: &str, prompt: &str, ago_ms: i64| {
+        let mut request = template.clone();
+        request.prompt = prompt.into();
+        let issued_at = chrono::Utc::now().timestamp_millis() - ago_ms;
+        zeron_doc::SessionCommandEntry {
+            id: format!("cmd-{id}"),
+            payload: SessionCommandPayload::Run {
+                message_id: format!("m-{id}"),
+                request,
+            },
+            issued_by: "phone".into(),
+            issued_at,
+            based_on: None,
+            expires_at: Some(issued_at + 3_600_000),
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        }
     };
-    core.doc_host
-        .open(CHAT)
-        .unwrap()
-        .doc()
-        .queue_command(&entry)
-        .expect("write the command");
+    let doc = core.doc_host.open(CHAT).unwrap();
+    doc.doc()
+        .queue_command(&sent("first", "first, sent while away", 60_000))
+        .unwrap();
+    doc.doc()
+        .queue_command(&sent("second", "second, sent while away", 58_000))
+        .unwrap();
     core.doc_host.enqueue_wakeup(CHAT).expect("wake the host");
     wait_for(
-        || queue_texts(&core) == vec!["second, sent while asleep"],
+        || queue_texts(&core) == vec!["second, sent while away"],
         "the second to wait for the first turn",
     )
     .await;
     assert_eq!(
         *prompts.lock().unwrap(),
-        vec!["first, sent while asleep"],
+        vec!["opening", "first, sent while away"],
         "the second was steered into the first turn"
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while prompts.lock().unwrap().len() < 2 {
+    while prompts.lock().unwrap().len() < 3 {
         assert!(tokio::time::Instant::now() < deadline, "the second never ran");
         let _ = harness.finish.send(());
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(
         *prompts.lock().unwrap(),
-        vec!["first, sent while asleep", "second, sent while asleep"]
+        vec!["opening", "first, sent while away", "second, sent while away"]
     );
     let _ = harness.finish.send(());
     core.shutdown().await;
