@@ -510,9 +510,15 @@ pub fn apply_keymap(
             AddSpacePalette,
             None,
         ),
-        // Fixed: ⌘K summons the command palette.
-        // Pressing it again dismisses.
-        KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
+        // Summons the command palette; pressing it again dismisses.
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.toggle_command_palette,
+                ShortcutId::ToggleCommandPalette.default_combo(),
+            ),
+            ToggleCommandPalette,
+            None,
+        ),
         KeyBinding::new(
             &valid_or_default(&keymap.open_model_picker, "mod-/"),
             OpenModelPicker,
