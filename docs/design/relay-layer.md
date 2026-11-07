@@ -168,8 +168,8 @@ the old log stays a valid, quiet log, and deletes can't touch existing rows.
 4. The DO deletes the row, but only for the device the registry says hosts the chat. A
    device's own idea of who hosts isn't enough: one that hasn't heard of a move could
    confirm a row the new host still needs, and that device might not come back. So the DO
-   asks `RegistryRoom` (`/chat-host`, cached 30 s), and without an answer it keeps the row
-   and redelivers. `delivered` names batch ids, not positions, so a late or repeated one
+   asks `RegistryRoom` (`/chat-host`), each time, and without an answer it keeps the row
+   and redelivers. A `delivered` is rare enough for that: one per sent message at most. `delivered` names batch ids, not positions, so a late or repeated one
    can't delete a newer row. A device that becomes the host re-reads the queue, so what it
    read before can now be confirmed.
 

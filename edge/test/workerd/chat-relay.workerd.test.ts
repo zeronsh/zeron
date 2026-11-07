@@ -768,7 +768,27 @@ describe("only the chat's host can retire a queue row", () => {
     author.socket.close();
   });
 
-  it("the host moving is noticed within the lookup's lifetime for anyone else", async () => {
+  it("a host that has just confirmed loses the right the moment the chat moves", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    await hostedBy(name, "first");
+    const first = await connect(name, "first", { relay: true, org });
+    const sender = await connect(name, "sender", { relay: true, org });
+    sender.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(2));
+    await sender.nextOf(FRAME.queued);
+    first.sendFrame(FRAME.delivered, { batchIds: ["m1"] });
+    await expect.poll(() => queueCount(name)).toBe(0);
+    await hostedBy(name, "second");
+    sender.sendFrame(FRAME.enqueue, { batchId: "m2" }, bytes(3));
+    await sender.nextOf(FRAME.queued);
+    first.sendFrame(FRAME.delivered, { batchIds: ["m2"] });
+    await first.settled();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(await queueCount(name)).toBe(1);
+    for (const client of [first, sender]) client.socket.close();
+  });
+
+  it("the host moving is noticed for anyone else", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);
     await hostedBy(name, "first");

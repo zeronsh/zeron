@@ -75,8 +75,6 @@ const LEGACY_READ_TTL_MS = 2 * 60_000;
 const MAX_DELIVERED_IDS = 100;
 /** How often an arriving reader may wake a host that isn't in the room. */
 const HOST_WAKE_MIN_MS = 60_000;
-/** How long a room trusts the registry's answer about who hosts its chat. */
-const HOST_LOOKUP_TTL_MS = 30_000;
 const RELAY_DIRTY = "relayDirty";
 
 interface SocketState {
@@ -130,8 +128,6 @@ export class ChatRoom implements DurableObject {
   private relayDirtyMarked = false;
   /** Layer off: whether to look for a queue left from when it was on. */
   private staleQueueChecked = false;
-  /** Who the registry last said hosts this chat. */
-  private hostLookup?: { device: string; at: number };
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -855,10 +851,6 @@ export class ChatRoom implements DurableObject {
   /** The registry's answer: a device, null if it has no such chat row yet, or
    * undefined if it couldn't be asked. */
   private async chatHost(state: SocketState): Promise<string | null | undefined> {
-    const now = Date.now();
-    if (this.hostLookup && this.hostLookup.device === state.device && now - this.hostLookup.at < HOST_LOOKUP_TTL_MS) {
-      return this.hostLookup.device;
-    }
     try {
       const room = this.env.REGISTRY_ROOMS.get(
         this.env.REGISTRY_ROOMS.idFromName(`reg1/${state.orgId}/${state.userId}`)
@@ -868,7 +860,6 @@ export class ChatRoom implements DurableObject {
       });
       if (!reply.ok) return undefined;
       const { deviceId } = (await reply.json()) as { deviceId?: string | null };
-      if (typeof deviceId === "string") this.hostLookup = { device: deviceId, at: now };
       return deviceId ?? null;
     } catch (error) {
       console.warn("chat relay: registry unavailable", String(error));
