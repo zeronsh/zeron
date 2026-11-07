@@ -1,13 +1,56 @@
 import { describe, expect, it } from "vitest";
 import {
+  DISK_CRITICAL,
+  DISK_WARN,
   HEARTBEAT_STALE_MS,
+  MACHINES,
+  REFRESH_MARGIN_MS,
+  diskLevel,
   idleDecision,
+  machineName,
+  machineSpec,
+  refreshDueAt,
   parseIdleMs,
   parseTtlSeconds,
   shouldExtendTtl,
   tokenTimestampCheck,
   workflowInstanceId
 } from "./policy";
+
+describe("the machine catalog", () => {
+  it("names every size once, smallest first, and only those", () => {
+    expect(MACHINES.map((m) => m.id)).toEqual(["small", "default", "large", "xlarge"]);
+    for (const machine of MACHINES) expect(machineName(machine.id)).toBe(machine.id);
+    expect(machineName("huge")).toBeUndefined();
+    expect(machineName(1)).toBeUndefined();
+    expect(machineName(undefined)).toBeUndefined();
+    const disks = MACHINES.map((m) => m.diskGiB);
+    expect([...disks].sort((a, b) => a - b)).toEqual(disks);
+  });
+
+  it("carries what Boat's refusal said large holds", () => {
+    expect(machineSpec("large")?.diskGiB).toBe(111.8);
+  });
+});
+
+describe("disk levels", () => {
+  it("warns at 80% and is critical at 90% of what the size holds", () => {
+    expect(diskLevel(79.9, 100)).toBe("ok");
+    expect(diskLevel(100 * DISK_WARN, 100)).toBe("warn");
+    expect(diskLevel(89.9, 100)).toBe("warn");
+    expect(diskLevel(100 * DISK_CRITICAL, 100)).toBe("critical");
+    expect(diskLevel(118.3, 111.8)).toBe("critical");
+    expect(diskLevel(0, 51)).toBe("ok");
+  });
+});
+
+describe("a sleeping machine's refresh", () => {
+  it("falls due before the retention ends, with room for another try", () => {
+    const retention = 14 * 24 * 60 * 60_000;
+    expect(refreshDueAt(1_000, retention)).toBe(1_000 + retention - REFRESH_MARGIN_MS);
+    expect(REFRESH_MARGIN_MS).toBeGreaterThanOrEqual(24 * 60 * 60_000);
+  });
+});
 
 describe("runner token timestamps", () => {
   const now = 1_800_000_000_000;

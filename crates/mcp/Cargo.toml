@@ -24,3 +24,4 @@ futures.workspace = true
 zeron-theme.workspace = true
 zeron-visual.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
