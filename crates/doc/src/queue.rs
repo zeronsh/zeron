@@ -20,6 +20,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{DocError, SessionDoc};
 
+/// Loro reads the list length and inserts under separate locks, so a host
+/// draining the head on another thread can shrink the list in between and
+/// the insert reports `OutOfBound` for a position that was valid a moment
+/// ago. Nothing was written; recomputing the position settles it.
+fn retry_out_of_bound<T>(
+    mut insert: impl FnMut() -> Result<T, loro::LoroError>,
+) -> Result<T, loro::LoroError> {
+    let mut attempts = 0;
+    loop {
+        match insert() {
+            Err(loro::LoroError::OutOfBound { .. }) if attempts < 8 => attempts += 1,
+            other => return other,
+        }
+    }
+}
+
 /// One unsent message waiting its turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,7 +140,7 @@ impl SessionDoc {
             return Err(DocError::Schema("queued message text required".into()));
         }
         let queue = self.doc().get_movable_list("queue");
-        let map = queue.push_container(loro::LoroMap::new())?;
+        let map = retry_out_of_bound(|| queue.push_container(loro::LoroMap::new()))?;
         write_queued_map(&map, item)?;
         self.doc().commit();
         Ok(())
@@ -142,7 +158,9 @@ impl SessionDoc {
             return Err(DocError::Schema("queued message text required".into()));
         }
         let queue = self.doc().get_movable_list("queue");
-        let map = queue.insert_container(index.min(queue.len()), loro::LoroMap::new())?;
+        let map = retry_out_of_bound(|| {
+            queue.insert_container(index.min(queue.len()), loro::LoroMap::new())
+        })?;
         write_queued_map(&map, item)?;
         self.doc().commit();
         Ok(())
