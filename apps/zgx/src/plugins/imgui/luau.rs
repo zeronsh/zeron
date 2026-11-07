@@ -218,7 +218,7 @@ impl ImGuiWindows {
         match op.as_str() {
             "show" => answer(window.show()),
             "hide" => answer(window.hide()),
-            "focus" => answer(window.focus()),
+            "focus" => answer(window.focus_window()),
             "minimize" => answer(window.minimize()),
             "restore" => answer(window.restore()),
             "maximize" => answer(window.maximize()),

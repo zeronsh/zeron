@@ -21,8 +21,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-use zgx::compose::gpu_view;
+use zgx::compose::{component, gpu_view};
 use zgx::gpu_view::GpuView;
+use zgx::input::InputEvent;
+use zgx::platform::PlatformService;
 use zgx::reactive::Signal;
 use zgx::style::Styled;
 use zgx_desktop::{
@@ -754,12 +756,31 @@ impl PluginWindow {
     /// and asks for a frame when what is drawn changed. The framework routes
     /// each window's document events to that window's own view, so input from
     /// one plugin window never reaches another's.
-    pub fn pointer(&self, event: &zgx::input::InputEvent) {
+    pub fn event(&self, event: &zgx::input::InputEvent) {
         if !self.is_shown() {
             return;
         }
         let changed = self
-            .with_context(|context| super::input::pointer(context, event))
+            .with_context(|context| super::input::input(context, event))
+            .unwrap_or(false);
+        if changed {
+            self.request_frame();
+        }
+    }
+
+    /// Focus gained or lost on this window's content: Dear ImGui sees it and
+    /// a lost focus also releases whatever the pointer was holding.
+    pub fn focus(&self, focused: bool) {
+        if !self.is_shown() {
+            return;
+        }
+        let changed = self
+            .with_context(|context| {
+                if !focused {
+                    super::input::cancel(context);
+                }
+                super::input::focus(context, focused)
+            })
             .unwrap_or(false);
         if changed {
             self.request_frame();
@@ -880,7 +901,7 @@ impl PluginWindow {
         Ok(())
     }
 
-    pub fn focus(&self) -> Result<(), String> {
+    pub fn focus_window(&self) -> Result<(), String> {
         self.state.require_open()?;
         self.handle.request_focus();
         Ok(())
@@ -1121,31 +1142,92 @@ fn build_content(
     open: &Rc<RefCell<std::collections::BTreeMap<String, Rc<PluginWindow>>>>,
     key: &WindowKey,
 ) {
-    let _ = cx.render(
-        gpu_view("", view)
-            .w_full()
-            .h_full()
-            .focusable(true)
-            // The window's own pointer events go to its Dear ImGui context:
-            // only this window's view is mounted in this window's document.
-            .on_document_event({
-                let slot = slot.clone();
-                move |event: &zgx::input::InputEvent| {
-                    if let Some(window) = slot.borrow().clone() {
-                        window.pointer(event);
+    let double_click_time = cx
+        .ui
+        .input
+        .double_click_time()
+        .as_secs_f32()
+        .clamp(0.1, 5.0);
+    let double_click_max_dist = cx
+        .ui
+        .input
+        .double_click_area()
+        .map_or(6.0, |(width, height)| {
+            (width.min(height) / 2.0).clamp(1.0, 200.0)
+        });
+    let platform: Rc<RefCell<Option<Rc<PlatformService>>>> = Rc::default();
+    let slot_owned = slot.clone();
+    let view_owned = view.clone();
+    let content = component({
+        let platform = platform.clone();
+        let view = view_owned;
+        let slot = slot_owned.clone();
+        move |cx| {
+            *platform.borrow_mut() = cx.try_service::<PlatformService>();
+            gpu_view("", &view)
+                .w_full()
+                .h_full()
+                .focusable(true)
+                // Focus and blur reach the view as its own events, not as
+                // document events, so Dear ImGui is told about them here.
+                .on_event({
+                    let slot = slot.clone();
+                    move |cx: &mut zgx::input::EventContext| {
+                        let focused = match &cx.event {
+                            InputEvent::Focus => Some(true),
+                            InputEvent::Blur => Some(false),
+                            _ => None,
+                        };
+                        if let Some(focused) = focused
+                            && let Some(window) = slot.borrow().clone()
+                        {
+                            window.focus(focused);
+                        }
                     }
-                }
-            })
-            // The content, not a control inside it, takes the keyboard: focus
-            // once it is laid out (a node nothing has laid out cannot take
-            // focus yet).
-            .on_mount(|handle| {
-                let focus = handle.clone();
-                handle.after_layout(move || {
-                    focus.focus();
-                });
-            }),
-    );
+                })
+                // The window's own events go to its Dear ImGui context:
+                // only this window's view is mounted in this window's document.
+                .on_document_event({
+                    let slot = slot.clone();
+                    move |event: &zgx::input::InputEvent| {
+                        if let Some(window) = slot.borrow().clone() {
+                            window.event(event);
+                        }
+                    }
+                })
+                // The content, not a control inside it, takes the keyboard: focus
+                // once it is laid out (a node nothing has laid out cannot take
+                // focus yet). Its context also takes the platform's clipboard
+                // and double-click settings then.
+                .on_mount({
+                    let slot = slot.clone();
+                    move |handle| {
+                        if let Some(window) = slot.borrow().clone() {
+                            let platform = platform.borrow().clone();
+                            window.with_context(|context| {
+                                let _ = context.with_active(|context| {
+                                    super::input::configure_io(
+                                        context.io_mut(),
+                                        double_click_time,
+                                        double_click_max_dist,
+                                    );
+                                    if let Some(platform) = platform {
+                                        context.set_clipboard_backend(super::input::ZgxClipboard(
+                                            platform,
+                                        ));
+                                    }
+                                });
+                            });
+                        }
+                        let focus = handle.clone();
+                        handle.after_layout(move || {
+                            focus.focus();
+                        });
+                    }
+                })
+        }
+    });
+    let _ = cx.render(content);
     let open = open.clone();
     let global = key.global();
     cx.on_closed(move || {
