@@ -437,11 +437,14 @@ actions.reuse_cycle = function()
 	end)
 end
 
--- `VAL-WIN-009`: the live cap, driven to it. Everything closes first so the
--- loop's own eight are the whole population the probe counts.
+-- `VAL-WIN-009`: the live cap, driven to it. Everything except the
+-- Probe Actions drive surface closes first, so the surface survives and the
+-- loop's own eight are the whole population the probe counts with it.
 actions.n_loop = function()
 	for _, window in open_ids() do
-		close_window(window)
+		if window ~= "actions" then
+			close_window(window)
+		end
 	end
 	later(function()
 		for i = 1, 12 do
@@ -478,7 +481,9 @@ end
 
 actions.close_all_windows = function()
 	for _, window in open_ids() do
-		close_window(window)
+		if window ~= "actions" then
+			close_window(window)
+		end
 	end
 end
 

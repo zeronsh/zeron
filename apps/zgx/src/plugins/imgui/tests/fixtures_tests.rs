@@ -992,6 +992,10 @@ fn the_main_probe_reports_per_window_state_ticks_and_store() {
     // The tool still answers with every window closed: VAL-LIFE-007's
     // condition that the plugin stays loaded is observable, not assumed.
     run_action(&app, &fake, &calls, "close_all_windows");
+    fake.answer(
+        "imgui-win-probe",
+        &serde_json::json!({ "op": "close", "window": "actions" }),
+    );
     app.frames(10);
     let closed = status(&app, &fake, &calls);
     assert_eq!(number(&closed["open"]), 0.0, "{closed}");

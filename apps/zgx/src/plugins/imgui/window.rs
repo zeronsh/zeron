@@ -17,6 +17,7 @@
 //! windows (the registry's `close_all`), which is the other direction.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -53,6 +54,49 @@ pub const MAX_ID_BYTES: usize = 64;
 /// A window with no size asked for opens at this, in logical points.
 pub const DEFAULT_WIDTH: f64 = 720.0;
 pub const DEFAULT_HEIGHT: f64 = 480.0;
+
+#[cfg(windows)]
+pub(crate) fn frame_inset(
+    decorations: bool,
+    titlebar: Titlebar,
+    resizable: bool,
+    scale: f64,
+) -> (i32, i32) {
+    if !decorations || titlebar != Titlebar::Standard {
+        return (0, 0);
+    }
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        WS_BORDER, WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_WINDOWEDGE, WS_SIZEBOX,
+        WS_SYSMENU,
+    };
+    let style = WS_CAPTION
+        | WS_BORDER
+        | WS_CLIPSIBLINGS
+        | WS_SYSMENU
+        | if resizable { WS_SIZEBOX } else { 0 };
+    let ex = WS_EX_WINDOWEDGE | WS_EX_APPWINDOW;
+    let dpi = ((scale * 96.0).round() as u32).clamp(96, 384);
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, ex, dpi) };
+    (rect.left, rect.top)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn frame_inset(
+    _decorations: bool,
+    _titlebar: Titlebar,
+    _resizable: bool,
+    _scale: f64,
+) -> (i32, i32) {
+    (0, 0)
+}
 
 /// One plugin window's name: unique per plugin, and only meaningful inside
 /// it. `(plugin, id)` is the key every map and saved frame uses; the same id
@@ -280,10 +324,11 @@ impl WindowSpec {
             1.0
         };
         let pixels = |points: f64| (points * scale).round().max(1.0) as u32;
+        let inset = frame_inset(self.decorations, self.titlebar, self.resizable, scale);
         let bounds = self.position.map(|(x, y)| WindowBounds {
             position: Some((
-                (f64::from(x) * scale).round() as i32,
-                (f64::from(y) * scale).round() as i32,
+                (f64::from(x) * scale).round() as i32 + inset.0,
+                (f64::from(y) * scale).round() as i32 + inset.1,
             )),
             size: (pixels(self.size.0), pixels(self.size.1)),
         });
@@ -307,6 +352,32 @@ impl WindowSpec {
             ..WindowOptions::default()
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LastPlacement {
+    pub bounds: WindowBounds,
+    pub size: (f64, f64),
+}
+
+pub(crate) fn window_options(
+    spec: &WindowSpec,
+    key: &WindowKey,
+    scale: f64,
+    saved: Option<LastPlacement>,
+) -> (WindowOptions, (f64, f64)) {
+    let mut options = spec.to_options(key, scale);
+    let size = if spec.remember
+        && let Some(restored) = saved
+    {
+        options.bounds = Some(restored.bounds);
+        options.width = restored.size.0;
+        options.height = restored.size.1;
+        restored.size
+    } else {
+        spec.size
+    };
+    (options, size)
 }
 
 /// A refusal about `field`, saying which window it was for when the id is
@@ -531,6 +602,11 @@ impl CloseReason {
     }
 }
 
+struct WindowGeometry {
+    viewport: Signal<(f32, f32)>,
+    bounds: Signal<WindowBounds>,
+}
+
 /// One open plugin window: its native window, its GPU view, its Dear ImGui
 /// context, and what every control changed.
 pub struct PluginWindow {
@@ -539,6 +615,8 @@ pub struct PluginWindow {
     state: WindowState,
     view: GpuView,
     painter: Rc<RefCell<ImguiViewport>>,
+    geometry: RefCell<Option<WindowGeometry>>,
+    last_placement: Rc<RefCell<HashMap<String, LastPlacement>>>,
     /// The window's Dear ImGui context. Scene-suspended between frames, so
     /// another window can take its turn; dropped when the window closes,
     /// which frees its font atlas and everything it owned.
@@ -631,6 +709,41 @@ impl PluginWindow {
         if changed {
             self.request_frame();
         }
+    }
+
+    pub(crate) fn attach_geometry(
+        &self,
+        viewport: Signal<(f32, f32)>,
+        bounds: Signal<WindowBounds>,
+    ) {
+        *self.geometry.borrow_mut() = Some(WindowGeometry { viewport, bounds });
+    }
+
+    fn geometry(&self) -> Option<(WindowBounds, (f64, f64))> {
+        let guard = self.geometry.borrow();
+        let geometry = guard.as_ref()?;
+        let logical = geometry
+            .viewport
+            .with_untracked(|(width, height)| (f64::from(*width), f64::from(*height)));
+        let bounds = geometry.bounds.with_untracked(|bounds| *bounds);
+        if logical.0 <= 0.0 || logical.1 <= 0.0 || bounds.size.0 == 0 || bounds.size.1 == 0 {
+            return None;
+        }
+        Some((bounds, logical))
+    }
+
+    pub(crate) fn refresh_geometry(&self) {
+        let Some((bounds, logical)) = self.geometry() else {
+            return;
+        };
+        self.state.size.set(logical);
+        let scale = f64::from(bounds.size.0) / logical.0;
+        self.scale.set(scale.clamp(0.5, 4.0));
+    }
+
+    fn capture_placement(&self) -> Option<LastPlacement> {
+        self.geometry()
+            .map(|(bounds, size)| LastPlacement { bounds, size })
     }
 
     /// Runs `f` with the window's Dear ImGui context. None when the window
@@ -741,6 +854,13 @@ impl PluginWindow {
         {
             notify(&self.key.id);
         }
+        if reason == CloseReason::Closed
+            && let Some(placement) = self.capture_placement()
+        {
+            self.last_placement
+                .borrow_mut()
+                .insert(self.key.global(), placement);
+        }
         self.view.animate(false);
         self.handle.close();
     }
@@ -777,10 +897,12 @@ impl FrameWindow for PluginWindow {
     }
 
     fn frame_size(&self) -> (f64, f64) {
+        self.refresh_geometry();
         self.state.size()
     }
 
     fn frame_scale(&self) -> f64 {
+        self.refresh_geometry();
         self.scale.get()
     }
 
@@ -897,6 +1019,7 @@ fn build_content(
     let Some(record) = slot.borrow().clone() else {
         return;
     };
+    record.attach_geometry(cx.viewport.clone(), cx.window_info.bounds.clone());
     // The title bar's close button (and the window manager's) asks this
     // first: the plugin's `on_close` runs once, then the window goes.
     let closing = record;
@@ -927,6 +1050,7 @@ pub struct Windows {
     viewport: Signal<(f32, f32)>,
     bounds: Signal<WindowBounds>,
     open: Rc<RefCell<std::collections::BTreeMap<String, Rc<PluginWindow>>>>,
+    last_placement: Rc<RefCell<HashMap<String, LastPlacement>>>,
     /// What to tell each plugin when one of its windows closes.
     listeners: RefCell<std::collections::HashMap<String, CloseListener>>,
     /// How to ask each plugin for a frame (its own call queue), set when its
@@ -949,6 +1073,7 @@ impl Windows {
             viewport: cx.viewport.clone(),
             bounds: cx.window_info.bounds.clone(),
             open: Rc::default(),
+            last_placement: Rc::default(),
             listeners: RefCell::default(),
             calls: RefCell::default(),
             pump_cursor: Cell::new(0),
@@ -1075,7 +1200,8 @@ impl Windows {
                     spec.id
                 )
             })?;
-        let options = spec.to_options(&key, self.scale());
+        let saved = self.last_placement.borrow().get(&global).copied();
+        let (options, size) = window_options(&spec, &key, self.scale(), saved);
         let slot: Rc<RefCell<Option<Rc<PluginWindow>>>> = Rc::default();
         let handle = {
             let (slot, view, open, key) =
@@ -1090,12 +1216,16 @@ impl Windows {
                 spec.id
             ));
         }
+        let state = WindowState::new(key.clone(), &spec);
+        state.size.set(size);
         let record = Rc::new(PluginWindow {
-            state: WindowState::new(key.clone(), &spec),
+            state,
             key,
             handle,
             view,
             painter,
+            geometry: RefCell::new(None),
+            last_placement: self.last_placement.clone(),
             context: RefCell::new(Some(context)),
             frames: FrameState::new(),
             renderable: Cell::new(false),

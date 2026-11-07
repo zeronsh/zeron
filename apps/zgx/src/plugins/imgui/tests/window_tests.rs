@@ -13,7 +13,8 @@ use zgx_desktop::Titlebar;
 use zgx_script::Value;
 
 use crate::plugins::imgui::window::{
-    MAX_HEIGHT, MAX_WIDTH, MIN_HEIGHT, MIN_WIDTH, WindowKey, WindowSpec, WindowState, check_quota,
+    LastPlacement, MAX_HEIGHT, MAX_WIDTH, MIN_HEIGHT, MIN_WIDTH, WindowKey, WindowSpec,
+    WindowState, check_quota, frame_inset, window_options,
 };
 
 /// Parses a request as a plugin's `open_window` would.
@@ -159,7 +160,8 @@ fn the_options_zgx_opens_carry_the_exact_title_and_logical_size() {
     assert_eq!((options.width, options.height), (720.0, 480.0));
     let bounds = options.bounds.unwrap();
     assert_eq!(bounds.size, (1440, 960));
-    assert_eq!(bounds.position, Some((200, 240)));
+    let inset = frame_inset(spec.decorations, spec.titlebar, spec.resizable, 2.0);
+    assert_eq!(bounds.position, Some((200 + inset.0, 240 + inset.1)));
     assert!(options.resizable);
     assert_eq!(options.tabbing, zgx_desktop::Tabbing::Disallowed);
     // Persistence is opt-in: a requested size is the size a window opens at.
@@ -257,4 +259,63 @@ fn the_whole_app_stops_at_32_windows() {
     let error = check_quota("plug", 0, 32).expect_err("a 33rd window was allowed");
     assert!(error.contains("32"), "{error}");
     assert!(check_quota("plug", 0, 31).is_ok());
+}
+
+#[test]
+fn the_live_cap_is_a_count_not_a_latch() {
+    assert!(check_quota("plug", 8, 8).is_err(), "nine open is refused");
+    assert!(
+        check_quota("plug", 7, 8).is_ok(),
+        "a closed slot opens again"
+    );
+}
+
+#[test]
+fn a_remembered_window_restores_the_saved_placement_and_a_plain_one_does_not() {
+    let remembered = parse(
+        r#"{"id":"inspector","title":"x","size":{"width":720,"height":480},"position":{"x":120,"y":80},"remember":true}"#,
+    )
+    .unwrap();
+    let plain = parse(
+        r#"{"id":"inspector","title":"x","size":{"width":720,"height":480},"remember":false}"#,
+    )
+    .unwrap();
+    let key = WindowKey::new("plug", "inspector");
+    let saved = LastPlacement {
+        bounds: zgx_desktop::WindowBounds {
+            position: Some((400, 300)),
+            size: (1800, 1120),
+        },
+        size: (900.0, 560.0),
+    };
+
+    let (options, size) = window_options(&remembered, &key, 2.0, Some(saved));
+    assert_eq!(options.bounds, Some(saved.bounds));
+    assert_eq!(size, (900.0, 560.0));
+
+    let (options, size) = window_options(&plain, &key, 2.0, Some(saved));
+    assert!(
+        options.bounds.is_none(),
+        "a plain window keeps no saved frame"
+    );
+    assert_eq!(size, (720.0, 480.0));
+    assert!(options.frame_autosave.is_none());
+}
+
+#[test]
+fn a_requested_position_is_compensated_to_the_client_origin() {
+    let spec = parse(
+        r#"{"id":"inspector","title":"x","size":{"width":400,"height":300},"position":{"x":100,"y":120}}"#,
+    )
+    .unwrap();
+    let key = WindowKey::new("plug", "inspector");
+    let inset = frame_inset(spec.decorations, spec.titlebar, spec.resizable, 1.0);
+    if cfg!(windows) {
+        assert!(inset.0 < 0 && inset.1 < 0, "{inset:?}");
+    } else {
+        assert_eq!(inset, (0, 0));
+    }
+    let options = spec.to_options(&key, 1.0);
+    let position = options.bounds.unwrap().position.unwrap();
+    assert_eq!(position, (100 + inset.0, 120 + inset.1));
 }

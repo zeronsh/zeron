@@ -105,9 +105,9 @@ an unknown name raises a sentence naming it.
 | `open_left` / `open_right` / `open_both_sides` | opens the remembered side windows | VAL-LIFE-009, VAL-DOCK-003…005 |
 | `open_dup` | opens `dup`, then attempts `dup` again and records the refusal | VAL-WIN-007 |
 | `open_reuse` / `reuse_cycle` | opens, closes and reopens `reuse` (title `Probe Reuse Again`) | VAL-WIN-008 |
-| `n_loop` | closes every window, then opens `n1`… until the host refuses | VAL-WIN-009 |
+| `n_loop` | closes every window except `actions`, then opens `n1`… until the host refuses | VAL-WIN-009 |
 | `n_more` | closes the highest `n` and opens the next | VAL-WIN-009 |
-| `close_all_windows` | closes every window; the plugin stays loaded | VAL-WIN-010 |
+| `close_all_windows` | closes every window except `actions`; the plugin stays loaded | VAL-LIFE-006 |
 | `open_a` / `open_b` / `open_c` | open a probe window (`a`, `b` or `c`) after a close | VAL-WIN-005, VAL-WIN-016 |
 
 ## Tools
