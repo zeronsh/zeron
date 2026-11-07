@@ -662,7 +662,7 @@ impl RoomRelay {
         self.defer_checkpoint
             .store(relayed && (!route.on_screen || route.host_online), Ordering::Release);
         self.link_wanted.send_if_modified(|current| {
-            let next = route.link.wanted();
+            let next = route.link;
             let changed = *current != next;
             *current = next;
             changed
@@ -690,7 +690,7 @@ struct RoomRelay {
     relayed: Arc<AtomicBool>,
     defer_checkpoint: Arc<AtomicBool>,
     last_activity_ms: Arc<AtomicI64>,
-    link_wanted: watch::Sender<bool>,
+    link_wanted: watch::Sender<LinkWanted>,
     /// Since when a chat on screen has been waiting with its checkpoint deferred.
     deferred_since: Mutex<Option<std::time::Instant>>,
     applied: Mutex<Option<RelayRoute>>,
@@ -760,7 +760,7 @@ impl Room {
             let _runtime = crate::runtime::handle().enter();
             let handle = RelayHandle::spawn(&deps.device_id, sink.clone(), RelayPolicy::default());
             handle.set_serve_host_only(true);
-            let (link_wanted, wanted) = watch::channel(false);
+            let (link_wanted, wanted) = watch::channel(LinkWanted::default());
             let host = Arc::new(Mutex::new(deps.route.host.clone()));
             if let Some(direct) = deps.direct.clone() {
                 chat_link::spawn(
@@ -1143,7 +1143,7 @@ mod tests {
         let store = Arc::new(DocsStore::open(dir.path()).unwrap());
         let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
         let sink = Arc::new(sink(store, &doc, "chat"));
-        let (link_wanted, wanted) = watch::channel(false);
+        let (link_wanted, wanted) = watch::channel(LinkWanted::default());
         let handle = RelayHandle::spawn("ios", sink.clone(), RelayPolicy::default());
         let relay = RoomRelay {
             handle: handle.clone(),
@@ -1174,13 +1174,13 @@ mod tests {
         relay.apply_route(&route);
         assert!(relay.relayed.load(Ordering::Acquire));
         assert_eq!(*lock(&relay.host), "mac");
-        assert!(*wanted.borrow());
+        assert!(wanted.borrow().wanted());
         assert!(relay.defer_checkpoint.load(Ordering::Acquire), "the host can answer");
 
         // On screen with the host gone, only the room can help.
         relay.apply_route(&RelayRoute { host_online: false, link: LinkWanted { host_online: false, ..everything }, ..route.clone() });
         assert!(!relay.defer_checkpoint.load(Ordering::Acquire));
-        assert!(!*wanted.borrow(), "no link to a host that isn't there");
+        assert!(!wanted.borrow().wanted(), "no link to a host that isn't there");
 
         // Off screen, nobody's waiting for it.
         relay.apply_route(&RelayRoute { host_online: false, on_screen: false, ..route.clone() });
@@ -1190,6 +1190,6 @@ mod tests {
         relay.apply_route(&RelayRoute { generation: 2, link: LinkWanted { relayed: false, ..everything }, ..route });
         assert!(!relay.relayed.load(Ordering::Acquire));
         assert!(!relay.defer_checkpoint.load(Ordering::Acquire));
-        assert!(!*wanted.borrow());
+        assert!(!wanted.borrow().wanted());
     }
 }
