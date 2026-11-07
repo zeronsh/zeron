@@ -21,10 +21,12 @@
 //!   cloud.sessions               the Cloud sessions, each { chat, device, state,
 //!                                space, repo?, error?, failed_action?,
 //!                                machine?, stage?, disk?, wake_blocked?,
-//!                                expires? }; disk: { used, capacity, level };
-//!                                wake_blocked: { reason, needed }; expires in
-//!                                Unix seconds, as the scripts' times are. Nil
-//!                                from an edge with no sessions route.
+//!                                expires?, restored? }; disk: { used, capacity,
+//!                                level }; wake_blocked: { reason, needed };
+//!                                expires (and restored: when its machine last
+//!                                rebuilt its chat store from the server copy)
+//!                                in Unix seconds, as the scripts' times are.
+//!                                Nil from an edge with no sessions route.
 //!   cloud.wake({ chat, machine? })  wake a chat's machine (on that size): its
 //!                                session. Rejects with `disk_too_small` for a
 //!                                size too small, else a word as below or the
@@ -299,6 +301,7 @@ fn session_value(s: &Json) -> Value {
         ("wake_blocked", blocked),
         // (Seconds, as the scripts' times are.)
         ("expires", s["expiresAt"].as_f64().map_or(Value::Nil, |ms| Value::from(ms / 1000.0))),
+        ("restored", s["storeRecoveredAt"].as_f64().map_or(Value::Nil, |ms| Value::from(ms / 1000.0))),
     ])
 }
 
@@ -446,13 +449,14 @@ mod tests {
         let session = json!({ "chatId": "c1", "deviceId": "cloud-s1", "state": "sleeping", "repo": "acme/atlas", "machine": "default",
             "disk": { "usedGiB": 41.5, "capacityGiB": 50, "level": "warn" },
             "wakeBlocked": { "reason": "disk_too_small", "neededGiB": 150 },
-            "expiresAt": 1_800_000_000_000_i64 });
+            "expiresAt": 1_800_000_000_000_i64, "storeRecoveredAt": 1_799_000_000_000_i64 });
         let out: Json = serde_json::from_str(&session_value(&session).to_json()).unwrap();
         assert_eq!(out["chat"], "c1");
         assert_eq!(out["disk"]["used"], 41.5);
         assert_eq!(out["disk"]["level"], "warn");
         assert_eq!(out["wake_blocked"]["needed"], 150.0);
         assert_eq!(out["expires"], 1_800_000_000.0);
+        assert_eq!(out["restored"], 1_799_000_000.0);
     }
 
     #[test]
@@ -464,6 +468,7 @@ mod tests {
         assert!(out["disk"].is_null());
         assert!(out["wake_blocked"].is_null());
         assert!(out["expires"].is_null());
+        assert!(out["restored"].is_null());
         assert!(out["machine"].is_null());
     }
 

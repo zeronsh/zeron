@@ -2824,6 +2824,10 @@
       "provisioning": "Starting a Cloud machine…",
       "waking": "Waking its Cloud machine…",
       "updating": "Updating its Cloud machine…",
+      "slow": "Waking its Cloud machine is taking longer than usual…",
+      "restored_title": "This chat was restored from its server copy",
+      "restored_summary": "Its machine rebuilt its copy of the chat",
+      "restored_body": "This chat's machine found its own copy of the conversation damaged and rebuilt it from the server copy.",
       "stopping": "Its Cloud machine is going to sleep…",
       "deleting": "Deleting its Cloud machine…",
       "too_small": "That size can't hold this chat's files. Pick a bigger one.",
@@ -2890,6 +2894,8 @@
       "asleep": "Interrupted — its Cloud machine went to sleep",
       "resuming": "Resuming — waking its Cloud machine…",
       "resuming_updating": "Resuming — updating its Cloud machine…",
+      "slow": "Waking its Cloud machine is taking longer than usual…",
+      "resuming_slow": "Resuming — its Cloud machine is taking longer than usual to wake…",
       "the_host": "its computer",
       "unreachable": "Interrupted — can't reach {host}"
     }

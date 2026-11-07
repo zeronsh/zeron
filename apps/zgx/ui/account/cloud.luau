@@ -82,6 +82,9 @@ export type Session = {
 	wake_blocked: { reason: string?, needed: number? }?,
 	-- When its files go, in Unix seconds, while it sleeps.
 	expires: number?,
+	-- When its machine last rebuilt its chat store from the server copy, in
+	-- Unix seconds (nil from an older edge).
+	restored: number?,
 }
 export type Repo = { name: string, private: boolean, branch: string?, clone_url: string?, pushed: number }
 export type Now = {
@@ -285,12 +288,12 @@ local reading = false
 local read_at = -READ_GAP_MS
 
 -- States that settle on their own, followed closely; and a machine up that
--- installs a release before it answers (the edge's stage, taken back when
--- it's done).
+-- installs a release before it answers, or a wake far slower than normal
+-- that the edge is kicking (its stages, taken back when it's done).
 local SETTLING = { provisioning = true, starting = true, stopping = true, deleting = true }
 local SETTLING_EVERY, RESTING_EVERY = 3000, 60000
 local function holds(s: Session): boolean
-	return SETTLING[s.state] == true or s.stage == "updating"
+	return SETTLING[s.state] == true or s.stage == "updating" or s.stage == "slow"
 end
 
 -- Followed closely this long (seconds) after a message went to a Cloud

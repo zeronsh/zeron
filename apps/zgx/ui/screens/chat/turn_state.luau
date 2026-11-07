@@ -59,10 +59,14 @@ function M.of(t: Turn): State?
 		-- Up, and installing a release before it answers (the edge's stage:
 		-- said only once its engine is up, and taken back when it's done).
 		local updating = s.stage == "updating" and (state == "ready" or starting)
+		-- A wake far slower than normal, the edge kicking it meanwhile.
+		local slow = s.stage == "slow" and (state == "ready" or starting)
 		-- A prompt on its way to a machine still waking: that it's waking.
 		if t.sending then
 			if updating then
 				return { text = say("updating", "Updating its Cloud machine…"), spinner = true }
+			elseif slow then
+				return { text = say("slow", "Waking its Cloud machine is taking longer than usual…"), spinner = true }
 			end
 			return if starting then { text = say("waking", "Waking its Cloud machine…"), spinner = true } else nil
 		end
@@ -78,6 +82,8 @@ function M.of(t: Turn): State?
 			-- (Woken for a turn it was cut off in, it updates before it picks
 			-- the turn up.)
 			return { text = say("resuming_updating", "Resuming — updating its Cloud machine…"), spinner = true }
+		elseif slow then
+			return { text = say("resuming_slow", "Resuming — its Cloud machine is taking longer than usual to wake…"), spinner = true }
 		elseif starting then
 			-- (A machine that died mid-turn is woken and picks its turn up.)
 			return { text = say("resuming", "Resuming — waking its Cloud machine…"), spinner = true }

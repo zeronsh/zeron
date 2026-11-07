@@ -20,7 +20,8 @@
 --                              sessions
 --   cloud_stub.session.<case>  the chat's Cloud session, as `cloud_stub_sessions`
 --                              says: sleeping, waking, staged, provisioning,
---                              ready, updating, failed, blocked, blocked_none, disk_ok,
+--                              ready, updating, slow, restored, failed, blocked,
+--                              blocked_none, disk_ok,
 --                              disk_warn, disk_critical, expiring, expires_today,
 --                              expired, gone
 --   cloud_stub.refuse_wake     the next wake is refused as too small
@@ -405,6 +406,9 @@ ui.command {
 -- The session the fixture's chat has, by what the edge would say. (Its chat
 -- and machine ids the fixture's: `cloud_stub.session_ids` sets them.)
 local chat_id, device_id = "s2", "cloud-s2"
+-- When the `restored` case's machine rebuilt its store: one rebuild, however
+-- often it's read.
+local RESTORED_AT = os.time() - 3600
 local function session_of(fields: { [string]: any }): any
 	local s: { [string]: any } = { chat = chat_id, device = device_id, state = "sleeping", space = "atlas", repo = "acme/atlas", machine = "default" }
 	for k, v in fields do
@@ -419,6 +423,8 @@ local CASES: { [string]: () -> any } = {
 	provisioning = function() return session_of { state = "provisioning" } end,
 	ready = function() return session_of { state = "ready", disk = { used = 10, capacity = 50, level = "ok" } } end,
 	updating = function() return session_of { state = "ready", stage = "updating", disk = { used = 10, capacity = 50, level = "ok" } } end,
+	slow = function() return session_of { state = "starting", stage = "slow" } end,
+	restored = function() return session_of { state = "ready", restored = RESTORED_AT, disk = { used = 10, capacity = 50, level = "ok" } } end,
 	failed = function() return session_of { state = "error", error = "The provider ran out of machines in this region.", failed_action = "wake" } end,
 	blocked = function() return session_of { wake_blocked = { reason = "disk_too_small", needed = 150 } } end,
 	blocked_none = function() return session_of { wake_blocked = { reason = "disk_too_small", needed = 900 } } end,

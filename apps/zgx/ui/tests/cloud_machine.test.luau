@@ -101,6 +101,47 @@ test("a machine up that installs a release before it answers says so, until it's
 	expect((logic.line(session({ state = "sleeping", stage = "updating" })) :: any).text).to_be("Cloud machine asleep — it wakes when you send")
 end)
 
+test("a wake far slower than normal says so plainly, until it's up", function()
+	local slow = logic.line(session({ state = "starting", stage = "slow" })) :: any
+	expect(slow.text).to_be("Waking its Cloud machine is taking longer than usual…")
+	expect(slow.spinner).to_be(true)
+	expect(slow.tone).to_be(nil)
+	-- Up with no engine heard from yet: still slow.
+	expect((logic.line(session({ state = "ready", stage = "slow" })) :: any).text).to_be("Waking its Cloud machine is taking longer than usual…")
+	expect(logic.line(session({ state = "ready" }))).to_be(nil)
+	-- It raises no alert: it isn't a failure.
+	expect(alert_of(session({ state = "starting", stage = "slow" }))).to_be(nil)
+end)
+
+test("a chat whose machine rebuilt its store says so quietly, until put away", function()
+	local at = NOW - 3600
+	local a = alert_of(session({ state = "ready", restored = at })) :: any
+	expect(a.kind).to_be("restored")
+	expect(a.title).to_be("This chat was restored from its server copy")
+	expect(a.tone).to_be("neutral")
+	expect(a.dismissable).to_be(true)
+	expect(a.action).to_be(nil)
+	expect(logic.deck_alert(a, nil).tone).to_be("info")
+	-- Put away: gone, for that rebuild.
+	local map = logic.dismiss({}, "c1", a.kind, a.level)
+	local function with(m: any): any
+		return function(kind: string, level: string): boolean
+			return logic.dismissed(m, "c1", kind, level)
+		end
+	end
+	expect(alert_of(session({ state = "ready", restored = at }), { dismissed = with(map) })).to_be(nil)
+	-- Kept as long as that rebuild is news; a later one says so again.
+	expect(logic.settle(map, session({ state = "ready", restored = at }), NOW)).to_be(map)
+	expect((alert_of(session({ state = "ready", restored = NOW - 60 }), { dismissed = with(map) }) :: any).kind).to_be("restored")
+	local moved = logic.settle(map, session({ state = "ready", restored = NOW - 60 }), NOW)
+	expect(moved.c1).to_be(nil)
+	-- A week on, it isn't news.
+	expect(alert_of(session({ state = "ready", restored = NOW - 8 * DAY }))).to_be(nil)
+	-- Anything worth acting on comes first.
+	local warn = { used = 41, capacity = 50, level = "warn" }
+	expect((alert_of(session({ state = "ready", restored = at, disk = warn })) :: any).kind).to_be("disk")
+end)
+
 test("an old edge's session raises nothing", function()
 	local s = { chat = "c1", device = "cloud-1", state = "ready" }
 	expect(alert_of(s)).to_be(nil)
@@ -313,6 +354,11 @@ test("a prompt on its way says its machine is waking, and otherwise keeps Sendin
 	expect(turn({ sending = true, cloud = session({ state = "starting" }) })).to_be("Waking its Cloud machine…")
 	expect(turn({ sending = true, cloud = session({ state = "sleeping" }) })).to_be(nil)
 	expect(turn({ sending = true, host_unreachable = true })).to_be(nil)
+end)
+
+test("a prompt waiting on a slow wake says so", function()
+	expect(turn({ sending = true, cloud = session({ state = "starting", stage = "slow" }) })).to_be("Waking its Cloud machine is taking longer than usual…")
+	expect(turn({ cloud = session({ state = "starting", stage = "slow" }) })).to_be("Resuming — its Cloud machine is taking longer than usual to wake…")
 end)
 
 test("a prompt waiting on a machine that updates first says so", function()
@@ -973,6 +1019,25 @@ test("while waking, it follows closely", function()
 	local before = asked_like(app, "cloud.sessions")
 	app:wait("#never-shown", { timeout_ms = 3400 })
 	expect(asked_like(app, "cloud.sessions") > before).to_be(true)
+end)
+
+test("a slow wake is said on the deck and followed closely", function()
+	local app = on_cloud("slow", true)
+	expect(showing(app, in_deck('~"Waking its Cloud machine is taking longer than usual…"'))).to_be(true)
+	local before = asked_like(app, "cloud.sessions")
+	app:wait("#never-shown", { timeout_ms = 3400 })
+	expect(asked_like(app, "cloud.sessions") > before).to_be(true)
+end)
+
+test("the restored note sits in the deck until dismissed, and stays away", function()
+	local app = on_cloud("restored", true)
+	expect(showing(app, in_deck('~"This chat was restored from its server copy"'))).to_be(true)
+	app:click(in_deck('role:button "Dismiss This chat was restored from its server copy"'))
+	app:frames(30)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	-- Read again, the same rebuild: still away.
+	to_case(app, "restored")
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
 end)
 
 test("while its machine updates, it says so and follows closely", function()

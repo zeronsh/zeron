@@ -15,7 +15,8 @@
 --   default_rows(machines, chosen) Settings → Cloud's default sizes, on the
 --                                  alert's grid
 --   dismissed / dismiss / settle   dismissal: an alert put away stays away
---                                  until its level worsens
+--                                  until its level worsens (the restored note:
+--                                  until its machine rebuilds again)
 --
 -- A test requires this module alone, in a VM with no `ui`: there, the English
 -- it says (as screens/chat/link_notice).
@@ -118,6 +119,10 @@ function M.line(s: any, opts: { intent: boolean? }?): Notice?
 	if s.stage == "updating" and (state == "ready" or state == "starting" or state == "provisioning") then
 		-- Woken for a message, it installs a release before it answers.
 		return { text = say("updating", "Updating its Cloud machine…"), spinner = true }
+	elseif s.stage == "slow" and (state == "ready" or state == "starting" or state == "provisioning") then
+		-- Far slower than a normal wake (the edge kicks it meanwhile): said
+		-- plainly, never as a failure.
+		return { text = say("slow", "Waking its Cloud machine is taking longer than usual…"), spinner = true }
 	elseif state == "sleeping" then
 		return { text = say("asleep", "Cloud machine asleep — it wakes when you send"), action = say("wake", "Wake"), quiet = not intent }
 	elseif state == "provisioning" or state == "starting" then
@@ -257,6 +262,17 @@ end
 local DAY = 86400
 -- How far off a sleeping machine's files going is worth a word, then more.
 local EXPIRY_SOON, EXPIRY_VERY_SOON = 7 * DAY, DAY
+-- How long after its machine rebuilt its chat store a chat says so.
+M.RESTORED_FOR = 7 * DAY
+
+-- Its machine rebuilt its chat store from the server copy lately: which
+-- rebuild (what dismissing it remembers), or nil.
+function M.restored_level(s: any, now: number): string?
+	if not s.restored or now - s.restored > M.RESTORED_FOR then
+		return nil
+	end
+	return string.format("%d", s.restored)
+end
 
 -- A level's rank within its kind: higher is worse.
 local RANK = { ok = 0, warn = 1, critical = 2, soon = 1, very_soon = 2 }
@@ -292,7 +308,7 @@ end
 
 export type Alert = {
 	-- wake_blocked, wake_failed, failed, data_expired, send_failed, queued_old,
-	-- expiring, disk.
+	-- expiring, disk, restored.
 	kind: string,
 	-- What dismissal compares: a kind that can be put away has one.
 	level: string?,
@@ -330,6 +346,7 @@ end
 --
 --   its files are gone > it can't wake > it failed > a wake just refused
 --   > its disk is critical > its files going soon > its disk filling
+--   > it was restored from its server copy (a quiet note, put away for good)
 --
 -- Opts: `now` (Unix seconds), `failure` (the last wake's word), `dismissed`
 -- (`level -> bool`, whether a kind at a level is put away). `send_failed`: a
@@ -459,7 +476,24 @@ function M.alert(s: any, opts: { now: number, failure: string?, dismissed: ((kin
 			dismissable = true,
 		}
 	end
-	return disk
+	if disk then
+		return disk
+	end
+	-- Its machine found its own copy of the chat damaged and rebuilt it from
+	-- the server's: worth knowing, nothing to do. Said once, quietly.
+	local restored = M.restored_level(s, opts.now)
+	if restored and not put_away("restored", restored) then
+		return {
+			kind = "restored",
+			level = restored,
+			tone = "neutral",
+			title = say("restored_title", "This chat was restored from its server copy"),
+			summary = say("restored_summary", "Its machine rebuilt its copy of the chat"),
+			body = say("restored_body", "This chat's machine found its own copy of the conversation damaged and rebuilt it from the server copy."),
+			dismissable = true,
+		}
+	end
+	return nil
 end
 
 -- ── The sizes ──────────────────────────────────────────────────────────────
@@ -659,9 +693,12 @@ end
 -- `map`: chat -> kind -> the level it was put away at. Plain data, so whatever
 -- holds it (a persisted state) can.
 
--- Put away at this level, or a worse one?
+-- Put away at this level, or a worse one? (The restored note: that rebuild.)
 function M.dismissed(map: { [string]: { [string]: string } }, chat: string, kind: string, level: string): boolean
 	local put = map[chat] and map[chat][kind]
+	if kind == "restored" then
+		return put == level
+	end
 	return put ~= nil and M.rank(level) <= M.rank(put)
 end
 
@@ -686,12 +723,20 @@ function M.settle(map: { [string]: { [string]: string } }, s: any, now: number):
 	local level_now = {
 		disk = if s.disk then s.disk.level else nil,
 		expiring = M.expiry_level(s, now),
+		restored = M.restored_level(s, now),
 	}
 	local changed = false
 	local kept = {}
 	for kind, put in kinds do
 		local level = level_now[kind]
-		if M.rank(level) == 0 then
+		if kind == "restored" then
+			-- Kept while that rebuild is still news; a later one is new.
+			if level == put then
+				kept[kind] = put
+			else
+				changed = true
+			end
+		elseif M.rank(level) == 0 then
 			changed = true
 		elseif M.rank(level) < M.rank(put) then
 			changed = true

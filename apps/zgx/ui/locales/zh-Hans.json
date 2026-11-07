@@ -2824,6 +2824,10 @@
       "provisioning": "正在启动 Cloud 机器…",
       "waking": "正在唤醒 Cloud 机器…",
       "updating": "正在更新 Cloud 机器…",
+      "slow": "唤醒 Cloud 机器的时间比平常长…",
+      "restored_title": "此对话已从服务器副本恢复",
+      "restored_summary": "它的机器重建了对话副本",
+      "restored_body": "此对话的机器发现自己的对话副本已损坏，已从服务器副本重建。",
       "stopping": "Cloud 机器正在休眠…",
       "deleting": "正在删除 Cloud 机器…",
       "too_small": "这个规格放不下此对话的文件。请选择更大的规格。",
@@ -2890,6 +2894,8 @@
       "asleep": "已中断——Cloud 机器已休眠",
       "resuming": "正在恢复——唤醒 Cloud 机器…",
       "resuming_updating": "正在恢复——更新 Cloud 机器…",
+      "slow": "唤醒 Cloud 机器的时间比平常长…",
+      "resuming_slow": "正在恢复——唤醒 Cloud 机器的时间比平常长…",
       "the_host": "它的电脑",
       "unreachable": "已中断——无法连接到{host}"
     }
