@@ -4,6 +4,7 @@ import { exportMonth, handleAdminRoute, scanOrphans } from "../../src/cloud/bill
 import { CLOUD_INDEX_NAME } from "../../src/cloud/cloud-index";
 import {
   addCredits,
+  creditsOf,
   dayEnd,
   dayKey,
   dayStart,
@@ -147,6 +148,74 @@ describe("credits", () => {
     const reply = await grant({ orgId: u.orgId, userId: u.userId, credits: 250, reason: "beta" });
     expect(reply.status).toBe(200);
     expect(((await reply.json()) as { balance: number }).balance).toBeGreaterThan(249);
+  });
+});
+
+describe("the credit rate cutover", () => {
+  type Usage = { days: { day: string; credits: number }[]; credits: number; balance: number };
+  type Internals = { env: Env; billingUsage(month: string, now?: number): { seconds: number; dollars: number } };
+
+  const setRate = (u: TestUser, seconds: string, from: string) =>
+    runInDurableObject(deviceStub(u), (instance) => {
+      const self = instance as unknown as Internals;
+      self.env = { ...self.env, CLOUD_CREDIT_SECONDS: seconds, CLOUD_CREDIT_RATE_FROM: from };
+    });
+  const usage = async (u: TestUser, from: string, to: string) =>
+    (await (await call("GET", `/cloud/org1/usage?from=${from}&to=${to}`, userBearer(u))).json()) as Usage;
+  /** Yesterday in full plus today so far, read from the provider's meter. */
+  const ranSinceYesterday = async (credits: number) => {
+    const now = Date.now();
+    const { u } = await meteredUser(dayStart(dayKey(now)) - DAY, credits);
+    await runInDurableObject(deviceStub(u), (instance) => (instance as unknown as DeviceInternals).reconcile(now, true));
+    const rows = await runInDurableObject(deviceStub(u), (_instance, state) => listUsage(state.storage.sql));
+    const today = dayKey(now);
+    return { u, today, yesterday: dayKey(dayStart(today) - 1), todaySeconds: rows.find((r) => r.day === today)?.seconds ?? 0 };
+  };
+
+  it("leaves usage where it is while the cutover is a placeholder", async () => {
+    const { u, today, yesterday, todaySeconds } = await ranSinceYesterday(5000);
+    const before = await usage(u, yesterday, today);
+    await setRate(u, "30", "SET-AT-DEPLOY");
+    const after = await usage(u, yesterday, today);
+    expect(after).toEqual(before);
+    expect(after.days).toEqual([
+      { day: yesterday, credits: 1440 },
+      { day: today, credits: creditsOf(todaySeconds, 60) }
+    ]);
+  });
+
+  it("doesn't move a balance or the operator's figures when deployed ahead of the cutover", async () => {
+    const { u, today, yesterday } = await ranSinceYesterday(0);
+    // 100 left: re-pricing what was used at 30 seconds a credit would sink it.
+    const { credits } = await usage(u, yesterday, today);
+    await runInDurableObject(deviceStub(u), (_instance, state) =>
+      addCredits(state.storage.sql, { at: Date.now(), credits: credits + 100, reason: "test" })
+    );
+    const month = monthKey(Date.now());
+    const figures = () =>
+      runInDurableObject(deviceStub(u), (instance) => {
+        const { seconds, dollars } = (instance as unknown as Internals).billingUsage(month);
+        return { seconds, dollars };
+      });
+    const before = { usage: await usage(u, yesterday, today), figures: await figures() };
+    expect(before.usage.balance).toBeCloseTo(100, 1);
+
+    await setRate(u, "30", dayKey(dayEnd(today)));
+    expect(await usage(u, yesterday, today)).toEqual(before.usage);
+    expect(await figures()).toEqual(before.figures);
+    await runInDurableObject(deviceStub(u), (instance) => (instance as unknown as DeviceInternals).reconcile(Date.now(), true));
+    expect((await usage(u, yesterday, today)).balance).toBeGreaterThan(0);
+  });
+
+  it("charges a machine running across the cutover by day, from the provider's meter", async () => {
+    const { u, today, yesterday, todaySeconds } = await ranSinceYesterday(10_000);
+    await setRate(u, "30", today);
+    const reply = await usage(u, yesterday, today);
+    expect(reply.days).toEqual([
+      { day: yesterday, credits: 1440 }, // a whole day at 60 seconds a credit
+      { day: today, credits: creditsOf(todaySeconds, 30) }
+    ]);
+    expect(reply.balance).toBeCloseTo(10_000 - 1440 - creditsOf(todaySeconds, 30), 1);
   });
 });
 
