@@ -560,10 +560,12 @@ local function Composer(): Node
 		end
 	end)
 	-- A new chat with no model yet: the catalog's first. (Never a session's:
-	-- its model is its own.)
+	-- its model is its own.) Whenever that's so: the catalog come, or the
+	-- new page come back to with none chosen there, so what shows is what a
+	-- reload shows too.
 	ui.effect(function()
 		local c = store.catalog:get()
-		if session_id:peek() == nil and c.state == "ready" and model:peek() == nil and #c.models > 0 then
+		if session_id:get() == nil and c.state == "ready" and model:get() == nil and #c.models > 0 then
 			model:set(c.models[1].value)
 			effort:set(c.models[1].effort)
 		end
