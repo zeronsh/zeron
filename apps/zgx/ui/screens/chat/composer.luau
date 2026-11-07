@@ -63,6 +63,9 @@ local defaults = ui.persist("chat_new_defaults", {
 	-- Where (nil: none picked yet; screens/chat/where picks one).
 	project = nil :: string?,
 	branch = nil :: string?,
+	-- The saved account a new chat runs on (nil: the computer's own), its
+	-- "This chat" row's; sent only where that computer has it.
+	account = nil :: string?,
 })
 -- A new chat's own value of each choice where its default is none: what
 -- the composer shows then.
@@ -111,6 +114,8 @@ local function Composer(): Node
 	local function new_chat(): boolean
 		return session_id:get() == nil
 	end
+	-- (Set with the accounts, below: the new page's account for a chat.)
+	local new_account: (harness: string?, model: string?) -> string?
 	-- (Set as it sends from a new chat: the move to the session that
 	-- follows slides, as the prompt glides; see `place`.)
 	local slide_next = false
@@ -764,6 +769,8 @@ local function Composer(): Node
 		req.project = plan.project
 		req.device = plan.device
 		req.branch = plan.branch
+		-- (Cloud's agents run on Cloud's own accounts.)
+		req.account = if plan.cloud then nil else new_account(req.harness, req.model)
 		sessions
 			.create({
 				project = plan.project,
@@ -846,6 +853,45 @@ local function Composer(): Node
 	local accounts = shared.model_accounts(function(): string?
 		return device:get()
 	end, open, store.configure)
+	-- "This chat" on a new chat is the page's own setting (`defaults`), the
+	-- chat it makes taking it; on a chat, the chat's.
+	local chat_account = {
+		get = function(): string?
+			if new_chat() then
+				return defaults:get().account
+			end
+			return accounts.chat_account.get()
+		end,
+		set = function(id: string?)
+			if new_chat() then
+				local d = table.clone(defaults:peek()) :: any
+				d.account = id
+				defaults:set(d)
+			else
+				accounts.chat_account.set(id)
+			end
+		end,
+		allowed = function(harness: string): boolean
+			if new_chat() then
+				return shared.own_account_agent(harness)
+			end
+			return accounts.chat_account.allowed(harness)
+		end,
+	}
+	-- The new page's account for a chat of `harness` on `model`, when the
+	-- computer it's made on has it.
+	new_account = function(harness: string?, model: string?): string?
+		local id = defaults:peek().account
+		if id == nil or harness == nil or not shared.own_account_agent(harness) then
+			return nil
+		end
+		for _, a in accounts.accounts(harness, model or "") or {} do
+			if a.id == id then
+				return id
+			end
+		end
+		return nil
+	end
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -919,7 +965,7 @@ local function Composer(): Node
 			accounts = accounts.accounts,
 			on_account = accounts.on_account,
 			on_accounts_open = accounts.on_accounts_open,
-			chat_account = accounts.chat_account,
+			chat_account = chat_account,
 			-- What its context holds (the ring shows once a window is
 			-- reported, its card saying the numbers).
 			usage = function(): ds.ComposerUsage?

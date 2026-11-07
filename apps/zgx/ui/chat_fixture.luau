@@ -250,6 +250,10 @@ stub.send = function(req: any)
 	end
 	if req.fresh then
 		note(`run:{req.cwd or "-"}|{if req.worktree then "worktree" else "local"}|{req.branch or "-"}`)
+		-- (The account a new chat runs on, when one goes with it.)
+		if req.account then
+			note(`account:{req.session}:{req.account}`)
+		end
 	end
 	if req.fresh then
 		TRANSCRIPTS[req.session] = { { id = req.message_id or `{req.session}u`, role = "user", text = req.text } }

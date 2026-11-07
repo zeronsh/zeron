@@ -179,15 +179,8 @@ local function in_chat(list: { any }): any
 	return app
 end
 
-test("a new chat has no This chat row; a chat has one, on the computer's account", function()
+test("a chat's This chat row is on the computer's account until one is chosen", function()
 	local app = with_accounts(here(accounts()))
-	app:command("go_new")
-	app:frames(30)
-	app:click('role:button "Model"')
-	app:frames(30)
-	expect(app:has("#model-picker-chat-account")).to_be(false)
-	app:key("Escape")
-	app:frames(30)
 	app:command("go_s2")
 	app:frames(30)
 	app:click('role:button "Model"')
@@ -236,4 +229,72 @@ test("a chat on its own account shows that account's usage on the chip", functio
 	app:hover("#model-picker-usage")
 	expect(app:wait('"5h 5% · Week 91%"', { timeout_ms = 5000 })).to_be(true)
 	expect(app:has('"5h 34% · Week 12%"')).to_be(false)
+end)
+
+-- A new chat's: the page's own setting, kept with its others, and taken by
+-- the chat it makes (where that computer has the account).
+
+local function new_chat(list: { [string]: any }): any
+	local app = with_accounts(list)
+	app:command("go_home")
+	app:frames(30)
+	return app
+end
+
+local function choose_for_this_chat(app: any, email: string)
+	app:click('role:button "Model"')
+	app:frames(30)
+	app:click("#model-picker-chat-account")
+	app:frames(30)
+	app:click(`~"{email}"`)
+	app:frames(30)
+	app:key("Escape")
+	app:frames(30)
+end
+
+test("a new chat's account is chosen on its page and goes with the chat it makes", function()
+	local app = new_chat(here(accounts()))
+	app:click('role:button "Model"')
+	app:frames(30)
+	expect(app:tree("#model-picker-chat-account")).to_contain("Machine default")
+	app:key("Escape")
+	app:frames(30)
+	choose_for_this_chat(app, "work@example.test")
+	-- Nothing switched for the computer, nothing sent yet.
+	expect(string.find(app:state("calls"), "switch_on", 1, true)).to_be(nil)
+	-- Kept as the page's own: the next new chat starts on it too.
+	expect(app:state("chat_new_defaults").account).to_be("a2")
+	app:type("role:textbox", "Start the release")
+	app:key("Enter")
+	app:frames(30)
+	expect(app:state("calls")).to_contain("account:new1:a2")
+end)
+
+test("a new chat's account doesn't go to a computer that hasn't it", function()
+	local app = new_chat({
+		[""] = { ["claude-code"] = accounts() },
+		box = { ["claude-code"] = { { id = "b1", email = "box@example.test", plan = "Max", active = true, can_switch = true, windows = {} } } },
+	})
+	choose_for_this_chat(app, "work@example.test")
+	app:set_state("chat_device", "box")
+	app:set_state("chat_project", nil)
+	app:frames(30)
+	app:type("role:textbox", "On the box")
+	app:key("Enter")
+	app:frames(30)
+	local calls = app:state("calls")
+	expect(calls).to_contain("send:")
+	expect(string.find(calls, "account:", 1, true)).to_be(nil)
+end)
+
+test("Machine default on a new chat sends none", function()
+	local app = new_chat(here(accounts()))
+	choose_for_this_chat(app, "work@example.test")
+	choose_for_this_chat(app, "Machine default")
+	app:type("role:textbox", "Start")
+	app:key("Enter")
+	app:frames(30)
+	local calls = app:state("calls")
+	expect(calls).to_contain("send:")
+	expect(string.find(calls, "account:", 1, true)).to_be(nil)
 end)

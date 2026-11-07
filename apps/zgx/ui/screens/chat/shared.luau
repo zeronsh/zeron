@@ -893,6 +893,9 @@ end
 -- Agents whose chats can run on a saved account of their own (the engine's
 -- `ChatConfig::account`: Claude Code and Codex).
 local OWN_ACCOUNT_AGENTS = { ["claude-code"] = true, codex = true }
+function M.own_account_agent(harness: string): boolean
+	return OWN_ACCOUNT_AGENTS[harness] == true
+end
 
 -- The composer's accounts on `device` (ds.ModelPicker's `accounts`,
 -- `on_account`, `on_accounts_open`), whichever computer it is: asked for as
@@ -928,7 +931,7 @@ function M.model_accounts(
 					end
 				end,
 				allowed = function(harness: string): boolean
-					return open_chat() ~= nil and OWN_ACCOUNT_AGENTS[harness] == true
+					return open_chat() ~= nil and M.own_account_agent(harness)
 				end,
 			}
 			else nil,
