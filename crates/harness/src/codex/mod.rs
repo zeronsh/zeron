@@ -72,6 +72,7 @@ mod subagents;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -205,6 +206,9 @@ pub struct CodexHarness {
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
+    /// Present as the Codex CLI in `initialize` instead of Zeron. Shared with
+    /// the engine's per-device preference and read at every app-server spawn.
+    cli_identity: Arc<AtomicBool>,
 }
 
 impl Default for CodexHarness {
@@ -214,8 +218,44 @@ impl Default for CodexHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            cli_identity: Arc::default(),
         }
     }
+}
+
+/// Read the actual CLI version, retrying a failed bounded probe once.
+fn cli_version(exe: &Path) -> Result<semver::Version, HarnessError> {
+    crate::executable::binary_version(exe)
+        .or_else(|| {
+            // A cached failure must not prevent an explicit retry from probing.
+            if let Some(name) = exe.file_stem().and_then(|name| name.to_str()) {
+                crate::executable::invalidate_versions(&[name]);
+            }
+            crate::executable::binary_version(exe)
+        })
+        .ok_or_else(|| {
+            HarnessError::Protocol(
+                "Could not read the Codex CLI version. Retry, or turn off Identify as Codex CLI."
+                    .into(),
+            )
+        })
+}
+
+/// The `initialize` clientInfo. Codex turns `name` into the process-wide
+/// `originator` header and the `User-Agent` prefix/suffix of every model
+/// request, so endpoints that only admit the Codex CLI reject `zeron-native`.
+/// The CLI identity mirrors what the Codex TUI itself sends: `codex-tui` with
+/// the CLI's own version and no title.
+fn client_info(cli_identity: bool, exe: &Path) -> Result<Value, HarnessError> {
+    Ok(if cli_identity {
+        json!({ "name": "codex-tui", "version": cli_version(exe)?.to_string() })
+    } else {
+        json!({
+            "name": "zeron-native",
+            "title": "Zeron",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    })
 }
 
 impl CodexHarness {
@@ -227,6 +267,40 @@ impl CodexHarness {
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
         self
+    }
+
+    /// Share the "present as the Codex CLI" switch; flips apply to the next
+    /// app-server spawn (runs, model and skill discovery alike).
+    pub fn with_cli_identity(mut self, cli_identity: Arc<AtomicBool>) -> Self {
+        self.cli_identity = cli_identity;
+        self
+    }
+
+    /// Validate before enabling the preference; successful probes remain cached
+    /// until this executable is replaced (including a CLI update).
+    pub async fn validate_cli_identity(&self) -> Result<(), HarnessError> {
+        let executable = self.executable.clone();
+        tokio::task::spawn_blocking(move || {
+            let harness = Self {
+                executable,
+                ..Self::default()
+            };
+            let exe = harness.resolve_executable()?;
+            cli_version(&exe).map(|_| ())
+        })
+        .await
+        .map_err(|error| HarnessError::Protocol(format!("Codex version check failed: {error}")))?
+    }
+
+    async fn client_info(&self, exe: &Path) -> Result<Value, HarnessError> {
+        let cli_identity = self.cli_identity.load(Ordering::Relaxed);
+        let exe = exe.to_path_buf();
+        // Usually a cache hit; a replaced binary needs a bounded version probe.
+        tokio::task::spawn_blocking(move || client_info(cli_identity, &exe))
+            .await
+            .map_err(|error| {
+                HarnessError::Protocol(format!("Codex version check failed: {error}"))
+            })?
     }
 
     /// Tune the interrupt→SIGTERM→SIGKILL escalation timing.
@@ -264,6 +338,7 @@ impl CodexHarness {
     /// skills are separate from the slash-command catalog.
     async fn discover_skills(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
+        let client_info = self.client_info(&exe).await?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         if let Some(cwd) = cwd {
@@ -289,11 +364,7 @@ impl CodexHarness {
                 .request(
                     "initialize",
                     json!({
-                        "clientInfo": {
-                            "name": "zeron-native",
-                            "title": "Zeron",
-                            "version": env!("CARGO_PKG_VERSION"),
-                        },
+                        "clientInfo": client_info,
                         "capabilities": { "experimentalApi": true },
                     }),
                 )
@@ -320,6 +391,7 @@ impl CodexHarness {
     /// successful picker response.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let exe = self.resolve_executable()?;
+        let client_info = self.client_info(&exe).await?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
@@ -340,11 +412,7 @@ impl CodexHarness {
                 .request(
                     "initialize",
                     json!({
-                        "clientInfo": {
-                            "name": "zeron-native",
-                            "title": "Zeron",
-                            "version": env!("CARGO_PKG_VERSION"),
-                        },
+                        "clientInfo": client_info,
                         "capabilities": { "experimentalApi": true },
                     }),
                 )
@@ -888,6 +956,7 @@ impl CodexHarness {
         // The sandbox is the access mode's (see [`permissions`]), never the
         // request's own level.
         request.sandbox = permissions(run_access(&request), title_only).1;
+        let client_info = self.client_info(&exe).await?;
         let AppServer {
             child,
             client,
@@ -898,6 +967,7 @@ impl CodexHarness {
         tokio::spawn(run_session(Session {
             title_only,
             idle,
+            client_info,
             executable: exe,
             child,
             client,
@@ -1011,17 +1081,13 @@ fn check_codex_version(version: Option<&semver::Version>) -> Result<(), HarnessE
     }
 }
 
-fn initialize_params(opt_out: bool) -> Value {
+fn initialize_params(client_info: &Value, opt_out: bool) -> Value {
     let mut capabilities = json!({ "experimentalApi": true });
     if opt_out {
         capabilities["optOutNotificationMethods"] = json!(OPTED_OUT_NOTIFICATIONS);
     }
     json!({
-        "clientInfo": {
-            "name": "zeron-native",
-            "title": "Zeron",
-            "version": env!("CARGO_PKG_VERSION"),
-        },
+        "clientInfo": client_info,
         "capabilities": capabilities,
     })
 }
@@ -1139,6 +1205,7 @@ async fn resume_thread(client: &RpcClient, params: Value) -> Result<Value, Harne
 
 struct Session {
     executable: PathBuf,
+    client_info: Value,
     title_only: bool,
     idle: bool,
     child: Child,
@@ -1347,6 +1414,7 @@ struct ThreadMode {
 async fn run_session(session: Session) {
     let Session {
         executable,
+        client_info,
         title_only,
         idle,
         mut child,
@@ -1448,7 +1516,7 @@ async fn run_session(session: Session) {
     let mut attempt = 0;
     let mut opt_out = true;
     loop {
-        let handshake = client.request("initialize", initialize_params(opt_out));
+        let handshake = client.request("initialize", initialize_params(&client_info, opt_out));
         let failed = tokio::select! {
             res = handshake => match res {
                 Ok(_) => break,
@@ -3389,6 +3457,62 @@ mod tests {
         r.note_started("t-3".into());
         assert_eq!(r.active.as_deref(), Some("t-3"));
         assert!(r.is_completed("t-2"));
+    }
+}
+
+#[cfg(test)]
+mod client_info_tests {
+    use super::*;
+
+    #[test]
+    fn default_identity_is_zeron() {
+        let info = client_info(false, Path::new("/nonexistent/codex")).unwrap();
+        assert_eq!(info["name"], "zeron-native");
+        assert_eq!(info["title"], "Zeron");
+        assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_identity_retries_failures_caches_success_and_tracks_updates() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("identity-version-test");
+        let counter = dir.path().join("calls");
+        let write_cli = |version: &str| {
+            std::fs::write(&exe, format!(
+                "#!/bin/sh\nn=0\n[ ! -f '{0}' ] || n=$(cat '{0}')\nn=$((n + 1))\necho $n > '{0}'\n[ $n -ne 1 ] || exit 1\necho 'codex-cli {1}'\n",
+                counter.display(), version,
+            )).unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_cli("0.166.0");
+        let info = client_info(true, &exe).unwrap();
+        assert_eq!(info["name"], "codex-tui");
+        assert_eq!(info["version"], "0.166.0");
+        assert!(info.get("title").is_none());
+        assert_eq!(std::fs::read_to_string(&counter).unwrap().trim(), "2");
+        assert_eq!(client_info(true, &exe).unwrap(), info);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "2",
+            "successful validation is reused"
+        );
+        // Different file length invalidates the executable identity even on
+        // filesystems whose mtime resolution cannot distinguish these writes.
+        write_cli("0.167.123");
+        assert_eq!(client_info(true, &exe).unwrap()["version"], "0.167.123");
+        assert_eq!(std::fs::read_to_string(&counter).unwrap().trim(), "3");
+    }
+
+    #[test]
+    fn cli_identity_refuses_an_unknown_version() {
+        let error = client_info(true, Path::new("/nonexistent/codex")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Could not read the Codex CLI version")
+        );
     }
 }
 

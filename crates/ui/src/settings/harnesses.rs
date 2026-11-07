@@ -47,6 +47,9 @@ mod completion;
 #[path = "delegation.rs"]
 mod delegation;
 
+#[path = "codex_identity.rs"]
+mod codex_identity;
+
 /// Left inset of an expanded provider's details: the header trigger's
 /// padding, brand tile and gap, so the details start on the title's edge.
 const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
@@ -261,6 +264,10 @@ pub struct HarnessesPage {
     native_subagents_toggle: Option<Task<()>>,
     /// A switch is on its way to the device: further flips wait for it.
     native_subagents_saving: bool,
+    /// The target device's "Identify as Codex CLI" preference.
+    codex_identity: Loadable<bool>,
+    codex_identity_pending: Option<bool>,
+    codex_identity_task: Option<Task<()>>,
 }
 
 impl HarnessesPage {
@@ -293,6 +300,9 @@ impl HarnessesPage {
             native_subagents_task: None,
             native_subagents_toggle: None,
             native_subagents_saving: false,
+            codex_identity: Loadable::Idle,
+            codex_identity_pending: None,
+            codex_identity_task: None,
         };
         page.load(cx);
         page
@@ -399,6 +409,9 @@ impl HarnessesPage {
             self.expanded_harness = None;
         } else {
             self.expanded_harness = Some(harness);
+            if harness == HarnessId::Codex {
+                self.load_codex_identity(None, cx);
+            }
             if accounts::signs_in(harness) {
                 if let Some(accounts) = &self.accounts_page {
                     accounts.update(cx, |page, cx| page.set_embedded_harness(harness, cx));
@@ -468,6 +481,9 @@ impl HarnessesPage {
             .gap(px(20.0))
             .child(self.render_completion_for(harness, theme, cx))
             .children(self.render_native_subagents_for(harness, theme, cx))
+            .when(harness == HarnessId::Codex, |details| {
+                details.child(self.render_codex_identity(theme, cx))
+            })
             .children(self.render_updates_for(harness, theme, cx))
             .when_some(accounts, |details, accounts| details.child(accounts));
         if motion::reduced_motion(cx) {
@@ -651,6 +667,12 @@ impl HarnessesPage {
         self.native_subagents = Loadable::Idle;
         self.native_subagents_toggle = None;
         self.native_subagents_saving = false;
+        self.codex_identity = Loadable::Idle;
+        self.codex_identity_pending = None;
+        self.codex_identity_task = None;
+        if self.expanded_harness == Some(HarnessId::Codex) {
+            self.load_codex_identity(None, cx);
+        }
         self.load(cx);
         if let Some(painted) = painted.filter(|_| matches!(self.harnesses, Loadable::Loading)) {
             self.harnesses = painted;

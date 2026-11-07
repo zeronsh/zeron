@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,9 @@ struct HarnessPrefsFile {
     /// Harnesses the user turned native subagents off for: their runs
     /// delegate through side chats only.
     native_subagents_off: Vec<HarnessId>,
+    /// Codex presents itself as the Codex CLI instead of Zeron (see
+    /// [`HarnessRegistry::set_codex_cli_identity`]).
+    codex_cli_identity: bool,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -215,6 +219,11 @@ pub struct HarnessRegistry {
     account_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
     /// Credits Zeron in agents' commits ([`crate::commit_credit`]).
     commit_credit: std::sync::OnceLock<Arc<crate::commit_credit::CommitCredit>>,
+    /// Live mirror of `codex_cli_identity`, shared with the Codex harness so
+    /// a flip reaches the next app-server spawn without re-resolving.
+    codex_cli_identity: Arc<AtomicBool>,
+    /// Serialize validation and saving across clients on this device.
+    codex_identity_update: tokio::sync::Mutex<()>,
 }
 
 impl Default for HarnessRegistry {
@@ -300,6 +309,8 @@ impl HarnessRegistry {
             run_environment: Mutex::new(None),
             account_environment: Mutex::new(None),
             commit_credit: std::sync::OnceLock::new(),
+            codex_cli_identity: Arc::default(),
+            codex_identity_update: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -496,6 +507,8 @@ impl HarnessRegistry {
             .ok()
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
+        self.codex_cli_identity
+            .store(loaded.codex_cli_identity, Ordering::Relaxed);
         *self.prefs() = loaded;
         *self
             .prefs_path
@@ -655,6 +668,41 @@ impl HarnessRegistry {
         }
         self.persist_prefs();
         Ok(())
+    }
+
+    /// Whether Codex sessions on this device identify as the Codex CLI.
+    pub fn codex_cli_identity(&self) -> bool {
+        self.prefs().codex_cli_identity
+    }
+
+    /// Codex forwards `initialize.clientInfo.name` to the model provider as
+    /// the `originator` header and `User-Agent`; endpoints restricted to the
+    /// Codex CLI reject Zeron's own name. Applies to app-servers spawned after
+    /// the flip; threads Codex already recorded keep their stored originator.
+    pub async fn set_codex_cli_identity(&self, enabled: bool) -> Result<(), HarnessError> {
+        let harness = zeron_harness::CodexHarness::new();
+        self.set_codex_cli_identity_after_validation(enabled, harness.validate_cli_identity())
+            .await
+    }
+
+    async fn set_codex_cli_identity_after_validation(
+        &self,
+        enabled: bool,
+        validation: impl std::future::Future<Output = Result<(), HarnessError>>,
+    ) -> Result<(), HarnessError> {
+        let _update = self.codex_identity_update.lock().await;
+        if enabled {
+            validation.await?;
+        }
+        self.prefs().codex_cli_identity = enabled;
+        self.codex_cli_identity.store(enabled, Ordering::Relaxed);
+        self.persist_prefs();
+        Ok(())
+    }
+
+    /// The handle a Codex harness reads its identity from.
+    pub fn codex_cli_identity_handle(&self) -> Arc<AtomicBool> {
+        self.codex_cli_identity.clone()
     }
 
     pub fn register(&self, harness: Arc<dyn Harness>) {
@@ -894,6 +942,7 @@ fn full_registry() -> HarnessRegistry {
     // steering via native `turn/steer`, and the unified reasoning ladder from
     // zeron_harness::codex::catalog. CLI discovery only happens when a
     // run/model call actually resolves the slot.
+    let codex_cli_identity = registry.codex_cli_identity_handle();
     registry.register_lazy(
         HarnessDescriptor {
             icon: None,
@@ -917,7 +966,11 @@ fn full_registry() -> HarnessRegistry {
             supports_plan: true,
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
+        Box::new(move || {
+            Ok(Arc::new(
+                zeron_harness::CodexHarness::new().with_cli_identity(codex_cli_identity.clone()),
+            ) as Arc<dyn Harness>)
+        }),
     );
     // Cursor via the pinned @cursor/sdk shim (NOT ACP — that surface strips
     // subagent transcripts), same lazy pattern: the static descriptor mirrors
@@ -1538,6 +1591,116 @@ mod tests {
             .expect("mock slot");
         assert!(mock.installed);
         assert_eq!(mock.enabled, Some(false));
+    }
+
+    /// The Codex CLI identity is per-device: it persists in harness-prefs,
+    /// survives a reload, and the handle handed to Codex flips live.
+    #[tokio::test]
+    async fn codex_cli_identity_persists_and_flips_the_shared_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        let handle = registry.codex_cli_identity_handle();
+        assert!(!registry.codex_cli_identity());
+        assert!(!handle.load(Ordering::Relaxed));
+
+        registry
+            .set_codex_cli_identity_after_validation(true, std::future::ready(Ok(())))
+            .await
+            .unwrap();
+        assert!(registry.codex_cli_identity());
+        assert!(
+            handle.load(Ordering::Relaxed),
+            "live harnesses see the flip"
+        );
+
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert!(reloaded.codex_cli_identity());
+        assert!(reloaded.codex_cli_identity_handle().load(Ordering::Relaxed));
+
+        // Files written before the setting existed default to Zeron's identity.
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{ "disabled": [] }"#,
+        )
+        .unwrap();
+        let legacy = HarnessRegistry::new();
+        legacy.load_prefs(dir.path());
+        assert!(!legacy.codex_cli_identity());
+    }
+
+    #[tokio::test]
+    async fn codex_cli_identity_failed_validation_does_not_enable_or_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        let rejected =
+            || std::future::ready(Err(HarnessError::Protocol("version unavailable".into())));
+        assert!(
+            registry
+                .set_codex_cli_identity_after_validation(true, rejected())
+                .await
+                .is_err()
+        );
+        assert!(!registry.codex_cli_identity());
+        assert!(!registry.codex_cli_identity_handle().load(Ordering::Relaxed));
+        assert!(!dir.path().join("harness-prefs.json").exists());
+        // Turning this setting off must always work, even with a broken CLI.
+        registry
+            .set_codex_cli_identity_after_validation(false, rejected())
+            .await
+            .unwrap();
+        assert!(!registry.codex_cli_identity());
+    }
+
+    #[tokio::test]
+    async fn codex_cli_identity_serializes_saves_while_validation_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.load_prefs(dir.path());
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let enabling = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .set_codex_cli_identity_after_validation(true, async {
+                        started.send(()).unwrap();
+                        release_rx.await.unwrap();
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+        started_rx.await.unwrap();
+        assert!(
+            !registry.codex_cli_identity(),
+            "validation must finish before enabling"
+        );
+        let mut disabling = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry.set_codex_cli_identity(false).await.unwrap();
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut disabling)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        enabling.await.unwrap();
+        disabling.await.unwrap();
+        assert!(!registry.codex_cli_identity());
+        assert!(!registry.codex_cli_identity_handle().load(Ordering::Relaxed));
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert!(
+            !reloaded.codex_cli_identity(),
+            "disk follows the serialized final save"
+        );
     }
 
     /// A prefs file from the fixed-default era is an allow-list: everything
