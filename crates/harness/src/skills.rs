@@ -9,6 +9,18 @@ use zeron_proto::{HarnessId, invocation::Skill};
 
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 
+/// Dependency, cache and VCS folders. None of their files is a skill, but a
+/// skill that installed its own packages can hold tens of thousands, and each
+/// would be charged to the budget every root shares. `site-packages` covers a
+/// virtualenv whatever it is named.
+const SKIPPED_DIRS: &[&str] = &[
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "site-packages",
+];
+
 /// Commands and skill metadata both need the provider's advertised catalog.
 /// Share an overlapping probe, but refresh on a later open so provider account,
 /// plugin and workspace changes are not hidden behind a persistent host cache.
@@ -287,7 +299,12 @@ fn scan_root(
         for entry in children {
             let path = entry.path();
             if path.is_dir() {
-                pending.push((path, depth + 1));
+                if !SKIPPED_DIRS
+                    .iter()
+                    .any(|skipped| entry.file_name() == *skipped)
+                {
+                    pending.push((path, depth + 1));
+                }
                 continue;
             }
             let legacy_commands = root.file_name().is_some_and(|name| name == "commands");
@@ -482,6 +499,52 @@ mod tests {
         scan_root(&repo, "", HarnessId::Pi, &mut found, &mut remaining).unwrap();
         assert_eq!(remaining, 0);
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn discovery_skips_dependency_folders_so_later_roots_are_still_scanned() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(
+            &home,
+            ".agents/skills/tool/SKILL.md",
+            "---\nname: tool\n---\nBody",
+        );
+        // A global skill that installed its own dependencies. A SKILL.md
+        // inside any of these folders belongs to a package, not to the user.
+        for dir in [
+            ".git",
+            ".venv",
+            "__pycache__",
+            "node_modules",
+            "site-packages",
+        ] {
+            write(
+                &home,
+                &format!(".agents/skills/tool/{dir}/package/SKILL.md"),
+                "---\nname: package\n---\nBody",
+            );
+        }
+        for index in 0..MAX_DISCOVERY_ENTRIES + 100 {
+            write(
+                &home,
+                &format!(".agents/skills/tool/node_modules/file-{index}.js"),
+                "x",
+            );
+        }
+        write(
+            &repo,
+            ".agents/skills/local/SKILL.md",
+            "---\nname: local\n---\nBody",
+        );
+        let names: Vec<_> = discover_at(HarnessId::Cursor, &repo, &home)
+            .unwrap()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        assert_eq!(names, ["local", "tool"]);
     }
 
     #[cfg(unix)]
