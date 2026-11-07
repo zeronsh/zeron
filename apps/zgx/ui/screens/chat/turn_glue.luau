@@ -40,6 +40,11 @@ function M.of(session: () -> any): (m: any, sending: boolean) -> TurnState.State
 			judge_again_at(started + TurnState.GRACE)
 		end
 		local machine = if cloud.on_device(s.device) then cloud.session_for(s.id, s.device) else nil
+		-- On its way to a Cloud machine: what the machine says of itself is
+		-- read closely a while (a woken one may update before it answers).
+		if sending and machine and m.id then
+			cloud.sending(m.id)
+		end
 		local unreachable, host = false, nil
 		local here = sessions.now:get().here
 		if not machine and s.device and s.device ~= here then

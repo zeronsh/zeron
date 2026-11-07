@@ -2823,6 +2823,7 @@
       "waking_stage": "Waking its Cloud machine — {stage}…",
       "provisioning": "Starting a Cloud machine…",
       "waking": "Waking its Cloud machine…",
+      "updating": "Updating its Cloud machine…",
       "stopping": "Its Cloud machine is going to sleep…",
       "deleting": "Deleting its Cloud machine…",
       "too_small": "That size can't hold this chat's files. Pick a bigger one.",
@@ -2882,11 +2883,13 @@
     "turn_state": {
       "interrupted": "Interrupted",
       "waking": "Waking its Cloud machine…",
+      "updating": "Updating its Cloud machine…",
       "expired": "Interrupted — its Cloud machine's files are gone",
       "blocked": "Interrupted — its Cloud machine can't wake",
       "failed": "Interrupted — its Cloud machine failed",
       "asleep": "Interrupted — its Cloud machine went to sleep",
       "resuming": "Resuming — waking its Cloud machine…",
+      "resuming_updating": "Resuming — updating its Cloud machine…",
       "the_host": "its computer",
       "unreachable": "Interrupted — can't reach {host}"
     }

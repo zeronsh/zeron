@@ -24,8 +24,11 @@
 --                               shares its parent's, by its machine's device
 --   cloud.on_device(device)     whether that device is a Cloud machine
 --   cloud.follow(on)            read the sessions while `on()` says a Cloud chat
---                               is showing: closely while one is settling, else
---                               rarely, never redrawing unless they changed
+--                               is showing: closely while one is settling or
+--                               updating, and for a minute after that or after
+--                               a send (`sending`), else rarely, never
+--                               redrawing unless they changed
+--   cloud.sending(id)           message `id` is on its way to a Cloud machine
 --   cloud.machines()            the sizes on offer (tracked); none from an edge
 --                               that predates choosing one
 --   cloud.machine()             the size new chats start on (tracked)
@@ -281,6 +284,33 @@ local READ_GAP_MS = 1500
 local reading = false
 local read_at = -READ_GAP_MS
 
+-- States that settle on their own, followed closely; and a machine up that
+-- installs a release before it answers (the edge's stage, taken back when
+-- it's done).
+local SETTLING = { provisioning = true, starting = true, stopping = true, deleting = true }
+local SETTLING_EVERY, RESTING_EVERY = 3000, 60000
+local function holds(s: Session): boolean
+	return SETTLING[s.state] == true or s.stage == "updating"
+end
+
+-- Followed closely this long (seconds) after a message went to a Cloud
+-- machine, and after a machine last read as settling or updating: a woken
+-- machine reads ready once its engine is up, and only then says whether it
+-- updates first.
+local WATCH = 60
+local held_at = -math.huge
+local sends_seen: { [string]: boolean } = {}
+local WATCH_TICK = ui.state("account_cloud_watch", 0)
+
+local function note_holding(list: { Session })
+	for _, s in list do
+		if holds(s) then
+			held_at = os.time()
+			return
+		end
+	end
+end
+
 -- (Several panes may follow at once, and a wake reads as it lands: one read
 -- out at a time, none straight after another.)
 function M.load_sessions(force: boolean?)
@@ -291,6 +321,7 @@ function M.load_sessions(force: boolean?)
 	M.ask_sessions():after(function(list: any)
 		reading = false
 		local next_list = list or {}
+		note_holding(next_list)
 		if not same(M.sessions:peek(), next_list) then
 			M.sessions:set(next_list)
 		end
@@ -302,6 +333,7 @@ end
 
 -- One session's answer, in the list.
 local function take_session(s: Session)
+	note_holding({ s })
 	local list = table.clone(M.sessions:peek())
 	for i, was in list do
 		if was.chat == s.chat then
@@ -314,14 +346,24 @@ local function take_session(s: Session)
 	M.sessions:set(list)
 end
 
--- States that settle on their own, followed closely.
-local SETTLING = { provisioning = true, starting = true, stopping = true, deleting = true }
-local SETTLING_EVERY, RESTING_EVERY = 3000, 60000
+-- A message (by its id) is on its way to a Cloud machine: the sessions are
+-- followed closely for a while (WATCH), once per message.
+function M.sending(id: string)
+	if sends_seen[id] then
+		return
+	end
+	sends_seen[id] = true
+	held_at = math.max(held_at, os.time())
+	-- (Said while a row is drawn: the follow hears of it after.)
+	ui.after(0, function()
+		WATCH_TICK:set(WATCH_TICK:peek() + 1)
+	end)
+end
 
 function M.follow(on: () -> boolean)
 	local settling = ui.computed(function(): boolean
 		for _, s in M.sessions:get() do
-			if SETTLING[s.state] then
+			if holds(s) then
 				return true
 			end
 		end
@@ -335,9 +377,19 @@ function M.follow(on: () -> boolean)
 			M.load()
 		end
 		M.load_sessions()
+		WATCH_TICK:get()
+		local close = settling:get()
+		local left = held_at + WATCH - os.time()
+		if not close and left >= 0 then
+			-- Still in a send's or a wake's watch: closely until it's over.
+			close = true
+			ui.after(left * 1000 + 100, function()
+				WATCH_TICK:set(WATCH_TICK:peek() + 1)
+			end)
+		end
 		-- (A timer made in an effect belongs to its run. A read alone draws
 		-- nothing: the window still rests between them.)
-		ui.every(if settling:get() then SETTLING_EVERY else RESTING_EVERY, function()
+		ui.every(if close then SETTLING_EVERY else RESTING_EVERY, function()
 			M.load_sessions()
 		end)
 	end)

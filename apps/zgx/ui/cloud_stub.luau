@@ -20,7 +20,7 @@
 --                              sessions
 --   cloud_stub.session.<case>  the chat's Cloud session, as `cloud_stub_sessions`
 --                              says: sleeping, waking, staged, provisioning,
---                              ready, failed, blocked, blocked_none, disk_ok,
+--                              ready, updating, failed, blocked, blocked_none, disk_ok,
 --                              disk_warn, disk_critical, expiring, expires_today,
 --                              expired, gone
 --   cloud_stub.refuse_wake     the next wake is refused as too small
@@ -418,6 +418,7 @@ local CASES: { [string]: () -> any } = {
 	staged = function() return session_of { state = "starting", stage = "clone" } end,
 	provisioning = function() return session_of { state = "provisioning" } end,
 	ready = function() return session_of { state = "ready", disk = { used = 10, capacity = 50, level = "ok" } } end,
+	updating = function() return session_of { state = "ready", stage = "updating", disk = { used = 10, capacity = 50, level = "ok" } } end,
 	failed = function() return session_of { state = "error", error = "The provider ran out of machines in this region.", failed_action = "wake" } end,
 	blocked = function() return session_of { wake_blocked = { reason = "disk_too_small", needed = 150 } } end,
 	blocked_none = function() return session_of { wake_blocked = { reason = "disk_too_small", needed = 900 } } end,

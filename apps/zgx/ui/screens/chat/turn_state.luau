@@ -56,8 +56,14 @@ function M.of(t: Turn): State?
 	if s then
 		local state = s.state
 		local starting = state == "starting" or state == "provisioning"
+		-- Up, and installing a release before it answers (the edge's stage:
+		-- said only once its engine is up, and taken back when it's done).
+		local updating = s.stage == "updating" and (state == "ready" or starting)
 		-- A prompt on its way to a machine still waking: that it's waking.
 		if t.sending then
+			if updating then
+				return { text = say("updating", "Updating its Cloud machine…"), spinner = true }
+			end
 			return if starting then { text = say("waking", "Waking its Cloud machine…"), spinner = true } else nil
 		end
 		if state == "data_expired" then
@@ -68,6 +74,10 @@ function M.of(t: Turn): State?
 			return interrupted(say("failed", "Interrupted — its Cloud machine failed"))
 		elseif state == "sleeping" or state == "stopping" then
 			return interrupted(say("asleep", "Interrupted — its Cloud machine went to sleep"))
+		elseif updating then
+			-- (Woken for a turn it was cut off in, it updates before it picks
+			-- the turn up.)
+			return { text = say("resuming_updating", "Resuming — updating its Cloud machine…"), spinner = true }
 		elseif starting then
 			-- (A machine that died mid-turn is woken and picks its turn up.)
 			return { text = say("resuming", "Resuming — waking its Cloud machine…"), spinner = true }

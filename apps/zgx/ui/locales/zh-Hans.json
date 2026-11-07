@@ -2823,6 +2823,7 @@
       "waking_stage": "正在唤醒 Cloud 机器——{stage}…",
       "provisioning": "正在启动 Cloud 机器…",
       "waking": "正在唤醒 Cloud 机器…",
+      "updating": "正在更新 Cloud 机器…",
       "stopping": "Cloud 机器正在休眠…",
       "deleting": "正在删除 Cloud 机器…",
       "too_small": "这个规格放不下此对话的文件。请选择更大的规格。",
@@ -2882,11 +2883,13 @@
     "turn_state": {
       "interrupted": "已中断",
       "waking": "正在唤醒 Cloud 机器…",
+      "updating": "正在更新 Cloud 机器…",
       "expired": "已中断——Cloud 机器上的文件已删除",
       "blocked": "已中断——Cloud 机器无法唤醒",
       "failed": "已中断——Cloud 机器出错",
       "asleep": "已中断——Cloud 机器已休眠",
       "resuming": "正在恢复——唤醒 Cloud 机器…",
+      "resuming_updating": "正在恢复——更新 Cloud 机器…",
       "the_host": "它的电脑",
       "unreachable": "已中断——无法连接到{host}"
     }

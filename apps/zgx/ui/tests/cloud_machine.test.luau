@@ -90,6 +90,17 @@ test("a stage reads in words; one it can't word isn't shown as an id", function(
 	expect(text("x_internal_step")).to_be("Waking its Cloud machine…")
 end)
 
+test("a machine up that installs a release before it answers says so, until it's done", function()
+	local updating = logic.line(session({ state = "ready", stage = "updating" })) :: any
+	expect(updating.text).to_be("Updating its Cloud machine…")
+	expect(updating.spinner).to_be(true)
+	expect(logic.line(session({ state = "ready" }))).to_be(nil)
+	-- (Said as it wakes too, should the stage come before ready does.)
+	expect((logic.line(session({ state = "starting", stage = "updating" })) :: any).text).to_be("Updating its Cloud machine…")
+	-- A stage left on a machine gone to sleep is not this.
+	expect((logic.line(session({ state = "sleeping", stage = "updating" })) :: any).text).to_be("Cloud machine asleep — it wakes when you send")
+end)
+
 test("an old edge's session raises nothing", function()
 	local s = { chat = "c1", device = "cloud-1", state = "ready" }
 	expect(alert_of(s)).to_be(nil)
@@ -302,6 +313,14 @@ test("a prompt on its way says its machine is waking, and otherwise keeps Sendin
 	expect(turn({ sending = true, cloud = session({ state = "starting" }) })).to_be("Waking its Cloud machine…")
 	expect(turn({ sending = true, cloud = session({ state = "sleeping" }) })).to_be(nil)
 	expect(turn({ sending = true, host_unreachable = true })).to_be(nil)
+end)
+
+test("a prompt waiting on a machine that updates first says so", function()
+	expect(turn({ sending = true, cloud = session({ state = "ready", stage = "updating" }) })).to_be("Updating its Cloud machine…")
+	expect(turn({ sending = true, cloud = session({ state = "ready" }) })).to_be(nil)
+	-- A turn it was cut off in waits for the update too.
+	expect(turn({ cloud = session({ state = "ready", stage = "updating" }) })).to_be("Resuming — updating its Cloud machine…")
+	expect(turn({ cloud = session({ state = "ready" }) })).to_be("Interrupted")
 end)
 
 -- ── Held sends and long waits ──────────────────────────────────────────────
@@ -951,6 +970,23 @@ end)
 
 test("while waking, it follows closely", function()
 	local app = on_cloud("waking")
+	local before = asked_like(app, "cloud.sessions")
+	app:wait("#never-shown", { timeout_ms = 3400 })
+	expect(asked_like(app, "cloud.sessions") > before).to_be(true)
+end)
+
+test("while its machine updates, it says so and follows closely", function()
+	local app = on_cloud("updating", true)
+	expect(showing(app, in_deck('~"Updating its Cloud machine…"'))).to_be(true)
+	local before = asked_like(app, "cloud.sessions")
+	app:wait("#never-shown", { timeout_ms = 3400 })
+	expect(asked_like(app, "cloud.sessions") > before).to_be(true)
+end)
+
+test("woken, it keeps following closely a while: an update is said only once it's up", function()
+	local app = on_cloud("waking")
+	app:command("cloud_stub.session.ready")
+	app:wait("#never-shown", { timeout_ms = 300 })
 	local before = asked_like(app, "cloud.sessions")
 	app:wait("#never-shown", { timeout_ms = 3400 })
 	expect(asked_like(app, "cloud.sessions") > before).to_be(true)

@@ -115,7 +115,10 @@ function M.line(s: any, opts: { intent: boolean? }?): Notice?
 	if state == "data_expired" or state == "error" or (s.wake_blocked and s.wake_blocked.reason == "disk_too_small") then
 		return nil
 	end
-	if state == "sleeping" then
+	if s.stage == "updating" and (state == "ready" or state == "starting" or state == "provisioning") then
+		-- Woken for a message, it installs a release before it answers.
+		return { text = say("updating", "Updating its Cloud machine…"), spinner = true }
+	elseif state == "sleeping" then
 		return { text = say("asleep", "Cloud machine asleep — it wakes when you send"), action = say("wake", "Wake"), quiet = not intent }
 	elseif state == "provisioning" or state == "starting" then
 		local stage = stage_words(s.stage)
