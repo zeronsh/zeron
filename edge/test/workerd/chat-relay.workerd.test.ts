@@ -172,19 +172,6 @@ describe("relay frames", () => {
     viewer.socket.close();
   });
 
-  it("honours skip, so a device on a direct link gets one copy", async () => {
-    const name = crypto.randomUUID();
-    await enableRelay(name);
-    const host = await connect(name, "host", { relay: true });
-    const direct = await connect(name, "direct", { relay: true });
-    const other = await connect(name, "other", { relay: true });
-    host.sendFrame(FRAME.relay, { skip: ["direct"] }, bytes(3));
-    await other.nextOf(FRAME.relay);
-    await direct.settled();
-    expect(direct.frames.filter(f => f.type === FRAME.relay)).toEqual([]);
-    for (const client of [host, direct, other]) client.socket.close();
-  });
-
   it("directs sync frames to their target alone, and drops them if it's gone", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);

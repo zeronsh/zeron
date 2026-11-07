@@ -243,13 +243,6 @@ impl PreviewService {
         })?;
         peers.open(device, service, false).await
     }
-    /// Drop the connection to `device`, so the next stream pairs afresh. For a
-    /// connection that has stopped carrying anything but still looks open.
-    pub async fn reset_peer(&self, device: &str) {
-        if let Some(peers) = self.0.peers.get().cloned() {
-            peers.remove(device).await;
-        }
-    }
     pub fn catalog(&self) -> &Catalog {
         &self.0.catalog
     }

@@ -50,7 +50,7 @@ export const FRAME = {
 
   // relay layer (docs/design/relay-layer.md): only with CHAT_RELAY_LAYER on,
   // and only to sockets whose `hello` said `relay: 1`.
-  /** `{skip?}` + update, to live peers; `{device, queued?, batchId?}` from them.
+  /** `{}` + update, to live peers; `{device, queued?, batchId?}` from them.
    * Never stored. `queued` marks a row held in the offline queue. */
   relay: 0x0c,
   /** `{hello?}` + version vector. `hello` asks peers to answer if it's behind. */

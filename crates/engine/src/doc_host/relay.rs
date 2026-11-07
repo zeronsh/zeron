@@ -13,11 +13,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zeron_proto::relay_gen::{RELAY_ROOM_GEN, STORED_ROOM_GEN, relay_allowed};
-use zeron_sync::chat_relay::{RelayEvent, RelayHandle, RelayPolicy, run_link};
+use zeron_sync::chat_relay::{RelayEvent, RelayHandle, RelayPolicy};
 
-use super::{ChatDocHandle, DocHost, DocHostInner, lock};
+use super::{ChatDocHandle, DocHost, lock};
 
-pub use zeron_proto::relay_gen::CHAT_LINK_PREFIX;
 /// `spawn_chat2_checkpoint`'s reason for the checkpoint a stop owes.
 pub(super) const HEAL_REASON: &str = "relay-heal";
 
@@ -38,12 +37,6 @@ const CHECKPOINT_RETRY_MAX: Duration = Duration::from_secs(300);
 /// How long a host keeps its socket after a peer's last frame, so a peer it just
 /// woke or that's mid-sync isn't cut off. A sync sends frames throughout.
 const LINGER_AFTER_PEER: Duration = Duration::from_secs(15);
-/// Direct link attempts, from a chat on screen to its host.
-const LINK_RETRY_MIN: Duration = Duration::from_secs(15);
-const LINK_RETRY_MAX: Duration = Duration::from_secs(300);
-/// Longest a link attempt may take, pairing included. An open on a connection that
-/// has stopped moving would otherwise wait forever and block every later attempt.
-const LINK_OPEN_LIMIT: Duration = Duration::from_secs(45);
 /// A snapshot past this stays on stored rows, or goes back to them. The room takes
 /// checkpoints up to 32 MiB (`MAX_CHECKPOINT_BYTES`), and a chat over that can't
 /// heal, can't bring an old reader up to date and can't let a Cloud machine sleep.
@@ -108,7 +101,6 @@ pub(crate) struct ChatRelayState {
     commits: AtomicU64,
     /// The version the room's checkpoint last reached, and when.
     checkpointed: Mutex<Option<(loro::VersionVector, Instant)>>,
-    link: Mutex<Option<CancellationToken>>,
     /// This process has seen its doc catch up with the room. Before that, its
     /// export may hold less than the checkpoint it would replace.
     caught_up: AtomicBool,
@@ -116,16 +108,7 @@ pub(crate) struct ChatRelayState {
     relayed_here: AtomicBool,
     /// The room refused a checkpoint as too big, and it would again.
     too_large: AtomicBool,
-    /// Ends the links this host accepted, when the chat's handle goes away. A link
-    /// holds its own reference to the relay task, which has no doc after that.
-    accepted: CancellationToken,
     journal: Mutex<Journal>,
-}
-
-impl Drop for ChatRelayState {
-    fn drop(&mut self) {
-        self.accepted.cancel();
-    }
 }
 
 impl ChatRelayState {
@@ -143,11 +126,9 @@ impl ChatRelayState {
             unretired: Mutex::new(Unretired::default()),
             commits: AtomicU64::new(0),
             checkpointed: Mutex::new(None),
-            link: Mutex::new(None),
             caught_up: AtomicBool::new(false),
             relayed_here: AtomicBool::new(false),
             too_large: AtomicBool::new(false),
-            accepted: CancellationToken::new(),
             journal: Mutex::new(Journal::default()),
         })
     }
@@ -240,12 +221,6 @@ impl ChatRelayState {
         }
     }
 
-    pub(super) fn stop_link(&self) {
-        if let Some(stop) = lock(&self.link).take() {
-            stop.cancel();
-        }
-    }
-
     pub(super) fn mode_epoch(&self) -> u64 {
         self.mode_epoch.load(Ordering::Acquire)
     }
@@ -288,12 +263,6 @@ impl ChatDocHandle {
             && !state.checkpoint_covers(&self.doc.doc().oplog_vv()))
     }
 
-    /// Another device has a link to this chat open. The link's relay task is this
-    /// handle's: evicting it would leave that device talking to a task with no doc.
-    pub(super) fn relay_has_links(&self) -> bool {
-        lock(&self.relay).as_ref().is_some_and(|state| state.relay.stats().links > 0)
-    }
-
     pub(crate) fn note_journaled(&self, ordinal: i64) {
         if let Some(state) = &*lock(&self.relay) {
             lock(&state.journal).newest = ordinal;
@@ -303,7 +272,7 @@ impl ChatDocHandle {
 
 impl DocHost {
     /// This chat's relay state. It outlives a room session: an idle host's socket
-    /// closes and reopens with each turn, and its mode and links carry over, or
+    /// closes and reopens with each turn, and its mode carries over, or
     /// every reopening would send a burst of stored rows.
     pub(super) fn relay_state_for(
         &self,
@@ -341,8 +310,6 @@ impl DocHost {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut last_refresh: Option<Instant> = None;
             let mut last_room = None;
-            let mut link_retry = LINK_RETRY_MIN;
-            let mut next_link = Instant::now();
             let mut last_commits = 0u64;
             let mut last_commit_at = Instant::now();
             loop {
@@ -360,12 +327,6 @@ impl DocHost {
                         let now = Instant::now();
                         let room = lock(&handle.chat2).as_ref().and_then(|c| c.relay_answer());
                         if room != last_room || last_refresh.is_none_or(|at| now - at >= MODE_REFRESH) {
-                            // The room coming back means the network did: try now,
-                            // not at the end of a long backoff.
-                            if room.is_some() && last_room.is_none() {
-                                next_link = now;
-                                link_retry = LINK_RETRY_MIN;
-                            }
                             last_room = room;
                             last_refresh = Some(now);
                             host.refresh_relay_mode(&handle, &state);
@@ -400,19 +361,6 @@ impl DocHost {
                         }
                         if state.relaying() && crate::runner::session().is_some() {
                             host.cloud_checkpoint_due(&handle, &state, now, last_commit_at);
-                        }
-
-                        if host.wants_chat_link(&handle) {
-                            if lock(&state.link).is_none() && now >= next_link {
-                                next_link = now + link_retry;
-                                link_retry = (link_retry * 2).min(LINK_RETRY_MAX);
-                                host.spawn_chat_link(&handle, &state);
-                            }
-                            if state.relay.stats().links > 0 {
-                                link_retry = LINK_RETRY_MIN;
-                            }
-                        } else {
-                            state.stop_link();
                         }
                     }
                 }
@@ -576,57 +524,6 @@ impl DocHost {
         Ok(())
     }
 
-    fn wants_chat_link(&self, handle: &Arc<ChatDocHandle>) -> bool {
-        if handle.messages_tx.receiver_count() == 0 || self.inner.chat_links.get().is_none() {
-            return false;
-        }
-        let Some(workspace) = self.workspace() else {
-            return false;
-        };
-        let Ok(Some(chat)) = workspace.chat(&handle.chat_id) else {
-            return false;
-        };
-        chat.room_gen.unwrap_or(1) >= RELAY_ROOM_GEN && !workspace.is_host(&handle.chat_id)
-    }
-
-    fn spawn_chat_link(&self, handle: &Arc<ChatDocHandle>, state: &Arc<ChatRelayState>) {
-        let Some(previews) = self.inner.chat_links.get().cloned() else {
-            return;
-        };
-        let Some(host_device) = self.remote_host_for(&handle.chat_id) else {
-            return;
-        };
-        let stop = CancellationToken::new();
-        *lock(&state.link) = Some(stop.clone());
-        let state = state.clone();
-        let service = format!("{CHAT_LINK_PREFIX}{}", handle.chat_id);
-        let chat = handle.chat_id.clone();
-        self.spawn_worker(async move {
-            match open_within(LINK_OPEN_LIMIT, previews.open_peer_stream(&host_device, &service)).await {
-                LinkOpen::Open(stream) => {
-                    tracing::info!(chat = %chat, device = %host_device, "chat link up");
-                    run_link(stream, host_device.clone(), state.relay.clone(), stop.clone()).await;
-                    // Nobody asked it to end: the connection under it is dead or stuck.
-                    // It can look open for minutes, and reusing it would stay on the
-                    // room long after the network has recovered.
-                    if !stop.is_cancelled() {
-                        tracing::info!(chat = %chat, device = %host_device, "chat link lost; pairing afresh next time");
-                        previews.reset_peer(&host_device).await;
-                    }
-                }
-                LinkOpen::Stuck => {
-                    tracing::info!(chat = %chat, device = %host_device, "chat link open stuck; pairing afresh next time");
-                    previews.reset_peer(&host_device).await;
-                }
-                LinkOpen::Refused(error) => {
-                    // The room carries this chat. The maintenance tick retries.
-                    tracing::debug!(chat = %chat, %error, "chat link unavailable");
-                }
-            }
-            *lock(&state.link) = None;
-        });
-    }
-
     /// This build has the layer turned off and hosts a chat a build with it on left
     /// on generation 3. Rows it stores next would depend on what was only relayed,
     /// so it owes the same checkpoint any host that stops relaying does, then moves
@@ -672,44 +569,6 @@ impl DocHost {
             }
         }
     }
-
-    /// Keep the service that opens direct links. Only with the flag on.
-    pub fn set_chat_links(&self, previews: zeron_preview::PreviewService) {
-        let _ = self.inner.chat_links.set(previews);
-    }
-
-    fn accept_chat_link(&self, chat: &str) -> anyhow::Result<Arc<ChatRelayState>> {
-        let hosted = self.workspace().is_some_and(|workspace| {
-            workspace.is_host(chat) && matches!(workspace.chat(chat), Ok(Some(_)))
-        });
-        if !hosted {
-            anyhow::bail!("this device doesn't host that chat");
-        }
-        let handle = self.open(chat).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        lock(&handle.relay)
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("that chat isn't ready for a link yet"))
-    }
-}
-
-enum LinkOpen<T> {
-    Open(T),
-    /// The connection answered no: this service isn't available there.
-    Refused(anyhow::Error),
-    /// No answer at all in time.
-    Stuck,
-}
-
-async fn open_within<T>(
-    limit: Duration,
-    open: impl std::future::Future<Output = anyhow::Result<T>>,
-) -> LinkOpen<T> {
-    match tokio::time::timeout(limit, open).await {
-        Ok(Ok(stream)) => LinkOpen::Open(stream),
-        Ok(Err(error)) if error.downcast_ref::<tokio::time::error::Elapsed>().is_some() => LinkOpen::Stuck,
-        Ok(Err(error)) => LinkOpen::Refused(error),
-        Err(_) => LinkOpen::Stuck,
-    }
 }
 
 /// Whether a device publishes a chat's ops by relay. Everything must agree:
@@ -722,54 +581,6 @@ fn decide_relaying(
     holding_for_legacy: bool,
 ) -> bool {
     is_host && room_offers && generation >= RELAY_ROOM_GEN && every_device_follows && !holding_for_legacy
-}
-
-/// Whether a device may open a chat link to this host. Cloud machines run agent
-/// code, so a link stays between the owner's own devices.
-fn link_peer_allowed(peer: Option<&str>) -> bool {
-    peer.is_some_and(|peer| !zeron_proto::is_cloud_device(peer, ""))
-}
-
-/// `chatlink/{chatId}`: another device on the account reaching this chat's host.
-pub struct ChatLinkService {
-    host: Weak<DocHostInner>,
-}
-
-impl ChatLinkService {
-    pub fn new(host: &DocHost) -> Self {
-        Self { host: Arc::downgrade(&host.inner) }
-    }
-}
-
-#[async_trait::async_trait]
-impl zeron_preview::mux::Connector for ChatLinkService {
-    async fn connect(&self, service: &str) -> anyhow::Result<zeron_preview::mux::BoxIo> {
-        self.connect_from(None, service).await
-    }
-
-    async fn connect_from(
-        &self,
-        peer: Option<&str>,
-        service: &str,
-    ) -> anyhow::Result<zeron_preview::mux::BoxIo> {
-        if !link_peer_allowed(peer) {
-            anyhow::bail!("chat links are only open to the owner's devices");
-        }
-        let peer = peer.unwrap_or_default().to_string();
-        let chat = service
-            .strip_prefix(CHAT_LINK_PREFIX)
-            .ok_or_else(|| anyhow::anyhow!("not a chat link"))?;
-        let inner = self.host.upgrade().ok_or_else(|| anyhow::anyhow!("engine stopped"))?;
-        let host = DocHost { inner };
-        let state = host.accept_chat_link(chat)?;
-        let (ours, theirs) = tokio::io::duplex(256 * 1024);
-        let relay = state.relay.clone();
-        let stop = state.accepted.child_token();
-        host.spawn_worker(async move {
-            run_link(ours, peer, relay, stop).await;
-        });
-        Ok(Box::new(theirs))
-    }
 }
 
 #[cfg(test)]
@@ -840,28 +651,6 @@ mod tests {
         let state = state();
         std::mem::forget(runtime);
         state
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_open_that_never_answers_gives_up() {
-        let open = open_within::<()>(LINK_OPEN_LIMIT, std::future::pending());
-        assert!(matches!(open.await, LinkOpen::Stuck));
-        let elapsed = tokio::time::timeout(Duration::from_millis(1), std::future::pending::<()>())
-            .await
-            .unwrap_err();
-        let timed_out = open_within::<()>(LINK_OPEN_LIMIT, async move { Err(elapsed.into()) });
-        assert!(matches!(timed_out.await, LinkOpen::Stuck), "its ready wait timed out");
-        let refused = open_within::<()>(LINK_OPEN_LIMIT, async { anyhow::bail!("no such chat") });
-        assert!(matches!(refused.await, LinkOpen::Refused(_)));
-    }
-
-    #[tokio::test]
-    async fn accepted_links_end_with_the_chats_handle() {
-        let state = state();
-        let link = state.accepted.child_token();
-        assert!(!link.is_cancelled());
-        drop(state);
-        assert!(link.is_cancelled());
     }
 
     /// Answers every checkpoint POST and counts them.
@@ -979,13 +768,5 @@ mod tests {
         assert!(!decide_relaying(true, true, STORED_ROOM_GEN, true, false), "the chat is on stored rows");
         assert!(!decide_relaying(true, true, RELAY_ROOM_GEN, false, false), "a device can't follow");
         assert!(!decide_relaying(true, true, RELAY_ROOM_GEN, true, true), "an old reader is here");
-    }
-
-    #[test]
-    fn a_link_stays_between_the_owners_devices() {
-        assert!(link_peer_allowed(Some("laptop")));
-        assert!(!link_peer_allowed(None));
-        let cloud = format!("{}machine", zeron_proto::cloud::CLOUD_DEVICE_PREFIX);
-        assert!(!link_peer_allowed(Some(&cloud)));
     }
 }

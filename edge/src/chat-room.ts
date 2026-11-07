@@ -733,7 +733,7 @@ export class ChatRoom implements DurableObject {
     }
     if (!this.admitRelay(state.device, payload.byteLength)) return;
     if (type === FRAME.relay) this.markRelayDirty();
-    const { to, skip, ...rest } = header;
+    const { to, ...rest } = header;
     const forwarded = { ...rest, device: state.device };
     if (type === FRAME.syncReq || type === FRAME.syncData) {
       if (typeof to !== "string") return;
@@ -742,10 +742,7 @@ export class ChatRoom implements DurableObject {
       }
       return;
     }
-    const skipped = Array.isArray(skip) ? skip : [];
-    for (const peer of this.relaySockets(ws)) {
-      if (!skipped.includes(peer.device)) send(peer.socket, type, forwarded, payload);
-    }
+    for (const peer of this.relaySockets(ws)) send(peer.socket, type, forwarded, payload);
     // A host's announce follows its commits. Telling it each time an old reader
     // is still here keeps it storing for as long as that reader stays.
     if (type === FRAME.announce && this.legacyPeerCount() > 0) {
