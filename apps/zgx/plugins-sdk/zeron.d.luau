@@ -18,6 +18,64 @@ export type Rgb = {
 	b: number,
 }
 
+export type TextureHandle = any
+
+export type FontHandle = any
+
+export type DrawList = {
+	add_line: (self: DrawList, options: { from: { number }, to: { number }, color: Colour, thickness: number? }) -> (),
+	add_rect: (self: DrawList, options: { min: { number }, max: { number }, color: Colour, thickness: number?, rounding: number? }) -> (),
+	add_rect_filled: (self: DrawList, options: { min: { number }, max: { number }, color: Colour, rounding: number? }) -> (),
+	add_rect_rounded: (self: DrawList, options: { min: { number }, max: { number }, color: Colour, rounding: number, thickness: number? }) -> (),
+	add_rect_rounded_filled: (self: DrawList, options: { min: { number }, max: { number }, color: Colour, rounding: number }) -> (),
+	add_circle: (self: DrawList, options: { center: { number }, radius: number, color: Colour, thickness: number? }) -> (),
+	add_circle_filled: (self: DrawList, options: { center: { number }, radius: number, color: Colour }) -> (),
+	add_text: (self: DrawList, options: { pos: { number }, text: string, color: Colour, font_size: number? }) -> (),
+	add_image: (self: DrawList, options: { handle: TextureHandle, min: { number }, max: { number }, uv_min: { number }?, uv_max: { number }?, color: Colour? }) -> (),
+	add_poly_filled: (self: DrawList, options: { points: { { number } }, color: Colour }) -> (),
+	add_poly_line: (self: DrawList, options: { points: { { number } }, color: Colour, thickness: number?, closed: boolean? }) -> (),
+	push_clip_rect: (self: DrawList, options: { min: { number }, max: { number } }) -> (),
+	pop_clip_rect: (self: DrawList) -> (),
+	clear: (self: DrawList) -> (),
+}
+
+export type ImageOptions = {
+	handle: TextureHandle,
+	width: number,
+	height: number,
+}
+
+export type ImageAnswer = {
+	ok: boolean,
+	min: Point,
+	max: Point,
+}
+
+export type ImGuiStyle = {
+	theme: string,
+	colours: { [string]: string },
+	frame_rounding: number,
+	window_rounding: number,
+	window_padding: Point,
+	item_spacing: Point,
+	border_size: number,
+	text_size: number,
+	dpi_scale: number,
+	font: string?,
+}
+
+export type StyleOptions = {
+	theme: "auto" | "dark" | "light"?,
+	colours: { [string]: string }?,
+	frame_rounding: number?,
+	window_rounding: number?,
+	window_padding: Point?,
+	item_spacing: Point?,
+	border_size: number?,
+	text_size: number?,
+	font: FontHandle?,
+}
+
 export type WindowState = {
 	open: boolean,
 	shown: boolean,
@@ -157,6 +215,9 @@ export type Ui = {
 	begin_list_box: (id: string, size: Size?) -> boolean,
 	end_list_box: () -> (),
 	color_edit3: (label: string, colour: Rgb, options: { [string]: any }?) -> Rgb,
+	image: (options: ImageOptions) -> ImageAnswer,
+	get_window_draw_list: () -> DrawList,
+	draw: (list: DrawList) -> (),
 	color_button: (options: { [string]: any }) -> boolean,
 	begin_drag_drop_source: () -> boolean,
 	set_drag_drop_payload: (kind: string, payload: any) -> (),
@@ -191,6 +252,14 @@ export type ImGuiHandle = {
 export type ImGui = {
 	open_window: (options: WindowOptions) -> ImGuiHandle,
 	is_open: (window: string) -> boolean,
+	draw_list: () -> DrawList,
+	texture: (options: { path: string }) -> TextureHandle,
+	texture_size: (handle: TextureHandle) -> (number, number),
+	font: (options: { path: string, size: number? }) -> FontHandle,
+	font_size: (font: FontHandle) -> number,
+	style: () -> ImGuiStyle,
+	set_style: (options: StyleOptions) -> (),
+	reset_style: () -> (),
 }
 
 export type Zeron = {

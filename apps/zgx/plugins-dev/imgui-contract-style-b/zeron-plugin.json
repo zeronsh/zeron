@@ -1,0 +1,20 @@
+{
+  "id": "imgui-contract-style-b",
+  "name": "ImGui Contract Style B",
+  "version": "1.0.0",
+  "description": "The validation contract's second styling fixture: it sets no style, so its window must wear Zeron's own look whatever the other styling fixture sets in the same session.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"],
+  "tools": [
+    {
+      "name": "probe_run",
+      "description": "Keeps the window drawing; it has no style to set.",
+      "input": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "probe_status",
+      "description": "The look this window wears: theme, tokens, rounding and padding.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}

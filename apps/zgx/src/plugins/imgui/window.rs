@@ -19,6 +19,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use zgx::compose::{component, gpu_view};
@@ -37,7 +38,9 @@ use super::frame::{FrameCalls, FrameReport, FrameState, FrameWindow};
 use super::render::ImguiViewport;
 use super::runtime::FrameSpec;
 use super::runtime::WindowContext as ImGuiContext;
-use dear_imgui_rs::{MouseButton, Ui};
+use super::style::{self, PluginStyle};
+use super::texture::PluginTextures;
+use dear_imgui_rs::{FontId, MouseButton, Ui};
 
 /// What a plugin hears when one of its windows closes: the window id it
 /// named, once per window.
@@ -681,6 +684,11 @@ pub struct PluginWindow {
     /// What to tell the plugin when the window closes (the bridge pushes an
     /// `imgui.close` call into the plugin's queue).
     notify: Option<CloseListener>,
+    /// The plugin's look: the palette and metrics every frame is drawn with,
+    /// shared with the plugin's other windows and with no other plugin's.
+    style: Rc<PluginStyle>,
+    /// The pictures this plugin registered, drawn by handle.
+    textures: Rc<PluginTextures>,
 }
 
 impl PluginWindow {
@@ -1079,15 +1087,41 @@ impl FrameWindow for PluginWindow {
         draw: impl FnOnce(*const Ui),
     ) -> Result<super::render::PreparedFrame, String> {
         let want_atlas = self.frame_needs_atlas();
+        let resolved = self.style.resolve();
+        let font = resolved.font.clone();
+        let size = self.style.text_size(&resolved);
+        let drawn_with: Cell<Option<FontId>> = Cell::new(None);
         self.with_context(|context| {
-            context.build_frame(spec, want_atlas, |ui| {
-                // SAFETY: `build_frame` keeps the context alive and its frame
-                // open for exactly this closure, on this thread.
-                let root = unsafe { &*ui };
-                // The plugin draws into one window filling the client area:
-                // its widgets land in the plugin's window, never Zeron's.
-                super::frame::root_window(root, &spec, || draw(ui));
-            })
+            let fonts = context.font_ids();
+            context.build_frame(
+                spec,
+                want_atlas,
+                |context| {
+                    style::apply(context, &resolved);
+                    if let Some(font) = &font {
+                        drawn_with.set(ImGuiContext::ensure_font(
+                            context,
+                            &fonts,
+                            font.id,
+                            &font.bytes,
+                            font.size,
+                        ));
+                    }
+                },
+                |ui| {
+                    // SAFETY: `build_frame` keeps the context alive and its
+                    // frame open for exactly this closure, on this thread.
+                    let root = unsafe { &*ui };
+                    let push = size.map(|size| super::frame::FrameFont {
+                        font: drawn_with.get(),
+                        size,
+                    });
+                    // The plugin draws into one window filling the client
+                    // area: its widgets land in the plugin's window, never
+                    // Zeron's.
+                    super::frame::root_window(root, &spec, push, || draw(ui));
+                },
+            )
         })
         .ok_or_else(|| {
             format!(
@@ -1096,6 +1130,8 @@ impl FrameWindow for PluginWindow {
             )
         })?
         .map_err(|error| error.to_string())
+        // The pictures this frame may draw, for the GPU view to upload.
+        .map(|frame| frame.with_textures(self.textures.all()))
     }
 
     fn frame_deliver(&self, frame: super::render::PreparedFrame) {
@@ -1116,6 +1152,14 @@ impl FrameWindow for PluginWindow {
 
     fn frame_state(&self) -> &FrameState {
         &self.frames
+    }
+
+    fn frame_style(&self) -> Option<Rc<PluginStyle>> {
+        Some(self.style.clone())
+    }
+
+    fn frame_textures(&self) -> Option<Rc<PluginTextures>> {
+        Some(self.textures.clone())
     }
 }
 
@@ -1281,6 +1325,13 @@ pub struct Windows {
     /// How to ask each plugin for a frame (its own call queue), set when its
     /// actions are served.
     calls: RefCell<std::collections::HashMap<String, FrameCalls>>,
+    /// Each plugin's look and pictures, kept for the whole session: a style
+    /// or a font outlives the window that first used it, and a plugin that
+    /// reopens a window finds what it set still there.
+    styles: RefCell<HashMap<String, Rc<PluginStyle>>>,
+    textures: RefCell<HashMap<String, Rc<PluginTextures>>>,
+    /// Where each plugin's own files are (`imgui.texture`, `imgui.font`).
+    roots: RefCell<HashMap<String, PathBuf>>,
     /// Where the pump's round robin resumes: one window a tick, so several
     /// plugin windows can never add up to a stalled main window.
     pump_cursor: Cell<usize>,
@@ -1301,16 +1352,49 @@ impl Windows {
             last_placement: Rc::default(),
             listeners: RefCell::default(),
             calls: RefCell::default(),
+            styles: RefCell::default(),
+            textures: RefCell::default(),
+            roots: RefCell::default(),
             pump_cursor: Cell::new(0),
             pumping: Cell::new(false),
             tasks: cx.tasks.clone(),
         })
     }
 
+    /// Where `plugin`'s own files are: the folder its `init.luau` came from.
+    pub fn set_root(&self, plugin: &str, root: PathBuf) {
+        self.roots.borrow_mut().insert(plugin.to_string(), root);
+    }
+
+    /// `plugin`'s look, made on first ask.
+    pub fn style(&self, plugin: &str) -> Rc<PluginStyle> {
+        if let Some(style) = self.styles.borrow().get(plugin) {
+            return style.clone();
+        }
+        let root = self.roots.borrow().get(plugin).cloned().unwrap_or_default();
+        let style = Rc::new(PluginStyle::new(root));
+        self.styles
+            .borrow_mut()
+            .insert(plugin.to_string(), style.clone());
+        style
+    }
+
+    /// `plugin`'s pictures, made on first ask.
+    pub fn textures(&self, plugin: &str) -> Rc<PluginTextures> {
+        if let Some(textures) = self.textures.borrow().get(plugin) {
+            return textures.clone();
+        }
+        let textures = Rc::new(PluginTextures::new());
+        self.textures
+            .borrow_mut()
+            .insert(plugin.to_string(), textures.clone());
+        textures
+    }
+
     /// How many device pixels a logical point is, as the main window last
     /// reported it. 1.0 until the window says (a headless or not-yet-shown
     /// window), which is also what a 100% display uses.
-    fn scale(&self) -> f64 {
+    pub fn scale(&self) -> f64 {
         let logical = self.viewport.with_untracked(|(width, _)| f64::from(*width));
         let physical = self
             .bounds
@@ -1457,6 +1541,8 @@ impl Windows {
             scale: Cell::new(self.scale()),
             pending_pointer_clear: Cell::new(false),
             notify: self.listeners.borrow().get(plugin).cloned(),
+            style: self.style(plugin),
+            textures: self.textures(plugin),
         });
         *slot.borrow_mut() = Some(record.clone());
         self.open.borrow_mut().insert(global, record.clone());

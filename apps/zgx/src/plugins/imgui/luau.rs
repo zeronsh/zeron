@@ -80,6 +80,8 @@ const WIDGET_OPS: &[&str] = &[
     "combo",
     "selectable",
     "bullet_text",
+    "image",
+    "paint",
     "invisible_button",
     "is_item_hovered",
     "is_item_active",
@@ -141,6 +143,9 @@ const WIDGET_OPS: &[&str] = &[
 /// Ends the frame the render callback was given.
 const FRAME_END: &str = "frame_end";
 
+/// The ops that name no window: the plugin's own look and its pictures.
+const PLUGIN_OPS: &[&str] = &["style", "set_style", "reset_style", "texture", "font"];
+
 /// What the host keeps of one plugin's windows, as the action closes over it.
 pub struct ImGuiWindows {
     windows: Rc<Windows>,
@@ -184,6 +189,13 @@ pub fn serve(
     windows.listen(id, closed);
     if let Some(frames) = frames {
         windows.listen_calls(id, frames);
+    }
+    // Where this plugin's own files are, for `imgui.texture` and
+    // `imgui.font`: the folder its scripts were loaded from.
+    if let Some(folder) =
+        item().and_then(|item| item.json["snapshot"].as_str().map(std::path::PathBuf::from))
+    {
+        windows.set_root(id, folder);
     }
     let name = format!("plugin.{id}.imgui");
     // The VM layer: a plugin not granted `imgui.windows` cannot even bind,
@@ -263,6 +275,9 @@ impl ImGuiWindows {
         }
         if WIDGET_OPS.contains(&op.as_str()) {
             return self.widget(&op, arg);
+        }
+        if PLUGIN_OPS.contains(&op.as_str()) {
+            return self.plugin_op(&op, arg);
         }
         if op == FRAME_END {
             return self.frame_end(arg);
@@ -395,6 +410,55 @@ impl ImGuiWindows {
         match window.widget(op, seq as u64, arg) {
             Ok(answer) => answer,
             Err(error) => self.refuse(error),
+        }
+    }
+
+    /// The plugin's own look and pictures: `imgui.style`, `imgui.set_style`,
+    /// `imgui.reset_style`, `imgui.texture` and `imgui.font`. None of them
+    /// names a window or draws anything; every one passes the same gate.
+    fn plugin_op(&self, op: &str, arg: &Value) -> Value {
+        if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {
+            return self.refuse(error);
+        }
+        let style = self.windows.style(&self.plugin);
+        match op {
+            "style" => super::style::view(&style.resolve(), self.windows.scale()),
+            "set_style" => match style.set(arg) {
+                Ok(()) => Value::record([("ok", Value::Bool(true))]),
+                Err(error) => self.refuse(error),
+            },
+            "reset_style" => {
+                style.reset();
+                Value::record([("ok", Value::Bool(true))])
+            }
+            "texture" => {
+                let Some(path) = arg.field("path").map(crate::auth::text) else {
+                    return self.refuse(
+                        "imgui.texture needs a path, like imgui.texture{ path = \"assets/icon.png\" }."
+                            .into(),
+                    );
+                };
+                let textures = self.windows.textures(&self.plugin);
+                match textures.register(style.root(), &path) {
+                    Ok(image) => Value::record([
+                        ("ok", Value::Bool(true)),
+                        ("id", Value::from(image.id as f64)),
+                        ("width", Value::from(image.width as f64)),
+                        ("height", Value::from(image.height as f64)),
+                    ]),
+                    Err(error) => self.refuse(error),
+                }
+            }
+            "font" => match style.load_font(arg) {
+                Ok(font) => Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("id", Value::from(font.id as f64)),
+                    ("path", Value::from(font.path.as_str())),
+                    ("size", Value::from(f64::from(font.size))),
+                ]),
+                Err(error) => self.refuse(error),
+            },
+            _ => unreachable!("every plugin op is matched above"),
         }
     }
 

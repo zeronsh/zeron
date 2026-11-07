@@ -28,12 +28,13 @@ fn vs_main(
     return out;
 }
 
-// The atlas is white with coverage in alpha (Dear ImGui 1.92+), so the
-// sampled red channel is never used and every quad shades from its colour.
+// The atlas is white with coverage in alpha (Dear ImGui 1.92+), so a text or
+// shape quad shades from its colour alone; a plugin's picture carries its own
+// colours, which multiply the tint.
 fn shaded(in: VertexOut) -> vec4<f32> {
-    let coverage = textureSample(atlas, atlas_sampler, in.uv).a;
-    let alpha = in.color.a * coverage;
-    return vec4<f32>(in.color.rgb * alpha, alpha);
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    let alpha = in.color.a * texel.a;
+    return vec4<f32>(in.color.rgb * texel.rgb * alpha, alpha);
 }
 
 @fragment

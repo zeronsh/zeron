@@ -211,11 +211,16 @@ impl FrameWindow for Probe {
         let mut guard = self.context.borrow_mut();
         let context = guard.as_mut().expect("the probe's context");
         context
-            .build_frame(spec, want_atlas, |ui| {
-                // SAFETY: `build_frame` keeps the frame open for this closure.
-                let root = unsafe { &*ui };
-                frame::root_window(root, &spec, || draw(ui));
-            })
+            .build_frame(
+                spec,
+                want_atlas,
+                |_| {},
+                |ui| {
+                    // SAFETY: `build_frame` keeps the frame open for this closure.
+                    let root = unsafe { &*ui };
+                    frame::root_window(root, &spec, None, || draw(ui));
+                },
+            )
             .map_err(|error| error.to_string())
     }
 

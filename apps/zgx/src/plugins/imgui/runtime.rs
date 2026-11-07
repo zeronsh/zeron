@@ -13,9 +13,15 @@
 //! will run later), the second replays it on the GPU (the paint phase, which
 //! never touches the context).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
 
-use dear_imgui_rs::{Context, ContextId, LegacyFontAtlas, SuspendedContext, TextureStatus, Ui};
+use dear_imgui_rs::fonts::FontSource;
+use dear_imgui_rs::{
+    Context, ContextId, FontId, LegacyFontAtlas, SuspendedContext, TextureStatus, Ui,
+};
 use zgx_gpu::wgpu;
 
 use super::render::{
@@ -110,6 +116,9 @@ pub struct WindowContext {
     atlas_size: Option<(u32, u32)>,
     /// Whether a first (full) atlas upload has been prepared.
     atlas_created: bool,
+    /// The fonts a plugin loaded, added to this context's atlas once: a
+    /// font id only means something inside the context that made it.
+    fonts: Rc<RefCell<HashMap<u64, FontId>>>,
 }
 
 enum Slot {
@@ -133,6 +142,7 @@ impl WindowContext {
             frames: 0,
             atlas_size: None,
             atlas_created: false,
+            fonts: Rc::default(),
         };
         // Legacy renderer mode: this host uploads the atlas itself, so the
         // context must not use the managed-texture protocol.
@@ -258,16 +268,53 @@ impl WindowContext {
         want_atlas: bool,
         build: impl FnOnce(&Ui),
     ) -> Result<PreparedFrame, ImGuiHostError> {
-        self.build_frame(spec, want_atlas, |ui| {
-            // SAFETY: `build_frame` keeps the context alive and its frame
-            // open for exactly this closure, on this thread.
-            build(unsafe { &*ui })
-        })
+        self.build_frame(
+            spec,
+            want_atlas,
+            |_| {},
+            |ui| {
+                // SAFETY: `build_frame` keeps the context alive and its frame
+                // open for exactly this closure, on this thread.
+                build(unsafe { &*ui })
+            },
+        )
     }
 
-    /// Builds one whole frame: activates the context, sets the frame's size
-    /// and delta time, opens the frame, runs `draw` while it is open, then
-    /// ends it, copies its draw data and suspends the context again.
+    /// The font ids this context's atlas holds, by the plugin's font id: the
+    /// one a frame pushes before it draws.
+    pub fn font_ids(&self) -> Rc<RefCell<HashMap<u64, FontId>>> {
+        Rc::clone(&self.fonts)
+    }
+
+    /// Adds a plugin's font to this context's atlas, once, and answers its
+    /// id. The atlas is rebuilt after, which is what makes the glyphs
+    /// available to this frame's text.
+    pub fn ensure_font(
+        context: &mut Context,
+        fonts: &Rc<RefCell<HashMap<u64, FontId>>>,
+        id: u64,
+        bytes: &[u8],
+        size: f32,
+    ) -> Option<FontId> {
+        if let Some(font) = fonts.borrow().get(&id) {
+            return Some(*font);
+        }
+        let atlas = context.font_atlas();
+        // SAFETY: the bytes are a complete font file the plugin shipped and
+        // the atlas reads them only while building, which happens before
+        // this returns; they outlive the call in the plugin's own style.
+        let source = unsafe { FontSource::ttf_data_with_size(bytes, size) };
+        let font = atlas.add_font(&[source]);
+        atlas.try_claim_legacy_renderer().ok()?.build();
+        fonts.borrow_mut().insert(id, font);
+        Some(font)
+    }
+
+    /// Builds one whole frame: activates the context, runs `setup` (the
+    /// plugin's style and font, which must be in place before the frame
+    /// opens), sets the frame's size and delta time, opens the frame, runs
+    /// `draw` while it is open, then ends it, copies its draw data and
+    /// suspends the context again.
     ///
     /// `draw` gets the frame's [`Ui`] as a pointer rather than a borrow: the
     /// live path runs the plugin's script from inside this closure, and the
@@ -278,6 +325,7 @@ impl WindowContext {
         &mut self,
         spec: FrameSpec,
         want_atlas: bool,
+        setup: impl FnOnce(&mut Context),
         draw: impl FnOnce(*const Ui),
     ) -> Result<PreparedFrame, ImGuiHostError> {
         let last_size = self.atlas_size;
@@ -289,6 +337,7 @@ impl WindowContext {
         // and all plugin windows would stay frozen until restart.
         let mut turn = Turn::take(self)?;
         let built = turn.with_context(move |context| {
+            setup(context);
             let io = context.io_mut();
             io.set_display_size(spec.display_size);
             io.set_display_framebuffer_scale([spec.framebuffer_scale; 2]);

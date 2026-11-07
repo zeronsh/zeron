@@ -39,10 +39,13 @@
 pub mod frame;
 pub mod input;
 pub mod luau;
+pub mod paint;
 pub mod permission;
 pub mod render;
 pub mod runtime;
 pub mod snapshot;
+pub mod style;
+pub mod texture;
 pub mod window;
 
 /// The host's windows: one per `(plugin, window id)`, made through the

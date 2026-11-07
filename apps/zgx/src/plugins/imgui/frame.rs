@@ -64,8 +64,11 @@ use std::time::{Duration, Instant};
 use dear_imgui_rs::{Condition, MouseButton, StyleVarVec2, Ui, WindowFlags};
 use zgx_script::Value;
 
+use super::paint::Paint;
 use super::render::PreparedFrame;
 use super::runtime::FrameSpec;
+use super::style::{PluginStyle, Resolved, Tokens};
+use super::texture::PluginTextures;
 
 /// The one ImGui window each frame fills: the plugin's drawing surface. It is
 /// named with a `##` id so the plugin's own labels are never confused with it.
@@ -81,15 +84,25 @@ const ROOT_FLAGS: WindowFlags = WindowFlags::NO_TITLE_BAR
     .union(WindowFlags::NO_SCROLLBAR)
     .union(WindowFlags::NO_SCROLL_WITH_MOUSE);
 
+/// The font a frame draws its widgets at: the plugin's own when it loaded
+/// one, and the size its `text_size` asks for.
+pub struct FrameFont {
+    /// The plugin's font in this frame's context atlas, when it loaded one.
+    pub font: Option<dear_imgui_rs::FontId>,
+    pub size: f32,
+}
+
 /// Runs `draw` inside the full-window ImGui window a plugin's widgets land in,
 /// so a widget called at the top of `on_render` draws in the plugin's own
 /// window and nowhere else.
-pub fn root_window(ui: &Ui, spec: &FrameSpec, draw: impl FnOnce()) {
+pub fn root_window(ui: &Ui, spec: &FrameSpec, font: Option<FrameFont>, draw: impl FnOnce()) {
+    let pushed = font.map(|font| ui.push_font_with_size(font.font, font.size));
     ui.window(ROOT_WINDOW)
         .position([0.0, 0.0], Condition::Always)
         .size(spec.display_size, Condition::Always)
         .flags(ROOT_FLAGS)
         .build(draw);
+    drop(pushed);
 }
 
 /// The most time one plugin's render callback may spend in a frame.
@@ -192,6 +205,15 @@ pub trait FrameWindow {
         spec: FrameSpec,
         draw: impl FnOnce(*const Ui),
     ) -> Result<PreparedFrame, String>;
+    /// The plugin's look: the colours and metrics its windows are drawn with.
+    /// `None` for a window whose plugin set none (the tests' own windows).
+    fn frame_style(&self) -> Option<Rc<PluginStyle>> {
+        None
+    }
+    /// The plugin's own pictures, for `ui.image` and the draw lists.
+    fn frame_textures(&self) -> Option<Rc<PluginTextures>> {
+        None
+    }
     /// Hands a finished frame to the GPU view, which invalidates so it paints.
     fn frame_deliver(&self, frame: PreparedFrame);
     /// The window is beyond saving; close it (the plugin stays loaded).
@@ -1120,6 +1142,8 @@ impl FrameState {
             "end_list_box" => end_list_box(ui, frame, op),
             "color_edit3" => color_edit3(ui, arg, op),
             "color_button" => color_button(ui, arg, op),
+            "image" => image(window, ui, arg, op),
+            "paint" => paint(window, ui, arg),
             "begin_drag_drop_source" => begin_drag_drop_source(ui, frame, op),
             "set_drag_drop_payload" => set_drag_drop_payload(self, ui, frame, arg, op),
             "end_drag_drop_source" => end_drag_drop_source(ui, frame, op),
@@ -1481,7 +1505,7 @@ fn point(at: [f32; 2]) -> Value {
     ])
 }
 
-fn type_name(value: &Value) -> &'static str {
+pub(crate) fn type_name(value: &Value) -> &'static str {
     match value {
         Value::Nil => "nil",
         Value::Bool(_) => "a boolean",
@@ -2908,6 +2932,81 @@ fn shortcut(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
         ("ok", Value::Bool(true)),
         ("value", Value::Bool(pressed)),
     ]))
+}
+
+/// `ui.image`: a picture this plugin registered, at the size asked for.
+fn image(window: &impl FrameWindow, ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
+    let textures = textures_of(window);
+    let handle = match arg.field("handle") {
+        Some(Value::Num(id)) if id.is_finite() && *id >= 0.0 => *id as u64,
+        Some(other) => {
+            return Err(format!(
+                "ui.{op} needs handle to be a texture handle from imgui.texture, not {}.",
+                type_name(other)
+            ));
+        }
+        None => {
+            return Err(format!(
+                "ui.{op} needs a handle, like ui.image{{ handle = imgui.texture{{ path = … }}, width = 64, height = 64 }}."
+            ));
+        }
+    };
+    if !textures.holds(handle) {
+        return Err(format!(
+            "ui.{op} needs handle to be a texture handle this plugin made with imgui.texture{{ path = … }}."
+        ));
+    }
+    let width = match arg.field("width") {
+        Some(Value::Num(width)) if width.is_finite() && *width > 0.0 => *width as f32,
+        Some(_) => return Err(format!("ui.{op} needs width to be more than zero.")),
+        None => return Err(format!("ui.{op} needs a width, like width = 64.")),
+    };
+    let height = match arg.field("height") {
+        Some(Value::Num(height)) if height.is_finite() && *height > 0.0 => *height as f32,
+        Some(_) => return Err(format!("ui.{op} needs height to be more than zero.")),
+        None => return Err(format!("ui.{op} needs a height, like height = 64.")),
+    };
+    ui.image(dear_imgui_rs::TextureId::new(handle), [width, height]);
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("min", point(ui.item_rect_min())),
+        ("max", point(ui.item_rect_max())),
+    ]))
+}
+
+/// One draw-list call: the frame's own list painting at once.
+fn paint(window: &impl FrameWindow, ui: &Ui, arg: &Value) -> Result<Value, String> {
+    let style = resolved_of(window);
+    let textures = textures_of(window);
+    Paint {
+        ui,
+        style: &style,
+        textures: &textures,
+    }
+    .apply(arg)
+}
+
+/// The plugin's look, or Zeron's dark default for a window whose host set
+/// none (the tests' own windows).
+fn resolved_of(window: &impl FrameWindow) -> Resolved {
+    window.frame_style().map_or_else(
+        || Resolved {
+            theme: super::style::Theme::Auto,
+            dark: true,
+            tokens: Tokens::zeron_dark(),
+            metrics: super::style::Metrics::default(),
+            font: None,
+        },
+        |style| style.resolve(),
+    )
+}
+
+/// The plugin's pictures; an empty registry for a window whose host has none
+/// (the tests' own windows), so a handle is refused rather than drawn.
+fn textures_of(window: &impl FrameWindow) -> Rc<PluginTextures> {
+    window
+        .frame_textures()
+        .unwrap_or_else(|| Rc::new(PluginTextures::new()))
 }
 
 fn unavailable_widget(op: &str) -> String {

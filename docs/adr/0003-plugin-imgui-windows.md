@@ -61,6 +61,22 @@ The regression tests are a two-frame changed-content readback (frame 2 must diff
 which catches a buffer uploaded once) and an 800×600 frame painted into a 400×300 target inside a
 wgpu error scope.
 
+Textures are per draw command. A `PreparedFrame` carries the id of the texture each command
+draws from, and the plugin's own pictures (`imgui.texture`) ride along with it as
+`Rc<TextureImage>`: the renderer uploads each one the first time it meets its id and keeps the
+texture and its bind group, so a picture drawn on sixty frames is one GPU texture, not sixty.
+The font atlas is the same kind of binding, made first and used for every command that names no
+picture. Ids come from one process-wide counter starting above every id Dear ImGui hands out, so
+a plugin's picture can never be mistaken for the atlas. The fragment shader multiplies the
+sampled texel by the vertex colour, which is what makes the atlas (white with coverage in alpha)
+and a picture (its own colours) one pipeline.
+
+Palettes come from `zeron_theme::catalog`, the same library the Themes page reads: the colours
+the palette itself carries are used as they are, and the washes and hairlines the design system
+derives from them are derived the same way (`ui/ds/palettes.tokens`). A plugin's style is its
+own — one `PluginStyle` per plugin, applied to that plugin's contexts before each frame opens —
+so nothing one plugin sets can reach another plugin or Zeron's own window.
+
 Rejected: the managed `WgpuRenderer` in `dear-imgui-wgpu` 0.22. Its frame-resource arena creates
 vertex, index and uniform buffers for every render epoch, and an epoch is one native frame
 (`Context::render()` allocates a fresh snapshot epoch per call). An animating plugin window would

@@ -1322,6 +1322,216 @@ return function(id: string): any
 		return answer
 	end
 
+	-- Whether a render callback is running: draw lists paint only inside one.
+	local imgui_frame_live = false
+	-- What each draw list is made of, by its handle: the commands a kept list
+	-- replays, and whether a live list already drew them.
+	local imgui_lists: { [any]: any } = {}
+	-- The pictures and fonts `imgui.texture` and `imgui.font` handed out, by
+	-- their handles: the host's own id stays here, never on the handle.
+	local imgui_textures: { [any]: any } = {}
+	local imgui_font_handles: { [any]: any } = {}
+	-- How many handles of each kind were made, for `imgui.texture#n`.
+	local imgui_made_kind: { [string]: number } = {}
+
+	-- A host handle: a table whose metatable hides everything but its own
+	-- methods, so nothing it holds (a pointer, an id) is reachable, and
+	-- `tostring` names it stably.
+	local function imgui_handle(kind: string, methods: { [string]: any }): any
+		imgui_made_kind[kind] = (imgui_made_kind[kind] or 0) + 1
+		local n = imgui_made_kind[kind]
+		return setmetatable({}, {
+			__metatable = `imgui.{kind}`,
+			__tostring = function()
+				return `imgui.{kind}#{n}`
+			end,
+			__index = function(_, key)
+				local method = methods[key]
+				if method then
+					return method
+				end
+				error(`imgui.{kind}#{n} has no "{tostring(key)}". Its methods are the ones docs/plugins.md lists.`, 2)
+			end,
+			__newindex = function()
+				error(`imgui.{kind}#{n} can't be changed: it is a host handle.`, 2)
+			end,
+		})
+	end
+
+	-- Two clip rectangles intersected, for nested `push_clip_rect`.
+	local function imgui_clip_with(clip: any, next: any): any
+		if not clip then
+			return next
+		end
+		local min = { math.max(clip.min[1], next.min[1]), math.max(clip.min[2], next.min[2]) }
+		local max = { math.min(clip.max[1], next.max[1]), math.min(clip.max[2], next.max[2]) }
+		if max[1] <= min[1] or max[2] <= min[2] then
+			return { min = min, max = { min[1], min[2] } }
+		end
+		return { min = min, max = max }
+	end
+
+	-- One point, as the host reads it (`{ x, y }` or `{ x = …, y = … }`).
+	local function imgui_point(value: any, what: string): { number }
+		if type(value) ~= "table" then
+			error(`{what} needs a point of two numbers, like \{ 10, 20 \}`, 3)
+		end
+		local x = if type(value[1]) == "number" then value[1] else value.x
+		local y = if type(value[2]) == "number" then value[2] else value.y
+		if type(x) ~= "number" or type(y) ~= "number" then
+			error(`{what} needs a point of two numbers, like \{ 10, 20 \}`, 3)
+		end
+		return { x, y }
+	end
+
+	-- The colour `ui.color_edit3` hands back. Its channels are plain fields,
+	-- so the value goes back into the next frame as it came out; its
+	-- metatable hides everything else, and it is the same table for the same
+	-- label, so `tostring` names it the same on every frame.
+	local imgui_colours: { [string]: any } = {}
+	local function imgui_colour(window: string, label: string, value: any): any
+		local key = `{window}/{label}`
+		local handle = imgui_colours[key]
+		if not handle then
+			imgui_made_kind.colour = (imgui_made_kind.colour or 0) + 1
+			local n = imgui_made_kind.colour
+			handle = {}
+			setmetatable(handle, {
+				__metatable = "imgui.colour",
+				__tostring = function()
+					return `imgui.colour#{n}`
+				end,
+				__index = function(_, field)
+					error(`imgui.colour#{n} has no "{tostring(field)}": a colour has r, g and b.`, 2)
+				end,
+			})
+			imgui_colours[key] = handle
+		end
+		handle.r = value.r
+		handle.g = value.g
+		handle.b = value.b
+		return handle
+	end
+
+	-- A draw list. `live` ones are the window's own and paint as they are
+	-- called; the others keep their commands for `ui.draw` to replay, which
+	-- is what lets a plugin hold one across frames.
+	local function imgui_draw_list(live: boolean, window: string?, seq: number?): any
+		local commands = {}
+		local clips: { any } = {}
+		local methods: { [string]: any } = {}
+		local function current_clip(): any
+			local clip: any = nil
+			for _, pushed in clips do
+				clip = imgui_clip_with(clip, pushed)
+			end
+			return clip
+		end
+		local function refuse(kind: string)
+			if not imgui_frame_live then
+				error(
+					`Drawing is only allowed during on_render: {kind} works inside a window's render callback and nowhere else.`,
+					4
+				)
+			end
+		end
+		local function add(kind: string, fields: any)
+			refuse(`dl:{kind}`)
+			local command = table.clone(fields or {})
+			command.kind = kind
+			if live then
+				command.op = "paint"
+				command.window = window
+				command.seq = seq
+			end
+			local clip = current_clip()
+			if clip then
+				command.clip = { min = clip.min, max = clip.max }
+			end
+			if not live then
+				table.insert(commands, command)
+				return
+			end
+			local ok, why = pcall(imgui_ask, command)
+			if not ok then
+				if imgui_refusal then
+					imgui_refusal.sentence = tostring(why)
+				end
+				error(why, 0)
+			end
+		end
+
+		function methods.add_line(_self: any, fields: any)
+			imgui_point(fields.from, "dl:add_line")
+			imgui_point(fields.to, "dl:add_line")
+			add("line", fields)
+		end
+		function methods.add_rect(_self: any, fields: any)
+			add("rect", fields)
+		end
+		function methods.add_rect_filled(_self: any, fields: any)
+			add("rect_filled", fields)
+		end
+		function methods.add_rect_rounded(_self: any, fields: any)
+			add("rect_rounded", fields)
+		end
+		function methods.add_rect_rounded_filled(_self: any, fields: any)
+			add("rect_rounded_filled", fields)
+		end
+		function methods.add_circle(_self: any, fields: any)
+			add("circle", fields)
+		end
+		function methods.add_circle_filled(_self: any, fields: any)
+			add("circle_filled", fields)
+		end
+		function methods.add_text(_self: any, fields: any)
+			add("text", fields)
+		end
+		function methods.add_image(_self: any, fields: any)
+			local picture = imgui_textures[fields.handle]
+			if not picture then
+				error(
+					"dl:add_image needs handle to be a texture handle from imgui.texture{ path = … }, not another value.",
+					3
+				)
+			end
+			local command = table.clone(fields)
+			command.handle = picture.id
+			add("image", command)
+		end
+		function methods.add_poly_filled(_self: any, fields: any)
+			add("poly_filled", fields)
+		end
+		function methods.add_poly_line(_self: any, fields: any)
+			add("poly_line", fields)
+		end
+		function methods.push_clip_rect(_self: any, fields: any)
+			refuse("dl:push_clip_rect")
+			local next = {
+				min = imgui_point(fields.min, "dl:push_clip_rect"),
+				max = imgui_point(fields.max, "dl:push_clip_rect"),
+			}
+			table.insert(clips, next)
+		end
+		function methods.pop_clip_rect(_self: any)
+			refuse("dl:pop_clip_rect")
+			if #clips == 0 then
+				error("dl:pop_clip_rect was called with no clip to pop: push one first.", 3)
+			end
+			clips[#clips] = nil
+		end
+		function methods.clear(_self: any)
+			if live then
+				error("the window's own draw list is cleared at the start of every frame; use imgui.draw_list() for one you can clear.", 3)
+			end
+			table.clear(commands)
+			table.clear(clips)
+		end
+		local handle = imgui_handle("draw_list", methods)
+		imgui_lists[handle] = { live = live, commands = commands }
+		return handle
+	end
+
 	-- What `on_render` is handed: the widgets below, each a synchronous
 	-- call into the frame the host has open for this window. A refusal is
 	-- recorded in the frame's own marker (`imgui_refusal`), so `imgui_frame`
@@ -1602,7 +1812,7 @@ return function(id: string): any
 		end
 		function view.color_edit3(label: any, colour: { r: number, g: number, b: number }, options: { [string]: any }?): { r: number, g: number, b: number }
 			local answer = call("color_edit3", { label = tostring(label), value = colour, options = options })
-			return answer.value
+			return imgui_colour(window, tostring(label), answer.value)
 		end
 		function view.color_button(fields: { [string]: any }): boolean
 			local answer = call("color_button", table.clone(fields))
@@ -1639,92 +1849,129 @@ return function(id: string): any
 		function view.time_picker(fields: { [string]: any })
 			call("time_picker", table.clone(fields or {}))
 		end
+		-- The frame's own draw list: it paints as it is called, and is empty
+		-- again next frame.
+		function view.get_window_draw_list(): any
+			if not imgui_frame_live then
+				error(
+					"Drawing is only allowed during on_render: ui.get_window_draw_list works inside a window's render callback and nowhere else.",
+					3
+				)
+			end
+			return imgui_draw_list(true, window, seq)
+		end
+		-- A list made with `imgui.draw_list`, drawn now.
+		function view.draw(list: any)
+			local kept = imgui_lists[list]
+			if not kept then
+				error("ui.draw needs a draw list from imgui.draw_list() or ui.get_window_draw_list().", 3)
+			end
+			for _, command in kept.commands do
+				call("paint", table.clone(command))
+			end
+		end
+		function view.image(fields: { [string]: any }): any
+			local picture = imgui_textures[fields.handle]
+			if not picture then
+				error("ui.image needs handle to be a texture handle from imgui.texture{ path = … }, not another value.", 3)
+			end
+			local asked = table.clone(fields)
+			asked.handle = picture.id
+			return call("image", asked)
+		end
 		return view
 	end
 
-	local function imgui_handle(window: string): any
-		local handle: any = { __id = window, __closed = false }
+	-- The state behind a window handle, kept out of the handle itself: a
+	-- handle the plugin holds carries no field it could read or write.
+	local imgui_window_state: { [any]: any } = {}
+
+	local function imgui_window_handle(window: string): any
+		local state = { closed = false, render = nil, close = nil }
+		local methods: { [string]: any } = {}
+		local handle = imgui_handle("window", methods)
+		imgui_window_state[handle] = state
 		local function live()
-			if handle.__closed then
+			if state.closed then
 				error(`Window "{window}" is closed. Open it again with zeron.imgui.open_window.`, 3)
 			end
 		end
 		-- The callback that draws the window, once per shown frame.
-		function handle.on_render(_self: any, fn: (any) -> ())
+		function methods.on_render(_self: any, fn: (any) -> ())
 			live()
-			handle.__render = fn
+			state.render = fn
 			imgui_ask({ op = "render", window = window, on = true })
 		end
 		-- Told when the window closes: your close(), the OS close button, or
 		-- Zeron taking the plugin away. Runs exactly once per close.
-		function handle.on_close(_self: any, fn: () -> ())
+		function methods.on_close(_self: any, fn: () -> ())
 			live()
-			handle.__close = fn
+			state.close = fn
 		end
-		function handle.close(_self: any)
-			if handle.__closed then
+		function methods.close(_self: any)
+			if state.closed then
 				return
 			end
 			imgui_ask({ op = "close", window = window })
 		end
-		function handle.is_open(_self: any): boolean
-			if handle.__closed then
+		function methods.is_open(_self: any): boolean
+			if state.closed then
 				return false
 			end
 			local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, { op = "is_open", window = window })
 			return ok and type(answer) == "table" and answer.open == true
 		end
-		function handle.state(_self: any): any
-			if handle.__closed then
+		function methods.state(_self: any): any
+			if state.closed then
 				return { open = false, shown = false, minimized = false, frames = 0 }
 			end
 			local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, { op = "state", window = window })
 			return if ok and type(answer) == "table" then answer else { open = false }
 		end
-		function handle.show(_self: any)
+		function methods.show(_self: any)
 			live()
 			imgui_ask({ op = "show", window = window })
 		end
-		function handle.hide(_self: any)
+		function methods.hide(_self: any)
 			live()
 			imgui_ask({ op = "hide", window = window })
 		end
-		function handle.focus(_self: any)
+		function methods.focus(_self: any)
 			live()
 			imgui_ask({ op = "focus", window = window })
 		end
-		function handle.minimize(_self: any)
+		function methods.minimize(_self: any)
 			live()
 			imgui_ask({ op = "minimize", window = window })
 		end
-		function handle.restore(_self: any)
+		function methods.restore(_self: any)
 			live()
 			imgui_ask({ op = "restore", window = window })
 		end
-		function handle.maximize(_self: any)
+		function methods.maximize(_self: any)
 			live()
 			imgui_ask({ op = "maximize", window = window })
 		end
-		function handle.begin_drag(_self: any)
+		function methods.begin_drag(_self: any)
 			live()
 			imgui_ask({ op = "begin_drag", window = window })
 		end
-		function handle.begin_resize(_self: any, edge: string)
+		function methods.begin_resize(_self: any, edge: string)
 			live()
 			imgui_ask({ op = "begin_resize", window = window, edge = tostring(edge) })
 		end
-		function handle.is_maximized(_self: any): boolean
-			if handle.__closed then
+		function methods.is_maximized(_self: any): boolean
+			if state.closed then
 				return false
 			end
 			local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, { op = "is_maximized", window = window })
 			return ok and type(answer) == "table" and answer.maximized == true
 		end
-		function handle.set_title(_self: any, title: string)
+		function methods.set_title(_self: any, title: string)
 			live()
 			imgui_ask({ op = "set_title", window = window, title = tostring(title) })
 		end
-		function handle.set_size(_self: any, size: { width: number, height: number })
+		function methods.set_size(_self: any, size: { width: number, height: number })
 			live()
 			imgui_ask({ op = "set_size", window = window, size = size })
 		end
@@ -1742,7 +1989,7 @@ return function(id: string): any
 		request.op = "open_window"
 		local answer = imgui_ask(request)
 		local window = tostring(answer.id or request.id)
-		local handle = imgui_handle(window)
+		local handle = imgui_window_handle(window)
 		imgui_live[window] = handle
 		return handle
 	end
@@ -1750,6 +1997,83 @@ return function(id: string): any
 	function imgui.is_open(window: string): boolean
 		local handle = imgui_live[window]
 		return handle ~= nil and handle.is_open(handle)
+	end
+
+	-- A draw list you keep: `imgui.draw_list()` makes one (before any frame,
+	-- if you like), its calls are remembered, and `ui.draw(it)` replays them
+	-- into the frame you call it from. `:clear()` forgets them.
+	function imgui.draw_list(): any
+		return imgui_draw_list(false)
+	end
+
+	-- A picture inside your plugin's own folder, drawn by its handle with
+	-- `ui.image{ … }` or `dl:add_image{ … }`.
+	function imgui.texture(fields: { [string]: any }): any
+		local asked = table.clone(fields or {})
+		asked.op = "texture"
+		local answer = imgui_ask(asked)
+		local handle = imgui_handle("texture", {})
+		imgui_textures[handle] = {
+			id = answer.id,
+			width = answer.width,
+			height = answer.height,
+			path = tostring(asked.path or ""),
+		}
+		return handle
+	end
+
+	function imgui.texture_size(handle: any): (number, number)
+		local picture = imgui_textures[handle]
+		if not picture then
+			error("imgui.texture_size needs a texture handle from imgui.texture{ path = … }.", 2)
+		end
+		return picture.width, picture.height
+	end
+
+	-- A font file inside your plugin's own folder, worn with
+	-- `imgui.set_style{ font = f }`.
+	function imgui.font(fields: { [string]: any }): any
+		local asked = table.clone(fields or {})
+		asked.op = "font"
+		local answer = imgui_ask(asked)
+		local handle = imgui_handle("font", {})
+		imgui_font_handles[handle] = { id = answer.id, path = answer.path, size = answer.size }
+		return handle
+	end
+
+	function imgui.font_size(font: any): number
+		local loaded = imgui_font_handles[font]
+		if not loaded then
+			error("imgui.font_size needs a font from imgui.font{ path = …, size = … }.", 2)
+		end
+		return loaded.size
+	end
+
+	-- The look your windows wear now: `theme`, `colours` by token, the
+	-- metrics, the font and the window's scale.
+	function imgui.style(): any
+		return imgui_ask({ op = "style" })
+	end
+
+	-- Changes your own windows' look: `theme`, `colours`, `frame_rounding`,
+	-- `window_rounding`, `window_padding`, `item_spacing`, `border_size`,
+	-- `text_size`, `font`.
+	function imgui.set_style(fields: { [string]: any })
+		local asked = table.clone(fields or {})
+		asked.op = "set_style"
+		if asked.font ~= nil then
+			local loaded = imgui_font_handles[asked.font]
+			if not loaded then
+				error("imgui.set_style needs font to be a handle from imgui.font{ path = … }.", 2)
+			end
+			asked.font = { __font = loaded.id }
+		end
+		imgui_ask(asked)
+	end
+
+	-- Zeron's look again, on your next frame.
+	function imgui.reset_style()
+		imgui_ask({ op = "reset_style" })
 	end
 
 	-- The host pushed a frame request: run the window's on_render against the
@@ -1760,9 +2084,12 @@ return function(id: string): any
 		local ok, why = true, nil
 		local refused = {}
 		imgui_refusal = refused
-		if handle and handle.__render and not handle.__closed then
-			ok, why = pcall(handle.__render, imgui_ui(window, tonumber(call.seq) or 0))
+		imgui_frame_live = true
+		local state = if handle then imgui_window_state[handle] else nil
+		if state and state.render and not state.closed then
+			ok, why = pcall(state.render, imgui_ui(window, tonumber(call.seq) or 0))
 		end
+		imgui_frame_live = false
 		imgui_refusal = nil
 		ui.invoke(`{prefix}.imgui_end`, {
 			window = window,
@@ -1783,12 +2110,16 @@ return function(id: string): any
 		imgui_live[window] = nil
 		imgui_made[window] = nil
 		for _, h in handles or {} do
-			h.__closed = true
+			local each = imgui_window_state[h]
+			if each then
+				each.closed = true
+			end
 		end
-		if handle then
-			handle.__closed = true
-			if handle.__close then
-				local ok, why = pcall(handle.__close, window)
+		local state = if handle then imgui_window_state[handle] else nil
+		if state then
+			state.closed = true
+			if state.close then
+				local ok, why = pcall(state.close, window)
 				if not ok then
 					print(`{id}: on_close for window "{window}" failed: {why}`)
 				end

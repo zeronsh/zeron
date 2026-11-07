@@ -60,6 +60,9 @@ thread_local! {
 
 /// The library as the scripts see it, read again from disk.
 fn publish() {
+    // The plugin windows' palettes are read from the same files: a changed
+    // theme reaches them on their next frame.
+    crate::plugins::imgui::style::invalidate();
     let Some(shared) = LIBRARY.with(|l| l.borrow().clone()) else { return };
     let Some(dir) = data_dir() else { return };
     let (library, warning) = match CustomThemeLibrary::load(&dir) {

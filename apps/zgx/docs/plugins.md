@@ -722,6 +722,94 @@ w:on_render(function(ui)
 end)
 ```
 
+### Drawing
+
+Two draw lists take the same calls: the frame's own, `ui.get_window_draw_list()`, which paints where you call it, and one you keep, `imgui.draw_list()`, whose calls are remembered and replayed by `ui.draw(list)` — that is how a plugin draws the same shape on every frame without rebuilding it.
+
+```lua
+local scratch = zeron.imgui.draw_list()          -- before any frame, if you like
+
+w:on_render(function(ui)
+	local dl = ui.get_window_draw_list()
+	dl:add_line { from = { 40, 60 }, to = { 240, 60 }, color = "#ff0000", thickness = 3 }
+	dl:add_rect { min = { 40, 90 }, max = { 240, 140 }, color = "#00a0ff", thickness = 2, rounding = 6 }
+	dl:add_rect_filled { min = { 40, 160 }, max = { 240, 200 }, color = "$accent" }
+	dl:add_circle { center = { 320, 160 }, radius = 40, color = "#ffffff", thickness = 2 }
+	dl:add_circle_filled { center = { 420, 160 }, radius = 40, color = "#22cc88" }
+	dl:add_text { pos = { 40, 220 }, text = "100%", color = "#ffcc00", font_size = 20 }
+	dl:add_poly_filled { points = { { 60, 320 }, { 140, 260 }, { 220, 320 } }, color = "#ff00ff" }
+	dl:add_poly_line { points = { { 300, 260 }, { 340, 320 }, { 300, 380 } }, color = "#00ffff", thickness = 2 }
+	dl:push_clip_rect { min = { 400, 300 }, max = { 600, 400 } }
+	dl:add_rect_filled { min = { 0, 0 }, max = { 720, 480 }, color = "#ff000050" }
+	dl:pop_clip_rect()
+
+	scratch:clear()
+	scratch:add_line { from = { 40, 400 }, to = { 200, 440 }, color = "#00ff00" }
+	ui.draw(scratch)
+end)
+```
+
+Calls take `min`/`max`, `from`/`to`, `center` or a `points` list of `{ x, y }` pairs, plus `color` (a `"#rrggbb"`, a `"#rrggbbaa"`, or a Zeron token like `"$accent"`), `thickness` (1 by default), `rounding`, and `text`/`font_size` for text. Geometry is in window points. `push_clip_rect`/`pop_clip_rect` cut everything drawn after them to their rectangle; `clear()` empties a kept list and is refused on the frame's own list, which Dear ImGui empties every frame.
+
+Drawing is only allowed inside `on_render`: a call from a timer, an action or after the window closed raises a sentence saying so, and nothing is drawn.
+
+### Pictures
+
+`imgui.texture` loads a picture from your plugin's own folder (the one your `init.luau` came from) and hands back a handle; a path that leaves that folder is refused.
+
+```lua
+local checker = zeron.imgui.texture { path = "assets/checker.png" }
+local width, height = zeron.imgui.texture_size(checker)
+
+w:on_render(function(ui)
+	ui.image { handle = checker, width = 64, height = 64 }
+	ui.get_window_draw_list():add_image { handle = checker, min = { 40, 40 }, max = { 104, 104 } }
+	ui.get_window_draw_list():add_image {
+		handle = checker, min = { 120, 40 }, max = { 184, 104 }, uv_min = { 0, 0 }, uv_max = { 0.5, 0.5 },
+	}
+end)
+```
+
+PNG and JPEG decode to RGBA8. Each picture is uploaded once and stays on the GPU while the plugin is loaded: drawing it on sixty frames costs one texture, not sixty. `add_image` also takes `uv_min`/`uv_max` to draw part of a picture and `color` to tint it. A handle that is not one of your own pictures — a number, a path, another plugin's handle — is refused with a sentence naming what a handle is.
+
+### Style and theme
+
+A plugin window wears the same theme Zeron wears, and can change it for itself alone. Nothing a plugin sets reaches Zeron's own window or another plugin's.
+
+```lua
+local look = zeron.imgui.style()
+print(look.theme)                        -- "dark" or "light"
+print(look.colours["$background"])       -- "#0b0b0dcc"
+
+zeron.imgui.set_style {
+	theme = "light",                     -- "auto" (Zeron's), "dark" or "light"
+	colours = { ["$background"] = "#101820", ["$text.primary"] = "#ffcc00" },
+	frame_rounding = 8,
+	window_rounding = 14,
+	window_padding = { x = 16, y = 16 },
+	item_spacing = { x = 8, y = 6 },
+	border_size = 2,
+	text_size = 15,
+}
+zeron.imgui.reset_style()                -- Zeron's look again
+```
+
+The colours are Zeron's own tokens, and every one is worn by the widgets that carry it: `$background` the window and menus, `$text.primary`/`$text.secondary`/`$text.tertiary` the inks, `$border` hairlines and separators, `$accent`/`$accent.hover`/`$accent.text` the accent and what sits on it, `$danger`/`$warning`/`$success` the tones, `$selection` a picked row, `$hover`/`$pressed` the pointer's wash, `$focus.ring` the keyboard ring. A token you do not set keeps the theme's value; a token that is not one of the fifteen is refused by name.
+
+The palette comes from the theme Zeron wears (`theme-library.json` and what is chosen in Settings): `$background`, `$text.primary`, `$text.secondary`, `$text.tertiary`, `$accent`, `$danger`, `$warning` and `$success` are the palette's own colours, and the rest are derived from them the way Zeron's design system derives them — `$border` the primary ink at 7 % (`14 %` in a light theme), `$hover` at 5 %, `$pressed` at 9 % (`8 %`), `$selection` the accent at 35 % (`24 %`), `$focus.ring` the accent at 60 %, `$accent.hover` the accent moved 12 % toward white (`10 %` toward black), and `$accent.text` whichever of black and white reads on it. A chosen accent reaches every one of them.
+
+`imgui.style()` reports what is worn right now — `theme`, `colours`, the metrics, `font` (the path of the font you loaded, or nil) and `dpi_scale` — after the app's light/dark switch too: with `theme = "auto"` your window follows Zeron's appearance within a frame, and `theme = "dark"` or `"light"` pins it whatever Zeron wears.
+
+A font of your own is a file inside your plugin's folder:
+
+```lua
+local serif = zeron.imgui.font { path = "assets/InstrumentSerif-Regular.ttf", size = 20 }
+print(zeron.imgui.font_size(serif))     -- 20
+zeron.imgui.set_style { font = serif }
+```
+
+The font is added to the window's own atlas and everything drawn after it wears it; `text_size` scales text without changing the face.
+
 ## Zeron's components
 
 Zeron lends your plugin its design system: the same components Zeron's own screens are built from, from whichever template is active, so your plugin looks native in every theme and template. It needs no permission. Require the modules you use from `@ds/…` (not `@app/…`, which plugins can't reach):

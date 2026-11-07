@@ -703,13 +703,13 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // themes the content only.
     let window = cx.window.clone();
     host.action("appearance", move |value| {
-        set_appearance(
-            &window,
-            match value {
-                Value::Bool(dark) => Some(dark),
-                _ => None,
-            },
-        )
+        let dark = match value {
+            Value::Bool(dark) => Some(dark),
+            _ => None,
+        };
+        // Plugin windows wear the same scheme (src/plugins/imgui/style.rs).
+        crate::plugins::imgui::style::set_appearance(dark);
+        set_appearance(&window, dark)
     });
     // Whether the system asks for no transparency (Windows' Transparency
     // effects off): every glass solid (src/transparency.rs).

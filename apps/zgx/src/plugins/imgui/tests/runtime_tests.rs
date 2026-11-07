@@ -196,7 +196,7 @@ fn a_panic_in_one_windows_draw_leaves_its_context_suspended() {
     // one process-wide current context: left active, every later window's
     // `activate` fails and all plugin windows stay frozen until restart.
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = first.build_frame(spec, false, |_| panic!("the draw closure failed"));
+        let _ = first.build_frame(spec, false, |_| {}, |_| panic!("the draw closure failed"));
     }));
     assert!(panic.is_err(), "the draw's panic must reach the caller");
     assert!(

@@ -26,7 +26,9 @@ fn spec() -> FrameSpec {
 
 /// One frame, with nothing drawn: Dear ImGui applies what the events queued.
 fn frame(context: &mut WindowContext) {
-    context.build_frame(spec(), false, |_| {}).expect("a frame");
+    context
+        .build_frame(spec(), false, |_| {}, |_| {})
+        .expect("a frame");
 }
 
 fn io<T>(context: &mut WindowContext, read: impl FnOnce(&dear_imgui_rs::Io) -> T) -> T {
@@ -40,13 +42,18 @@ fn frame_with<T>(context: &mut WindowContext, read: impl FnOnce(&dear_imgui_rs::
     let result: RefCell<Option<T>> = RefCell::new(None);
     let size = spec();
     context
-        .build_frame(size, false, |ui| {
-            let ui = unsafe { &*ui };
-            crate::plugins::imgui::frame::root_window(ui, &size, || {
-                let read = read.borrow_mut().take().expect("one read");
-                *result.borrow_mut() = Some(read(ui));
-            });
-        })
+        .build_frame(
+            size,
+            false,
+            |_| {},
+            |ui| {
+                let ui = unsafe { &*ui };
+                crate::plugins::imgui::frame::root_window(ui, &size, None, || {
+                    let read = read.borrow_mut().take().expect("one read");
+                    *result.borrow_mut() = Some(read(ui));
+                });
+            },
+        )
         .expect("a frame");
     result.borrow_mut().take().expect("a result")
 }

@@ -1,0 +1,26 @@
+{
+  "id": "imgui-contract-draw",
+  "name": "ImGui Contract Drawing",
+  "version": "1.0.0",
+  "description": "The validation contract's drawing fixture: one 720x480 window that draws one row's geometry at a time (lines, rectangles, circles, text, an image, polygons, a clip, an alpha wash, a kept draw list, refused handles and printed handles), driven by its Probe Actions window or the probe_run tool.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"],
+  "tools": [
+    {
+      "name": "probe_run",
+      "description": "Draws one screen by name, the same screens its Probe Actions window's buttons select; `off_frame` runs the off-frame attempts.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "description": "The screen's name, as README.md lists it." }
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "probe_status",
+      "description": "Which screen is drawn, how many frames it has drawn, and the last refusal.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "imgui-contract-style",
+  "name": "ImGui Contract Style",
+  "version": "1.0.0",
+  "description": "The validation contract's styling fixture: one 720x480 window that wears one screen's style at a time (Zeron's own, light, its own colours, rounding, padding, spacing, border, text size, its own font) and prints imgui.style() for the frame it draws.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"],
+  "tools": [
+    {
+      "name": "probe_run",
+      "description": "Wears one screen's style by name, the same screens its Probe Actions window's buttons select.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "description": "The screen's name, as README.md lists it." }
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "probe_status",
+      "description": "The look the window wears now: theme, the fifteen tokens, the metrics and the font.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}

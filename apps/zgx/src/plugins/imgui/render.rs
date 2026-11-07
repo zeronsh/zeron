@@ -19,18 +19,22 @@
 //! ## What is kept between frames
 //!
 //! Two buffers (vertices and indices), one pipeline per target format, one
-//! sampler, and the font-atlas texture with its bind group. Everything else
-//! is written into them. [`ResourceCounters`] records every creation and
+//! sampler, and one texture with its bind group per picture a frame draws —
+//! the font atlas and every `imgui.texture` a plugin registered. Everything
+//! else is written into them. [`ResourceCounters`] records every creation and
 //! release, so a test — or `zgx inspect` later — can prove that a steady
 //! workload creates nothing.
 
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
 use dear_imgui_rs::render::{DrawCmd, DrawData};
 use dear_imgui_rs::{LegacyFontAtlas, TextureFormat as AtlasFormat};
+
+use super::texture::TextureImage;
 use zgx_gpu::viewport::{Viewport, ViewportFrame};
 use zgx_gpu::wgpu;
 
@@ -229,7 +233,7 @@ pub struct DrawStats {
     pub vertices: usize,
     pub indices: usize,
     /// Commands dropped before drawing: an empty clip rectangle, or a raw
-    /// callback this renderer does not serve. Images arrive with M3.
+    /// callback this renderer does not serve.
     pub skipped_commands: usize,
 }
 
@@ -254,6 +258,10 @@ pub struct PreparedFrame {
     lists: Vec<PreparedList>,
     commands: Vec<PreparedCommand>,
     atlas: Option<AtlasImage>,
+    /// Every picture this frame can draw besides the atlas: the plugin's own
+    /// `imgui.texture` handles, each with the pixels the renderer uploads
+    /// once. Shared, so a frame costs the plugin nothing to hand over.
+    textures: Vec<Rc<TextureImage>>,
     stats: DrawStats,
 }
 
@@ -275,6 +283,9 @@ struct PreparedCommand {
     count: usize,
     /// In device pixels: left, top, width, height.
     clip: [u32; 4],
+    /// Dear ImGui's texture for this command: the atlas, or one of the
+    /// plugin's own pictures. Zero draws from the atlas.
+    texture: u64,
 }
 
 impl PreparedFrame {
@@ -341,6 +352,7 @@ impl PreparedFrame {
                     idx_offset: cmd_params.idx_offset,
                     count,
                     clip,
+                    texture: cmd_params.texture_id.id(),
                 });
                 frame.stats.commands += 1;
             }
@@ -355,6 +367,17 @@ impl PreparedFrame {
     pub fn with_atlas(mut self, atlas: Option<AtlasImage>) -> Self {
         self.atlas = atlas;
         self
+    }
+
+    /// Attaches the plugin's pictures, which the renderer uploads the first
+    /// time it meets each one's id.
+    pub fn with_textures(mut self, textures: Vec<Rc<TextureImage>>) -> Self {
+        self.textures = textures;
+        self
+    }
+
+    pub fn textures(&self) -> &[Rc<TextureImage>] {
+        &self.textures
     }
 
     pub fn atlas(&self) -> Option<&AtlasImage> {
@@ -535,6 +558,15 @@ struct AtlasTexture {
     id: u64,
 }
 
+/// One picture a frame draws, uploaded: the GPU texture and the bind group
+/// a draw command binds for it.
+struct TextureBinding {
+    /// Dropped last: the bind group borrows the view.
+    _texture: TrackedTexture,
+    bind_group: wgpu::BindGroup,
+    size: (u32, u32),
+}
+
 /// Draws prepared Dear ImGui frames with wgpu.
 ///
 /// One renderer serves one plugin window (and its one context). It owns its
@@ -551,6 +583,9 @@ pub struct WgpuRenderer {
     pipeline: Option<wgpu::RenderPipeline>,
     pipeline_format: Option<wgpu::TextureFormat>,
     atlas: Option<AtlasTexture>,
+    /// Every picture the plugin registered, uploaded once and kept: an
+    /// image drawn on sixty frames is one GPU texture, not sixty.
+    textures: HashMap<u64, TextureBinding>,
     vertex: Option<(TrackedBuffer, usize)>,
     index: Option<(TrackedBuffer, usize)>,
     counters: Rc<Cell<ResourceCounters>>,
@@ -572,6 +607,7 @@ impl WgpuRenderer {
             pipeline: None,
             pipeline_format: None,
             atlas: None,
+            textures: HashMap::new(),
             vertex: None,
             index: None,
             counters: Rc::new(Cell::new(ResourceCounters::default())),
@@ -603,6 +639,7 @@ impl WgpuRenderer {
         self.pipeline = None;
         self.pipeline_format = None;
         self.atlas = None;
+        self.textures.clear();
         self.bind_group_layout = None;
         self.sampler = None;
         self.vertex = None;
@@ -687,6 +724,7 @@ impl WgpuRenderer {
         if let Some(atlas) = &frame.atlas {
             self.upload_atlas(atlas);
         }
+        self.upload_textures(&frame.textures);
         if !frame.commands.is_empty() && self.atlas.is_none() {
             return Err(RenderError::MissingAtlas);
         }
@@ -719,7 +757,10 @@ impl WgpuRenderer {
             return Ok(stats);
         };
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &atlas.bind_group, &[]);
+        let atlas_id = atlas.id;
+        let atlas_group = &atlas.bind_group;
+        let mut bound = Some(atlas_id);
+        pass.set_bind_group(0, atlas_group, &[]);
         for command in &frame.commands {
             let list = frame.lists[command.list];
             let vertex_offset = (list.vtx_offset + command.vtx_offset) * VERTEX_BYTES;
@@ -741,6 +782,17 @@ impl WgpuRenderer {
                 continue;
             }
             pass.set_scissor_rect(x, y, width, height);
+            if bound != Some(command.texture) {
+                // The atlas serves a command that names no picture of its
+                // own (text, shapes) and any id this renderer never saw.
+                let group = self
+                    .textures
+                    .get(&command.texture)
+                    .map(|binding| &binding.bind_group)
+                    .unwrap_or(atlas_group);
+                pass.set_bind_group(0, group, &[]);
+                bound = Some(command.texture);
+            }
             pass.draw_indexed(0..command.count as u32, 0, 0..1);
             stats.draw_calls += 1;
         }
@@ -815,6 +867,80 @@ impl WgpuRenderer {
                 &self.index.as_ref().expect("the buffer is there").0.buffer,
                 0,
                 &bytes,
+            );
+        }
+    }
+
+    /// Uploads the plugin's pictures the renderer does not have yet. A
+    /// picture is uploaded once per device and drawn from then on; one that
+    /// is already here is left alone.
+    fn upload_textures(&mut self, textures: &[Rc<TextureImage>]) {
+        if textures.is_empty() {
+            return;
+        }
+        self.ensure_atlas_bindings();
+        for image in textures {
+            let size = image.size();
+            if self
+                .textures
+                .get(&image.id)
+                .is_some_and(|binding| binding.size == size)
+            {
+                continue;
+            }
+            let layout = self
+                .bind_group_layout
+                .as_ref()
+                .expect("the atlas layout was just made")
+                .clone();
+            let sampler = self
+                .sampler
+                .as_ref()
+                .expect("the atlas sampler was just made")
+                .clone();
+            let texture = TrackedTexture::new(
+                &self.device,
+                wgpu::TextureDescriptor {
+                    label: Some("imgui plugin texture"),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                },
+                &self.counters,
+            );
+            write_rgba(&self.queue, &texture.texture, image.pixels(), size);
+            let view = texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("imgui plugin texture binding"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            });
+            self.textures.insert(
+                image.id,
+                TextureBinding {
+                    _texture: texture,
+                    bind_group,
+                    size,
+                },
             );
         }
     }
