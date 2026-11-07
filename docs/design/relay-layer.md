@@ -397,11 +397,24 @@ each Cloud machine to answering devices that contacted it.
 
 ### How often it will fail
 
-There's no good primary measurement. Vendor and secondary sources cluster around 75-85%
-of sessions connecting directly with STUN and 15-25% needing TURN, with more failures
-on corporate and cellular networks. Treat that as a rough estimate. Our own traffic is
-the real source of truth, and direct-link success should be measured per platform before
-any wider rollout.
+Vendor and secondary sources cluster around 75-85% of sessions connecting directly with
+STUN. Fresh pairings measured on real networks (2026-11-06), on one account:
+
+| Pair | Direct | Pairing p50 | RTT |
+|---|---|---|---|
+| Mac on home NAT ↔ public server | 60/60 | 1.1 s | 69 ms |
+| Mac on home NAT ↔ Boat machine | 30/30 | 1.6 s | 152 ms |
+| Public server ↔ Boat machine | 30/30 | 1.1 s | 79 ms |
+| Mac ↔ Mac on one LAN (paired over Tailscale) | 30/30 | 0.7 s | 23 ms |
+| Public server ↔ a laptop on a phone hotspot | 25/30 | 5.2 s | 540 ms |
+| Home NAT ↔ the same hotspot | 26/30 | 5.8 s | 465 ms |
+| Home NAT ↔ a simulated Linux NAT | 0/30 | | |
+
+The hotspot had a weak signal, so those two rows may be worse than a typical cell connection.
+The simulated NAT fails because a packet arriving first creates a conntrack entry and the NAT
+moves the outbound port. Real Linux-based routers may do the same. A failed attempt costs a
+30 s wait, and the chat stays on the room throughout. Measure per platform before any wider
+rollout, because this is one account on a few networks.
 
 ### TURN
 
@@ -420,9 +433,9 @@ hooks are defaulted so `crates/client` still builds unchanged, and a phone seen 
 ### Cloud machines
 
 A viewer always starts the pairing, and `PreviewRoom` already lets a Cloud machine answer
-only devices that contacted it. Whether the sandbox provider's network lets hole punching
-succeed is unknown: it hasn't been tested on a real sandbox. If it doesn't, Cloud links stay
-on the DO, so Cloud P2P is unproven even though the code path is the same. When a Cloud
+only devices that contacted it. Boat machines pair directly from a home NAT and from a public server (see above), so Cloud links
+work on that provider. Two Cloud machines don't pair with each other, by design: neither has
+contacted the other, and a link's host refuses Cloud peers. When a Cloud
 machine sleeps the link ends, and reads then come from its checkpoint.
 
 ### Latency
@@ -437,13 +450,20 @@ The direct path skips the trip through the DO's region.
 - **Direct path, different networks:** the internet path between the two, usually
   shorter than going through the DO's region, though not always.
 
-The savings have **not** been measured on a real network. The loopback test in
-`crates/engine/tests/chat_link_p2p.rs` measured commit to the viewer's doc at p50 0.53 ms and p95 0.67 ms
-over 200 commits. That shows the link adds no holdup of its own, which isn't the same as measuring a WAN
-saving. Before a rollout, compare `relay` against direct
-one-way delay between two real networks. Streaming text arrives in 120 ms commits, so
-savings smaller than that are hard to see while streaming. Where it should be felt is
-the first token after send, and typing a steer into a running agent.
+Measured with a mock agent on real networks (2026-11-06), p50, direct against relay:
+
+| Pair | Commit to viewer | First token after send | Steer round trip |
+|---|---|---|---|
+| Mac on home NAT ↔ public server | 30-42 ms / 52-54 ms | 236-283 ms / 332-382 ms | 211-244 ms / 322-336 ms |
+| Mac ↔ Mac on one LAN (over Tailscale) | not measured | 218-222 ms / 350-357 ms | 166-228 ms / 347-363 ms |
+| Mac on home NAT ↔ Boat machine | not measured | 281-300 ms / 328-339 ms | 296-309 ms / 335-342 ms |
+| Public server ↔ hotspot, weak signal | not measured | 664-699 ms / 566-763 ms | 574 ms / 639-715 ms |
+
+Streaming text arrives in 120 ms commits, which is about the size of a token's whole wait (p50 94-111 ms
+direct, 118-125 ms relay on the first row), so a 10-20 ms saving while streaming won't be seen. A send or
+steer saves 40-130 ms on the good networks, and that's where a person could feel it. On a slow radio
+link the saving disappears. These round trips also include the rest of a turn's start, which a real agent
+makes much longer.
 
 ### Is it sound?
 
@@ -470,26 +490,20 @@ Moving fields to live-only frames is riskier, for these reasons:
 
 ## Testing before any real user
 
-Done locally: flag-off identity, DO relay and queue behaviour against
-real workerd, convergence (two devices plus host, late joiner, host offline, reconnect,
-reordered delivery, an old client in the mix) with real Loro docs against simulated faults and against a
-real DO under `wrangler dev`, a real WebRTC pair on loopback, and two real engines on a local edge:
-generation 3, a turn that stores nothing, and a device returning without the layer. The engines' direct
-link came up in those runs, on one machine.
+Done on a deployed test worker with real engines on real networks (2026-11-06): pairing and latency
+per the tables above, link and network failures with recovery, restarts of every role, the room dropped,
+released v0.2.137 and v0.2.116 in the account, the offline queue including a host change, local-first after
+SIGKILL, a real Cloud machine, and chaos with real `gpt-6.1-terra` turns.
 
 Still needed, in this order:
 
-1. Two engines and real rooms on `wrangler dev`, with the flags on, for a day of real work.
-2. Staging edge, with a fleet of the owner's own devices: one old build in the mix on purpose.
-3. A real long-running agent turn with disconnects: airplane mode, sleep, Wi-Fi to cellular.
-4. The 1.2 Mbps and 2 KiB/s profiles from `docs/transport-reliability.md` for a late joiner of a
+1. The owner's own devices with the flags on for a day of real work.
+2. Airplane mode and laptop sleep on a real laptop, which these runs simulated on servers.
+3. The 1.2 Mbps and 2 KiB/s profiles from `docs/transport-reliability.md` for a late joiner of a
    large chat over the relay, with no HTTP checkpoint to fall back on.
-5. A full 30-chat warm set, checking DO message counts, CPU and battery against today.
-6. Direct-link success rate and one-way delay per platform and network.
-7. A real Cloud machine: checkpoint cadence, sleep, wake on a queued message, and whether P2P
-   pairs at all.
-8. Old iOS and Android builds against a generation 3 chat, end to end.
-9. Rollback: turn the edge flag off with hosts mid-turn, and confirm that readers converge.
+4. Real iOS and Android builds from the App Store against a generation 3 chat. The iOS
+   simulator has been run with the code from `main`; Android hasn't.
+5. Direct-link success rate per platform, from real traffic.
 
 ## Rollout
 
@@ -534,7 +548,6 @@ Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine.
 
 **Built, but only covered by reading and unit-level tests:**
 
-- The Cloud checkpoint policy and the sleep gate. Nothing has run on a real sandbox.
 - A host on a network with HTTPS but no sockets going back to stored rows.
 
 **Not built:**
