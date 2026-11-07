@@ -3248,3 +3248,45 @@ async fn review_flag_off_parked_row_reads_a_checkpoint_posted_after_it_parked() 
     client.shutdown().await;
     assert_eq!(cursor, 1, "the parked row never imported: the newer checkpoint was never read");
 }
+
+/// A redial asked for while the socket is already down (the app returning to the
+/// foreground after the OS cut it) is answered by the next dial. It must not end
+/// the session that dial joins: that cost a second dial and about a second.
+#[tokio::test(start_paused = true)]
+async fn a_redial_asked_while_down_doesnt_end_the_next_session() {
+    let _serial = PATH_AND_TIMING.lock().await;
+    let (pipe1, mut end1) = pipe_pair();
+    let (pipe2, mut end2) = pipe_pair();
+    let (pipe3, _end3) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let flaky = FlakyConnector::new(vec![Some(pipe1), None, Some(pipe2), Some(pipe3)]);
+    let s1 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end1, state, &[], vec![], false).await;
+            end1
+        }
+    });
+    let client = ChatClient::connect_with_tuned(flaky.clone(), sink, fetch, "dev-a", 0, ChatTuning::default())
+        .await
+        .expect("first join succeeds");
+    drop(s1.await.unwrap());
+    while flaky.dial_times().len() < 2 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    client.redial();
+    let s2 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end2, state, &[], vec![], true).await;
+            end2
+        }
+    });
+    let _keep = s2.await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(flaky.dial_times().len(), 3, "the join, the refusal, and one recovery");
+    assert_eq!(client.stats().disconnects, 1);
+    assert!(client.stats().connected);
+    client.shutdown().await;
+}

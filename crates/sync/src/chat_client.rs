@@ -1130,6 +1130,9 @@ impl Actor {
                 .dial_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
+            // This dial is the fresh socket any redial asked for so far. Left in
+            // the channel, such a request would end the session it joins.
+            while self.redial_rx.try_recv().is_ok() {}
             tracing::info!(attempt, "chat2 dialing");
             let dial = tokio::select! {
                 result = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()) => result,
