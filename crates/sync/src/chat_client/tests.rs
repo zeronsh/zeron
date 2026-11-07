@@ -3128,7 +3128,8 @@ impl BinConnector for RoomWithParkedRow {
 }
 
 /// A parked row that reading the checkpoint doesn't fill: over ten idle minutes
-/// the client stays quiet instead of redialling and downloading it again.
+/// the client stays quiet instead of redialling and downloading it again. It does
+/// rejoin now and then, ever more slowly, to hear whether the checkpoint changed.
 #[tokio::test(start_paused = true)]
 async fn old_reader_with_the_host_away_stays_quiet() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -3148,7 +3149,7 @@ async fn old_reader_with_the_host_away_stays_quiet() {
     tokio::time::sleep(Duration::from_secs(600)).await;
     let (d, f) = (dials.load(Relaxed), fetches.load(Relaxed));
     client.shutdown().await;
-    assert!(d <= 3 && f <= 2, "dials={d} fetches={f}");
+    assert!(d <= 6 && f <= 2, "dials={d} fetches={f}");
 }
 
 // ── review: flag-off parked row vs a newer checkpoint ───────────────────────
