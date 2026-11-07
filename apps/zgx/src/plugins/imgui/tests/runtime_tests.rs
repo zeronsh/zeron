@@ -140,3 +140,111 @@ fn two_contexts_render_through_suspend_and_activate() {
         path_b.display()
     );
 }
+
+#[test]
+fn a_window_context_tears_down_and_leaves_the_process_ready() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let spec = FrameSpec::from_device_pixels(SIZE, 1.0);
+    let mut renderer = WgpuRenderer::new(gpu.device.clone(), gpu.queue.clone(), format);
+    let target = OffscreenTarget::new(&gpu.device, SIZE, format);
+
+    {
+        let mut window = WindowContext::try_create("torn down").expect("a context");
+        // A turn before the drop: the window goes back to suspended, and
+        // dropping it takes the context and its atlas with it.
+        let prepared = window
+            .prepare(spec, true, |ui| panel(ui, RED, "Torn down"))
+            .expect("a prepared frame");
+        let (_, image) =
+            snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &prepared)
+                .expect("an offscreen frame");
+        assert!(image.non_background_pixels() > 1_000);
+        assert!(!window.is_active());
+    }
+
+    // The process is ready for the next window: the process-global current
+    // context was cleared with the drop, and nothing the dropped one owned is
+    // needed by the next.
+    let mut next = WindowContext::try_create("after teardown").expect("a context after teardown");
+    let prepared = next
+        .prepare(spec, renderer.needs_atlas(), |ui| panel(ui, BLUE, "After"))
+        .expect("the next window draws");
+    let (_, image) = snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &prepared)
+        .expect("an offscreen frame");
+    assert!(!next.is_active());
+    assert!(
+        image.near(60, 60, [38, 115, 230, 255], 12),
+        "the window after teardown lost its content: {:?}",
+        image.pixel(60, 60)
+    );
+    assert_eq!(next.frames(), 1);
+}
+
+#[test]
+fn a_panic_in_one_windows_draw_leaves_its_context_suspended() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let mut first = WindowContext::try_create("panicking window").expect("first context");
+    let mut second = WindowContext::try_create("next window").expect("second context");
+    let spec = FrameSpec::from_device_pixels(SIZE, 1.0);
+
+    // A draw that panics unwinds through the frame. The context must be
+    // suspended when the panic reaches the caller, because Dear ImGui has
+    // one process-wide current context: left active, every later window's
+    // `activate` fails and all plugin windows stay frozen until restart.
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = first.build_frame(spec, false, |_| panic!("the draw closure failed"));
+    }));
+    assert!(panic.is_err(), "the draw's panic must reach the caller");
+    assert!(
+        !first.is_active(),
+        "a panicking draw left its context active"
+    );
+
+    // The next window takes its turn normally, in the same process.
+    let mut renderer = WgpuRenderer::new(gpu.device.clone(), gpu.queue.clone(), format);
+    let target = OffscreenTarget::new(&gpu.device, SIZE, format);
+    let prepared = second
+        .prepare(spec, renderer.needs_atlas(), |ui| {
+            panel(ui, BLUE, "Plugin B")
+        })
+        .expect("the next window draws after another window's panic");
+    let (_, image) = snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &prepared)
+        .expect("an offscreen frame");
+    assert!(!second.is_active());
+    assert!(
+        image.non_background_pixels() > 1_000,
+        "the second window drew nothing"
+    );
+    assert!(
+        image.near(60, 60, [38, 115, 230, 255], 12),
+        "the second window's accent is missing: {:?}",
+        image.pixel(60, 60)
+    );
+
+    // And the window whose draw panicked is itself usable afterwards.
+    let recovered = first
+        .prepare(spec, true, |ui| panel(ui, RED, "Plugin A"))
+        .expect("the panicking window recovers");
+    let (_, image) = snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &recovered)
+        .expect("the recovered window draws");
+    assert!(!first.is_active());
+    assert!(
+        image.near(60, 60, [217, 64, 38, 255], 12),
+        "the recovered window lost its content: {:?}",
+        image.pixel(60, 60)
+    );
+
+    let path = std::env::temp_dir()
+        .join("zeron-zgx-imgui-tests")
+        .join("panic-recovery.png");
+    image.save_png(&path).expect("the evidence PNG");
+    println!(
+        "imgui panic recovery: {} non-background px -> {}",
+        image.non_background_pixels(),
+        path.display()
+    );
+}

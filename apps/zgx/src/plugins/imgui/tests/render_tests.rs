@@ -12,6 +12,8 @@ use crate::plugins::imgui::snapshot::{self, OffscreenTarget, Snapshot};
 
 const SIZE: (u32, u32) = (800, 600);
 const CLEAR: [u8; 4] = [26, 28, 33, 255];
+const CHURN_RED: [f32; 4] = [0.90, 0.15, 0.15, 1.0];
+const CHURN_BLUE: [f32; 4] = [0.10, 0.35, 0.95, 1.0];
 
 fn spec(size: (u32, u32)) -> FrameSpec {
     FrameSpec::from_device_pixels(size, 1.0)
@@ -134,17 +136,29 @@ fn offscreen_frame_draws_text_and_a_filled_rect() {
     assert!(!window.is_active(), "a frame leaves the context suspended");
 }
 
-/// 2000 text items, the workload `VAL-PERF-010` names.
-fn heavy_workload(ui: &Ui, items: &[String]) {
+/// 2000 text items, the workload `VAL-PERF-010` names, rotated by `version`
+/// so every frame's content differs, plus a fixed-size accent rectangle whose
+/// colour alternates with the version. Every version has the same vertex
+/// count, so the existing buffers are enough and any allocation shows up as
+/// churn.
+fn heavy_workload(ui: &Ui, items: &[String], version: u32) {
     let draw = ui.get_background_draw_list();
-    let mut index = 0;
+    let offset = (version as usize * 37) % items.len();
     for row in 0..50 {
         for column in 0..40 {
+            let index = (row * 40 + column + offset) % items.len();
             let position = [4.0 + column as f32 * 30.0, 4.0 + row as f32 * 14.0];
             draw.add_text(position, [1.0, 1.0, 1.0, 1.0], &items[index]);
-            index += 1;
         }
     }
+    let accent = if version.is_multiple_of(2) {
+        CHURN_RED
+    } else {
+        CHURN_BLUE
+    };
+    draw.add_rect([1250.0, 700.0], [1270.0, 710.0], accent)
+        .filled(true)
+        .build();
 }
 
 fn paint(
@@ -153,10 +167,11 @@ fn paint(
     gpu: &TestGpu,
     target: &OffscreenTarget,
     items: &[String],
+    version: u32,
 ) {
     let prepared = window
         .prepare(spec(target.size()), renderer.needs_atlas(), |ui| {
-            heavy_workload(ui, items)
+            heavy_workload(ui, items, version)
         })
         .expect("a prepared frame");
     let mut encoder = gpu
@@ -182,9 +197,10 @@ fn steady_state_creates_and_releases_no_gpu_resource() {
     let items: Vec<String> = (0..2000).map(|index| format!("item {index}")).collect();
 
     // Warm-up: the pipeline, both buffers at their final size and the atlas
-    // are made here.
-    for _ in 0..30 {
-        paint(&mut window, &mut renderer, &gpu, &target, &items);
+    // are made here. The content changes every frame, so this is a real
+    // workload and not the same geometry replayed.
+    for version in 0..30 {
+        paint(&mut window, &mut renderer, &gpu, &target, &items, version);
     }
     gpu.device
         .poll(wgpu::PollType::wait_indefinitely())
@@ -194,10 +210,20 @@ fn steady_state_creates_and_releases_no_gpu_resource() {
     assert_eq!(at_frame_30.live_buffers, 2, "vertex and index buffers");
     assert_eq!(at_frame_30.live_textures, 1, "the font atlas");
 
-    // 270 more frames: the window `VAL-PERF-011` measures.
-    for index in 0..270 {
-        paint(&mut window, &mut renderer, &gpu, &target, &items);
-        if index % 10 == 9 {
+    // 270 more frames: the window `VAL-PERF-011` measures. Every frame's
+    // content differs, so a renderer that allocated per frame would show it
+    // and a renderer that uploads only once would not notice here — the
+    // changed-content pixel check below catches that one.
+    for version in 0..270 {
+        paint(
+            &mut window,
+            &mut renderer,
+            &gpu,
+            &target,
+            &items,
+            30 + version,
+        );
+        if version % 10 == 9 {
             gpu.device
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("the GPU caught up");
@@ -247,13 +273,168 @@ fn steady_state_creates_and_releases_no_gpu_resource() {
     // The 270th frame still draws (the counters alone could come from 270
     // empty frames).
     let last = window
-        .prepare(spec(size), false, |ui| heavy_workload(ui, &items))
+        .prepare(spec(size), false, |ui| heavy_workload(ui, &items, 300))
         .expect("a prepared frame");
     let (stats, image) = snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &last)
         .expect("the last frame draws");
     assert!(stats.draw_calls > 0);
     assert!(stats.vertices > 0);
     assert!(image.non_background_pixels() > 10_000);
+
+    // The content really changed: two versions through the same renderer
+    // must produce different pixels. This is what fails when an upload
+    // branch skips rewriting a buffer it already has, leaving the first
+    // frame on screen for ever.
+    let even = window
+        .prepare(spec(size), false, |ui| heavy_workload(ui, &items, 0))
+        .expect("a prepared frame");
+    let (_, even_image) = snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &even)
+        .expect("the even frame draws");
+    let odd = window
+        .prepare(spec(size), false, |ui| heavy_workload(ui, &items, 1))
+        .expect("a prepared frame");
+    let (_, odd_image) = snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &odd)
+        .expect("the odd frame draws");
+    assert!(
+        even_image.near(1255, 705, [230, 38, 38, 255], 12),
+        "the even frame's accent is wrong: {:?}",
+        even_image.pixel(1255, 705)
+    );
+    assert!(
+        odd_image.near(1255, 705, [26, 89, 242, 255], 12),
+        "the odd frame replayed the even frame's pixels: {:?}",
+        odd_image.pixel(1255, 705)
+    );
+    let changed = even_image
+        .pixels()
+        .iter()
+        .zip(odd_image.pixels())
+        .filter(|(even, odd)| even != odd)
+        .count();
+    assert!(
+        changed > 10_000,
+        "only {changed} pixels changed between two versions of a changing frame"
+    );
+    assert_eq!(
+        renderer.counters(),
+        at_frame_300,
+        "changing content must not allocate past the warm-up buffers"
+    );
+}
+
+#[test]
+fn a_second_frame_with_different_content_replaces_the_first() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut window = WindowContext::try_create("changed content").expect("a context");
+    let mut renderer = WgpuRenderer::new(gpu.device.clone(), gpu.queue.clone(), format);
+    let target = OffscreenTarget::new(&gpu.device, SIZE, format);
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    // Frame 1 paints a red rect and a label; frame 2 a blue rect and another
+    // label. Both go through one renderer, whose buffers frame 1 made, so
+    // frame 2 can only show its own content if every paint rewrites them.
+    let mut images = Vec::new();
+    for (colour, label) in [(CHURN_RED, "frame one"), (CHURN_BLUE, "frame two")] {
+        let prepared = window
+            .prepare(spec(SIZE), renderer.needs_atlas(), |ui| {
+                let draw = ui.get_background_draw_list();
+                draw.add_rect([40.0, 40.0], [240.0, 140.0], colour)
+                    .filled(true)
+                    .build();
+                draw.add_text([40.0, 160.0], [1.0, 1.0, 1.0, 1.0], label);
+            })
+            .expect("a prepared frame");
+        assert_eq!(prepared.target_size(), SIZE);
+        let (_, image) =
+            snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, &prepared)
+                .expect("an offscreen frame");
+        images.push(image);
+    }
+    if let Some(error) = block_on(scope.pop()) {
+        panic!("wgpu validation error while replacing a frame: {error}");
+    }
+
+    let first = &images[0];
+    let second = &images[1];
+    assert!(
+        first.near(100, 80, [230, 38, 38, 255], 12),
+        "frame 1 did not draw its red rect: {:?}",
+        first.pixel(100, 80)
+    );
+    assert!(
+        second.near(100, 80, [26, 89, 242, 255], 12),
+        "frame 2 replayed frame 1 instead of uploading its own vertices: {:?}",
+        second.pixel(100, 80)
+    );
+    let changed = first
+        .pixels()
+        .iter()
+        .zip(second.pixels())
+        .filter(|(was, now)| was != now)
+        .count();
+    assert!(
+        changed > 10_000,
+        "only {changed} pixels changed between two frames of different content"
+    );
+    assert_eq!(
+        renderer.counters().buffers_created,
+        2,
+        "the second frame must reuse the vertex and index buffers"
+    );
+    let path = evidence_dir().join("changed-content-frame-two.png");
+    second.save_png(&path).expect("the evidence PNG");
+    println!("imgui changed content: {changed} px -> {}", path.display());
+}
+
+#[test]
+fn a_frame_prepared_for_a_larger_target_paints_into_a_smaller_one() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let mut window = WindowContext::try_create("resized target").expect("a context");
+    let mut renderer = WgpuRenderer::new(gpu.device.clone(), gpu.queue.clone(), format);
+    let small = OffscreenTarget::new(&gpu.device, (400, 300), format);
+
+    let prepared = window
+        .prepare(spec(SIZE), true, |ui| probe(ui, 1))
+        .expect("a prepared frame");
+    assert_eq!(
+        prepared.target_size(),
+        SIZE,
+        "a prepared frame records the target it was built for"
+    );
+
+    // The first paint after a resize: the frame is still the old size. A
+    // scissor captured for 800×600 would leave the 400×300 attachment, which
+    // wgpu rejects (and zgx turns validation errors into panics in debug
+    // builds), so the renderer clips each scissor to the attachment.
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("resized target"),
+        });
+    let stats = renderer
+        .render(&mut encoder, small.render_target(), &prepared)
+        .expect("a clamped frame");
+    gpu.queue.submit([encoder.finish()]);
+    if let Some(error) = block_on(scope.pop()) {
+        panic!("painting an 800x600 frame into a 400x300 target tripped wgpu validation: {error}");
+    }
+
+    let image = small.read(&gpu.device, &gpu.queue);
+    assert_eq!((image.width(), image.height()), (400, 300));
+    assert!(
+        stats.draw_calls > 0,
+        "every command was dropped instead of clipped"
+    );
+    assert!(
+        image.non_background_pixels() > 1_000,
+        "the smaller target stayed blank"
+    );
+    assert_eq!(prepared.target_size(), SIZE);
 }
 
 #[test]

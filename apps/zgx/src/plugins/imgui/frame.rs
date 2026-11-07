@@ -44,7 +44,10 @@
 //! broken with the error text and its windows go (VAL-LIFE-012). A refused
 //! widget is the one failure that never does that: it is the plugin's own
 //! drawing mistake, said where the call was made, and the frame is simply
-//! dropped ([`FrameEnd::refused`]).
+//! dropped ([`FrameEnd::refused`]). A **panic** inside a draw is a host
+//! failure: it is caught at the frame boundary so the pump keeps serving every
+//! window, recorded against the failing window, and never withdraws the
+//! plugin.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -209,6 +212,16 @@ pub trait FrameWindow {
         Self: Sized,
     {
         self.frame_state().conclude(self, prepared)
+    }
+
+    /// Ends the frame a panic brought down. The panic is a host failure, not
+    /// the plugin's: it counts against this window and is reported, but it
+    /// never withdraws the plugin (unlike a script error on a first frame).
+    fn frame_conclude_panic(&self, error: String) -> FrameEnd
+    where
+        Self: Sized,
+    {
+        self.frame_state().conclude_panic(self, error)
     }
 
     fn frame_take_end(&self) -> Option<FrameEnd> {
@@ -509,6 +522,34 @@ impl FrameState {
         end
     }
 
+    /// Ends a frame whose draw closure panicked.
+    ///
+    /// The context half of the unwind is [`runtime::build_frame`]'s job (it
+    /// always suspends), so this only records the outcome. A panic is not a
+    /// script error: [`run`] reports it and, after
+    /// [`MAX_CONSECUTIVE_ERRORS`], closes the window, but the plugin is never
+    /// withdrawn for one — a bug in the host must not unload a plugin.
+    pub fn conclude_panic(&self, _window: &impl FrameWindow, error: String) -> FrameEnd {
+        let Some(frame) = self.live.borrow_mut().take() else {
+            let end = FrameEnd {
+                seq: self.seq.get(),
+                painted: false,
+                error: Some(error),
+                first: self.frames.get() == 0,
+                refused: false,
+                consecutive_errors: self.consecutive.get(),
+                ms: 0.0,
+            };
+            *self.pending.borrow_mut() = Some(end.clone());
+            return end;
+        };
+        let ms = frame.started_wall.elapsed().as_secs_f64().max(0.0) * 1000.0;
+        let first = self.frames.get() == 0;
+        let end = self.record_failure(&error, first, ms);
+        *self.pending.borrow_mut() = Some(end.clone());
+        end
+    }
+
     /// The end recorded by the last [`conclude`](Self::conclude), once.
     pub fn take_end(&self) -> Option<FrameEnd> {
         self.pending.borrow_mut().take()
@@ -611,7 +652,9 @@ impl FrameCalls {
 /// The plugin's `on_render` runs inside [`FrameCalls::push`], on this stack,
 /// while the frame is open; by the time it returns the frame has been painted
 /// or aborted. A callback that never answers its `imgui_end` (an error outside
-/// the SDK's guard) has its frame aborted with a sentence saying so.
+/// the SDK's guard) has its frame aborted with a sentence saying so. A panic
+/// anywhere inside the draw is caught here: it fails this window's frame
+/// without taking the pump — or any other window — down with it.
 pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
     if !window.frame_open() || !window.frame_shown() || !window.frame_renderable() {
         return None;
@@ -628,24 +671,60 @@ pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
         }
     };
     let call = format!("imgui-frame-{}-{seq}", window.frame_id());
-    let built = window.frame_build(spec, |ui| {
-        window.frame_set_ui(ui);
-        calls.push(
-            call.clone(),
-            "imgui.frame",
-            vec![
-                ("window", Value::from(window.frame_id())),
-                ("seq", Value::from(seq as f64)),
-                ("budget", Value::from(BUDGET_MS)),
-            ],
-        );
-    });
-    let end = window.frame_conclude(built);
+    // A panic inside the draw (which includes the script's `on_render` and
+    // any host code it reaches) must not kill the pump: the pump is one task
+    // for every plugin window, so an escaping panic would freeze them all
+    // until restart. Catch it here, where the frame boundary is, and let the
+    // failure path below treat it as this window's failed frame. The context
+    // is already suspended again by `build_frame`'s unwinding guard.
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        window.frame_build(spec, |ui| {
+            window.frame_set_ui(ui);
+            calls.push(
+                call.clone(),
+                "imgui.frame",
+                vec![
+                    ("window", Value::from(window.frame_id())),
+                    ("seq", Value::from(seq as f64)),
+                    ("budget", Value::from(BUDGET_MS)),
+                ],
+            );
+        })
+    }));
+    let (built, panic) = match attempt {
+        Ok(built) => (built, None),
+        Err(payload) => {
+            let sentence = panic_sentence(window.frame_id(), payload.as_ref());
+            (Err(sentence.clone()), Some(sentence))
+        }
+    };
+    let end = match &panic {
+        Some(error) => window.frame_conclude_panic(error.clone()),
+        None => window.frame_conclude(built),
+    };
     calls.take(&call);
     if let Some(error) = &end.error {
         if end.refused {
             // Said where the call was made (the widget op reports each
             // refusal naming its widget), so the pump only records it.
+        } else if panic.is_some() {
+            // A host-side panic fails this window's frame. It is reported
+            // and, after the same run of failures, closes the window; the
+            // plugin itself stays loaded and its other windows keep drawing.
+            eprintln!(
+                "zeron-zgx: plugin {}: window \"{}\": {error}",
+                window.frame_plugin(),
+                window.frame_id()
+            );
+            if end.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                eprintln!(
+                    "zeron-zgx: plugin {}: closing window \"{}\" after {} failed frames",
+                    window.frame_plugin(),
+                    window.frame_id(),
+                    end.consecutive_errors
+                );
+                window.frame_close();
+            }
         } else if end.first {
             // A window that cannot draw its first frame is reported broken,
             // with the error text, and taken away (VAL-LIFE-012).
@@ -675,6 +754,17 @@ pub fn budget_sentence(window: &str) -> String {
     format!(
         "Window \"{window}\"'s render callback took too long: a frame may spend {BUDGET_MS:.0} ms of CPU. Draw less, or do the work outside on_render."
     )
+}
+
+/// The sentence a panicking draw is recorded with. The payload is whatever
+/// the panic carried: a `&str`, a `String`, or nothing readable.
+fn panic_sentence(window: &str, payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message");
+    format!("Window \"{window}\"'s render callback panicked: {message}")
 }
 
 fn string_arg(arg: &Value, field: &str, op: &str) -> Result<String, String> {

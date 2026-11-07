@@ -241,6 +241,14 @@ pub struct DrawStats {
 /// this renderer needs it.
 #[derive(Clone, Debug, Default)]
 pub struct PreparedFrame {
+    /// The target size in device pixels this frame was captured for.
+    ///
+    /// Vertices and clip rectangles are in the coordinates of that target.
+    /// The paint target can be a different size — the first paint after a
+    /// window resize, or a snapshot at another size — so
+    /// [`WgpuRenderer::render`] clips each scissor to the attachment it
+    /// actually has instead of asking wgpu for a rectangle outside it.
+    target_size: (u32, u32),
     vertices: Vec<u8>,
     indices: Vec<u16>,
     lists: Vec<PreparedList>,
@@ -279,6 +287,7 @@ impl PreparedFrame {
         let display_pos = draw_data.display_pos();
         let scale = draw_data.framebuffer_scale();
         let mut frame = Self {
+            target_size,
             stats: DrawStats {
                 draw_lists: draw_data.draw_lists_count(),
                 ..DrawStats::default()
@@ -354,6 +363,12 @@ impl PreparedFrame {
 
     pub fn stats(&self) -> DrawStats {
         self.stats
+    }
+
+    /// The target size in device pixels this frame was captured for (see the
+    /// field).
+    pub fn target_size(&self) -> (u32, u32) {
+        self.target_size
     }
 
     pub fn vertex_bytes(&self) -> usize {
@@ -714,12 +729,18 @@ impl WgpuRenderer {
                 index.buffer.slice(index_offset as u64..),
                 wgpu::IndexFormat::Uint16,
             );
-            pass.set_scissor_rect(
-                command.clip[0],
-                command.clip[1],
-                command.clip[2],
-                command.clip[3],
-            );
+            // The frame was captured for `frame.target_size`, and the
+            // attachment can be smaller — the first paint after a resize,
+            // say. wgpu rejects a scissor that leaves the attachment, so
+            // clip it to what is actually there; a command entirely outside
+            // draws nothing.
+            let [x, y, width, height] = command.clip;
+            let width = width.min(target.size.0.saturating_sub(x));
+            let height = height.min(target.size.1.saturating_sub(y));
+            if width == 0 || height == 0 {
+                continue;
+            }
+            pass.set_scissor_rect(x, y, width, height);
             pass.draw_indexed(0..command.count as u32, 0, 0..1);
             stats.draw_calls += 1;
         }
@@ -728,25 +749,31 @@ impl WgpuRenderer {
 
     fn upload_vertex(&mut self, frame: &PreparedFrame) {
         let required = frame.vertices.len();
+        // Every frame's bytes go into the buffer: reusing the allocation is
+        // what keeps the churn counters flat, but skipping the write would
+        // replay frame 1 for every later frame. A buffer is made only when
+        // the frame does not fit the one already there.
         let capacity = match self.vertex.as_ref() {
-            Some((_, capacity)) if *capacity >= required => return,
+            Some((_, capacity)) if *capacity >= required => *capacity,
             Some((_, capacity)) => (*capacity * 2).max(required.next_power_of_two()),
             None => required.next_power_of_two().max(MIN_VERTEX_BYTES),
         };
-        let buffer = TrackedBuffer::new(
-            &self.device,
-            wgpu::BufferDescriptor {
-                label: Some("imgui vertices"),
-                size: capacity as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            },
-            &self.counters,
-        );
-        self.vertex = Some((buffer, capacity));
+        if self.vertex.as_ref().map(|(_, capacity)| *capacity) != Some(capacity) {
+            let buffer = TrackedBuffer::new(
+                &self.device,
+                wgpu::BufferDescriptor {
+                    label: Some("imgui vertices"),
+                    size: capacity as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                },
+                &self.counters,
+            );
+            self.vertex = Some((buffer, capacity));
+        }
         if required > 0 {
             self.queue.write_buffer(
-                &self.vertex.as_ref().expect("just made").0.buffer,
+                &self.vertex.as_ref().expect("the buffer is there").0.buffer,
                 0,
                 &frame.vertices,
             );
@@ -755,22 +782,26 @@ impl WgpuRenderer {
 
     fn upload_index(&mut self, frame: &PreparedFrame) {
         let required = frame.index_bytes();
+        // The same invariant as `upload_vertex`: reuse the buffer, but write
+        // this frame's indices into it every time.
         let capacity = match self.index.as_ref() {
-            Some((_, capacity)) if *capacity >= required => return,
+            Some((_, capacity)) if *capacity >= required => *capacity,
             Some((_, capacity)) => (*capacity * 2).max(required.next_power_of_two()),
             None => required.next_power_of_two().max(MIN_INDEX_BYTES),
         };
-        let buffer = TrackedBuffer::new(
-            &self.device,
-            wgpu::BufferDescriptor {
-                label: Some("imgui indices"),
-                size: capacity as u64,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            },
-            &self.counters,
-        );
-        self.index = Some((buffer, capacity));
+        if self.index.as_ref().map(|(_, capacity)| *capacity) != Some(capacity) {
+            let buffer = TrackedBuffer::new(
+                &self.device,
+                wgpu::BufferDescriptor {
+                    label: Some("imgui indices"),
+                    size: capacity as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                },
+                &self.counters,
+            );
+            self.index = Some((buffer, capacity));
+        }
         if required > 0 {
             // `queue.write_buffer` copies in 4-byte units; an odd index count
             // is padded, and the extra index is never drawn.
@@ -780,8 +811,11 @@ impl WgpuRenderer {
                 bytes.extend_from_slice(&index.to_ne_bytes());
             }
             bytes.resize(padded, 0);
-            self.queue
-                .write_buffer(&self.index.as_ref().expect("just made").0.buffer, 0, &bytes);
+            self.queue.write_buffer(
+                &self.index.as_ref().expect("the buffer is there").0.buffer,
+                0,
+                &bytes,
+            );
         }
     }
 

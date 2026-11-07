@@ -873,3 +873,79 @@ fn the_view_replays_the_frame_the_pump_prepared() {
         painted.non_background_pixels()
     );
 }
+
+#[test]
+fn a_draw_panic_fails_the_window_and_the_pump_keeps_going() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let probe = Probe::new("panic");
+    let failed = Rc::new(RefCell::new(None));
+
+    let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+        probe.text(seq, "before the panic");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("a first frame");
+    assert!(end.painted);
+
+    // A panic inside the draw is caught at the frame boundary: this window's
+    // frame fails and the reason is recorded, but nothing else is disturbed.
+    let end = run_frame_reporting(&probe, failed.clone(), |_, _| panic!("draw exploded"))
+        .expect("the pump survives a panicking draw");
+    assert!(!end.painted);
+    let error = end
+        .error
+        .clone()
+        .expect("the panic is recorded as this frame's error");
+    assert!(
+        error.contains("panicked") && error.contains("draw exploded"),
+        "unexpected sentence: {error}"
+    );
+    assert!(
+        probe.frame_open(),
+        "a panic must not close the window on its first failure"
+    );
+    assert_eq!(
+        *failed.borrow(),
+        None,
+        "a host panic must not withdraw the plugin"
+    );
+
+    // The pump keeps serving the same window after the panic.
+    let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+        probe.text(seq, "after the panic");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("a frame after the panic");
+    assert!(
+        end.painted,
+        "the window did not draw again after a panicking frame: {:?}",
+        end.error
+    );
+    assert_eq!(probe.frame_state().report().consecutive_errors, 0);
+    let (_, image) = raster(&gpu, &probe);
+    assert!(
+        image.non_background_pixels() > 100,
+        "the frame after the panic was blank"
+    );
+
+    // Three panics in a row close the window; the plugin is still not
+    // withdrawn (the bridge is never told it failed).
+    for _ in 0..3 {
+        let end = run_frame_reporting(&probe, failed.clone(), |_, _| panic!("draw exploded again"))
+            .expect("the pump survives repeated panics");
+        assert!(!end.painted);
+    }
+    assert!(
+        !probe.frame_open(),
+        "the window closes after three failed frames"
+    );
+    assert_eq!(*failed.borrow(), None, "the plugin stays loaded");
+    assert!(
+        run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+            probe.text(seq, "no frame for a closed window");
+        })
+        .is_none(),
+        "a closed window asks for no frames"
+    );
+}

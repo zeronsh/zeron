@@ -51,6 +51,16 @@ that only ever grow, one font-atlas texture, one sampler, and one pipeline per t
 `device_changed()` drops and rebuilds all of them. There is no uniform buffer and no per-frame
 uniform write.
 
+Reusing an upload buffer never means skipping its contents: every paint writes the prepared
+frame's vertices and indices into the buffers it already has, and allocates only when the frame
+does not fit. A `PreparedFrame` also records the target size (device pixels) it was captured
+for. Painting it into a different target — the first paint after a window resize, or a snapshot
+at another size — clips each scissor rectangle to the attachment instead of submitting one that
+leaves it, which wgpu rejects (and zgx turns validation errors into panics in debug builds).
+The regression tests are a two-frame changed-content readback (frame 2 must differ from frame 1,
+which catches a buffer uploaded once) and an 800×600 frame painted into a 400×300 target inside a
+wgpu error scope.
+
 Rejected: the managed `WgpuRenderer` in `dear-imgui-wgpu` 0.22. Its frame-resource arena creates
 vertex, index and uniform buffers for every render epoch, and an epoch is one native frame
 (`Context::render()` allocates a fresh snapshot epoch per call). An animating plugin window would
@@ -116,7 +126,11 @@ request and draw nothing. If `on_render` errors or exceeds its 8 ms CPU budget, 
 that frame, keeps the last good draw data (or an ImGui-drawn error panel), records the error, and
 stays responsive; three consecutive failures close the window while leaving the plugin loaded.
 Because painting never executes script, a slow plugin cannot stall presentation mid-frame or
-stutter Zeron's main window.
+stutter Zeron's main window. A panic inside a draw is contained at the frame boundary: the
+context is suspended again while the panic unwinds (so later windows can still activate theirs,
+which is Dear ImGui's one-active-context constraint), the failing window records the panic like
+any other failed frame and closes after the same three in a row, and the plugin is never
+withdrawn for a host failure. The pump keeps serving every other window.
 
 ### Permission: `imgui.windows`
 

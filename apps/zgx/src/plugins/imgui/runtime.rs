@@ -223,10 +223,13 @@ impl WindowContext {
         }
     }
 
-    /// Runs `f` with the context active, suspending it again afterwards.
+    /// Runs `f` with the context active.
     ///
-    /// Panics inside `f` still leave the window suspended: the binding
-    /// library ends the frame and restores the suspension on unwind.
+    /// A suspended window goes through the binding's guarded scope, which
+    /// ends an open frame and clears the current context even when `f`
+    /// panics. A window the caller already activated is left active on
+    /// return, and on unwind too — [`build_frame`](Self::build_frame) does
+    /// not use this path for exactly that reason, taking a [`Turn`] instead.
     pub fn with_active<R>(
         &mut self,
         f: impl FnOnce(&mut Context) -> R,
@@ -277,10 +280,15 @@ impl WindowContext {
         want_atlas: bool,
         draw: impl FnOnce(*const Ui),
     ) -> Result<PreparedFrame, ImGuiHostError> {
-        self.activate()?;
         let last_size = self.atlas_size;
         let created = self.atlas_created;
-        let built = self.with_active(move |context| {
+        // The turn takes the active context out of the slot and its `Drop`
+        // suspends it again — including while a panic unwinds. Dear ImGui has
+        // one process-wide current context, so a draw that panics must not
+        // leave this one active: every later window's `activate` would fail
+        // and all plugin windows would stay frozen until restart.
+        let mut turn = Turn::take(self)?;
+        let built = turn.with_context(move |context| {
             let io = context.io_mut();
             io.set_display_size(spec.display_size);
             io.set_display_framebuffer_scale([spec.framebuffer_scale; 2]);
@@ -310,9 +318,10 @@ impl WindowContext {
             Ok::<_, ImGuiHostError>((prepared, atlas_size, atlas_created))
         });
         // Always leave the context suspended for the next window's turn,
-        // even when the frame failed.
-        let _ = self.suspend();
-        let (prepared, atlas_size, atlas_created) = built??;
+        // even when the frame failed. The guard has already done it if the
+        // closure panicked.
+        turn.finish()?;
+        let (prepared, atlas_size, atlas_created) = built?;
         self.atlas_size = atlas_size;
         self.atlas_created = atlas_created;
         self.frames += 1;
@@ -336,6 +345,68 @@ impl WindowContext {
         let draw = prepared.stats();
         let render = renderer.render(encoder, target, &prepared)?;
         Ok(FrameOutcome { draw, render })
+    }
+}
+
+/// One window's turn: the context, taken out of its slot and active.
+///
+/// Whatever ends the turn — a finished frame, an error, or a panic inside
+/// the draw closure — the context goes back into the slot suspended. That is
+/// not bookkeeping: Dear ImGui has one process-wide current context, so a
+/// context left active on unwind makes every later window's `activate` fail
+/// and freezes every plugin window until the app restarts.
+struct Turn<'a> {
+    slot: &'a mut Slot,
+    context: Option<Context>,
+}
+
+impl<'a> Turn<'a> {
+    /// Activates `window`'s context and takes it for this turn.
+    fn take(window: &'a mut WindowContext) -> Result<Self, ImGuiHostError> {
+        window.activate()?;
+        let current = std::mem::replace(&mut window.slot, Slot::Empty);
+        let Slot::Active(context) = current else {
+            unreachable!("activate() leaves an active context in the slot");
+        };
+        Ok(Self {
+            slot: &mut window.slot,
+            context: Some(context),
+        })
+    }
+
+    fn with_context<R>(&mut self, f: impl FnOnce(&mut Context) -> R) -> R {
+        f(self.context.as_mut().expect("the turn's context"))
+    }
+
+    /// Suspends the context and returns it to the window's slot.
+    fn finish(mut self) -> Result<(), ImGuiHostError> {
+        self.suspend()
+    }
+
+    fn suspend(&mut self) -> Result<(), ImGuiHostError> {
+        let Some(context) = self.context.take() else {
+            return Ok(());
+        };
+        match context.suspend() {
+            Ok(suspended) => {
+                *self.slot = Slot::Suspended(suspended);
+                Ok(())
+            }
+            Err(error) => {
+                let reason = error.reason().to_string();
+                *self.slot = Slot::Active(error.into_owner());
+                Err(ImGuiHostError::context(reason))
+            }
+        }
+    }
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        // On unwind the binding's frame token has already ended the frame, so
+        // this normally succeeds. A failure keeps the context in the slot
+        // rather than destroying it; panicking inside a drop would abort.
+        let _ = self.suspend();
     }
 }
 
