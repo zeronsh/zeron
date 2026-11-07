@@ -281,5 +281,49 @@ These cost real time on iOS, or would have.
   `HOME` also snapshots real agent logins. Use a private `HOME`, a `PATH` without agent CLIs, and the mock harness.
 - **`Syncing…` right after a host stops is correct.** Presence stays fresh for 45 s after the last beat, and the 20 s patience
   usually ends the wait first.
+- **A shipped build can't say why a chat is empty.** On a chat that was only ever relayed, with its host away, it shows a blank
+  transcript until the host returns and heals. Its transcript fills by itself then, and nothing's lost, but that binary can't
+  change. Turning the edge flag on 14 days ahead keeps this rare. It applies to shipped Android builds too.
 
 ## Test status
+
+iOS, as of this writing. Android has run none of it.
+
+**On a simulator, with the real app.** A real `workerd` Durable Object under `wrangler dev`, real engines with the mock harness,
+and the phone's own `docs.sqlite3` and the room's `/stats` read directly.
+
+| Flow | Result |
+|---|---|
+| A turn streams to a phone watching | Arrives. `headSeq` doesn't move. The journal goes from 1 row to 0 |
+| Killed mid-stream (`kill -9`), relaunched with no network | Everything received shows, with no spinner. Back online, the rest arrives |
+| Frozen and cut off, a turn runs, thawed | Caught up 0.8 s to 1.6 s after returning |
+| Send with no network, kill, relaunch offline | Echo on screen, outbox holds 1 row |
+| Then network back with the host away | Outbox empties, `relayQueue` is 1, no stored row. Says the host is offline |
+| Then the host returns | `relayQueue` is 0 within 2 s. The host answers and the reply arrives |
+| Never loaded, host away | "Syncing…", then the host-away text within 24 s. Fills by itself within 2 s of the host's return |
+| Never loaded, no network | The offline text, no spinner |
+| Direct link, host on the same Mac | With only the chat room cut, a turn arrived by link, and a send reached the host by link while the outbox held it until the room returned |
+| Direct link, host on another machine over the internet | The same. A Mac behind home NAT and a Linux server paired |
+| 1,000 tokens from that host through a freeze, a network loss and a kill | 1,000 of 1,000 in the phone's saved copy, read from its store. No stored rows. The kill left 5 journal rows, replayed on relaunch |
+| Link on an idle chat | Closes after 60 s, and a new turn opens another |
+| App built from `main`, relayed chat, host away | 60 s with 0 checkpoint reads, 0 joins, 0 row pulls. Blank transcript |
+| Then the host returns | It heals, the transcript fills, and 30 s more shows no further reads or joins |
+| App built from `main`, host present | The chat moves to generation 2 in 4 s. Turns store rows and reach it |
+| New build installed back over it | The room's list empties. Generation 3 in 5 s, stored rows for the 10-minute hold |
+| Fresh install, room has a checkpoint, host away | Loads it with one read, and three relaunches read nothing more. Then opens with no network |
+
+**Tests only:** a Cloud machine's checkpoint and sleep as a phone sees them (`a_sleeping_machines_checkpoint…`, `a_chat_off_screen…`,
+with a checkpoint a host posted, not a real sandbox), and a host losing the capability.
+
+**Not run at all, and needs a real device:**
+
+- A real suspension by iOS, a jetsam kill, and real airplane mode. A simulator shares its Mac's network, so this used `kill -STOP`,
+  `kill -9`, `-network-offline` and a forwarder taken away. The `NWPathMonitor` handler itself has never fired on a change.
+- Wi-Fi to cellular, a cellular NAT, and a poor link.
+- Battery and data use. The design keeps sockets and links off at rest, and that's been checked by behaviour, not measured.
+
+**Not run at all, for other reasons:**
+
+- A real agent. A fresh engine data dir with a real `HOME` snapshots real logins, so everything here used the mock harness.
+- A real Cloud machine with a phone on it, or an actual TestFlight binary. The old phone here is the app built from `main`.
+- `zeron-edge-p2p-test`: it needs an interactive WorkOS sign-in, so the rig used a local edge, tunnelled to the second machine.
