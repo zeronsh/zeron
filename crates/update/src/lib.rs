@@ -2005,6 +2005,7 @@ impl Updater {
             .and_then(transaction::read)
             .is_some_and(|last| {
                 last.phase == transaction::Phase::RolledBack
+                    && !last.interrupted
                     && latest.as_deref() == Some(last.target.as_str())
             })
     }
@@ -2360,7 +2361,9 @@ fn boot_verdict(
         }
         if last.target == latest {
             match last.phase {
-                transaction::Phase::RolledBack => return BootVerdict::Skip(BootSkipReason::WentBack),
+                transaction::Phase::RolledBack if !last.interrupted => {
+                    return BootVerdict::Skip(BootSkipReason::WentBack);
+                }
                 transaction::Phase::Failed => return BootVerdict::Skip(BootSkipReason::Failed),
                 _ => {}
             }
@@ -2669,6 +2672,10 @@ mod tests {
 
         let back = transaction_of("2.0.0", "rolledBack");
         assert_eq!(verdict(Some(&back), None), BootVerdict::Skip(BootSkipReason::WentBack));
+        // Gone back only because the service was stopped mid-trial: tried again.
+        let mut interrupted = transaction_of("2.0.0", "rolledBack");
+        interrupted.interrupted = true;
+        assert_eq!(verdict(Some(&interrupted), None), BootVerdict::Newer);
         // Going back from one release says nothing about the next.
         assert_eq!(
             boot_verdict("2.0.1", "1.0.0", Some(&back), None, 0),

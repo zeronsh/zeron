@@ -278,6 +278,10 @@ pub struct Transaction {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
+    /// Gone back because the service was stopped mid-trial (a sleep, a restart),
+    /// not because the release failed: it's tried again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 /// An update's state, as `UpdateStatus` reports it.
@@ -787,6 +791,7 @@ pub fn request_within(
         trial_pid: None,
         reason: None,
         finished_at: None,
+        interrupted: false,
     };
     write(data_dir, &transaction)?;
     crash_point("requested");
@@ -883,6 +888,33 @@ pub fn current_trial() -> Option<Trial> {
 /// Why this trial is giving up, for the record the old version will write.
 pub fn note_trial_failure(data_dir: &Path, why: &str) {
     let _ = write_durably(&data_dir.join(NOTE_FILE), why.as_bytes());
+}
+
+/// How an interrupted trial's note starts ([`note_trial_interrupted`]).
+const INTERRUPTED_NOTE: &str = "interrupted:";
+
+/// This process, on trial, is being stopped from outside (SIGTERM: the machine
+/// going to sleep, the service restarting, a person). That says nothing about the
+/// release: the old version still goes back, since nothing committed, but says
+/// why, and the release is tried again. Before this, such a stop read as "the new
+/// version stopped before it was ready", and a wake never tried the release again.
+pub fn note_trial_interrupted() {
+    if let Some(trial) = current_trial() {
+        note_trial_failure(&trial.data_dir, INTERRUPTED_NOTE);
+    }
+}
+
+/// This process, on trial, panicked: what it said, for the record (the log alone
+/// may be gone by the time anyone looks).
+pub fn note_trial_panicked(message: &str) {
+    if let Some(trial) = current_trial() {
+        let message = message.trim();
+        let message: String = message.chars().take(300).collect();
+        note_trial_failure(
+            &trial.data_dir,
+            &format!("The new version crashed while starting ({message})."),
+        );
+    }
 }
 
 /// The new version has proved itself: move `current`, which is the commit, then
@@ -1169,11 +1201,21 @@ fn hand_over(
 }
 
 fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()> {
-    let why = std::fs::read_to_string(data_dir.join(NOTE_FILE))
+    let note = std::fs::read_to_string(data_dir.join(NOTE_FILE))
         .ok()
-        .filter(|note| !note.trim().is_empty())
-        .or_else(|| transaction.reason.clone())
-        .unwrap_or_else(|| "The new version stopped before it was ready.".to_owned());
+        .filter(|note| !note.trim().is_empty());
+    // A restore that was itself interrupted keeps what the first pass decided.
+    if note.as_deref().is_some_and(|note| note.starts_with(INTERRUPTED_NOTE)) {
+        transaction.interrupted = true;
+    }
+    let why = if transaction.interrupted {
+        "Zeron was stopped while it was trying the new version (the machine went to sleep, or \
+         the service restarted)."
+            .to_owned()
+    } else {
+        note.or_else(|| transaction.reason.clone())
+            .unwrap_or_else(|| "The new version stopped before it was ready.".to_owned())
+    };
     tracing::warn!(id = %transaction.id, %why, "update failed; going back");
     if !snapshot_dir(data_dir, &transaction.id).is_dir() {
         // Trial is only recorded once the snapshot is done, so this is someone's
@@ -1190,12 +1232,12 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
     let from = transaction.from.clone();
     let target = transaction.target.clone();
     let layout = transaction.layout.clone();
-    finish(
-        data_dir,
-        transaction,
-        Phase::RolledBack,
-        Some(format!("{why} Zeron went back to {from} instead of {target}.")),
-    )?;
+    let outcome = if transaction.interrupted {
+        format!("{why} It's on {from} for now and will try {target} again.")
+    } else {
+        format!("{why} Zeron went back to {from} instead of {target}.")
+    };
+    finish(data_dir, transaction, Phase::RolledBack, Some(outcome))?;
     crash_point("rollback-recorded");
     discard_snapshots(data_dir);
     layout.tidy();
@@ -1545,6 +1587,7 @@ mod tests {
             trial_pid: None,
             reason: None,
             finished_at: None,
+            interrupted: false,
         }
     }
 

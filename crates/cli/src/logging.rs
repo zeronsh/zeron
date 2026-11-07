@@ -88,6 +88,8 @@ pub fn long_running_setup() {
         tracing::error!(panic = %info,
             backtrace = %std::backtrace::Backtrace::force_capture(),
             "application panic");
+        // A new version on trial that dies of this: the old one says why.
+        zeron_update::transaction::note_trial_panicked(&info.to_string());
         default_hook(info);
     }));
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
