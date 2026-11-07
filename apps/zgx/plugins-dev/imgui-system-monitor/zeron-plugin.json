@@ -1,0 +1,8 @@
+{
+  "id": "imgui-system-monitor",
+  "name": "ImGui System Monitor",
+  "version": "1.0.0",
+  "description": "A native window with coloured readings, two progress bars that move every frame and a button that pauses the sampling.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"]
+}

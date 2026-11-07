@@ -1,0 +1,8 @@
+{
+  "id": "imgui-playground",
+  "name": "ImGui Widget Playground",
+  "version": "1.0.0",
+  "description": "Every basic widget in one native window: checkbox, radio buttons, a slider, a drag, a combo, rows, a bar and a scrolling log.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"]
+}

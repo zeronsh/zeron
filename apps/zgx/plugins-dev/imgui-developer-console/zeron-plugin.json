@@ -1,0 +1,8 @@
+{
+  "id": "imgui-developer-console",
+  "name": "ImGui Developer Console",
+  "version": "1.0.0",
+  "description": "A command line in a native window: type a command, press Run and the echo of it lands in the log below.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"]
+}
