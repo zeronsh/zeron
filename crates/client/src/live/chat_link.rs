@@ -23,6 +23,9 @@ use crate::lock;
 /// and the room is carrying the chat meanwhile.
 const LINK_RETRY_MIN: Duration = Duration::from_secs(15);
 const LINK_RETRY_MAX: Duration = Duration::from_secs(300);
+/// After a refusal over a connection that's up: an idle host may still be opening the chat.
+const REFUSED_RETRY: Duration = Duration::from_secs(2);
+const REFUSED_QUICK_RETRIES: u32 = 4;
 /// A link that lived this long earns a fresh retry curve.
 const LINK_STABLE: Duration = Duration::from_secs(60);
 /// A chat on screen doing nothing for this long gives up its link.
@@ -64,6 +67,8 @@ pub(crate) fn spawn(
     crate::runtime::shared().spawn(async move {
         let service = format!("{CHAT_LINK_PREFIX}{chat_id}");
         let mut retry = LINK_RETRY_MIN;
+        let mut was_wanted = false;
+        let mut quick_left = 0;
         loop {
             // Until someone wants one. Nothing runs here at rest.
             let woken = tokio::select! {
@@ -73,11 +78,16 @@ pub(crate) fn spawn(
             if !woken {
                 return;
             }
+            if !was_wanted {
+                was_wanted = true;
+                quick_left = REFUSED_QUICK_RETRIES;
+            }
             let target = lock(&host).clone();
             let opened = tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = until(&mut wanted, false) => {
                     direct.release_if_idle(&target);
+                    was_wanted = false;
                     continue;
                 }
                 opened = direct.open(&target, &service) => opened,
@@ -103,6 +113,7 @@ pub(crate) fn spawn(
                         if finished {
                             return;
                         }
+                        was_wanted = false;
                         continue;
                     }
                     tracing::info!(chat = %chat_id, device = %target, "chat link down");
@@ -113,11 +124,27 @@ pub(crate) fn spawn(
                 // The room carries this chat.
                 Err(error) => tracing::debug!(chat = %chat_id, %error, "chat link unavailable"),
             }
+            // The connection is up and the host said not yet: an idle host is still
+            // opening the chat its wake asked for. That's cheap to ask again, a few times.
+            let refused = quick_left > 0 && direct.ready(&target).await;
+            let wait = if refused {
+                quick_left -= 1;
+                REFUSED_RETRY
+            } else {
+                retry
+            };
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 // Asked to stop between attempts: a half-open pairing shouldn't stay.
-                _ = until(&mut wanted, false) => direct.release_if_idle(&target),
-                _ = tokio::time::sleep(retry) => retry = (retry * 2).min(LINK_RETRY_MAX),
+                _ = until(&mut wanted, false) => {
+                    direct.release_if_idle(&target);
+                    was_wanted = false;
+                }
+                _ = tokio::time::sleep(wait) => {
+                    if !refused {
+                        retry = (retry * 2).min(LINK_RETRY_MAX);
+                    }
+                }
                 // A network change or the app coming back tries now.
                 _ = direct.changed() => retry = LINK_RETRY_MIN,
             }

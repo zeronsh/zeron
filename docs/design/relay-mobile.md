@@ -184,8 +184,9 @@ cargo test -p zeron-client --test relay
 inherited environment first: an engine with none of this set would touch production.
 
 ```sh
+# edge/public has to exist first: `npm run card-assets`, or an empty folder for this.
 (cd edge && npx wrangler dev --port 27650 --var AUTH_MODE:dev --var CHAT_RELAY_LAYER:1)
-python3 proxy.py 27660 27650   # a forwarder you can take away, for playing a dead network
+python3 proxy.py 27660 27650   # any TCP forwarder you can kill, for playing a dead network
 
 env -u ZERON_APP -u ZERON_DATA_DIR -u ZERON_EDGE_URL -u ZERON_IPC_PORT -u ZERON_MANAGED_ENGINE \
     -u ZERON_WORKOS_CLIENT_ID -u ZERON_CALLBACK_PORT \
