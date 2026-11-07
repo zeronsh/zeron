@@ -1499,6 +1499,16 @@ impl Actor {
                         return SessionEnd::Reconnect;
                     }
                     _ = self.shutdown.changed() => return SessionEnd::Stop,
+                    // The relay layer's frames don't wait on the checkpoint: on a
+                    // relay chat, they are the catch-up.
+                    out = recv_relay(&mut relay_out) => match out {
+                        Some(frame) => {
+                            if pipe.tx.send(frame).await.is_err() {
+                                return SessionEnd::Reconnect;
+                            }
+                        }
+                        None => relay_out = None,
+                    },
                     inbound = pipe.rx.recv() => match inbound {
                         Some(raw) => match wire::decode(&raw) {
                             Some(frame) => buffered.push(frame),
@@ -1556,7 +1566,18 @@ impl Actor {
             None => {
                 let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
                     loop {
-                        let bytes = pipe.rx.recv().await?;
+                        // Nor on the backfill: a host that has just rejoined is
+                        // waiting for this device's announce and sync request.
+                        let bytes = tokio::select! {
+                            inbound = pipe.rx.recv() => inbound?,
+                            out = recv_relay(&mut relay_out) => {
+                                match out {
+                                    Some(frame) => pipe.tx.send(frame).await.ok()?,
+                                    None => relay_out = None,
+                                }
+                                continue;
+                            }
+                        };
                         let Some(frame) = wire::decode(&bytes) else {
                             return None;
                         };
