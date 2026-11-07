@@ -3422,6 +3422,17 @@ fn is_chat_spawn(id: &str, folded: &[MessagePart], doc: &SessionDoc) -> bool {
     }) || doc.has_subagent_spawn(id)
 }
 
+/// When to commit what just changed: at once, unless a commit went out less than a
+/// window ago, then a window after it. The same at most one per window as waiting a
+/// window every time, without making the first change after a pause wait.
+fn next_commit(last: Option<tokio::time::Instant>) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    match last {
+        Some(at) => (at + std::time::Duration::from_millis(STREAM_COMMIT_MS)).max(now),
+        None => now,
+    }
+}
+
 /// Test-only instrumentation: how often `drive_run`'s coalesced commit branch
 /// fires. The sink-dirty regression test proves the branch ticks once per
 /// commit window instead of spinning on a deadline left in the past.
@@ -4226,6 +4237,9 @@ async fn drive_run(
 
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
+    // Commits are at most one per window, but the first after a quiet spell goes at
+    // once: a turn's first token and a steer's echo don't wait out a window.
+    let mut last_flush: Option<tokio::time::Instant> = None;
     // Set when the engine interrupts the run: the harness gets this long to end its own
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
@@ -4566,6 +4580,7 @@ async fn drive_run(
                     FLUSH_TICKS.with(|t| t.set(t.get() + 1));
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
                     // (parent + any dirty subagent docs).
+                    last_flush = Some(tokio::time::Instant::now());
                     if dirty {
                         if let Err(err) = sync_segment(
                             doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
@@ -4737,8 +4752,7 @@ async fn drive_run(
                 zeron_doc::fold_event_into_parts(&mut folded, &event);
                 if !dirty {
                     dirty = true;
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    flush_at = next_commit(last_flush);
                 }
             }
             // Open the sink lazily; an open failure degrades to chip-only.
@@ -4806,8 +4820,7 @@ async fn drive_run(
                 // fire the commit branch on every event instead of once per
                 // STREAM_COMMIT_MS window.
                 if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    flush_at = next_commit(last_flush);
                 }
                 if done {
                     let status = match sub_event.as_ref() {
@@ -5447,8 +5460,7 @@ async fn drive_run(
 
         if !folded.is_empty() && !dirty {
             dirty = true;
-            flush_at =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+            flush_at = next_commit(last_flush);
         }
     };
 
@@ -5563,6 +5575,19 @@ async fn drive_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_change_after_a_pause_commits_at_once_and_a_stream_stays_paced() {
+        let window = std::time::Duration::from_millis(STREAM_COMMIT_MS);
+        let start = tokio::time::Instant::now();
+        assert_eq!(next_commit(None), start, "a turn's first token");
+        assert_eq!(next_commit(Some(start)), start + window, "just committed: a window on");
+        tokio::time::advance(window * 3).await;
+        assert_eq!(next_commit(Some(start)), tokio::time::Instant::now(), "quiet since");
+        tokio::time::advance(window / 2).await;
+        let recent = tokio::time::Instant::now() - window / 4;
+        assert_eq!(next_commit(Some(recent)), recent + window);
+    }
 
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {

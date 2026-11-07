@@ -248,7 +248,7 @@ export default {
       const notHost = await runnerChatGate(env, auth, parts[1]);
       if (notHost) return notHost;
     }
-    const chatResponse = chatRoute(request, env, auth.userId);
+    const chatResponse = chatRoute(request, env, auth.userId, auth.orgId);
     if (chatResponse) return chatResponse;
 
     // ── workspace rooms (ARCHITECTURE §2.2/§6.1): same SessionRoom DO class;

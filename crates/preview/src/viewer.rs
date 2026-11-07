@@ -102,6 +102,19 @@ impl ViewerPeers {
         });
     }
 
+    /// Nothing is using the connection to `device`: close it, so its ICE keepalives
+    /// stop waking the radio. A later [`Self::open`] pairs again. Left alone if
+    /// another stream (a terminal) still rides it.
+    pub fn release_if_idle(&self, device: &str) {
+        let peers = self.peers.clone();
+        let device = device.to_owned();
+        self.runtime.spawn(async move {
+            if peers.ready(&device).await.is_some_and(|mux| mux.stream_count() == 0) {
+                peers.remove(&device).await;
+            }
+        });
+    }
+
     /// The device's network changed: every connection's path is gone.
     pub fn network_changed(&self) {
         let peers = self.peers.clone();
