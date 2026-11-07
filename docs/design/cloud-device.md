@@ -322,7 +322,10 @@ figure.
 
 **Pre-sleep cleanup** (`crates/engine/src/cloud_disk.rs`), once quiesce has accepted the sleep,
 budgeted 25 s of the 60 the edge gives it. It deletes from an allow-list: always
-`target/*/incremental`; then, only while the disk is still over the warning level and asking again
+Codex's own downloads in the managed `CODEX_HOME` (`cache/`, about 60 MB of plugin catalog, and
+`plugins/cache/`, about 30 MB of the account's plugin bundles), which every wake would otherwise copy
+back in while the engine starts, and which Codex fetches again itself, in the background, once it
+runs (never its `auth.json`, sessions, databases or settings); always `target/*/incremental`; then, only while the disk is still over the warning level and asking again
 before each, `target/*/deps` and named package-manager download caches in the home directory. A
 `target` counts only if Cargo marked it as its own (`.rustc_info.json` and a `CACHEDIR.TAG` with
 Cargo's signature) and git tracks nothing in it, which also rules out anything outside a repository.
@@ -427,6 +430,13 @@ taking 7 to 23 s. So once an update settles (committed, or given up), and on eve
 machine (`ZERON_DEVICE_PLATFORM=cloud`) keeps none of them: going back there is a reinstall, which
 downloads anyway. Other Linux installs keep the newest older one, to go back to by hand. Never
 `current`, the running executable's folder, or a newer version (an update being staged).
+
+A Cloud machine doesn't keep the release's `zeron-engine` either: it's the desktop app's background
+engine (78 MB), and the unit runs `zeron headless`, which links the engine. The installer and the
+updater leave it out, and the tidy and the pre-sleep cleanup remove it from versions installed before.
+Measured on staging (send to first output, n=8 each), a machine on one version went from a median of
+17.5 s to 14.2 s once neither it nor Codex's downloads came back with each wake; its wake downloaded
+225 MB, 205 of them the engine it runs.
 
 A longer wake reads as updating: the engine says so (`POST /runner/wake-stage`), `CloudSession.stage`
 is `updating` while it lasts (a stage nobody clears stops showing after 10 minutes), the desktop's

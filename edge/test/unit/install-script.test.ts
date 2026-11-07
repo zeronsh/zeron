@@ -51,6 +51,8 @@ const setup = () => {
   const fakeZeron = join(release, "zeron-1.2.3-linux-x86_64", "zeron");
   writeFileSync(fakeZeron, "#!/bin/sh\necho zeron 1.2.3\n");
   chmodSync(fakeZeron, 0o755);
+  // The release is the desktop's too: it carries the background engine.
+  writeFileSync(join(release, "zeron-1.2.3-linux-x86_64", "zeron-engine"), "#!/bin/sh\nexit 1\n");
   execFileSync("tar", ["-czf", join(release, "zeron.tar.gz"), "-C", release, "zeron-1.2.3-linux-x86_64"]);
   const log = join(root, "calls.log");
   writeFileSync(log, "");
@@ -107,6 +109,8 @@ describe("cloud install script", { timeout: 60_000 }, () => {
     const data = join(home, ".zeron");
     expect(readlinkSync(join(data, "app", "current"))).toBe(join(data, "app", "1.2.3"));
     expect(existsSync(join(data, "app", "1.2.3", "zeron"))).toBe(true);
+    // Never run on Cloud, and copied back in on every wake if kept.
+    expect(existsSync(join(data, "app", "1.2.3", "zeron-engine"))).toBe(false);
     const envFile = join(data, "env");
     expect(statSync(envFile).mode & 0o777).toBe(0o600);
     expect(readFileSync(envFile, "utf8")).toBe(

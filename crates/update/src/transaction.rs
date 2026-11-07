@@ -249,6 +249,7 @@ impl Layout {
         match self {
             Self::Versioned { app_root } => {
                 crate::prune_installed_versions(app_root, crate::older_versions_kept(), abandoned);
+                crate::strip_cloud_unused_installed(app_root);
             }
             Self::MacBundle { bundle, .. } => crate::prune_retired_mac_bundles(bundle),
             Self::WindowsFolder { incoming, .. } => {

@@ -1069,6 +1069,16 @@ pub async fn stage_headless(
     manifest: &Manifest,
     app_root: &Path,
 ) -> anyhow::Result<PathBuf> {
+    stage_headless_on(edge_url, manifest, app_root, on_cloud()).await
+}
+
+/// [`stage_headless`]; on a Cloud machine without [`CLOUD_UNUSED_FILES`].
+async fn stage_headless_on(
+    edge_url: &str,
+    manifest: &Manifest,
+    app_root: &Path,
+    cloud: bool,
+) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_managed_update_platform()?;
     let version = &manifest.version;
@@ -1105,6 +1115,9 @@ pub async fn stage_headless(
             bail!("tarball {file} did not contain a zeron binary");
         }
         verify_staged_binary(&unpacked.join("zeron"), version).await?;
+        if cloud {
+            strip_cloud_unused(&unpacked);
+        }
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
@@ -1153,7 +1166,53 @@ pub fn older_versions_kept() -> usize {
 }
 
 fn older_versions_kept_on(platform: Option<&str>) -> usize {
-    if platform == Some("cloud") { 0 } else { 1 }
+    if on_cloud_platform(platform) { 0 } else { 1 }
+}
+
+fn on_cloud_platform(platform: Option<&str>) -> bool {
+    platform == Some("cloud")
+}
+
+fn on_cloud() -> bool {
+    on_cloud_platform(std::env::var("ZERON_DEVICE_PLATFORM").ok().as_deref())
+}
+
+/// Release files a Cloud machine never runs: the desktop app's background
+/// engine (78 MB). A Cloud machine runs `zeron headless`, which links the
+/// engine, and its disk is copied back in on every wake.
+pub const CLOUD_UNUSED_FILES: &[&str] = &["zeron-engine"];
+
+/// Remove [`CLOUD_UNUSED_FILES`] from the version folder `dir`.
+pub fn strip_cloud_unused(dir: &Path) {
+    for name in CLOUD_UNUSED_FILES {
+        let path = dir.join(name);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+            && let Err(err) = std::fs::remove_file(&path)
+        {
+            tracing::warn!(path = %path.display(), error = %err, "couldn't remove an unused release file");
+        }
+    }
+}
+
+/// On a Cloud machine, every installed version's unused files (the ones
+/// installed before Cloud stopped unpacking them).
+pub fn strip_cloud_unused_installed(app_root: &Path) {
+    if on_cloud() {
+        strip_unused_from_versions(app_root);
+    }
+}
+
+fn strip_unused_from_versions(app_root: &Path) {
+    let Ok(entries) = std::fs::read_dir(app_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let named_like_a_version =
+            entry.file_name().to_str().is_some_and(|name| parse_version(name).is_some());
+        if named_like_a_version && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            strip_cloud_unused(&entry.path());
+        }
+    }
 }
 
 /// Remove what a managed install no longer needs from `app_root`: version folders
@@ -3524,6 +3583,28 @@ mod tests {
         assert_eq!(folders(&app_root), ["0.2.10", "0.2.11", "0.2.12", "current"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_cloud_machine_keeps_no_desktop_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10", "0.2.11"]);
+        for ver in ["0.2.10", "0.2.11"] {
+            std::fs::write(app_root.join(ver).join("zeron-engine"), "desktop").unwrap();
+        }
+        std::fs::create_dir_all(app_root.join("notes")).unwrap();
+        std::fs::write(app_root.join("notes").join("zeron-engine"), "not a version").unwrap();
+        apply_headless(&app_root, "0.2.11").unwrap();
+
+        strip_unused_from_versions(&app_root);
+
+        for ver in ["0.2.10", "0.2.11"] {
+            assert!(!app_root.join(ver).join("zeron-engine").exists(), "{ver}");
+            assert!(app_root.join(ver).join("zeron").exists(), "{ver}");
+        }
+        assert!(app_root.join("notes").join("zeron-engine").exists());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_download_whose_process_is_gone_is_cleared() {
@@ -3920,6 +4001,38 @@ mod tests {
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
         assert!(staged.join("zeron").is_file());
+    }
+
+    /// The release carries the desktop's background engine; a Cloud machine
+    /// stages the release without it, anywhere else keeps it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cloud_machine_stages_a_release_without_the_desktop_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path().join("pkg");
+        std::fs::create_dir_all(pkg.join("zeron-pkg")).unwrap();
+        std::fs::write(pkg.join("zeron-pkg").join("zeron-engine"), "desktop").unwrap();
+        let bytes = fake_headless_tarball(&pkg, "9.9.9");
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                headless_artifact("9.9.9"),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+                },
+            )]
+            .into(),
+            ..Manifest::default()
+        };
+        for (cloud, kept) in [(true, false), (false, true)] {
+            let app_root = tmp.path().join(format!("app-{cloud}"));
+            std::fs::create_dir_all(&app_root).unwrap();
+            let (base, server) = serve_forever(bytes.clone()).await;
+            let staged = stage_headless_on(&base, &manifest, &app_root, cloud).await.unwrap();
+            server.abort();
+            assert!(staged.join("zeron").is_file(), "cloud {cloud}");
+            assert_eq!(staged.join("zeron-engine").exists(), kept, "cloud {cloud}");
+        }
     }
 
     #[test]
