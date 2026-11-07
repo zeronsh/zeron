@@ -4435,4 +4435,304 @@ fn a_list_box_selects_the_clicked_row() {
     probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
     run_frame(&probe, draw.clone()).expect("release");
     assert_eq!(&*chosen.borrow(), "delta", "the third row became chosen");
+}#[test]
+fn a_context_menu_opens_on_right_click_and_not_left() {
+    let _guard = imgui_guard();
+    let right = Probe::new("ctx-right");
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let open = Rc::new(RefCell::new(false));
+
+    let draw = {
+        let (rect, open) = (rect.clone(), open.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "selectable",
+                    seq,
+                    &Value::record([("label", Value::from("row-a")), ("selected", Value::Bool(false))]),
+                )
+                .expect("selectable");
+            *rect.borrow_mut() = rect_of(&answer);
+            let popup = probe
+                .frame_widget("begin_popup_context_item", seq, &Value::record([("id", Value::from("ctx"))]))
+                .expect("context popup");
+            *open.borrow_mut() = matches!(popup.field("open"), Some(Value::Bool(true)));
+            if matches!(popup.field("open"), Some(Value::Bool(true))) {
+                probe.frame_widget("end_popup", seq, &no_arg()).expect("end popup");
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    run_frame(&right, draw.clone()).expect("frame 0");
+    assert!(!*open.borrow(), "the menu starts closed");
+
+    let (left, top, right_edge, bottom) = *rect.borrow();
+    let centre = [(left + right_edge) / 2.0, (top + bottom) / 2.0];
+    right.edit_io(|io| io.add_mouse_pos_event(centre));
+    right.edit_io(|io| io.add_mouse_button_event(MouseButton::Right, true));
+    run_frame(&right, draw.clone()).expect("press");
+    right.edit_io(|io| io.add_mouse_button_event(MouseButton::Right, false));
+    run_frame(&right, draw.clone()).expect("release");
+    assert!(*open.borrow(), "a right-click opens the context menu");
+
+    let left = Probe::new("ctx-left");
+    let open_left = Rc::new(RefCell::new(false));
+    {
+        let (_open, open_left) = (open.clone(), open_left.clone());
+        let left = left.clone();
+        run_frame(&left, move |probe, seq| {
+            probe
+                .frame_widget(
+                    "selectable",
+                    seq,
+                    &Value::record([("label", Value::from("row-a")), ("selected", Value::Bool(false))]),
+                )
+                .expect("selectable");
+            let popup = probe
+                .frame_widget("begin_popup_context_item", seq, &Value::record([("id", Value::from("ctx"))]))
+                .expect("context popup");
+            *open_left.borrow_mut() = matches!(popup.field("open"), Some(Value::Bool(true)));
+            if matches!(popup.field("open"), Some(Value::Bool(true))) {
+                probe.frame_widget("end_popup", seq, &no_arg()).expect("end popup");
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("left frame 0");
+        let (l, t, r, b) = *rect.borrow();
+        let centre = [(l + r) / 2.0, (t + b) / 2.0];
+        left.edit_io(|io| io.add_mouse_pos_event(centre));
+        left.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+        run_frame(&left, |probe, seq| {
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("left press");
+        left.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+        run_frame(&left, |probe, seq| {
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("left release");
+    }
+    assert!(!*open_left.borrow(), "a left-click must not open the menu");
+}
+
+#[test]
+fn a_modal_popup_blocks_behind_and_reports_its_choice() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("modal");
+    let behind = Rc::new(Cell::new(0));
+    let confirm = Rc::new(RefCell::new(None::<String>));
+    let behind_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let ok_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let modal_open = Rc::new(Cell::new(true));
+
+    let draw = {
+        let (behind, confirm, behind_rect, ok_rect, modal_open) = (
+            behind.clone(),
+            confirm.clone(),
+            behind_rect.clone(),
+            ok_rect.clone(),
+            modal_open.clone(),
+        );
+        move |probe: &Probe, seq: u64| {
+            let button = probe
+                .frame_widget("button", seq, &Value::record([("label", Value::from("Behind"))]))
+                .expect("behind button");
+            *behind_rect.borrow_mut() = rect_of(&button);
+            if matches!(button.field("value"), Some(Value::Bool(true))) {
+                behind.set(behind.get() + 1);
+            }
+            if modal_open.get() {
+                probe
+                    .frame_widget("open_popup", seq, &Value::record([("id", Value::from("confirm"))]))
+                    .expect("open modal");
+                let popup = probe
+                    .frame_widget(
+                        "begin_popup_modal",
+                        seq,
+                        &Value::record([
+                            ("id", Value::from("confirm")),
+                            ("options", Value::record([("always_auto_resize", Value::Bool(true))])),
+                        ]),
+                    )
+                    .expect("modal");
+                if matches!(popup.field("open"), Some(Value::Bool(true))) {
+                    let ok = probe
+                        .frame_widget("button", seq, &Value::record([("label", Value::from("OK"))]))
+                        .expect("OK");
+                    *ok_rect.borrow_mut() = rect_of(&ok);
+                    if matches!(ok.field("value"), Some(Value::Bool(true))) {
+                        *confirm.borrow_mut() = Some("ok".to_string());
+                        modal_open.set(false);
+                    }
+                    let cancel = probe
+                        .frame_widget("button", seq, &Value::record([("label", Value::from("Cancel"))]))
+                        .expect("Cancel");
+                    if matches!(cancel.field("value"), Some(Value::Bool(true))) {
+                        *confirm.borrow_mut() = Some("cancel".to_string());
+                        modal_open.set(false);
+                    }
+                    probe.frame_widget("end_popup", seq, &no_arg()).expect("end popup");
+                }
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (bl, bt, br, bb) = *behind_rect.borrow();
+    let behind_centre = [(bl + br) / 2.0, (bt + bb) / 2.0];
+    // Clicking Behind while the modal is up must not leak through.
+    probe.edit_io(|io| io.add_mouse_pos_event(behind_centre));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press behind");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release behind");
+    assert_eq!(behind.get(), 0, "the modal blocks the widget behind it");
+
+    // Click OK: the modal records the choice, closes, and Behind works again.
+    let (ol, ot, orr, ob) = *ok_rect.borrow();
+    let ok_centre = [(ol + orr) / 2.0, (ot + ob) / 2.0];
+    probe.edit_io(|io| io.add_mouse_pos_event(ok_centre));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press OK");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release OK");
+    assert_eq!(confirm.borrow().as_deref(), Some("ok"), "OK reports the choice");
+    assert!(!modal_open.get(), "the modal closed");
+
+    run_frame(&probe, draw.clone()).expect("settle after close");
+    run_frame(&probe, draw.clone()).expect("settle after close");
+
+    probe.edit_io(|io| io.add_mouse_pos_event(behind_centre));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press behind again");
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release behind again");
+    assert_eq!(behind.get(), 1, "Behind works once the modal is gone");
+}
+
+#[test]
+fn a_shortcut_fires_only_its_chord() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("shortcut");
+    let hits = Rc::new(Cell::new(0));
+
+    let draw = {
+        let hits = hits.clone();
+        move |probe: &Probe, seq: u64| {
+            let answer = probe
+                .frame_widget(
+                    "shortcut",
+                    seq,
+                    &Value::record([
+                        (
+                            "mods",
+                            Value::List(
+                                ["ctrl"].iter().map(|m| Value::from(*m)).collect::<Vec<_>>().into(),
+                            ),
+                        ),
+                        ("key", Value::from("K")),
+                    ]),
+                )
+                .expect("shortcut");
+            if matches!(answer.field("value"), Some(Value::Bool(true))) {
+                hits.set(hits.get() + 1);
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    probe.edit_io(|io| io.add_key_event(Key::ModCtrl, true));
+    probe.edit_io(|io| io.add_key_event(Key::K, true));
+    run_frame(&probe, draw.clone()).expect("ctrl+K");
+    probe.edit_io(|io| io.add_key_event(Key::K, false));
+    run_frame(&probe, draw.clone()).expect("release K");
+    probe.edit_io(|io| io.add_key_event(Key::ModCtrl, false));
+    run_frame(&probe, draw.clone()).expect("release ctrl");
+    assert_eq!(hits.get(), 1, "ctrl+K fires the shortcut once");
+
+    tap_key(&probe, Key::K);
+    run_frame(&probe, draw.clone()).expect("plain K");
+    assert_eq!(hits.get(), 1, "a plain K must not fire the chord");
+
+    probe.edit_io(|io| io.add_key_event(Key::ModCtrl, true));
+    probe.edit_io(|io| io.add_key_event(Key::K, true));
+    run_frame(&probe, draw.clone()).expect("ctrl+K again");
+    probe.edit_io(|io| io.add_key_event(Key::K, false));
+    run_frame(&probe, draw.clone()).expect("release K again");
+    probe.edit_io(|io| io.add_key_event(Key::ModCtrl, false));
+    run_frame(&probe, draw.clone()).expect("release ctrl again");
+    assert_eq!(hits.get(), 2, "a second chord fires once more");
+}
+
+#[test]
+fn date_and_time_pickers_are_refused_naming_the_version() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("refusals");
+    run_frame(&probe, |probe, seq| {
+        let date = probe
+            .frame_widget("date_picker", seq, &Value::record([("id", Value::from("start"))]))
+            .expect_err("date_picker must be refused");
+        assert!(date.contains("date_picker"), "{date}");
+        assert!(date.contains("1.93"), "{date}");
+        let time = probe
+            .frame_widget("time_picker", seq, &Value::record([("id", Value::from("start"))]))
+            .expect_err("time_picker must be refused");
+        assert!(time.contains("time_picker"), "{time}");
+        assert!(time.contains("1.93"), "{time}");
+        probe.text(seq, "still alive");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the frame after both refusals still paints");
+}
+
+#[test]
+fn a_colour_editor_returns_the_colour_it_was_given() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("colour");
+    let returned = Rc::new(RefCell::new((0.0_f64, 0.0_f64, 0.0_f64)));
+    let captured = returned.clone();
+    run_frame(&probe, move |probe, seq| {
+        let answer = probe
+            .frame_widget(
+                "color_edit3",
+                seq,
+                &Value::record([
+                    ("label", Value::from("Tint")),
+                    (
+                        "value",
+                        Value::record([
+                            ("r", Value::from(0.2)),
+                            ("g", Value::from(0.4)),
+                            ("b", Value::from(0.9)),
+                        ]),
+                    ),
+                    (
+                        "options",
+                        Value::record([("display_mode", Value::from("rgb"))]),
+                    ),
+                ]),
+            )
+            .expect("color_edit3");
+        let value = answer.field("value").expect("the colour table");
+        *captured.borrow_mut() = (num_of(value, "r"), num_of(value, "g"), num_of(value, "b"));
+        let probe_answered = probe
+            .frame_widget(
+                "color_button",
+                seq,
+                &Value::record([
+                    ("id", Value::from("swatch")),
+                    ("value", value.clone()),
+                    ("width", Value::from(40.0)),
+                    ("height", Value::from(40.0)),
+                ]),
+            )
+            .expect("color_button");
+        let _ = rect_of(&probe_answered);
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the colour frame");
+    let (r, g, b) = *returned.borrow();
+    assert!((r - 0.2).abs() < 0.01 && (g - 0.4).abs() < 0.01 && (b - 0.9).abs() < 0.01);
 }

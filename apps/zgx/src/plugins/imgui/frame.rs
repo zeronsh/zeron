@@ -2874,7 +2874,7 @@ fn shortcut(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
         }
     }
     let chord = dear_imgui_rs::KeyChord::new(key).with_mods(modifiers);
-    let pressed = ui.shortcut(chord);
+    let pressed = ui.is_key_chord_pressed(chord);
     Ok(Value::record([
         ("ok", Value::Bool(true)),
         ("value", Value::Bool(pressed)),
