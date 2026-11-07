@@ -34,22 +34,24 @@ local M = {}
 -- The longer side of the picture's grid (Zeron's proxy of the picture).
 M.GRID_MAX = 2048
 
--- The paper, by scheme (sRGB).
+-- The paper, by scheme (sRGB): near black, warm white. Fixed, not the
+-- card's fill: a theme's grey card under the ink flattened the dark (the
+-- texture a fifth to a half fainter), and every theme draws the same.
 M.PAPER = { dark = { 0.043, 0.039, 0.055 }, light = { 0.969, 0.961, 0.945 } }
 -- How much of a cell the ink covers, from the paper's own colour to the
 -- edge of the colours (the same for every effect): never less than
 -- `FLOOR` (the dark of a picture keeps a quiet texture, not a few bright
--- specks), never more than `MOST` (the ink stays a mark on a ground, the
--- ground taking the rest of the colour where it's bright).
-M.FLOOR, M.MOST = 0.12, 0.72
--- By scheme: how far past the colour the ink may go from the paper (1.6:
--- six tenths further), so its colour stays the picture's, deeper, not a
--- printer's primary; and how far every effect lets the picture recede into
--- the paper (the room its ink needs over the brightest of a picture in the
--- dark, the darkest in the light): one small offset, the same for all. The
--- light's are less, as ink on white reads stronger than light on black.
-M.PUSH = { dark = 1.6, light = 1.35 }
-M.RECEDE = { dark = 0.05, light = 0.04 }
+-- specks), never more than `MOST` (the ink stays a mark on the paper, the
+-- paper taking the rest of the colour where it's bright).
+M.FLOOR, M.MOST = 0.12, 0.62
+-- By scheme: how far past the colour the ink may go from the paper (2.2:
+-- more than twice as far), so it reads at a step back yet stays the
+-- picture's colour, deeper, not a printer's primary; and how far every
+-- effect lets the picture recede into the paper (in sRGB: the room its
+-- ink needs over the brightest of a picture in the dark, the darkest in
+-- the light): one offset, the same for all.
+M.PUSH = { dark = 2.2, light = 1.7 }
+M.RECEDE = { dark = 0.07, light = 0.08 }
 
 -- Which candidate each effect draws.
 M.VARIANT = { dither = "silk", ascii = "mono", halftone = "tiles", scanlines = "crt" } :: { [string]: string }
@@ -102,9 +104,10 @@ struct FxInk { ink:vec3<f32>, gap:vec3<f32> }
 // the line from the paper through `c` (as far as covering `k` takes, no
 // further than the push, nor than the colours go), the gaps the paper or,
 // where the ink can't make it up alone, the rest of `c` on that line.
-fn fx_split(input:LayerInput,c:vec3<f32>,k:f32)->FxInk {
+fn fx_split(input:LayerInput,c:vec3<f32>,k:f32)->FxInk {return fx_split_by(input,c,k,input.params[3].w);}
+fn fx_split_by(input:LayerInput,c:vec3<f32>,k:f32,push:f32)->FxInk {
  let p=fx_paper(input);
- let ink=p+(c-p)*min(1./max(max(k,fx_reach(c,p)),1e-4),input.params[3].w);
+ let ink=p+(c-p)*min(1./max(max(k,fx_reach(c,p)),1e-4),push);
  return FxInk(ink,(c-k*ink)/max(1.-k,1e-4));
 }
 // How much of a cell its ink covers where the picture is `c`: from the
@@ -189,11 +192,16 @@ fn fx_cell(input:LayerInput,g:vec3<f32>,k:vec2<i32>)->vec3<f32> {
 ]]
 end
 
--- ASCII: cells of 6 by 8 glyph pixels (`px` of the picture's each), each
--- the glyph whose strokes cover what the colour there takes.
+-- ASCII: the picture made of characters. Cells of 6 by 8 glyph pixels
+-- (`px` of the picture's each), each one glyph in one colour on the
+-- paper: the glyph whose strokes cover what the cell's colour takes, so the
+-- characters' weight and colour carry the picture, and the paper shows
+-- between them. With `inverse`, the brightest cells (the darkest, in the
+-- light) take a glyph cut out of a block of ink, as a terminal's inverse
+-- video, so even they keep the paper's characters. `dense` above 1 takes
+-- heavier glyphs in dimmer ink.
 -- Glyphs, 5 by 7, rows top to bottom (the left pixel the high bit).
 local GLYPHS: { { number } } = {
-	{ 0, 0, 0, 0, 0, 0, 0 }, -- " "
 	{ 0, 0, 0, 0, 0, 12, 12 }, -- "."
 	{ 0, 0, 0, 31, 0, 0, 0 }, -- "-"
 	{ 0, 12, 12, 0, 12, 12, 0 }, -- ":"
@@ -206,101 +214,111 @@ local GLYPHS: { { number } } = {
 	{ 10, 10, 31, 10, 31, 10, 10 }, -- "#"
 	{ 14, 17, 23, 21, 23, 16, 15 }, -- "@"
 	{ 30, 17, 17, 30, 17, 17, 30 }, -- "B"
+	{ 17, 27, 21, 21, 17, 17, 17 }, -- "M"
 }
-local function ascii(o: { px: number, dots: boolean, sparse: number }): string
-	local rows, shares = {}, {}
-	for _, glyph in GLYPHS do
-		local lit = 0
-		for _, row in glyph do
-			table.insert(rows, `{row}u`)
-			local r = row
+local function ascii(o: { px: number, inverse: boolean, dense: number }): string
+	-- How many of a glyph's pixels are lit.
+	local function lit(rows: { number }): number
+		local n = 0
+		for _, r in rows do
 			while r > 0 do
-				lit += r % 2
+				n += r % 2
 				r = r // 2
 			end
 		end
-		table.insert(shares, string.format("%.5f", lit / 48 * (if o.dots then math.pi * 0.42 * 0.42 else 1)))
+		return n
+	end
+	-- The ramp, lightest first: a space, the glyphs, then (inverse) the
+	-- glyphs cut out of ink, heaviest first.
+	local ramp: { { rows: { number }, inv: boolean, share: number } } = { { rows = { 0, 0, 0, 0, 0, 0, 0 }, inv = false, share = 0 } }
+	for _, g in GLYPHS do
+		local r = g
+		table.insert(ramp, { rows = r, inv = false, share = lit(r) / 48 })
+		-- (Cut out only where it reads as a letter: not a dot or a sign.)
+		if o.inverse and lit(r) >= 12 then
+			table.insert(ramp, { rows = r, inv = true, share = 1 - lit(r) / 48 })
+		end
+	end
+	table.sort(ramp, function(a: { share: number }, b: { share: number }): boolean
+		return a.share < b.share
+	end)
+	local rows, invs, shares = {}, {}, {}
+	for _, e in ramp do
+		for _, r in e.rows do
+			table.insert(rows, `{r}u`)
+		end
+		table.insert(invs, if e.inv then "true" else "false")
+		table.insert(shares, string.format("%.5f", e.share))
 	end
 	return string.format(
 		[[
 const FX_PX:f32=%.4f;
-const FX_SPARSE:f32=%.3f;
+const FX_DENSE:f32=%.3f;
 const FX_GLYPHS=array<u32,%d>(%s);
+const FX_INV=array<bool,%d>(%s);
 const FX_SHARES=array<f32,%d>(%s);
 const FX_COUNT:u32=%du;
-// The cell's glyph and its ink (the glyph whose share of the cell is
-// enough, the density moving it lighter or heavier).
-struct FxGlyph { i:u32, ink:FxInk, c:vec3<f32> }
+const FX_BN=array<u32,1024>(%s);
+// A cell's glyph (its place in the ramp) and its ink and gap.
+struct FxGlyph { i:u32, ink:FxInk }
 fn fx_glyph(input:LayerInput,g:vec3<f32>,cell:vec2<i32>)->FxGlyph {
  let size=vec2(6.,8.)*FX_PX;
  let c=fx_mean(input,g,(vec2<f32>(cell)+.5)*size,size);
- // (Its share of the most a glyph covers.)
- let want=fx_share(input,c)/input.params[2].z*FX_SHARES[FX_COUNT-1u]*FX_SPARSE*(1.-input.params[0].y);
+ // The least share of ink that makes the colour up (its ink at the edge
+ // of the colours, as bright as it goes), denser by FX_DENSE, the density
+ // setting moving it lighter or heavier.
+ let want=min(fx_reach(c,fx_paper(input))*FX_DENSE*(1.-input.params[0].y),1.);
  var i=0u;
  loop {if i+1u>=FX_COUNT || FX_SHARES[i]>=want {break;} i++;}
- return FxGlyph(i,fx_split(input,c,FX_SHARES[i]),c);
+ // Between the glyph below and this one, by blue noise: a flat field
+ // takes varied characters, as drawn by hand, not one repeated. Past the
+ // heaviest, any of the four heaviest (the gaps make the rest up).
+ let n=(u32(cell.y)&63u)*64u+(u32(cell.x)&63u);
+ let t=(f32((FX_BN[n>>2u]>>((n&3u)*8u))&255u)+.5)/256.;
+ if FX_SHARES[i]<want {i-=min(u32(t*4.),i);}
+ else if i>0u && (want-FX_SHARES[i-1u])/max(FX_SHARES[i]-FX_SHARES[i-1u],1e-4)<t {i-=1u;}
+ // (No push: the paper stays bare between the glyphs, however few.)
+ return FxGlyph(i,fx_split_by(input,c,FX_SHARES[i],1e4));
 }
-// The glyph's ink (`cover` of the window's pixel) and its gap at `q`, each
-// as the cell's are to its colour, over the picture there: the strokes
-// keep the picture's own detail and stay lighter (darker, in the light)
-// than the gap however the picture runs under them.
-fn fx_glyph_at(input:LayerInput,g:vec3<f32>,q:vec2<f32>,gl:FxGlyph,cover:f32)->vec3<f32> {
- let c=max(gl.c,vec3(1e-4));
- return clamp(fx_src(input,g,q)*mix(gl.ink.gap,gl.ink.ink,cover)/c,vec3(0.),vec3(1.));
+// Whether pixel `at` of a cell (0 to 5 across, 0 to 7 down) is ink.
+fn fx_lit(i:u32,at:vec2<i32>)->bool {
+ var on=false;
+ if at.x<5 && at.y<7 {on=((FX_GLYPHS[i*7u+u32(at.y)]>>u32(4-at.x))&1u)==1u;}
+ return on!=FX_INV[i];
 }
-// Whether glyph pixel `x`, `y` of glyph `i` is lit.
-fn fx_lit(i:u32,x:i32,y:i32)->bool {
- if x>4 || y>6 {return false;}
- return ((FX_GLYPHS[i*7u+u32(y)]>>u32(4-x))&1u)==1u;
+// The colour of glyph pixel `k`: its cell's ink or gap.
+fn fx_px(input:LayerInput,g:vec3<f32>,k:vec2<i32>,cell:vec2<i32>,gl:FxGlyph)->vec3<f32> {
+ let at=vec2<i32>(floor(vec2<f32>(k)/vec2(6.,8.)));
+ var here=gl;
+ if any(at!=cell) {here=fx_glyph(input,g,at);}
+ return select(here.ink.gap,here.ink.ink,fx_lit(here.i,k-at*vec2(6,8)));
 }
-]],
-		o.px,
-		o.sparse,
-		#rows,
-		table.concat(rows, ","),
-		#shares,
-		table.concat(shares, ","),
-		#shares
-	) .. (if o.dots
-		then [[
-// Each lit pixel a round dot (a dot matrix): the four glyph pixels round
-// the window's, each its dot's coverage.
-fn fx_effect(input:LayerInput,g:vec3<f32>,q:vec2<f32>,fp:f32)->vec3<f32> {
- let x=q/FX_PX;
- let here=vec2<i32>(floor(x));
- let cell=vec2<i32>(floor(vec2<f32>(here)/vec2(6.,8.)));
- let gl=fx_glyph(input,g,cell);
- let b=vec2<i32>(floor(x-.5));
- var cover=0.;
- for (var j=0;j<2;j++) {for (var i=0;i<2;i++) {
-  let k=b+vec2(i,j);
-  let at=k-cell*vec2(6,8);
-  if all(at>=vec2(0)) && all(at<vec2(6,8)) && fx_lit(gl.i,at.x,at.y) {
-   let d=length(x-(vec2<f32>(k)+.5))-.42;
-   cover=max(cover,clamp(.5-d*FX_PX/fp,0.,1.));
-  }
- }}
- return fx_glyph_at(input,g,q,gl,cover);
-}
-]]
-		else [[
-// Each lit pixel a square: the window's pixel takes each glyph pixel it
-// covers by how much falls there (the cell's glyph, its own edge a gap).
+// The window's pixel takes each glyph pixel it covers by how much falls
+// there (a neighbouring cell's own glyph where it reaches into one).
 fn fx_effect(input:LayerInput,g:vec3<f32>,q:vec2<f32>,fp:f32)->vec3<f32> {
  let x=q/FX_PX; let w=fp/FX_PX;
  let k=vec2<i32>(floor(x-.5*w));
  let o=fx_over(x,w);
  let cell=vec2<i32>(floor(floor(x)/vec2(6.,8.)));
  let gl=fx_glyph(input,g,cell);
- var s=0.;
- for (var j=0;j<2;j++) {for (var i=0;i<2;i++) {
-  let at=k+vec2(i,j)-cell*vec2(6,8);
-  let wt=select(1.-o.x,o.x,i==1)*select(1.-o.y,o.y,j==1);
-  if wt>0. && all(at>=vec2(0)) && fx_lit(gl.i,at.x,at.y) {s+=wt;}
- }}
- return fx_glyph_at(input,g,q,gl,s);
+ var s=fx_px(input,g,k,cell,gl)*(1.-o.x)*(1.-o.y);
+ if o.x>0. {s+=fx_px(input,g,k+vec2(1,0),cell,gl)*o.x*(1.-o.y);}
+ if o.y>0. {s+=fx_px(input,g,k+vec2(0,1),cell,gl)*(1.-o.x)*o.y;}
+ if o.x>0. && o.y>0. {s+=fx_px(input,g,k+vec2(1,1),cell,gl)*o.x*o.y;}
+ return s;
 }
-]])
+]],
+		o.px,
+		o.dense,
+		#rows,
+		table.concat(rows, ","),
+		#invs,
+		table.concat(invs, ","),
+		#shares,
+		table.concat(shares, ","),
+		#shares,
+		blue_noise
+	)
 end
 
 -- Halftone: a dot in each cell of a screen `pitch` pixels apart at `angle`
@@ -395,7 +413,7 @@ M.VARIANTS = {
 		end,
 		-- Bayer's 8 by 8, ink or gap: an even, woven screen.
 		silk = function()
-			return dither { cell = 2, levels = 2, map = "bayer" }
+			return dither { cell = 3, levels = 2, map = "bayer" }
 		end,
 		-- Blue noise, three steps: a soft film grain.
 		film = function()
@@ -403,17 +421,19 @@ M.VARIANTS = {
 		end,
 	},
 	ascii = {
-		-- Square pixels, cells of 6 by 8.
+		-- Glyphs on the paper, dense; where they can't make the colour up,
+		-- the paper between them takes the rest.
 		mono = function()
-			return ascii { px = 1.25, dots = false, sparse = 0.6 }
+			return ascii { px = 1.25, inverse = false, dense = 1.25 }
 		end,
-		-- A dot matrix: each lit pixel a round dot.
-		matrix = function()
-			return ascii { px = 1.25, dots = true, sparse = 0.6 }
+		-- Glyphs on the paper, the brightest cells (darkest, in the light)
+		-- a block of ink with the glyph cut out (a stencil, inverse video).
+		stencil = function()
+			return ascii { px = 1.25, inverse = true, dense = 1.1 }
 		end,
-		-- Larger glyphs.
-		large = function()
-			return ascii { px = 1.75, dots = false, sparse = 0.6 }
+		-- The stencil, larger.
+		poster = function()
+			return ascii { px = 1.6, inverse = true, dense = 1.1 }
 		end,
 	},
 	halftone = {
@@ -431,9 +451,9 @@ M.VARIANTS = {
 		end,
 	},
 	scanlines = {
-		-- A CRT's rows: 60% of each lit, soft.
+		-- A CRT's rows, 4 of the picture's pixels apart: 55% of each lit, soft.
 		crt = function()
-			return scanlines { period = 3, band = 0.62, soft = 0.4 }
+			return scanlines { period = 4, band = 0.55, soft = 0.25 }
 		end,
 		-- A line screen: each row's band as thick as its colour takes.
 		lines = function()
