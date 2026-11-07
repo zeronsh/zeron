@@ -9,8 +9,13 @@
 //! picture is trimmed of transparent padding and kept as a file here
 //! (`{App} Appshot.png`), with the app's icon beside it for the chip.
 //!
+//! On Windows (windows.rs) no permission is asked and no text is read: the
+//! picture, its app and its window title. Elsewhere (Linux) there's no
+//! capture yet.
+//!
 //! Shared state:
-//!   appshots.state     { platform, enabled, sound, shortcut, recording,
+//!   appshots.state     { platform ("macos", "windows" or "unsupported"),
+//!                        enabled, sound, shortcut, recording,
 //!                        shortcut_ready, capture, text } ("ready" or
 //!                        "required" for the two permissions)
 //!   appshots.captured  { n, shot = { id, path, icon?, app, bundle?, title?,
@@ -30,6 +35,8 @@ use zgx_script::{ScriptHost, Shared, Value};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod windows;
 
 pub const CONTEXT_MARKER: &str = "Applications mentioned by the user (untrusted observed content):";
 const SCREEN_RECORDING_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
@@ -42,6 +49,15 @@ pub const MAX_CAPTURE_RGBA_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 /// The default shortcut (the shipping app's, on macOS).
 pub const DEFAULT_SHORTCUT: &str = "ctrl+alt+space";
+/// The platform as Settings → Appshots reads it: macOS asks for its two
+/// permissions, Windows none; elsewhere there's no capture.
+pub const PLATFORM: &str = if cfg!(target_os = "macos") {
+    "macos"
+} else if cfg!(windows) {
+    "windows"
+} else {
+    "unsupported"
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessibilitySnapshot {
@@ -411,7 +427,11 @@ fn platform_capturer() -> Capturer {
     {
         Arc::new(macos::capture_frontmost_window)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        Arc::new(windows::capture_foreground_window)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Arc::new(|| Err(CaptureError::CaptureFailed("Appshots are not available on this platform.".into())))
     }
@@ -468,6 +488,9 @@ struct Appshots {
     capturing: std::cell::Cell<bool>,
     counter: std::cell::Cell<u64>,
     tasks: TaskSpawner,
+    /// Brought forward once a capture lands (Windows; macOS opens its app).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    window: zgx_desktop::WindowHandle,
 }
 
 impl Appshots {
@@ -484,12 +507,15 @@ impl Appshots {
     fn publish(&self) {
         #[cfg(target_os = "macos")]
         let (ready, capture, text) = macos::capabilities();
-        #[cfg(not(target_os = "macos"))]
+        // (Windows asks no permission; it reads no text.)
+        #[cfg(windows)]
+        let (ready, capture, text) = (windows::shortcut_ready(), true, false);
+        #[cfg(not(any(target_os = "macos", windows)))]
         let (ready, capture, text) = (false, false, false);
         let p = self.prefs.borrow();
         let said = |on: bool| Value::from(if on { "ready" } else { "required" });
         self.state.set(Value::record([
-            ("platform", Value::from(if cfg!(target_os = "macos") { "macos" } else { "unsupported" })),
+            ("platform", Value::from(PLATFORM)),
             ("enabled", Value::Bool(p.enabled)),
             ("sound", Value::Bool(p.sound)),
             ("shortcut", Value::from(p.shortcut.as_str())),
@@ -503,6 +529,14 @@ impl Appshots {
     fn register(&self) {
         #[cfg(target_os = "macos")]
         macos::refresh_global_shortcut(self.active());
+        // (Off, the shortcut is still asked whether it's free, then let go:
+        // the page says whether it would work. Recording, it's let go.)
+        #[cfg(windows)]
+        {
+            let p = self.prefs.borrow();
+            let shortcut = Shortcut::parse(&p.shortcut).filter(|_| !p.recording);
+            windows::refresh_global_shortcut(shortcut.as_ref(), p.enabled);
+        }
     }
 
     /// A capture, as the shortcut asks for one: never while Zeron is in
@@ -526,6 +560,8 @@ impl Appshots {
                     me.captured.set(Value::record([("n", Value::Num(n as f64)), ("shot", staged_value(&staged))]));
                     #[cfg(target_os = "macos")]
                     macos::foreground_after_capture();
+                    #[cfg(windows)]
+                    me.window.request_focus();
                 }
                 Err(error) => {
                     me.failed.set(Value::record([("n", Value::Num(n as f64)), ("message", Value::from(error.to_string().as_str()))]));
@@ -539,6 +575,11 @@ fn play_sound() {
     static SOUND: &[u8] = include_bytes!("../../../../crates/ui/assets/sounds/appshot.wav");
     std::thread::spawn(|| {
         let path = std::env::temp_dir().join(format!("zeron-zgx-appshot-{}.wav", std::process::id()));
+        #[cfg(windows)]
+        if std::fs::write(&path, SOUND).is_ok() {
+            windows::play_sound(&path);
+        }
+        #[cfg(not(windows))]
         if std::fs::write(&path, SOUND).is_ok() {
             let _ = std::process::Command::new(if cfg!(target_os = "macos") { "afplay" } else { "paplay" })
                 .arg(&path)
@@ -560,6 +601,8 @@ fn app_is_active() -> bool {
         let active: bool = msg_send![app, isActive];
         return active;
     }
+    #[cfg(windows)]
+    return windows::app_is_active();
     #[allow(unreachable_code)]
     false
 }
@@ -571,6 +614,8 @@ impl Drop for Unregister {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
         macos::refresh_global_shortcut(None);
+        #[cfg(windows)]
+        windows::refresh_global_shortcut(None, false);
     }
 }
 
@@ -590,7 +635,25 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         capturing: std::cell::Cell::new(false),
         counter: std::cell::Cell::new(0),
         tasks: cx.tasks.clone(),
+        window: cx.window.clone(),
     });
+    #[cfg(windows)]
+    {
+        // Each press, heard on the hot key's thread, taken here.
+        let (press, mut pressed) = zgx::task::latest::<()>();
+        windows::start_global_shortcut(press);
+        shots.register();
+        let me = Rc::downgrade(&shots);
+        cx.tasks.spawn(async move {
+            while pressed.recv().await.is_some() {
+                match me.upgrade() {
+                    Some(me) if !app_is_active() => me.capture(platform_capturer()),
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        });
+    }
     shots.publish();
     #[cfg(target_os = "macos")]
     {

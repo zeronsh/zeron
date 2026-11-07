@@ -93,3 +93,33 @@ test("a reply picture whose kept file was pruned says so, never a script error",
 	expect(app:has('"Pruned couldn\'t be shown"')).to_be(true)
 	expect(app:has('"Open Pruned"')).to_be(false)
 end)
+
+test("a picture's path on a Windows device is one to draw, as one on a Mac or Linux is (the shipping app's rules)", function()
+	local path = require("../screens/chat/picture_paths").picture
+	expect(path("/tmp/shots/before.png", "/work/app")).to_be("/tmp/shots/before.png")
+	expect(path("shots/after.JPG", "/work/app")).to_be("/work/app/shots/after.JPG")
+	expect(path("./chart.webp", "/work/app")).to_be("/work/app/chart.webp")
+	-- Windows: a drive's path as it is, a relative one joined with `\`.
+	expect(path([[C:\Users\me\AppData\Local\Temp\shot.png]], nil)).to_be([[C:\Users\me\AppData\Local\Temp\shot.png]])
+	expect(path("C:/work/b.png", nil)).to_be("C:/work/b.png")
+	expect(path([[shots\a.gif]], [[C:\work\app]])).to_be([[C:\work\app\shots\a.gif]])
+	expect(path("shots/a.png", [[C:\work\app\]])).to_be([[C:\work\app\shots\a.png]])
+	for _, src in {
+		"",
+		"https://example.com/a.png",
+		"file:///tmp/a.png",
+		"data:image/png;base64,iVBORw0KGgo=",
+		"~/Pictures/a.png",
+		[[\\host\share\a.png]],
+		"//host/share/a.png",
+		[[\??\C:\a.png]],
+		"C:a.png",
+		"/tmp/logo.svg",
+		"/tmp/no-extension",
+	} do
+		expect(if path(src, "/work/app") == nil then src else `drawn: {src}`).to_be(src)
+	end
+	-- A relative path needs the chat's folder, a path of its own.
+	expect(path("a.png", nil)).to_be_nil()
+	expect(path("a.png", "~/.zeron/scratch/x")).to_be_nil()
+end)

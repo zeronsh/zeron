@@ -4,6 +4,10 @@
 -- permissions, each with its state and the way to grant it. The host checks
 -- the permissions (src/appshots); "Check again" asks it afresh after a trip
 -- to System Settings.
+--
+-- Only what the platform has: the permissions are macOS's alone. Windows
+-- asks none and reads no text, so its page is the capture's rows; where
+-- the host has no capture (Linux), the page says so and nothing more.
 
 local ds = require("@ds")
 local search = require("@app/screens/settings/search")
@@ -14,21 +18,33 @@ local M = {}
 M.ID = "appshots"
 M.TITLE = "Appshots"
 
-search.index(M.ID, ui.t("settings.appshots.title"), ui.t("settings.appshots.terms"), {
+local function state(): any
+	return Appshots.state:get() or {}
+end
+
+-- The host's platform: "macos" (also before the host says, and a test's
+-- `true`), "windows", or "unsupported".
+local function platform(): string
+	local p = state().platform
+	return if p == "windows" or p == "unsupported" then p else "macos"
+end
+
+local entries = {
 	{ key = "enabled", title = ui.t("settings.appshots.enabled.label"), terms = ui.t("settings.appshots.enabled.terms") },
 	{ key = "sound", title = ui.t("settings.appshots.sound.label"), terms = ui.t("settings.appshots.sound.terms") },
 	{ key = "shortcut", title = ui.t("settings.appshots.shortcut.label"), terms = ui.t("settings.appshots.shortcut.terms") },
 	{ key = "destination", title = ui.t("settings.appshots.destination.label"), terms = ui.t("settings.appshots.destination.terms") },
-	{ key = "capture", title = ui.t("settings.appshots.capture.label"), terms = ui.t("settings.appshots.capture.terms") },
-	{ key = "text", title = ui.t("settings.appshots.text.label"), terms = ui.t("settings.appshots.text.terms") },
-})
+}
+-- (The permissions found only where they show.)
+local p = (Appshots.state:peek() or {}).platform
+if p ~= "windows" and p ~= "unsupported" then
+	table.insert(entries, { key = "capture", title = ui.t("settings.appshots.capture.label"), terms = ui.t("settings.appshots.capture.terms") })
+	table.insert(entries, { key = "text", title = ui.t("settings.appshots.text.label"), terms = ui.t("settings.appshots.text.terms") })
+end
+search.index(M.ID, ui.t("settings.appshots.title"), ui.t("settings.appshots.terms"), if p == "unsupported" then {} else entries)
 
 local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
-end
-
-local function state(): any
-	return Appshots.state:get() or {}
 end
 
 -- A capability's badge: "Ready", or "Required" / "Set up".
@@ -169,10 +185,24 @@ M.view = ui.component(function(_: {}): Node
 	local function shortcut_ready(): boolean
 		return state().shortcut_ready == true
 	end
+	local function macos(): boolean
+		return platform() == "macos"
+	end
+	local function captures(): boolean
+		return platform() ~= "unsupported"
+	end
 	return ds.Settings.Page {
 		title = ui.t("settings.appshots.title"),
-		description = ui.t("settings.appshots.description"),
-		ds.Settings.Section {
+		description = function(): string
+			local p = platform()
+			if p == "windows" then
+				return ui.t("settings.appshots.windows_description"):get()
+			elseif p == "unsupported" then
+				return ui.t("settings.appshots.unsupported_description"):get()
+			end
+			return ui.t("settings.appshots.description"):get()
+		end,
+		ui.show(captures, ds.Settings.Section {
 			title = ui.t("settings.appshots.capture_section"),
 			ds.Settings.Group {
 				row("enabled", {
@@ -188,8 +218,12 @@ M.view = ui.component(function(_: {}): Node
 				row("shortcut", {
 					label = ui.t("settings.appshots.shortcut.label"),
 					description = function(): string
-						return if shortcut_ready()
-							then ui.t("settings.appshots.shortcut.ready"):get()
+						if shortcut_ready() then
+							return ui.t("settings.appshots.shortcut.ready"):get()
+						end
+						-- (Windows: another app registered it first.)
+						return if platform() == "windows"
+							then ui.t("settings.appshots.shortcut.taken"):get()
 							else ui.t("settings.appshots.shortcut.unavailable"):get()
 					end,
 					control = ui.row { gap = "$space.2", items = "center", badge(shortcut_ready, ui.t("settings.appshots.set_up")), Recorder {} },
@@ -220,8 +254,8 @@ M.view = ui.component(function(_: {}): Node
 					},
 				}),
 			},
-		},
-		ds.Settings.Section {
+		}),
+		ui.show(macos, ds.Settings.Section {
 			title = ui.t("settings.appshots.permissions"),
 			description = ui.t("settings.appshots.permissions_description"),
 			ds.Settings.Group {
@@ -250,14 +284,17 @@ M.view = ui.component(function(_: {}): Node
 					},
 				}),
 			},
-		},
-		ui.row {
-			gap = "$space.3",
-			items = "center",
-			pl = ds.Settings.inset(),
-			ui.text { ui.t("settings.appshots.changed"), text_size = "$font.size.sm", color = "$text.secondary" },
-			ds.Button { tone = "ghost", size = "sm", on_click = Appshots.refresh, ui.t("settings.appshots.check_again") },
-		},
+		}),
+		ui.show(
+			macos,
+			ui.row {
+				gap = "$space.3",
+				items = "center",
+				pl = ds.Settings.inset(),
+				ui.text { ui.t("settings.appshots.changed"), text_size = "$font.size.sm", color = "$text.secondary" },
+				ds.Button { tone = "ghost", size = "sm", on_click = Appshots.refresh, ui.t("settings.appshots.check_again") },
+			}
+		),
 	}
 end)
 

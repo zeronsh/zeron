@@ -434,6 +434,14 @@ impl PictureRead {
     }
 }
 
+/// Whether `path` is absolute on the device it names a file of, whichever
+/// that is: `/x`, or Windows' `C:\x` / `C:/x` (a chat on a Windows device
+/// sends its pictures as such). The engine there says whether it may be read.
+fn host_absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    path.starts_with('/') || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\'))
+}
+
 /// `bytes` kept as a file named by their hash (one already there is the
 /// same picture), with the extension its media type says.
 fn keep_image(hash: &str, mime: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
@@ -752,7 +760,7 @@ impl Files {
         let path = text(arg.field("path"));
         let checkout = text(arg.field("checkout"));
         // (A file outside the project goes by its own path, no checkout.)
-        if checkout.is_empty() && !path.starts_with('/') {
+        if checkout.is_empty() && !host_absolute(&path) {
             return Err("The project's checkout isn't known.".into());
         }
         params.insert("path".into(), Json::String(path));
@@ -872,7 +880,7 @@ impl Files {
             params.remove("chatId");
         }
         let path = text(arg.field("path"));
-        if !path.starts_with('/') {
+        if !host_absolute(&path) {
             return Err("That picture isn't a path on the chat's device.".into());
         }
         params.insert("path".into(), Json::String(path));
