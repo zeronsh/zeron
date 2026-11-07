@@ -19,6 +19,7 @@ local route = require("@app/screens/shell/route")
 local shell_view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
 local sessions = require("@account/sessions")
+local engine = require("@account/engine")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
@@ -62,11 +63,18 @@ return function(props: Props): Node
 	-- session (a page swap; another session is the same page, showing it,
 	-- in place).
 	local view = ui.presence(function(): string
+		-- (The engine can't start: said in the page's place, with Retry.)
+		if engine.failed:get() then
+			return "engine"
+		end
 		if route.chat:get().name == "plugin" then
 			return "none"
 		end
 		return if in_session() then "session" else "home"
 	end, function(kind: string): Node
+		if kind == "engine" then
+			return require("@app/screens/engine/start")()
+		end
 		-- (A plugin's page is a route of its own: no chat under it.)
 		if kind == "none" then
 			return ui.div {}

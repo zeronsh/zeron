@@ -727,6 +727,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // and GitHub for Cloud (src/github.rs): every window but the intro's.
     if entry != "intro.luau" {
         auth::install(cx, &host);
+        // Whether the engine can't start, and Retry (src/engine/mod.rs).
+        engine::install_script(&host);
         agents::install(&host);
         acp_registry::install(cx, &host);
         github::install(cx, &host);

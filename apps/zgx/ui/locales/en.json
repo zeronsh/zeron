@@ -3074,6 +3074,10 @@
       "old": "This Zeron needs a newer engine",
       "old_tip": "Its engine is older than this version needs. Open About & updates to go back to Stable.",
       "short_old": "Needs a newer engine"
+    },
+    "start": {
+      "failed_title": "Zeron can't start its engine",
+      "failed_body": "It has been trying for a minute. Try again to start it."
     }
   },
   "account": {

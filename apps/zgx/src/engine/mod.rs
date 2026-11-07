@@ -13,6 +13,12 @@
 //! calls wait and screens stay loading (`keeps_waiting`, `says_unreachable`).
 //! An engine that answered and went is reconnected to in the same way, and
 //! only said as unreachable after [`CONNECT_WAIT`].
+//!
+//! An engine this app can start that still hasn't answered after
+//! [`START_WAIT`] can't start: scripts are told (`engine.start`, `{ failed }`)
+//! and show it, with Retry (`engine.retry`), which starts or dials again at
+//! once and waits another [`START_WAIT`]. An engine that answers meanwhile
+//! clears it ([`StartWatch`]).
 
 pub mod lists;
 pub mod manager;
@@ -26,12 +32,16 @@ use std::{
 
 use serde_json::{Value as Json, json};
 use zgx_desktop::{TaskSpawner, WindowContext};
+use zgx_script::{ScriptHost, Shared, Value};
 
 use manager::{Config, Spawner};
 use rpc::{DialError, Rpc};
 
 /// How long a connection lost, or an engine this app can't start, takes to
 /// be said as `offline`.
+/// How long a launch waits for an engine it can start before saying it can't.
+const START_WAIT: Duration = Duration::from_secs(60);
+
 const CONNECT_WAIT: Duration = Duration::from_secs(20);
 
 type Listener = Rc<dyn Fn(&Rpc)>;
@@ -53,6 +63,13 @@ pub struct Engine {
     down_since: Cell<Instant>,
     /// What hears that no connection is now said as unreachable.
     unreachable_listeners: RefCell<Vec<Rc<dyn Fn()>>>,
+    /// Whether the engine is said as unable to start, and since when it's
+    /// been waited for.
+    start: RefCell<StartWatch>,
+    /// Each window's `engine.start`.
+    start_shared: RefCell<Vec<Shared>>,
+    /// Retry asked: the supervisor starts or dials again at once.
+    retry_asked: Cell<bool>,
     /// The latest window's tasks: the connection lives on them, and moves to
     /// the next window's when that window closes.
     tasks: RefCell<Option<TaskSpawner>>,
@@ -66,6 +83,19 @@ thread_local! {
 /// The engine's data dir, from the config (see `Engine::data_dir`).
 pub fn data_dir() -> Option<std::path::PathBuf> {
     get().data_dir()
+}
+
+/// `engine.start` (`{ failed }`: the engine can't start) and `engine.retry`
+/// for `host`'s scripts.
+pub fn install_script(host: &ScriptHost) {
+    let engine = get();
+    let failed = engine.start.borrow().failed;
+    engine.start_shared.borrow_mut().push(host.shared("engine.start", start_record(failed)));
+    host.action("engine.retry", |_| get().retry());
+}
+
+fn start_record(failed: bool) -> Value {
+    Value::record([("failed", Value::Bool(failed))])
 }
 
 pub fn get() -> Rc<Engine> {
@@ -113,6 +143,9 @@ impl Engine {
             answered: Cell::new(false),
             down_since: Cell::new(Instant::now()),
             unreachable_listeners: RefCell::default(),
+            start: RefCell::new(StartWatch::new(Instant::now())),
+            start_shared: RefCell::default(),
+            retry_asked: Cell::new(false),
             tasks: RefCell::default(),
             supervising: Cell::new(false),
         }
@@ -182,6 +215,38 @@ impl Engine {
     /// a connection, it's not asked.)
     pub fn unreachable(&self) -> bool {
         says_unreachable(self.config.is_err(), self.answered.get(), self.can_start(), self.down_since.get().elapsed())
+    }
+
+    /// Retry, from the engine that can't start: back to waiting, and an
+    /// engine started (or dialled) again at once.
+    pub fn retry(&self) {
+        eprintln!("zeron-zgx: engine: trying again");
+        let changed = self.start.borrow_mut().retry(Instant::now());
+        self.down_since.set(Instant::now());
+        self.retry_asked.set(true);
+        if changed {
+            self.publish_start();
+        }
+    }
+
+    /// The supervisor's look at whether the engine can't start.
+    fn look_start(&self) {
+        let connected = self.rpc.borrow().as_ref().is_some_and(|rpc| !rpc.is_closed());
+        let changed = self.start.borrow_mut().look(Instant::now(), connected, self.answered.get(), self.can_start());
+        if changed {
+            let failed = self.start.borrow().failed;
+            if failed {
+                eprintln!("zeron-zgx: engine: hasn't started in {}s; said so", START_WAIT.as_secs());
+            }
+            self.publish_start();
+        }
+    }
+
+    fn publish_start(&self) {
+        let value = start_record(self.start.borrow().failed);
+        for shared in self.start_shared.borrow().iter() {
+            shared.set(value.clone());
+        }
     }
 
     /// Whether this app can start an engine, should none answer.
@@ -277,6 +342,11 @@ impl Engine {
         // The token the engine last refused, if it refused the last dial.
         let mut refused = None::<Option<String>>;
         loop {
+            if self.retry_asked.replace(false) {
+                spawner = Spawner::new();
+                delay = Duration::from_millis(250);
+                refused = None;
+            }
             let token = rpc::read_token(&config.data_dir);
             // Refused again with the same token: nothing will change by
             // dialling as often (a data dir with a copy of an engine's token,
@@ -294,6 +364,7 @@ impl Engine {
                     *self.rpc.borrow_mut() = Some(rpc.clone());
                     self.scope.borrow_mut().take();
                     self.restarting.set(false);
+                    self.look_start();
                     // Which workspace it opened: whether a session change
                     // needs it started again.
                     let (me, info) = (self.clone(), rpc.clone());
@@ -341,6 +412,7 @@ impl Engine {
                     }
                 }
             }
+            self.look_start();
             if !said_unreachable && self.rpc.borrow().is_none() && self.unreachable() {
                 said_unreachable = true;
                 let listeners = self.unreachable_listeners.borrow().clone();
@@ -355,7 +427,7 @@ impl Engine {
             loop {
                 zgx::timer::sleep(delay.min(TOKEN_LOOK)).await;
                 let changed = refused.as_ref().is_some_and(|was| *was != rpc::read_token(&config.data_dir));
-                if changed || waited.elapsed() >= delay {
+                if changed || waited.elapsed() >= delay || self.retry_asked.get() {
                     break;
                 }
             }
@@ -375,6 +447,35 @@ const STALE_TOKEN_WAIT: Duration = Duration::from_secs(60);
 /// has; to a minute while the engine keeps refusing the same token.
 fn next_delay(delay: Duration, stale_token: bool) -> Duration {
     (delay * 2).min(if stale_token { STALE_TOKEN_WAIT } else { Duration::from_secs(3) })
+}
+
+/// Whether the engine is said as unable to start: one this app can start
+/// that hasn't answered in this run after [`START_WAIT`] (from the launch, or
+/// the last Retry). Said until an engine answers or Retry is asked.
+struct StartWatch {
+    since: Instant,
+    failed: bool,
+}
+
+impl StartWatch {
+    fn new(now: Instant) -> Self {
+        Self { since: now, failed: false }
+    }
+
+    /// Looked at `now`: whether `failed` changed.
+    fn look(&mut self, now: Instant, connected: bool, answered: bool, startable: bool) -> bool {
+        let failed = !connected
+            && !answered
+            && startable
+            && (self.failed || now.saturating_duration_since(self.since) >= START_WAIT);
+        std::mem::replace(&mut self.failed, failed) != failed
+    }
+
+    /// Retry at `now`: waited for again. Whether `failed` changed.
+    fn retry(&mut self, now: Instant) -> bool {
+        self.since = now;
+        std::mem::replace(&mut self.failed, false)
+    }
 }
 
 /// Whether a call keeps waiting for a connection past its time.
@@ -405,6 +506,56 @@ mod tests {
     use super::*;
 
     const LONG: Duration = Duration::from_secs(3600);
+
+    /// No engine for a minute: it can't start. Not a moment before.
+    #[test]
+    fn no_engine_for_a_minute_is_said_as_unable_to_start() {
+        let t0 = Instant::now();
+        let mut watch = StartWatch::new(t0);
+        assert!(!watch.look(t0 + Duration::from_secs(59), false, false, true));
+        assert!(!watch.failed);
+        assert!(watch.look(t0 + START_WAIT, false, false, true));
+        assert!(watch.failed);
+        // (Said once: no change on the next look.)
+        assert!(!watch.look(t0 + START_WAIT + Duration::from_secs(1), false, false, true));
+        assert!(watch.failed);
+    }
+
+    /// Retry goes back to waiting, for another minute.
+    #[test]
+    fn retry_waits_another_minute() {
+        let t0 = Instant::now();
+        let mut watch = StartWatch::new(t0);
+        watch.look(t0 + START_WAIT, false, false, true);
+        let at = t0 + START_WAIT + Duration::from_secs(5);
+        assert!(watch.retry(at));
+        assert!(!watch.failed);
+        assert!(!watch.look(at + Duration::from_secs(59), false, false, true));
+        assert!(watch.look(at + START_WAIT, false, false, true));
+        assert!(watch.failed);
+    }
+
+    /// An engine that answers late clears it by itself, and once one has
+    /// answered, losing it is never said so.
+    #[test]
+    fn an_engine_arriving_late_clears_it() {
+        let t0 = Instant::now();
+        let mut watch = StartWatch::new(t0);
+        watch.look(t0 + START_WAIT, false, false, true);
+        assert!(watch.look(t0 + START_WAIT * 2, true, true, true));
+        assert!(!watch.failed);
+        assert!(!watch.look(t0 + LONG, false, true, true));
+        assert!(!watch.failed);
+    }
+
+    /// With no engine this app could start, nothing waits for one.
+    #[test]
+    fn nothing_to_start_is_never_said_so() {
+        let t0 = Instant::now();
+        let mut watch = StartWatch::new(t0);
+        assert!(!watch.look(t0 + LONG, false, false, false));
+        assert!(!watch.failed);
+    }
 
     /// A window whose data dir holds a copy of an engine's token (a test
     /// window on the user's engine) once dialled every 3 s for as long as it

@@ -23,6 +23,7 @@ local invite = require("@self/invite")
 local github = require("@self/github")
 local providers = require("@self/providers")
 local done = require("@self/done")
+local engine = require("@account/engine")
 
 -- The ways back and on. (The dots are the frame's, drawn once over every
 -- step, so a step draws none of its own.)
@@ -157,8 +158,14 @@ return function(): Node
 				return n
 			end,
 		},
-		ui.presence(state.step, function(s: state.Step)
-			local build = STEPS[s] or STEPS.signin
+		-- (The engine can't start: said in the step's place, with Retry.)
+		ui.presence(function(): string
+			return if engine.failed:get() then "engine" else state.step:get()
+		end, function(s: string)
+			if s == "engine" then
+				return require("@app/screens/engine/start")()
+			end
+			local build = STEPS[s :: state.Step] or STEPS.signin
 			return build()
 		end, {
 			w_full = true,

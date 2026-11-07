@@ -458,6 +458,29 @@ local icons_refused: string? = nil
 -- Cloud's machines among the devices, as the engine lists them: two
 -- sessions' (their platform, id and capability say Cloud's), never a device
 -- to pick.
+-- The engine (@account/engine), as the host would: it can't start, and
+-- Retry back to waiting (each counted in `fixture_engine_retries`); then
+-- an engine that answers.
+local engine_stub = require("@account/engine") :: any
+local engine_retries = ui.state("fixture_engine_retries", 0)
+engine_stub.retry = function()
+	engine_retries:set(engine_retries:peek() + 1)
+	engine_stub.start:set({ failed = false })
+end
+ui.command {
+	id = "fixture.engine_cant_start",
+	title = "Fixture: the engine hasn't started in a minute",
+	run = function()
+		engine_stub.start:set({ failed = true })
+	end,
+}
+ui.command {
+	id = "fixture.engine_started",
+	title = "Fixture: the engine answers",
+	run = function()
+		engine_stub.start:set({ failed = false })
+	end,
+}
 ui.command {
 	id = "fixture.sessions_loading",
 	title = "Fixture: an engine that hasn't answered, no chats heard",
