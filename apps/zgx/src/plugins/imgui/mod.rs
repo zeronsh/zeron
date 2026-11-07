@@ -43,6 +43,7 @@ pub mod paint;
 pub mod permission;
 pub mod render;
 pub mod runtime;
+pub mod scene;
 pub mod snapshot;
 pub mod style;
 pub mod texture;

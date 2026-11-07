@@ -77,6 +77,17 @@ derives from them are derived the same way (`ui/ds/palettes.tokens`). A plugin's
 own — one `PluginStyle` per plugin, applied to that plugin's contexts before each frame opens —
 so nothing one plugin sets can reach another plugin or Zeron's own window.
 
+A plugin can also draw a solid model. `ui.scene3d` reserves a rect and the renderer draws it
+in a pass of its own after the widgets, against a depth buffer it owns: solid triangles, no
+culling, lit per pixel by a key and a fill light, scissored to the widget's rect so nothing
+leaves it. The model, view and projection matrices are multiplied into the vertices on the CPU,
+exactly as the ImGui vertices already are, so the pass needs no uniform buffer and nothing is
+written between frames but the vertices. A mesh (`imgui.mesh`) is uploaded once and drawn by
+handle, like a picture; the id space is the plugin's own. Depth is `Depth32Float`, made with the
+target and rebuilt when the target changes, so a resized window costs one texture, not one a
+frame. The scene draws over the frame's widgets because a scene is a widget: what the plugin
+draws outside its rect stays visible, and what it puts inside is covered by the model.
+
 Rejected: the managed `WgpuRenderer` in `dear-imgui-wgpu` 0.22. Its frame-resource arena creates
 vertex, index and uniform buffers for every render epoch, and an epoch is one native frame
 (`Context::render()` allocates a fresh snapshot epoch per call). An animating plugin window would

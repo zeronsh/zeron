@@ -1331,6 +1331,8 @@ return function(id: string): any
 	-- their handles: the host's own id stays here, never on the handle.
 	local imgui_textures: { [any]: any } = {}
 	local imgui_font_handles: { [any]: any } = {}
+	-- The meshes `imgui.mesh` handed out, by their handles.
+	local imgui_meshes: { [any]: any } = {}
 	-- How many handles of each kind were made, for `imgui.texture#n`.
 	local imgui_made_kind: { [string]: number } = {}
 
@@ -1872,6 +1874,31 @@ return function(id: string): any
 				call("paint", table.clone(command))
 			end
 		end
+		function view.scene3d(fields: { [string]: any }): any
+			local asked = table.clone(fields or {})
+			local models = {}
+			for at, model in asked.models or {} do
+				local mesh = imgui_meshes[model.mesh]
+				if not mesh then
+					error(
+						`ui.scene3d's model {at} needs mesh to be a handle from imgui.mesh\{ ... \}, not another value.`,
+						3
+					)
+				end
+				local placed = table.clone(model)
+				placed.mesh = mesh.id
+				table.insert(models, placed)
+			end
+			asked.models = models
+			local answer = call("scene3d", asked)
+			return {
+				hovered = answer.hovered == true,
+				active = answer.active == true,
+				clicked = answer.clicked == true,
+				min = answer.min,
+				max = answer.max,
+			}
+		end
 		function view.image(fields: { [string]: any }): any
 			local picture = imgui_textures[fields.handle]
 			if not picture then
@@ -2030,6 +2057,17 @@ return function(id: string): any
 			error("imgui.texture_size needs a texture handle from imgui.texture{ path = … }.", 2)
 		end
 		return picture.width, picture.height
+	end
+
+	-- A mesh of triangles for `ui.scene3d`: ten numbers a vertex (x, y, z,
+	-- nx, ny, nz, r, g, b, a) and three indices a triangle, uploaded once.
+	function imgui.mesh(fields: { [string]: any }): any
+		local asked = table.clone(fields or {})
+		asked.op = "mesh"
+		local answer = imgui_ask(asked)
+		local handle = imgui_handle("mesh", {})
+		imgui_meshes[handle] = { id = answer.id, triangles = answer.triangles }
+		return handle
 	end
 
 	-- A font file inside your plugin's own folder, worn with

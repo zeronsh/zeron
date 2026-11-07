@@ -38,6 +38,7 @@ use super::frame::{FrameCalls, FrameReport, FrameState, FrameWindow};
 use super::render::ImguiViewport;
 use super::runtime::FrameSpec;
 use super::runtime::WindowContext as ImGuiContext;
+use super::scene::PluginMeshes;
 use super::style::{self, PluginStyle};
 use super::texture::PluginTextures;
 use dear_imgui_rs::{FontId, MouseButton, Ui};
@@ -689,6 +690,8 @@ pub struct PluginWindow {
     style: Rc<PluginStyle>,
     /// The pictures this plugin registered, drawn by handle.
     textures: Rc<PluginTextures>,
+    /// The meshes this plugin registered, drawn by `ui.scene3d`.
+    meshes: Rc<PluginMeshes>,
 }
 
 impl PluginWindow {
@@ -1161,6 +1164,10 @@ impl FrameWindow for PluginWindow {
     fn frame_textures(&self) -> Option<Rc<PluginTextures>> {
         Some(self.textures.clone())
     }
+
+    fn frame_meshes(&self) -> Option<Rc<PluginMeshes>> {
+        Some(self.meshes.clone())
+    }
 }
 
 /// Draws a plugin window's prepared frame: the paint half of the frame
@@ -1330,6 +1337,7 @@ pub struct Windows {
     /// reopens a window finds what it set still there.
     styles: RefCell<HashMap<String, Rc<PluginStyle>>>,
     textures: RefCell<HashMap<String, Rc<PluginTextures>>>,
+    meshes: RefCell<HashMap<String, Rc<PluginMeshes>>>,
     /// Where each plugin's own files are (`imgui.texture`, `imgui.font`).
     roots: RefCell<HashMap<String, PathBuf>>,
     /// Where the pump's round robin resumes: one window a tick, so several
@@ -1354,6 +1362,7 @@ impl Windows {
             calls: RefCell::default(),
             styles: RefCell::default(),
             textures: RefCell::default(),
+            meshes: RefCell::default(),
             roots: RefCell::default(),
             pump_cursor: Cell::new(0),
             pumping: Cell::new(false),
@@ -1377,6 +1386,18 @@ impl Windows {
             .borrow_mut()
             .insert(plugin.to_string(), style.clone());
         style
+    }
+
+    /// `plugin`'s meshes, made on first ask.
+    pub fn meshes(&self, plugin: &str) -> Rc<PluginMeshes> {
+        if let Some(meshes) = self.meshes.borrow().get(plugin) {
+            return meshes.clone();
+        }
+        let meshes = Rc::new(PluginMeshes::new());
+        self.meshes
+            .borrow_mut()
+            .insert(plugin.to_string(), meshes.clone());
+        meshes
     }
 
     /// `plugin`'s pictures, made on first ask.
@@ -1543,6 +1564,7 @@ impl Windows {
             notify: self.listeners.borrow().get(plugin).cloned(),
             style: self.style(plugin),
             textures: self.textures(plugin),
+            meshes: self.meshes(plugin),
         });
         *slot.borrow_mut() = Some(record.clone());
         self.open.borrow_mut().insert(global, record.clone());

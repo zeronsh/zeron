@@ -82,6 +82,7 @@ const WIDGET_OPS: &[&str] = &[
     "bullet_text",
     "image",
     "paint",
+    "scene3d",
     "invisible_button",
     "is_item_hovered",
     "is_item_active",
@@ -144,7 +145,14 @@ const WIDGET_OPS: &[&str] = &[
 const FRAME_END: &str = "frame_end";
 
 /// The ops that name no window: the plugin's own look and its pictures.
-const PLUGIN_OPS: &[&str] = &["style", "set_style", "reset_style", "texture", "font"];
+const PLUGIN_OPS: &[&str] = &[
+    "style",
+    "set_style",
+    "reset_style",
+    "texture",
+    "font",
+    "mesh",
+];
 
 /// What the host keeps of one plugin's windows, as the action closes over it.
 pub struct ImGuiWindows {
@@ -445,6 +453,18 @@ impl ImGuiWindows {
                         ("id", Value::from(image.id as f64)),
                         ("width", Value::from(image.width as f64)),
                         ("height", Value::from(image.height as f64)),
+                    ]),
+                    Err(error) => self.refuse(error),
+                }
+            }
+            "mesh" => {
+                let meshes = self.windows.meshes(&self.plugin);
+                match meshes.register(arg) {
+                    Ok(mesh) => Value::record([
+                        ("ok", Value::Bool(true)),
+                        ("id", Value::from(mesh.id as f64)),
+                        ("vertices", Value::from(mesh.vertices.len() as f64)),
+                        ("triangles", Value::from((mesh.indices.len() / 3) as f64)),
                     ]),
                     Err(error) => self.refuse(error),
                 }

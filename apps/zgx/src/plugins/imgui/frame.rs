@@ -67,6 +67,7 @@ use zgx_script::Value;
 use super::paint::Paint;
 use super::render::PreparedFrame;
 use super::runtime::FrameSpec;
+use super::scene::{self, SceneSpec};
 use super::style::{PluginStyle, Resolved, Tokens};
 use super::texture::PluginTextures;
 
@@ -214,6 +215,10 @@ pub trait FrameWindow {
     fn frame_textures(&self) -> Option<Rc<PluginTextures>> {
         None
     }
+    /// The plugin's own meshes, for `ui.scene3d`.
+    fn frame_meshes(&self) -> Option<Rc<super::scene::PluginMeshes>> {
+        None
+    }
     /// Hands a finished frame to the GPU view, which invalidates so it paints.
     fn frame_deliver(&self, frame: PreparedFrame);
     /// The window is beyond saving; close it (the plugin stays loaded).
@@ -304,6 +309,8 @@ struct LiveFrame {
     /// The frame's `Ui`, owned by the context. Valid while the frame is open,
     /// on this thread only; [`FrameState`] never lets it outlive the frame.
     ui: *const Ui,
+    /// Device pixels per point, for the rects a scene is scissored to.
+    scale: f32,
     started_wall: Instant,
     ops: u32,
     /// Set when the script side reports the callback overran its budget.
@@ -327,6 +334,9 @@ struct LiveFrame {
     tree_depth: u32,
     drag_source_open: bool,
     drag_target_open: bool,
+    /// The 3D scenes the callback asked for, in the order it asked: built
+    /// once the frame's target size is known.
+    scenes: Vec<SceneSpec>,
 }
 
 /// One open table region: which columns the plugin declared, for a sort spec
@@ -458,6 +468,7 @@ impl FrameState {
             first,
             exempt,
             ui: std::ptr::null(),
+            scale: scale as f32,
             started_wall: now,
             ops: 0,
             over_budget: false,
@@ -477,6 +488,7 @@ impl FrameState {
             tree_depth: 0,
             drag_source_open: false,
             drag_target_open: false,
+            scenes: Vec::new(),
         });
         Ok((seq, spec))
     }
@@ -1144,6 +1156,7 @@ impl FrameState {
             "color_button" => color_button(ui, arg, op),
             "image" => image(window, ui, arg, op),
             "paint" => paint(window, ui, arg),
+            "scene3d" => scene3d(frame, window, ui, arg, op),
             "begin_drag_drop_source" => begin_drag_drop_source(ui, frame, op),
             "set_drag_drop_payload" => set_drag_drop_payload(self, ui, frame, arg, op),
             "end_drag_drop_source" => end_drag_drop_source(ui, frame, op),
@@ -1203,6 +1216,12 @@ impl FrameState {
             Some(error) => self.record_failure(&error, first, ms),
             None => match prepared {
                 Ok(prepared) => {
+                    let target = prepared.target_size();
+                    let prepared = prepared.with_scenes(SceneSpec::build_all(
+                        &frame.scenes,
+                        target,
+                        frame.scale,
+                    ));
                     window.frame_deliver(prepared);
                     self.frames.set(self.frames.get() + 1);
                     self.consecutive.set(0);
@@ -2984,6 +3003,53 @@ fn paint(window: &impl FrameWindow, ui: &Ui, arg: &Value) -> Result<Value, Strin
         textures: &textures,
     }
     .apply(arg)
+}
+
+/// `ui.scene3d`: a 3D scene drawn into the rect the widget reserves.
+fn scene3d(
+    frame: &mut super::frame::LiveFrame,
+    window: &impl FrameWindow,
+    ui: &Ui,
+    arg: &Value,
+    op: &str,
+) -> Result<Value, String> {
+    let meshes = meshes_of(window);
+    let style = resolved_of(window);
+    if frame.scenes.len() >= scene::MAX_SCENES {
+        return Err(format!(
+            "ui.{op} draws {} scenes a frame at most; this one is the {}.",
+            scene::MAX_SCENES,
+            frame.scenes.len() + 1
+        ));
+    }
+    let id = invisible_id(arg, op)?;
+    let size = item_size(arg, op)?;
+    let mut spec = scene::parse_scene(arg, &style, &meshes)?;
+    let spacing = ui.push_style_var_y(StyleVarVec2::ItemSpacing, 0.0);
+    let clicked = ui.invisible_button(id, size);
+    spacing.pop();
+    let hovered = ui.is_item_hovered();
+    let active = ui.is_item_active();
+    let min = ui.item_rect_min();
+    let max = ui.item_rect_max();
+    spec.rect = [min[0], min[1], max[0], max[1]];
+    frame.scenes.push(spec);
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("hovered", Value::Bool(hovered)),
+        ("active", Value::Bool(active)),
+        ("clicked", Value::Bool(clicked)),
+        ("min", point(min)),
+        ("max", point(max)),
+    ]))
+}
+
+/// The plugin's meshes; an empty registry for a window whose host has none
+/// (the tests' own windows), so a handle is refused rather than drawn.
+fn meshes_of(window: &impl FrameWindow) -> Rc<super::scene::PluginMeshes> {
+    window
+        .frame_meshes()
+        .unwrap_or_else(|| Rc::new(super::scene::PluginMeshes::new()))
 }
 
 /// The plugin's look, or Zeron's dark default for a window whose host set

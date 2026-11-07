@@ -772,6 +772,36 @@ end)
 
 PNG and JPEG decode to RGBA8. Each picture is uploaded once and stays on the GPU while the plugin is loaded: drawing it on sixty frames costs one texture, not sixty. `add_image` also takes `uv_min`/`uv_max` to draw part of a picture and `color` to tint it. A handle that is not one of your own pictures — a number, a path, another plugin's handle — is refused with a sentence naming what a handle is.
 
+### 3D
+
+A window can draw a solid model: the host owns a depth-tested pass, so faces
+hide each other correctly and the light falls on them per pixel.
+
+```lua
+local cube = zeron.imgui.mesh {
+	vertices = { -1,-1,-1, 0,0,-1, 1,1,1,1,  … },   -- x, y, z, nx, ny, nz, r, g, b, a
+	indices = { 0, 1, 2, 0, 2, 3, … },              -- three per triangle
+}
+
+w:on_render(function(ui)
+	local view = ui.scene3d {
+		id = "model",
+		width = 640, height = 360,
+		camera = { yaw = 0.7, pitch = -0.4, distance = 9, fov = 42 },
+		models = {
+			{ mesh = cube, position = { 0, 0, 0 }, rotation = { 0.2, 0.8, 0 }, scale = 1, color = "$accent" },
+		},
+	}
+	if view.active and ui.is_mouse_dragging() then
+		local dx, dy = ui.mouse_delta()
+		camera.yaw -= dx * 0.01
+		camera.pitch = camera.pitch + dy * 0.01
+	end
+end)
+```
+
+A mesh is ten numbers a vertex — position, outward normal and colour (0 to 1) — and three indices a triangle; it is uploaded once and drawn by handle. `scene3d` reserves its rect like any other widget and draws the models over it, so the widgets drawn outside it stay visible and the ones inside are covered; paint a backdrop with the draw list and it stays under the cubes. `camera` orbits a target (default the origin): `yaw`, `pitch` (clamped to ±1.55), `distance`, `fov` from 5 to 150. Each model has `position`, `rotation` (radians, x then y then z), `scale` (one number or three) and `color`, which tints the vertices. The answer's `hovered`, `active` and `clicked` are the pointer over the rect, so a drag turns the camera the way `invisible_button` does. Four scenes a frame at most.
+
 ### Style and theme
 
 A plugin window wears the same theme Zeron wears, and can change it for itself alone. Nothing a plugin sets reaches Zeron's own window or another plugin's.

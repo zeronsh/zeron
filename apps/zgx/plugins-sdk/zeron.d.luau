@@ -20,6 +20,24 @@ export type Rgb = {
 
 export type TextureHandle = any
 
+export type MeshHandle = any
+
+export type SceneOptions = {
+	id: string,
+	width: number,
+	height: number,
+	camera: { yaw: number?, pitch: number?, distance: number?, fov: number?, target: { number }? }?,
+	models: { { mesh: MeshHandle, position: { number }?, rotation: { number }?, scale: number | { number }?, color: Colour? } },
+}
+
+export type SceneAnswer = {
+	hovered: boolean,
+	active: boolean,
+	clicked: boolean,
+	min: Point,
+	max: Point,
+}
+
 export type FontHandle = any
 
 export type DrawList = {
@@ -218,6 +236,7 @@ export type Ui = {
 	end_list_box: () -> (),
 	color_edit3: (label: string, colour: Rgb, options: { [string]: any }?) -> Rgb,
 	image: (options: ImageOptions) -> ImageAnswer,
+	scene3d: (options: SceneOptions) -> SceneAnswer,
 	get_window_draw_list: () -> DrawList,
 	draw: (list: DrawList) -> (),
 	color_button: (options: { [string]: any }) -> boolean,
@@ -255,6 +274,7 @@ export type ImGui = {
 	open_window: (options: WindowOptions) -> ImGuiHandle,
 	is_open: (window: string) -> boolean,
 	draw_list: () -> DrawList,
+	mesh: (options: { vertices: { number }, indices: { number } }) -> MeshHandle,
 	texture: (options: { path: string }) -> TextureHandle,
 	texture_size: (handle: TextureHandle) -> (number, number),
 	font: (options: { path: string, size: number? }) -> FontHandle,

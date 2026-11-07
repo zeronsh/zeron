@@ -34,6 +34,7 @@ use std::rc::Rc;
 use dear_imgui_rs::render::{DrawCmd, DrawData};
 use dear_imgui_rs::{LegacyFontAtlas, TextureFormat as AtlasFormat};
 
+use super::scene::PreparedScene;
 use super::texture::TextureImage;
 use zgx_gpu::viewport::{Viewport, ViewportFrame};
 use zgx_gpu::wgpu;
@@ -50,6 +51,9 @@ const MIN_VERTEX_BYTES: usize = 16 * 1024;
 const MIN_INDEX_BYTES: usize = 16 * 1024;
 
 const SHADER: &str = include_str!("imgui.wgsl");
+const SCENE_SHADER: &str = include_str!("scene.wgsl");
+/// The depth format a scene's pass tests against.
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 // ---------------------------------------------------------------------------------------------
 // Counters
@@ -262,6 +266,9 @@ pub struct PreparedFrame {
     /// `imgui.texture` handles, each with the pixels the renderer uploads
     /// once. Shared, so a frame costs the plugin nothing to hand over.
     textures: Vec<Rc<TextureImage>>,
+    /// The 3D scenes this frame draws, before its widgets, each scissored to
+    /// the rect its widget reserved.
+    scenes: Vec<PreparedScene>,
     stats: DrawStats,
 }
 
@@ -378,6 +385,16 @@ impl PreparedFrame {
 
     pub fn textures(&self) -> &[Rc<TextureImage>] {
         &self.textures
+    }
+
+    /// Attaches the 3D scenes the frame draws under its widgets.
+    pub fn with_scenes(mut self, scenes: Vec<PreparedScene>) -> Self {
+        self.scenes = scenes;
+        self
+    }
+
+    pub fn scenes(&self) -> &[PreparedScene] {
+        &self.scenes
     }
 
     pub fn atlas(&self) -> Option<&AtlasImage> {
@@ -497,13 +514,26 @@ fn begin_pass<'a>(
     encoder: &'a mut wgpu::CommandEncoder,
     target: &RenderTarget<'_>,
 ) -> wgpu::RenderPass<'a> {
+    begin_pass_from(encoder, target, false)
+}
+
+/// Begins a colour pass, optionally keeping what is already there.
+fn begin_pass_from<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    target: &RenderTarget<'_>,
+    keep: bool,
+) -> wgpu::RenderPass<'a> {
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("imgui frame"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: target.view,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(target.clear),
+                load: if keep {
+                    wgpu::LoadOp::Load
+                } else {
+                    wgpu::LoadOp::Clear(target.clear)
+                },
                 store: wgpu::StoreOp::Store,
             },
             depth_slice: None,
@@ -513,6 +543,53 @@ fn begin_pass<'a>(
         occlusion_query_set: None,
         multiview_mask: None,
     })
+}
+
+/// Begins one scene's pass: the colour kept (or cleared for the first), the
+/// depth buffer cleared to the far plane, scissored to the scene's rect.
+fn begin_scene_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    target: &RenderTarget<'_>,
+    depth: &'a wgpu::TextureView,
+    clip: [u32; 4],
+    first: bool,
+) -> wgpu::RenderPass<'a> {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("imgui scene"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target.view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: if first {
+                    wgpu::LoadOp::Clear(target.clear)
+                } else {
+                    wgpu::LoadOp::Load
+                },
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
+    pass
+}
+
+/// Where one scene's triangles sit in the frame's shared buffers.
+#[derive(Clone, Copy, Debug, Default)]
+struct SceneRange {
+    vertex: u64,
+    index: u64,
 }
 
 /// Why a prepared frame could not be drawn.
@@ -539,6 +616,7 @@ impl std::error::Error for RenderError {}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
     pub draw_calls: u32,
+    pub scene_calls: u32,
     pub vertices: u32,
     pub indices: u32,
     pub target: (u32, u32),
@@ -588,8 +666,23 @@ pub struct WgpuRenderer {
     textures: HashMap<u64, TextureBinding>,
     vertex: Option<(TrackedBuffer, usize)>,
     index: Option<(TrackedBuffer, usize)>,
+    /// The 3D pass: one pipeline per target format, its own vertex and index
+    /// buffers, and the depth buffer it tests against.
+    scene_pipeline: Option<wgpu::RenderPipeline>,
+    scene_pipeline_format: Option<wgpu::TextureFormat>,
+    scene_vertex: Option<(TrackedBuffer, usize)>,
+    scene_index: Option<(TrackedBuffer, usize)>,
+    depth: Option<DepthTarget>,
     counters: Rc<Cell<ResourceCounters>>,
     frames: u64,
+}
+
+/// The depth buffer a frame's 3D scenes test against, made with the size of
+/// the target they draw into.
+struct DepthTarget {
+    _texture: TrackedTexture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
 }
 
 impl WgpuRenderer {
@@ -610,6 +703,11 @@ impl WgpuRenderer {
             textures: HashMap::new(),
             vertex: None,
             index: None,
+            scene_pipeline: None,
+            scene_pipeline_format: None,
+            scene_vertex: None,
+            scene_index: None,
+            depth: None,
             counters: Rc::new(Cell::new(ResourceCounters::default())),
             frames: 0,
         }
@@ -638,6 +736,11 @@ impl WgpuRenderer {
     pub fn device_changed(&mut self) {
         self.pipeline = None;
         self.pipeline_format = None;
+        self.scene_pipeline = None;
+        self.scene_pipeline_format = None;
+        self.scene_vertex = None;
+        self.scene_index = None;
+        self.depth = None;
         self.atlas = None;
         self.textures.clear();
         self.bind_group_layout = None;
@@ -796,7 +899,49 @@ impl WgpuRenderer {
             pass.draw_indexed(0..command.count as u32, 0, 0..1);
             stats.draw_calls += 1;
         }
+        drop(pass);
+        // The frame's 3D scenes, over the widgets they stand in: a scene is
+        // a widget in the layout, so the rect it reserved shows the model
+        // and whatever the plugin draws outside it stays visible.
+        self.draw_scenes(encoder, &target, frame, &mut stats);
         Ok(stats)
+    }
+
+    /// Draws the frame's 3D scenes, each its own pass: the colour kept from
+    /// the widgets' pass, the depth buffer cleared so every scene starts
+    /// fresh, scissored to the rect its widget reserved.
+    fn draw_scenes(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &RenderTarget<'_>,
+        frame: &PreparedFrame,
+        stats: &mut RenderStats,
+    ) {
+        if frame.scenes.is_empty() {
+            return;
+        }
+        let ranges = self.upload_scenes(frame);
+        self.ensure_scene_pipeline();
+        self.ensure_depth(target.size);
+        for (scene, range) in frame.scenes.iter().zip(ranges) {
+            if scene.clip[2] == 0 || scene.clip[3] == 0 || scene.indices.is_empty() {
+                continue;
+            }
+            let (Some(pipeline), Some((vertex, _)), Some((index, _)), Some(depth)) = (
+                self.scene_pipeline.as_ref(),
+                self.scene_vertex.as_ref(),
+                self.scene_index.as_ref(),
+                self.depth.as_ref(),
+            ) else {
+                continue;
+            };
+            let mut pass = begin_scene_pass(encoder, target, &depth.view, scene.clip, false);
+            pass.set_pipeline(pipeline);
+            pass.set_vertex_buffer(0, vertex.buffer.slice(range.vertex..));
+            pass.set_index_buffer(index.buffer.slice(range.index..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..scene.indices.len() as u32, 0, 0..1);
+            stats.scene_calls += 1;
+        }
     }
 
     fn upload_vertex(&mut self, frame: &PreparedFrame) {
@@ -943,6 +1088,181 @@ impl WgpuRenderer {
                 },
             );
         }
+    }
+
+    /// Uploads every scene's triangles into the frame's scene buffers and
+    /// answers where each scene's vertices and indices start.
+    fn upload_scenes(&mut self, frame: &PreparedFrame) -> Vec<SceneRange> {
+        let vertex_bytes: usize = frame.scenes.iter().map(|scene| scene.vertices.len()).sum();
+        let index_bytes: usize = frame
+            .scenes
+            .iter()
+            .map(|scene| scene.indices.len() * 4)
+            .sum();
+        grow(
+            &mut self.scene_vertex,
+            vertex_bytes,
+            &self.device,
+            &self.counters,
+            "imgui scene vertices",
+            wgpu::BufferUsages::VERTEX,
+        );
+        grow(
+            &mut self.scene_index,
+            index_bytes,
+            &self.device,
+            &self.counters,
+            "imgui scene indices",
+            wgpu::BufferUsages::INDEX,
+        );
+        let mut ranges = Vec::with_capacity(frame.scenes.len());
+        let mut vertex_at = 0usize;
+        let mut index_at = 0usize;
+        let mut vertices = Vec::with_capacity(vertex_bytes);
+        let mut corners = Vec::with_capacity(index_bytes);
+        for scene in &frame.scenes {
+            ranges.push(SceneRange {
+                vertex: vertex_at as u64,
+                index: index_at as u64,
+            });
+            vertices.extend_from_slice(&scene.vertices);
+            for index in &scene.indices {
+                corners.extend_from_slice(&index.to_ne_bytes());
+            }
+            vertex_at += scene.vertices.len();
+            index_at += scene.indices.len() * 4;
+        }
+        if vertex_bytes > 0
+            && let Some((buffer, _)) = self.scene_vertex.as_ref()
+        {
+            self.queue.write_buffer(&buffer.buffer, 0, &vertices);
+        }
+        if index_bytes > 0
+            && let Some((buffer, _)) = self.scene_index.as_ref()
+        {
+            let padded = index_bytes.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize);
+            corners.resize(padded, 0);
+            self.queue.write_buffer(&buffer.buffer, 0, &corners);
+        }
+        ranges
+    }
+
+    /// The depth buffer the scenes test against, sized to the target.
+    fn ensure_depth(&mut self, size: (u32, u32)) {
+        if self.depth.as_ref().is_some_and(|depth| depth.size == size) {
+            return;
+        }
+        let texture = TrackedTexture::new(
+            &self.device,
+            wgpu::TextureDescriptor {
+                label: Some("imgui scene depth"),
+                size: wgpu::Extent3d {
+                    width: size.0.max(1),
+                    height: size.1.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            },
+            &self.counters,
+        );
+        let view = texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.depth = Some(DepthTarget {
+            _texture: texture,
+            view,
+            size,
+        });
+    }
+
+    /// The pipeline the scenes draw with: solid triangles, depth-tested, no
+    /// culling (a plugin's winding is its own business).
+    fn ensure_scene_pipeline(&mut self) {
+        if self.scene_pipeline.is_some() && self.scene_pipeline_format == Some(self.format) {
+            return;
+        }
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("imgui scene shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SCENE_SHADER)),
+            });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("imgui scene pipeline layout"),
+                bind_group_layouts: &[],
+                immediate_size: 0,
+            });
+        let entry_point = if self.format.is_srgb() {
+            "fs_srgb"
+        } else {
+            "fs_main"
+        };
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("imgui scene pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 28,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Unorm8x4,
+                                offset: 24,
+                                shader_location: 2,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry_point),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+        self.scene_pipeline = Some(pipeline);
+        self.scene_pipeline_format = Some(self.format);
     }
 
     fn upload_atlas(&mut self, image: &AtlasImage) {
@@ -1096,6 +1416,38 @@ impl WgpuRenderer {
         self.pipeline = Some(pipeline);
         self.pipeline_format = Some(self.format);
     }
+}
+
+/// Makes sure `buffer` can hold `required` bytes and answers its capacity.
+fn grow(
+    buffer: &mut Option<(TrackedBuffer, usize)>,
+    required: usize,
+    device: &wgpu::Device,
+    counters: &Rc<Cell<ResourceCounters>>,
+    label: &str,
+    usage: wgpu::BufferUsages,
+) -> usize {
+    let capacity = match buffer.as_ref() {
+        Some((_, capacity)) if *capacity >= required => *capacity,
+        Some((_, capacity)) => (*capacity * 2).max(required.next_power_of_two()),
+        None => required.next_power_of_two().max(MIN_VERTEX_BYTES),
+    };
+    if buffer.as_ref().map(|(_, capacity)| *capacity) != Some(capacity) {
+        *buffer = Some((
+            TrackedBuffer::new(
+                device,
+                wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: capacity as u64,
+                    usage: usage | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                },
+                counters,
+            ),
+            capacity,
+        ));
+    }
+    capacity
 }
 
 fn write_rgba(queue: &wgpu::Queue, texture: &wgpu::Texture, pixels: &[u8], size: (u32, u32)) {

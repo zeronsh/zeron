@@ -1,10 +1,14 @@
 --!strict
--- A 3D viewer in a native window: a cube you can turn with the pointer.
+-- A real 3D viewer in a native window: a lattice of cubes drawn by the GPU,
+-- depth-tested and lit, under a title bar the plugin draws itself.
 --
--- Dear ImGui draws in two dimensions, so the cube is projected here, in
--- Luau: eight corners, six faces, a perspective divide and a painter's sort
--- (farthest first), each face shaded from the accent the window wears. Drag
--- the viewport to rotate it; the auto-spin stops the moment you do.
+-- Dear ImGui draws in two dimensions, so the host takes the mesh and the
+-- camera and draws them with wgpu in the window's own target: a depth buffer
+-- decides what hides what, the fragment shader lights each face, and the
+-- result sits in the rect this window reserves for it. The plugin owns the
+-- geometry, the shading palette and the camera; the title bar is the
+-- plugin's too — `titlebar = "hidden"` leaves no OS chrome, so the bar below
+-- is drawn with buttons and dragged with the window's own drag gesture.
 --
 --   ZERON_ZGX_DEV_PLUGINS=apps/zgx/plugins-dev/imgui-3d-viewer \
 --     apps/zgx/target/debug/zeron-zgx.exe gallery
@@ -16,66 +20,76 @@ local imgui = zeron.imgui
 local window = imgui.open_window {
 	id = "viewer",
 	title = "3D Viewer",
-	size = { width = 760, height = 560 },
+	size = { width = 900, height = 620 },
+	titlebar = "hidden",
 }
 
--- One unit cube, its corners and the six faces as corner indices, each with
--- the shade it takes (the light sits up and to the left, in front).
-local CORNERS = {
-	{ -1, -1, -1 },
-	{ 1, -1, -1 },
-	{ 1, 1, -1 },
-	{ -1, 1, -1 },
-	{ -1, -1, 1 },
-	{ 1, -1, 1 },
-	{ 1, 1, 1 },
-	{ -1, 1, 1 },
-}
+-- The bar's height, the buttons' size and the window's own margin, in points.
+local BAR = 38
+local BUTTON = 34
+local MARGIN = 14
 
-local FACES = {
-	{ corners = { 1, 2, 3, 4 }, shade = 0.52, normal = { 0, 0, -1 } },
-	{ corners = { 5, 6, 7, 8 }, shade = 1.15, normal = { 0, 0, 1 } },
-	{ corners = { 1, 5, 6, 2 }, shade = 0.68, normal = { 0, -1, 0 } },
-	{ corners = { 2, 6, 7, 3 }, shade = 0.92, normal = { 1, 0, 0 } },
-	{ corners = { 3, 7, 8, 4 }, shade = 0.80, normal = { 0, 1, 0 } },
-	{ corners = { 4, 8, 5, 1 }, shade = 0.74, normal = { -1, 0, 0 } },
-}
+-- One cube: four corners a face, six faces, outward normals so the light
+-- finds each face on its own. White, so the scene's tint colours it.
+local function cube(size: number): any
+	local h = size / 2
+	local faces = {
+		{ n = { 0, 0, 1 }, c = { { -h, -h, h }, { h, -h, h }, { h, h, h }, { -h, h, h } } },
+		{ n = { 0, 0, -1 }, c = { { h, -h, -h }, { -h, -h, -h }, { -h, h, -h }, { h, h, -h } } },
+		{ n = { 1, 0, 0 }, c = { { h, -h, h }, { h, -h, -h }, { h, h, -h }, { h, h, h } } },
+		{ n = { -1, 0, 0 }, c = { { -h, -h, -h }, { -h, -h, h }, { -h, h, h }, { -h, h, -h } } },
+		{ n = { 0, 1, 0 }, c = { { -h, h, h }, { h, h, h }, { h, h, -h }, { -h, h, -h } } },
+		{ n = { 0, -1, 0 }, c = { { -h, -h, -h }, { h, -h, -h }, { h, -h, h }, { -h, -h, h } } },
+	}
+	local vertices = {}
+	local indices = {}
+	for _, face in faces do
+		local base = #vertices / 10
+		for _, corner in face.c do
+			table.insert(vertices, corner[1])
+			table.insert(vertices, corner[2])
+			table.insert(vertices, corner[3])
+			table.insert(vertices, face.n[1])
+			table.insert(vertices, face.n[2])
+			table.insert(vertices, face.n[3])
+			table.insert(vertices, 1)
+			table.insert(vertices, 1)
+			table.insert(vertices, 1)
+			table.insert(vertices, 1)
+		end
+		for _, step in { 0, 1, 2, 0, 2, 3 } do
+			table.insert(indices, base + step)
+		end
+	end
+	return imgui.mesh { vertices = vertices, indices = indices }
+end
 
-local yaw = 0.6
-local pitch = -0.35
+local lattice = cube(0.62)
+
+-- Where the cubes sit: three by three by three, a step apart.
+local PLACES = {}
+for x = -1, 1 do
+	for y = -1, 1 do
+		for z = -1, 1 do
+			table.insert(PLACES, { x = x * 1.65, y = y * 1.65, z = z * 1.65, step = x + y + z })
+		end
+	end
+end
+
+local yaw = 0.7
+local pitch = -0.42
+local distance = 9.2
 local spin = true
-local zoom = 1.0
 local frames = 0
+local clock = 0
+local last_tick = os.clock()
+local last_click = 0
 
 local function clamp(value: number, low: number, high: number): number
 	return math.max(low, math.min(high, value))
 end
 
--- Turn a point about the vertical axis, then the horizontal one.
-local function rotate(point: { number }, turn: number, tilt: number): { number }
-	local cos_yaw, sin_yaw = math.cos(turn), math.sin(turn)
-	local x = point[1] * cos_yaw - point[3] * sin_yaw
-	local z = point[1] * sin_yaw + point[3] * cos_yaw
-	local cos_pitch, sin_pitch = math.cos(tilt), math.sin(tilt)
-	local y = point[2] * cos_pitch - z * sin_pitch
-	local depth = point[2] * sin_pitch + z * cos_pitch
-	return { x, y, depth }
-end
-
-local function rotate_normal(normal: { number }, turn: number, tilt: number): { number }
-	return rotate(normal, turn, tilt)
-end
-
--- A point in the box `(left, top)..(right, bottom)` on screen, its depth
--- scaled by the perspective divide.
-local function project(point: { number }, centre: { number }, radius: number): (number, number, number)
-	local focal = 4.0
-	local depth = point[3] + focal
-	local scale = radius * focal / (depth * 2.2)
-	return centre[1] + point[1] * scale, centre[2] - point[2] * scale, depth
-end
-
--- `#rrggbb` to its channels, and back with each one moved by `factor`.
+-- Mix two colours, for the cubes' tints.
 local function channels(colour: string): { number }
 	local digits = string.sub(colour, 2, 7)
 	return {
@@ -85,105 +99,161 @@ local function channels(colour: string): { number }
 	}
 end
 
-local function shaded(rgb: { number }, factor: number): string
-	local function channel(value: number): string
-		local level = math.floor(clamp(value * factor, 0, 255) + 0.5)
-		return string.format("%02x", level)
+local function mix(from: { number }, to: { number }, amount: number): string
+	local function channel(at: number): string
+		return string.format("%02x", math.floor(from[at] + (to[at] - from[at]) * amount + 0.5))
 	end
-	return `#{channel(rgb[1])}{channel(rgb[2])}{channel(rgb[3])}`
+	return `#{channel(1)}{channel(2)}{channel(3)}`
 end
 
-local function cube(ui: any, left: number, top: number, right: number, bottom: number)
-	local accent = imgui.style().colours["$accent"] or "#8b7cf6"
-	local rgb = channels(accent)
-	local draw = ui.get_window_draw_list()
-	local centre = { (left + right) / 2, (top + bottom) / 2 }
-	local radius = math.min(right - left, bottom - top) / 2 * 0.8 * zoom
-
-	local turned = {}
-	for index, corner in CORNERS do
-		turned[index] = rotate(corner, yaw, pitch)
+local function models(): { any }
+	local look = imgui.style()
+	local accent = channels(look.colours["$accent"] or "#8b7cf6")
+	local softer = channels(look.colours["$accent.hover"] or "#998cf7")
+	local bright = channels(look.colours["$text.primary"] or "#e8e8ea")
+	local placed = {}
+	for _, place in PLACES do
+		local tint = if place.step > 1
+			then mix(accent, bright, 0.35)
+			else if place.step < -1 then mix(accent, softer, 0.7) else mix(accent, softer, 0.3)
+		table.insert(placed, {
+			mesh = lattice,
+			position = { place.x, place.y, place.z },
+			-- Each cube turns on its own, so the lattice reads as solid up
+			-- close and as a turning cloud from the outside.
+			rotation = {
+				clock * (0.25 + 0.05 * place.step),
+				clock * (0.4 - 0.04 * place.step),
+				clock * 0.15,
+			},
+			scale = 1,
+			color = tint,
+		})
 	end
-	local camera = {}
-	for index, face in FACES do
-		local normal = rotate_normal(face.normal, yaw, pitch)
-		-- Faces the camera can see, farthest first.
-		if normal[3] > 0.02 then
-			local points = {}
-			local depth = 0
-			for _, at in face.corners do
-				local x, y, z = project(turned[at], centre, radius)
-				table.insert(points, { x, y })
-				depth += z
+	return placed
+end
+
+-- The bar the plugin draws: a drag strip, and minimise, maximise and close.
+-- A double click on the strip maximises or restores, as an OS bar would.
+local function title_bar(ui: any, width: number): any
+	local strip = ui.invisible_button {
+		id = "titlebar",
+		size = { width = width - BUTTON * 3 - 8, height = BAR - 8 },
+	}
+	if strip.active and ui.is_mouse_dragging() then
+		window:begin_drag()
+	end
+	if strip.clicked then
+		local now = os.clock()
+		if now - last_click < 0.4 then
+			last_click = 0
+			if window:is_maximized() then
+				window:restore()
+			else
+				window:maximize()
 			end
-			table.insert(camera, { points = points, shade = face.shade * (0.75 + 0.35 * normal[3]), depth = depth })
+		else
+			last_click = now
 		end
 	end
-	table.sort(camera, function(a: any, b: any): boolean
-		return a.depth > b.depth
-	end)
-	for _, face in camera do
-		draw:add_poly_filled { points = face.points, color = shaded(rgb, face.shade) }
-		draw:add_poly_line {
-			points = face.points,
-			color = shaded(rgb, face.shade * 1.5),
-			thickness = 2,
-			closed = true,
-		}
+	ui.same_line()
+	if ui.small_button("_") then
+		window:minimize()
 	end
+	ui.same_line()
+	if ui.small_button("[]") then
+		if window:is_maximized() then
+			window:restore()
+		else
+			window:maximize()
+		end
+	end
+	ui.same_line()
+	if ui.small_button("x") then
+		window:close()
+	end
+	return strip
 end
 
 window:on_render(function(ui)
+	local now = os.clock()
+	clock += math.min(now - last_tick, 0.1)
+	last_tick = now
 	frames += 1
 	if spin then
-		local step = 0.9 / 60
-		yaw += step
+		yaw += 0.006
 		if yaw > math.pi * 2 then
 			yaw -= math.pi * 2
 		end
 	end
 
 	local state = window:state()
-	local width = math.max(320, (tonumber(state.width) or 760) - 48)
-	local height = math.max(220, (tonumber(state.height) or 560) - 200)
+	local width = math.max(420, (tonumber(state.width) or 900) - MARGIN * 2)
+	local height = math.max(260, (tonumber(state.height) or 620) - BAR - MARGIN * 2)
 
-	ui.text("3D Viewer")
-	ui.text_colored(
-		`yaw {string.format("%.2f", yaw)}  pitch {string.format("%.2f", pitch)}  zoom {string.format("%.2f", zoom)}  frame {frames}`,
-		"#8a8a8a"
-	)
-	ui.text_colored("drag the viewport to turn the cube", "#8a8a8a")
+	local strip = title_bar(ui, width)
+	ui.separator()
 
-	local bar = ui.invisible_button { id = "viewport", size = { width = width, height = height } }
-	local min, max = bar.min, bar.max
-	if bar.active and ui.is_mouse_dragging() then
+	local view = ui.scene3d {
+		id = "lattice",
+		width = width,
+		height = height,
+		camera = { yaw = yaw, pitch = pitch, distance = distance, fov = 42 },
+		models = models(),
+	}
+	if view.active and ui.is_mouse_dragging() then
 		local dx, dy = ui.mouse_delta()
 		if dx ~= 0 or dy ~= 0 then
-			yaw += dx * 0.012
-			pitch = clamp(pitch + dy * 0.012, -1.45, 1.45)
+			yaw -= dx * 0.01
+			pitch = clamp(pitch + dy * 0.01, -1.4, 1.4)
 			spin = false
 		end
 	end
-	cube(ui, min.x, min.y, max.x, max.y)
+	if view.clicked and not spin then
+		spin = true
+	end
 
-	if ui.button(if spin then "Stop" else "Spin") then
+	-- The scene draws over this frame, so its backdrop and its labels are
+	-- painted here: the cubes land on top of them.
+	local look = imgui.style()
+	local draw = ui.get_window_draw_list()
+	draw:add_rect_filled { min = view.min, max = view.max, color = "#0a0b0f" }
+	draw:add_text {
+		pos = { strip.min.x + 2, strip.min.y + 7 },
+		text = "3D Viewer",
+		color = look.colours["$text.primary"] or "#e8e8ea",
+		font_size = 16,
+	}
+
+	if ui.button(if spin then "Stop" else "Orbit") then
 		spin = not spin
 	end
 	ui.same_line()
 	if ui.button("Reset") then
-		yaw = 0.6
-		pitch = -0.35
-		zoom = 1.0
+		yaw = 0.7
+		pitch = -0.42
+		distance = 9.2
 		spin = true
 	end
 	ui.same_line()
-	zoom = ui.slider_float("zoom", zoom, { min = 0.5, max = 2.0 })
+	distance = ui.slider_float("distance", distance, { min = 3.5, max = 16 })
+	ui.same_line()
+	ui.text_colored(
+		`{#PLACES} cubes · {string.format("%.2f", yaw)} / {string.format("%.2f", pitch)} · frame {frames}`,
+		"#5c5c68"
+	)
 end)
 
--- A tool so the window can be checked without a pointer.
 zeron.tool {
 	name = "viewer_status",
 	run = function(): any
-		return { yaw = yaw, pitch = pitch, zoom = zoom, spin = spin, frames = frames }
+		return {
+			yaw = yaw,
+			pitch = pitch,
+			distance = distance,
+			spin = spin,
+			cubes = #PLACES,
+			frames = frames,
+		}
 	end,
 }
