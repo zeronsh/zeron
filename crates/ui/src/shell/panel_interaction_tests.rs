@@ -568,3 +568,84 @@ fn the_session_card_lands_with_a_chat_switch_and_eases_on_its_toggle(cx: &mut Te
         assert_eq!(cx.debug_bounds("session-info").is_some(), shown);
     }
 }
+
+/// A run that ends in the side chat the right pane shows is seen while you
+/// look at it, as one in the open chat is: its lane row must not keep the
+/// completed check until the tab is closed and opened again (#1108). Behind
+/// another surface, in a closed pane or an inactive window, nobody looks.
+#[gpui::test]
+fn a_side_chat_on_screen_is_seen_as_its_run_ends(cx: &mut TestAppContext) {
+    use zeron_proto::ChatIndicator::{Completed, Idle};
+    let (_dir, shell, cx) = setup(cx);
+    let side: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+        "id": "side", "title": "Side chat", "parentChatId": "a",
+        "deviceId": "local", "archived": false, "createdAt": Utc::now(),
+    }))
+    .unwrap();
+    change(&shell, cx, |shell, _, cx| {
+        shell
+            .state
+            .update(cx, |state, _| state.chats.push(side.clone()));
+        shell.open_side_chat(side, shell.panel_key(cx), cx);
+    });
+    let tab = RightSurface::SideChat(shell.read_with(cx, |s, _| s.side_chat_seq));
+    // `chat`'s run ends with a reply nobody has seen yet.
+    let finish = |cx: &mut VisualTestContext, chat: &str| {
+        change(&shell, cx, |shell, _, cx| {
+            shell.state.update(cx, |state, _| {
+                let now = Utc::now();
+                let row = state.chats.iter_mut().find(|c| c.id == chat).unwrap();
+                row.last_message_at = Some(now);
+                row.last_seen_at = Some(now - chrono::Duration::minutes(1));
+            });
+        });
+        settled(&shell, cx);
+    };
+    // What the lane row (and, for the open chat, its sidebar row) shows.
+    let status = |cx: &mut VisualTestContext, chat: &str| {
+        shell.read_with(cx, |shell, cx| {
+            let state = shell.state.read(cx);
+            let row = state.chats.iter().find(|c| c.id == chat).unwrap();
+            state.display_status_for(row, Utc::now())
+        })
+    };
+
+    cx.deactivate_window();
+    finish(cx, "side");
+    assert!(shell.read_with(cx, |s, cx| s.right_pane_shown(cx)));
+    assert_eq!(status(cx, "side"), Completed, "the window is inactive");
+
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    settled(&shell, cx);
+    assert_eq!(status(cx, "side"), Idle, "on screen in an active window");
+
+    change(&shell, cx, |s, _, cx| {
+        s.set_right_active(RightSurface::Picker, cx)
+    });
+    finish(cx, "side");
+    assert_eq!(status(cx, "side"), Completed, "behind the surface picker");
+    change(&shell, cx, |s, _, cx| s.set_right_active(tab, cx));
+    settled(&shell, cx);
+    assert_eq!(status(cx, "side"), Idle, "back on its tab");
+
+    change(&shell, cx, |s, _, cx| s.toggle_right_pane(cx));
+    finish(cx, "side");
+    assert_eq!(status(cx, "side"), Completed, "the pane is closed");
+    change(&shell, cx, |s, _, cx| s.open_child_chat_tab("side", cx));
+    settled(&shell, cx);
+    assert_eq!(status(cx, "side"), Idle, "reopened from its lane row");
+
+    change(&shell, cx, |s, _, cx| {
+        s.open_settings(SettingsSection::Appearance, cx)
+    });
+    finish(cx, "side");
+    assert_eq!(status(cx, "side"), Completed, "Settings covers the window");
+    change(&shell, cx, |s, _, cx| s.close_settings(cx));
+    settled(&shell, cx);
+    assert_eq!(status(cx, "side"), Idle, "back from Settings");
+
+    // The open chat beside it is still seen as its run ends.
+    finish(cx, "a");
+    assert_eq!(status(cx, "a"), Idle);
+}

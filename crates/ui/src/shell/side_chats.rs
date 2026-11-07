@@ -222,6 +222,23 @@ impl Shell {
         self.open_side_chat(chat, key, cx);
     }
 
+    /// The side chat on screen: the right pane shows its tab, open and not
+    /// hidden by the window fit (which hides it off the chat route).
+    pub(super) fn side_chat_on_screen(&self, cx: &App) -> Option<String> {
+        if !self.right_pane_shown(cx) {
+            return None;
+        }
+        let RightSurface::SideChat(id) = self.resolved_right_active(cx) else {
+            return None;
+        };
+        self.side_chats
+            .get(&id)?
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+    }
+
     /// Reveal the surface host of the pane keyed `key`: the live one through
     /// the user-visible path, a background conversation's by flag, so a
     /// fork that finishes after the user switched away opens ITS pane, not
