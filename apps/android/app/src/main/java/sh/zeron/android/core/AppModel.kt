@@ -469,8 +469,22 @@ class AppModel(private val app: Application) {
 
     private var inForeground = true
 
+    /**
+     * iOS suspends a backgrounded app, which is what stops its sockets. Android may not for
+     * hours (before 14, a process just stays running with its keepalives waking the radio),
+     * so once delivery has had its time the core is told to let go of them. Not during a
+     * call, which runs in the background on purpose.
+     */
+    private val rest = object : Runnable {
+        override fun run() {
+            if (inForeground) return
+            if (voice.live) main.postDelayed(this, REST_RECHECK_MS) else _client.value?.onBackgroundIdle()
+        }
+    }
+
     fun onForeground() {
         inForeground = true
+        main.removeCallbacks(rest)
         endDeliveryHold()
         _client.value?.onForeground()
         refreshWorkspace()
@@ -495,6 +509,8 @@ class AppModel(private val app: Application) {
         } == true
         if (_client.value != null && !isDemo && (recent || pending)) DeliveryService.hold(app, 25_000)
         _client.value?.onBackground()
+        main.removeCallbacks(rest)
+        main.postDelayed(rest, REST_AFTER_MS)
     }
 
     private fun endDeliveryHold() = DeliveryService.release(app)
@@ -520,8 +536,14 @@ class AppModel(private val app: Application) {
     }
 
     private val networkPath = NetworkPathTracker(
-        setOnline = { _client.value?.setNetworkOnline(it) },
-        pathChanged = { _client.value?.networkPathChanged() },
+        setOnline = {
+            Log.i("Zeron", "network: ${if (it) "online" else "no path"}")
+            _client.value?.setNetworkOnline(it)
+        },
+        pathChanged = {
+            Log.i("Zeron", "network: path changed")
+            _client.value?.networkPathChanged()
+        },
     )
 
     private fun watchNetwork() {
@@ -726,6 +748,10 @@ class AppModel(private val app: Application) {
         }
     }
 }
+
+/** Past [DeliveryService]'s 25 s, so a message sent just before leaving goes first. */
+private const val REST_AFTER_MS = 30_000L
+private const val REST_RECHECK_MS = 60_000L
 
 /** A snackbar raised from anywhere in the app. */
 class Toast(val message: String, val action: String? = null, val run: (() -> Unit)? = null)

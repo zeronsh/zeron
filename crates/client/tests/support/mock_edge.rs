@@ -92,6 +92,7 @@ struct Shared {
     kick_tx: broadcast::Sender<String>,
     /// Per chat: checkpoint downloads, row pulls (with their queries), and HTTP pushes.
     downloads: Mutex<HashMap<String, usize>>,
+    probes: Mutex<HashMap<String, usize>>,
     pulls: Mutex<HashMap<String, Vec<String>>>,
     http_pushes: Mutex<HashMap<String, Vec<String>>>,
 }
@@ -137,6 +138,7 @@ impl MockEdge {
             relay_tx: broadcast::channel(4096).0,
             kick_tx: broadcast::channel(64).0,
             downloads: Mutex::new(HashMap::new()),
+            probes: Mutex::new(HashMap::new()),
             pulls: Mutex::new(HashMap::new()),
             http_pushes: Mutex::new(HashMap::new()),
         });
@@ -323,6 +325,11 @@ impl MockEdge {
 
     pub fn checkpoint_downloads(&self, chat: &str) -> usize {
         self.shared.downloads.lock().unwrap().get(chat).copied().unwrap_or(0)
+    }
+
+    /// Probes this room has answered.
+    pub fn probes(&self, chat: &str) -> usize {
+        self.shared.probes.lock().unwrap().get(chat).copied().unwrap_or(0)
     }
 
     /// The query string of every plain-HTTP row pull of this chat.
@@ -745,6 +752,7 @@ async fn serve_chat(ws: Ws, chat: String, shared: Arc<Shared>) {
                         }
                     }
                     frame_type::PROBE => {
+                        *shared.probes.lock().unwrap().entry(chat.clone()).or_default() += 1;
                         let ok = chat_frames::encode(frame_type::PROBE_OK, &json!({ "headSeq": head(&shared) }), &[]);
                         if tx.send(Message::Binary(ok)).await.is_err() {
                             break;

@@ -1091,6 +1091,12 @@ impl LinkCache {
         lock(&self.dial_state).clear();
     }
 
+    /// Close every peer socket and forget each one's retry curve. The next call dials.
+    pub fn close_all(&self) {
+        lock(&self.links).clear();
+        lock(&self.dial_state).clear();
+    }
+
     /// Data-driven cooldown reset: called when out-of-band evidence says the
     /// peer is alive again (fresh workspace presence heartbeat). The next call
     /// dials immediately instead of waiting out the backoff window.

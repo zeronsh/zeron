@@ -677,6 +677,10 @@ impl Client {
                 inner.recompute_connectivity();
             }
         }
+        // A previous account may have left the process at rest.
+        if !inner.is_demo() {
+            zeron_sync::wake::set_resting(false);
+        }
         let ticker = Arc::downgrade(&inner);
         let cancel = inner.cancel.clone();
         crate::runtime::shared().spawn(async move {
@@ -1683,10 +1687,16 @@ impl Client {
 
     /// The OS network path changed (another interface, a new address): the
     /// direct connections' paths are gone, so they re-pair now and the
-    /// terminals on them carry on over the relay meanwhile.
+    /// terminals on them carry on over the relay meanwhile. A socket on the old
+    /// path can die without saying so, so the rooms find out now rather than at
+    /// their next quiet probe.
     pub fn network_path_changed(&self) {
-        if let Some(direct) = self.inner.live().and_then(|live| live.direct()) {
-            direct.network_changed();
+        if let Some(live) = self.inner.live() {
+            if let Some(direct) = live.direct() {
+                direct.network_changed();
+            }
+            live.kick();
+            self.kick_rooms();
         }
         self.inner.terminals_wake.notify_waiters();
     }
@@ -1707,6 +1717,12 @@ impl Client {
     /// restart PR watches.
     pub fn on_foreground(&self) {
         self.inner.foreground.store(true, Ordering::Release);
+        if !self.inner.is_demo() {
+            zeron_sync::wake::set_resting(false);
+        }
+        if let Some(direct) = self.inner.live().and_then(|live| live.direct()) {
+            direct.rest(false);
+        }
         let away = lock(&self.inner.backgrounded_at)
             .take()
             .map(|at| at.elapsed())
@@ -1749,6 +1765,24 @@ impl Client {
                 // No ticks from here on, and a link's keepalive would keep the
                 // radio up until the OS suspends us: stop now.
                 core.refresh_relay(&self.inner);
+            }
+        }
+    }
+
+    /// Still in the background once any delivery has had its time, on a platform that
+    /// doesn't suspend the process. iOS does, and has no reason to call this. Everything
+    /// lets go of its socket as a suspension would cut it, and stays down until
+    /// [`Self::on_foreground`], so nothing keeps the radio up. What a room would have sent
+    /// meanwhile comes from the version exchange on return.
+    pub fn on_background_idle(&self) {
+        if self.inner.is_demo() || self.inner.foreground.load(Ordering::Acquire) {
+            return;
+        }
+        zeron_sync::wake::set_resting(true);
+        if let Some(live) = self.inner.live() {
+            live.relay.release();
+            if let Some(direct) = live.direct() {
+                direct.rest(true);
             }
         }
     }

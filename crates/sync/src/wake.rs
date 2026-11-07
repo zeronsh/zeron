@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 const TICK: Duration = Duration::from_secs(1);
 /// Wall time must outrun monotonic time by this much in one tick to count as
@@ -34,6 +34,9 @@ static ONLINE: OnceLock<broadcast::Sender<()>> = OnceLock::new();
 /// backoff loops behave exactly as before. Only an explicit
 /// [`set_path_online(false)`] from a platform monitor flips this true.
 static PATH_OFFLINE: AtomicBool = AtomicBool::new(false);
+
+/// See [`set_resting`].
+static RESTING: OnceLock<watch::Sender<bool>> = OnceLock::new();
 
 /// Subscribe to system-wake events (the detector spawns on first call).
 pub fn subscribe() -> broadcast::Receiver<()> {
@@ -113,4 +116,34 @@ pub fn set_path_online(online: bool) {
 /// absent or wrong, so parked waits keep a coarse safety timer.
 pub fn path_is_offline() -> bool {
     PATH_OFFLINE.load(Ordering::Relaxed)
+}
+
+fn resting() -> &'static watch::Sender<bool> {
+    RESTING.get_or_init(|| watch::channel(false).0)
+}
+
+/// Nobody's using this process, and the OS may not suspend it for hours (Android
+/// before 14 can leave one running). Sockets close and nothing dials, polls or retries
+/// until this is cleared, so an idle phone's radio can sleep. Unlike [`path_is_offline`]
+/// there's no safety timer: the network works, so a dial would succeed and wake it.
+/// Nothing durable depends on this: outboxes hold their rows and resume on return.
+pub fn set_resting(rest: bool) {
+    let was = resting().send_replace(rest);
+    if was && !rest {
+        notify_online();
+    }
+}
+
+pub fn is_resting() -> bool {
+    *resting().borrow()
+}
+
+/// Resolves when [`set_resting`] says to let go.
+pub async fn until_resting() {
+    let _ = resting().subscribe().wait_for(|rest| *rest).await.is_ok();
+}
+
+/// Resolves when nothing's resting, at once if nothing is.
+pub async fn until_awake() {
+    let _ = resting().subscribe().wait_for(|rest| !*rest).await.is_ok();
 }

@@ -62,10 +62,14 @@ pub(crate) async fn wait_backoff(cancel: &CancellationToken, wait: Duration) -> 
         wait + jitter
     };
     tokio::select! {
+        _ = cancel.cancelled() => return false,
+        _ = tokio::time::sleep(wait) => {}
+        _ = wake.recv() => {}
+        _ = online.recv() => {}
+    }
+    tokio::select! {
         _ = cancel.cancelled() => false,
-        _ = tokio::time::sleep(wait) => true,
-        _ = wake.recv() => true,
-        _ = online.recv() => true,
+        _ = zeron_sync::wake::until_awake() => true,
     }
 }
 
