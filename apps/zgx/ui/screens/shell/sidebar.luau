@@ -1547,7 +1547,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		limit = props.limit,
 		direct = props.direct,
 		loading = function(): boolean
-			return sessions.now:get().state ~= "ready"
+			return sessions.state:get() ~= "ready"
 		end,
 		island = props.island,
 		selected = shared.selected,
