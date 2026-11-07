@@ -35,7 +35,7 @@ local sent_pictures = ReplyImages.for_attachments(function(): any
 	if not s or s.state == "missing" then
 		return nil
 	end
-	return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+	return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
 end)
 
 export type Id = string | () -> string? | State<string?> | nil

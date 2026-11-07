@@ -940,6 +940,30 @@ ui.command {
 		publish()
 	end,
 }
+-- A message in a chat that's running: the third most recent comes to the
+-- top, as the engine's list says once a reply moves (src/slide_bench_tests.rs
+-- sends one every two seconds). Its time by a count, not the clock, so every
+-- run moves the same rows at the same frames.
+local messages = 0
+ui.command {
+	id = "message",
+	title = "A message lands in a running chat",
+	run = function()
+		local live = {}
+		for _, c in model.chats do
+			table.insert(live, c)
+		end
+		table.sort(live, function(a: any, b: any): boolean
+			return a.updated > b.updated
+		end)
+		local c = live[math.min(3, #live)]
+		if c then
+			messages += 1
+			c.updated = NOW + messages
+			publish()
+		end
+	end,
+}
 ui.command {
 	id = "arrive",
 	title = "A new session arrives",
