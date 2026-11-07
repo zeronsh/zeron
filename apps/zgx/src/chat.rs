@@ -29,7 +29,9 @@
 //!   chat.interrupt(id)
 //!   chat.respond({ id, request, decision = "once" | "always" | "deny" |
 //!                  "answer", values?, text? })
-//!   chat.configure({ id, model?, effort?, fast?, access?, plan? })
+//!   chat.configure({ id, model?, effort?, fast?, access?, plan?, account? })
+//!                                 (`account`: a saved account's id the chat
+//!                                 runs on; "": the computer's own)
 //!   chat.queue({ id, op = "remove" | "send" | "move", item, to? })
 //!
 //! The wire (crates/rpc, crates/doc): `WatchDocMessages` (a reset, then
@@ -635,8 +637,8 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("chat.configure", move |args| {
         let v = v.clone();
         // (Its model and effort are a preview's to change; what an agent may
-        // do unasked isn't.)
-        let access = args.field("access").is_some();
+        // do unasked, and which account it spends, aren't.)
+        let access = args.field("access").is_some() || args.field("account").is_some();
         async move { if access { crate::plugins::preview::refuse("chat.configure")?; } v.configure(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
@@ -2632,6 +2634,17 @@ fn merged_config(config: &Json, args: &Value) -> Json {
     {
         c["modelOptions"][key] = json!(if fast.truthy() { on } else { off });
     }
+    // The saved account it runs on ("": the computer's own again).
+    if let Some(account) = args.field("account").map(text) {
+        match account.is_empty() {
+            true => {
+                if let Some(map) = c.as_object_mut() {
+                    map.remove("account");
+                }
+            }
+            false => c["account"] = json!(account),
+        }
+    }
     c
 }
 
@@ -4339,6 +4352,8 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("options", options),
         ("access", Value::from(access)),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
+        // The saved account it runs on (nil: the computer's own).
+        ("account", s(&config["account"])),
         ("running", Value::Bool(live)),
         ("context", open.context.map(Value::Num).unwrap_or(Value::Nil)),
         ("context_tokens", open.context_usage.0.map(Value::Num).unwrap_or(Value::Nil)),
@@ -5429,6 +5444,21 @@ mod tests {
         assert_eq!((words.as_str(), quotes.len()), ("", 1));
         let plain = "See: Selected from this conversation: is a header";
         assert_eq!(split_quotes(plain), (plain.to_owned(), Vec::new()));
+    }
+
+    #[test]
+    fn a_chat_takes_an_account_of_its_own_and_gives_it_back() {
+        let chat = json!({ "harness": "claude-code", "model": "sonnet", "reasoning": "medium", "modelOptions": {}, "sandbox": "workspace-write" });
+        let pinned = merged_config(&chat, &Value::record([("account", Value::from("0123456789abcdef"))]));
+        assert_eq!(pinned["account"], json!("0123456789abcdef"));
+        assert_eq!(pinned["model"], json!("sonnet"));
+        // A send (no `account`) keeps it, and doesn't count as a change.
+        let sent = merged_config(&pinned, &Value::record([("text", Value::from("hi"))]));
+        assert_eq!(sent["account"], json!("0123456789abcdef"));
+        assert!(!runs_otherwise(&pinned, &sent));
+        // "": the computer's own again.
+        let back = merged_config(&pinned, &Value::record([("account", Value::from(""))]));
+        assert!(back.get("account").is_none());
     }
 
     #[test]

@@ -607,6 +607,7 @@ async fn chat_config_selects_the_run_harness() {
                 sandbox: SandboxLevel::WorkspaceWrite,
                 access: Default::default(),
                 plan: false,
+                account: None,
             }),
             None,
         )

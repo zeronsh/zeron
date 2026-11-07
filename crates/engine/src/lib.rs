@@ -83,7 +83,7 @@ pub mod workspace_host;
 pub mod workspace_search;
 mod worktree_settings;
 
-pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
+pub use agent_accounts::{AccountsRunEnvironment, AgentAccounts, AgentAccountsConfig};
 pub use auth::{
     Auth, AuthConfig, AuthState, AuthUser, OrgMembership, ScreenHint, SignInOptions,
 };
@@ -417,7 +417,7 @@ impl EngineCore {
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
-        registry.set_account_environment(Arc::new(agent_accounts::MuseRunEnvironment(
+        registry.set_account_environment(Arc::new(agent_accounts::AccountsRunEnvironment(
             agent_accounts.clone(),
         )));
         // Plugins' agent ops (usage, accounts, models: plugins/agents) reach

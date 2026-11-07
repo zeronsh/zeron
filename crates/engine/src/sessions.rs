@@ -1028,7 +1028,12 @@ impl SessionsEngine {
                 .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
-        let credential = self.inner.registry.run_credential(harness_id).await;
+        let account = self.inner.chat_account(chat_id);
+        let credential = self
+            .inner
+            .registry
+            .run_credential_for(harness_id, account.as_deref())
+            .await;
         let binary = {
             let harness = harness.clone();
             tokio::task::spawn_blocking(move || binary_identity(harness.as_ref()))
@@ -1237,6 +1242,7 @@ impl SessionsEngine {
                 stops_seen: stops,
                 fork_history_sent,
                 started,
+                account,
             },
             turn,
             side_chats_only,
@@ -1259,10 +1265,26 @@ impl SessionsEngine {
         if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
             return false;
         }
-        match self.inner.registry.run_credential(harness_id).await {
+        let account = self.inner.chat_account(chat_id);
+        let now = self
+            .inner
+            .registry
+            .run_credential_for(harness_id, account.as_deref())
+            .await;
+        // A chat leaving its own account for the machine's login has no
+        // fingerprint now, but its session still runs on that account.
+        let left_account = now.is_none()
+            && started_with
+                .is_some_and(|c| c.starts_with(crate::agent_accounts::PINNED_CREDENTIAL));
+        match now {
             Some(now) if Some(now.as_str()) != started_with => {
                 tracing::info!(chat = %chat_id, harness = ?harness_id,
                     "credential changed; replacing the parked session");
+                true
+            }
+            None if left_account => {
+                tracing::info!(chat = %chat_id, harness = ?harness_id,
+                    "chat back on the machine's login; replacing the parked session");
                 true
             }
             _ => false,
@@ -2558,6 +2580,15 @@ impl Inner {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
 
+    /// The saved account a chat runs on (`ChatConfig::account`), `None` for
+    /// the machine's active login.
+    fn chat_account(&self, chat_id: &str) -> Option<String> {
+        self.workspace()?
+            .chat_config(chat_id)?
+            .account
+            .filter(|id| !id.is_empty())
+    }
+
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.
     fn note_message(&self, chat_id: &str, text: &str) {
         if text.is_empty() {
@@ -3706,6 +3737,9 @@ struct RunResumeState {
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
     /// Set once the harness stream is open (see [`RunHandle::started`]).
     started: Arc<std::sync::atomic::AtomicBool>,
+    /// The saved account the chat names (`ChatConfig::account`), read once
+    /// at dispatch so the spawn and its credential fingerprint agree.
+    account: Option<String>,
 }
 
 fn cursor_unstarted_history(
@@ -4035,7 +4069,7 @@ async fn drive_run(
                 // `RunRequest::env` is serde-skipped, never persisted.
                 match inner
                     .registry
-                    .prepare_run(harness_id, &mut wire_request)
+                    .prepare_run_for(harness_id, resume_state.account.as_deref(), &mut wire_request)
                     .await
                 {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,

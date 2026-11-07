@@ -198,6 +198,7 @@ impl Suite {
                     sandbox: SandboxLevel::DangerFullAccess,
                     access: Default::default(),
                     plan: false,
+                    account: None,
                 },
             )
             .unwrap();
@@ -1290,6 +1291,7 @@ async fn restart_durability() {
                 sandbox: SandboxLevel::DangerFullAccess,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
         )
         .unwrap();

@@ -343,6 +343,13 @@ local function service(id: string): any
 		return agents("switch_account", s)
 	end
 
+	-- Have one chat run on a saved account of its own from its next turn
+	-- ("accounts.switch"); no `account`: on this computer's active one
+	-- again. Claude Code and Codex chats. Other chats keep theirs.
+	function M.set_chat_account(s: { chat: string, account: string? }): any
+		return agents("set_chat_account", s)
+	end
+
 	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
 	function M.models(harness: string): any
 		return agents("models", { harness = harness })

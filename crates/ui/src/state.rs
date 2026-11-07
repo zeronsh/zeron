@@ -7563,6 +7563,7 @@ mod tests {
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             access: Default::default(),
             plan: false,
+            account: None,
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -7589,6 +7590,7 @@ mod tests {
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
         );
     }

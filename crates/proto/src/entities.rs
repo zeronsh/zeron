@@ -238,6 +238,12 @@ pub struct ChatConfig {
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan: bool,
+    /// The saved agent account (an [`crate::AgentAccount`] id of the host
+    /// device) this chat runs on instead of the machine's active login.
+    /// `None`: the machine's active login, as every chat ran before. Read by
+    /// the HOST at each spawn, so a change applies from the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.

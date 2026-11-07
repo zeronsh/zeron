@@ -860,6 +860,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
             },
             access: Default::default(),
             plan: false,
+            account: None,
         })
     }
 }

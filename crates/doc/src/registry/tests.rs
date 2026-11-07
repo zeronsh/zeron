@@ -268,6 +268,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
             sandbox: SandboxLevel::WorkspaceWrite,
             access: Default::default(),
             plan: false,
+            account: None,
         }),
         last_message_preview: None,
         last_message_at: None,

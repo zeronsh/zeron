@@ -105,11 +105,13 @@ pub struct RelayedCallback {
     pub location: Option<String>,
 }
 
+mod homes;
 mod muse;
 mod oauth;
 mod registry_login;
 #[cfg(test)]
 mod provider_tests;
+pub use homes::{AccountsRunEnvironment, PINNED_CREDENTIAL};
 pub use muse::MuseRunEnvironment;
 mod stores;
 mod usage;
@@ -776,6 +778,9 @@ struct Inner {
     /// credentials over a freshly signed-in slot, or a switch can race a
     /// removal and cause the wrong live account to be signed out.
     ops: tokio::sync::Mutex<()>,
+    /// Serializes the account dirs chats run from (`homes`): seeding one,
+    /// moving a login out of one, removing one. Taken after `ops`.
+    homes: tokio::sync::Mutex<()>,
     flows: Mutex<HashMap<String, LoginFlow>>,
     /// `"{harness}:{accountKey}"` → usage state; mirrored to disk.
     usage: Mutex<HashMap<String, UsageEntry>>,
@@ -881,6 +886,7 @@ impl AgentAccounts {
                 http,
                 endpoints,
                 ops: tokio::sync::Mutex::new(()),
+                homes: tokio::sync::Mutex::new(()),
                 flows: Mutex::new(HashMap::new()),
                 usage: Mutex::new(usage),
                 inflight_probes: Mutex::new(std::collections::HashSet::new()),
@@ -972,6 +978,8 @@ impl AgentAccounts {
         // denied) or identity unresolvable (an opaque token whose profile
         // call failed). Active, never switchable.
         let mut unreadable: Vec<(HarnessId, Detected)> = Vec::new();
+        // Account dirs chats run from: their newest logins into the slots.
+        self.sync_homes().await;
         let mut live = |harness: HarnessId, detected: &Detected| {
             active_keys
                 .entry(harness)
@@ -1215,6 +1223,11 @@ impl AgentAccounts {
                     "That saved login no longer exists — refresh and try again.".into(),
                 )
             })?;
+        // A login held by the account's own dir (chats run on it) MOVES to
+        // the machine: never two live copies (see `homes`).
+        let _homes = self.inner.homes.lock().await;
+        let (slot, handover) = self.begin_handover(harness, slot).await?;
+        let slot_id = slot.id.clone();
         match harness {
             HarnessId::ClaudeCode => {
                 let slot = self.revive_claude_slot(slot).await?;
@@ -1240,6 +1253,10 @@ impl AgentAccounts {
                 )));
             }
         }
+        if handover.is_some() {
+            self.retire_home_login(harness, &slot_id).await?;
+        }
+        drop(handover);
         *lock(&self.inner.claude_credentials) = None;
         self.list_locked(false).await
     }
@@ -1585,6 +1602,8 @@ impl AgentAccounts {
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
+        // The dir its chats ran from goes with it (and its login).
+        self.remove_home(harness, account_id).await?;
         self.list_locked(false).await
     }
 
@@ -3474,6 +3493,10 @@ impl AgentAccounts {
     /// false whenever the live identity couldn't be read (`~/.claude.json`
     /// mid-rewrite), and rotating the CLI's own refresh token logs it out.
     async fn claude_slot_is_not_live(&self, slot: &Slot) -> bool {
+        // Its own dir holds it: the CLI refreshes it there.
+        if self.holds_live_login(HarnessId::ClaudeCode, &slot.id).await {
+            return false;
+        }
         let file = &self.inner.config.claude_config_file;
         let cfg = read_json(file);
         if cfg.is_none() && file.exists() {
@@ -3736,6 +3759,18 @@ mod keychain {
                 None,
                 Some("The Claude Code Keychain entry could not be parsed.".into()),
             ),
+        }
+    }
+
+    /// Remove this user's item of `service` (an account dir's login handed
+    /// back to the machine). An absent item is success.
+    pub(super) async fn delete_credentials(service: &str) -> Result<(), EngineError> {
+        match exec_code(&["delete-generic-password", "-a", &account(), "-s", service]).await {
+            (Some(0), _, _) | (Some(ITEM_NOT_FOUND), _, _) => Ok(()),
+            (_, _, stderr) => Err(EngineError::Other(format!(
+                "Keychain delete failed: {}",
+                stderr.trim()
+            ))),
         }
     }
 

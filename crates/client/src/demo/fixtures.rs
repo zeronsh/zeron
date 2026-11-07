@@ -466,6 +466,7 @@ pub(crate) fn seed(
                 sandbox: SandboxLevel::WorkspaceWrite,
                 access: Default::default(),
                 plan: false,
+                account: None,
             }),
             last_message_preview: Some(demo.preview.into()),
             last_message_at: Some(ms(last)),

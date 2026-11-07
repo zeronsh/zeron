@@ -625,6 +625,7 @@ async fn provider_cannot_change_while_a_turn_is_running() {
                 sandbox: SandboxLevel::WorkspaceWrite,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
         )
         .unwrap();
@@ -659,6 +660,7 @@ async fn provider_cannot_change_while_a_turn_is_running() {
                 sandbox: SandboxLevel::WorkspaceWrite,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
         })
     };

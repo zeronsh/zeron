@@ -1714,6 +1714,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             access: Default::default(),
             plan: false,
+            account: None,
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();
         core.doc_host

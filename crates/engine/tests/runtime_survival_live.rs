@@ -159,6 +159,7 @@ async fn agent_process_survives_sends_and_cancel() {
                 sandbox: SandboxLevel::DangerFullAccess,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
         )
         .unwrap();

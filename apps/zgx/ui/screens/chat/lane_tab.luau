@@ -564,7 +564,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	end
 	local accounts = Shared.model_accounts(function(): string?
 		return device:get()
-	end)
+	end, function(): any
+		return session:get()
+	end, store.configure)
 	-- What `@`, `/` and `$` offer, as the chat page's. (A split's pane: the
 	-- window's composer types, a press focusing it.)
 	local function run_command(command: string)
@@ -683,6 +685,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		accounts = accounts.accounts,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
+		chat_account = accounts.chat_account,
 		-- What its context holds: the chat page's ring and card, from the
 		-- side chat's own numbers (once it has run and they're reported).
 		usage = function(): any

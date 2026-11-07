@@ -109,6 +109,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                 sandbox: SandboxLevel::DangerFullAccess,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
         )
         .unwrap();

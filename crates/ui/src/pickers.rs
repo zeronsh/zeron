@@ -168,6 +168,7 @@ impl ResolvedRunConfig {
             sandbox: SandboxLevel::WorkspaceWrite,
             access: self.access,
             plan: self.plan,
+            account: None,
         })
     }
 }
@@ -2636,6 +2637,8 @@ impl Pickers {
             .and_then(|c| c.config.as_ref())
         {
             config.sandbox = existing.sandbox;
+            // The account it runs on is set elsewhere (zgx's This chat row).
+            config.account = existing.account.clone();
         }
         change(&mut config);
         // Reasoning must stay concrete for whatever model the row now names —

@@ -80,6 +80,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
                 sandbox: SandboxLevel::DangerFullAccess,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
         )
         .unwrap();

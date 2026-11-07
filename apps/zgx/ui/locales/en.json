@@ -871,6 +871,8 @@
       "default": "Default",
       "reasoning": "REASONING",
       "account": "Account",
+      "this_chat": "This chat",
+      "machine_default": "Machine default",
       "model": "Model",
       "search_starred": "Search starred models…",
       "search_agent": "Search {agent} models…",

@@ -10,7 +10,7 @@
 //! |---|---|
 //! | `usage.read` | read each account's usage windows and plan; usage events |
 //! | `accounts.read` | read the saved accounts (and their email); account events |
-//! | `accounts.switch` | make another saved account the active one |
+//! | `accounts.switch` | make another saved account the active one, or have a chat run on one of its own |
 //! | `models.read` | read a harness's models and a chat's model; model events |
 //! | `models.set` | set a chat's model, effort and options |
 //! | `messages.send` | send a chat a message, start a chat, answer a question, as the composer does |
@@ -615,6 +615,10 @@ impl Agents {
                 need(ACCOUNTS_SWITCH, "switch your agents' accounts")?;
                 self.switch(&by, &args).await
             }
+            "set_chat_account" => {
+                need(ACCOUNTS_SWITCH, "switch your agents' accounts")?;
+                self.set_chat_account(&by, &args).await
+            }
             "models" => {
                 need(MODELS_READ, "see your agents' models")?;
                 let harness = provider_arg(&args, "harness")?
@@ -855,6 +859,52 @@ impl Agents {
         Ok(json!({ "status": "set", "applies": "next_turn", "model": chat_model_json(&chat.id, &config) }))
     }
 
+    /// `zeron.set_chat_account { chat, account? }`: the chat runs on one of
+    /// its provider's saved accounts from its next turn (`account` absent:
+    /// on this computer's active login again). Other chats keep theirs.
+    async fn set_chat_account(&self, by: &By, args: &Json) -> Result<Json, Refused> {
+        let chat = self.chat(args)?;
+        let mut config = chat
+            .config
+            .clone()
+            .ok_or_else(|| Refused::new(reason::NOT_FOUND, "That chat hasn't chosen a provider yet"))?;
+        let account = args
+            .get("account")
+            .and_then(Json::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        if let Some(id) = &account {
+            if !matches!(config.harness, HarnessId::ClaudeCode | HarnessId::Codex) {
+                return Err(Refused::new(
+                    reason::BAD_CALL,
+                    "Only Claude Code and Codex chats can run on an account of their own",
+                ));
+            }
+            let snapshot = self.read_accounts(false).await?;
+            if !snapshot
+                .accounts
+                .iter()
+                .any(|a| a.harness == config.harness && a.id == *id && a.switchable)
+            {
+                return Err(Refused::new(
+                    reason::NOT_FOUND,
+                    format!("{} has no saved account \"{id}\"", config.harness.as_str()),
+                ));
+            }
+        }
+        if config.account == account {
+            return Err(Refused::new(reason::ALREADY, "That chat runs on that account already"));
+        }
+        self.loop_guard(by)?;
+        config.account = account.clone();
+        self.host()?
+            .set_chat_config(&chat.id, config)
+            .map_err(|why| Refused::new(reason::FAILED, why))?;
+        tracing::info!(plugin = %by.plugin, chat = %chat.id, "plugins: set a chat's account");
+        self.record(by, json!({ "op": "set_chat_account", "chat": chat.id, "account": account }));
+        Ok(json!({ "status": "set", "applies": "next_turn", "chat": chat.id, "account": account }))
+    }
+
     // ── Messages ───────────────────────────────────────────────────────────
 
     /// `zeron.send_message { chat, text, attachments?, mode? }`: as the
@@ -960,6 +1010,7 @@ impl Agents {
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 access: Default::default(),
                 plan: false,
+                account: None,
             },
             cwd: text("cwd"),
         };

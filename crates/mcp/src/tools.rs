@@ -1212,6 +1212,7 @@ impl Tools {
             sandbox,
             access,
             plan: args.plan,
+            account: None,
         };
 
         let chat_id = uuid::Uuid::new_v4().to_string();

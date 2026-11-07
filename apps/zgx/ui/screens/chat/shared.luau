@@ -890,14 +890,48 @@ local function account_detail(account: any): string
 	return table.concat(parts, " · ")
 end
 
+-- Agents whose chats can run on a saved account of their own (the engine's
+-- `ChatConfig::account`: Claude Code and Codex).
+local OWN_ACCOUNT_AGENTS = { ["claude-code"] = true, codex = true }
+
 -- The composer's accounts on `device` (ds.ModelPicker's `accounts`,
 -- `on_account`, `on_accounts_open`), whichever computer it is: asked for as
 -- it's first seen.
-function M.model_accounts(device: () -> string?): any
+--
+-- With `chat` (the chat open: its session) and `configure` (store.configure),
+-- also ds.ModelPicker's `chat_account`: the account that chat runs on.
+function M.model_accounts(
+	device: () -> string?,
+	chat: (() -> any)?,
+	configure: ((id: string, patch: { [string]: any }) -> ())?
+): any
 	ui.effect(function()
 		agents.watch_device(account_key(device()))
 	end)
+	-- The open chat's own account (its "This chat" row): a chat made.
+	local function open_chat(): any
+		local s = if chat then chat() else nil
+		return if s and s.id and s.state == "ready" then s else nil
+	end
 	return {
+		chat_account = if chat and configure
+			then {
+				get = function(): string?
+					local s = open_chat()
+					return if s then s.account else nil
+				end,
+				set = function(id: string?)
+					local s = open_chat()
+					if s and configure then
+						-- ("": the computer's own again.)
+						configure(s.id, { account = id or "" })
+					end
+				end,
+				allowed = function(harness: string): boolean
+					return open_chat() ~= nil and OWN_ACCOUNT_AGENTS[harness] == true
+				end,
+			}
+			else nil,
 		accounts = function(harness: string, model: string): { any }?
 			local on = agents.on_device:get()[account_key(device())]
 			local list = on and on[harness]

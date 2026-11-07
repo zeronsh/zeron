@@ -60,6 +60,14 @@ export type Account = {
 	active: boolean,
 	can_switch: boolean,
 }
+-- The chat open, when there is one: the account it runs on (an account's
+-- id; nil: the computer's own), which its "This chat" row sets. `allowed`:
+-- whether an agent's chats can run on an account of their own.
+export type ChatAccount = {
+	get: () -> string?,
+	set: (id: string?) -> (),
+	allowed: (harness: string) -> boolean,
+}
 export type Props = {
 	-- The accounts of a model's agent (nil or none: no row, no ring), followed
 	-- as they change. `on_account` puts one in use; `on_accounts_open` asks
@@ -67,6 +75,8 @@ export type Props = {
 	accounts: ((harness: string, model: string) -> { Account }?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
+	-- The chat open's own account (nil: a new chat, or no such row).
+	chat_account: ChatAccount?,
 	model: State<string?>,
 	effort: State<string?>,
 	fast: State<boolean>?,
@@ -458,11 +468,53 @@ return ui.component(function(props: Props): Node
 		end
 		return nil
 	end
+	-- The account this chat runs on when it has one of its own (one of the
+	-- chosen agent's), and so the one it runs on either way.
+	local function pinned(): Account?
+		local c = props.chat_account
+		return if c then account_by_id(c.get()) else nil
+	end
+	local function runs_on(): Account?
+		return pinned() or in_use()
+	end
+	local function chat_pinnable(): boolean
+		local c = props.chat_account
+		local m = current()
+		return c ~= nil and m ~= nil and c.allowed(m.harness) and #accounts() > 0
+	end
 	local function used(a: Account?): number
 		return if a and a.used then a.used else 0
 	end
 	local function percent(f: number): string
 		return locale.s("ds.composer.context.percent", { n = math.floor(f * 100 + 0.5) })
+	end
+
+	-- An account in a list: its address, plan and windows in words; a ring
+	-- of how much of it is used.
+	local function account_item(a: Account, disabled: boolean): Dropdown.Item
+		local words = { a.plan or "", a.detail }
+		return {
+			value = a.id,
+			label = a.email,
+			private = true,
+			disabled = disabled,
+			description = if words[1] ~= "" and words[2] ~= "" then `{words[1]} · {words[2]}` else words[1] .. words[2],
+		}
+	end
+	local function account_ring(item: Dropdown.Item): Node?
+		return ui.show(function(): boolean
+			local a = account_by_id(item.value)
+			return a ~= nil and a.used ~= nil
+		end, ui.div {
+			self = "center",
+			shrink = 0,
+			context_usage.Ring {
+				ink = context_usage.usage_ink,
+				fraction = function(): number
+					return used(account_by_id(item.value))
+				end,
+			},
+		})
 	end
 
 	-- The account row: its name, the address in use and how much of it is
@@ -480,16 +532,7 @@ return ui.component(function(props: Props): Node
 			items = function(): { Dropdown.Item }
 				local out: { Dropdown.Item } = {}
 				for _, a in accounts() do
-					local words = { a.plan or "", a.detail }
-					table.insert(out, {
-						value = a.id,
-						label = a.email,
-						private = true,
-						disabled = not a.active and not a.can_switch,
-						description = if words[1] ~= "" and words[2] ~= ""
-							then `{words[1]} · {words[2]}`
-							else words[1] .. words[2],
-					})
+					table.insert(out, account_item(a, not a.active and not a.can_switch))
 				end
 				return out
 			end,
@@ -498,21 +541,7 @@ return ui.component(function(props: Props): Node
 			width = 300,
 			placement = { side = "right", align = "start", offset = 7 },
 			on_open = sync,
-			trailing_item = function(item: Dropdown.Item): Node?
-				return ui.show(function(): boolean
-					local a = account_by_id(item.value)
-					return a ~= nil and a.used ~= nil
-				end, ui.div {
-					self = "center",
-					shrink = 0,
-					context_usage.Ring {
-						ink = context_usage.usage_ink,
-						fraction = function(): number
-							return used(account_by_id(item.value))
-						end,
-					},
-				})
-			end,
+			trailing_item = account_ring,
 			on_choose = function(id: string)
 				local m = current()
 				if m and props.on_account then
@@ -564,11 +593,87 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
-	-- The ring on the chip, right of the effort: how near the account in use
-	-- is to a limit. (Nothing reported, or its mark alone, folded: no ring.)
+	-- The chat's own account, under the computer's (an option's row): the
+	-- computer's (Machine default), or one of the agent's accounts for this
+	-- chat alone, from its next turn. Other chats keep theirs.
+	local MACHINE = ""
+	local function chat_account_row(): Node
+		local value = ui.use_state(MACHINE :: string?)
+		local function sync()
+			local a = pinned()
+			value:set(if a then a.id else MACHINE)
+		end
+		ui.effect(sync)
+		return Dropdown {
+			value = value,
+			items = function(): { Dropdown.Item }
+				local out: { Dropdown.Item } = {
+					{ value = MACHINE, label = locale.s("ds.model_picker.machine_default") },
+				}
+				for _, a in accounts() do
+					table.insert(out, account_item(a, not a.can_switch))
+				end
+				return out
+			end,
+			label = locale.t("ds.model_picker.this_chat"),
+			search = false,
+			width = 300,
+			placement = { side = "right", align = "start", offset = 7 },
+			on_open = sync,
+			trailing_item = account_ring,
+			on_choose = function(id: string)
+				local c = props.chat_account
+				if c then
+					c.set(if id == MACHINE then nil else id)
+				end
+			end,
+			trigger = function(menu: Dropdown.Menu): Node
+				local row: ContainerProps = {
+					id = "model-picker-chat-account",
+					label = locale.t("ds.model_picker.this_chat"),
+					bg = function()
+						return if menu.open:get() then "$hover" else "#00000000"
+					end,
+					on_click = menu.toggle,
+					ui.text { locale.t("ds.model_picker.this_chat"), text_size = "$font.size.md", color = "$text.primary", grow = 1 },
+					ui.show(function(): boolean
+						return pinned() ~= nil
+					end, PrivateText {
+						function(): string
+							local a = pinned()
+							return if a then a.email else ""
+						end,
+						reveal = false,
+						truncate = true,
+						text_size = "$font.size.md",
+						color = "$text.tertiary",
+						max_w = 128,
+						shrink = 1,
+					}),
+					ui.show(function(): boolean
+						return pinned() == nil
+					end, FadeText {
+						function(): string
+							return locale.s("ds.model_picker.machine_default")
+						end,
+						text_size = "$font.size.md",
+						color = "$text.tertiary",
+						max_w = 128,
+					}),
+					Menu.chevron(),
+				}
+				Menu.look(row)
+				return ui.row(row)
+			end,
+		}
+	end
+
+	-- The ring on the chip, right of the effort: how near the account this
+	-- chat runs on is to a limit. (Nothing reported, or its mark alone,
+	-- folded: no ring.)
 	local function usage_ring(): Node
 		return ui.show(function(): boolean
-			local a = in_use()
+			local a = runs_on()
 			return a ~= nil and a.used ~= nil and (props.fold == nil or props.fold() < 2)
 		end, ui.div {
 			id = "model-picker-usage",
@@ -576,14 +681,14 @@ return ui.component(function(props: Props): Node
 			shrink = 0,
 			tooltip = Tooltip {
 				function(): string
-					local a = in_use()
+					local a = runs_on()
 					return if a then a.detail else ""
 				end,
 			},
 			context_usage.Ring {
 				ink = context_usage.usage_ink,
 				fraction = function(): number
-					return used(in_use())
+					return used(runs_on())
 				end,
 			},
 		})
@@ -643,6 +748,7 @@ return ui.component(function(props: Props): Node
 		ui.show(function(): boolean
 			return #accounts() > 0
 		end, account_row()),
+		ui.show(chat_pinnable, chat_account_row()),
 		ui.each(owned, function(it: Owned): Node
 			return option_row(it.option)
 		end, {

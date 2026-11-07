@@ -359,6 +359,31 @@ async fn agents_switching_makes_the_account_active_says_who_and_isnt_paced() {
 }
 
 #[tokio::test]
+async fn agents_a_chat_can_be_set_to_run_on_an_account_of_its_own() {
+    let f = Fixture::new();
+    f.grant("p", &[ACCOUNTS_SWITCH]);
+    let set = f.op("p", json!({ "op": "set_chat_account", "chat": "c1", "account": "a2" })).await.unwrap();
+    assert_eq!((set["status"].as_str(), set["applies"].as_str()), (Some("set"), Some("next_turn")));
+    assert_eq!(f.host.chats()[0].config.as_ref().unwrap().account.as_deref(), Some("a2"));
+    // Nothing switched for the computer.
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), 0);
+    assert!(f.snapshot().accounts.iter().any(|a| a.id == "a1" && a.active));
+    for (args, why) in [
+        (json!({ "op": "set_chat_account", "chat": "c1", "account": "a2" }), reason::ALREADY),
+        (json!({ "op": "set_chat_account", "chat": "c1", "account": "zz" }), reason::NOT_FOUND),
+        (json!({ "op": "set_chat_account", "chat": "zz", "account": "a1" }), reason::NOT_FOUND),
+    ] {
+        assert_eq!(f.op("p", args.clone()).await.unwrap_err().reason, why, "{args}");
+    }
+    // Back to the computer's own.
+    f.op("p", json!({ "op": "set_chat_account", "chat": "c1" })).await.unwrap();
+    assert_eq!(f.host.chats()[0].config.as_ref().unwrap().account, None);
+    // It takes the permission to switch accounts.
+    f.grant("q", &[ACCOUNTS_READ]);
+    assert!(f.op("q", json!({ "op": "set_chat_account", "chat": "c1", "account": "a2" })).await.is_err());
+}
+
+#[tokio::test]
 async fn agents_a_switch_happens_at_once_or_waits_when_asked() {
     let f = Fixture::new();
     f.grant("p", &[ACCOUNTS_SWITCH]);

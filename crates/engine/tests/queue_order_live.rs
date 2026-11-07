@@ -106,6 +106,7 @@ impl Rig {
                     sandbox: SandboxLevel::DangerFullAccess,
                     access: Default::default(),
                     plan: false,
+                    account: None,
                 },
             )
             .unwrap();

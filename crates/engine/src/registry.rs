@@ -170,6 +170,24 @@ pub trait RunEnvironment: Send + Sync {
         None
     }
 
+    /// [`Self::prepare`] for a run of a chat that names its own saved
+    /// account (`ChatConfig::account`; `None`: the machine's active login).
+    /// Providers that keep no accounts ignore it.
+    async fn prepare_for(
+        &self,
+        harness: HarnessId,
+        _account: Option<&str>,
+        request: &mut zeron_proto::RunRequest,
+    ) -> Result<(), String> {
+        self.prepare(harness, request).await
+    }
+
+    /// [`Self::credential`] for a chat that names `account` (see
+    /// [`Self::prepare_for`]).
+    async fn credential_for(&self, harness: HarnessId, _account: Option<&str>) -> Option<String> {
+        self.credential(harness).await
+    }
+
     /// A run of `harness` that started with `credential` reported the
     /// subscription's usage (see [`zeron_proto::AgentEvent::PlanUsage`]).
     async fn record_usage(
@@ -342,8 +360,19 @@ impl HarnessRegistry {
         harness: HarnessId,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
+        self.prepare_run_for(harness, None, request).await
+    }
+
+    /// [`Self::prepare_run`] for a chat that names its own saved `account`
+    /// ([`RunEnvironment::prepare_for`]).
+    pub async fn prepare_run_for(
+        &self,
+        harness: HarnessId,
+        account: Option<&str>,
+        request: &mut zeron_proto::RunRequest,
+    ) -> Result<(), String> {
         for environment in self.environments() {
-            environment.prepare(harness, request).await?;
+            environment.prepare_for(harness, account, request).await?;
         }
         if let Some(credit) = self.commit_credit.get() {
             credit.apply(&mut request.env);
@@ -353,8 +382,18 @@ impl HarnessRegistry {
 
     /// [`RunEnvironment::credential`] (`None` without a provider).
     pub async fn run_credential(&self, harness: HarnessId) -> Option<String> {
+        self.run_credential_for(harness, None).await
+    }
+
+    /// [`Self::run_credential`] for a chat that names its own saved
+    /// `account` ([`RunEnvironment::credential_for`]).
+    pub async fn run_credential_for(
+        &self,
+        harness: HarnessId,
+        account: Option<&str>,
+    ) -> Option<String> {
         for environment in self.environments() {
-            if let Some(credential) = environment.credential(harness).await {
+            if let Some(credential) = environment.credential_for(harness, account).await {
                 return Some(credential);
             }
         }

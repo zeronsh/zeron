@@ -129,6 +129,8 @@ export type Props = {
 	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
+	-- The open chat's own account (ds.ModelPicker's `chat_account`).
+	chat_account: ModelPicker.ChatAccount?,
 	-- How much of the model's context is used (0 to 1): a ring beside its
 	-- chip.
 	context: (number | () -> number)?,
@@ -1395,6 +1397,7 @@ return ui.component(function(props: Props): Node
 			accounts = props.accounts,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,
+			chat_account = props.chat_account,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			showing = props.model_open,
