@@ -626,6 +626,8 @@ local function Composer(): Node
 					if shared.text:peek() == "" then
 						shared.text:set(text_out)
 					end
+					-- Its files too, before any added since.
+					shared.restore_cargo_of(id, carried)
 				end)
 			end
 			if running:peek() then
