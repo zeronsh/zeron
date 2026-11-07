@@ -20,6 +20,7 @@ pub mod net_path;
 pub mod registry;
 pub mod socket;
 mod store;
+mod store_recovery;
 mod sync_jobs;
 mod types;
 pub mod wake;
@@ -31,4 +32,5 @@ pub use registry::{
     ReconnectState, RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning,
 };
 pub use store::{DocsStore, StoreError};
+pub use store_recovery::{Recovery as StoreRecovery, corruption_seen, marker_path as store_check_marker, request_check as request_store_check};
 pub use types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};

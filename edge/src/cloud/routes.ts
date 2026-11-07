@@ -287,6 +287,7 @@ export const handleCloudRoute = async (
     // before the machine counts as gone.
     const every = count(body.everySecs);
     const everySecs = every !== undefined && every >= 1 && every <= 3600 ? every : undefined;
+    const storeRecoveredAt = byteCount(body.storeRecoveredAt);
     const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
     return rpc(() =>
       accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, {
@@ -295,7 +296,8 @@ export const handleCloudRoute = async (
         backgroundRuns,
         waitingRuns,
         ...(diskUsedBytes === undefined ? {} : { diskUsedBytes }),
-        ...(everySecs === undefined ? {} : { everySecs })
+        ...(everySecs === undefined ? {} : { everySecs }),
+        ...(storeRecoveredAt === undefined ? {} : { storeRecoveredAt })
       })
     );
   }

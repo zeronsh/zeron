@@ -1020,6 +1020,22 @@ struct HeartbeatBody {
     disk_total_bytes: Option<u64>,
     /// How often it beats from here on, in seconds. Older edges ignore it.
     every_secs: u64,
+    /// When this run found its chat store damaged and rebuilt it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_recovered_at: Option<i64>,
+}
+
+/// Unix ms this process rebuilt a damaged chat store at its start (0: it didn't).
+static STORE_RECOVERED_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// The store's open found it damaged and rebuilt it: every heartbeat says so,
+/// for the edge to record and show.
+pub fn note_store_recovered(at_ms: i64) {
+    STORE_RECOVERED_AT.store(at_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn store_recovered_at() -> Option<i64> {
+    Some(STORE_RECOVERED_AT.load(std::sync::atomic::Ordering::SeqCst)).filter(|at| *at > 0)
 }
 
 /// The edge's answer: what this machine's size holds, when it says.
@@ -1212,6 +1228,7 @@ pub fn spawn_heartbeat(
                 background_runs: runs.background,
                 waiting_runs: runs.waiting,
                 every_secs: cadence.as_secs().max(1),
+                store_recovered_at: store_recovered_at(),
             };
             match http.post(&url).bearer_auth(token).json(&body).send().await {
                 Ok(res) if res.status().is_success() => {
