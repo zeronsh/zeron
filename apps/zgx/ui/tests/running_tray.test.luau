@@ -171,3 +171,18 @@ test("with nothing running the tray stays for whoever has it open, and goes when
 	expect(app:has('role:button "Open Subagents"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
+
+test("a command of several lines shows on one line in its row", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	app:set_state("test_running_tasks", {
+		{ id = "b1", kind = "process", name = "Check the build", detail = "cd repo\n  cargo check\ncargo test", since = os.time() - 5 },
+	})
+	app:frames(20)
+	app:click('role:button "Open Running"')
+	app:frames(30)
+	expect(app:has('~"cd repo cargo check cargo test"')).to_be(true)
+	expect(app:has('~"cargo check\ncargo test"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
