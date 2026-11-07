@@ -251,6 +251,36 @@ end
 stub.retry = function(id: string, message: string)
 	note(`retry:{id}:{message}`)
 end
+-- This device's outbox, as the engine takes a send out of it (#1256's
+-- RemoveHeldSend): gone from the chat's waiting list, or not there. An
+-- engine from before it refuses.
+local no_removal = false
+ui.command {
+	id = "engine_without_removal",
+	title = "The engine can't take a send out of its outbox",
+	run = function()
+		no_removal = true
+	end,
+}
+stub.remove_held = function(id: string, item: string, message: string?): any
+	note(`remove_held:{id}:{item}:{message or "-"}`)
+	if no_removal then
+		return { after = function(_self: any, _ok: any, err: (any) -> ()) err({ message = "unsupported" }) end }
+	end
+	local s = META[id]
+	local kept, found = {}, false
+	for _, w in (s and s.waiting) or {} do
+		if w.id == item then
+			found = true
+		else
+			table.insert(kept, w)
+		end
+	end
+	if found then
+		publish(id, { waiting = kept })
+	end
+	return settled(found)
+end
 -- Each project's branches, as git where it lives would list them (the
 -- box's asked of the box).
 local REFS: { [string]: { any } } = {
@@ -588,6 +618,20 @@ ui.command {
 	run = function()
 		if opened then
 			publish(opened, { waiting = { { id = "o1", message = "m-o1", text = "With files", sent = os.time(), held = true, failure = "too many files are waiting for Cloud machines to collect them; retry once one has" } } })
+		end
+	end,
+}
+-- This device's outbox for the chat: one send still uploading, one that
+-- stopped trying.
+ui.command {
+	id = "waiting_outbox",
+	title = "Two sends in this device's outbox",
+	run = function()
+		if opened then
+			publish(opened, { waiting = {
+				{ id = "o-up", message = "m-up", text = "Still uploading", sent = os.time(), held = true },
+				{ id = "o-stop", message = "m-stop", text = "Gave up", sent = os.time(), held = true, failure = "upload failed" },
+			} })
 		end
 	end,
 }

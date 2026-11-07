@@ -2802,6 +2802,7 @@
       "edit_conflict": "队列中的消息已更改：你的编辑未保存",
       "edit_not_saved": "你的编辑未保存",
       "didnt_send": "消息未发送",
+      "didnt_remove": "无法移除这条消息",
       "starting_cloud": "正在启动 Cloud 设备…",
       "starting": "正在开始对话…",
       "didnt_start": "对话未能开始",
@@ -2874,7 +2875,9 @@
       "queued_old_body": "排队于{ago}，此对话的机器一唤醒就会发送。不再需要的请先从队列中移除。",
       "send_failed_title": "有一条消息未发送",
       "store_full": "等待 Cloud 机器取走的文件太多。等其中一台取走后再试。",
-      "held_sending": "正在发送…"
+      "held_sending": "正在发送…",
+      "outbox_uploading": "正在上传…",
+      "outbox_failed": "未发送"
     },
     "turn_state": {
       "interrupted": "已中断",

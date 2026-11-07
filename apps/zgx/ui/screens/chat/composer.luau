@@ -452,8 +452,44 @@ local function Composer(): Node
 			end
 		end,
 	}
+	-- This device's outbox for the chat (#1256): sends uploading or stopped,
+	-- each removable where the engine can take one back. Whether it can is
+	-- asked once a chat has one, by taking out a send that isn't there (an
+	-- engine from before it refuses "unsupported"; then no Remove).
+	local outbox = ui.computed(function(): { any }?
+		local s = open()
+		return s and s.waiting
+	end)
+	local removes_held = ui.state("chat_removes_held", nil :: { chat: string, can: boolean }?)
+	ui.effect(function()
+		local chat = session_id:get()
+		if not chat or not CloudMachine.has_outbox(outbox:get()) then
+			return
+		end
+		local known = removes_held:peek()
+		if known and known.chat == chat then
+			return
+		end
+		removes_held:set({ chat = chat, can = false })
+		store.remove_held(chat, "zgx-asks-whether-it-can"):after(function()
+			if session_id:peek() == chat then
+				removes_held:set({ chat = chat, can = true })
+			end
+		end, function(err: any)
+			local m = if type(err) == "table" and err.message then tostring(err.message) else tostring(err)
+			-- (Unsure, not refused: asked again next time.)
+			if m ~= "unsupported" and session_id:peek() == chat then
+				removes_held:set(nil)
+			end
+		end)
+	end)
+	local function can_remove_held(): boolean
+		local known = removes_held:get()
+		return known ~= nil and known.chat == session_id:get() and known.can
+	end
 	-- The queue it shows: its own (one that waited long says how long), then
-	-- what's held back for its machine (screens/chat/held), each removable.
+	-- what's held back for its machine (screens/chat/held), each removable,
+	-- then this device's outbox.
 	local shown_queue = ui.computed(function(): { any }
 		local out: { any } = {}
 		local now = machine.now()
@@ -474,6 +510,9 @@ local function Composer(): Node
 				-- (Refused, and its machine can take it: the person's to send.)
 				waiting = if h.refused and not reason then nil else CloudMachine.held_label(reason),
 			})
+		end
+		for _, row in CloudMachine.outbox_rows(outbox:get(), can_remove_held()) do
+			table.insert(out, row)
 		end
 		return out
 	end)
@@ -1019,7 +1058,9 @@ local function Composer(): Node
 			-- (A held row goes on its own; one refused, by its Send.)
 			on_queue_send = function(row: string)
 				local held, chat = Held.id_of(row), session_id:peek()
-				if not held then
+				if CloudMachine.outbox_id(row) then
+					return
+				elseif not held then
 					asks.on_queue_send(row)
 				elseif chat and not machine.hold_reason() then
 					release(chat, held)
@@ -1029,7 +1070,9 @@ local function Composer(): Node
 			-- after what's there.)
 			on_queue_edit = function(row: string)
 				local held, chat = Held.id_of(row), session_id:peek()
-				if not held then
+				if CloudMachine.outbox_id(row) then
+					return
+				elseif not held then
 					edits.on_queue_edit(row)
 					return
 				end
@@ -1046,6 +1089,24 @@ local function Composer(): Node
 				if held then
 					if chat then
 						Held.remove(chat, held)
+					end
+					return
+				end
+				-- An outbox send: out for good, and its prompt with it. (Gone
+				-- already, it went out or was taken out elsewhere; the list
+				-- says so as it changes.)
+				local sent = CloudMachine.outbox_id(row)
+				if sent then
+					if chat and can_remove_held() then
+						local message = nil
+						for _, w in outbox:peek() or {} do
+							if w.id == sent then
+								message = w.message
+							end
+						end
+						store.remove_held(chat, sent, message):after(function() end, function()
+							own_notice:set { tone = "danger", key = "chat.composer.didnt_remove", dismissable = true }
+						end)
 					end
 					return
 				end

@@ -163,6 +163,46 @@ function M.held_label(reason: string?): string
 	return if reason == "fresh" then say("held_fresh_short", "Waits for a fresh machine") else say("held_size_short", "Waits for a size")
 end
 
+-- This device's outbox (#1256): sends whose files are still uploading, or that
+-- stopped trying, as the queue's rows, after its own. Each says which, in its
+-- action's place; Remove takes one out for good, where the engine can
+-- (`removable`: false hides it).
+M.OUTBOX = "outbox:"
+
+function M.outbox_rows(list: { any }?, removable: boolean): { any }
+	local out = {}
+	for _, w in list or {} do
+		if w.held and w.id then
+			table.insert(out, {
+				id = M.OUTBOX .. w.id,
+				text = w.text or "",
+				waiting = if w.failure then say("outbox_failed", "Didn't send") else say("outbox_uploading", "Uploading…"),
+				removable = removable,
+			})
+		end
+	end
+	return out
+end
+
+-- The outbox send a queue row stands for, if it is one.
+function M.outbox_id(row: string): string?
+	if string.sub(row, 1, #M.OUTBOX) == M.OUTBOX then
+		return string.sub(row, #M.OUTBOX + 1)
+	end
+	return nil
+end
+
+-- Whether the list has any outbox send (worth asking the engine whether it
+-- can take one back).
+function M.has_outbox(list: { any }?): boolean
+	for _, w in list or {} do
+		if w.held then
+			return true
+		end
+	end
+	return false
+end
+
 -- The alert's line while messages are held.
 function M.held_words(reason: string, count: number): string
 	if reason == "fresh" then

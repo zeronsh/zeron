@@ -2802,6 +2802,7 @@
       "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",
       "edit_not_saved": "Your edit wasn't saved",
       "didnt_send": "Your message didn't send",
+      "didnt_remove": "Couldn't remove that message",
       "starting_cloud": "Starting a Cloud machine…",
       "starting": "Starting the chat…",
       "didnt_start": "The chat didn't start",
@@ -2874,7 +2875,9 @@
       "queued_old_body": "Queued {ago}, they send as soon as this chat's machine wakes. Remove any you no longer want from the queue first.",
       "send_failed_title": "A message didn't send",
       "store_full": "Too many files are waiting for Cloud machines to collect them. Try again once one has.",
-      "held_sending": "Sending…"
+      "held_sending": "Sending…",
+      "outbox_uploading": "Uploading…",
+      "outbox_failed": "Didn't send"
     },
     "turn_state": {
       "interrupted": "Interrupted",

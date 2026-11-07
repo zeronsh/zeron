@@ -63,6 +63,8 @@ export type Queued = {
 	-- How long it has waited, said beside it once that's worth knowing
 	-- ("3 days ago").
 	age: string?,
+	-- false: it can't be taken back from here (no Remove).
+	removable: boolean?,
 }
 export type TodoState = "done" | "doing" | "pending"
 export type Todo = { id: string, text: string, state: TodoState }
@@ -959,7 +961,9 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 						end
 					end,
 				},
-				IconButton {
+				ui.show(function(): boolean
+					return now().removable ~= false
+				end, IconButton {
 					icon = "trash-bin-minimalistic",
 					label = locale.t("ds.composer_dock.remove"),
 					tooltip = locale.s("ds.composer_dock.remove"),
@@ -971,7 +975,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 							props.on_queue_remove(q.id)
 						end
 					end,
-				},
+				}),
 			},
 			primary,
 		}

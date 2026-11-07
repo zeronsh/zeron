@@ -1121,6 +1121,66 @@ test("a refused held message's Edit takes its words back to the composer", funct
 	expect(sends_of(app, "Take me back")).to_be(1)
 end)
 
+test("the outbox's sends are queue rows, removable only where the engine can", function()
+	local list = {
+		{ id = "c1", text = "Already in the chat" },
+		{ id = "o1", text = "Uploading", held = true },
+		{ id = "o2", text = "Stopped", held = true, failure = "upload failed" },
+	}
+	expect(logic.has_outbox(list)).to_be(true)
+	expect(logic.has_outbox({ list[1] })).to_be(false)
+	local rows = logic.outbox_rows(list, true)
+	expect(#rows).to_be(2)
+	expect(rows[1].id).to_be("outbox:o1")
+	expect(rows[1].waiting).to_be("Uploading…")
+	expect(rows[2].waiting).to_be("Didn't send")
+	expect(rows[2].removable).to_be(true)
+	expect(logic.outbox_rows(list, false)[1].removable).to_be(false)
+	expect(logic.outbox_id("outbox:o2")).to_be("o2")
+	expect(logic.outbox_id("held:o2")).to_be_nil()
+end)
+
+local function outbox_row(words: string): string
+	return `role:listitem ~"{words}"`
+end
+
+test("every outbox send shows with Remove, uploading or stopped, and Remove takes it out", function()
+	local app = on_cloud("ready")
+	app:command("waiting_outbox")
+	app:frames(30)
+	open_queue(app)
+	for _, case in { { "Still uploading", "Uploading…" }, { "Gave up", "Didn't send" } } do
+		local row = outbox_row(case[1])
+		expect(app:tree(`{row} >> role:button "{case[2]}"`)).to_contain("disabled")
+		expect(app:has(`{row} >> role:button "Remove"`)).to_be(true)
+		expect(app:has(`{row} >> role:button "Send next"`)).to_be(false)
+	end
+	-- Asked once whether the engine can, by a send that isn't there.
+	local _, asked = string.gsub(app:state("calls"), "remove_held:s2:zgx%-asks%-whether%-it%-can", "")
+	expect(asked).to_be(1)
+	app:hover(outbox_row("Gave up"))
+	app:frames(20)
+	app:click(`{outbox_row("Gave up")} >> role:button "Remove"`)
+	app:frames(30)
+	expect(app:state("calls")).to_contain("remove_held:s2:o-stop:m-stop")
+	expect(app:has(outbox_row("Gave up"))).to_be(false)
+	expect(app:has(outbox_row("Still uploading"))).to_be(true)
+	expect(app:state("calls")).never.to_contain("remove_held:s2:o-up")
+end)
+
+test("an engine that can't take a send back shows the outbox without Remove", function()
+	local app = on_cloud("ready")
+	app:command("engine_without_removal")
+	app:command("waiting_outbox")
+	app:frames(30)
+	open_queue(app)
+	for _, words in { "Still uploading", "Gave up" } do
+		expect(app:has(outbox_row(words))).to_be(true)
+		expect(app:has(`{outbox_row(words)} >> role:button "Remove"`)).to_be(false)
+	end
+	expect(app:state("calls")).never.to_contain("remove_held:s2:o-")
+end)
+
 test("a held message can be let go, and then nothing sends", function()
 	local app = on_cloud("blocked")
 	send_to(app, "Never mind")
