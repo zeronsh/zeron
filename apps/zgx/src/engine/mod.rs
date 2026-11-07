@@ -5,8 +5,14 @@
 //! the engine started when nothing answers ([`manager`], which also says
 //! which engine and refuses production's).
 //!
-//! Callers `call` a method (waiting a while for a connection first) or ask
-//! to hear each new connection (`on_connect`) to start their watches on it.
+//! Callers `call` a method (waiting for a connection first) or ask to hear
+//! each new connection (`on_connect`) to start their watches on it.
+//!
+//! A launch has no connection until its engine answers, and that can take as
+//! long as the engine before it takes to leave. Until then nothing is wrong:
+//! calls wait and screens stay loading (`keeps_waiting`, `says_unreachable`).
+//! An engine that answered and went is reconnected to in the same way, and
+//! only said as unreachable after [`CONNECT_WAIT`].
 
 pub mod manager;
 pub mod rpc;
@@ -23,7 +29,8 @@ use zgx_desktop::{TaskSpawner, WindowContext};
 use manager::{Config, Spawner};
 use rpc::{DialError, Rpc};
 
-/// How long a call waits for a connection before it says `offline`.
+/// How long a connection lost, or an engine this app can't start, takes to
+/// be said as `offline`.
 const CONNECT_WAIT: Duration = Duration::from_secs(20);
 
 type Listener = Rc<dyn Fn(&Rpc)>;
@@ -39,6 +46,12 @@ pub struct Engine {
     /// A restart asked of this connection's engine (once each).
     restarting: Cell<bool>,
     listeners: RefCell<Vec<Listener>>,
+    /// An engine has answered in this run.
+    answered: Cell<bool>,
+    /// Since when there has been no connection (the launch, or its loss).
+    down_since: Cell<Instant>,
+    /// What hears that no connection is now said as unreachable.
+    unreachable_listeners: RefCell<Vec<Rc<dyn Fn()>>>,
     /// The latest window's tasks: the connection lives on them, and moves to
     /// the next window's when that window closes.
     tasks: RefCell<Option<TaskSpawner>>,
@@ -77,6 +90,7 @@ impl Drop for Supervising {
     fn drop(&mut self) {
         self.0.supervising.set(false);
         self.0.rpc.borrow_mut().take();
+        self.0.down_since.set(Instant::now());
     }
 }
 
@@ -95,6 +109,9 @@ impl Engine {
             signed_in: Cell::new(false),
             restarting: Cell::new(false),
             listeners: RefCell::default(),
+            answered: Cell::new(false),
+            down_since: Cell::new(Instant::now()),
+            unreachable_listeners: RefCell::default(),
             tasks: RefCell::default(),
             supervising: Cell::new(false),
         }
@@ -154,6 +171,23 @@ impl Engine {
         }
     }
 
+    /// `listener` hears when no connection comes to be said as unreachable,
+    /// for a screen that shows it to read [`Engine::unreachable`] again.
+    pub fn on_unreachable(&self, listener: impl Fn() + 'static) {
+        self.unreachable_listeners.borrow_mut().push(Rc::new(listener));
+    }
+
+    /// Whether no connection is to be said as "can't reach the engine". (With
+    /// a connection, it's not asked.)
+    pub fn unreachable(&self) -> bool {
+        says_unreachable(self.config.is_err(), self.answered.get(), self.can_start(), self.down_since.get().elapsed())
+    }
+
+    /// Whether this app can start an engine, should none answer.
+    pub fn can_start(&self) -> bool {
+        self.config.as_ref().is_ok_and(|config| config.startable().is_some())
+    }
+
     /// The connection, waiting up to `wait` for one.
     pub async fn connection(&self, wait: Duration) -> Option<Rpc> {
         let until = Instant::now() + wait;
@@ -168,9 +202,34 @@ impl Engine {
         }
     }
 
+    /// The connection for a call: waiting for it for as long as a launch's
+    /// engine is on its way, else up to [`CONNECT_WAIT`].
+    async fn connection_for_call(&self) -> Option<Rpc> {
+        let until = Instant::now() + CONNECT_WAIT;
+        loop {
+            if let Some(rpc) = self.rpc.borrow().clone().filter(|rpc| !rpc.is_closed()) {
+                return Some(rpc);
+            }
+            let waiting = keeps_waiting(self.answered.get(), self.can_start());
+            if self.config.is_err() || (!waiting && Instant::now() >= until) {
+                return None;
+            }
+            zgx::timer::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// A unary call: its answer, or the engine's error, or `offline` when
     /// there's no engine to ask.
     pub async fn call(&self, method: &str, params: Json) -> Result<Json, String> {
+        let Some(rpc) = self.connection_for_call().await else {
+            return Err("offline".into());
+        };
+        rpc.call(method, params).await
+    }
+
+    /// [`Engine::call`] that says `offline` after [`CONNECT_WAIT`] whatever
+    /// the engine is doing: for what someone is waiting on an answer to.
+    pub async fn call_soon(&self, method: &str, params: Json) -> Result<Json, String> {
         let Some(rpc) = self.connection(CONNECT_WAIT).await else {
             return Err("offline".into());
         };
@@ -213,12 +272,15 @@ impl Engine {
         let mut spawner = Spawner::new();
         let mut delay = Duration::from_millis(250);
         let mut said = None::<String>;
+        let mut said_unreachable = false;
         loop {
             let token = rpc::read_token(&config.data_dir);
             match rpc::connect(config.port, token).await {
                 Ok(rpc) => {
                     delay = Duration::from_millis(250);
                     said = None;
+                    said_unreachable = false;
+                    self.answered.set(true);
                     eprintln!("zeron-zgx: engine: connected");
                     *self.rpc.borrow_mut() = Some(rpc.clone());
                     self.scope.borrow_mut().take();
@@ -238,10 +300,13 @@ impl Engine {
                     }
                     let reason = rpc.pump().await;
                     self.rpc.borrow_mut().take();
+                    self.down_since.set(Instant::now());
                     eprintln!("zeron-zgx: engine: connection ended ({reason})");
                 }
                 Err(DialError::Refused) => {
-                    if spawner.start_if_due(config) {
+                    // (Started one, or an engine is about to let go of the
+                    // data dir: it's a moment away, not worth backing off.)
+                    if spawner.start_if_due(config) || spawner.held() {
                         delay = Duration::from_millis(500);
                     }
                 }
@@ -254,10 +319,27 @@ impl Engine {
                     }
                 }
             }
+            if !said_unreachable && self.rpc.borrow().is_none() && self.unreachable() {
+                said_unreachable = true;
+                let listeners = self.unreachable_listeners.borrow().clone();
+                for listener in listeners {
+                    listener();
+                }
+            }
             zgx::timer::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(3));
         }
     }
+}
+
+/// Whether a call keeps waiting for a connection past its time.
+fn keeps_waiting(answered: bool, startable: bool) -> bool {
+    !answered && startable
+}
+
+/// Whether no connection is to be said as "can't reach the engine".
+fn says_unreachable(refused: bool, answered: bool, startable: bool, down_for: Duration) -> bool {
+    refused || (!keeps_waiting(answered, startable) && down_for >= CONNECT_WAIT)
 }
 
 /// An engine error as a script's outcome word: `offline` (no engine, or the
@@ -270,5 +352,38 @@ pub fn outcome(error: &str) -> &'static str {
         "signed_out"
     } else {
         "failed"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LONG: Duration = Duration::from_secs(3600);
+
+    /// Starting up, an engine this app can start is on its way, however long
+    /// the one before it takes to leave: nothing gives up on it.
+    #[test]
+    fn a_launch_keeps_waiting_for_an_engine_it_can_start() {
+        assert!(keeps_waiting(false, true));
+        assert!(!says_unreachable(false, false, true, LONG));
+    }
+
+    /// With no engine to start, or a config refused, nothing is coming.
+    #[test]
+    fn nothing_waits_for_an_engine_that_can_t_come() {
+        assert!(!keeps_waiting(false, false));
+        assert!(!says_unreachable(false, false, false, Duration::ZERO));
+        assert!(says_unreachable(false, false, false, CONNECT_WAIT));
+        assert!(says_unreachable(true, false, true, Duration::ZERO));
+    }
+
+    /// Once it has answered, losing it is a moment's reconnect, and past that
+    /// it's said as before.
+    #[test]
+    fn losing_an_engine_that_answered_is_said_after_a_while() {
+        assert!(!keeps_waiting(true, true));
+        assert!(!says_unreachable(false, true, true, Duration::from_secs(1)));
+        assert!(says_unreachable(false, true, true, CONNECT_WAIT));
     }
 }

@@ -540,6 +540,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 chats.connected(rpc);
             }
         });
+        let weak = Rc::downgrade(&chats);
+        engine::get().on_unreachable(move || {
+            if let Some(chats) = weak.upgrade() {
+                chats.publish_views();
+            }
+        });
     }
     let weak = Rc::downgrade(&view);
     engine::get().on_connect(move |rpc| {
@@ -1844,7 +1850,8 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let value = {
             let open = self.open.borrow();
-            let offline = self.rpc.borrow().as_ref().is_none_or(Rpc::is_closed);
+            let no_connection = self.rpc.borrow().as_ref().is_none_or(Rpc::is_closed);
+            let offline = chat_offline(no_connection, engine::get().unreachable());
             match open.as_ref() {
                 None => Value::Nil,
                 Some(open) => session_value(&chats, open, offline),
@@ -4236,6 +4243,11 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     ]))
 }
 
+/// Whether the open chat is said as offline.
+fn chat_offline(no_connection: bool, unreachable: bool) -> bool {
+    no_connection && unreachable
+}
+
 fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let chat = chats.chat(&open.id);
     // Ready once its transcript has come and the chat itself (its config)
@@ -5477,6 +5489,15 @@ mod tests {
         assert!(matches!(apply(&mut entries, &mut frame), Ok(Change::Rows)));
         let ids: Vec<_> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["a", "b", "c"]);
+    }
+
+    /// No connection yet is the chat loading: "can't load" is for an engine
+    /// that can't be reached.
+    #[test]
+    fn a_chat_waiting_on_its_connection_is_loading() {
+        assert!(!super::chat_offline(true, false));
+        assert!(super::chat_offline(true, true));
+        assert!(!super::chat_offline(false, true));
     }
 
     #[test]
