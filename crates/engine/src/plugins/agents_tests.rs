@@ -91,6 +91,13 @@ pub(crate) struct Host {
     pub(crate) sessions: Mutex<Vec<Session>>,
     pub(crate) forced: AtomicUsize,
     pub(crate) activations: AtomicUsize,
+    /// Messages delivered: (chat, text, attachments, how).
+    pub(crate) delivered: Mutex<Vec<(String, String, Vec<String>, Delivery)>>,
+    pub(crate) created: Mutex<Vec<NewChat>>,
+    /// The question each chat waits on.
+    pub(crate) pending: Mutex<HashMap<String, String>>,
+    pub(crate) answered: Mutex<Vec<(String, String, Vec<UserInputAnswer>)>>,
+    pub(crate) sent_by: Mutex<Vec<(String, String, Json)>>,
 }
 
 impl AgentHost for Host {
@@ -129,6 +136,41 @@ impl AgentHost for Host {
         let c = chats.iter_mut().find(|c| c.id == chat).ok_or("no chat")?;
         c.config = Some(config);
         Ok(())
+    }
+
+    fn status(&self, chat: &str) -> Option<SessionStatus> {
+        lock(&self.sessions).iter().find(|s| s.chat_id == chat).map(|s| s.status)
+    }
+
+    fn deliver(&self, chat: &str, text: &str, attachments: Vec<String>, how: Delivery) -> Result<String, String> {
+        let mut delivered = lock(&self.delivered);
+        delivered.push((chat.into(), text.into(), attachments, how));
+        Ok(format!("m{}", delivered.len()))
+    }
+
+    fn create_chat(&self, new: &NewChat) -> Result<(), String> {
+        let mut made = chat(&new.chat_id, new.config.model.as_deref().unwrap_or("opus"));
+        made.config = Some(new.config.clone());
+        lock(&self.chats).push(made);
+        lock(&self.created).push(new.clone());
+        Ok(())
+    }
+
+    fn pending_input(&self, chat: &str) -> Result<Option<String>, String> {
+        Ok(lock(&self.pending).get(chat).cloned())
+    }
+
+    fn answer(&self, chat: &str, request: &str, answers: Vec<UserInputAnswer>) -> Result<String, String> {
+        lock(&self.answered).push((chat.into(), request.into(), answers));
+        Ok("cmd-1".into())
+    }
+
+    fn mark_sent_by(&self, chat: &str, id: &str, by: Json) {
+        lock(&self.sent_by).push((chat.into(), id.into(), by));
+    }
+
+    fn default_harness(&self) -> Option<HarnessId> {
+        Some(HarnessId::ClaudeCode)
     }
 }
 
@@ -596,4 +638,233 @@ async fn agents_events_go_only_to_listeners_that_match() {
     f.set_used(0.7);
     f.agents.observe_accounts(&f.snapshot());
     assert!(f.events().is_empty(), "a codex listener hears nothing of claude-code");
+}
+
+// ── Messages (`messages.send`) ──────────────────────────────────────────────
+
+impl Fixture {
+    /// Chat c1's turn as this device sees it, told to `agents`.
+    fn turn(&self, status: SessionStatus) {
+        let outcome = (status == SessionStatus::Idle).then_some(DoneStatus::Completed);
+        let list = vec![session("c1", status, outcome)];
+        *lock(&self.host.sessions) = list.clone();
+        self.agents.observe_sessions(&list);
+    }
+
+    fn delivered(&self) -> Vec<(String, String, Vec<String>, Delivery)> {
+        lock(&self.host.delivered).clone()
+    }
+}
+
+#[tokio::test]
+async fn messages_each_op_needs_messages_send() {
+    let ops = [
+        json!({ "op": "send_message", "chat": "c1", "text": "hi" }),
+        json!({ "op": "new_chat", "prompt": "hi" }),
+        json!({ "op": "answer", "chat": "c1", "answers": { "q1": "Yes" } }),
+    ];
+    for args in &ops {
+        let f = Fixture::new();
+        lock(&f.host.pending).insert("c1".into(), "r1".into());
+        // Everything else, never messages.send: refused, and nothing sent.
+        f.grant("p", &[USAGE_READ, ACCOUNTS_READ, ACCOUNTS_SWITCH, MODELS_READ, MODELS_SET, "sessions.read", "files.read"]);
+        let refused = f.op("p", args.clone()).await.unwrap_err();
+        assert_eq!(refused.reason, reason::NOT_ALLOWED, "{args}");
+        assert!(refused.message.contains(MESSAGES_SEND), "{}", refused.message);
+        f.grant("p", &[MESSAGES_SEND]);
+        f.op("p", args.clone()).await.unwrap_or_else(|r| panic!("{args}: {r:?}"));
+    }
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND]);
+    assert!(f.delivered().is_empty());
+    assert!(lock(&f.host.answered).is_empty());
+}
+
+#[tokio::test]
+async fn messages_go_as_the_composer_sends_them() {
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND]);
+    f.turn(SessionStatus::Idle);
+    // Nothing running: a turn of its own, whatever the mode.
+    let sent = f.op("p", json!({ "op": "send_message", "chat": "c1", "text": " go on ", "mode": "queue" })).await.unwrap();
+    assert_eq!((sent["delivery"].as_str(), sent["chat"].as_str()), (Some("run"), Some("c1")));
+    // Running: queued for its end by default, or steering it.
+    f.turn(SessionStatus::Working);
+    let queued = f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "next" })).await.unwrap();
+    assert_eq!(queued["delivery"], "queue");
+    let steered = f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "also", "mode": "steer" })).await.unwrap();
+    assert_eq!(steered["delivery"], "steer");
+    let d = f.delivered();
+    assert_eq!(d.iter().map(|x| (x.1.as_str(), x.3)).collect::<Vec<_>>(), [("go on", Delivery::Run), ("next", Delivery::Queue), ("also", Delivery::Steer)]);
+    // Waiting on an answer: a steer is refused (answer it, or queue).
+    f.turn(SessionStatus::AwaitingInput);
+    let refused = f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "x", "mode": "steer" })).await.unwrap_err();
+    assert_eq!(refused.reason, reason::BAD_CALL);
+    for (args, why) in [
+        (json!({ "op": "send_message", "chat": "c1", "text": "  " }), reason::BAD_CALL),
+        (json!({ "op": "send_message", "chat": "zz", "text": "x" }), reason::NOT_FOUND),
+        (json!({ "op": "send_message", "chat": "c1", "text": "x", "mode": "shout" }), reason::BAD_CALL),
+        // A file attached names it: that needs files.read too.
+        (json!({ "op": "send_message", "chat": "c1", "text": "x", "attachments": ["/etc/hosts"] }), reason::NOT_ALLOWED),
+    ] {
+        assert_eq!(f.op("p", args.clone()).await.unwrap_err().reason, why, "{args}");
+    }
+    f.grant("p", &[MESSAGES_SEND, "files.read"]);
+    f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "see", "attachments": ["/tmp/a.png"] })).await.unwrap();
+    assert_eq!(f.delivered().last().unwrap().2, ["/tmp/a.png"]);
+}
+
+#[tokio::test]
+async fn messages_say_which_plugin_sent_them_beside_the_transcript() {
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND]);
+    f.turn(SessionStatus::Idle);
+    let sent = f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "hi" })).await.unwrap();
+    let marks = lock(&f.host.sent_by).clone();
+    assert_eq!(marks.len(), 1);
+    let (chat, id, by) = &marks[0];
+    assert_eq!((chat.as_str(), id.as_str()), ("c1", sent["id"].as_str().unwrap()));
+    assert_eq!((by["plugin"].as_str(), by["name"].as_str(), by["kind"].as_str()), (Some("p"), Some("Plugin p"), Some("run")));
+    let action = &f.agents.status("p")["actions"][0];
+    assert_eq!((action["op"].as_str(), action["chat"].as_str()), (Some("send_message"), Some("c1")));
+}
+
+#[tokio::test]
+async fn messages_turns_a_plugin_set_off_carry_its_by() {
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND]);
+    f.grant("w", &["sessions.read"]);
+    let events: Vec<(String, String, Json)> = ["turn.started", "turn.finished", "chat.awaiting_input"]
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (format!("@{i}"), e.to_string(), json!({})))
+        .collect();
+    f.agents.listen("w", Target::Window, &events);
+    f.turn(SessionStatus::Idle);
+    f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "go" })).await.unwrap();
+    f.turn(SessionStatus::Working);
+    f.turn(SessionStatus::AwaitingInput);
+    f.turn(SessionStatus::Working);
+    f.turn(SessionStatus::Idle);
+    let told = f.told();
+    let by: Vec<(&str, Option<&str>)> = told.iter().map(|t| (t.3.as_str(), t.4["by"]["plugin"].as_str())).collect();
+    assert_eq!(by, [("turn.started", Some("p")), ("chat.awaiting_input", Some("p")), ("turn.finished", Some("p"))]);
+    // The person's next turn is theirs: no by.
+    f.turn(SessionStatus::Working);
+    f.turn(SessionStatus::Idle);
+    assert!(f.told().iter().all(|t| t.4.get("by").is_none()));
+    // Queued behind a running turn: the turn after it is the plugin's.
+    f.turn(SessionStatus::Working);
+    f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "after" })).await.unwrap();
+    f.turn(SessionStatus::Idle);
+    f.turn(SessionStatus::Working);
+    f.turn(SessionStatus::Idle);
+    let by: Vec<(String, Option<String>)> =
+        f.told().iter().map(|t| (t.3.clone(), t.4["by"]["plugin"].as_str().map(str::to_owned))).collect();
+    assert_eq!(by[..2], [("turn.started".to_string(), None), ("turn.finished".to_string(), None)], "the running turn was the person's: {by:?}");
+    assert_eq!(by[2..], [("turn.started".to_string(), Some("p".to_string())), ("turn.finished".to_string(), Some("p".to_string()))]);
+}
+
+#[tokio::test]
+async fn messages_a_plugin_sending_on_its_own_turns_end_is_stopped_after_16() {
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND, "sessions.read"]);
+    f.agents.listen("p", Target::Window, &[("@1".into(), "turn.finished".into(), json!({}))]);
+    f.turn(SessionStatus::Idle);
+    // Its first send, then one on each of its own turns' end.
+    for hop in 1..=LOOP_HOPS {
+        let sent = f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "continue" })).await;
+        assert_eq!(sent.unwrap()["status"], "sent", "hop {hop}");
+        f.turn(SessionStatus::Working);
+        f.turn(SessionStatus::Idle);
+    }
+    let stopped = f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "continue" })).await.unwrap_err();
+    assert_eq!(stopped.reason, reason::LOOP);
+    assert_eq!(f.delivered().len(), LOOP_HOPS as usize);
+    assert!(f.agents.notices("p").last().unwrap().contains("Stopped a loop"));
+}
+
+#[tokio::test]
+async fn messages_a_send_not_set_off_by_its_own_last_starts_the_count_over() {
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND, "sessions.read"]);
+    f.agents.listen("p", Target::Window, &[("@1".into(), "turn.finished".into(), json!({}))]);
+    f.turn(SessionStatus::Idle);
+    let send = || f.op("p", json!({ "op": "send_message", "chat": "c1", "text": "continue" }));
+    // Ten of its own in a row.
+    for _ in 0..10 {
+        send().await.unwrap();
+        f.turn(SessionStatus::Working);
+        f.turn(SessionStatus::Idle);
+    }
+    // A turn of the person's ends (no `by`), and it sends on that: not set
+    // off by its own, so it counts from one again...
+    f.turn(SessionStatus::Working);
+    f.turn(SessionStatus::Idle);
+    send().await.unwrap();
+    // ...so 15 more of its own make 16 in a row, and only the next is stopped.
+    for hop in 2..=LOOP_HOPS {
+        f.turn(SessionStatus::Working);
+        f.turn(SessionStatus::Idle);
+        send().await.unwrap_or_else(|r| panic!("hop {hop}: {r:?}"));
+    }
+    f.turn(SessionStatus::Working);
+    f.turn(SessionStatus::Idle);
+    assert_eq!(send().await.unwrap_err().reason, reason::LOOP);
+}
+
+#[tokio::test]
+async fn messages_a_new_chat_is_made_and_sent_its_first_message() {
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND]);
+    let made = f
+        .op("p", json!({ "op": "new_chat", "prompt": "Fix the build", "project": "atlas", "model": "sonnet", "effort": "high", "cwd": "/work" }))
+        .await
+        .unwrap();
+    let id = made["chat"].as_str().unwrap().to_owned();
+    let created = lock(&f.host.created).clone();
+    assert_eq!(created.len(), 1);
+    let new = &created[0];
+    assert_eq!(new.chat_id, id);
+    assert_eq!((new.project.as_deref(), new.cwd.as_deref(), new.device.as_deref()), (Some("atlas"), Some("/work"), None));
+    assert_eq!(new.config.harness, HarnessId::ClaudeCode, "the default harness");
+    assert_eq!((new.config.model.as_deref(), new.config.reasoning), (Some("sonnet"), Some(ReasoningLevel::High)));
+    assert_eq!(f.delivered(), [(id.clone(), "Fix the build".to_string(), vec![], Delivery::Run)]);
+    assert_eq!(lock(&f.host.sent_by)[0].0, id);
+    for (args, why) in [
+        (json!({ "op": "new_chat", "prompt": "" }), reason::BAD_CALL),
+        (json!({ "op": "new_chat", "prompt": "x", "model": "gpt" }), reason::NOT_FOUND),
+        (json!({ "op": "new_chat", "prompt": "x", "harness": "nope" }), reason::NOT_FOUND),
+        (json!({ "op": "new_chat", "prompt": "x", "effort": "max" }), reason::NOT_FOUND),
+    ] {
+        assert_eq!(f.op("p", args.clone()).await.unwrap_err().reason, why, "{args}");
+    }
+}
+
+#[tokio::test]
+async fn messages_a_question_is_answered_as_respond_to_input_answers_it() {
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND]);
+    let none = f.op("p", json!({ "op": "answer", "chat": "c1", "answers": { "q1": "Yes" } })).await.unwrap_err();
+    assert_eq!(none.reason, reason::NOT_FOUND, "nothing waits");
+    lock(&f.host.pending).insert("c1".into(), "r7".into());
+    let done = f
+        .op("p", json!({ "op": "answer", "chat": "c1", "answers": [{ "question": "q1", "labels": ["Yes"] }, { "question": "q2", "label": "Later" }] }))
+        .await
+        .unwrap();
+    assert_eq!((done["status"].as_str(), done["request"].as_str()), (Some("answered"), Some("r7")));
+    let answered = lock(&f.host.answered).clone();
+    assert_eq!(answered[0].0, "c1");
+    assert_eq!(answered[0].1, "r7");
+    assert_eq!(
+        answered[0].2,
+        [
+            UserInputAnswer { question_id: "q1".into(), labels: vec!["Yes".into()] },
+            UserInputAnswer { question_id: "q2".into(), labels: vec!["Later".into()] },
+        ]
+    );
+    // A request named is answered as named; no answers is a bad call.
+    f.op("p", json!({ "op": "answer", "chat": "c1", "request": "r9", "answers": { "q1": ["A", "B"] } })).await.unwrap();
+    assert_eq!(lock(&f.host.answered)[1].1, "r9");
+    assert_eq!(f.op("p", json!({ "op": "answer", "chat": "c1", "answers": {} })).await.unwrap_err().reason, reason::BAD_CALL);
 }

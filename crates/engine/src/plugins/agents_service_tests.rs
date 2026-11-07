@@ -330,3 +330,132 @@ fn agents_permissions_are_known_and_controls_stay_outside_the_sandbox() {
     assert!(capability::OUTSIDE_SANDBOX.contains(&"models.set"));
     assert!(!capability::OUTSIDE_SANDBOX.contains(&"usage.read"));
 }
+
+// ── Messages (`messages.send`) through the plugins module ──────────────────
+
+const SENDER: &str = r#"
+local zeron = require("./zeron")("svc")
+
+zeron.serve("send", function(args)
+	return zeron.send_message({ chat = args.chat, text = args.text, mode = args.mode }):await()
+end)
+
+zeron.serve("start", function(args)
+	return zeron.new_chat({ prompt = args.prompt, harness = "claude-code" }):await()
+end)
+
+zeron.serve("answer", function(args)
+	return zeron.answer({ chat = args.chat, answers = { q1 = "Yes" } }):await()
+end)
+"#;
+
+fn delivered(f: &Fixture) -> Vec<(String, String, Vec<String>, agents::Delivery)> {
+    lock(&f.host.delivered).clone()
+}
+
+#[test]
+fn messages_send_is_known_and_always_asked() {
+    assert!(manifest::KNOWN_PERMISSIONS.contains(&"messages.send"));
+    assert!(capability::OUTSIDE_SANDBOX.contains(&"messages.send"));
+    let manifest = manifest::Manifest::from_value(json!({
+        "id": "svc", "name": "Svc", "version": "1.0.0", "entry": "init.luau",
+        "permissions": ["ui.add", "sessions.read", "messages.send"],
+    }))
+    .unwrap();
+    assert_eq!(manifest.problem(), None);
+    let granted = capability::inside_sandbox(&capability::record(&manifest));
+    assert_eq!(granted["permissions"], json!(["sessions.read", "ui.add"]), "installing your own never grants it");
+}
+
+#[tokio::test]
+async fn messages_a_service_sends_starts_and_answers_with_messages_send() {
+    let f = fixture();
+    write(&f.plugins, &["service", "messages.send"], Some(SENDER)).await;
+    allow(&f.plugins).await;
+    let sent = ask(&f.plugins, "send", json!({ "chat": "c1", "text": "hello" })).await;
+    assert_eq!(sent["ok"], true, "{sent}");
+    assert_eq!(sent["value"]["delivery"], "run");
+    let started = ask(&f.plugins, "start", json!({ "prompt": "Fix the build" })).await;
+    assert_eq!(started["ok"], true, "{started}");
+    let chat = started["value"]["chat"].as_str().unwrap().to_owned();
+    lock(&f.host.pending).insert("c1".into(), "r1".into());
+    let answered = ask(&f.plugins, "answer", json!({ "chat": "c1" })).await;
+    assert_eq!(answered["value"]["request"], "r1", "{answered}");
+    let d = delivered(&f);
+    assert_eq!(d.iter().map(|x| (x.0.as_str(), x.1.as_str())).collect::<Vec<_>>(), [("c1", "hello"), (chat.as_str(), "Fix the build")]);
+    // Each recorded as the plugin's, beside the transcript and in its status.
+    let marks = lock(&f.host.sent_by).clone();
+    assert!(marks.iter().all(|(_, _, by)| by["plugin"] == "svc" && by["name"] == "Svc"), "{marks:?}");
+    let state = call(&f.plugins, methods::PLUGIN_STATUS, json!({ "id": "svc" })).await;
+    let ops: Vec<&str> = state["agents"]["actions"].as_array().unwrap().iter().filter_map(|a| a["op"].as_str()).collect();
+    assert_eq!(ops, ["send_message", "send_message", "answer"], "{state}");
+}
+
+#[tokio::test]
+async fn messages_a_service_without_messages_send_is_refused() {
+    let f = fixture();
+    write(&f.plugins, &["service", "sessions.read"], Some(SENDER)).await;
+    allow(&f.plugins).await;
+    let refused = ask(&f.plugins, "send", json!({ "chat": "c1", "text": "hello" })).await;
+    assert!(refused["message"].as_str().unwrap().starts_with("not_allowed:"), "{refused}");
+    assert!(refused["message"].as_str().unwrap().contains("messages.send"), "{refused}");
+    assert!(delivered(&f).is_empty());
+}
+
+#[tokio::test]
+async fn messages_a_window_and_another_device_send_by_this_devices_grants() {
+    let f = fixture();
+    write(&f.plugins, &["ui.add", "messages.send"], None).await;
+    allow(&f.plugins).await;
+    let sent = call(&f.plugins, methods::PLUGIN_AGENTS, json!({ "plugin": "svc", "op": "send_message", "args": { "chat": "c1", "text": "hi" } })).await;
+    assert_eq!(sent["ok"], true, "{sent}");
+    let own_key = signing::load_key(&f.plugins.inner.data_dir).map(|k| k.public());
+    let serve = json!({ "plugin": "svc", "version": "1.0.0", "authorKey": own_key, "from": "dev-2", "op": "send_message", "args": { "chat": "c1", "text": "from afar" } });
+    let remote = call(&f.plugins, methods::SERVE_PLUGIN_AGENTS, serve).await;
+    assert_eq!(remote["ok"], true, "{remote}");
+    assert_eq!(delivered(&f).len(), 2);
+    // Never an agent's.
+    assert!(!zeron_rpc::agent_allowed(methods::PLUGIN_AGENTS) && !zeron_rpc::agent_allowed(methods::SERVE_PLUGIN_AGENTS));
+}
+
+/// The example (plugins-dev/keep-going), as it ships: with no window open,
+/// a turn whose reply ends with the marker is sent "continue"; one that
+/// doesn't, nothing.
+#[tokio::test]
+async fn messages_the_keep_going_example_continues_a_turn_that_asks() {
+    let f = fixture();
+    let dir = f.plugins.plugins_dir().join("keep-going");
+    std::fs::create_dir_all(&dir).unwrap();
+    let example = "../../apps/zgx/plugins-dev/keep-going";
+    for file in ["zeron-plugin.json", "init.luau", "service.luau"] {
+        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join(example).join(file), dir.join(file)).unwrap();
+    }
+    std::fs::write(dir.join("zeron.luau"), scaffold::SDK).unwrap();
+    let signed = call(&f.plugins, methods::SIGN_PLUGIN, json!({ "id": "keep-going" })).await;
+    assert!(signed.get("rpc_error").is_none(), "{signed}");
+    let item = call(&f.plugins, methods::LIST_PLUGINS, json!({})).await["plugins"][0].clone();
+    let decided = call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "keep-going", "allow": true, "hash": item["hash"] })).await;
+    assert_eq!(decided["status"], "on", "{decided}");
+    until("its listener is known", || {
+        f.plugins.inner.services.status("keep-going")["listeners"].as_array().is_some_and(|l| l.len() == 1)
+    })
+    .await;
+    let agents = f.plugins.agents().clone();
+    let turn = |reply: &str| {
+        let working = vec![super::agents::tests::session("c1", zeron_proto::SessionStatus::Working, None)];
+        *lock(&f.host.sessions) = working.clone();
+        agents.observe_sessions(&working);
+        agents.observe_reply("c1", reply);
+        let idle = vec![super::agents::tests::session("c1", zeron_proto::SessionStatus::Idle, Some(zeron_proto::DoneStatus::Completed))];
+        *lock(&f.host.sessions) = idle.clone();
+        agents.observe_sessions(&idle);
+    };
+    agents.observe_sessions(&[]);
+    turn("All done.");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(delivered(&f).is_empty(), "no marker, nothing sent");
+    turn("Half the files are fixed.\n[continue]\n");
+    until("it sent continue", || delivered(&f).len() == 1).await;
+    assert_eq!(delivered(&f)[0].1, "continue");
+    assert_eq!(delivered(&f)[0].3, agents::Delivery::Run);
+}

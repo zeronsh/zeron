@@ -427,6 +427,8 @@ impl EngineCore {
             data_dir: repos.data_dir().to_path_buf(),
             workspace: workspace.clone(),
             sessions: sessions.clone(),
+            doc_host: doc_host.clone(),
+            default_harness,
         }));
         plugins.follow_agents(
             agent_accounts.watch_snapshots(),

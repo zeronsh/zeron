@@ -13,9 +13,12 @@
 //! | `accounts.switch` | make another saved account the active one |
 //! | `models.read` | read a harness's models and a chat's model; model events |
 //! | `models.set` | set a chat's model, effort and options |
+//! | `messages.send` | send a chat a message, start a chat, answer a question, as the composer does |
 //!
-//! Turn and input events need `sessions.read`. A field a plugin wasn't
-//! allowed is left out of what it's told, never blanked.
+//! Turn and input events need `sessions.read`; a turn's reply rides its
+//! `turn.finished` with `messages.read`. A field a plugin wasn't allowed is
+//! left out of what it's told, never blanked. The turns a plugin's message
+//! set off carry its `by`, which is what the loop guard counts.
 //!
 //! **Never** tokens, login flows, reset credits, or creating and forgetting
 //! logins: those stay Settings'.
@@ -48,7 +51,7 @@ use futures::future::BoxFuture;
 use serde_json::{Map, Value as Json, json};
 use zeron_proto::{
     AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel,
-    Session, SessionStatus, run_errors::ProviderProblem,
+    Session, SessionStatus, UserInputAnswer, run_errors::ProviderProblem,
 };
 
 pub const USAGE_READ: &str = "usage.read";
@@ -56,6 +59,8 @@ pub const ACCOUNTS_READ: &str = "accounts.read";
 pub const ACCOUNTS_SWITCH: &str = "accounts.switch";
 pub const MODELS_READ: &str = "models.read";
 pub const MODELS_SET: &str = "models.set";
+pub const MESSAGES_SEND: &str = "messages.send";
+const FILES_READ: &str = "files.read";
 const SESSIONS_READ: &str = "sessions.read";
 
 /// Every event a plugin may listen for (`zeron.on`).
@@ -159,6 +164,68 @@ pub trait AgentHost: Send + Sync + 'static {
     fn sessions(&self) -> Vec<Session>;
     /// `Mutate setChatConfig`.
     fn set_chat_config(&self, chat: &str, config: ChatConfig) -> Result<(), String>;
+    /// A chat's status wherever it runs (this device's, else the
+    /// workspace's mirror of its host's).
+    fn status(&self, _chat: &str) -> Option<SessionStatus> {
+        None
+    }
+    /// A message into `chat`, as the composer sends one: a run of its own
+    /// (`QueueCommand run`), a steer of the turn running, or a queued row
+    /// (`QueueMessage`, held for the turn's end). Its id: the message's, or
+    /// the queued row's.
+    fn deliver(&self, _chat: &str, _text: &str, _attachments: Vec<String>, _how: Delivery) -> Result<String, String> {
+        Err("Sending messages isn't available on this device".into())
+    }
+    /// `Mutate createChat`, hosted where `new` says.
+    fn create_chat(&self, _new: &NewChat) -> Result<(), String> {
+        Err("Starting chats isn't available on this device".into())
+    }
+    /// The request a chat's question (or approval) waits on, latest first.
+    fn pending_input(&self, _chat: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    /// `QueueCommand respondInput`, as `respond_to_input` answers.
+    fn answer(&self, _chat: &str, _request: &str, _answers: Vec<UserInputAnswer>) -> Result<String, String> {
+        Err("Answering isn't available on this device".into())
+    }
+    /// Record who sent `id` (a message, a queued row) beside `chat`'s
+    /// transcript.
+    fn mark_sent_by(&self, _chat: &str, _id: &str, _by: Json) {}
+    /// The harness a new chat runs when none is asked.
+    fn default_harness(&self) -> Option<HarnessId> {
+        None
+    }
+}
+
+/// How a plugin's message goes, as the composer would send it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Nothing runs: a turn of its own.
+    Run,
+    /// Into the turn running.
+    Steer,
+    /// Held until the turn running ends.
+    Queue,
+}
+
+impl Delivery {
+    pub fn word(self) -> &'static str {
+        match self {
+            Delivery::Run => "run",
+            Delivery::Steer => "steer",
+            Delivery::Queue => "queue",
+        }
+    }
+}
+
+/// A chat a plugin starts (`zeron.new_chat`).
+#[derive(Debug, Clone)]
+pub struct NewChat {
+    pub chat_id: String,
+    pub device: Option<String>,
+    pub project: Option<String>,
+    pub config: ChatConfig,
+    pub cwd: Option<String>,
 }
 
 /// What a plugin was allowed on this device, while it's on.
@@ -237,6 +304,14 @@ struct State {
     /// A switch or set a plugin is making: told with its `by`.
     switch_by: HashMap<String, (String, By)>,
     model_by: HashMap<String, By>,
+    /// The plugin whose message a chat's turn is running (its turn events
+    /// carry its `by`), until the turn ends.
+    turn_by: HashMap<String, By>,
+    /// A plugin's message queued behind a chat's running turn: the next
+    /// turn is its.
+    queued_by: HashMap<String, By>,
+    /// Each chat's last turn's final reply, until its `turn.finished`.
+    replies: HashMap<String, String>,
     /// Each plugin's last actions (`plugin_status`).
     actions: HashMap<String, VecDeque<Json>>,
     /// What each plugin's row says (a listener failing, a loop stopped).
@@ -255,6 +330,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 const ACTIONS_KEPT: usize = 20;
 const NOTICES_KEPT: usize = 5;
+/// The end of a turn's reply a plugin is told (`turn.finished`'s `reply`).
+const MAX_REPLY_BYTES: usize = 16 * 1024;
+const MESSAGES_READ: &str = "messages.read";
 
 /// A plugin's changes, each set off by its last, before the next is refused.
 pub const LOOP_HOPS: u32 = 16;
@@ -557,6 +635,21 @@ impl Agents {
                 need(MODELS_SET, "change your chats' models")?;
                 self.set_model(&by, &args).await
             }
+            "send_message" => {
+                need(MESSAGES_SEND, "send messages in your chats")?;
+                if args.get("attachments").and_then(Json::as_array).is_some_and(|a| !a.is_empty()) {
+                    need(FILES_READ, "attach files")?;
+                }
+                self.send_message(&by, &args)
+            }
+            "new_chat" => {
+                need(MESSAGES_SEND, "start chats")?;
+                self.new_chat(&by, &args).await
+            }
+            "answer" => {
+                need(MESSAGES_SEND, "answer your chats' questions")?;
+                self.answer(&by, &args)
+            }
             "set_default_model" => {
                 // The default for new chats is the window's own (the app
                 // keeps it): checked and told here, kept there.
@@ -762,6 +855,168 @@ impl Agents {
         Ok(json!({ "status": "set", "applies": "next_turn", "model": chat_model_json(&chat.id, &config) }))
     }
 
+    // ── Messages ───────────────────────────────────────────────────────────
+
+    /// `zeron.send_message { chat, text, attachments?, mode? }`: as the
+    /// composer sends, by the chat's status wherever it runs. Running, it's
+    /// queued for the turn's end (`mode = "queue"`, the default) or steers
+    /// it (`"steer"`); not running, it's a turn of its own.
+    fn send_message(&self, by: &By, args: &Json) -> Result<Json, Refused> {
+        let text = args.get("text").and_then(Json::as_str).unwrap_or_default().trim().to_owned();
+        if text.is_empty() {
+            return Err(Refused::new(reason::BAD_CALL, "A message needs its text"));
+        }
+        let chat = self.chat(args)?;
+        if chat.config.is_none() {
+            return Err(Refused::new(reason::NOT_FOUND, "That chat hasn't chosen a provider yet"));
+        }
+        let attachments: Vec<String> = args
+            .get("attachments")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().or_else(|| a.get("path").and_then(Json::as_str)).map(str::to_owned))
+            .filter(|p| !p.is_empty())
+            .collect();
+        let host = self.host()?;
+        let status = host.status(&chat.id);
+        let running = matches!(status, Some(SessionStatus::Working | SessionStatus::AwaitingInput));
+        let how = match args.get("mode").and_then(Json::as_str).unwrap_or("queue") {
+            _ if !running => Delivery::Run,
+            "queue" | "" => Delivery::Queue,
+            "steer" if status == Some(SessionStatus::Working) => Delivery::Steer,
+            "steer" => {
+                return Err(Refused::new(
+                    reason::BAD_CALL,
+                    "That chat is waiting for an answer: answer it (zeron.answer), or queue this",
+                ));
+            }
+            other => return Err(Refused::new(reason::BAD_CALL, format!("\"{other}\" isn't a mode: \"queue\" or \"steer\""))),
+        };
+        self.loop_guard(by)?;
+        let id = host.deliver(&chat.id, &text, attachments, how).map_err(|why| Refused::new(reason::FAILED, why))?;
+        self.attribute(by, &chat.id, &id, how);
+        tracing::info!(plugin = %by.plugin, chat = %chat.id, delivery = how.word(), "plugins: sent a message");
+        Ok(json!({ "status": "sent", "chat": chat.id, "delivery": how.word(), "id": id }))
+    }
+
+    /// Who sent `id` in `chat`: beside its transcript, in `plugin_status`,
+    /// and on the turn it runs (its events carry `by`).
+    fn attribute(&self, by: &By, chat: &str, id: &str, how: Delivery) {
+        if let Ok(host) = self.host() {
+            host.mark_sent_by(chat, id, json!({ "plugin": by.plugin, "name": by.name, "kind": how.word(), "at": crate::now_ms() }));
+        }
+        {
+            let mut st = self.state();
+            match how {
+                Delivery::Queue => st.queued_by.insert(chat.to_owned(), by.clone()),
+                Delivery::Run | Delivery::Steer => st.turn_by.insert(chat.to_owned(), by.clone()),
+            };
+        }
+        self.record(by, json!({ "op": "send_message", "chat": chat, "id": id, "delivery": how.word() }));
+    }
+
+    /// `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?,
+    /// cwd? }`: a chat made as the composer makes one, and its first
+    /// message. Its id.
+    async fn new_chat(&self, by: &By, args: &Json) -> Result<Json, Refused> {
+        let prompt = args.get("prompt").and_then(Json::as_str).unwrap_or_default().trim().to_owned();
+        if prompt.is_empty() {
+            return Err(Refused::new(reason::BAD_CALL, "A new chat needs its first message (prompt)"));
+        }
+        let host = self.host()?;
+        let harness = match provider_arg(args, "harness")? {
+            Some(h) => h,
+            None => host
+                .default_harness()
+                .ok_or_else(|| Refused::new(reason::BAD_CALL, "Say which harness the chat runs"))?,
+        };
+        let asked_model = args.get("model").and_then(Json::as_str).filter(|m| !m.is_empty());
+        let asked_effort = args.get("effort").and_then(Json::as_str).filter(|e| !e.is_empty());
+        let (model, reasoning) = if asked_model.is_some() || asked_effort.is_some() {
+            let models = self.read_models(harness).await?;
+            let found = match asked_model {
+                Some(id) => models.iter().find(|m| m.id == id).ok_or_else(|| {
+                    Refused::new(reason::NOT_FOUND, format!("{} has no model \"{id}\"", harness.as_str()))
+                })?,
+                None => models
+                    .first()
+                    .ok_or_else(|| Refused::new(reason::NOT_FOUND, format!("{} lists no models", harness.as_str())))?,
+            };
+            (asked_model.map(str::to_owned), self.effort(found, args)?)
+        } else {
+            (None, None)
+        };
+        let text = |key: &str| args.get(key).and_then(Json::as_str).filter(|s| !s.trim().is_empty()).map(str::to_owned);
+        let new = NewChat {
+            chat_id: crate::new_id(),
+            device: text("device"),
+            project: text("project"),
+            config: ChatConfig {
+                harness,
+                model,
+                reasoning,
+                model_options: Map::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                access: Default::default(),
+                plan: false,
+            },
+            cwd: text("cwd"),
+        };
+        self.loop_guard(by)?;
+        host.create_chat(&new).map_err(|why| Refused::new(reason::FAILED, why))?;
+        let id = host
+            .deliver(&new.chat_id, &prompt, Vec::new(), Delivery::Run)
+            .map_err(|why| Refused::new(reason::FAILED, why))?;
+        self.attribute(by, &new.chat_id, &id, Delivery::Run);
+        tracing::info!(plugin = %by.plugin, chat = %new.chat_id, "plugins: started a chat");
+        Ok(json!({ "status": "sent", "chat": new.chat_id, "id": id }))
+    }
+
+    /// `zeron.answer { chat, answers, request? }`: a chat's question (or
+    /// approval) answered, as `respond_to_input` answers it. `answers`:
+    /// `{ { question, labels } }` (or `{ [question] = label(s) }`).
+    fn answer(&self, by: &By, args: &Json) -> Result<Json, Refused> {
+        let chat = self.chat(args)?;
+        let host = self.host()?;
+        let request = match args.get("request").and_then(Json::as_str).filter(|r| !r.is_empty()) {
+            Some(r) => r.to_owned(),
+            None => host
+                .pending_input(&chat.id)
+                .map_err(|why| Refused::new(reason::FAILED, why))?
+                .ok_or_else(|| Refused::new(reason::NOT_FOUND, "That chat isn't waiting on a question"))?,
+        };
+        let labels = |v: &Json| -> Vec<String> {
+            match v {
+                Json::String(s) => vec![s.clone()],
+                Json::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect(),
+                _ => Vec::new(),
+            }
+        };
+        let answers: Vec<UserInputAnswer> = match args.get("answers") {
+            Some(Json::Array(list)) => list
+                .iter()
+                .filter_map(|a| {
+                    let question = a.get("question").or_else(|| a.get("question_id")).and_then(Json::as_str)?;
+                    Some(UserInputAnswer { question_id: question.to_owned(), labels: labels(a.get("labels").or_else(|| a.get("label"))?) })
+                })
+                .collect(),
+            Some(Json::Object(map)) => map
+                .iter()
+                .map(|(question, v)| UserInputAnswer { question_id: question.clone(), labels: labels(v) })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if answers.is_empty() || answers.iter().any(|a| a.labels.is_empty()) {
+            return Err(Refused::new(reason::BAD_CALL, "Say each question's answer: answers = { { question, labels } }"));
+        }
+        self.loop_guard(by)?;
+        let id = host.answer(&chat.id, &request, answers).map_err(|why| Refused::new(reason::FAILED, why))?;
+        self.record(by, json!({ "op": "answer", "chat": chat.id, "request": request }));
+        tracing::info!(plugin = %by.plugin, chat = %chat.id, "plugins: answered a chat's question");
+        Ok(json!({ "status": "answered", "chat": chat.id, "request": request, "id": id }))
+    }
+
     fn record(&self, by: &By, mut action: Json) {
         action["at"] = json!(crate::now_ms());
         let mut st = self.state();
@@ -810,7 +1065,9 @@ impl Agents {
     fn loop_guard(&self, by: &By) -> Result<(), Refused> {
         let now = Instant::now();
         let mut st = self.state();
-        let set_off = st.echoed.get(&by.plugin).is_some_and(|at| now.duration_since(*at) < LOOP_WINDOW);
+        // Set off by its own last change: told of it since that change (each
+        // telling sets off one change at most).
+        let set_off = st.echoed.remove(&by.plugin).is_some_and(|at| now.duration_since(at) < LOOP_WINDOW);
         let hops = if set_off { st.chain.get(&by.plugin).copied().unwrap_or(0) + 1 } else { 1 };
         if hops > LOOP_HOPS {
             st.chain.remove(&by.plugin);
@@ -891,8 +1148,15 @@ impl Agents {
                     self.deliver(&sink, &plugin, target, &listener.key, raw.event, data.clone());
                     told = true;
                 }
-                if own && told {
-                    self.state().echoed.insert(plugin.clone(), Instant::now());
+                // What it heard last decides: its own change sets off the next
+                // (`loop_guard` counts it); anyone else's starts it over.
+                if told {
+                    let mut st = self.state();
+                    if own {
+                        st.echoed.insert(plugin.clone(), Instant::now());
+                    } else {
+                        st.echoed.remove(&plugin);
+                    }
                 }
             }
         }
@@ -1102,10 +1366,22 @@ impl Agents {
                     continue;
                 }
                 let active = |x: Option<SessionStatus>| matches!(x, Some(SessionStatus::Working | SessionStatus::AwaitingInput));
-                let chat = json!({ "chat": s.chat_id });
+                // A turn a plugin's message set off: the next queued behind it
+                // is the plugin's turn, once it starts.
+                if !active(was)
+                    && active(Some(s.status))
+                    && let Some(by) = st.queued_by.remove(&s.chat_id)
+                {
+                    st.turn_by.insert(s.chat_id.clone(), by);
+                }
+                let mut chat = json!({ "chat": s.chat_id });
+                if let Some(by) = st.turn_by.get(&s.chat_id) {
+                    chat["by"] = by.json();
+                }
                 match (was, s.status) {
                     (w, SessionStatus::Working) if !active(w) => {
                         st.problems.remove(&s.chat_id);
+                        st.replies.remove(&s.chat_id);
                         events.push(("turn.started", s.chat_id.clone(), chat));
                     }
                     (Some(SessionStatus::Working), SessionStatus::AwaitingInput) => {
@@ -1135,7 +1411,16 @@ impl Agents {
                         if problem == Some(ProviderProblem::SignedOut) {
                             data["problem"] = json!("signed_out");
                         }
-                        events.push(("turn.finished", s.chat_id.clone(), data.clone()));
+                        // The turn ends: whose it was goes with it.
+                        if let Some(by) = st.turn_by.remove(&s.chat_id) {
+                            data["by"] = by.json();
+                        }
+                        // (Its reply, for those allowed messages.read: below.)
+                        let mut finished = data.clone();
+                        if let Some(reply) = st.replies.remove(&s.chat_id) {
+                            finished["@reply"] = json!(reply);
+                        }
+                        events.push(("turn.finished", s.chat_id.clone(), finished));
                         if outcome == "errored" || outcome == "limited" {
                             events.push(("turn.errored", s.chat_id.clone(), data));
                         }
@@ -1150,12 +1435,32 @@ impl Agents {
         }
         let raws = events
             .into_iter()
-            .map(|(event, chat, data)| Raw::new(event, data).with(MODELS_READ, "provider", json!(provider_of(&chat))))
+            .map(|(event, chat, mut data)| {
+                let reply = data.as_object_mut().and_then(|d| d.remove("@reply")).unwrap_or(Json::Null);
+                Raw::new(event, data)
+                    .with(MODELS_READ, "provider", json!(provider_of(&chat)))
+                    .with(MESSAGES_READ, "reply", reply)
+            })
             .collect();
         self.tell(raws);
         if settled {
             self.run_pending();
         }
+    }
+
+    /// A turn's final reply, as its harness ended it: told with its
+    /// `turn.finished` (`reply`, to plugins allowed `messages.read`).
+    pub fn observe_reply(&self, chat: &str, reply: &str) {
+        let mut reply = reply.to_owned();
+        if reply.len() > MAX_REPLY_BYTES {
+            // Its end is what a plugin reads it for (a marker, a last word).
+            let mut cut = reply.len() - MAX_REPLY_BYTES;
+            while !reply.is_char_boundary(cut) {
+                cut += 1;
+            }
+            reply = reply[cut..].to_owned();
+        }
+        self.state().replies.insert(chat.to_owned(), reply);
     }
 
     /// A turn's error, as a harness said it: a limit, a sign-in.
