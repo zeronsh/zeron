@@ -182,6 +182,11 @@ local function Composer(): Node
 					end
 					if v ~= nil and not equal(locals[k]:peek(), v) then
 						locals[k]:set(v)
+					elseif v == nil and (k == "model" or k == "effort") and locals[k]:peek() ~= nil then
+						-- A session that names none runs its agent's own: never
+						-- the last chat's model (another agent's, maybe one
+						-- this device doesn't have), sent along as a pick.
+						locals[k]:set(nil)
 					end
 					applied[k] = if v ~= nil then v else locals[k]:peek()
 				end
@@ -347,12 +352,23 @@ local function Composer(): Node
 	-- the model picker lists that device's agents and models, as the
 	-- shipping app's does. (nil: this one, or not known yet.)
 	local catalog_device = ui.state("chat_catalog_device", nil :: string?)
-	ui.effect(function()
+	local function run_device(): string?
 		local d = device:get()
 		if d == nil and session_id:get() == nil then
 			local p = route.project:get()
 			d = if p then p.device else nil
 		end
+		return d
+	end
+	-- Whether the catalog shown is `d`'s (one of this device's says none).
+	local function shows_catalog_of(d: string?): boolean
+		local shown = (store.catalog:get() :: any).device
+		return shown == d or (shown == nil and (d == nil or d == sessions.now:get().here))
+	end
+	-- (Asked once per device: the host keeps a look current itself, a late
+	-- answer to an older one changing nothing, src/chat.rs `reload_remote`.)
+	ui.effect(function()
+		local d = run_device()
 		if d ~= catalog_device:peek() then
 			catalog_device:set(d)
 			store.catalog_on(d)
@@ -360,10 +376,21 @@ local function Composer(): Node
 	end)
 	-- A new chat moved onto Cloud runs only the agents Cloud has accounts
 	-- for: a model it doesn't run gives way to Cloud's first, as the
-	-- shipping app drops one on the switch.
+	-- shipping app drops one on the switch. So does one the last new chat
+	-- used that its device doesn't offer (once all its agents have said: a
+	-- model still on its way isn't dropped), so a chat isn't made on a
+	-- device for an agent it doesn't have.
 	ui.effect(function()
 		local cat = store.catalog:get()
-		if session_id:get() ~= nil or device:get() ~= Where.CLOUD or (cat :: any).device ~= Where.CLOUD then
+		if session_id:get() ~= nil then
+			return
+		end
+		local d = run_device()
+		if d == Where.CLOUD then
+			if (cat :: any).device ~= Where.CLOUD then
+				return
+			end
+		elseif (cat :: any).complete ~= true or not shows_catalog_of(d) then
 			return
 		end
 		local picked = model:peek()
@@ -1015,6 +1042,32 @@ local function Composer(): Node
 			-- The catalog, followed in place as it comes and changes.
 			harnesses = function(): { ds.Harness }
 				return store.catalog:get().harnesses
+			end,
+			-- The session's model named by the host (its catalog's name, else
+			-- its id), for the chip while the catalog shown doesn't list it.
+			-- (Not a pick of another: that one's in the catalog. A session
+			-- naming none: its agent's own default, by name.)
+			model_label = function(): string?
+				local s = open()
+				if s and s.model == model:get() then
+					return s.model_label
+				end
+				return nil
+			end,
+			-- A session naming no model runs its agent's own: the catalog's
+			-- first of that agent (the host's `model_label` names it too),
+			-- shown with its mark and reasoning, never sent as a pick.
+			default_model = function(): string?
+				local s = open()
+				if not s or s.model ~= nil or s.harness == nil then
+					return nil
+				end
+				for _, m in store.catalog:get().models do
+					if m.harness == s.harness then
+						return m.value
+					end
+				end
+				return nil
 			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models

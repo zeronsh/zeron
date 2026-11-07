@@ -245,7 +245,9 @@ return ui.component(function(props: Props): Node
 				local at, own = source(n, a)
 				local p = if pictures and not own then pictures.resolve(at) else nil
 				local src = if p and p.state == "ready" and p.src then p.src else at
-				table.insert(out, { src = src, name = a.name, path = if string.sub(src, 1, 1) == "/" then src else nil })
+				-- (A file here by its whole path: a Mac's `/…` or Windows' `C:\…`.)
+				local whole = string.sub(src, 1, 1) == "/" or string.match(src, "^%a:[\\/]") ~= nil
+				table.insert(out, { src = src, name = a.name, path = if whole then src else nil })
 			end
 		end
 		return out

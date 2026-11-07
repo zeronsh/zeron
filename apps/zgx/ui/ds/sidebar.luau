@@ -43,6 +43,7 @@ local Surface = require("@self/surface")
 local Avatar = require("@self/avatar")
 local Switch = require("@self/switch")
 local Glass = require("@self/glass")
+local material = require("@self/material")
 local Menu = require("@self/menu")
 local icon_button = require("@self/icon_button")
 local IconButton = icon_button.IconButton
@@ -4610,6 +4611,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 		icon = "more-horizontal",
 		label = locale.t("ds.sidebar.view.options"),
 		tooltip = locale.s("ds.sidebar.view.options"),
+		-- (On the title bar's line, one of its controls: its glyph held.)
+		tone = "bar",
 		lit = view_open,
 		on_click = function()
 			view_open:set(true)
@@ -5100,7 +5103,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 				bottom = 5,
 				overflow = "hidden",
 				rounded = "$zeron.inset.radius",
-				bg = "$zeron.inset.bg",
+				-- (Frosted, its own wash over the window's glass, Zeron's
+				-- sidebar tone; opaque, the page's card's fill.)
+				bg = material.pick("$zeron.sidebar.tint", "$zeron.sidebar.solid"),
 				ui.column(body),
 			}
 			else ui.column(body),
