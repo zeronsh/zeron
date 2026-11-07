@@ -628,7 +628,11 @@ async fn deleting_a_cloud_chat_deletes_its_machine() {
     })
     .await
     .unwrap_or_else(|_| panic!("{expected} not called: {:?}", deletes(&seen)));
-    assert_eq!(deletes(&seen), vec![expected], "only the Cloud chat's machine");
+    assert_eq!(
+        deletes(&seen),
+        vec![expected],
+        "only the Cloud chat's machine"
+    );
     core.shutdown().await;
 }
 
@@ -646,9 +650,8 @@ async fn provider_switch_is_refused_for_a_host_that_cannot_switch() {
     )
     .unwrap();
     let client = memory_client(core.rpc_service());
-    let config = |harness: &str| {
-        serde_json::json!({ "harness": harness, "sandbox": "workspace-write" })
-    };
+    let config =
+        |harness: &str| serde_json::json!({ "harness": harness, "sandbox": "workspace-write" });
     let cwd = dir.path().display().to_string();
     for (chat, device) in [
         ("old-host-chat", "cloud-old-machine".to_string()),
@@ -670,11 +673,162 @@ async fn provider_switch_is_refused_for_a_host_that_cannot_switch() {
             serde_json::json!({ "op": "setChatConfig", "chatId": chat, "config": config(harness) }),
         )
     };
-    let refused = switch("old-host-chat", "codex").await.unwrap_err().to_string();
+    let refused = switch("old-host-chat", "codex")
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(refused.contains("newer Zeron"), "{refused}");
     // The same provider (a model or effort change) still goes through.
     switch("old-host-chat", "claude-code").await.unwrap();
     // This engine hosts its own chats and switches them.
     switch("own-chat", "codex").await.unwrap();
+    core.shutdown().await;
+}
+
+/// GitHub's logins through the engine: listed, one disconnected, one made the
+/// first new sessions try; a repository names who reaches it; and an edge from
+/// before several logins answers shapes these calls still read.
+#[tokio::test]
+async fn github_logins_are_listed_and_changed_one_at_a_time() {
+    fn login(slot: &str, account: &str, active: bool) -> serde_json::Value {
+        serde_json::json!({
+            "slot": slot, "status": "connected", "active": active, "kind": "github",
+            "account": account, "avatarUrl": format!("https://github.com/{account}.png?size=64"),
+            "authorizedDevices": ["cloud-acct"], "createdAt": 1, "updatedAt": 2
+        })
+    }
+    let (edge_url, seen) = scripted_edge(|request, _body| {
+        if request.starts_with("GET ") && request.ends_with("/accounts/github") {
+            let accounts = [login("awork", "work-me", false), login("ahome", "home-me", true)];
+            return (200, serde_json::json!({ "accounts": accounts }).to_string());
+        }
+        if request.starts_with("DELETE ") && request.ends_with("/accounts/github/awork") {
+            let accounts = [login("ahome", "home-me", true)];
+            return (200, serde_json::json!({ "accounts": accounts }).to_string());
+        }
+        if request.starts_with("POST ") && request.ends_with("/accounts/github/active") {
+            let accounts = [login("awork", "work-me", true), login("ahome", "home-me", false)];
+            return (200, serde_json::json!({ "accounts": accounts }).to_string());
+        }
+        if request.starts_with("GET ") && request.contains("/github/repos") {
+            let reply = serde_json::json!({
+                "repos": [{
+                    "fullName": "work-org/api", "cloneUrl": "https://github.com/work-org/api.git",
+                    "defaultBranch": "main", "private": true, "pushedAt": 1,
+                    "installationId": 100, "account": "work-me", "accounts": ["work-me", "home-me"]
+                }, {
+                    // As an old vault answers.
+                    "fullName": "old/shape", "cloneUrl": "https://github.com/old/shape.git",
+                    "defaultBranch": "main", "private": false, "pushedAt": 0
+                }],
+                "installations": [{ "id": 100, "target": "work-org", "reachedBy": ["work-me", "home-me"] }]
+            });
+            return (200, reply.to_string());
+        }
+        if request.starts_with("POST ") && request.contains("/github/device/flow1") {
+            return (
+                200,
+                r#"{"state":"connected","account":"work-me","alreadyConnected":true}"#.into(),
+            );
+        }
+        if request.starts_with("GET /cloud/") {
+            return (200, r#"{"state":"ready","deviceId":"cloud-acct","available":true}"#.into());
+        }
+        (404, r#"{"error":"not_found","message":"no route"}"#.into())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+
+    let listed: serde_json::Value = client
+        .call_as(methods::GITHUB_ACCOUNTS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["accounts"][0]["account"], "work-me");
+    assert_eq!(
+        listed["accounts"][0]["avatarUrl"],
+        "https://github.com/work-me.png?size=64"
+    );
+    assert_eq!(listed["accounts"][1]["active"], true);
+
+    let left: serde_json::Value = client
+        .call_as(
+            methods::GITHUB_ACCOUNT_FORGET,
+            serde_json::json!({ "slot": "awork" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(left["accounts"].as_array().unwrap().len(), 1);
+    assert_eq!(left["accounts"][0]["account"], "home-me");
+
+    let picked: serde_json::Value = client
+        .call_as(
+            methods::GITHUB_ACCOUNT_ACTIVATE,
+            serde_json::json!({ "slot": "awork" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(picked["accounts"][0]["active"], true);
+
+    // A slot goes into a path: nothing but an id gets there.
+    for method in [
+        methods::GITHUB_ACCOUNT_FORGET,
+        methods::GITHUB_ACCOUNT_ACTIVATE,
+    ] {
+        let refused = client
+            .call(
+                method,
+                serde_json::json!({ "slot": "../credentials/github" }),
+            )
+            .await;
+        assert!(refused.is_err(), "{method}");
+    }
+
+    let repos: serde_json::Value = client
+        .call_as(methods::LIST_GITHUB_REPOS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(repos["repos"][0]["account"], "work-me");
+    assert_eq!(
+        repos["repos"][0]["accounts"],
+        serde_json::json!(["work-me", "home-me"])
+    );
+    assert_eq!(repos["repos"][0]["installationId"], 100);
+    assert_eq!(repos["repos"][1]["fullName"], "old/shape");
+    assert!(repos["repos"][1].get("account").is_none());
+
+    let polled: serde_json::Value = client
+        .call_as(
+            methods::GITHUB_CONNECT_POLL,
+            serde_json::json!({ "flowId": "flow1" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(polled["alreadyConnected"], true);
+
+    let seen = seen.lock().unwrap().clone();
+    let org = core.workspace.org_id().to_string();
+    for wanted in [
+        format!("GET /vault/{org}/accounts/github"),
+        format!("DELETE /vault/{org}/accounts/github/awork"),
+        format!("POST /vault/{org}/accounts/github/active"),
+    ] {
+        assert!(
+            seen.iter().any(|(request, _)| *request == wanted),
+            "{wanted}: {seen:?}"
+        );
+    }
+    assert!(
+        !seen
+            .iter()
+            .any(|(request, _)| request.contains("credentials/github"))
+    );
     core.shutdown().await;
 }

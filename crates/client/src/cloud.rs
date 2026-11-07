@@ -296,6 +296,7 @@ impl Client {
             return Ok(GithubConnectProgress {
                 state: zeron_proto::GithubConnectState::Connected,
                 account: Some("octocat".into()),
+                already_connected: false,
                 error: None,
             });
         }
@@ -903,6 +904,7 @@ mod demo {
                 private,
                 description: (!description.is_empty()).then(|| description.into()),
                 pushed_at: pushed,
+                ..Default::default()
             })
             .collect()
     }
@@ -940,6 +942,7 @@ mod demo {
                 display_name: Some("You".into()),
                 organization: None,
                 plan: Some("Max 20×".into()),
+                avatar_url: None,
                 authorized_devices: vec![CLOUD_DEVICE.into()],
                 created_at: 0,
                 updated_at: 0,

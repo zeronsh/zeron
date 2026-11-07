@@ -1540,6 +1540,14 @@ export class CloudAccount extends DurableObject<Env> {
     return this.sessionByDevice(deviceId)?.repo.fullName;
   }
 
+  /** The machine of the session that started this one, for a delegate: it
+   * works as the same GitHub login. */
+  async parentDeviceOf(caller: CloudCaller, deviceId: string): Promise<string | undefined> {
+    if (!this.matches(caller)) return undefined;
+    const parent = this.sessionByDevice(deviceId)?.parentChatId;
+    return parent === undefined ? undefined : this.sessions.get(parent)?.deviceId;
+  }
+
   /** `POST /runner/heartbeat` (runner bearer, already verified). */
   async heartbeat(runner: CloudCaller & { deviceId: string }, beat: Heartbeat): Promise<CloudResult<{ ok: true }>> {
     const s = this.sessionByDevice(runner.deviceId);
