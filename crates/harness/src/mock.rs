@@ -106,6 +106,8 @@ fn fanout_settle(i: usize) -> Vec<AgentEvent> {
             is_error: failed,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         },
         fanout_tag(
@@ -320,6 +322,8 @@ impl Harness for MockHarness {
                             is_error: false,
                             output: Some("test result: ok. 128 passed; 0 failed".into()),
                             diff: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                             exit_code: None,
                         });
                         send("All 128 tests pass.");
@@ -542,6 +546,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -581,6 +587,8 @@ impl Harness for MockHarness {
                     is_error: false,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 };
                 let done = AgentEvent::Done {
@@ -747,6 +755,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -804,6 +814,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     });
                     events.push(AgentEvent::TextDelta {
@@ -982,6 +994,8 @@ fn background_run(
                 },
             });
             let _ = tx.send(AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: format!("{id}-call"),
                 is_error: false,
                 output: Some(format!("Command running in background with ID: {id}")),

@@ -142,6 +142,9 @@ struct DocPartJson {
     /// One-line live tail of the subagent's output (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_tail: Option<String>,
+    /// Uploads copies of images embedded in a tool result (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview_paths: Option<Vec<String>>,
     /// A command's exit status (additive; command tools only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
@@ -205,6 +208,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_ref,
             subagent_status,
             subagent_tail,
+            preview_paths,
             exit_code,
             output_truncated,
             output_lines,
@@ -231,6 +235,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 .to_owned()
             }),
             subagent_tail: subagent_tail.clone(),
+            preview_paths: (!preview_paths.is_empty()).then(|| preview_paths.clone()),
             exit_code: *exit_code,
             output_truncated: output_truncated.then_some(true),
             output_lines: *output_lines,
@@ -320,6 +325,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
+                preview_paths: p.preview_paths.unwrap_or_default(),
                 exit_code: p.exit_code,
                 output_truncated: p.output_truncated.unwrap_or(false),
                 output_lines: p.output_lines,
@@ -1095,6 +1101,18 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     if let Some(exit_code) = doc_part.exit_code {
         map.insert("exitCode", exit_code as i64)?;
     }
@@ -1268,6 +1286,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: obj
+                .get("previewPaths")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
             exit_code: obj
                 .get("exitCode")
                 .and_then(|x| x.as_i64())
@@ -1581,6 +1603,18 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     if let Some(exit_code) = doc_part.exit_code {
         map.insert("exitCode", exit_code as i64)?;
     }
@@ -1890,6 +1924,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -1957,6 +1992,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -2012,6 +2048,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -2197,6 +2234,43 @@ mod tests {
     }
 
     #[test]
+    fn tool_preview_paths_round_trip_through_the_doc() {
+        let doc = SessionDoc::init("previews").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev", 1).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::ReadFile {
+                    path: "/tmp/shots/1.png".into(),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolResult {
+                exit_code: None,
+                id: "t".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: vec!["/uploads/abc-image.png".into()],
+                image_payloads: Vec::new(),
+            },
+        );
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool { preview_paths, .. } => {
+                assert_eq!(preview_paths, &vec!["/uploads/abc-image.png".to_string()]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn segment_writer_streams_text_incrementally() {
         let doc = SessionDoc::init("chat-1").unwrap();
         let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
@@ -2223,6 +2297,8 @@ mod tests {
                 is_error: false,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         );
@@ -2343,6 +2419,8 @@ mod tests {
                     old_text: Some("old\n".into()),
                     new_text: "new\n".into(),
                 }),
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         );
@@ -2401,6 +2479,8 @@ mod tests {
         fold_event_into_parts(
             &mut folded,
             &AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: "c1".into(),
                 is_error: true,
                 output: Some(full.clone()),
@@ -2475,6 +2555,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                preview_paths: Vec::new(),
                 exit_code: None,
                 output_truncated: false,
                 output_lines: None,
