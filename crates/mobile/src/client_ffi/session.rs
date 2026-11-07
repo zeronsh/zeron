@@ -228,6 +228,35 @@ pub struct ContextUsage {
     pub window: Option<u64>,
 }
 
+/// Why a transcript with nothing in it has nothing in it. Anything stored on this
+/// device always shows, so this is only about a chat it has never loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TranscriptLoad {
+    /// Show the transcript: it has content, or the chat really is empty.
+    Ready,
+    /// "Syncing…"
+    Syncing,
+    /// "Reconnecting…"
+    Reconnecting,
+    /// "Offline — this chat loads when you're back online". No spinner.
+    Offline,
+    /// "This chat lives on another device — it loads when that device is back
+    /// online". No spinner: nothing is lost, and nothing's happening here.
+    HostAway,
+}
+
+impl From<zc::TranscriptLoad> for TranscriptLoad {
+    fn from(load: zc::TranscriptLoad) -> Self {
+        match load {
+            zc::TranscriptLoad::Ready => Self::Ready,
+            zc::TranscriptLoad::Syncing => Self::Syncing,
+            zc::TranscriptLoad::Reconnecting => Self::Reconnecting,
+            zc::TranscriptLoad::Offline => Self::Offline,
+            zc::TranscriptLoad::HostAway => Self::HostAway,
+        }
+    }
+}
+
 /// Everything the composer and its status strip render.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct ComposerState {
@@ -254,6 +283,8 @@ pub struct ComposerState {
     /// Scroll-to-own-send target.
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    /// What to show in place of an empty transcript, if anything.
+    pub transcript_load: TranscriptLoad,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -349,6 +380,7 @@ impl From<&zc::ComposerState> for ComposerState {
                 tokens: u.tokens,
                 window: u.window,
             }),
+            transcript_load: c.transcript_load.into(),
         }
     }
 }

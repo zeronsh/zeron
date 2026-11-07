@@ -482,8 +482,8 @@ Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine.
 
 **Not built:**
 
-- Mobile. `crates/client` still works as it does today, and a phone seen in the last 14 days holds its
-  account's chats on generation 2.
+- Android. `crates/client` has the layer and iOS runs it ([relay-mobile.md](relay-mobile.md)). Android has
+  yet to turn it on, and a phone without it seen in the last 14 days holds its account's chats on generation 2.
 - Sidebar churn.
 - Removing old rows, or backups for device-hosted chats. The nightly backup still runs for a room whose
   rows change, which a generation 3 room's mostly don't.

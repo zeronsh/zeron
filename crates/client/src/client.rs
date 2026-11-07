@@ -34,6 +34,8 @@ const TICK: Duration = Duration::from_secs(1);
 /// is evicted. On-screen sessions, streaming ones and ones with unadopted
 /// sends are never evicted.
 pub const WARM_SESSION_CAP: usize = 6;
+/// Away from the foreground this long, a chat on screen redials on return.
+const SUSPENSION_CUTS_SOCKETS: std::time::Duration = std::time::Duration::from_secs(8);
 /// Sessions `preload_sessions` warms (front page order).
 pub const PRELOAD_CAP: usize = 4;
 
@@ -76,6 +78,10 @@ pub(crate) struct ClientInner {
     connectivity_tracker: Mutex<ConnectivityTracker>,
     connectivity: RwLock<Connectivity>,
     path_online: AtomicBool,
+    /// The platform's path reports, None until its first: connects wait on it.
+    path_report: tokio::sync::watch::Sender<Option<bool>>,
+    /// When this client was built, for how long a connect waits on that first report.
+    started_at: tokio::time::Instant,
     foreground: AtomicBool,
     synced: AtomicBool,
     pub(crate) harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
@@ -185,7 +191,7 @@ impl ClientInner {
         }
         live.mark_registry_dirty();
         if let Some(presence) = live.presence() {
-            self.workspace.replace_presence(presence);
+            self.adopt_presence(live, presence);
         }
         self.recompute_connectivity();
         self.recompute_workspace();
@@ -193,26 +199,43 @@ impl ClientInner {
         // New rows may flip a chat's roomGen / host: attach rooms.
         for core in self.cores() {
             core.ensure_room(self);
+            core.refresh_relay(self);
         }
+    }
+
+    /// What a connect waits on before it dials: see [`crate::live::path_gate`].
+    pub(crate) fn path_gate(&self) -> crate::live::path_gate::PathGate {
+        crate::live::path_gate::PathGate::new(self.path_report.subscribe(), self.started_at)
+    }
+
+    /// Whether `device` has beaten recently enough to be worth a dial.
+    pub(crate) fn presence_fresh(&self, device: &str) -> bool {
+        self.workspace
+            .presence()
+            .get(device)
+            .is_some_and(|at| now_ms() - at < crate::connectivity::PRESENCE_FRESH_MS)
     }
 
     /// Live: a presence beat arrived (or the local beat ticked).
     pub(crate) fn presence_changed(self: &Arc<Self>) {
         let Some(live) = self.live() else { return };
         if let Some(presence) = live.presence() {
-            let before = self.workspace.presence();
-            let now = now_ms();
-            for (device, at) in &presence {
-                let was_fresh = before
-                    .get(device)
-                    .is_some_and(|b| now - b < crate::connectivity::PRESENCE_FRESH_MS);
-                if !was_fresh && now - at < crate::connectivity::PRESENCE_FRESH_MS {
-                    live.relay.peer_alive(device);
-                }
-            }
-            self.workspace.replace_presence(presence);
+            self.adopt_presence(live, presence);
         }
         self.recompute_workspace();
+    }
+
+    /// Store new presence, and wake whatever waits on a device that's back. Every
+    /// path that copies presence in goes through here: a registry join or a tick
+    /// can be the first to show a host up (a cold launch, a return from the
+    /// background), and a watch parked on that host would otherwise wait for good.
+    fn adopt_presence(&self, live: &LiveBackend, presence: HashMap<String, i64>) {
+        let back = newly_fresh(&self.workspace.presence(), &presence, now_ms());
+        // Stored first: whatever `peer_alive` wakes reads the new presence.
+        self.workspace.replace_presence(presence);
+        for device in &back {
+            live.relay.peer_alive(device);
+        }
     }
 
     pub(crate) fn connectivity_changed(self: &Arc<Self>) {
@@ -526,7 +549,7 @@ impl ClientInner {
     fn tick(self: &Arc<Self>) {
         if let Some(live) = self.live() {
             if let Some(presence) = live.presence() {
-                self.workspace.replace_presence(presence);
+                self.adopt_presence(live, presence);
             }
             let peers_known = self
                 .workspace
@@ -541,6 +564,11 @@ impl ClientInner {
         for core in self.cores() {
             if core.has_pending_sends() {
                 core.refresh();
+            }
+            core.refresh_relay(self);
+            // An empty transcript's patience runs out with no event to say so.
+            if core.view_attached() {
+                core.recompute_composer(self);
             }
         }
     }
@@ -620,6 +648,8 @@ impl Client {
                 ..Default::default()
             }),
             path_online: AtomicBool::new(true),
+            path_report: tokio::sync::watch::Sender::new(None),
+            started_at: tokio::time::Instant::now(),
             foreground: AtomicBool::new(true),
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
@@ -1242,14 +1272,17 @@ impl Client {
         if self.inner.workspace.chat(chat_id).is_none() {
             return Err(ClientError::NotFound(chat_id.to_owned()));
         }
+        let mut journaled = 0;
         let (doc, cursor, hydrated) = match self.inner.backend() {
             Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
             Backend::Live(live) => {
                 let local = crate::live::room::load_local(&live.store, chat_id);
+                journaled = local.journaled;
                 (local.doc, local.cursor, local.had_content)
             }
         };
         let core = SessionCore::new(chat_id, &self.inner, doc, cursor);
+        core.set_journaled(journaled);
         let core = {
             let mut sessions = lock(&self.inner.sessions);
             sessions
@@ -1640,6 +1673,12 @@ impl Client {
     /// "unsatisfied" — ambiguity stays online.
     pub fn set_network_online(&self, online: bool) {
         let was = self.inner.path_online.swap(online, Ordering::AcqRel);
+        // The first report releases the connects waiting on it, whatever it says.
+        self.inner.path_report.send_if_modified(|path| {
+            let changed = *path != Some(online);
+            *path = Some(online);
+            changed
+        });
         if !self.inner.is_demo() {
             // Parks/un-parks every sync backoff in the process (zeron-sync).
             zeron_sync::wake::set_path_online(online);
@@ -1694,6 +1733,17 @@ impl Client {
             live.kick();
             live.probe_health();
             self.kick_rooms();
+            // Suspended this long, the OS has likely cut its sockets without saying.
+            // Whoever's looking at a chat shouldn't wait out a probe to find that out.
+            if away >= SUSPENSION_CUTS_SOCKETS {
+                for core in self.inner.cores() {
+                    if core.view_attached()
+                        && let Some(room) = core.room()
+                    {
+                        room.redial();
+                    }
+                }
+            }
             live.relay.clear_unsupported();
             self.inner.reconcile_change_request_watches();
         }
@@ -1710,6 +1760,9 @@ impl Client {
             live.flush_registry(&self.inner);
             for core in self.inner.cores() {
                 core.flush();
+                // No ticks from here on, and a link's keepalive would keep the
+                // radio up until the OS suspends us: stop now.
+                core.refresh_relay(&self.inner);
             }
         }
     }
@@ -1767,9 +1820,35 @@ pub struct PushPrefs {
     pub failed: bool,
 }
 
+/// Devices fresh in `after` that weren't in `before`.
+fn newly_fresh(before: &HashMap<String, i64>, after: &HashMap<String, i64>, now: i64) -> Vec<String> {
+    let fresh = |at: i64| now - at < crate::connectivity::PRESENCE_FRESH_MS;
+    after
+        .iter()
+        .filter(|(device, at)| fresh(**at) && !before.get(*device).is_some_and(|b| fresh(*b)))
+        .map(|(device, _)| device.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_counts_as_back_only_when_it_turns_fresh() {
+        let fresh = crate::connectivity::PRESENCE_FRESH_MS;
+        let now = 10 * fresh;
+        let before = HashMap::from([("stale".to_string(), now - 2 * fresh), ("up".to_string(), now - 1)]);
+        let after = HashMap::from([
+            ("stale".to_string(), now),
+            ("up".to_string(), now),
+            ("new".to_string(), now),
+            ("old".to_string(), now - 2 * fresh),
+        ]);
+        let mut back = newly_fresh(&before, &after, now);
+        back.sort();
+        assert_eq!(back, vec!["new".to_string(), "stale".to_string()]);
+    }
 
     #[test]
     fn demo_replica_is_local_only_and_never_queues() {

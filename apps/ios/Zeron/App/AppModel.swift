@@ -112,6 +112,14 @@ final class AppModel {
                 : ""
             DispatchQueue.main.async {
                 guard let self else { return }
+                #if DEBUG
+                // A simulator shares its Mac's network, so a rig plays airplane mode
+                // with this and an edge URL it can take away.
+                if ProcessInfo.processInfo.arguments.contains("-network-offline") {
+                    self.client?.setNetworkOnline(online: false)
+                    return
+                }
+                #endif
                 self.client?.setNetworkOnline(online: p.status == .satisfied)
                 if let last = self.pathShape, last != shape, !shape.isEmpty {
                     self.client?.networkPathChanged()
@@ -184,7 +192,8 @@ final class AppModel {
             deviceId: Self.deviceId,
             deviceName: UIDevice.current.name,
             platform: "ios",
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+            relayLayer: Self.runsRelayLayer
         )
         do {
             client = try CoreClient(config: config, credentials: credentials, listener: bridge)
@@ -203,6 +212,17 @@ final class AppModel {
             client = nil
             return false
         }
+    }
+
+    /// Whether this build follows relayed chats (docs/design/relay-mobile.md). The
+    /// room's answer decides the rest, so an edge with the flag off changes nothing.
+    /// `-no-relay-layer` behaves as a shipped build does, for testing an old phone in
+    /// an account of new devices.
+    static var runsRelayLayer: Bool {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-no-relay-layer") { return false }
+        #endif
+        return true
     }
 
     /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.

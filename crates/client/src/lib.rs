@@ -58,7 +58,7 @@ pub use session::{
     AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
     LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,
     QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
-    SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
+    SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch, TranscriptLoad,
 };
 pub use subagents::{SubagentInfo, SubagentSink, SubagentState, SubagentWatch};
 pub use terminal::{TerminalInfo, TerminalLink, TerminalReplies, TerminalSink, TerminalUpdate};
