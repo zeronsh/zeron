@@ -103,7 +103,8 @@ mod chip_copy_tests;
 mod drop_tests;
 #[cfg(test)]
 mod fit_tests;
-#[cfg(test)]
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
 mod slide_bench_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
