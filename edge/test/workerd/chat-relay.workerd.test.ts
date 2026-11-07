@@ -584,6 +584,22 @@ describe("relay-era checkpoints", () => {
     old.socket.close();
   });
 
+  it("a socket from before the flag went off is sent to say hello again", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const host = await connect(name, "host", { relay: true });
+    const closed = new Promise<number>(resolve => host.socket.addEventListener("close", e => resolve(e.code)));
+    await runInDurableObject(room(name), instance => {
+      const target = instance as unknown as { env: Record<string, unknown> };
+      target.env = { ...target.env, CHAT_RELAY_LAYER: "" };
+    });
+    host.sendFrame(FRAME.relay, {}, bytes(1));
+    expect(await closed).toBe(1012);
+    const again = await connect(name, "host", { relay: true });
+    expect(again.state.header.relay).toBeUndefined();
+    again.socket.close();
+  });
+
   it("with the flag off, atFloor means nothing", async () => {
     const name = crypto.randomUUID();
     const old = await connect(name, "old");

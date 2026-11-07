@@ -28,10 +28,8 @@ const UPLOAD_PARALLEL: usize = 3;
 /// registry has been live long enough to have heard its beats.
 const DARK_AFTER_MS: i64 = 5 * 60_000;
 const LIVENESS_WARMUP_MS: i64 = 60_000;
-/// A PR-status watch retries a host that presence says is up from this...
+/// A PR-status watch retries a host that presence says is up from this.
 const WATCH_RETRY_MIN: Duration = Duration::from_millis(500);
-/// ...to this, for when presence is wrong: a host that beats but doesn't answer.
-const WATCH_RETRY_MAX: Duration = Duration::from_secs(60);
 
 pub(crate) fn deadline(method: &str) -> Duration {
     match method {
@@ -353,10 +351,18 @@ impl Relay {
     }
 }
 
+/// The longest a change request watch waits between tries, for when presence is
+/// wrong: a host that beats but doesn't answer. One watch per open checkout.
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(120);
+
+fn next_watch_retry(wait: Duration) -> Duration {
+    (wait * 2).min(WATCH_RETRY_MAX)
+}
+
 /// One `WatchCheckoutChangeRequest` stream for as long as the chat is listed. It only
 /// dials a host whose presence is fresh: an offline host parks it, with no traffic,
 /// until a beat says the host is back, and then it dials at once. A host that beats
-/// but doesn't answer is retried 0.5s→60s. The last status stays in the workspace
+/// but doesn't answer is retried 0.5s→2min. The last status stays in the workspace
 /// through all of it, so a chat on an offline host keeps showing its PR. An engine
 /// without the method marks the device unsupported.
 fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken) {
@@ -429,7 +435,25 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
                 // The host came back from being stale: try now, from the start of the curve.
                 _ = alive.changed() => backoff = WATCH_RETRY_MIN / 2,
             }
-            backoff = (backoff * 2).min(WATCH_RETRY_MAX);
+            backoff = next_watch_retry(backoff);
         }
     });
+}
+
+#[cfg(test)]
+mod watch_retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_thats_away_is_retried_ever_more_slowly() {
+        let mut wait = Duration::from_millis(500);
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            wait = next_watch_retry(wait);
+            waits.push(wait);
+        }
+        assert_eq!(waits[0], Duration::from_secs(1));
+        assert_eq!(*waits.last().unwrap(), WATCH_RETRY_MAX);
+        assert!(waits.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
 }

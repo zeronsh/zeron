@@ -104,11 +104,18 @@ pub async fn run_signing_in(
             &wake,
             signing_in(),
         );
-        tokio::select! { _ = stop.cancelled() => break, result = connected => {
+        let refused = tokio::select! { _ = stop.cancelled() => break, result = connected => {
+            let refused = result.as_ref().is_err_and(credentials_refused);
             if let Err(error) = result { tracing::debug!(%error, "preview coordinator disconnected"); }
-        } }
+            refused
+        } };
         catalog.clear_remote();
-        peers.clear().await;
+        // Open connections were admitted by credentials that may have ended since.
+        if refused || config.tokens.token().await.is_err() {
+            peers.clear().await;
+        } else {
+            peers.clear_unopened().await;
+        }
         while outgoing.try_recv().is_ok() {} // signaling from the old lease is stale
         tokio::select! {
             _ = stop.cancelled() => break,
@@ -118,6 +125,15 @@ pub async fn run_signing_in(
     }
     catalog.clear_remote();
     peers.clear().await;
+}
+
+/// The coordinator turned these credentials away, as opposed to a socket that ended.
+fn credentials_refused(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<tokio_tungstenite::tungstenite::Error>(),
+        Some(tokio_tungstenite::tungstenite::Error::Http(response))
+            if matches!(response.status().as_u16(), 401 | 403)
+    )
 }
 
 fn coordinator_url(
@@ -208,7 +224,7 @@ async fn connect(
                         anyhow::ensure!(text.len() <= 1024*1024, "oversized preview coordinator message");
                         match serde_json::from_str::<Incoming>(&text)? {
                             Incoming::Catalog { device, services } => catalog.set_remote(&device, services)?,
-                            Incoming::Gone { device } => { catalog.remove_remote(&device); peers.remove(&device).await; }
+                            Incoming::Gone { device } => { catalog.remove_remote(&device); peers.gone(&device).await; }
                             Incoming::Signal { from, signal } => {
                                 anyhow::ensure!(negotiations.len() < 16, "too many concurrent preview negotiations");
                                 let peers = peers.clone();
@@ -236,6 +252,21 @@ mod tests {
         async fn token(&self) -> anyhow::Result<String> {
             anyhow::bail!("unused")
         }
+    }
+
+    #[test]
+    fn only_a_refusal_counts_as_losing_credentials() {
+        use tokio_tungstenite::tungstenite::{Error, http::Response};
+        let refusal = |status: u16| {
+            anyhow::Error::from(Error::Http(
+                Response::builder().status(status).body(None).unwrap(),
+            ))
+        };
+        assert!(credentials_refused(&refusal(401)));
+        assert!(credentials_refused(&refusal(403)));
+        assert!(!credentials_refused(&refusal(429)), "the device limit");
+        assert!(!credentials_refused(&refusal(503)));
+        assert!(!credentials_refused(&anyhow::anyhow!("preview coordinator closed")));
     }
 
     #[test]

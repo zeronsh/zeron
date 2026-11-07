@@ -434,6 +434,13 @@ export class ChatRoom implements DurableObject {
     }
     const frame = decodeFrame(new Uint8Array(message));
     const state = ws.deserializeAttachment() as SocketState;
+    if (frame && state.relay && !this.relayEnabled()) {
+      // The layer was turned off under a live session, and a socket that survived
+      // the deploy still thinks it's on. Its next hello gets the room's real answer,
+      // so its host goes back to stored rows now, not when this socket happens to end.
+      ws.close(1012, "relay layer off");
+      return;
+    }
     if (!frame || (RELAY_FRAME_TYPES.has(frame.type) && !this.relayEnabled())) {
       send(ws, FRAME.error, { code: "bad_frame", message: "malformed frame" });
       return;
