@@ -472,9 +472,12 @@ impl DocHost {
                 device.id == chat.device_id && device.supports(zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY)
             })
         });
-        if let Some(client) = &*lock(&handle.chat2) {
-            client.set_queue_pushes(!is_host && offered && generation >= RELAY_ROOM_GEN && host_reads_queue);
-        }
+        // On the relay handle, not the client: a client that dials and pushes before
+        // the first maintenance tick would otherwise store a send as a row. The room's
+        // answer for each session still decides (`push_kind`).
+        state
+            .relay
+            .set_queue_pushes(!is_host && offered && generation >= RELAY_ROOM_GEN && host_reads_queue);
         state.relay.set_policy(RelayPolicy { confirm_queue: is_host });
         state.relay.set_host(Some(chat.device_id));
     }
@@ -758,6 +761,53 @@ mod tests {
         let (_, newest) = store.pending_chat_inbox("chat").unwrap();
         store.retire_chat_inbox("chat", newest).unwrap();
         assert!(store.pending_chat_inbox("chat").unwrap().0.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_viewer_knows_to_use_the_queue_before_its_first_dial() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            crate::doc_host::DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: zeron_proto::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let workspace = crate::workspace_host::WorkspaceHost::open(
+            store.clone(),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "viewer".into(),
+                device_name: "viewer".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        workspace.upsert_device_row(&zeron_proto::Device {
+            id: "host".into(),
+            name: "host".into(),
+            platform: "linux".into(),
+            last_seen_at: Some(chrono::Utc::now()),
+            created_at: None,
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: vec![zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY.into()],
+        });
+        workspace.create_chat("chat", None, Some("host"), None, None).unwrap();
+        let mut row = workspace.chat("chat").unwrap().unwrap();
+        row.room_gen = Some(RELAY_ROOM_GEN);
+        workspace.import_chat_row(&row).unwrap();
+        host.set_workspace(workspace);
+        let handle = host.open_local("chat").unwrap();
+        let state = state();
+        assert!(lock(&handle.chat2).is_none(), "no client yet");
+        host.refresh_relay_mode(&handle, &state);
+        assert!(state.relay.queue_pushes(), "a send goes to the queue from the first push");
     }
 
     #[test]

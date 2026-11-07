@@ -194,7 +194,7 @@ impl RelayHandle {
         self.counters.queue_pushes.store(queue, Relaxed);
     }
 
-    pub(crate) fn queue_pushes(&self) -> bool {
+    pub fn queue_pushes(&self) -> bool {
         self.counters.queue_pushes.load(Relaxed)
     }
 
