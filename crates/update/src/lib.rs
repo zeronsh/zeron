@@ -1069,6 +1069,16 @@ pub async fn stage_headless(
     manifest: &Manifest,
     app_root: &Path,
 ) -> anyhow::Result<PathBuf> {
+    stage_headless_on(edge_url, manifest, app_root, on_cloud()).await
+}
+
+/// [`stage_headless`]; on a Cloud machine without [`CLOUD_UNUSED_FILES`].
+async fn stage_headless_on(
+    edge_url: &str,
+    manifest: &Manifest,
+    app_root: &Path,
+    cloud: bool,
+) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_managed_update_platform()?;
     let version = &manifest.version;
@@ -1105,6 +1115,9 @@ pub async fn stage_headless(
             bail!("tarball {file} did not contain a zeron binary");
         }
         verify_staged_binary(&unpacked.join("zeron"), version).await?;
+        if cloud {
+            strip_cloud_unused(&unpacked);
+        }
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
@@ -1140,6 +1153,155 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
         let _ = (app_root, version);
         require_managed_update_platform()?;
         unreachable!("supported managed-update platforms are Unix")
+    }
+}
+
+/// How many versions older than `current` a managed install keeps once an update
+/// has settled: one, to go back to by hand, except on a Cloud machine. Its disk
+/// is copied back in on every wake, and everything on it is read in alongside
+/// the engine that's starting, so each version kept (about 270 MB) slowed every
+/// wake by seconds. Going back there is a reinstall, which downloads anyway.
+pub fn older_versions_kept() -> usize {
+    older_versions_kept_on(std::env::var("ZERON_DEVICE_PLATFORM").ok().as_deref())
+}
+
+fn older_versions_kept_on(platform: Option<&str>) -> usize {
+    if on_cloud_platform(platform) { 0 } else { 1 }
+}
+
+fn on_cloud_platform(platform: Option<&str>) -> bool {
+    platform == Some("cloud")
+}
+
+fn on_cloud() -> bool {
+    on_cloud_platform(std::env::var("ZERON_DEVICE_PLATFORM").ok().as_deref())
+}
+
+/// Release files a Cloud machine never runs: the desktop app's background
+/// engine (78 MB). A Cloud machine runs `zeron headless`, which links the
+/// engine, and its disk is copied back in on every wake.
+pub const CLOUD_UNUSED_FILES: &[&str] = &["zeron-engine"];
+
+/// Remove [`CLOUD_UNUSED_FILES`] from the version folder `dir`.
+pub fn strip_cloud_unused(dir: &Path) {
+    for name in CLOUD_UNUSED_FILES {
+        let path = dir.join(name);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+            && let Err(err) = std::fs::remove_file(&path)
+        {
+            tracing::warn!(path = %path.display(), error = %err, "couldn't remove an unused release file");
+        }
+    }
+}
+
+/// On a Cloud machine, every installed version's unused files (the ones
+/// installed before Cloud stopped unpacking them).
+pub fn strip_cloud_unused_installed(app_root: &Path) {
+    if on_cloud() {
+        strip_unused_from_versions(app_root);
+    }
+}
+
+fn strip_unused_from_versions(app_root: &Path) {
+    let Ok(entries) = std::fs::read_dir(app_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let named_like_a_version =
+            entry.file_name().to_str().is_some_and(|name| parse_version(name).is_some());
+        if named_like_a_version && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            strip_cloud_unused(&entry.path());
+        }
+    }
+}
+
+/// Remove what a managed install no longer needs from `app_root`: version folders
+/// older than the one `current` names, past the newest `older_kept` of them;
+/// `abandoned`, a version an update gave up on, unless it's `current`; and
+/// downloads (`.stage-*`) whose process is gone. Never `current`, the folder this
+/// executable runs from, a newer version (it may be one being staged), or
+/// anything not named like a version. Returns the versions removed.
+pub fn prune_installed_versions(
+    app_root: &Path,
+    older_kept: usize,
+    abandoned: Option<&str>,
+) -> Vec<String> {
+    let Some(current) = std::fs::read_link(app_root.join("current"))
+        .ok()
+        .and_then(|target| Some(target.file_name()?.to_str()?.to_owned()))
+        .filter(|name| app_root.join(name).join("zeron").is_file())
+    else {
+        // No working install to measure against: leave everything alone.
+        return Vec::new();
+    };
+    let Some(current_version) = parse_version(&current) else {
+        return Vec::new();
+    };
+    let running = std::env::current_exe()
+        .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
+        .and_then(|exe| Some(exe.parent()?.file_name()?.to_str()?.to_owned()));
+    let Ok(entries) = std::fs::read_dir(app_root) else {
+        return Vec::new();
+    };
+    let mut older = Vec::new();
+    let mut doomed = Vec::new();
+    for entry in entries.flatten() {
+        // A symlink (`current` among them) is never a version's folder.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Some(rest) = name.strip_prefix(".stage-") {
+            if stage_is_abandoned(rest) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+            continue;
+        }
+        if name == current || running.as_deref() == Some(name.as_str()) {
+            continue;
+        }
+        let Some(version) = parse_version(&name) else {
+            continue;
+        };
+        if abandoned == Some(name.as_str()) {
+            doomed.push(name);
+        } else if version < current_version {
+            older.push((version, name));
+        }
+    }
+    older.sort_by(|a, b| b.0.cmp(&a.0));
+    doomed.extend(older.into_iter().skip(older_kept).map(|(_, name)| name));
+    // Linux is fine with a running image's file gone; macOS isn't (#1037).
+    doomed.retain(|name| {
+        let dir = app_root.join(name);
+        !process_runs_from(&dir) && std::fs::remove_dir_all(dir).is_ok()
+    });
+    if !doomed.is_empty() {
+        let _ = std::fs::File::open(app_root).and_then(|dir| dir.sync_all());
+        tracing::info!(removed = ?doomed, %current, "removed engine versions no longer needed");
+    }
+    doomed
+}
+
+/// `.stage-<version>-<pid>`, left by a download whose process is gone (a stop
+/// mid-download kills it before it can clean up).
+fn stage_is_abandoned(rest: &str) -> bool {
+    let Some(pid) = rest.rsplit_once('-').and_then(|(_, pid)| pid.parse::<u32>().ok()) else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        !Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 
@@ -3341,6 +3503,132 @@ mod tests {
         // Unstaged version refuses.
         assert!(apply_headless(&app_root, "0.2.0").is_err());
     }
+
+    #[cfg(unix)]
+    fn versions_installed(app_root: &Path, versions: &[&str]) {
+        for ver in versions {
+            std::fs::create_dir_all(app_root.join(ver)).unwrap();
+            std::fs::write(app_root.join(ver).join("zeron"), ver).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn folders(app_root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(app_root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settled_install_keeps_current_and_the_one_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.9", "0.2.10", "0.2.11", "0.2.12", "0.2.13"]);
+        // Not versions, so not ours to judge.
+        std::fs::create_dir_all(app_root.join("notes")).unwrap();
+        std::fs::write(app_root.join("README"), "hi").unwrap();
+        apply_headless(&app_root, "0.2.12").unwrap();
+
+        let removed = prune_installed_versions(&app_root, 1, None);
+
+        assert_eq!(removed.len(), 2, "{removed:?}");
+        // 0.2.13 is newer than current: an update staged and waiting, kept.
+        assert_eq!(folders(&app_root), ["0.2.11", "0.2.12", "0.2.13", "README", "current", "notes"]);
+        assert_eq!(std::fs::read_link(app_root.join("current")).unwrap(), app_root.join("0.2.12"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cloud_machine_keeps_only_the_version_it_runs() {
+        assert_eq!(older_versions_kept_on(Some("cloud")), 0);
+        assert_eq!(older_versions_kept_on(Some("linux")), 1);
+        assert_eq!(older_versions_kept_on(None), 1);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.155", "0.2.156", "0.2.157", "0.2.158"]);
+        apply_headless(&app_root, "0.2.158").unwrap();
+
+        prune_installed_versions(&app_root, older_versions_kept_on(Some("cloud")), None);
+
+        assert_eq!(folders(&app_root), ["0.2.158", "current"]);
+        // Again: nothing more to do, and nothing breaks.
+        assert!(prune_installed_versions(&app_root, 0, None).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_an_update_gave_up_on_goes_but_current_never_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10", "0.2.11"]);
+        apply_headless(&app_root, "0.2.10").unwrap();
+
+        assert_eq!(prune_installed_versions(&app_root, 1, Some("0.2.11")), ["0.2.11"]);
+        assert_eq!(folders(&app_root), ["0.2.10", "current"]);
+        // Named as abandoned while it's current (a reinstall since): kept.
+        assert!(prune_installed_versions(&app_root, 0, Some("0.2.10")).is_empty());
+        assert_eq!(folders(&app_root), ["0.2.10", "current"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_a_working_current_nothing_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10", "0.2.11"]);
+        assert!(prune_installed_versions(&app_root, 0, None).is_empty());
+        // `current` names a folder with no engine in it.
+        std::fs::create_dir_all(app_root.join("0.2.12")).unwrap();
+        std::os::unix::fs::symlink(app_root.join("0.2.12"), app_root.join("current")).unwrap();
+        assert!(prune_installed_versions(&app_root, 0, None).is_empty());
+        assert_eq!(folders(&app_root), ["0.2.10", "0.2.11", "0.2.12", "current"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cloud_machine_keeps_no_desktop_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10", "0.2.11"]);
+        for ver in ["0.2.10", "0.2.11"] {
+            std::fs::write(app_root.join(ver).join("zeron-engine"), "desktop").unwrap();
+        }
+        std::fs::create_dir_all(app_root.join("notes")).unwrap();
+        std::fs::write(app_root.join("notes").join("zeron-engine"), "not a version").unwrap();
+        apply_headless(&app_root, "0.2.11").unwrap();
+
+        strip_unused_from_versions(&app_root);
+
+        for ver in ["0.2.10", "0.2.11"] {
+            assert!(!app_root.join(ver).join("zeron-engine").exists(), "{ver}");
+            assert!(app_root.join(ver).join("zeron").exists(), "{ver}");
+        }
+        assert!(app_root.join("notes").join("zeron-engine").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_download_whose_process_is_gone_is_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        versions_installed(&app_root, &["0.2.10"]);
+        apply_headless(&app_root, "0.2.10").unwrap();
+        // A pid that can't be running (above the kernel's pid_max ceiling).
+        let gone = app_root.join(".stage-0.2.11-4194305");
+        let live = app_root.join(format!(".stage-0.2.11-{}", std::process::id()));
+        for stage in [&gone, &live] {
+            std::fs::create_dir_all(stage.join("unpacked")).unwrap();
+        }
+        prune_installed_versions(&app_root, 0, None);
+        assert!(!gone.exists());
+        assert!(live.exists());
+    }
     #[test]
     fn schedule_is_wall_clock_with_failure_backoff() {
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
@@ -3720,6 +4008,38 @@ mod tests {
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
         assert!(staged.join("zeron").is_file());
+    }
+
+    /// The release carries the desktop's background engine; a Cloud machine
+    /// stages the release without it, anywhere else keeps it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cloud_machine_stages_a_release_without_the_desktop_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path().join("pkg");
+        std::fs::create_dir_all(pkg.join("zeron-pkg")).unwrap();
+        std::fs::write(pkg.join("zeron-pkg").join("zeron-engine"), "desktop").unwrap();
+        let bytes = fake_headless_tarball(&pkg, "9.9.9");
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                headless_artifact("9.9.9"),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+                },
+            )]
+            .into(),
+            ..Manifest::default()
+        };
+        for (cloud, kept) in [(true, false), (false, true)] {
+            let app_root = tmp.path().join(format!("app-{cloud}"));
+            std::fs::create_dir_all(&app_root).unwrap();
+            let (base, server) = serve_forever(bytes.clone()).await;
+            let staged = stage_headless_on(&base, &manifest, &app_root, cloud).await.unwrap();
+            server.abort();
+            assert!(staged.join("zeron").is_file(), "cloud {cloud}");
+            assert_eq!(staged.join("zeron-engine").exists(), kept, "cloud {cloud}");
+        }
     }
 
     #[test]
