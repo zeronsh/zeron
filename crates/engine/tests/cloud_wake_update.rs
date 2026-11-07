@@ -13,7 +13,8 @@ use futures::stream::BoxStream;
 use tokio::sync::Notify;
 
 use zeron_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc, SessionMessageEntry,
+    MessagePart, MessageRole, MessageStatus, QueuedMessage, SessionCommandPayload, SessionDoc,
+    SessionMessageEntry,
 };
 use zeron_engine::wake_update::{self, Found, Limits, Steps};
 use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
@@ -539,5 +540,46 @@ async fn a_killed_turn_waits_for_the_check_too() {
         rig.runs.lock().unwrap()[0].resume.as_deref(),
         Some("hs-killed")
     );
+    core.shutdown().await;
+}
+
+/// A row left on the disk comes back frozen, and a Cloud machine thaws its own once
+/// boot recovery is over. Held for the check, that's when the hold lifts: nothing else
+/// says so, and the row would wait for a prompt that may never come.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_on_the_machines_disk_goes_once_the_check_lets_work_start() {
+    let _serial = SERIAL.lock().await;
+    let rig = Rig::new();
+    std::fs::write(rig.dir.join("device-id"), "cloud-machine").unwrap();
+    let before = rig.boot();
+    create_chat(&before).await;
+    before.workspace.set_chat_cwd(CHAT, "~").unwrap();
+    before.shutdown().await;
+    drop(before);
+
+    let doc = SessionDoc::init(CHAT).unwrap();
+    doc.push_queued(&QueuedMessage::new("row-1", "and then this", "phone"))
+        .unwrap();
+    let store = DocsStore::open(rig.store_dir()).unwrap();
+    store
+        .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+        .unwrap();
+    drop(store);
+
+    wake_update::force_armed(true);
+    let core = rig.boot();
+    wake_update::force_armed(false);
+    let handle = core.doc_host.open(CHAT).unwrap();
+    settle().await;
+    assert_eq!(rig.answers(), 0, "the row went ahead of the check");
+
+    let steps = Script::finding(Found::Current);
+    wake_update::gate_then_release(&core, &steps, wake_update::LIMITS).await;
+    wait_for(
+        || handle.doc().read_queue().unwrap().is_empty() && answered(&core, "and then this"),
+        "the row",
+    )
+    .await;
+    assert_eq!(rig.answers(), 1);
     core.shutdown().await;
 }
