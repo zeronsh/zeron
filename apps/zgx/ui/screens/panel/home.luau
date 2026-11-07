@@ -1279,9 +1279,10 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: at its top, level with the transcript's first
-	-- message beside it, so a part opening or closing grows it downward and
-	-- nothing above moves. Taller than the panel, it scrolls.
+	-- Where it stands: at its top, across the card (its rows from the
+	-- card's left, their letters at its right, as the shipping app's), so a
+	-- part opening or closing grows it downward and nothing above moves.
+	-- Taller than the panel, it scrolls.
 	local view = ui.ref()
 	return ui.scroll {
 		ref = view,
@@ -1291,7 +1292,6 @@ M.Page = ui.component(function(props: Props): Node
 		w_full = true,
 		grow = 1,
 		min_h = 0,
-		items = "center",
 		overscroll = "contain",
 		-- (Its edges fade where there's more to scroll to, as the sidebar's
 		-- and Settings' lists do.)
@@ -1302,7 +1302,6 @@ M.Page = ui.component(function(props: Props): Node
 		provide = { session = sid, panel_key = passed },
 		ui.column {
 			w_full = true,
-			max_w = 380,
 			px = "$space.4",
 			pb = "$space.6",
 			gap = "$space.5",

@@ -1749,6 +1749,8 @@ return function(props: Props): Node
 					tooltip_side = "bottom",
 					w = EXPAND,
 					h = EXPAND,
+					-- (One of the title bar's: its glyph held under the pointer.)
+					tone = "bar",
 					on_click = function()
 						shell_view.toggle_expanded()
 					end,

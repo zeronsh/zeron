@@ -1149,13 +1149,16 @@ fn intro_window() -> WindowOptions {
 }
 
 /// The glass under Zeron's window: the under-window blur alone, untinted
-/// (`plain`), which the theme's `background` tints. On Windows, the
-/// material's own backdrop: plain glass there is the blur of whatever is
-/// behind the window with no system backdrop (zgx #1495/#1496, gpui's
-/// `Blurred`), and Zeron's window would show straight through it.
+/// (`plain`), which the theme's frost (`glass.tint`, Zeron's `glass` at
+/// 0.80) tints, on every platform. On Windows that's the acrylic accent's
+/// blur of what's behind the window (zgx #1495), gpui's `Blurred`, as the
+/// shipping app's: the frost values are that app's, made for it. The
+/// material's own backdrop there is Mica, which blurs nothing (solid under
+/// the frost); Acrylic, a transient material's, adds the system's tint
+/// under it and goes solid whenever the window isn't active. With
+/// Transparency effects off, plain glass goes solid (zgx #1496).
 fn zeron_glass() -> Glass {
-    let glass = Glass::new(GlassMaterial::UnderWindowBackground);
-    if cfg!(windows) { glass } else { glass.plain() }
+    Glass::new(GlassMaterial::UnderWindowBackground).plain()
 }
 
 /// Zeron's window: an inset title bar over the colourless under-window
@@ -1168,8 +1171,10 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
         glass: Some(zeron_glass()),
-        // (Windows: the caption buttons keep to the title row at any zoom.)
-        caption_height: Some(32.),
+        // (Windows: the caption buttons keep to the title row at any zoom,
+        // the bar's whole 38, as Zeron's: shell.rs
+        // `render_windows_caption_controls`, `Theme::TITLEBAR_HEIGHT`.)
+        caption_height: Some(38.),
         ..Default::default()
     }
 }
@@ -1265,14 +1270,14 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
 
 #[cfg(test)]
 mod glass_tests {
-    /// The window's glass is the under-window blur alone, except on
-    /// Windows, where plain glass shows whatever is behind the window: there
-    /// it is the material's own backdrop.
+    /// The window's glass is the under-window blur alone on every
+    /// platform: on Windows, the acrylic accent's blur the shipping app's
+    /// frost was made for, not Mica, which blurs nothing.
     #[test]
-    fn the_window_s_glass_is_plain_except_on_windows() {
+    fn the_window_s_glass_is_plain_everywhere() {
         let glass = super::zeron_glass();
         assert_eq!(glass.material, super::GlassMaterial::UnderWindowBackground);
-        assert_eq!(glass.plain, !cfg!(windows));
+        assert!(glass.plain);
     }
 }
 

@@ -96,15 +96,22 @@ end
 
 -- Whether the window is on macOS, as the host says (src/main.rs
 -- `platform`): its buttons the traffic lights at the bar's left. Asked once.
-local macos: boolean? = nil
-local function on_macos(): boolean
-	if macos == nil then
-		local ok, platform = pcall(function(): any
+local platform: string? = nil
+local function platform_now(): string
+	if platform == nil then
+		local ok, name = pcall(function(): any
 			return ui.shared("platform", ""):peek()
 		end)
-		macos = ok and platform == "macos"
+		platform = if ok and type(name) == "string" then name else ""
 	end
-	return macos :: boolean
+	return platform :: string
+end
+local function on_macos(): boolean
+	return platform_now() == "macos"
+end
+-- Whether it's on Windows (its buttons zgx's caption buttons, at the right).
+local function on_windows(): boolean
+	return platform_now() == "windows"
 end
 
 -- Whether the window is in full screen (tracked).
@@ -257,8 +264,9 @@ local CAPTION_GLYPH, CONTROL_INK = 10, 12
 local function actions_right(): number
 	local side, buttons = window_buttons()
 	-- (Linux's buttons, circles in a strip the bar's height or more, keep
-	-- the row's padding before them.)
-	if side == "right" and buttons.height >= H then
+	-- the row's padding before them. Windows' span the bar's whole 38 too,
+	-- as Zeron's, src/main.rs `caption_height`: still one rhythm.)
+	if side == "right" and buttons.height >= H and not on_windows() then
 		return buttons.width + ROW_PAD
 	end
 	if side == "right" then
@@ -303,6 +311,8 @@ local function control(label: Label, glyph: Node, enabled: (() -> boolean)?, on_
 		label = label,
 		w = size,
 		h = size,
+		-- (Its glyph held under the pointer, the wash alone coming: Zeron's.)
+		tone = "bar",
 		tooltip_side = "bottom",
 		disabled = function(): boolean
 			return not able()
@@ -429,6 +439,7 @@ local TitleBar = ui.component(function(props: Props): Node
 						return not collapsed:get()
 					end) :: any,
 					size = 16,
+					ink = "$zeron.bar.ink",
 				},
 				nil,
 				function()

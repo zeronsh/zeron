@@ -1467,6 +1467,63 @@ ui.command {
 		store.catalog:set { state = "ready", harnesses = {}, models = {} }
 	end,
 }
+-- The box's catalog come, as the host sends it (`device`: whose).
+ui.command {
+	id = "catalog_of_box",
+	title = "The box's catalog comes",
+	run = function()
+		local c = table.clone(store.catalog:peek()) :: any
+		c.device = "box"
+		store.catalog:set(c)
+	end,
+}
+-- The open session names no model (made without one: its agent runs its
+-- own), the host naming that one.
+ui.command {
+	id = "session_names_no_model",
+	title = "The open session names no model",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			local next = table.clone(META[s.id] or {}) :: any
+			next.id = s.id
+			next.state = "ready"
+			next.harness = "claude-code"
+			next.model = nil
+			next.effort = nil
+			next.model_label = "Its own model"
+			META[s.id] = next
+			store.session:set(next)
+		end
+	end,
+}
+-- Every agent here has said, and none offers Opus.
+ui.command {
+	id = "catalog_complete_without_opus",
+	title = "The catalog is complete, without Opus",
+	run = function()
+		local c = store.catalog:peek()
+		local models: { any } = {}
+		for _, m in c.models do
+			if m.value ~= "opus" then
+				table.insert(models, m)
+			end
+		end
+		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)
+	end,
+}
+-- The open session runs a model no catalog shown lists (Pi's, on a device
+-- not looked at yet), named by the host.
+ui.command {
+	id = "session_model_elsewhere",
+	title = "The open session runs a model the catalog doesn't list",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { model = "pi/kimi-k3", model_label = "Kimi K3" })
+		end
+	end,
+}
 
 -- A plugin putting words into the composer (`zeron.compose.insert`).
 ui.command {

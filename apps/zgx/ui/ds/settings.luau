@@ -22,6 +22,7 @@ local Links = require("@ds/links")
 local Icon = require("@self/icon")
 local Tile = require("@self/tile")
 local control = require("@self/control")
+local material = require("@self/material")
 local SectionTitle = require("@self/section_title")
 local Hint = require("@self/hint")
 local FadeText = require("@self/fade_text")
@@ -236,7 +237,7 @@ function M.Group(props: GroupProps): Node
 	return ui.column {
 		w_full = true,
 		rounded = "$radius.xl",
-		bg = "$zeron.settings.card",
+		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
 		border = 1,
 		border_color = "$zeron.settings.edge",
 		overflow = "hidden",
@@ -289,7 +290,7 @@ function M.Each(list: State<{ any }>, row: (item: any, i: number, now: State<any
 		ui.column {
 			w_full = true,
 			rounded = "$radius.xl",
-			bg = "$zeron.settings.card",
+			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
 			border = 1,
 			border_color = "$zeron.settings.edge",
 			overflow = "hidden",
@@ -1007,7 +1008,7 @@ function M.Catalog(props: CatalogProps): Node
 			id = "catalog-card",
 			w_full = true,
 			rounded = "$radius.xl",
-			bg = "$zeron.settings.card",
+			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
 			border = 1,
 			border_color = "$zeron.settings.edge",
 			overflow = "hidden",
