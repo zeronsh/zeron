@@ -656,10 +656,10 @@ M.URGENCY = {
 	failed = 3,
 	limited = 4,
 	working = 5,
-	connecting = 6,
-	plan = 7,
-	done = 8,
-	waiting = 9,
+	waiting = 6,
+	connecting = 7,
+	plan = 8,
+	done = 9,
 } :: { [string]: number }
 function M.pressing(sessions: { { status: status.Kind? } }): status.Kind?
 	local best: status.Kind? = nil
@@ -815,7 +815,7 @@ function M.Row(props: RowProps): Node
 	local hovered = ui.use_state(false)
 	local function strong(): boolean
 		local s = cur()
-		return (s.status ~= nil and s.status ~= "waiting") or (props.selected ~= nil and props.selected())
+		return s.status ~= nil or (props.selected ~= nil and props.selected())
 	end
 	local harness = props.harness or function(): boolean
 		return true

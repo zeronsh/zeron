@@ -324,6 +324,50 @@ async fn eager_done_forwards_wake_turn_as_second_done() {
 }
 
 #[tokio::test]
+async fn a_background_wake_is_signalled_and_what_the_agent_waits_on_follows_the_roster() {
+    let (mut controls, _steer, _token) = controls("A");
+    let turn = zeron_harness::TurnControl::default();
+    controls.turn = turn.clone();
+    let mut waiting = turn.watch_waiting();
+    let woke = {
+        let turn = turn.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(10), turn.woke()).await.is_ok()
+        })
+    };
+    // Snapshot every list the agent waits on, as it changes.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let watcher = {
+        let seen = seen.clone();
+        let turn = turn.clone();
+        tokio::spawn(async move {
+            while waiting.changed().await.is_ok() {
+                let ids: Vec<String> = waiting.borrow_and_update().iter().map(|w| w.id.clone()).collect();
+                // The agent marks the shell it waits on as soon as it's listed.
+                if ids == ["ag1"] {
+                    let _ = turn.mark_awaited(&["bn1".into()], true);
+                }
+                seen.lock().unwrap().push(ids);
+            }
+        })
+    };
+    let events = run_to_end(&harness(), request("scenario:shellwake"), controls).await;
+    assert!(woke.await.unwrap(), "the CLI's own wake turn is signalled");
+    watcher.abort();
+    let seen = seen.lock().unwrap().clone();
+    // The background agent counts at once; the shell once marked; both go
+    // when the roster drains.
+    assert!(seen.contains(&vec!["ag1".to_string()]), "{seen:?}");
+    assert!(seen.contains(&vec!["ag1".to_string(), "bn1".to_string()]), "{seen:?}");
+    assert_eq!(seen.last(), Some(&Vec::new()), "{seen:?}");
+    // The first init is the session's start, not a wake: one wake only.
+    assert_eq!(
+        events.iter().filter(|e| matches!(e, AgentEvent::Done { .. })).count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn ask_user_question_round_trips_through_the_control_channel() {
     // The questions must reach the ENGINE's input bridge (`request_input`) —
     // and the harness must NOT emit its own `InputRequested`/`InputResolved`

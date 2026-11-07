@@ -222,6 +222,11 @@ local function set_cargo(key: string, list: { any })
 	kept:set(all)
 end
 
+-- Chat `key`'s chips replaced (a queued message's, shown as it's edited).
+function M.set_cargo_of(key: string, list: { any })
+	set_cargo(key, list)
+end
+
 function M.push_cargo(key: string?, item: any)
 	if key == nil or here:peek() == key then
 		M.cargo:push(item)

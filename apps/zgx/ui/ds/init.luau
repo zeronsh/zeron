@@ -117,6 +117,7 @@ return {
 	Select = require("@self/select"),
 	Slider = require("@self/slider"),
 	NumberStepper = require("@self/stepper"),
+	DatePicker = require("@self/date_picker"),
 	Tabs = require("@self/tabs"),
 	Badge = badge.Badge,
 	Tag = badge.Tag,
