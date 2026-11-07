@@ -280,12 +280,11 @@ function M.permission(item: any, permission: string): Line
 	elseif permission == "accounts.read" then
 		return line(false, "user-rounded", "plugins.words.permission.accounts_read.title", "plugins.words.permission.accounts_read.detail")
 	elseif permission == "accounts.switch" then
-		-- (A change to what your agents run as: always asked, said so.)
-		return line(true, "user-rounded", "plugins.words.permission.accounts_switch.title", "plugins.words.permission.accounts_switch.detail")
+		return line(false, "user-rounded", "plugins.words.permission.accounts_switch.title", "plugins.words.permission.accounts_switch.detail")
 	elseif permission == "models.read" then
 		return line(false, "list", "plugins.words.permission.models_read.title", "plugins.words.permission.models_read.detail")
 	elseif permission == "models.set" then
-		return line(true, "pen", "plugins.words.permission.models_set.title", "plugins.words.permission.models_set.detail")
+		return line(false, "pen", "plugins.words.permission.models_set.title", "plugins.words.permission.models_set.detail")
 	elseif permission == "links.open" then
 		return line(false, "arrow-up-right", "plugins.words.permission.links_open.title", "plugins.words.permission.links_open.detail")
 	elseif permission == "navigate" then

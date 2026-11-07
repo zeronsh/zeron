@@ -80,6 +80,7 @@ pub(crate) fn session(chat: &str, status: SessionStatus, outcome: Option<DoneSta
         updated_at: Utc::now(),
         running_subagents: 0,
         background_tasks: Vec::new(),
+        waiting: None,
     }
 }
 
@@ -287,7 +288,7 @@ async fn agents_accounts_show_email_only_with_accounts_read_and_never_secrets() 
 }
 
 #[tokio::test]
-async fn agents_switching_makes_the_account_active_says_who_and_is_paced() {
+async fn agents_switching_makes_the_account_active_says_who_and_isnt_paced() {
     let f = Fixture::new();
     f.grant("p", &[ACCOUNTS_SWITCH]);
     f.grant("watcher", &[ACCOUNTS_READ]);
@@ -306,39 +307,42 @@ async fn agents_switching_makes_the_account_active_says_who_and_is_paced() {
     // The account that's active already: refused, so nothing loops.
     let again = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a2" })).await.unwrap_err();
     assert_eq!(again.reason, reason::ALREADY);
-    // Back at once: paced.
-    let back = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a1" })).await.unwrap_err();
-    assert_eq!(back.reason, reason::PACED);
-    assert_eq!(f.host.activations.load(Ordering::SeqCst), 1);
+    // Back at once: no pace.
+    let back = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a1" })).await.unwrap();
+    assert_eq!(back["status"], "switched");
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), 2);
     assert_eq!(f.agents.status("p")["actions"][0]["op"], "switch_account");
     let missing = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "zz" })).await.unwrap_err();
     assert_eq!(missing.reason, reason::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn agents_a_switch_waits_for_running_chats_on_that_provider() {
+async fn agents_a_switch_happens_at_once_or_waits_when_asked() {
     let f = Fixture::new();
     f.grant("p", &[ACCOUNTS_SWITCH]);
     *lock(&f.host.sessions) = vec![session("c1", SessionStatus::Working, None)];
     f.agents.observe_sessions(&f.host.sessions());
-    let busy = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a2" })).await.unwrap_err();
-    assert_eq!(busy.reason, reason::BUSY);
+    // A chat running: switched at once all the same.
+    let now = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a2" })).await.unwrap();
+    assert_eq!(now["status"], "switched");
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), 1);
+    // `when_idle`: waits for it.
     let waiting = f
-        .op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a2", "when_idle": true }))
+        .op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a1", "when_idle": true }))
         .await
         .unwrap();
     assert_eq!(waiting["status"], "waiting");
-    assert_eq!(f.host.activations.load(Ordering::SeqCst), 0, "nothing switched under a running chat");
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), 1, "nothing more switched under a running chat");
     *lock(&f.host.sessions) = vec![session("c1", SessionStatus::Idle, Some(DoneStatus::Completed))];
     f.agents.observe_sessions(&f.host.sessions());
     for _ in 0..50 {
-        if f.host.activations.load(Ordering::SeqCst) == 1 {
+        if f.host.activations.load(Ordering::SeqCst) == 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(f.host.activations.load(Ordering::SeqCst), 1, "switched once the turn finished");
-    assert!(f.snapshot().accounts.iter().any(|a| a.id == "a2" && a.active));
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), 2, "switched once the turn finished");
+    assert!(f.snapshot().accounts.iter().any(|a| a.id == "a1" && a.active));
 }
 
 #[tokio::test]
@@ -504,7 +508,7 @@ async fn agents_turn_events_need_sessions_read_and_say_how_the_turn_ended() {
 }
 
 #[tokio::test]
-async fn agents_a_failing_service_listener_is_dropped_and_said() {
+async fn agents_a_failing_service_listener_stays_and_its_row_says_so() {
     let f = Fixture::new();
     f.grant("p", &[USAGE_READ]);
     lock(&f.sink.failing).insert("p".into());
@@ -519,14 +523,67 @@ async fn agents_a_failing_service_listener_is_dropped_and_said() {
     }
     let told = f.told();
     let to_service = told.iter().filter(|t| t.1 == Target::Service).count();
-    assert_eq!(to_service, 3, "dropped after its third failure: {told:?}");
-    // Its window is told, to say so in its row in Settings → Plugins.
+    assert_eq!(to_service, 4, "told every change, failing or not: {told:?}");
+    // Its window is told each time, to say so in its row in Settings → Plugins.
     let said: Vec<&Told> = told.iter().filter(|t| t.1 == Target::Window).collect();
-    assert_eq!(said.len(), 1, "{told:?}");
-    assert_eq!((said[0].2.as_str(), said[0].3.as_str()), ("@dropped", "listener.dropped"));
-    let dropped = f.agents.dropped("p");
-    assert_eq!(dropped.len(), 1);
-    assert!(dropped[0].contains("usage.changed"), "{dropped:?}");
+    assert_eq!(said.len(), 4, "{told:?}");
+    assert_eq!((said[0].2.as_str(), said[0].3.as_str()), ("@notice", "plugin.notice"));
+    let notices = f.agents.notices("p");
+    let last = notices.last().unwrap();
+    assert!(last.contains("usage.changed") && last.contains("4 times in a row"), "{notices:?}");
+    // Hearing one again starts the count over.
+    lock(&f.sink.failing).remove("p");
+    f.set_used(0.95);
+    f.agents.observe_accounts(&f.snapshot());
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    lock(&f.sink.failing).insert("p".into());
+    f.set_used(0.97);
+    f.agents.observe_accounts(&f.snapshot());
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    let notices = f.agents.notices("p");
+    assert!(!notices.last().unwrap().contains("in a row"), "{notices:?}");
+}
+
+#[tokio::test]
+async fn agents_a_plugin_answering_its_own_changes_is_stopped_after_16() {
+    let f = Fixture::new();
+    f.grant("p", &[ACCOUNTS_SWITCH, ACCOUNTS_READ]);
+    f.agents.observe_accounts(&f.snapshot());
+    // It hears its own switches, and answers each with another.
+    f.agents.listen("p", Target::Window, &[("@1".into(), "account.switched".into(), json!({}))]);
+    let mut to = ["a2", "a1"].into_iter().cycle();
+    for hop in 1..=LOOP_HOPS {
+        let done = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": to.next().unwrap() })).await;
+        assert_eq!(done.unwrap()["status"], "switched", "hop {hop}");
+    }
+    let stopped = f
+        .op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": to.next().unwrap() }))
+        .await
+        .unwrap_err();
+    assert_eq!(stopped.reason, reason::LOOP);
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), LOOP_HOPS as usize);
+    assert!(f.agents.notices("p").last().unwrap().contains("Stopped a loop"));
+    // The listener stays, and the next change (the one refused, made again)
+    // starts over.
+    let next = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": "a2" })).await;
+    assert_eq!(next.unwrap()["status"], "switched");
+}
+
+#[tokio::test]
+async fn agents_many_changes_not_set_off_by_their_own_never_count_as_a_loop() {
+    let f = Fixture::new();
+    f.grant("p", &[ACCOUNTS_SWITCH]);
+    // It doesn't listen for its own switches: however many, no loop.
+    f.agents.observe_accounts(&f.snapshot());
+    let mut to = ["a2", "a1"].into_iter().cycle();
+    for hop in 0..(LOOP_HOPS * 3) {
+        let done = f.op("p", json!({ "op": "switch_account", "provider": "claude-code", "account": to.next().unwrap() })).await;
+        assert_eq!(done.unwrap()["status"], "switched", "change {hop}");
+    }
 }
 
 #[tokio::test]

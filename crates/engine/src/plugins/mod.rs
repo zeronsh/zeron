@@ -2189,7 +2189,7 @@ impl Plugins {
                     out["service"] = if status.is_null() { serde_json::json!({ "running": false }) } else { status };
                 }
                 // What it did to your agents' accounts and models here, and
-                // its listeners dropped for failing (plugins/agents).
+                // what its row says (a listener failing, a loop stopped).
                 let agents = self.inner.agents.status(&entry.item.id);
                 if !agents.is_null() {
                     out["agents"] = agents;

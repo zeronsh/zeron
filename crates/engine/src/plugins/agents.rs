@@ -28,9 +28,17 @@
 //! rotate a saved login's single-use refresh token): only `usage_refresh`
 //! does, paced per plugin on top of the engine's own 30 s per account.
 //!
-//! **Controls are paced** and attributed: a switch at most once a minute
-//! per plugin and provider and 10 an hour per plugin, a model set 20 a
-//! minute; each is logged as the plugin's and told with `by`.
+//! **Controls are attributed**, not limited: each switch or model set is
+//! logged as the plugin's and told with `by`.
+//!
+//! **A loop is stopped** (`loop_guard`): a plugin told of its own change
+//! that answers with another, and again, [`LOOP_HOPS`] times in a row, has
+//! that next change refused (`loop`), and its row in Settings says so. How
+//! often a plugin changes things never counts, only its changes setting off
+//! its own (as cloud functions stop a function re-triggering itself).
+//!
+//! **A failing listener stays**: each failure is logged, and its row in
+//! Settings says the latest and how many in a row.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -84,29 +92,17 @@ pub fn event_needs(event: &str) -> Option<&'static str> {
 /// Pacing (tests make them short).
 #[derive(Debug, Clone)]
 pub struct Pacing {
-    /// Between two switches of one provider's account by one plugin.
-    pub switch_gap: Duration,
-    /// Switches one plugin may make in an hour.
-    pub switches_per_hour: usize,
     /// Between two forced usage reads by one plugin.
     pub refresh_gap: Duration,
-    /// Model sets one plugin may make in a minute.
-    pub sets_per_minute: usize,
     /// How long a `when_idle` switch waits for that provider's chats.
     pub idle_wait: Duration,
-    /// Failures in a row (an error, a timeout) that drop a listener.
-    pub failures_to_drop: u32,
 }
 
 impl Default for Pacing {
     fn default() -> Self {
         Self {
-            switch_gap: Duration::from_secs(60),
-            switches_per_hour: 10,
             refresh_gap: Duration::from_secs(5 * 60),
-            sets_per_minute: 20,
             idle_wait: Duration::from_secs(30 * 60),
-            failures_to_drop: 3,
         }
     }
 }
@@ -135,12 +131,12 @@ impl Refused {
 pub mod reason {
     /// This device didn't allow the plugin what the op needs.
     pub const NOT_ALLOWED: &str = "not_allowed";
-    /// Too soon after the last (see [`super::Pacing`]).
+    /// Too soon after the last usage refresh (see [`super::Pacing`]).
     pub const PACED: &str = "paced";
-    /// A chat on that provider is running here.
-    pub const BUSY: &str = "busy";
     /// It's that way already.
     pub const ALREADY: &str = "already";
+    /// The plugin's own changes kept setting each other off (`LOOP_HOPS`).
+    pub const LOOP: &str = "loop";
     /// No such provider, account, chat, model, effort or option.
     pub const NOT_FOUND: &str = "not_found";
     /// The op itself is wrong.
@@ -227,10 +223,6 @@ type ChatModel = (Option<String>, Option<ReasoningLevel>, Map<String, Json>);
 #[derive(Default)]
 struct State {
     listeners: BTreeMap<(String, Target), Vec<Listener>>,
-    failures: HashMap<(String, Target, String), u32>,
-    /// Listeners dropped (failing), by plugin: what Settings and
-    /// `plugin_status` say.
-    dropped: HashMap<String, Vec<String>>,
     /// Each threshold listener's side of its line, per account window.
     below: HashMap<(String, Target, String, String, String, String), bool>,
     accounts: Option<AgentAccountsSnapshot>,
@@ -240,16 +232,21 @@ struct State {
     models: HashMap<String, Vec<String>>,
     /// The provider problem a chat's turn reported, until it ends.
     problems: HashMap<String, ProviderProblem>,
-    switched_at: HashMap<(String, String), Instant>,
-    switches: HashMap<String, VecDeque<Instant>>,
     refreshed_at: HashMap<String, Instant>,
-    sets: HashMap<String, VecDeque<Instant>>,
     pending: HashMap<(String, String), PendingSwitch>,
     /// A switch or set a plugin is making: told with its `by`.
     switch_by: HashMap<String, (String, By)>,
     model_by: HashMap<String, By>,
     /// Each plugin's last actions (`plugin_status`).
     actions: HashMap<String, VecDeque<Json>>,
+    /// What each plugin's row says (a listener failing, a loop stopped).
+    notices: HashMap<String, VecDeque<String>>,
+    /// A listener's failures in a row.
+    failures: HashMap<(String, Target, String), u32>,
+    /// When each plugin was last told of a change it made itself.
+    echoed: HashMap<String, Instant>,
+    /// Each plugin's changes in a row, each set off by its last.
+    chain: HashMap<String, u32>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -257,6 +254,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 const ACTIONS_KEPT: usize = 20;
+const NOTICES_KEPT: usize = 5;
+
+/// A plugin's changes, each set off by its last, before the next is refused.
+pub const LOOP_HOPS: u32 = 16;
+/// How soon after a plugin is told of its own change another counts as set
+/// off by it.
+const LOOP_WINDOW: Duration = Duration::from_secs(10);
 
 /// Plugins' agent ops and events. Cheap to clone.
 #[derive(Clone)]
@@ -555,7 +559,7 @@ impl Agents {
             }
             "set_default_model" => {
                 // The default for new chats is the window's own (the app
-                // keeps it): checked, paced and told here, kept there.
+                // keeps it): checked and told here, kept there.
                 need(MODELS_SET, "change your chats' models")?;
                 let harness = provider_arg(&args, "harness")?
                     .ok_or_else(|| Refused::new(reason::BAD_CALL, "Say which harness's default"))?;
@@ -566,7 +570,7 @@ impl Agents {
                     .find(|m| m.id == model)
                     .ok_or_else(|| Refused::new(reason::NOT_FOUND, format!("{} has no model \"{model}\"", harness.as_str())))?;
                 let effort = self.effort(found, &args)?;
-                self.pace_set(&by)?;
+                self.loop_guard(&by)?;
                 let data = json!({
                     "default": true,
                     "provider": harness.as_str(),
@@ -648,65 +652,22 @@ impl Agents {
         if !target.switchable {
             return Err(Refused::new(reason::FAILED, "Zeron can't switch to that account"));
         }
-        if self.busy(host.as_ref(), harness) {
-            if args.get("when_idle").and_then(Json::as_bool) == Some(true) {
-                self.state().pending.insert(
-                    (by.plugin.clone(), harness.as_str().to_owned()),
-                    PendingSwitch {
-                        account: account.clone(),
-                        by: by.clone(),
-                        until: Instant::now() + self.inner.pacing.idle_wait,
-                    },
-                );
-                self.record(by, json!({ "op": "switch_account", "provider": harness.as_str(), "account": account, "waiting": true }));
-                return Ok(json!({ "status": "waiting", "provider": harness.as_str(), "account": account }));
-            }
-            return Err(Refused::new(
-                reason::BUSY,
-                format!("A {} chat is running on this device: switch when it's done (or pass when_idle)", harness.as_str()),
-            ));
+        self.loop_guard(by)?;
+        // Switched at once, running chats or not; `when_idle` asks to wait
+        // for that provider's chats here to finish first.
+        if args.get("when_idle").and_then(Json::as_bool) == Some(true) && self.busy(host.as_ref(), harness) {
+            self.state().pending.insert(
+                (by.plugin.clone(), harness.as_str().to_owned()),
+                PendingSwitch {
+                    account: account.clone(),
+                    by: by.clone(),
+                    until: Instant::now() + self.inner.pacing.idle_wait,
+                },
+            );
+            self.record(by, json!({ "op": "switch_account", "provider": harness.as_str(), "account": account, "waiting": true }));
+            return Ok(json!({ "status": "waiting", "provider": harness.as_str(), "account": account }));
         }
-        self.pace_switch(by, harness)?;
         self.activate(by, harness, &account).await
-    }
-
-    fn pace_switch(&self, by: &By, harness: HarnessId) -> Result<(), Refused> {
-        let pacing = &self.inner.pacing;
-        let mut st = self.state();
-        let now = Instant::now();
-        let key = (by.plugin.clone(), harness.as_str().to_owned());
-        if let Some(at) = st.switched_at.get(&key)
-            && now.duration_since(*at) < pacing.switch_gap
-        {
-            return Err(Refused::new(
-                reason::PACED,
-                format!("{} switched {} accounts {} s ago", by.name, harness.as_str(), now.duration_since(*at).as_secs()),
-            ));
-        }
-        let hour = Duration::from_secs(3600);
-        let recent = st.switches.entry(by.plugin.clone()).or_default();
-        recent.retain(|t| now.duration_since(*t) < hour);
-        if recent.len() >= pacing.switches_per_hour {
-            return Err(Refused::new(
-                reason::PACED,
-                format!("{} switched accounts {} times this hour", by.name, recent.len()),
-            ));
-        }
-        recent.push_back(now);
-        st.switched_at.insert(key, now);
-        Ok(())
-    }
-
-    fn pace_set(&self, by: &By) -> Result<(), Refused> {
-        let mut st = self.state();
-        let now = Instant::now();
-        let recent = st.sets.entry(by.plugin.clone()).or_default();
-        recent.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
-        if recent.len() >= self.inner.pacing.sets_per_minute {
-            return Err(Refused::new(reason::PACED, format!("{} changed models {} times this minute", by.name, recent.len())));
-        }
-        recent.push_back(now);
-        Ok(())
     }
 
     async fn activate(&self, by: &By, harness: HarnessId, account: &str) -> Result<Json, Refused> {
@@ -788,7 +749,7 @@ impl Agents {
         if chat.config.as_ref() == Some(&config) {
             return Err(Refused::new(reason::ALREADY, "That chat has that model already"));
         }
-        self.pace_set(by)?;
+        self.loop_guard(by)?;
         let host = self.host()?;
         self.state().model_by.insert(chat.id.clone(), by.clone());
         if let Err(why) = host.set_chat_config(&chat.id, config.clone()) {
@@ -811,20 +772,62 @@ impl Agents {
         kept.push_back(action);
     }
 
-    /// What `plugin_status` says: its last actions, its listeners dropped.
+    /// What `plugin_status` says: its last actions, and what its row says.
     pub fn status(&self, plugin: &str) -> Json {
         let st = self.state();
         let actions: Vec<Json> = st.actions.get(plugin).map(|a| a.iter().cloned().collect()).unwrap_or_default();
-        let dropped = st.dropped.get(plugin).cloned().unwrap_or_default();
-        if actions.is_empty() && dropped.is_empty() {
+        let notices: Vec<String> = st.notices.get(plugin).map(|n| n.iter().cloned().collect()).unwrap_or_default();
+        if actions.is_empty() && notices.is_empty() {
             return Json::Null;
         }
-        json!({ "actions": actions, "dropped": dropped })
+        json!({ "actions": actions, "notices": notices })
     }
 
-    /// Why `plugin`'s listeners were dropped, for its row in Settings.
-    pub fn dropped(&self, plugin: &str) -> Vec<String> {
-        self.state().dropped.get(plugin).cloned().unwrap_or_default()
+    /// What `plugin`'s row in Settings says, latest last.
+    pub fn notices(&self, plugin: &str) -> Vec<String> {
+        self.state().notices.get(plugin).map(|n| n.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    /// Kept for `plugin_status`, and told to the plugin's window, which
+    /// reports it as a problem of its own (its row in Settings → Plugins).
+    fn notice(&self, plugin: &str, notice: String) {
+        {
+            let mut st = self.state();
+            let kept = st.notices.entry(plugin.to_owned()).or_default();
+            if kept.len() >= NOTICES_KEPT {
+                kept.pop_front();
+            }
+            kept.push_back(notice.clone());
+        }
+        if let Some(sink) = self.sink() {
+            sink.to_window(plugin, "@notice", "plugin.notice", json!({ "notice": notice }));
+        }
+    }
+
+    /// Before a plugin's change: refused when its own changes have set each
+    /// other off `LOOP_HOPS` times in a row. A change not set off by its own
+    /// starts the count again.
+    fn loop_guard(&self, by: &By) -> Result<(), Refused> {
+        let now = Instant::now();
+        let mut st = self.state();
+        let set_off = st.echoed.get(&by.plugin).is_some_and(|at| now.duration_since(*at) < LOOP_WINDOW);
+        let hops = if set_off { st.chain.get(&by.plugin).copied().unwrap_or(0) + 1 } else { 1 };
+        if hops > LOOP_HOPS {
+            st.chain.remove(&by.plugin);
+            st.echoed.remove(&by.plugin);
+            drop(st);
+            tracing::warn!(plugin = %by.plugin, "plugins: stopped a loop of a plugin's own changes");
+            self.notice(
+                &by.plugin,
+                format!("Stopped a loop: {} changes in a row, each set off by its own last one", LOOP_HOPS),
+            );
+            return Err(Refused::new(
+                reason::LOOP,
+                format!("{}'s changes kept setting each other off ({LOOP_HOPS} in a row): this one wasn't made", by.name),
+            ));
+        }
+        st.chain.insert(by.plugin.clone(), hops);
+        Ok(())
     }
 
     // ── Listeners ──────────────────────────────────────────────────────────
@@ -849,8 +852,8 @@ impl Agents {
         } else {
             st.listeners.insert(key, listeners);
         }
-        st.failures.retain(|(p, t, _), _| !(p == plugin && *t == target));
         st.below.retain(|(p, t, ..), _| !(p == plugin && *t == target));
+        st.failures.retain(|(p, t, _), _| !(p == plugin && *t == target));
         // A threshold's baseline is what's known now.
         let accounts = st.accounts.clone();
         drop(st);
@@ -881,8 +884,15 @@ impl Agents {
                     continue; // (Each listener's own: `thresholds`.)
                 }
                 let Some(data) = raw.fitted(&grant) else { continue };
+                // Its own change, told back to it: what `loop_guard` counts.
+                let own = raw.data.get("by").and_then(|b| b.get("plugin")).and_then(Json::as_str) == Some(plugin.as_str());
+                let mut told = false;
                 for listener in list.iter().filter(|l| l.event == raw.event && matches(&l.opts, &data)) {
                     self.deliver(&sink, &plugin, target, &listener.key, raw.event, data.clone());
+                    told = true;
+                }
+                if own && told {
+                    self.state().echoed.insert(plugin.clone(), Instant::now());
                 }
             }
         }
@@ -905,39 +915,25 @@ impl Agents {
         }
     }
 
-    /// How a listener took an event: failing `failures_to_drop` times in a
-    /// row drops it, and Settings says so.
+    /// How a listener took an event. A failure is logged and said on the
+    /// plugin's row (how many in a row); the listener stays, and is told the
+    /// next event as before.
     pub fn heard(&self, plugin: &str, target: Target, key: &str, event: &str, outcome: Result<(), String>) {
-        let mut st = self.state();
         let id = (plugin.to_owned(), target, key.to_owned());
         match outcome {
             Ok(()) => {
-                st.failures.remove(&id);
+                self.state().failures.remove(&id);
             }
             Err(why) => {
-                let n = st.failures.entry(id.clone()).or_default();
-                *n += 1;
-                if *n >= self.inner.pacing.failures_to_drop {
-                    st.failures.remove(&id);
-                    if let Some(list) = st.listeners.get_mut(&(plugin.to_owned(), target)) {
-                        list.retain(|l| l.key != key);
-                    }
-                    let notice = format!(
-                        "Stopped telling its {event} listener: it failed {} times in a row ({why})",
-                        self.inner.pacing.failures_to_drop
-                    );
-                    tracing::warn!(%plugin, %event, "plugins: dropped a failing listener");
-                    let dropped = st.dropped.entry(plugin.to_owned()).or_default();
-                    if !dropped.contains(&notice) {
-                        dropped.push(notice.clone());
-                    }
-                    drop(st);
-                    // Its row in Settings → Plugins says so (its window
-                    // reports it as a problem of its own).
-                    if let Some(sink) = self.sink() {
-                        sink.to_window(plugin, "@dropped", "listener.dropped", json!({ "notice": notice }));
-                    }
-                }
+                let n = {
+                    let mut st = self.state();
+                    let n = st.failures.entry(id).or_default();
+                    *n += 1;
+                    *n
+                };
+                tracing::warn!(%plugin, %event, %why, failures = n, "plugins: a listener failed");
+                let times = if n == 1 { String::new() } else { format!(" ({n} times in a row)") };
+                self.notice(plugin, format!("Its {event} listener failed{times}: {why}"));
             }
         }
     }
@@ -1244,12 +1240,9 @@ impl Agents {
             let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
             let this = self.clone();
             runtime.spawn(async move {
-                // Still allowed, still not active, still paced.
+                // Still allowed. (Its loop was counted as it asked.)
                 let still = this.sink().and_then(|s| s.grants(&plugin)).is_some_and(|g| g.allows(ACCOUNTS_SWITCH));
                 if !still {
-                    return;
-                }
-                if this.pace_switch(&pending.by, harness).is_err() {
                     return;
                 }
                 if let Err(refused) = this.activate(&pending.by, harness, &pending.account).await {

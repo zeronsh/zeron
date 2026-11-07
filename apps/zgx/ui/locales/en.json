@@ -3188,7 +3188,7 @@
         },
         "accounts_switch": {
           "title": "Switch which account your agents use",
-          "detail": "It can make another saved account the active one, never while a chat on it is running. It can't sign in or remove an account."
+          "detail": "It can make another saved account the active one. It can't sign in or remove an account."
         },
         "models_read": {
           "title": "See your agents' models",

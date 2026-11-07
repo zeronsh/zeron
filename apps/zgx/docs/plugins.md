@@ -57,9 +57,9 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `service` | run its service (the manifest's `service`) on this device, with no window open, for its windows and agents here and on your other devices |
 | `usage.read` | read each agent account's usage: its windows (session, week, …), how much is used, when each resets, its plan. Not who the account is. See [Your agents](#your-agents-usage-accounts-and-models) |
 | `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
-| `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
+| `accounts.switch` | make another saved account the active one for a provider, on this device or one it names |
 | `models.read` | read each harness's models, efforts and options, and a chat's model |
-| `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
+| `models.set` | set a chat's model, effort and options, and what new chats start with |
 
 ## Reaching the network
 
@@ -402,7 +402,7 @@ A plugin can watch how much of your agents' plans you've used, switch which save
 
 **What it never gets.** No sign-in, token or password; it can't add or remove an account, or read another plugin's grants. A read never makes Zeron ask a provider again (that can spend a saved login's one-time refresh); only `usage_refresh` does, paced.
 
-**Switching is careful.** A switch is refused (`busy`) while a chat on that provider runs on that device: pass `when_idle = true` to switch once they've finished (within 30 minutes). Switching to the account that's active already is refused (`already`), and switches are paced (`paced`): once a minute per provider and 10 an hour, per plugin. Setting models is paced at 20 a minute. Each change says which plugin made it: in its event (`by = { plugin, name }`), and in `plugin_status` (`agents.actions`).
+**Switching.** A switch happens at once, chats running or not; pass `when_idle = true` to switch once that provider's chats on that device have finished (within 30 minutes). Switching to the account that's active already is refused (`already`). Each change says which plugin made it: in its event (`by = { plugin, name }`), and in `plugin_status` (`agents.actions`).
 
 **Another device.** Name it per call (`device = id`, a session's or project's `device`): that device decides with what it allowed your plugin there (installed, on, the same version by the same author, and the permission), as a service call does. A service acts on its own device; to act on another, call your service there.
 
@@ -427,7 +427,8 @@ They're told as Zeron learns of a change, never by polling: when Settings, the c
 - **Narrowing.** `opts.provider`, `opts.account`, `opts.window` and `opts.chat` let only matching events through. A threshold watches the active account unless `opts.account` names one.
 - **A threshold starts from what it sees.** The first reading only learns which side of the line each window is on, so read `zeron.usage()` as you start to act on how things stand now.
 - **Only what you were allowed.** A field your plugin wasn't allowed is left out, never blanked: `email` is there with `accounts.read`, `chat` with `sessions.read`, a turn's `provider` with `models.read`.
-- **A handler can't hold Zeron up.** Events are told after the change, never before it. A service's listener that fails (or takes past its time) three times in a row is dropped, and your row in Settings → Plugins and `plugin_status` (`agents.dropped`) say so.
+- **A handler can't hold Zeron up.** Events are told after the change, never before it. A listener that fails (or takes past its time) stays on and hears the next event; your row in Settings → Plugins and `plugin_status` (`agents.notices`) say the latest failure and how many in a row.
+- **A loop is stopped.** A plugin told of its own change (`by` is it) that answers with another change, and so on 16 times in a row, has that next change refused (`loop`), and your row says so. How often you change things never counts, only your changes setting off your own.
 
 ```lua
 -- service.luau ("service", "usage.read", "accounts.read", "accounts.switch")

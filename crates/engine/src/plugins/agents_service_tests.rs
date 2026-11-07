@@ -1,7 +1,7 @@
 //! Plugins' agent controls through the plugins module: a headless service
 //! reacting to an event with no window open, the engine refusing what a
-//! plugin wasn't allowed here, your own plugins still asked for the
-//! controls, windows told over their channel, and another device's calls
+//! plugin wasn't allowed here, your own plugins allowed the controls as
+//! any other permission, windows told over their channel, and another device's calls
 //! decided by this device's grants.
 
 use std::sync::atomic::Ordering;
@@ -126,9 +126,9 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
 const ALL: &[&str] = &["service", "usage.read", "accounts.read", "accounts.switch", "models.read"];
 
 #[test]
-fn agents_your_own_plugin_is_still_asked_for_the_controls() {
+fn agents_your_own_plugin_is_allowed_the_controls_as_any_permission() {
     // What installing your own plugin grants without asking
-    // (`inside_sandbox`, lifecycle.rs): the reads, never the controls.
+    // (`inside_sandbox`, lifecycle.rs): the reads and the controls alike.
     let manifest = manifest::Manifest::from_value(json!({
         "id": "svc", "name": "Svc", "version": "1.0.0", "entry": "init.luau",
         "permissions": ["ui.add", "usage.read", "accounts.read", "models.read", "accounts.switch", "models.set"],
@@ -136,7 +136,10 @@ fn agents_your_own_plugin_is_still_asked_for_the_controls() {
     .unwrap();
     assert_eq!(manifest.problem(), None);
     let granted = capability::inside_sandbox(&capability::record(&manifest));
-    assert_eq!(granted["permissions"], json!(["accounts.read", "models.read", "ui.add", "usage.read"]));
+    assert_eq!(
+        granted["permissions"],
+        json!(["accounts.read", "accounts.switch", "models.read", "models.set", "ui.add", "usage.read"])
+    );
     // And a control added in an update asks again.
     let before = capability::record(
         &manifest::Manifest::from_value(json!({
@@ -322,11 +325,9 @@ async fn agents_the_account_rotate_example_switches_once_a_running_chat_finishes
 }
 
 #[test]
-fn agents_permissions_are_known_and_controls_stay_outside_the_sandbox() {
+fn agents_permissions_are_known_and_inside_the_sandbox() {
     for p in ["usage.read", "accounts.read", "accounts.switch", "models.read", "models.set"] {
         assert!(manifest::KNOWN_PERMISSIONS.contains(&p), "{p}");
+        assert!(!capability::OUTSIDE_SANDBOX.contains(&p), "{p}");
     }
-    assert!(capability::OUTSIDE_SANDBOX.contains(&"accounts.switch"));
-    assert!(capability::OUTSIDE_SANDBOX.contains(&"models.set"));
-    assert!(!capability::OUTSIDE_SANDBOX.contains(&"usage.read"));
 }

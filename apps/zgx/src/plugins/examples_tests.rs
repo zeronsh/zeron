@@ -4058,9 +4058,9 @@ end)
     assert_eq!(toasts.iter().filter(|t| t.contains("usage.threshold")).count(), 1, "{toasts:?}");
     assert!(toasts.iter().any(|t| t.contains("usage.threshold 5")), "{toasts:?}");
     assert!(!toasts.iter().any(|t| t.contains("never")), "{toasts:?}");
-    // A listener its service had dropped: its row says so.
-    tell(&mut app, "watcher", "zeron:listener.dropped", json!({ "listener": "@dropped", "data": { "notice": "Stopped telling its usage.changed listener" } }));
+    // What Zeron says of it (a listener failing, a loop stopped): its row says so.
+    tell(&mut app, "watcher", "zeron:plugin.notice", json!({ "listener": "@notice", "data": { "notice": "Its usage.changed listener failed (3 times in a row): boom" } }));
     let problems = said(&heard, "plugin.watcher.problem");
-    assert!(problems.iter().any(|p| p.contains("Stopped telling its usage.changed listener")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("Its usage.changed listener failed (3 times in a row)")), "{problems:?}");
     assert_eq!(app.error(), None);
 }

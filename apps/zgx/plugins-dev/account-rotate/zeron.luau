@@ -1036,9 +1036,9 @@ return function(id: string): any
 		local event = message.event
 		if type(event) == "string" and string.sub(event, 1, 6) == "zeron:" then
 			local wrapped = message.data or {}
-			if wrapped.listener == "@dropped" then
-				-- Its service's listener failed and was dropped: its row says so.
-				local notice = (wrapped.data and wrapped.data.notice) or "A listener was dropped"
+			if wrapped.listener == "@notice" then
+				-- What Zeron says of it (a listener failing, a loop stopped): its row says so.
+				local notice = (wrapped.data and wrapped.data.notice) or "A listener failed"
 				ui.invoke(`{prefix}.problem`, { error = notice, at = "zeron.on" })
 				return
 			end
