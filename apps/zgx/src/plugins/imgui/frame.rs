@@ -38,16 +38,19 @@
 //! ## Errors and the plugin
 //!
 //! An error inside `on_render` is recorded and the plugin stays loaded; three
-//! consecutive failures close the window (the plugin keeps running). The
-//! exception is the window's **first** frame: a window that cannot draw once
-//! is a window that never becomes visible, so the plugin is reported as
-//! broken with the error text and its windows go (VAL-LIFE-012). A refused
-//! widget is the one failure that never does that: it is the plugin's own
-//! drawing mistake, said where the call was made, and the frame is simply
-//! dropped ([`FrameEnd::refused`]). A **panic** inside a draw is a host
-//! failure: it is caught at the frame boundary so the pump keeps serving every
-//! window, recorded against the failing window, and never withdraws the
-//! plugin.
+//! consecutive failures close the window (the plugin keeps running). A window's
+//! **first attempted** frame is different: one that cannot draw at all never
+//! becomes visible, so that failure is terminal. It is reported once in a
+//! sentence naming the window and the script's own words, handed to the bridge
+//! when there is one (which withdraws the plugin), and the window is closed on
+//! both the dev and installed routes (VAL-LIFE-012). "First" counts attempted
+//! frames, not painted ones, so a window that never painted does not take that
+//! path again and again. A refused widget is the one failure that never does
+//! that: it is the plugin's own drawing mistake, said where the call was made,
+//! and the frame is simply dropped ([`FrameEnd::refused`]). A **panic** inside
+//! a draw is a host failure: it is caught at the frame boundary so the pump
+//! keeps serving every window, recorded against the failing window, and never
+//! withdraws the plugin.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -116,7 +119,8 @@ pub struct FrameReport {
     pub errors: u64,
     pub consecutive_errors: u32,
     pub last_error: Option<String>,
-    /// The first frame's error, when the window never drew once.
+    /// The error from the window's first attempted frame, when that frame
+    /// failed.
     pub first_error: Option<String>,
     /// How long the last frame's callback took, in milliseconds.
     pub last_ms: f64,
@@ -132,7 +136,9 @@ pub struct FrameEnd {
     pub painted: bool,
     /// Why it was not, when it was not.
     pub error: Option<String>,
-    /// Whether this was the window's first frame.
+    /// Whether this was the window's first attempted frame (not its first
+    /// painted one: a window that never paints still gets only one first
+    /// attempt).
     pub first: bool,
     /// Whether the callback died on a widget call the host refused (drawn
     /// outside a live frame, or after the window closed), rather than on
@@ -239,6 +245,10 @@ pub trait FrameWindow {
 /// One frame in flight: what the widgets are drawn into and what it has cost.
 struct LiveFrame {
     seq: u64,
+    /// Whether this was the window's first attempted frame. Recorded when
+    /// the frame starts, because a window that fails it never paints and so
+    /// has no painted frame to compare against later.
+    first: bool,
     /// The frame's `Ui`, owned by the context. Valid while the frame is open,
     /// on this thread only; [`FrameState`] never lets it outlive the frame.
     ui: *const Ui,
@@ -259,6 +269,9 @@ struct LiveFrame {
 #[derive(Default)]
 pub struct FrameState {
     seq: Cell<u64>,
+    /// Frames begun, painted or not. This is what "first frame" means: a
+    /// window that never painted still had its first attempt.
+    attempted: Cell<u64>,
     live: RefCell<Option<LiveFrame>>,
     frames: Cell<u64>,
     errors: Cell<u64>,
@@ -343,10 +356,13 @@ impl FrameState {
         };
         let seq = self.seq.get() + 1;
         self.seq.set(seq);
+        let first = self.attempted.get() == 0;
+        self.attempted.set(self.attempted.get() + 1);
         self.last_started.set(Some(now));
         self.pending.borrow_mut().take();
         *self.live.borrow_mut() = Some(LiveFrame {
             seq,
+            first,
             ui: std::ptr::null(),
             started_wall: now,
             ops: 0,
@@ -485,7 +501,7 @@ impl FrameState {
         };
         let seq = frame.seq;
         let ms = frame.started_wall.elapsed().as_secs_f64().max(0.0) * 1000.0;
-        let first = self.frames.get() == 0;
+        let first = frame.first;
         let refused = frame.refused;
         let failure = if frame.over_budget || frame.started_wall.elapsed() > BUDGET {
             Some(budget_sentence(window.frame_id()))
@@ -535,7 +551,7 @@ impl FrameState {
                 seq: self.seq.get(),
                 painted: false,
                 error: Some(error),
-                first: self.frames.get() == 0,
+                first: false,
                 refused: false,
                 consecutive_errors: self.consecutive.get(),
                 ms: 0.0,
@@ -544,7 +560,7 @@ impl FrameState {
             return end;
         };
         let ms = frame.started_wall.elapsed().as_secs_f64().max(0.0) * 1000.0;
-        let first = self.frames.get() == 0;
+        let first = frame.first;
         let end = self.record_failure(&error, first, ms);
         *self.pending.borrow_mut() = Some(end.clone());
         end
@@ -641,7 +657,9 @@ impl FrameCalls {
         (self.take)(id)
     }
 
-    /// Reports a plugin that could not draw its window's first frame.
+    /// Reports a plugin whose window could not draw its first frame, in a
+    /// sentence naming the window and the script's own words. The bridge
+    /// withdraws the plugin; a dev plugin writes it to the log.
     pub fn failed(&self, error: &str) {
         (self.failed)(error)
     }
@@ -726,9 +744,15 @@ pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
                 window.frame_close();
             }
         } else if end.first {
-            // A window that cannot draw its first frame is reported broken,
-            // with the error text, and taken away (VAL-LIFE-012).
-            calls.failed(error);
+            // A window that cannot draw its first attempted frame is a window
+            // that never becomes visible: retrying cannot help, so this is
+            // terminal. Report it once, with the window's id and the script's
+            // own words, hand it to the bridge when there is one (which
+            // withdraws the plugin), and close the window on both routes —
+            // even when that report has no plugin manager to reach.
+            let sentence = first_frame_sentence(window.frame_id(), error);
+            calls.failed(&sentence);
+            window.frame_close();
         } else {
             eprintln!(
                 "zeron-zgx: plugin {}: window \"{}\": {error}",
@@ -754,6 +778,12 @@ pub fn budget_sentence(window: &str) -> String {
     format!(
         "Window \"{window}\"'s render callback took too long: a frame may spend {BUDGET_MS:.0} ms of CPU. Draw less, or do the work outside on_render."
     )
+}
+
+/// The sentence a first-frame failure is reported with: which window, and
+/// the script's own words. One window's failure never hides another's.
+fn first_frame_sentence(window: &str, error: &str) -> String {
+    format!("Window \"{window}\"'s first frame failed: {error}")
 }
 
 /// The sentence a panicking draw is recorded with. The payload is whatever

@@ -2,11 +2,12 @@
 -- The validation contract's failing-open fixture
 -- (apps/zgx/plugins-dev/imgui-win-probe-broken-open).
 --
--- `VAL-LIFE-007`: the window is created, its first render callback raises
+-- `VAL-LIFE-012`: the window is created, its first render callback raises
 -- `probe open failure`, and the host must report that and take the window
--- (and the plugin) down without leaving a native window behind or bringing
--- Zeron down. The tool exists so the row can check the plugin stops
--- answering once the failure has been reported.
+-- down without leaving a native window behind or bringing Zeron down. On the
+-- installed route the plugin is withdrawn too; the dev route has no plugin
+-- manager, so the plugin itself stays loaded. The tool exists so the row can
+-- check the installed route stops answering once the failure is reported.
 --
 -- Run it (the app must survive the failure):
 --   ZERON_ZGX_DEV_PLUGINS=<this folder> ZERON_ZGX_PLUGIN_LOG=1 \

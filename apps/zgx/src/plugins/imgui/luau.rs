@@ -392,7 +392,9 @@ pub fn dev_calls(host: &ScriptHost, id: &str) -> FrameCalls {
     let failed = {
         let plugin = id.to_string();
         move |error: &str| {
-            eprintln!("zeron-zgx: dev plugin {plugin}: a window's first frame failed: {error}");
+            // The pump's sentence already names the window and the script's
+            // own words; the dev route has no Settings row to put it on.
+            eprintln!("zeron-zgx: dev plugin {plugin}: {error}");
         }
     };
     FrameCalls::new(push, take, failed)

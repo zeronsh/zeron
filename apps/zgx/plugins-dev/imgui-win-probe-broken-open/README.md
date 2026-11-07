@@ -11,12 +11,17 @@ of `apps/zgx/plugins-sdk/zeron.luau`.
 
 ## What it serves
 
-`VAL-LIFE-007`: once the failure is reported, no native window for this plugin
-may exist (the process's top-level window count returns to its pre-enable
-value), the plugin's row shows `probe open failure`, and the plugin is not
-loaded (its `probe_status` tool does not answer). If the host instead leaves a
-window behind or keeps the plugin loaded, that is the defect this fixture
-exposes.
+`VAL-LIFE-012`: once the first-frame failure is reported, no native window for
+this plugin may exist (the process's top-level window count returns to its
+pre-enable value), the plugin log carries the error sentence naming
+`probe open failure`, the window is not recreated, and Zeron stays up with its
+main window answering.
+
+On the **dev route** (`ZERON_ZGX_DEV_PLUGINS`) there is no plugin manager, so
+the plugin itself stays loaded and its tool still answers; only the window
+goes. On the **installed route** the plugin is additionally marked broken and
+withdrawn, so its row in Settings → Plugins carries `probe open failure` and
+its `probe_status` tool stops answering.
 
 ## Run it
 
@@ -40,8 +45,10 @@ apps/zgx/target/debug/zeron-zgx.exe gallery
 ## Plugin log
 
 `probe-broken: opened broken: the first render raises probe open failure`, then
-the host's own failure report, then `probe-broken: closed:closecall broken`
-if the close reaches `on_close`.
+the host's own failure report
+(`Window "broken"'s first frame failed: … probe open failure`), then
+`probe-broken: closed:closecall broken` because the host's own close reaches
+`on_close`.
 
 ## Tests
 

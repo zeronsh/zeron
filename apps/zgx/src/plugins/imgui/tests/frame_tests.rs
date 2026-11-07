@@ -606,6 +606,16 @@ fn an_overrun_callback_is_aborted_and_reported() {
     let _guard = imgui_guard();
     let probe = Probe::new("slow");
 
+    // A clean first frame, so the overrun below is a later failure: a
+    // first-frame failure is terminal now (its own tests prove that).
+    let end = run_frame(&probe, |probe, seq| {
+        probe.text(seq, "fine");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the first frame");
+    assert!(end.painted, "{end:?}");
+    assert_eq!(probe.delivered.borrow().len(), 1);
+
     // A callback that spends more than its 8 ms: the frame is thrown away.
     // (The host refuses the widget once the budget is gone, as the SDK does
     // from the script side, so the call's own error is expected here.)
@@ -625,11 +635,13 @@ fn an_overrun_callback_is_aborted_and_reported() {
     })
     .expect("the frame was attempted");
     assert!(!end.painted, "an overrun frame must not paint: {end:?}");
+    assert!(!end.first, "the window painted its first frame: {end:?}");
     let error = end.error.expect("the overrun is reported");
     assert!(error.contains("too long"), "{error}");
-    assert!(
-        probe.delivered.borrow().is_empty(),
-        "nothing was handed to the GPU view"
+    assert_eq!(
+        probe.delivered.borrow().len(),
+        1,
+        "nothing new was handed to the GPU view"
     );
     assert_eq!(probe.frame_state().report().errors, 1);
 
@@ -640,50 +652,110 @@ fn an_overrun_callback_is_aborted_and_reported() {
     })
     .expect("the next frame");
     assert!(end.painted, "{end:?}");
-    assert_eq!(probe.delivered.borrow().len(), 1);
+    assert_eq!(probe.delivered.borrow().len(), 2);
 }
 
 #[test]
-fn a_render_error_keeps_the_plugin_and_closes_only_after_three() {
+fn a_first_frame_error_reports_the_window_once_and_closes_it() {
     let _guard = imgui_guard();
     let probe = Probe::new("boom");
     let failed = Rc::new(RefCell::new(None::<String>));
 
-    // The first frame's error is the window's own failure: reported, and
-    // the plugin told its window could not draw (VAL-LIFE-012's host half).
+    // A script error on the window's first attempted frame is terminal: it
+    // never becomes visible, so it is reported with the window's id and the
+    // script's own words, and taken away (VAL-LIFE-012's host half).
     let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
         let _ = probe.frame_script_end(seq, Some("probe open failure".into()), false);
     })
     .expect("the first frame ended");
     assert!(!end.painted);
-    assert!(end.first);
-    assert_eq!(
-        failed.borrow().as_deref(),
-        Some("probe open failure"),
-        "the plugin hears the first frame's own words"
+    assert!(end.first, "{end:?}");
+    let sentence = failed.borrow().clone().expect("the failure is reported");
+    assert!(
+        sentence.contains("\"boom\"") && sentence.contains("probe open failure"),
+        "the report names the window and the script's words: {sentence}"
     );
+    assert!(probe.closed.get(), "a failed first frame closes the window");
+    assert!(!probe.frame_open(), "the window is gone: {end:?}");
+    assert!(probe.delivered.borrow().is_empty(), "nothing was painted");
+    assert_eq!(probe.frame_state().report().frames, 0, "no frame painted");
 
-    // Later errors are recorded, not fatal: the window keeps painting and
-    // the plugin stays loaded.
+    // Nothing more is pumped for it, and the failure is not reported again:
+    // deriving "first" from painted frames would retry this window forever.
     *failed.borrow_mut() = None;
-    let _ = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+    assert!(
+        run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+            probe.text(seq, "retried");
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .is_none(),
+        "a closed window asks for no further frame"
+    );
+    assert!(failed.borrow().is_none(), "the failure is reported once");
+    assert_eq!(probe.frame_state().report().errors, 1);
+    assert_eq!(
+        probe.frame_state().report().first_error.as_deref(),
+        Some("probe open failure"),
+        "the first attempt's error is kept for diagnostics"
+    );
+}
+
+#[test]
+fn a_first_frame_error_closes_the_window_without_a_failed_callback() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("unreported");
+
+    // The dev route reports to its log and the installed route to its bridge;
+    // neither reporter is what closes the window. A no-op reporter must still
+    // leave no window behind, half-drawn or retried.
+    let end = run_frame(&probe, |probe, seq| {
+        let _ = probe.frame_script_end(seq, Some("probe open failure".into()), false);
+    })
+    .expect("the first frame ended");
+    assert!(!end.painted);
+    assert!(end.first);
+    assert!(probe.closed.get());
+    assert!(!probe.frame_open());
+    assert!(
+        run_frame(&probe, |probe, seq| {
+            probe.text(seq, "retried");
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .is_none(),
+        "no further frame is pumped for it"
+    );
+}
+
+#[test]
+fn a_later_error_keeps_the_plugin_and_closes_only_after_three() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("boom");
+    let failed = Rc::new(RefCell::new(None::<String>));
+
+    // A painted first frame: the next attempt is a later one.
+    let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
         probe.text(seq, "ok");
         let _ = probe.frame_script_end(seq, None, false);
     })
-    .expect("a good frame");
+    .expect("a good first frame");
+    assert!(end.painted && end.first, "{end:?}");
     assert_eq!(probe.delivered.borrow().len(), 1);
+
+    // Later errors are recorded, not fatal: the window keeps painting and
+    // the plugin stays loaded.
     for _ in 0..2 {
         let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
             let _ = probe.frame_script_end(seq, Some("a later error".into()), false);
         })
         .expect("a failed frame");
         assert!(!end.painted);
-        assert!(!end.first);
+        assert!(!end.first, "a painted first frame is first only once");
     }
     assert!(
         failed.borrow().is_none(),
         "a later error is reported against the window, not as a broken plugin"
     );
+    assert!(probe.frame_open(), "a later error keeps today's policy");
     assert_eq!(probe.frame_state().report().consecutive_errors, 2);
 
     // The third in a row closes the window; the plugin itself is untouched.
@@ -695,6 +767,50 @@ fn a_render_error_keeps_the_plugin_and_closes_only_after_three() {
         probe.closed.get(),
         "three failed frames in a row close the window"
     );
+    assert!(failed.borrow().is_none(), "the plugin stays loaded");
+}
+
+#[test]
+fn the_first_attempted_frame_is_first_not_the_first_painted_one() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("attempts");
+    let failed = Rc::new(RefCell::new(None::<String>));
+
+    // The first attempt ends in a widget the host refused: no frame was
+    // painted and it is not a failure (VAL-WIDGET-022).
+    let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+        let error = probe
+            .frame_widget(
+                "text",
+                seq + 99,
+                &Value::record([("text", Value::from("x"))]),
+            )
+            .expect_err("another frame's seq");
+        let _ = probe.frame_script_end(seq, Some(error), true);
+    })
+    .expect("the refused first attempt");
+    assert!(end.refused && end.first, "{end:?}");
+    assert_eq!(probe.frame_state().report().frames, 0);
+    assert!(probe.frame_open(), "a refusal never closes the window");
+
+    // The second attempt is not a first frame even though nothing painted:
+    // "first" counts attempts, not painted frames. It follows the later-frame
+    // policy instead of reporting a window that is not on its first try.
+    let end = run_frame_reporting(&probe, failed.clone(), |probe, seq| {
+        let _ = probe.frame_script_end(seq, Some("a later error".into()), false);
+    })
+    .expect("the second attempt");
+    assert!(!end.painted);
+    assert!(
+        !end.first,
+        "only the first attempted frame is first: {end:?}"
+    );
+    assert!(
+        failed.borrow().is_none(),
+        "the plugin is not reported broken for a later frame"
+    );
+    assert!(probe.frame_open(), "a later failure keeps today's policy");
+    assert_eq!(probe.frame_state().report().consecutive_errors, 1);
 }
 
 #[test]
@@ -765,6 +881,13 @@ fn a_refused_widget_never_takes_the_plugin_down() {
 fn a_frame_the_script_never_finished_is_aborted() {
     let _guard = imgui_guard();
     let probe = Probe::new("half");
+    // A clean first frame, so the abandoned frame below is a later failure
+    // rather than the terminal first-frame one.
+    run_frame(&probe, |probe, seq| {
+        probe.text(seq, "fine");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the first frame");
     // The push closure draws one widget and never calls frame_end: an error
     // that escaped the SDK's guard. The pump must still close the frame.
     let end = run_frame(&probe, |probe, seq| {
@@ -772,6 +895,7 @@ fn a_frame_the_script_never_finished_is_aborted() {
     })
     .expect("the frame was aborted");
     assert!(!end.painted);
+    assert!(!end.first, "{end:?}");
     assert!(
         end.error
             .as_deref()
@@ -786,6 +910,7 @@ fn a_frame_the_script_never_finished_is_aborted() {
     })
     .expect("the next frame");
     assert!(end.painted, "{end:?}");
+    assert_eq!(probe.delivered.borrow().len(), 2);
 }
 
 #[test]

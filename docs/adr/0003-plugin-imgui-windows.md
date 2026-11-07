@@ -125,12 +125,17 @@ slow script delays only its own next frame. Hidden, minimized, and closed window
 request and draw nothing. If `on_render` errors or exceeds its 8 ms CPU budget, the host aborts
 that frame, keeps the last good draw data (or an ImGui-drawn error panel), records the error, and
 stays responsive; three consecutive failures close the window while leaving the plugin loaded.
-Because painting never executes script, a slow plugin cannot stall presentation mid-frame or
-stutter Zeron's main window. A panic inside a draw is contained at the frame boundary: the
-context is suspended again while the panic unwinds (so later windows can still activate theirs,
-which is Dear ImGui's one-active-context constraint), the failing window records the panic like
-any other failed frame and closes after the same three in a row, and the plugin is never
-withdrawn for a host failure. The pump keeps serving every other window.
+The exception is a window's first **attempted** frame: a window that cannot draw at all never
+becomes visible, so that failure is terminal. It is reported once in a sentence naming the window
+and the script's own error, it withdraws the plugin on the installed route (the dev route has no
+plugin manager to withdraw from), and the window is closed on both routes whether or not a failed
+callback is wired. "First" counts attempts, not painted frames, so a window that never painted is
+not retried forever. Because painting never executes script, a slow plugin cannot stall
+presentation mid-frame or stutter Zeron's main window. A panic inside a draw is contained at the
+frame boundary: the context is suspended again while the panic unwinds (so later windows can
+still activate theirs, which is Dear ImGui's one-active-context constraint), the failing window
+records the panic like any other failed frame and closes after the same three in a row, and the
+plugin is never withdrawn for a host failure. The pump keeps serving every other window.
 
 ### Permission: `imgui.windows`
 
