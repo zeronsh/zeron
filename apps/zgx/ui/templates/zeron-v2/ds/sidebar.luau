@@ -163,6 +163,8 @@ export type Props = {
 	-- Whether a change of width now should follow at once, not ease (the
 	-- window being resized).
 	direct: (() -> boolean)?,
+	-- The sessions haven't been heard yet: none isn't "none" until they have.
+	loading: (() -> boolean)?,
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
@@ -4973,7 +4975,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 		ui.show(function(): boolean
 			local ix = index:get()
 			local grouped = SessionRow.levels(organize:get())[1] == "project" and #ix.projects > 0
-			return not is_island and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
+			local loading = props.loading ~= nil and props.loading()
+			return not is_island and not loading and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
 		end, ui.text {
 			locale.t("ds.sidebar.empty"),
 			id = "sidebar-empty",
