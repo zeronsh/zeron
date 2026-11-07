@@ -27,10 +27,14 @@ configuration is installed globally (`setWebRTCConfiguration`), because WebRTC
 re-applies its global configuration when the audio unit starts and would otherwise
 drop the app's category options mid-call. Output follows the proximity sensor
 (loudspeaker in hand, earpiece at the ear) unless a headset, Bluetooth or car route
-is active. The call survives the screen locking (background audio). An interruption
-or failed connection closes it; it never resumes automatically. Cancellation
-invalidates pending continuations so late SDK callbacks cannot return a second
-result or reactivate media.
+is active. The call survives the screen locking (background audio). Its session is
+mixable (`mixWithOthers`): a nonmixable session is interrupted when another app, or
+the in-app browser, starts a video, and that ended the call. Other apps' audio now
+plays alongside the call, and audio already playing no longer pauses when a call
+starts; how much of it the microphone picks up on the loudspeaker is not measured.
+An interruption (a phone call, Siri, an alarm) or failed connection still closes the
+call; it never resumes automatically. Cancellation invalidates pending continuations
+so late SDK callbacks cannot return a second result or reactivate media.
 
 The orb is the desktop's: `zeron-orb` computes geometry, clock, audio response and
 crossfades for both, and iOS only paints the frames (`OrbView`).
@@ -40,6 +44,11 @@ bidirectional sound, barge-in/AEC, Bluetooth and route changes, background durin
 startup and active speech, denied permission, full-ID MCP delegation and unique
 host-side transcripts. Measure package size, CPU and latency on the target device;
 none are claimed by an offline build.
+
+Mixing with other apps' audio (not run; the unit tests assert the configuration
+only): a call stays connected while a video with sound plays in another app and in
+the in-app browser; microphone mute still silences the call while the video plays;
+an incoming phone call, Siri or an alarm still ends the call.
 
 Pending before App Store submission (owner decisions, also tracked in the
 [acceptance checklist](voice-remote-testing.md#legal-and-privacy-blocks-a-public-release)):
