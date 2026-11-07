@@ -83,14 +83,18 @@ fn a_new_chat_and_a_session_switch_the_composer_at_once() {
     );
 }
 
-/// What comes and goes with the panel fades as it drifts with the edge
+/// What comes and goes with the panel stands still and only fades a little
 /// (ds/motion `content`), never popping: the panel's tabs as it opens and
 /// closes, the page as the panel expands over it and gives it back. Over
-/// each, its opacity passes through between, a step at a time, and ends
-/// where it goes; settled, the layout warns of nothing new.
-/// (ui/tests/shell_route_motion.test.luau has their widths.)
+/// each, it stays where it's laid out (no drift: a hundredth of a point at
+/// most), its opacity passes through between, a step at a time, never
+/// under the fade's floor (0.3) as it shows, and ends where it goes (the
+/// page under the panel expanded, hidden; the panel's content, closed, at
+/// the floor in a panel that shows none of it); settled, the layout warns
+/// of nothing new. (ui/tests/shell_route_motion.test.luau has their widths.)
 #[test]
-fn the_panel_s_content_and_the_page_fade_as_they_come_and_go() {
+fn the_panel_s_content_and_the_page_only_fade_as_they_come_and_go() {
+    const FLOOR: f32 = 0.3;
     let mut app = mount();
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
     watch(&mut app, 20);
@@ -98,21 +102,37 @@ fn the_panel_s_content_and_the_page_fade_as_they_come_and_go() {
         app.ui.prepare_frame();
         zgx::inspect::layout_warnings(&app.ui).iter().map(|w| w.to_string()).collect()
     };
+    // (Where its right edge is painted: it stands at its column's side by
+    // the window's edge, the panel's content at the window's right, the
+    // page at its left.)
+    let edge = |app: &mut TestApp, id: &str| -> f32 {
+        let node = app.find(&format!("#{id}")).expect("it");
+        app.ui.prepare_frame();
+        let b = app.ui.scene.borrow().transformed_bounds(node);
+        if id == "shell-page-room" { b.x } else { b.x + b.width }
+    };
     // (What the fixture has before the panel ever opens.)
     let before = warnings(&mut app);
     let mut fade = |click: &str, id: &str, to: f32, what: &str| {
         app.click(click);
-        let seen: Vec<f32> = (0..30)
+        let seen: Vec<(f32, f32, bool)> = (0..30)
             .map(|_| {
                 app.frames(1);
                 std::thread::sleep(Duration::from_millis(12));
-                app.opacity(id)
+                // (Whether its column shows: the panel under 2 points shows none.)
+                let shows = id == "shell-page-room" || app.opacity("shell-files") > 0.;
+                (app.opacity(id), edge(&mut app, id), shows)
             })
             .collect();
-        let between = seen.iter().filter(|o| **o > 0.02 && **o < 0.98).count();
-        let jump = seen.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0., f32::max);
-        assert!(between >= 2 && jump <= 0.6, "{what}: {id} at {seen:?}");
-        assert!((seen.last().unwrap() - to).abs() < 0.01, "{what}: {id} ends at {seen:?}");
+        let (lo, hi) = seen.iter().filter(|s| s.2).fold((f32::MAX, f32::MIN), |(lo, hi), s| (lo.min(s.1), hi.max(s.1)));
+        let drift = hi - lo;
+        assert!(drift <= 0.011, "{what}: {id} moved {drift} points: {seen:?}");
+        let between = seen.iter().filter(|s| s.0 > 0.02 && s.0 < 0.98).count();
+        let jump = seen.windows(2).map(|w| (w[1].0 - w[0].0).abs()).fold(0., f32::max);
+        assert!(between >= 2 && jump <= 0.7, "{what}: {id} at {seen:?}");
+        let showing = seen.iter().filter(|s| (s.0 - to).abs() > 0.01).map(|s| s.0).fold(1., f32::min);
+        assert!(showing >= FLOOR - 0.01, "{what}: {id} fades only to the floor as it shows: {seen:?}");
+        assert!((seen.last().unwrap().0 - to).abs() < 0.01, "{what}: {id} ends at {seen:?}");
         // At rest, nothing it holds is laid out in a box that shows none of
         // it (`zgx inspect errors` names nothing new).
         app.frames(30);
@@ -121,5 +141,6 @@ fn the_panel_s_content_and_the_page_fade_as_they_come_and_go() {
     fade("#titlebar >> role:button \"Panel\"", "shell-files-content", 1., "opening");
     fade("#panel-expand", "shell-page-room", 0., "expanding");
     fade("#panel-expand", "shell-page-room", 1., "collapsing");
-    fade("#titlebar >> role:button \"Panel\"", "shell-files-content", 0., "closing");
+    fade("#titlebar >> role:button \"Panel\"", "shell-files-content", FLOOR, "closing");
+    assert!(app.opacity("shell-files") < 0.01, "closed, the panel shows none of it");
 }

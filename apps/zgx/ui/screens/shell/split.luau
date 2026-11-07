@@ -879,24 +879,10 @@ function M.opening_size(id: string): { w: number, h: number }?
 	}
 end
 
--- Where a pane just added comes in from (the gap it opens out of), as
--- signs along each axis (-1: its left or top), for its content's drift
--- (ds/motion `arrive`); nil once it's open.
-function M.opening_from(id: string): (number?, number?)
-	if settle:peek() >= 1 or not settle_new[id] then
-		return nil
-	end
-	local f, b = settle_from[id], M.frames:peek()[id]
-	if not f or not b then
-		return nil
-	end
-	local function sign(v: number): number
-		return if v > 0.0005 then 1 elseif v < -0.0005 then -1 else 0
-	end
-	-- (Its middle, as a share of the page, where it comes from less where it goes.)
-	local dx = (f.left.p + f.right.p) - (b.left.p + b.right.p)
-	local dy = (f.top.p + f.bottom.p) - (b.top.p + b.bottom.p)
-	return sign(dx), sign(dy)
+-- Whether a pane was just added and is opening out of its gap (its
+-- content's fade in, ds/motion `content`): false once it's open.
+function M.just_added(id: string): boolean
+	return settle:peek() < 1 and settle_new[id] == true and settle_from[id] ~= nil
 end
 
 M.across = ui.computed(function(): number
