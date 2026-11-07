@@ -1,10 +1,11 @@
 # Example plugins
 
-Eight plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
+Nine plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
 
 | Folder | Proves | Asks for | Who signs it |
 |---|---|---|---|
 | `account-rotate` | Your agents' usage and accounts, and their events, in a service with no window open: when the active Claude Code account drops below 10% remaining, it switches to the next saved account with more left, once that provider's running chats have finished (`when_idle`); its window says so in a toast | `service`, `usage.read`, `accounts.read`, `accounts.switch` | you: the switch is always asked, even for your own |
+| `keep-going` | Sending messages from a service with no window open (`messages.send`): when a chat's turn finishes and its reply ends with the line `[continue]`, it sends that chat "continue", as the composer would; a loop of its own is stopped at 16 in a row | `service`, `sessions.read`, `messages.read`, `messages.send` | you: sending messages is always asked, even for your own |
 | `checkout-status` | A service (`service.luau`, run headless by the engine on each device): a session row's menu asks the service on that session's device for its checkout's branch and changes (running that device's `git`), and agents get the same through a tool with no window open | `ui.add`, `sessions.read`, `files.read`, `service`, `commands` (`git`), `tools` | you, installed and allowed on each device that should answer |
 | `compact-sidebar` | Replacing a whole screen module (`ui.override` of `@app/screens/shell/sidebar`, wrapping `@app-original`) | `ui.replace` | you: loads once you've allowed `ui.replace` |
 | `focus` | A title-bar button (`zeron.place` at `#titlebar-actions`) and a filtered sidebar (`sidebar.filter`) | `ui.add`, `ui.change` | another account: the consent sheet shows "Made by @…" |

@@ -286,6 +286,9 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "list", "plugins.words.permission.models_read.title", "plugins.words.permission.models_read.detail")
 	elseif permission == "models.set" then
 		return line(true, "pen", "plugins.words.permission.models_set.title", "plugins.words.permission.models_set.detail")
+	elseif permission == "messages.send" then
+		-- (What your agents are told to do, as you: always asked, said so.)
+		return line(true, "chat-round-line", "plugins.words.permission.messages_send.title", "plugins.words.permission.messages_send.detail")
 	elseif permission == "links.open" then
 		return line(false, "arrow-up-right", "plugins.words.permission.links_open.title", "plugins.words.permission.links_open.detail")
 	elseif permission == "navigate" then

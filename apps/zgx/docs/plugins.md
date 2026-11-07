@@ -60,6 +60,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
 | `models.read` | read each harness's models, efforts and options, and a chat's model |
 | `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
+| `messages.send` | send a chat a message, start a chat, answer a chat's question, as you would from the composer. Always asked, even for your own plugins. See [Sending messages](#sending-messages) |
 
 ## Reaching the network
 
@@ -420,15 +421,15 @@ They're told as Zeron learns of a change, never by polling: when Settings, the c
 | `account.signed_out`, `login.expired` | `{ provider, account?, chat? }` | `accounts.read` |
 | `model.changed` | `{ chat, provider, model, effort, options, by? }`, or `{ default = true, provider, model, effort, by }` | `models.read` |
 | `models.updated` | `{ provider, models }`: a catalog changed | `models.read` |
-| `turn.started` | `{ chat }` | `sessions.read` |
-| `turn.finished`, `turn.errored` | `{ chat, outcome }`: `completed`, `errored`, `interrupted` or `limited` | `sessions.read` |
-| `chat.awaiting_input`, `chat.input_answered` | `{ chat }`: an agent asked a question or needs approval, and was answered | `sessions.read` |
+| `turn.started` | `{ chat, by? }` (`by`: the plugin whose message set it off) | `sessions.read` |
+| `turn.finished`, `turn.errored` | `{ chat, outcome, by?, reply? }`: `completed`, `errored`, `interrupted` or `limited`; `reply`, its final words (the last 16 KB), with `messages.read` | `sessions.read` |
+| `chat.awaiting_input`, `chat.input_answered` | `{ chat, by? }`: an agent asked a question or needs approval, and was answered | `sessions.read` |
 
 - **Narrowing.** `opts.provider`, `opts.account`, `opts.window` and `opts.chat` let only matching events through. A threshold watches the active account unless `opts.account` names one.
 - **A threshold starts from what it sees.** The first reading only learns which side of the line each window is on, so read `zeron.usage()` as you start to act on how things stand now.
 - **Only what you were allowed.** A field your plugin wasn't allowed is left out, never blanked: `email` is there with `accounts.read`, `chat` with `sessions.read`, a turn's `provider` with `models.read`.
 - **A handler can't hold Zeron up.** Events are told after the change, never before it. A listener that fails (or takes past its time) stays on and hears the next event; your row in Settings → Plugins and `plugin_status` (`agents.notices`) say the latest failure and how many in a row.
-- **A loop is stopped.** A plugin told of its own change (`by` is it) that answers with another change, and so on 16 times in a row, has that next change refused (`loop`), and your row says so. How often you change things never counts, only your changes setting off your own.
+- **A loop is stopped.** A plugin told of its own change (`by` is it) that answers with another change, and so on 16 times in a row, has that next change refused (`loop`), and your row says so. A message counts as a change: a turn your message set off is told with your `by`, so sending again on its `turn.finished` is counted. What you heard last decides: answering anyone else's change starts the count over. How often you change things never counts, only your changes setting off your own.
 
 ```lua
 -- service.luau ("service", "usage.read", "accounts.read", "accounts.switch")
@@ -443,6 +444,33 @@ end, { below = 10, provider = "claude-code" })
 ```
 
 `plugins-dev/account-rotate` is this whole: its service switches Claude Code to the next saved account with more left when the active one drops below 10%, once its chats finish, and its window says so in a toast.
+
+## Sending messages
+
+With `messages.send`, a plugin talks to your agents as you do: it sends a chat a message, starts a chat, and answers a chat's question or approval. The same calls work in a window and in `service.luau`, and each goes the way the composer's would, so a chat behaves exactly as if you'd sent it: queued behind a running turn, steering it, or a turn of its own, wherever the chat runs (its host may be another of your devices).
+
+| call | what | needs |
+|---|---|---|
+| `zeron.send_message { chat, text, attachments?, mode? }` | a message into `chat`: a turn of its own when nothing runs; while a turn runs, queued for its end (`mode = "queue"`, the default) or steering it (`"steer"`). A promise of `{ status = "sent", chat, delivery = "run" \| "queue" \| "steer", id }` | `messages.send`; `attachments` (files' paths on the chat's device) also `files.read` |
+| `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?, cwd? }` | a new chat, sent `prompt` as its first message: on `device` or in `project` (a project's id), with `harness` (else this device's default) and `model` and `effort` from its catalog. A promise of `{ status, chat, id }`: `chat` is the new chat's id | `messages.send` |
+| `zeron.answer { chat, answers, request? }` | the question (or approval) `chat` waits on, answered as you would: `answers = { [question] = label }` (or `{ labels }`, or a list of `{ question, labels }`); `request` names one, else the latest. A promise of `{ status = "answered", chat, request }` | `messages.send` |
+
+- **What it sends is yours.** Your agents read it as your message, and do what it says, so `messages.send` is always asked, even for your own plugins, and the consent sheet says so plainly.
+- **Who sent it is kept.** Each message a plugin sends is recorded as its (`{ plugin, name }`) beside the chat's transcript, synced with the chat, and in `plugin_status` (`agents.actions`). The transcript shows it as any message.
+- **Its turns say so.** The turn your message sets off (or, queued, the next one) is told with your `by`: `turn.started`, `chat.awaiting_input`, `turn.finished`, `turn.errored`.
+- **A loop is stopped**, as with switches: sending on your own message's `turn.finished`, 16 times in a row, has the next send refused (`loop`), and your row in Settings → Plugins says so. A send on something else (your own turn ending, say) starts the count over. How often you send never counts.
+- **Refusals.** `not_allowed` (the permission, or `files.read` for files), `not_found` (no such chat, model, effort or question waiting), `bad_call` (no text; `"steer"` while a chat waits for an answer: answer it, or queue), `loop`.
+
+```lua
+-- service.luau ("service", "sessions.read", "messages.read", "messages.send")
+zeron.on("turn.finished", function(e)
+	if e.outcome == "completed" and e.reply and string.find(e.reply, "%[continue%]%s*$") then
+		zeron.send_message({ chat = e.chat, text = "continue" }):await()
+	end
+end)
+```
+
+`plugins-dev/keep-going` is this whole: its service sends "continue" to a chat whose turn ends with the line `[continue]`, with no window open, and its window says so in a toast.
 
 ## Settings
 
