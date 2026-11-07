@@ -111,18 +111,24 @@ impl Decorations {
 struct StatusCache(Vec<WeakEntity<GitStatusSource>>);
 impl Global for StatusCache {}
 
-pub(super) struct GitStatusSource {
+pub(crate) struct GitStatusSource {
     engine: EngineHandle,
     context: FilesRequestContext,
     device_id: String,
     decorations: Decorations,
+    branch: Option<String>,
     revision: Option<String>,
     notice: Option<&'static str>,
     _task: Task<()>,
 }
 
 impl GitStatusSource {
-    fn matches(&self, engine: &EngineHandle, context: &FilesRequestContext, device: &str) -> bool {
+    pub(crate) fn matches(
+        &self,
+        engine: &EngineHandle,
+        context: &FilesRequestContext,
+        device: &str,
+    ) -> bool {
         self.engine.same_connection(engine)
             && self.device_id == device
             && self.context.target_device_id == context.target_device_id
@@ -132,6 +138,10 @@ impl GitStatusSource {
                 // share the viewed chat's source for the same host and path.
                 _ => self.context.cwd == context.cwd,
             }
+    }
+
+    pub(crate) fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
     }
 
     fn apply(
@@ -145,6 +155,7 @@ impl GitStatusSource {
             decorations = Decorations::default();
         }
         let revision = snapshot.as_ref().map(|s| s.revision.clone());
+        let branch = snapshot.as_ref().and_then(|s| s.branch.clone());
         let notice = match &snapshot {
             Some(snapshot) if !snapshot.complete => Some("Git status unavailable or incomplete"),
             Some(_) => None,
@@ -153,18 +164,19 @@ impl GitStatusSource {
             }
             None => None,
         };
-        if revision == self.revision && notice == self.notice {
+        if revision == self.revision && notice == self.notice && branch == self.branch {
             return;
         }
         self.revision = revision;
-        if self.decorations != decorations || self.notice != notice {
+        if self.decorations != decorations || self.notice != notice || self.branch != branch {
             self.decorations = decorations;
             self.notice = notice;
+            self.branch = branch;
             cx.notify();
         }
     }
 
-    fn acquire(
+    pub(crate) fn acquire(
         engine: EngineHandle,
         context: FilesRequestContext,
         device: String,
@@ -254,6 +266,7 @@ impl GitStatusSource {
                 context,
                 device_id: device,
                 decorations: Decorations::default(),
+                branch: None,
                 revision: None,
                 notice: None,
                 _task: task,
@@ -376,6 +389,7 @@ mod tests {
         CheckoutGitStatus {
             device_id: "remote".into(),
             checkout_id: "checkout".into(),
+            branch: None,
             revision: "1".into(),
             complete: true,
             files,
