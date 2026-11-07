@@ -104,6 +104,8 @@ mod drop_tests;
 #[cfg(test)]
 mod fit_tests;
 #[cfg(test)]
+mod slide_bench_tests;
+#[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
 mod i18n_tests;

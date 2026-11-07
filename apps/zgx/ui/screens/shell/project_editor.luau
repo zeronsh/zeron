@@ -74,7 +74,7 @@ local RING = 26
 
 local function project(): sessions.Project?
 	local id = editing:get()
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -286,7 +286,7 @@ local function head(): Node
 			return ""
 		end
 		local device = ""
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if d.id == p.device then
 				device = d.name
 			end

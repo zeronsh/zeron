@@ -491,17 +491,16 @@ local function Composer(): Node
 			return s.notice
 		end
 		-- The connection: this device's, then the chat's host.
-		local now = sessions.now:get()
 		local host_unreachable, host = false, nil
-		if s and s.device and s.device ~= now.here then
-			for _, d in now.devices or {} do
+		if s and s.device and s.device ~= sessions.here:get() then
+			for _, d in sessions.devices:get() or {} do
 				if d.id == s.device then
 					host_unreachable, host = d.online == false, d.name
 				end
 			end
 		end
 		return LinkNotice.of {
-			connection = now.connection,
+			connection = sessions.connection:get(),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
@@ -985,7 +984,7 @@ local function Composer(): Node
 			return nil
 		end
 		local path: string?, project: string? = nil, nil
-		for _, p in sessions.now:get().projects do
+		for _, p in sessions.projects:get() do
 			if p.id == s.project then
 				path, project = p.path, p.name
 			end
@@ -993,7 +992,7 @@ local function Composer(): Node
 		local lb = live_branch:get()
 		local name = if lb.key:sub(1, #s.id + 1) == `{s.id}|` then lb.name else (s :: any).branch
 		local on: string? = nil
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if d.id == (s :: any).device then
 				on = d.name
 			end

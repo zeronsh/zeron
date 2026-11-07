@@ -117,7 +117,7 @@ local function chat_of(id: string?): sessions.Chat?
 	return nil
 end
 local function device_of(id: string?): sessions.Device?
-	for _, d in sessions.now:get().devices do
+	for _, d in sessions.devices:get() do
 		if d.id == id then
 			return d
 		end
@@ -128,7 +128,7 @@ local function project_of(id: string?): sessions.Project?
 	if not id then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end

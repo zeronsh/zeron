@@ -38,6 +38,7 @@ pub fn build_id() -> &'static str {
 pub mod auth;
 mod change_request_store;
 pub mod change_requests;
+mod chat2_checkpoint;
 pub mod chat2_host;
 mod chat_persistence;
 mod cloud_accounts;

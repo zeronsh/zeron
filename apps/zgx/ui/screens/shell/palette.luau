@@ -98,7 +98,7 @@ local function projects_page(): any
 		placeholder = locale.s("shell.palette.search_projects"),
 		items = function(): { Item }
 			local out: { Item } = {}
-			for _, p in sessions.now:get().projects do
+			for _, p in sessions.projects:get() do
 				table.insert(out, {
 					id = `project:{p.id}`,
 					label = p.name,
