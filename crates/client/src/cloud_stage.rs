@@ -1,0 +1,225 @@
+//! What a Cloud machine says it is doing while a message waits for it.
+//!
+//! A machine woken by a message may install a release before it answers
+//! (`CloudSession::stage` reads [`zeron_proto::CLOUD_STAGE_UPDATING`]). Its
+//! heartbeat is back by then, so it doesn't read as starting: only the edge's
+//! session list says so. While one of this phone's sends waits on a Cloud
+//! machine, the list is read every [`POLL_MS`], and for [`WATCH_MS`] after
+//! the machine last read as starting, waking or updating: it says it updates
+//! only once its engine is up. Nothing waiting, nothing read.
+
+use std::collections::{HashMap, HashSet};
+
+use zeron_proto::CloudSessions;
+
+/// How often the session list is read while a send waits on a machine.
+pub(crate) const POLL_MS: i64 = 5_000;
+/// How long it is still read after the machine last read as getting to the
+/// send. Its look for a release takes seconds; this covers it with room.
+pub(crate) const WATCH_MS: i64 = 60_000;
+
+/// One chat with a send waiting on its Cloud machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MachineWait {
+    pub chat_id: String,
+    /// The machine (session device) it runs on.
+    pub device_id: String,
+    /// When its oldest waiting send was made.
+    pub sent_at_ms: i64,
+    /// The machine's heartbeat isn't back: starting or waking.
+    pub booting: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CloudStages {
+    /// Machines (session devices) that said they are updating, as last read.
+    updating: HashSet<String>,
+    /// Per waiting chat: when its machine last read as getting to the send.
+    waited: HashMap<String, i64>,
+    last_read_ms: Option<i64>,
+    reading: bool,
+}
+
+impl CloudStages {
+    pub(crate) fn updating(&self, device_id: &str) -> bool {
+        self.updating.contains(device_id)
+    }
+
+    /// Note what the sends wait on now; whether to read the list again (and
+    /// if so, it counts as being read until [`Self::read_done`]).
+    pub(crate) fn wants_read(&mut self, waits: &[MachineWait], now: i64) -> bool {
+        self.waited
+            .retain(|chat, _| waits.iter().any(|w| &w.chat_id == chat));
+        if waits.is_empty() {
+            // Nothing shows it, and it would be stale by the next send.
+            self.updating.clear();
+        }
+        let mut watching = false;
+        for wait in waits {
+            let held = wait.booting || self.updating(&wait.device_id);
+            let waited = self
+                .waited
+                .entry(wait.chat_id.clone())
+                .or_insert(wait.sent_at_ms);
+            if held {
+                *waited = now;
+            }
+            watching |= now - *waited <= WATCH_MS;
+        }
+        if !watching || self.reading || self.last_read_ms.is_some_and(|at| now - at < POLL_MS) {
+            return false;
+        }
+        self.reading = true;
+        self.last_read_ms = Some(now);
+        true
+    }
+
+    /// A read of the session list is over (it may have failed). Whether the
+    /// machines that say they are updating changed.
+    pub(crate) fn read_done(&mut self, sessions: Option<&CloudSessions>) -> bool {
+        self.reading = false;
+        self.record(sessions)
+    }
+
+    /// Any read of the session list (the poll's or a screen's).
+    pub(crate) fn record(&mut self, sessions: Option<&CloudSessions>) -> bool {
+        let Some(sessions) = sessions else {
+            return false;
+        };
+        let updating: HashSet<String> = sessions
+            .sessions
+            .iter()
+            .filter(|s| s.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_UPDATING))
+            .map(|s| s.device_id.clone())
+            .collect();
+        let changed = updating != self.updating;
+        self.updating = updating;
+        changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeron_proto::{CloudSession, CloudState};
+
+    fn wait(booting: bool) -> MachineWait {
+        MachineWait {
+            chat_id: "c".into(),
+            device_id: "cloud-s1".into(),
+            sent_at_ms: 0,
+            booting,
+        }
+    }
+
+    fn sessions(stage: Option<&str>) -> CloudSessions {
+        CloudSessions {
+            sessions: vec![CloudSession {
+                chat_id: "c".into(),
+                device_id: "cloud-s1".into(),
+                space_id: "sp".into(),
+                state: CloudState::Ready,
+                stage: stage.map(String::from),
+                ..Default::default()
+            }],
+            available: true,
+        }
+    }
+
+    /// One poll step at `now`: read if it wants to, answering with `stage`.
+    fn poll(
+        stages: &mut CloudStages,
+        waits: &[MachineWait],
+        now: i64,
+        stage: Option<&str>,
+    ) -> bool {
+        let read = stages.wants_read(waits, now);
+        if read {
+            stages.read_done(Some(&sessions(stage)));
+        }
+        read
+    }
+
+    #[test]
+    fn nothing_waiting_reads_nothing() {
+        let mut stages = CloudStages::default();
+        assert!(!stages.wants_read(&[], 0));
+        assert!(!stages.wants_read(&[], 100_000));
+    }
+
+    #[test]
+    fn a_woken_machine_is_followed_until_it_says_whether_it_updates() {
+        let mut stages = CloudStages::default();
+        // Waking, longer than the watch: followed throughout, every POLL_MS.
+        assert!(poll(&mut stages, &[wait(true)], 1_000, None));
+        assert!(
+            !poll(&mut stages, &[wait(true)], 3_000, None),
+            "not before POLL_MS"
+        );
+        assert!(poll(&mut stages, &[wait(true)], 90_000, None));
+        // Its heartbeat is back: it no longer reads as booting, but it only
+        // now looks for a release. Still read.
+        assert!(poll(
+            &mut stages,
+            &[wait(false)],
+            95_000,
+            Some(zeron_proto::CLOUD_STAGE_UPDATING)
+        ));
+        assert!(stages.updating("cloud-s1"));
+        // Installing takes a while: followed as long as it says so.
+        assert!(poll(
+            &mut stages,
+            &[wait(false)],
+            200_000,
+            Some(zeron_proto::CLOUD_STAGE_UPDATING)
+        ));
+        assert!(poll(&mut stages, &[wait(false)], 250_000, None));
+        assert!(!stages.updating("cloud-s1"));
+        // Done: a little longer, then nothing more to learn.
+        assert!(poll(&mut stages, &[wait(false)], 255_000, None));
+        assert!(!poll(
+            &mut stages,
+            &[wait(false)],
+            250_000 + WATCH_MS + 1,
+            None
+        ));
+    }
+
+    #[test]
+    fn a_send_that_stops_waiting_stops_the_reads() {
+        let mut stages = CloudStages::default();
+        assert!(poll(&mut stages, &[wait(false)], 1_000, None));
+        // Never taken: the reads end once the watch is over, not never.
+        assert!(!stages.wants_read(&[wait(false)], WATCH_MS + 1));
+        // Taken (or failed): nothing waits, nothing is read.
+        let mut stages = CloudStages::default();
+        assert!(poll(&mut stages, &[wait(true)], 1_000, None));
+        assert!(!stages.wants_read(&[], 10_000));
+        // And what it last said is forgotten: the next send reads it afresh.
+        stages.record(Some(&sessions(Some(zeron_proto::CLOUD_STAGE_UPDATING))));
+        assert!(stages.updating("cloud-s1"));
+        assert!(!stages.wants_read(&[], 20_000));
+        assert!(!stages.updating("cloud-s1"));
+    }
+
+    #[test]
+    fn one_read_at_a_time() {
+        let mut stages = CloudStages::default();
+        assert!(stages.wants_read(&[wait(true)], 0));
+        assert!(!stages.wants_read(&[wait(true)], 10_000), "still reading");
+        // A failed read changes nothing, and the next one goes ahead.
+        assert!(!stages.read_done(None));
+        assert!(stages.wants_read(&[wait(true)], 10_000));
+    }
+
+    #[test]
+    fn any_read_of_the_list_counts() {
+        let mut stages = CloudStages::default();
+        assert!(stages.record(Some(&sessions(Some(zeron_proto::CLOUD_STAGE_UPDATING)))));
+        assert!(stages.updating("cloud-s1"));
+        assert!(!stages.record(Some(&sessions(Some(zeron_proto::CLOUD_STAGE_UPDATING)))));
+        // A stage from a newer edge is just not this one.
+        assert!(stages.record(Some(&sessions(Some("something-new")))));
+        assert!(!stages.updating("cloud-s1"));
+    }
+}

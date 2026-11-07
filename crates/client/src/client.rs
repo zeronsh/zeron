@@ -83,6 +83,9 @@ pub(crate) struct ClientInner {
     /// `owner/name`): starting a Cloud session needs one, and reading it
     /// again would hold the new chat up.
     pub(crate) cloud_repos: Mutex<HashMap<String, crate::cloud::CloudRepoRef>>,
+    /// What Cloud machines say they are doing (updating), read while a send
+    /// waits on one ([`crate::cloud_stage`]).
+    pub(crate) cloud_stages: Mutex<crate::cloud_stage::CloudStages>,
     /// Terminals on other devices: direct link or relay, switching
     /// mid-session (the desktop engine runs the same hub).
     pub(crate) remote_terminals: zeron_term_link::remote::RemoteTerminals,
@@ -548,6 +551,70 @@ impl ClientInner {
                 core.refresh();
             }
         }
+        self.follow_cloud_stages();
+    }
+
+    /// The machine `device_id` (a Cloud session device) said it is installing
+    /// a release before it answers.
+    pub(crate) fn cloud_machine_updating(&self, device_id: &str) -> bool {
+        lock(&self.cloud_stages).updating(device_id)
+    }
+
+    /// While a send waits on a Cloud machine, re-read the session list now
+    /// and then: the machine says it is updating only there.
+    fn follow_cloud_stages(self: &Arc<Self>) {
+        if self.live().is_none() {
+            return;
+        }
+        let workspace = self.workspace.snapshot();
+        let waits: Vec<crate::cloud_stage::MachineWait> = self
+            .cores()
+            .iter()
+            .filter_map(|core| {
+                let sent_at_ms = core.oldest_pending_send_ms()?;
+                let row = workspace.session(&core.chat_id)?;
+                zeron_proto::is_cloud_device(&row.device_id, "").then(|| {
+                    crate::cloud_stage::MachineWait {
+                        chat_id: core.chat_id.clone(),
+                        device_id: row.device_id.clone(),
+                        sent_at_ms,
+                        booting: !workspace.device(&row.device_id).is_some_and(|d| d.online),
+                    }
+                })
+            })
+            .collect();
+        drop(workspace);
+        if !lock(&self.cloud_stages).wants_read(&waits, crate::now_ms()) {
+            return;
+        }
+        let client = Client {
+            inner: self.clone(),
+        };
+        crate::runtime::shared().spawn(async move {
+            // `cloud_sessions` records what it reads; this only ends the read.
+            let read = client.cloud_sessions().await;
+            lock(&client.inner.cloud_stages).read_done(None);
+            if let Err(err) = read {
+                tracing::debug!(error = %err, "Cloud session list not read");
+            }
+        });
+    }
+
+    /// The session list was read: when a machine started or stopped saying
+    /// it updates, the chats on it show it.
+    pub(crate) fn note_cloud_sessions(&self, sessions: &zeron_proto::CloudSessions) {
+        if !lock(&self.cloud_stages).record(Some(sessions)) {
+            return;
+        }
+        let workspace = self.workspace.snapshot();
+        for core in self.cores() {
+            let on_cloud = workspace
+                .session(&core.chat_id)
+                .is_some_and(|row| zeron_proto::is_cloud_device(&row.device_id, ""));
+            if on_cloud {
+                core.schedule_refresh();
+            }
+        }
     }
 }
 
@@ -629,6 +696,7 @@ impl Client {
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
             cloud_repos: Mutex::new(HashMap::new()),
+            cloud_stages: Mutex::new(Default::default()),
             remote_terminals: Default::default(),
             terminals_wake: Arc::new(tokio::sync::Notify::new()),
             backgrounded_at: Mutex::new(None),
