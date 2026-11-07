@@ -1,0 +1,15 @@
+{
+  "id": "imgui-no-permission",
+  "name": "ImGui Without Permission",
+  "version": "1.0.0",
+  "description": "The validation contract's consent fixture: it asks for no imgui.windows, keeps retrying open_window, and opens one window as soon as the permission is granted.",
+  "entry": "init.luau",
+  "permissions": ["tools"],
+  "tools": [
+    {
+      "name": "probe_status",
+      "description": "How many open_window asks were refused, the exact refusal sentence, and whether the window is open.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}

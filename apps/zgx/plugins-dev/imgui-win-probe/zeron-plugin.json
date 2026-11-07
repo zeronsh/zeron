@@ -1,0 +1,26 @@
+{
+  "id": "imgui-win-probe",
+  "name": "ImGui Window Probe",
+  "version": "1.0.0",
+  "description": "The validation contract's main fixture: native windows with the ids and options its window, lifecycle, input and docking rows name, plus probe actions and a probe_status tool.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows", "tools"],
+  "tools": [
+    {
+      "name": "probe_status",
+      "description": "What the probe knows about itself: open windows, per-window frames and counters, closes, timer ticks, store keys and the last refusal.",
+      "input": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "probe_run",
+      "description": "Runs one of the fixture's probe actions by name (reopen, blow_up, open_drag, open_quiet, n_loop, ...), the same actions its menu items run.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "description": "The probe action's name, as README.md lists it." }
+        },
+        "required": ["action"]
+      }
+    }
+  ]
+}

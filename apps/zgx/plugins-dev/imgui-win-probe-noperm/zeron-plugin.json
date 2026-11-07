@@ -1,0 +1,8 @@
+{
+  "id": "imgui-win-probe-noperm",
+  "name": "ImGui Window Probe (no permissions)",
+  "version": "1.0.0",
+  "description": "VAL-WIN-010(a): declares no permissions, asks for a native window once, and logs the refusal naming imgui.windows.",
+  "entry": "init.luau",
+  "permissions": []
+}

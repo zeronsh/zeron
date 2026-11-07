@@ -1,0 +1,8 @@
+{
+  "id": "imgui-win-probe-legacy",
+  "name": "ImGui Window Probe (legacy windows permission)",
+  "version": "1.0.0",
+  "description": "VAL-WIN-010(b): declares only the declarative windows permission, shows a ui.window panel, and logs the refusal of its native window request naming imgui.windows.",
+  "entry": "init.luau",
+  "permissions": ["windows"]
+}

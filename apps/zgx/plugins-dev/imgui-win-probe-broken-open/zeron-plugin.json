@@ -1,0 +1,15 @@
+{
+  "id": "imgui-win-probe-broken-open",
+  "name": "ImGui Window Probe (fails to open)",
+  "version": "1.0.0",
+  "description": "The validation contract's failure fixture: its window's first render callback raises probe open failure, and no native window may survive it.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows", "tools"],
+  "tools": [
+    {
+      "name": "probe_status",
+      "description": "Answers only while the plugin is loaded; a broken plugin's tool must not answer.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}

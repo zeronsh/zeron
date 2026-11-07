@@ -1,0 +1,26 @@
+{
+  "id": "imgui-win-probe-b",
+  "name": "ImGui Window Probe B",
+  "version": "1.0.0",
+  "description": "The validation contract's second probe: a window with the same id as the main probe's inspector, at its own size and position, so window ids can be shown to be scoped per plugin.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows", "tools"],
+  "tools": [
+    {
+      "name": "probe_status",
+      "description": "B's own inspector: whether it is open, its frame count, its counter and its close count.",
+      "input": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "probe_run",
+      "description": "Runs one of B's probe actions by name, the same actions its menu items run.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "description": "The probe action's name, as README.md lists it." }
+        },
+        "required": ["action"]
+      }
+    }
+  ]
+}
