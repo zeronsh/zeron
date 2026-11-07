@@ -34,6 +34,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -72,6 +73,10 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +91,7 @@ import uniffi.zeron_core.ComposerState
 import uniffi.zeron_core.ConnectivityState
 import uniffi.zeron_core.SendState
 import uniffi.zeron_core.SessionHandle
+import uniffi.zeron_core.TranscriptLoad
 
 private data class TextSheet(val title: String, val text: String, val mono: Boolean)
 
@@ -104,6 +110,8 @@ fun SessionScreen(
     onOpenSubagent: (parentId: String, docId: String, title: String, running: Boolean) -> Unit = { _, _, _, _ -> },
     /** Debug launch extra: open a companion once the session is up (`companions`, `terminal`, `side-chat:<id>`, `subagent:<tool id>`). */
     openCompanion: String? = null,
+    /** Debug launch extra: send this once the session is open. */
+    sendOnOpen: String? = null,
     /** An agent's logins (an error card's "Log in": `signIn` starts one at once). */
     onOpenAccounts: (AccountsTarget, signIn: Boolean) -> Unit = { _, _ -> },
     onOpenBilling: () -> Unit = {},
@@ -145,11 +153,18 @@ fun SessionScreen(
     }
 
     // Composer-facing state: re-pulled on this chat's events.
-    var composer by remember { mutableStateOf(handle.composer()) }
+    var composer by remember(chatId) { mutableStateOf(handle.composer()) }
     val workspace by model.workspace.collectAsState()
     val connectivity by model.connectivity.collectAsState()
     LaunchedEffect(chatId) {
+        // Attaching changed it, possibly before this was listening.
+        composer = handle.composer()
         model.sessionEvents.collect { if (it == chatId) composer = handle.composer() }
+    }
+    LaunchedEffect(chatId) {
+        val text = sendOnOpen ?: return@LaunchedEffect
+        runCatching { handle.send(uniffi.zeron_core.SendRequest(text, emptyList(), null, uniffi.zeron_core.BusyPolicy.QUEUE)) }
+        model.noteDeliveryActivity()
     }
     // Upload rings on pending thumbnails follow the escort.
     LaunchedEffect(composer.transferProgress) { transcript.uploadProgress = composer.transferProgress }
@@ -327,6 +342,13 @@ fun SessionScreen(
             var stack by remember { mutableStateOf(0.dp) }
             LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
             Transcript(transcript, actions, Modifier.fillMaxSize())
+            // Why a transcript with nothing in it has nothing in it.
+            androidx.compose.animation.Crossfade(
+                EmptyNotice.of(composer.transcriptLoad),
+                Modifier.align(Alignment.Center).padding(bottom = stack),
+                MaterialTheme.motionScheme.defaultEffectsSpec(),
+                label = "empty notice",
+            ) { notice -> notice?.let { EmptyTranscriptNotice(it) } }
             val page = MaterialTheme.colorScheme.background
             Box(
                 Modifier
@@ -465,15 +487,71 @@ private fun Banner(c: ComposerState, connectivity: ConnectivityState?, onRetry: 
         if (cloud.outOfCredits) return
         cloud.sessionError(chatId, deviceId)?.let { return StatusBanner("Cloud machine: $it", "Retry" to onRetry) }
     }
-    val text = when {
-        c.sendState == SendState.FAILED -> "Not delivered"
-        c.sendState == SendState.QUEUED -> "${c.host.name ?: "Host"} is offline — will send when it's back"
-        c.sendState == SendState.SENDING -> "Sending to host…"
-        connectivity == ConnectivityState.OFFLINE -> "Offline — sends are saved"
-        !c.room.connected && retryAt != null -> "Reconnecting in ${maxOf(1L, (retryAt - now) / 1000)}s"
-        else -> null
-    } ?: return
+    val text = bannerText(c.sendState, c.host.name, isCloud = cloud != null, connectivity, c.room.connected, retryAt, now) ?: return
     StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to onRetry else null)
+}
+
+/** The status pill's words. Send state outranks the connection: it's about something the user did. */
+internal fun bannerText(
+    send: SendState?,
+    hostName: String?,
+    isCloud: Boolean,
+    connectivity: ConnectivityState?,
+    roomConnected: Boolean,
+    retryAtMs: Long?,
+    nowMs: Long,
+): String? = when {
+    send == SendState.FAILED -> "Not delivered"
+    connectivity == ConnectivityState.OFFLINE -> "Offline — sends are saved"
+    // A Cloud chat's message waits for its machine to start or wake: the transcript's setup step says so.
+    send == SendState.QUEUED -> if (isCloud) null else "${hostName ?: "Host"} is offline — will send when it's back"
+    send == SendState.SENDING -> "Sending to host…"
+    !roomConnected && retryAtMs != null -> "Reconnecting in ${maxOf(1L, (retryAtMs - nowMs) / 1000)}s"
+    else -> null
+}
+
+/** A chat this device has nothing of. Anything it has stored always shows. */
+internal enum class EmptyNotice(val text: String, val working: Boolean) {
+    Syncing("Syncing…", true),
+    Reconnecting("Reconnecting…", true),
+    Offline("Offline — this chat loads when you're back online", false),
+    HostAway("This chat lives on another device — it loads when that device is back online", false);
+
+    companion object {
+        fun of(load: TranscriptLoad): EmptyNotice? = when (load) {
+            TranscriptLoad.READY -> null
+            TranscriptLoad.SYNCING -> Syncing
+            TranscriptLoad.RECONNECTING -> Reconnecting
+            TranscriptLoad.OFFLINE -> Offline
+            TranscriptLoad.HOST_AWAY -> HostAway
+        }
+    }
+}
+
+/**
+ * Centered where a transcript would start. A spinner only while this app is doing something:
+ * otherwise it would promise progress that isn't happening, so it gets the amber dot.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun EmptyTranscriptNotice(notice: EmptyNotice) {
+    Row(
+        Modifier.padding(horizontal = 32.dp).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+    ) {
+        if (notice.working) {
+            LoadingIndicator(Modifier.size(24.dp))
+        } else {
+            Box(Modifier.size(7.dp).background(warningColor(), CircleShape))
+        }
+        Text(
+            notice.text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
 }
 
 /** Whose logins an error card's "Log in" opens: Cloud's for a Cloud chat, else the host's. */

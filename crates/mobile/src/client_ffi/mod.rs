@@ -560,6 +560,12 @@ impl CoreClient {
     pub fn on_background(&self) {
         self.client.on_background();
     }
+
+    /// Still backgrounded after any delivery's had its time, where the OS doesn't
+    /// suspend the process: every socket closes until `on_foreground`.
+    pub fn on_background_idle(&self) {
+        self.client.on_background_idle();
+    }
 }
 
 // ── static helpers ─────────────────────────────────────────────────────────

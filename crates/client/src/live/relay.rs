@@ -121,6 +121,12 @@ impl Relay {
         }
     }
 
+    /// Let go of every host's socket until something next calls one.
+    pub(crate) fn release(&self) {
+        self.stop_watches();
+        self.links.close_all();
+    }
+
     pub(crate) fn shutdown(&self) {
         self.links.disconnect_all();
         for (_, token) in lock(&self.watches).drain() {

@@ -43,6 +43,7 @@ pub struct ViewerPeers {
     peers: Peers,
     wake: Arc<Notify>,
     changes: Arc<watch::Sender<u64>>,
+    resting: Arc<watch::Sender<bool>>,
     stop: CancellationToken,
 }
 
@@ -63,19 +64,22 @@ impl ViewerPeers {
             Peers::new(device_id, Arc::new(Refuse), stop.child_token())
         };
         let wake = Arc::new(Notify::new());
-        runtime.spawn(signaling::run_with_wake(
+        let (resting, rest) = watch::channel(false);
+        runtime.spawn(signaling::run_unless_resting(
             signaling,
             catalog,
             peers.clone(),
             outgoing,
             stop.child_token(),
             wake.clone(),
+            rest,
         ));
         Ok(Self {
             runtime: runtime.clone(),
             peers,
             wake,
             changes: Arc::new(watch::channel(0).0),
+            resting: Arc::new(resting),
             stop,
         })
     }
@@ -131,6 +135,12 @@ impl ViewerPeers {
         }
         self.wake.notify_one();
         self.changes.send_modify(|n| *n += 1);
+    }
+
+    /// Nobody's using this device: close signaling and every connection, and open
+    /// nothing until told otherwise. Each one would otherwise keep the radio up.
+    pub fn rest(&self, rest: bool) {
+        self.resting.send_replace(rest);
     }
 
     /// Resolves at the next network change or return to the foreground.
