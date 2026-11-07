@@ -7818,6 +7818,10 @@ impl Transcript {
             // the retry affordance, whatever the indicator fell back to.
             if self.state.read(cx).send_undelivered(&chat_id, now) {
                 let theme = Theme::of(cx).clone();
+                let label = match self.state.read(cx).held_send_failure(&chat_id) {
+                    Some(why) => format!("Not delivered: {why} — click to retry"),
+                    None => "Not delivered — click to retry".to_string(),
+                };
                 return Some(
                     div()
                         .id("undelivered-retry")
@@ -7830,7 +7834,7 @@ impl Transcript {
                         .text_color(theme.danger)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                        .child(SharedString::from("Not delivered — click to retry"))
+                        .child(SharedString::from(label))
                         .into_any_element(),
                 );
             }

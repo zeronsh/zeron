@@ -16,6 +16,7 @@
 pub(crate) mod delivery;
 pub(crate) mod direct;
 pub(crate) mod escort;
+pub(crate) mod held;
 pub(crate) mod relay;
 pub(crate) mod room;
 pub(crate) mod urls;
@@ -203,6 +204,7 @@ pub(crate) struct LiveBackend {
     /// Direct peer connections (terminals), started with the backend.
     pub(crate) direct: std::sync::OnceLock<Option<zeron_preview::viewer::ViewerPeers>>,
     pub(crate) escorts: escort::Escorts,
+    pub(crate) held: held::HeldSends,
     pub(crate) delivery_wake: Arc<Notify>,
     cancel: CancellationToken,
 }
@@ -233,6 +235,7 @@ impl LiveBackend {
             relay: relay::Relay::new(inner, &edge, bearer),
             direct: std::sync::OnceLock::new(),
             escorts: escort::Escorts::new(&inner.config.data_dir),
+            held: held::HeldSends::default(),
             delivery_wake: Arc::new(Notify::new()),
             edge,
             store,
@@ -260,6 +263,7 @@ impl LiveBackend {
         self.spawn_registry(inner);
         self.spawn_registry_saver(inner);
         self.escorts.respawn(inner);
+        self.held.resume(inner);
         delivery::start(inner, self.delivery_wake.clone(), self.cancel.clone());
     }
 

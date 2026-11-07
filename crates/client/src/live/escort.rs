@@ -5,7 +5,8 @@
 //! `UploadChunk`/`UploadCommit` under the SAME upload id + file name the ref
 //! names (the host resolves the ref to that path and defers the command
 //! until it lands). Escorts retry with backoff for up to the host's wait
-//! window and are re-derived from the stash on relaunch.
+//! window and are re-derived from the stash on relaunch. A Cloud-hosted chat's
+//! files go through the edge's store instead (held.rs), from the same stash.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,10 @@ pub(crate) struct StashMeta {
     pub host_device_id: String,
     pub name: String,
     pub created_at_ms: i64,
+    /// Going through the edge's store (held.rs), not over the peer link: no
+    /// escort pushes it, and it doesn't expire with the host's peer window.
+    #[serde(default)]
+    pub via_store: bool,
 }
 
 pub(crate) struct Escorts {
@@ -63,16 +68,51 @@ impl Escorts {
         )
     }
 
-    fn remove(&self, upload_id: &str) {
+    pub(crate) fn remove(&self, upload_id: &str) {
         let _ = std::fs::remove_file(self.bin(upload_id));
         let _ = std::fs::remove_file(self.meta(upload_id));
     }
 
-    fn load(&self, upload_id: &str) -> Option<(StashMeta, Vec<u8>)> {
+    pub(crate) fn load(&self, upload_id: &str) -> Option<(StashMeta, Vec<u8>)> {
         let meta: StashMeta =
             serde_json::from_slice(&std::fs::read(self.meta(upload_id)).ok()?).ok()?;
         let bytes = std::fs::read(self.bin(upload_id)).ok()?;
         Some((meta, bytes))
+    }
+
+    fn load_meta(&self, upload_id: &str) -> Option<StashMeta> {
+        serde_json::from_slice(&std::fs::read(self.meta(upload_id)).ok()?).ok()
+    }
+
+    /// Drop a file kept for the store's route, once nothing can need it again:
+    /// its message ran, or its person removed it. Peer escorts clear their own.
+    pub(crate) fn remove_stored(&self, upload_id: &str) {
+        if self.load_meta(upload_id).is_some_and(|meta| meta.via_store) {
+            self.remove(upload_id);
+        }
+    }
+
+    /// Whether this file is kept for the store's route.
+    pub(crate) fn stored(&self, upload_id: &str) -> bool {
+        self.load_meta(upload_id).is_some_and(|meta| meta.via_store)
+    }
+
+    /// The edge has no store: this file goes over the peer link after all, on
+    /// a fresh window (the message has only just gone out).
+    pub(crate) fn send_by_peer(&self, inner: &Arc<ClientInner>, upload_id: &str) {
+        let Some(mut meta) = self.load_meta(upload_id) else {
+            return;
+        };
+        meta.via_store = false;
+        meta.created_at_ms = now_ms();
+        if let Err(err) = std::fs::write(
+            self.meta(upload_id),
+            serde_json::to_vec(&meta).unwrap_or_default(),
+        ) {
+            tracing::warn!(upload = %upload_id, %err, "attachment stash not updated");
+            return;
+        }
+        self.spawn(inner, upload_id);
     }
 
     /// Stashed escorts not yet delivered for `chat_id`.
@@ -87,7 +127,7 @@ impl Escorts {
                 let id = name.strip_suffix(".json")?.to_owned();
                 let meta: StashMeta =
                     serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?;
-                (meta.chat_id == chat_id).then_some(id)
+                (meta.chat_id == chat_id && !meta.via_store).then_some(id)
             })
             .collect()
     }
@@ -99,7 +139,9 @@ impl Escorts {
         };
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(id) = name.strip_suffix(".json") {
+            if let Some(id) = name.strip_suffix(".json")
+                && self.load_meta(id).is_some_and(|meta| !meta.via_store)
+            {
                 self.spawn(inner, id);
             }
         }

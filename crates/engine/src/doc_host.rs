@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use zeron_doc::{
-    COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
+    CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
     evaluate_command, join_continuation_entries,
@@ -101,6 +101,8 @@ const TRANSFER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs
 /// A command whose attachment bytes are still in transit waits at most this
 /// long before the drain rejects it loudly (and the transfer task gives up on
 /// the same clock) — a chat must never wedge behind bytes that aren't coming.
+/// Bytes safely in the edge's store ARE coming: a Cloud host checks there
+/// before this cap applies (doc_host_attachments.rs), however long it slept.
 const ATTACHMENT_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const ATTACHMENT_WAIT_MAX_MS: i64 = ATTACHMENT_WAIT_MAX.as_millis() as i64;
 /// Re-check cadence while a chat's queue is deferred on in-transit bytes
@@ -256,6 +258,7 @@ struct DocHostInner {
     /// Quiesced for a Cloud sleep ([`DocHost::quiesce_for_sleep`]): drains
     /// leave new work pending in the room, for the machine once it wakes.
     quiesced: AtomicBool,
+    boot_recovery_finished: AtomicBool,
     /// Bumped per quiesce: only the newest one's lease lifts it.
     quiesce_generation: AtomicU64,
     /// Drains between their quiesce check and the end of their dispatch (a
@@ -315,6 +318,17 @@ struct DocHostInner {
     /// Shared client for sidecar blob PUT/GET (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
+    /// Chats with a worker draining their held sends (doc_host_attachments.rs).
+    held_active: Mutex<HashSet<String>>,
+    /// Releasing a held send and removing one exclude each other: a removed
+    /// send never goes out, and a send that went out reads as not removed.
+    held_gate: Mutex<()>,
+    /// Cuts a held send's backoff short on the user's retry.
+    held_kick: tokio::sync::Notify,
+    /// The outbox as the local interface shows it.
+    held_status: watch::Sender<Vec<zeron_proto::HeldSendStatus>>,
+    /// A Cloud host's looks in the attachment store, by `pending://` ref.
+    store_looks: Mutex<HashMap<String, attachment_store::StoreLook>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -572,6 +586,8 @@ pub struct ChatDocHandle {
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
     queue_tx: watch::Sender<Vec<QueuedMessage>>,
+    /// Bumped on every change to the doc (`WatchWaitingMessages` follows it).
+    changes: watch::Receiver<u64>,
     /// Serializes everything that TAKES from the queue. Both the doc-change
     /// task and the turn-end status watcher call `drain_queue`, and nothing
     /// keeps those two apart: without this they interleave across the
@@ -599,6 +615,8 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     queue_paused: AtomicBool,
+    /// The queue is paused because it was restored from disk, not by a person.
+    queue_frozen_by_recovery: AtomicBool,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -1080,6 +1098,7 @@ impl DocHost {
                 config,
                 sessions: Mutex::new(None),
                 quiesced: AtomicBool::new(false),
+                boot_recovery_finished: AtomicBool::new(false),
                 quiesce_generation: AtomicU64::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
@@ -1099,6 +1118,11 @@ impl DocHost {
                 connectivity: OnceLock::new(),
                 connectivity_started: AtomicBool::new(false),
                 transfers: watch::channel(Vec::new()).0,
+                held_active: Mutex::new(HashSet::new()),
+                held_gate: Mutex::new(()),
+                held_kick: tokio::sync::Notify::new(),
+                held_status: watch::channel(Vec::new()).0,
+                store_looks: Mutex::new(HashMap::new()),
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
@@ -1224,8 +1248,10 @@ impl DocHost {
         self.inner.quiesced.store(true, Ordering::SeqCst);
     }
 
-    /// End a quiesce and run everything that queued meanwhile.
+    /// End a quiesce and run everything that queued meanwhile. A boot that held
+    /// work has done its recovery by now, whatever it was holding for.
     pub fn lift_quiesce(&self) {
+        self.inner.boot_recovery_finished.store(true, Ordering::Release);
         if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -1434,12 +1460,43 @@ impl DocHost {
     /// and the transfer-read jail.
     pub fn set_uploads(&self, uploads: crate::uploads::Uploads) {
         let _ = self.inner.uploads.set(uploads);
+        // Sends still held for their attachment bytes pick up where they were.
+        // Here because they read those bytes from this store.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.resume_held_sends();
+        }
     }
 
     /// Wire the peer-link cache (engine assembly, edge runtimes only) — the
     /// transport for queued attachment transfers to a remote host.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
         let _ = self.inner.links.set(links);
+    }
+
+    /// Boot recovery has been through every chat it cut off, and each it means
+    /// to pick back up is marked: queues it restored can go now, or after those
+    /// turns.
+    pub fn boot_recovery_finished(&self) {
+        self.inner.boot_recovery_finished.store(true, Ordering::Release);
+        self.kick_drains();
+    }
+
+    /// A Cloud machine restarts on every wake, which nobody there asked for or
+    /// sees, so a message queued before a sleep or a kill was meant to go, and
+    /// frozen it would wait for a prompt that may never come. Not ahead of a turn
+    /// the kill cut off, though: boot recovery brings that back first, and a row
+    /// sent now would read to it as the chat having moved on.
+    fn thaw_recovered_queue(&self, handle: &ChatDocHandle, sessions: &SessionsEngine) {
+        if !handle.queue_frozen_by_recovery.load(Ordering::Acquire)
+            || !zeron_proto::is_cloud_device(&self.inner.config.device_id, "")
+            || !self.inner.boot_recovery_finished.load(Ordering::Acquire)
+            || sessions.revival_pending(&handle.chat_id)
+        {
+            return;
+        }
+        if handle.queue_frozen_by_recovery.swap(false, Ordering::AcqRel) {
+            handle.queue_paused.store(false, Ordering::Release);
+        }
     }
 
     /// Re-evaluate every open chat's commands and queue NOW. Called after an
@@ -1860,6 +1917,7 @@ impl DocHost {
         // user submitted to this live engine. Keep that recovered work frozen
         // until an explicit prompt / Send now / Steer action thaws it. Rows
         // appended after the handle exists retain the normal automatic drain.
+        // A Cloud machine thaws it itself (`thaw_recovered_queue`).
         let recovered_queue_pending = !initial_queue.is_empty();
         let (queue_tx, _) = watch::channel(initial_queue);
 
@@ -1871,12 +1929,14 @@ impl DocHost {
             transcript_import: Mutex::default(),
             transcript_history,
             queue_tx,
+            changes: changed_rx.clone(),
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
             held_sends: Mutex::new(HashMap::new()),
             stopped_by: Mutex::new(None),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            queue_frozen_by_recovery: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             last_focus: AtomicU64::new(0),
@@ -3708,6 +3768,16 @@ impl DocHost {
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
+        // A chat hosted on Cloud: the bytes go to the edge's store first, and
+        // the message enters the chat only once they're there.
+        if matches!(
+            payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+        ) && let Some(id) = self.hold_if_needed(chat_id, &payload, &transfers)?
+        {
+            self.unarchive_on_send(chat_id);
+            return Ok(id);
+        }
         let id = new_id();
         let now = now_ms();
         let based_on = handle.doc.read_entries()?.last().map(|m| CommandBasedOn {
@@ -3724,7 +3794,7 @@ impl DocHost {
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now,
             based_on,
-            expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+            expires_at: Some(now + self.command_ttl(chat_id)),
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
@@ -3780,9 +3850,29 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_transfers(
+            chat_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::queue_message_with_behavior`] plus the row's `pending://` bytes,
+    /// already committed to THIS device's uploads dir: a Cloud-hosted chat's
+    /// row waits until they're in the edge's store, like a command does.
+    pub fn queue_message_with_transfers(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
-        handle.doc.push_queued(&QueuedMessage {
+        let item = QueuedMessage {
             id: id.clone(),
             text: text.to_string(),
             attachments,
@@ -3791,8 +3881,14 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
-        })?;
+        };
+        if self.hold_row_if_needed(chat_id, &item, &transfers)? {
+            self.unarchive_on_send(chat_id);
+            return Ok(id);
+        }
+        handle.doc.push_queued(&item)?;
         handle.publish_queue();
+        self.spawn_row_transfers(chat_id, transfers);
         // Same reasoning as a command: the user is acting in this chat again.
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
@@ -4341,6 +4437,7 @@ impl DocHost {
         // lock next re-reads the queue and the status, so a drain that became
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
+        self.thaw_recovered_queue(handle, &sessions);
         if handle.queue_paused.load(Ordering::Acquire) {
             return;
         }
@@ -4389,7 +4486,9 @@ impl DocHost {
             // while the bytes chase it over the peer link. Hold it (in order)
             // until they land — UploadCommit re-drains — rather than handing
             // the agent refs it cannot open.
-            if !self.missing_row_attachments(&head).is_empty() {
+            let missing = self.missing_row_attachments(&head);
+            if !missing.is_empty() {
+                self.fetch_from_store(&handle.chat_id, &missing);
                 tracing::info!(chat = %handle.chat_id, row = %head.id,
                     "queued row held: attachment bytes in transit");
                 self.arm_attachment_wait(handle);
@@ -4503,6 +4602,7 @@ impl DocHost {
         {
             return Ok(false);
         }
+        handle.queue_frozen_by_recovery.store(false, Ordering::Release);
         handle.queue_paused.store(true, Ordering::Release);
         self.cancel_held_sends(handle);
         match sessions.interrupt(&handle.chat_id).await {
@@ -4858,7 +4958,14 @@ impl DocHost {
         if let Some(chat2) = lock(&handle.chat2).as_ref() {
             chat2.redial();
         }
-        self.nudge_remote_host(chat_id);
+        // A message still in the outbox isn't there for the host to find, and a
+        // woken machine bills: the send wakes it once its bytes are stored.
+        let held_messages = self.held_message_ids(chat_id);
+        if held_messages.is_empty() {
+            self.nudge_remote_host(chat_id);
+        }
+        self.retry_held_sends(chat_id)?;
+        let peer_transfers = self.peer_transfers_needed(chat_id);
         let commands = handle.doc.read_commands()?;
         let pending: Vec<SessionCommandEntry> = commands
             .iter()
@@ -4869,7 +4976,11 @@ impl DocHost {
             .cloned()
             .collect();
         for entry in pending {
-            let transfers = command_transfers(&entry);
+            let transfers = if peer_transfers {
+                command_transfers(&entry)
+            } else {
+                Vec::new()
+            };
             self.spawn_command_delivery(chat_id, entry, transfers);
         }
         // Dead attempts: a Run/Steer whose user message never landed and
@@ -4891,7 +5002,7 @@ impl DocHost {
             }) else {
                 continue;
             };
-            if message_landed(mid) {
+            if message_landed(mid) || held_messages.iter().any(|held| held == mid) {
                 continue;
             }
             let dead = match c.status {
@@ -4961,14 +5072,17 @@ impl DocHost {
                     turn_id: Some(m.id.clone()),
                     frontier: None,
                 }),
-                expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+                expires_at: Some(now + self.command_ttl(chat_id)),
                 status: SessionCommandStatus::Pending,
                 resolution: None,
             };
             tracing::info!(chat = %chat_id, old = %old.id, new = %reissue.id,
                 "retry re-issues a dead send attempt");
-            handle.doc.queue_command(&reissue)?;
             let transfers = command_transfers(&reissue);
+            if self.hold_reissue(chat_id, &reissue, &transfers)? {
+                continue;
+            }
+            handle.doc.queue_command(&reissue)?;
             self.spawn_command_delivery(chat_id, reissue, transfers);
         }
         // Locally-hosted (or already-synced) commands: a drain pass is the
@@ -4994,7 +5108,9 @@ impl DocHost {
         let handle = self.open(chat_id)?;
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
-        if !self.missing_attachments(&entry).is_empty() {
+        let missing = self.missing_attachments(&entry);
+        if !missing.is_empty() {
+            self.fetch_from_store(chat_id, &missing);
             return Err(EngineError::Other("attachments not landed yet".into()));
         }
         let sessions = self
@@ -5405,29 +5521,43 @@ impl DocHost {
             // command must stay eligible): a Run/Steer naming `pending://`
             // refs whose bytes haven't landed on this device yet waits for
             // the transfer instead of running without its images. The wait is
-            // bounded; past it the command fails loudly.
+            // bounded unless they're safely stored; past it the command fails
+            // loudly.
             if matches!(disposition, CommandDisposition::Execute) {
                 let missing = self.missing_attachments(&entry);
                 if !missing.is_empty() {
-                    if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS {
+                    self.fetch_from_store(&handle.chat_id, &missing);
+                    if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS
+                        || self.bytes_on_their_way(&missing)
+                    {
                         tracing::info!(chat = %handle.chat_id, command = %entry.id,
                             missing = missing.len(), "command deferred: attachment bytes in transit");
                         self.arm_attachment_wait(handle);
                         return; // preserve order; UploadCommit / the wait timer re-kick
                     }
+                    // In-flight claim, as for an execute: between the mark and
+                    // the outcome, a racing drain's dead-command sweep would
+                    // otherwise take this for a crash and write its own reason.
+                    if !lock(&self.inner.executing).insert(entry.id.clone()) {
+                        skipped.insert(entry.id.clone());
+                        continue;
+                    }
                     if let Err(err) = self.inner.store.mark_processed(&entry.id) {
                         tracing::error!(chat = %handle.chat_id, error = %err,
                             "processed-ledger write failed; halting drain");
+                        lock(&self.inner.executing).remove(&entry.id);
                         return;
                     }
                     tracing::warn!(chat = %handle.chat_id, command = %entry.id,
                         "command rejected: attachments never arrived");
+                    self.forget_store_looks(&missing);
                     self.resolve_command(
                         handle,
                         &entry.id,
                         SessionCommandStatus::Rejected,
                         Some("attachments never arrived"),
                     );
+                    lock(&self.inner.executing).remove(&entry.id);
                     continue;
                 }
             }
@@ -5562,7 +5692,7 @@ impl DocHost {
         };
         for path in attachments.iter_mut() {
             if let Some(abs) = uploads.resolve_pending(path) {
-                *prompt = prompt.replace(path.as_str(), &abs);
+                *prompt = crate::uploads::rewrite_pending_ref(prompt, path, &abs);
                 *path = abs;
             }
         }
@@ -5599,7 +5729,7 @@ impl DocHost {
         let mut out = prompt.to_string();
         for r in crate::uploads::pending_refs_in(prompt) {
             if let Some(abs) = uploads.resolve_pending(&r) {
-                out = out.replace(&r, &abs);
+                out = crate::uploads::rewrite_pending_ref(&out, &r, &abs);
             }
         }
         out
@@ -7061,3 +7191,6 @@ mod sync_lifecycle_tests;
 
 #[path = "doc_host_delivery.rs"]
 mod remote_delivery;
+
+#[path = "doc_host_attachments.rs"]
+mod attachment_store;

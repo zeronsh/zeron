@@ -36,6 +36,8 @@
  *   GET  /device/:deviceId/status
  *   PUT  /blob/:chatId/:partId        — tool-output sidecar (chat2-sync A2)
  *   GET  /blob/:chatId/:partId
+ *   PUT|GET|HEAD|DELETE /blob/:chatId/attachments/:uploadId — attachment bytes
+ *                                       awaiting a Cloud machine (attachment-blobs.ts)
  *   GET  /chat2/:chatId/ws            — chat2 log-relay room (wss, chat2-sync B)
  *   GET|POST /chat2/:chatId/checkpoint — client-built doc snapshot (Range-resumable GET)
  *   GET|PUT  /chat2/:chatId/tail      — host-published sidecars, served verbatim
@@ -96,6 +98,7 @@ import {
 import { handleAdminRoute, runCloudCron } from "./cloud/billing";
 import { sandboxProvider } from "./cloud/providers";
 import { FakeProvider } from "./cloud/providers/fake";
+import { handleAttachmentBlob } from "./attachment-blobs";
 import { runnerChatGate, runnerDeviceGate } from "./runner-access";
 import { runnerRefusal } from "./runner-policy";
 import { handleOnboardingRoute } from "./onboarding-routes";
@@ -395,6 +398,11 @@ export default {
         autoWakeCloudDevice(env, ctx, auth, deviceId, env.CLOUD_EDGE_URL ?? url.origin);
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, "/nudge", "");
       }
+    }
+
+    // ── attachment bytes on their way to a Cloud machine (attachment-blobs.ts).
+    if (parts[0] === "blob" && parts.length === 4 && parts[2] === "attachments" && ID_RE.test(parts[1]) && ID_RE.test(parts[3])) {
+      return handleAttachmentBlob(request, env, auth, parts[1], parts[3]);
     }
 
     // ── R2 tool-output sidecar (docs/chat2-sync.md A2): full tool outputs
