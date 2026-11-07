@@ -213,15 +213,10 @@ async fn observe(url: String, observed: Arc<Mutex<Observed>>) {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct Stats {
-    seq: u64,
-    pushes: BTreeMap<String, u64>,
-    rows_written: u64,
-    alarms: u64,
-}
-
-async fn stats(http: &str, org: &str, token: &str) -> Stats {
+/// The room's head: the batches it applied. (Its other /stats counters live
+/// in memory and reset whenever the idle object is evicted, which `wrangler
+/// dev` does within seconds.)
+async fn seq(http: &str, org: &str, token: &str) -> u64 {
     let body: Value = reqwest::Client::new()
         .get(format!("{http}/registry/{org}/stats"))
         .bearer_auth(token)
@@ -231,46 +226,24 @@ async fn stats(http: &str, org: &str, token: &str) -> Stats {
         .json()
         .await
         .expect("stats json");
-    Stats {
-        seq: body["seq"].as_u64().unwrap_or(0),
-        pushes: body["pushOutcomes"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .map(|(device, o)| (device.clone(), o["ok"].as_u64().unwrap_or(0)))
-            .collect(),
-        rows_written: body["writesSinceStart"]["rows"].as_u64().unwrap_or(0),
-        alarms: body["writesSinceStart"]["alarms"].as_u64().unwrap_or(0),
-    }
+    body["seq"].as_u64().unwrap_or(0)
 }
 
-fn report(phase: &str, seconds: u64, from: &Stats, to: &Stats, before: &Tally, after: &Tally) {
-    let pushes: BTreeMap<_, _> = to
-        .pushes
-        .iter()
-        .map(|(d, n)| (d.clone(), n - from.pushes.get(d).copied().unwrap_or(0)))
-        .filter(|(_, n)| *n > 0)
-        .collect();
+/// Rows moved, by kind, and which fields moved. Each row moved costs the room
+/// two billed rows (the row and its seq index entry); before the room stopped
+/// storing per-push bookkeeping, a one-row push cost five.
+fn report(phase: &str, seconds: u64, from: u64, to: u64, before: &Tally, after: &Tally) {
     let diff = |a: &BTreeMap<String, u64>, b: &BTreeMap<String, u64>| -> BTreeMap<String, u64> {
         b.iter()
-            .map(|(k, n)| (k.clone(), n - a.get(k).copied().unwrap_or(0)))
+            .map(|(k, n)| (k.clone(), n.saturating_sub(a.get(k).copied().unwrap_or(0))))
             .filter(|(_, n)| *n > 0)
             .collect()
     };
-    let written = to.rows_written.checked_sub(from.rows_written);
+    let rows = diff(&before.rows, &after.rows);
     println!("── {phase} ({seconds} s)");
-    println!("   pushes by device: {pushes:?}");
-    println!("   batches applied (seq): {}", to.seq - from.seq);
-    println!("   rows broadcast by kind: {:?}", diff(&before.rows, &after.rows));
+    println!("   batches applied (seq): {}", to - from);
+    println!("   rows moved by kind: {rows:?} = {} rows", rows.values().sum::<u64>());
     println!("   field writes: {:?}", diff(&before.fields, &after.fields));
-    match written {
-        Some(rows) => println!(
-            "   billed rows written: {} (+{} alarms)",
-            rows,
-            to.alarms - from.alarms
-        ),
-        None => println!("   billed rows written: room restarted mid-phase, meter reset"),
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -325,7 +298,7 @@ async fn registry_writes_per_turn_and_parked_minute() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let tally = || observed.lock().unwrap().tally.clone();
-    let (s0, t0) = (stats(&http, &org, &token).await, tally());
+    let (s0, t0) = (seq(&http, &org, &token).await, tally());
 
     // The turn: queued by a viewer, run by the host, streaming a delta a second.
     let handle = host.doc_host.open(CHAT).expect("open chat");
@@ -377,20 +350,21 @@ async fn registry_writes_per_turn_and_parked_minute() {
     )
     .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let (s1, t1) = (stats(&http, &org, &token).await, tally());
+    let (s1, t1) = (seq(&http, &org, &token).await, tally());
 
     // Parked: the turn is over, the runtime stays warm.
     tokio::time::sleep(Duration::from_secs(parked_secs)).await;
-    let (s2, t2) = (stats(&http, &org, &token).await, tally());
+    let (s2, t2) = (seq(&http, &org, &token).await, tally());
 
     println!("registry writes, org {org}");
-    report("streaming turn", turn_secs + 3, &s0, &s1, &t0, &t1);
-    report("parked after the turn", parked_secs, &s1, &s2, &t1, &t2);
+    report("streaming turn", turn_secs + 3, s0, s1, &t0, &t1);
+    report("parked after the turn", parked_secs, s1, s2, &t1, &t2);
     let gap = observed.lock().unwrap().longest_live_gap;
     println!("longest a reader held a live session row without a newer one: {gap:?}");
-    // What shipped readers need: a live row is never 45 s old.
+    // Shipped readers drop a live row at 45 s; restamps come at most 30 s
+    // apart, leaving the rest for delivery and clock skew.
     assert!(
-        gap < Duration::from_millis(zeron_proto::view::SESSION_STALE_MS as u64),
+        gap < Duration::from_secs(33),
         "a live session row went {gap:?} without a restamp"
     );
 

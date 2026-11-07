@@ -3384,6 +3384,12 @@ fn is_active(session: &Session) -> bool {
     )
 }
 
+/// How often a live run (and the activity projection) checks whether a
+/// session row is due its heartbeat. A check costs a lock and a compare;
+/// only a due one writes. Bounds a quiet row's restamps to
+/// `SESSION_HEARTBEAT_MS` plus this.
+const HEARTBEAT_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Whether a liveness touch should restamp (and so store) `session` at
 /// `now`: only a row readers would expire, once its last stamp is a
 /// heartbeat old.
@@ -4248,10 +4254,12 @@ async fn drive_run(
     // timeout here by design (a first port was rejected — agents may
     // legitimately be quiet for >10min): a live child means Working, dying
     // paths each carry their own error, and engine death stops these ticks
-    // so the gate still catches real crashes. touch_session stores a touch at
-    // most every SESSION_HEARTBEAT_MS, and only for a row that can expire, so
-    // a quiet live row is restamped every second tick (30 s).
-    let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    // so the gate still catches real crashes. touch_session stores a touch
+    // only for a row that can expire, once its stamp is SESSION_HEARTBEAT_MS
+    // old; this tick only checks, so a quiet live row is restamped within
+    // one tick of that (≤ 30 s apart, inside the 45 s gate). A coarser tick
+    // let a stamp from the last streamed event age 40 s before the next.
+    let mut live_heartbeat = tokio::time::interval(HEARTBEAT_CHECK);
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The runtime's background processes, published on the session row.
     let mut background_processes = turn.watch_background_processes();
@@ -5601,8 +5609,11 @@ mod tests {
             assert!(!touch_due(&session_at(status, now - ms(beat - 1)), now));
             assert!(touch_due(&session_at(status, now - ms(beat)), now));
         }
-        // Two 15 s liveness ticks: the second one stores, inside the gate.
-        assert!(beat > 15_000 && 2 * 15_000 + 15_000 <= zeron_proto::view::SESSION_STALE_MS);
+        // A due row is stored by the next check: at most 30 s apart, which
+        // leaves shipped readers' 45 s gate 15 s for delivery and skew.
+        let check = HEARTBEAT_CHECK.as_millis() as i64;
+        assert!(beat + check <= 30_000);
+        assert!(beat + check + 15_000 <= zeron_proto::view::SESSION_STALE_MS);
 
         let long_ago = now - chrono::Duration::minutes(20);
         assert!(!touch_due(&session_at(SessionStatus::Idle, long_ago), now));

@@ -111,8 +111,9 @@ Writers keep their rows quiet too:
 
 - A session row is restamped (`updatedAt`) only while it says something that expires
   (a live status, running subagents, background processes, a wait), and at most every
-  `SESSION_HEARTBEAT_MS` (25 s; quiet rows every 30 s). Shipped readers drop such a row
-  after 45 s with no other signal, so this is as slow as they allow. A session parked idle
+  `SESSION_HEARTBEAT_MS` (25 s, checked every 5 s, so never more than 30 s apart).
+  Shipped readers drop such a row after 45 s with no other signal, so this is as slow as
+  they allow with room for delivery and clock skew. A session parked idle
   after its turn is not restamped at all; it used to be every 15 s for 30 minutes.
 - `lastMessagePreview`/`lastMessageAt` are written when a message is sent and when a
   segment ends, never per streamed delta.

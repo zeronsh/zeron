@@ -29,7 +29,9 @@ impl SessionsEngine {
         }
         let inner = Arc::downgrade(&self.inner);
         let task = tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            // Only checks: a refresh is stored once a heartbeat old, so this
+            // bounds terminal leases to a heartbeat plus one tick apart.
+            let mut tick = tokio::time::interval(super::HEARTBEAT_CHECK);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             tick.tick().await;
             let mut previous = Vec::<Session>::new();

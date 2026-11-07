@@ -44,8 +44,8 @@ pub const SESSION_STALE_MS: i64 = 45_000;
 /// something readers drop once it goes stale ([`session_expires`]). Every
 /// restamp is a stored registry write, so it is as rare as shipped readers
 /// allow: they judge staleness against [`SESSION_STALE_MS`] with no other
-/// signal, so a quiet stretch (a restamp waits for the next 15 s liveness
-/// tick) still leaves 15 s for delivery and clock skew.
+/// signal. Hosts check every 5 s, so restamps land at most 30 s apart and
+/// leave 15 s for delivery and clock skew.
 pub const SESSION_HEARTBEAT_MS: i64 = 25_000;
 
 /// Whether a session row says anything that [`SESSION_STALE_MS`] expires: a
