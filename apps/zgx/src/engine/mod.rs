@@ -14,6 +14,7 @@
 //! An engine that answered and went is reconnected to in the same way, and
 //! only said as unreachable after [`CONNECT_WAIT`].
 
+pub mod lists;
 pub mod manager;
 pub mod rpc;
 

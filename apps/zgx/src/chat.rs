@@ -84,7 +84,11 @@ struct Chats {
     catalog: RefCell<Vec<Shared>>,
     catalog_state: Cell<CatalogState>,
     views: RefCell<Vec<Weak<View>>>,
-    watches: RefCell<Vec<Watch>>,
+    /// The engine's live session and chat lists, heard as changes.
+    listening: RefCell<Vec<engine::lists::Listening>>,
+    /// Chats this window made that the engine's list may not have yet
+    /// (`made`): its next list replaces them, or lets them go.
+    made_here: RefCell<Vec<String>>,
     rpc: RefCell<Option<Rpc>>,
     /// What each chat waiting on its person asks: "approval" or
     /// "question", by chat (`chat.asks`, for the sidebar's rows).
@@ -741,20 +745,15 @@ fn refs_value(found: &Json) -> Value {
 /// A frame's list, its items by `field`. Taken, not copied: these lists come whole
 /// for every change in any chat, a chat's every field, and a copy made here would
 /// be blocks by the thousand among the window's own, where they'd stay till the next.
-fn by_field(list: Json, field: &str) -> HashMap<String, Json> {
-    let Json::Array(list) = list else { return HashMap::new() };
-    list.into_iter().filter_map(|item| Some((item[field].as_str()?.to_owned(), item))).collect()
-}
-
 impl Chats {
     fn connected(self: &Rc<Self>, rpc: &Rpc) {
         let me = self.clone();
         engine::get().spawn(async move { me.look_ahead().await });
-        let mut watches = Vec::new();
+        let mut listening = Vec::new();
         let weak = Rc::downgrade(self);
-        watches.push(rpc.watch("WatchSessions", json!({}), move |item| {
+        listening.push(engine::lists::listen(rpc, "WatchSessions", move |frame| {
             let Some(me) = weak.upgrade() else { return };
-            *me.sessions.borrow_mut() = by_field(item, "chatId");
+            frame.apply_to_map(&mut me.sessions.borrow_mut());
             me.follow_asks();
             me.publish_views();
             // A turn starting or ending: the newest prompt's line follows.
@@ -774,13 +773,24 @@ impl Chats {
             }
         }));
         let weak = Rc::downgrade(self);
-        watches.push(rpc.watch("WatchChats", json!({}), move |item| {
+        listening.push(engine::lists::listen(rpc, "WatchChats", move |frame| {
             let Some(me) = weak.upgrade() else { return };
-            *me.chats.borrow_mut() = by_field(item, "id");
+            {
+                let mut chats = me.chats.borrow_mut();
+                frame.apply_to_map(&mut chats);
+                // (One made here and still not in the list goes, as it did
+                // when each list replaced them all.)
+                for id in me.made_here.borrow_mut().drain(..) {
+                    let listed = frame.list.as_array().is_some_and(|rows| rows.iter().any(|r| r["id"].as_str() == Some(&id)));
+                    if !listed && frame.changes.is_some() {
+                        chats.remove(&id);
+                    }
+                }
+            }
             me.chats_heard.set(true);
             me.publish_views();
         }));
-        *self.watches.borrow_mut() = watches;
+        *self.listening.borrow_mut() = listening;
         *self.rpc.borrow_mut() = Some(rpc.clone());
         self.ask_looks.borrow_mut().clear();
         let me = self.clone();
@@ -1136,11 +1146,23 @@ impl Chats {
         self.chats.borrow().get(id).cloned()
     }
 
+    /// Whether opening chat `id` marks it seen: when that changes what it
+    /// shows (`seen_would_change`), or its row isn't known yet.
+    fn marks_seen(&self, id: &str) -> bool {
+        let chats = self.chats.borrow();
+        let Some(chat) = chats.get(id) else { return true };
+        let session = self.sessions.borrow().get(id).cloned().unwrap_or(Json::Null);
+        seen_would_change(chat, &session, chrono::Utc::now())
+    }
+
     /// A chat this window just made (`sessions.create`), known before the
     /// engine's list says so: its first message, sent at once, goes where
     /// and how it was made (a side chat in its parent's folder, with its
     /// parent's agent and model). The engine's next list replaces it.
     fn made(&self, id: &str, row: Json) {
+        if !self.chats.borrow().contains_key(id) {
+            self.made_here.borrow_mut().push(id.to_owned());
+        }
         self.chats.borrow_mut().entry(id.to_owned()).or_insert(row);
     }
 
@@ -1402,8 +1424,10 @@ impl View {
         self.subscribe();
         self.publish_messages();
         self.publish_session();
-        if let Some(id) = self.open_id() {
-            // Its finished state seen, as the shipping app marks it.
+        // Its finished state seen, as the shipping app marks it: only while
+        // there's something to see (opening a chat looked at already writes
+        // nothing, so it doesn't send every window the chat list again).
+        if let Some(id) = self.open_id().filter(|id| chats.marks_seen(id)) {
             engine::get().spawn(async move {
                 let _ = engine::get().call("Mutate", json!({ "op": "markChatSeen", "chatId": id })).await;
             });
@@ -4467,6 +4491,42 @@ fn stale(updated: &Json) -> bool {
     seconds(updated).is_some_and(|at| now_seconds() - at > STALE_SECONDS)
 }
 
+/// Whether marking `chat` seen at `now` changes anything a viewport reads
+/// from it (`session`: its live state, or null). Every reader of a chat's
+/// `lastSeenAt` compares it with one of three stamps (zeron_proto's status
+/// and sleep rules): its last message, its terminal activity's report, and
+/// when its sleep ended. Once the mark is at or past all three, a newer one
+/// changes nothing on any device, yet it is a synced write: every window
+/// everywhere is sent the whole chat list again for it. Unknown (no row,
+/// a stamp that doesn't read): marked, as before.
+fn seen_would_change(chat: &Json, session: &Json, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let at = |v: &Json| -> Option<Option<chrono::DateTime<chrono::Utc>>> {
+        match v {
+            Json::Null => Some(None),
+            Json::String(s) => chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| Some(t.to_utc())),
+            Json::Number(n) => n.as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(Some),
+            _ => None,
+        }
+    };
+    if chat.is_null() {
+        return true;
+    }
+    let Some(Some(seen)) = at(&chat["lastSeenAt"]) else { return true };
+    let sleep = &chat["sleep"];
+    // (A sleep still to end: a mark now is before it, and changes nothing.)
+    let woke = match (at(&sleep["wokeAt"]), at(&sleep["until"])) {
+        (Some(Some(woke)), _) => Some(woke),
+        (Some(None), Some(Some(until))) => Some(until).filter(|until| *until <= now),
+        (Some(None), Some(None)) => None,
+        _ => return true,
+    };
+    let stamps = [at(&chat["lastMessageAt"]), at(&session["terminalActivity"]["updatedAt"]), Some(woke)];
+    stamps.into_iter().any(|stamp| match stamp {
+        None => true,
+        Some(stamp) => stamp.is_some_and(|stamp| stamp >= seen),
+    })
+}
+
 /// "Jul 1, 4:12 PM", in this Mac's time zone (the shipping app's
 /// `format_timestamp`).
 #[cfg(unix)]
@@ -4568,6 +4628,48 @@ mod pending_tests;
 
 #[cfg(test)]
 mod tests {
+    /// Opening a chat marks it seen only while that changes something any
+    /// viewport reads (its last message, its terminal's report, the end of
+    /// its sleep): a chat looked at already writes nothing, so its devices'
+    /// windows aren't each sent the whole chat list again for nothing.
+    #[test]
+    fn opening_a_chat_marks_it_seen_only_when_that_changes_something() {
+        use super::seen_would_change as would;
+        use serde_json::{Value as Json, json};
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-07T05:00:00Z").unwrap().to_utc();
+        let none = Json::Null;
+        // Looked at since its last word: nothing to mark.
+        let seen = json!({ "lastMessageAt": "2026-11-07T04:00:00Z", "lastSeenAt": "2026-11-07T04:30:00.250Z" });
+        assert!(!would(&seen, &none, now));
+        // Said something since: marked.
+        let unseen = json!({ "lastMessageAt": "2026-11-07T04:40:00Z", "lastSeenAt": "2026-11-07T04:30:00Z" });
+        assert!(would(&unseen, &none, now));
+        // Never seen, a row not known, or a stamp that doesn't read: marked, as before.
+        assert!(would(&json!({ "lastMessageAt": "2026-11-07T04:00:00Z" }), &none, now));
+        assert!(would(&Json::Null, &none, now));
+        assert!(would(&json!({ "lastMessageAt": "soon", "lastSeenAt": "2026-11-07T04:30:00Z" }), &none, now));
+        // Its terminal reported since it was seen: marked.
+        let terminal = json!({ "terminalActivity": { "updatedAt": "2026-11-07T04:45:00Z" } });
+        assert!(would(&seen, &terminal, now));
+        let earlier = json!({ "terminalActivity": { "updatedAt": "2026-11-07T04:10:00Z" } });
+        assert!(!would(&seen, &earlier, now));
+        // Woke (early, or its time passed) since it was seen: marked.
+        let woke = |sleep: Json| {
+            let mut chat = seen.clone();
+            chat["sleep"] = sleep;
+            chat
+        };
+        let at = "2026-11-07T03:00:00Z";
+        assert!(would(&woke(json!({ "at": at, "until": "2026-11-07T06:00:00Z", "wokeAt": "2026-11-07T04:50:00Z" })), &none, now));
+        assert!(would(&woke(json!({ "at": at, "until": "2026-11-07T04:55:00Z" })), &none, now));
+        // Still asleep (a mark now is before its end), or woke before it was seen: nothing.
+        assert!(!would(&woke(json!({ "at": at, "until": "2026-11-07T06:00:00Z" })), &none, now));
+        assert!(!would(&woke(json!({ "at": at, "until": "2026-11-07T04:10:00Z" })), &none, now));
+        // Milliseconds, as the doc keeps them.
+        let ms = json!({ "lastMessageAt": 1_794_000_000_500_i64, "lastSeenAt": 1_794_000_000_400_i64 });
+        assert!(would(&ms, &none, now));
+    }
+
     /// A queued message's files come back to an edit as chips named as they
     /// were attached, already on the host, a picture shown where it can be.
     #[test]
