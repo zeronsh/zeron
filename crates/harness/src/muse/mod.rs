@@ -203,6 +203,10 @@ impl Harness for MuseHarness {
     fn id(&self) -> HarnessId {
         HarnessId::Muse
     }
+    /// It starts a wake turn of its own when a background subagent ends.
+    fn wakes_on_background(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &str {
         "Muse Code"
     }
@@ -232,11 +236,6 @@ impl Harness for MuseHarness {
         true
     }
     fn stops_turn_in_place(&self) -> bool {
-        true
-    }
-    /// A steer during an open tool call: `turn/interrupt` ends the turn; the
-    /// host and its background agents stay up.
-    fn steer_stops_tool(&self) -> bool {
         true
     }
     /// The launch reads the sandbox and approval posture; the model moves

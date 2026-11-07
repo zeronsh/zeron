@@ -392,6 +392,10 @@ impl From<zc::ChatIndicator> for ChatIndicator {
     fn from(i: zc::ChatIndicator) -> Self {
         match i {
             zc::ChatIndicator::Working => ChatIndicator::Working,
+            // A turn that ended into a wait on background work that will
+            // wake its agent: still under way, never "done". The apps show it
+            // as working until they draw a wait of their own.
+            zc::ChatIndicator::Waiting => ChatIndicator::Working,
             zc::ChatIndicator::AwaitingInput => ChatIndicator::AwaitingInput,
             zc::ChatIndicator::Errored => ChatIndicator::Errored,
             zc::ChatIndicator::Completed => ChatIndicator::Completed,
