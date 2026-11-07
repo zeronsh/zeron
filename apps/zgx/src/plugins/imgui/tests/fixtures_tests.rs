@@ -35,10 +35,10 @@ const FIXTURES: &[&str] = &[
     "imgui-win-probe-legacy",
 ];
 
-/// The main probe's launch set, in the order its `init.luau` opens them, and
-/// the reason it is these eight: the canonical per-plugin cap is 8 and the
-/// rest of the contract's windows are one probe action away.
-const LAUNCH: &[&str] = &["a", "b", "c", "inspector", "size", "pos", "pos2", "bare"];
+/// The main probe's launch set, in the order its `init.luau` opens them: four
+/// windows so four slots stay free under the canonical 8-window cap, and
+/// every other contract window opens via a probe action with no close first.
+const LAUNCH: &[&str] = &["a", "b", "inspector", "bare"];
 
 fn folder(id: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -346,6 +346,16 @@ fn status(app: &TestApp, fake: &Fake, calls: &FrameCalls) -> Json {
     answer["value"].clone()
 }
 
+/// A fixture loaded to steady state with its frame queue, ready to drive one
+/// probe action from the four launch windows (so its four free slots absorb
+/// the action without a close first).
+fn driven(id: &str) -> (TestApp, Fake, FrameCalls) {
+    let (app, fake) = harness(id, 0);
+    app.frames(30);
+    let (calls, _closed) = luau::dev_listen(&app.host, id);
+    (app, fake, calls)
+}
+
 /// Every fixture folder carries the shipped SDK, byte for byte: a stale copy
 /// is a plugin that behaves like an older SDK.
 #[test]
@@ -440,10 +450,10 @@ fn every_fixture_declares_the_manifest_the_rows_expect() {
     );
 }
 
-/// The eight windows the contract needs at once, with the exact specs its
+/// The four windows the contract needs at once, with the exact specs its
 /// rows measure, and nothing else until an action asks.
 #[test]
-fn the_main_probe_opens_the_eight_windows_the_rows_need() {
+fn the_main_probe_opens_the_four_windows_the_rows_need() {
     let (app, fake) = harness("imgui-win-probe", 0);
     app.frames(30);
     assert_eq!(
@@ -475,34 +485,10 @@ fn the_main_probe_opens_the_eight_windows_the_rows_need() {
         "restored geometry: {inspector}"
     );
 
-    // VAL-WIN-002: the same size, resizable, and not remembered (the row
-    // measures the request, not an earlier frame).
-    let sized = &opened(&fake, "size")[0];
-    assert_eq!(sized["title"], Json::from("Probe Size"), "{sized}");
-    assert_eq!(number(&sized["size"]["width"]), 720.0, "{sized}");
-    assert_eq!(number(&sized["size"]["height"]), 480.0, "{sized}");
-    assert_eq!(sized["resizable"], Json::Bool(true), "{sized}");
-    assert!(
-        sized["remember"].is_null(),
-        "size does not remember a frame: {sized}"
-    );
-
-    // VAL-WIN-003: both measured origins, same size, 500 and 300 points apart.
-    let pos = &opened(&fake, "pos")[0];
-    assert_eq!(number(&pos["position"]["x"]), 100.0, "{pos}");
-    assert_eq!(number(&pos["position"]["y"]), 120.0, "{pos}");
-    assert_eq!(number(&pos["size"]["width"]), 400.0, "{pos}");
-    assert_eq!(number(&pos["size"]["height"]), 300.0, "{pos}");
-    let pos2 = &opened(&fake, "pos2")[0];
-    assert_eq!(number(&pos2["position"]["x"]), 600.0, "{pos2}");
-    assert_eq!(number(&pos2["position"]["y"]), 420.0, "{pos2}");
-    assert_eq!(number(&pos2["size"]["width"]), 400.0, "{pos2}");
-    assert_eq!(number(&pos2["size"]["height"]), 300.0, "{pos2}");
-
-    // VAL-WIN-005: three windows from one script, with distinct titles.
+    // VAL-WIN-005: two windows from one script, with distinct titles; the
+    // third (`c`) is one probe action away under the same row.
     assert_eq!(opened(&fake, "a")[0]["title"], Json::from("Probe A"));
     assert_eq!(opened(&fake, "b")[0]["title"], Json::from("Probe B"));
-    assert_eq!(opened(&fake, "c")[0]["title"], Json::from("Probe C"));
 
     // VAL-WIN-019: no platform title bar at all.
     let bare = &opened(&fake, "bare")[0];
@@ -525,9 +511,10 @@ fn the_main_probe_opens_the_eight_windows_the_rows_need() {
     }
 
     // Nothing else opens unasked: the rest of the contract's windows wait for
-    // a probe action (the per-plugin cap is 8).
+    // a probe action (the per-plugin cap is 8 and four slots stay free).
     for extra in [
-        "bounds", "drag", "quiet", "left", "right", "dup", "reuse", "n1",
+        "bounds", "c", "drag", "quiet", "left", "right", "dup", "reuse", "size", "pos", "pos2",
+        "n1",
     ] {
         assert!(
             opened(&fake, extra).is_empty(),
@@ -536,7 +523,7 @@ fn the_main_probe_opens_the_eight_windows_the_rows_need() {
         );
     }
 
-    // VAL-LIFE-009: the quiet preference is recorded under its own key.
+    // VAL-LIFE-016: the quiet preference is recorded under its own key.
     let stores = fake.stores.borrow().clone();
     let quiet = stores
         .iter()
@@ -558,14 +545,14 @@ fn the_main_probe_opens_the_eight_windows_the_rows_need() {
 }
 
 /// The probe actions the rows drive: each opens (or changes) the window the
-/// row names, with that row's options.
+/// row names, with that row's options, and the one-action-away windows open
+/// without closing anything first.
 #[test]
 fn the_main_probe_offers_the_probe_actions_the_rows_drive() {
+    // The menu lists every action by its probe-<name> id; it is published at
+    // load, so one harness is enough for this part.
     let (app, fake) = harness("imgui-win-probe", 0);
     app.frames(30);
-    let calls = luau::dev_listen(&app.host, "imgui-win-probe").0;
-
-    // The menu lists every action by its probe-<name> id.
     let published = fake.menus.borrow().last().cloned().unwrap_or(Json::Null);
     let items = published.as_array().cloned().unwrap_or_default();
     let ids: Vec<&str> = items
@@ -601,133 +588,209 @@ fn the_main_probe_offers_the_probe_actions_the_rows_drive() {
         assert!(ids.contains(&expected), "no menu item {expected}: {ids:?}");
     }
 
-    // VAL-WIN-004: the bounds window, both bounds stated.
-    let answer = run_action(&app, &fake, &calls, "open_bounds");
-    assert_eq!(answer["ok"], Json::Bool(true), "{answer}");
-    let bounds = &opened(&fake, "bounds")[0];
-    assert_eq!(number(&bounds["min_size"]["width"]), 400.0, "{bounds}");
-    assert_eq!(number(&bounds["min_size"]["height"]), 300.0, "{bounds}");
-    assert_eq!(number(&bounds["max_size"]["width"]), 900.0, "{bounds}");
-    assert_eq!(number(&bounds["max_size"]["height"]), 600.0, "{bounds}");
-    assert_eq!(bounds["resizable"], Json::Bool(true), "{bounds}");
+    // VAL-WIN-004: the bounds window, both bounds stated, no close first.
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_bounds");
+        let bounds = &opened(&fake, "bounds")[0];
+        assert_eq!(number(&bounds["min_size"]["width"]), 400.0, "{bounds}");
+        assert_eq!(number(&bounds["min_size"]["height"]), 300.0, "{bounds}");
+        assert_eq!(number(&bounds["max_size"]["width"]), 900.0, "{bounds}");
+        assert_eq!(number(&bounds["max_size"]["height"]), 600.0, "{bounds}");
+        assert_eq!(bounds["resizable"], Json::Bool(true), "{bounds}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_bounds closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
 
     // VAL-WIN-019...022: hidden chrome and the plugin's own bar.
-    run_action(&app, &fake, &calls, "open_drag");
-    let drag = &opened(&fake, "drag")[0];
-    assert_eq!(drag["title"], Json::from("Probe Drag"), "{drag}");
-    assert_eq!(drag["titlebar"], Json::from("hidden"), "{drag}");
-    assert_eq!(drag["decorations"], Json::Bool(false), "{drag}");
-    assert_eq!(drag["resizable"], Json::Bool(true), "{drag}");
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_drag");
+        let drag = &opened(&fake, "drag")[0];
+        assert_eq!(drag["title"], Json::from("Probe Drag"), "{drag}");
+        assert_eq!(drag["titlebar"], Json::from("hidden"), "{drag}");
+        assert_eq!(drag["decorations"], Json::Bool(false), "{drag}");
+        assert_eq!(drag["resizable"], Json::Bool(true), "{drag}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_drag closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
 
-    // VAL-LIFE-009: quiet opens hidden, from its recorded preference.
-    run_action(&app, &fake, &calls, "open_quiet");
-    let quiet = &opened(&fake, "quiet")[0];
-    assert_eq!(quiet["title"], Json::from("Probe Quiet"), "{quiet}");
-    assert_eq!(quiet["visible"], Json::Bool(false), "{quiet}");
+    // VAL-LIFE-016: quiet opens hidden, from its recorded preference.
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_quiet");
+        let quiet = &opened(&fake, "quiet")[0];
+        assert_eq!(quiet["title"], Json::from("Probe Quiet"), "{quiet}");
+        assert_eq!(quiet["visible"], Json::Bool(false), "{quiet}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_quiet closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
 
-    // VAL-LIFE-008: each side at its own size, both remembered, both at once.
-    run_action(&app, &fake, &calls, "open_both_sides");
-    let left = &opened(&fake, "left")[0];
-    assert_eq!(number(&left["size"]["width"]), 500.0, "{left}");
-    assert_eq!(number(&left["size"]["height"]), 400.0, "{left}");
-    assert_eq!(left["remember"], Json::Bool(true), "{left}");
-    let right = &opened(&fake, "right")[0];
-    assert_eq!(number(&right["size"]["width"]), 900.0, "{right}");
-    assert_eq!(number(&right["size"]["height"]), 700.0, "{right}");
-    assert_eq!(right["remember"], Json::Bool(true), "{right}");
+    // VAL-LIFE-009: each side at its own size, remembered, and one action
+    // away; `open_both_sides` opens the two at once.
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_left");
+        let left = &opened(&fake, "left")[0];
+        assert_eq!(left["title"], Json::from("Probe Left"), "{left}");
+        assert_eq!(number(&left["size"]["width"]), 500.0, "{left}");
+        assert_eq!(number(&left["size"]["height"]), 400.0, "{left}");
+        assert_eq!(left["remember"], Json::Bool(true), "{left}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_left closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_right");
+        let right = &opened(&fake, "right")[0];
+        assert_eq!(right["title"], Json::from("Probe Right"), "{right}");
+        assert_eq!(number(&right["size"]["width"]), 900.0, "{right}");
+        assert_eq!(number(&right["size"]["height"]), 700.0, "{right}");
+        assert_eq!(right["remember"], Json::Bool(true), "{right}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_right closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_both_sides");
+        let left = &opened(&fake, "left")[0];
+        assert_eq!(left["remember"], Json::Bool(true), "{left}");
+        let right = &opened(&fake, "right")[0];
+        assert_eq!(right["remember"], Json::Bool(true), "{right}");
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_both_sides closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+    }
 
     // VAL-WIN-007: dup opens once and the second request is refused with its
     // id in the sentence, which the fixture keeps and reports.
-    run_action(&app, &fake, &calls, "open_dup");
-    assert_eq!(opened(&fake, "dup").len(), 1, "{:?}", fake.opened.borrow());
-    let dup_asks: Vec<Json> = ops(&fake, "open_window")
-        .into_iter()
-        .filter(|asked| asked["id"].as_str() == Some("dup"))
-        .collect();
-    assert_eq!(
-        dup_asks.len(),
-        2,
-        "the duplicate was attempted: {dup_asks:?}"
-    );
-    assert_eq!(
-        dup_asks[1]["title"],
-        Json::from("Second Dup"),
-        "{dup_asks:?}"
-    );
-    let after = status(&app, &fake, &calls);
-    assert!(
-        after["last_refusal"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("dup"),
-        "the refusal names the id: {after}"
-    );
-
-    // VAL-WIN-008: the reuse id opens, closes and opens again.
-    run_action(&app, &fake, &calls, "open_reuse");
-    assert_eq!(
-        opened(&fake, "reuse")[0]["title"],
-        Json::from("Probe Reuse")
-    );
-    run_action(&app, &fake, &calls, "reuse_cycle");
-    app.frames(25);
-    let reuse = opened(&fake, "reuse");
-    assert_eq!(reuse.len(), 2, "the reopen: {reuse:?}");
-    assert_eq!(
-        reuse[1]["title"],
-        Json::from("Probe Reuse Again"),
-        "{reuse:?}"
-    );
-
-    // VAL-WIN-011/012: the live window's controls and setters.
-    run_action(&app, &fake, &calls, "hide_inspector");
-    run_action(&app, &fake, &calls, "show_inspector");
-    run_action(&app, &fake, &calls, "focus_inspector");
-    run_action(&app, &fake, &calls, "minimize_inspector");
-    run_action(&app, &fake, &calls, "restore_inspector");
-    run_action(&app, &fake, &calls, "rename_inspector");
-    run_action(&app, &fake, &calls, "resize_inspector");
-    run_action(&app, &fake, &calls, "inspector_as_a");
-    run_action(&app, &fake, &calls, "inspector_unnamed");
-    for op in ["hide", "show", "focus", "minimize", "restore"] {
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_dup");
+        assert_eq!(opened(&fake, "dup").len(), 1, "{:?}", fake.opened.borrow());
+        let dup_asks: Vec<Json> = ops(&fake, "open_window")
+            .into_iter()
+            .filter(|asked| asked["id"].as_str() == Some("dup"))
+            .collect();
+        assert_eq!(
+            dup_asks.len(),
+            2,
+            "the duplicate was attempted: {dup_asks:?}"
+        );
+        assert_eq!(
+            dup_asks[1]["title"],
+            Json::from("Second Dup"),
+            "{dup_asks:?}"
+        );
+        let after = status(&app, &fake, &calls);
         assert!(
-            ops(&fake, op)
-                .iter()
-                .any(|asked| asked["window"].as_str() == Some("inspector")),
-            "the {op} control reached the inspector"
+            after["last_refusal"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("dup"),
+            "the refusal names the id: {after}"
+        );
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_dup closed a window first: {:?}",
+            fake.ops.borrow()
         );
     }
-    let titles: Vec<String> = ops(&fake, "set_title")
-        .iter()
-        .filter_map(|asked| asked["title"].as_str().map(str::to_string))
-        .collect();
-    for title in ["Renamed Probe", "A Inspector", "Inspector"] {
-        assert!(titles.iter().any(|said| said == title), "{titles:?}");
-    }
-    assert!(
-        ops(&fake, "set_size")
-            .iter()
-            .any(|asked| number(&asked["size"]["width"]) == 1000.0
-                && number(&asked["size"]["height"]) == 640.0),
-        "resize_inspector"
-    );
-    assert!(
-        ops(&fake, "set_size")
-            .iter()
-            .any(|asked| number(&asked["size"]["width"]) == 400.0
-                && number(&asked["size"]["height"]) == 300.0),
-        "inspector_as_a"
-    );
 
-    // VAL-LIFE-005: close then reopen by the same id.
-    run_action(&app, &fake, &calls, "close_inspector");
-    run_action(&app, &fake, &calls, "reopen");
-    app.frames(30);
-    assert!(
-        opened(&fake, "inspector").len() >= 2,
-        "reopened: {:?}",
-        fake.opened.borrow()
-    );
+    // VAL-WIN-008: the reuse id opens plain, then closes and opens again.
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "open_reuse");
+        assert_eq!(
+            opened(&fake, "reuse")[0]["title"],
+            Json::from("Probe Reuse")
+        );
+        assert!(
+            ops(&fake, "close").is_empty(),
+            "open_reuse closed a window first: {:?}",
+            fake.ops.borrow()
+        );
+        run_action(&app, &fake, &calls, "reuse_cycle");
+        app.frames(25);
+        let reuse = opened(&fake, "reuse");
+        assert_eq!(reuse.len(), 2, "the reopen: {reuse:?}");
+        assert_eq!(
+            reuse[1]["title"],
+            Json::from("Probe Reuse Again"),
+            "{reuse:?}"
+        );
+    }
+
+    // VAL-WIN-011/012: the live window's controls and setters, all against
+    // the inspector that opened at launch.
+    {
+        let (app, fake, calls) = driven("imgui-win-probe");
+        run_action(&app, &fake, &calls, "hide_inspector");
+        run_action(&app, &fake, &calls, "show_inspector");
+        run_action(&app, &fake, &calls, "focus_inspector");
+        run_action(&app, &fake, &calls, "minimize_inspector");
+        run_action(&app, &fake, &calls, "restore_inspector");
+        run_action(&app, &fake, &calls, "rename_inspector");
+        run_action(&app, &fake, &calls, "resize_inspector");
+        run_action(&app, &fake, &calls, "inspector_as_a");
+        run_action(&app, &fake, &calls, "inspector_unnamed");
+        for op in ["hide", "show", "focus", "minimize", "restore"] {
+            assert!(
+                ops(&fake, op)
+                    .iter()
+                    .any(|asked| asked["window"].as_str() == Some("inspector")),
+                "the {op} control reached the inspector"
+            );
+        }
+        let titles: Vec<String> = ops(&fake, "set_title")
+            .iter()
+            .filter_map(|asked| asked["title"].as_str().map(str::to_string))
+            .collect();
+        for title in ["Renamed Probe", "A Inspector", "Inspector"] {
+            assert!(titles.iter().any(|said| said == title), "{titles:?}");
+        }
+        assert!(
+            ops(&fake, "set_size")
+                .iter()
+                .any(|asked| number(&asked["size"]["width"]) == 1000.0
+                    && number(&asked["size"]["height"]) == 640.0),
+            "resize_inspector"
+        );
+        assert!(
+            ops(&fake, "set_size")
+                .iter()
+                .any(|asked| number(&asked["size"]["width"]) == 400.0
+                    && number(&asked["size"]["height"]) == 300.0),
+            "inspector_as_a"
+        );
+
+        // VAL-LIFE-007: close then reopen by the same id.
+        run_action(&app, &fake, &calls, "close_inspector");
+        run_action(&app, &fake, &calls, "reopen");
+        app.frames(30);
+        assert!(
+            opened(&fake, "inspector").len() >= 2,
+            "reopened: {:?}",
+            fake.opened.borrow()
+        );
+    }
 }
 
 /// The probe's own JSON: per-window frames and counters, the timer that keeps
@@ -797,7 +860,7 @@ fn the_main_probe_reports_per_window_state_ticks_and_store() {
         later["ticks"]
     );
 
-    // The tool still answers with every window closed: VAL-LIFE-005's
+    // The tool still answers with every window closed: VAL-LIFE-007's
     // condition that the plugin stays loaded is observable, not assumed.
     run_action(&app, &fake, &calls, "close_all_windows");
     app.frames(10);
@@ -876,7 +939,7 @@ fn the_main_probe_reaches_the_cap_and_reuses_a_slot() {
     assert_eq!(number(&again["open"]), 8.0, "close one, open one: {again}");
 }
 
-/// `VAL-WIN-006`/`VAL-LIFE-008`: the same window id in two plugins is two
+/// `VAL-WIN-006`/`VAL-LIFE-009`: the same window id in two plugins is two
 /// native windows with their own geometry.
 #[test]
 fn the_second_probe_opens_the_same_id_at_its_own_geometry() {

@@ -7,16 +7,17 @@
 -- actions through the `probe_run` tool for a scripted probe that cannot
 -- click a menu.
 --
--- The host allows eight native windows per plugin (contract §5), so eight
--- open at launch and the rest are one action away (`open_bounds`,
--- `open_drag`, `open_quiet`, `open_left`, `open_right`, ...). README.md
--- maps every row to the window and action it uses, and says why the eight
--- are the eight.
+-- The host allows eight native windows per plugin (contract §5). Four open
+-- at launch — Probe A, Probe B, the inspector and the bare window — leaving
+-- four slots free, so every other window is one action away and opens with a
+-- plain `open_window` and no close first (`open_bounds`, `open_drag`,
+-- `open_quiet`, `open_left`, `open_right`, `open_both_sides`, `open_dup`,
+-- `open_reuse`). README.md maps every row to the window and action it uses.
 --
 -- What the probe reports about itself, without needing a window: the
 -- `probe_status` tool returns its own JSON (windows, frames, counters,
 -- closes, timer ticks, store keys). The timer keeps changing even with no
--- window open, so VAL-LIFE-005/006 can see the plugin still working.
+-- window open, so the lifecycle rows can see the plugin still working.
 --
 -- Run it (the gallery needs no engine and no sign-in):
 --   ZERON_ZGX_DEV_PLUGINS=<this folder> ZERON_ZGX_PLUGIN_LOG=1 \
@@ -101,7 +102,7 @@ end
 local function draw(window: string, view: any)
 	frames[window] = (frames[window] or 0) + 1
 	if blow_up then
-		-- `VAL-LIFE-006`: the host must close the windows and keep Zeron up.
+		-- `VAL-LIFE-011`: the host must close the windows and keep Zeron up.
 		error("probe render failure")
 	end
 	view.text(`window {window}`)
@@ -164,41 +165,17 @@ local function close_window(window: string)
 	end
 end
 
--- Makes room for one more window under the host's live cap: the preferred
--- window if it is open, else any window that is. `n_loop` and the cap rows
--- are the only places the exact population matters.
-local function free_slot(preferred: string)
-	if preferred ~= "" and shown(preferred) then
-		close_window(preferred)
-		return
-	end
-	for _, window in live_ids() do
-		close_window(window)
-		return
-	end
-end
-
--- The eight the contract needs at once: `VAL-WIN-001` (inspector, 720x480),
--- `VAL-WIN-002` (size, the same size but resizable), `VAL-WIN-003` (pos and
--- pos2 at their measured origins), `VAL-WIN-005` and `VAL-WIN-016/017` (a,
--- b, c), and `VAL-WIN-019` (bare, the plugin's own chrome). `remember` is on
--- only where a row measures restored geometry: inspector, left and right.
+-- The four the contract needs at once: `VAL-WIN-001` (inspector, 720x480),
+-- `VAL-WIN-005`/`VAL-WIN-016`/`VAL-WIN-017` (a and b, distinct windows) and
+-- `VAL-WIN-019` (bare, the plugin's own chrome). Four slots stay free, so
+-- the rest open one action away with no close first. `remember` is on only
+-- where a row measures restored geometry: inspector, left and right.
 open("a", "Probe A", { size = { width = 520, height = 360 } })
 open("b", "Probe B", { size = { width = 420, height = 300 } })
-open("c", "Probe C", { size = { width = 560, height = 340 } })
 open("inspector", "Probe Inspector", {
 	size = { width = 720, height = 480 },
 	position = { x = 120, y = 80 },
 	remember = true,
-})
-open("size", "Probe Size", { size = { width = 720, height = 480 }, resizable = true })
-open("pos", "Probe Pos", {
-	size = { width = 400, height = 300 },
-	position = { x = 100, y = 120 },
-})
-open("pos2", "Probe Pos Two", {
-	size = { width = 400, height = 300 },
-	position = { x = 600, y = 420 },
 })
 open("bare", "Probe Bare", {
 	size = { width = 600, height = 400 },
@@ -253,7 +230,7 @@ end)
 
 local actions: { [string]: () -> () } = {}
 
--- `VAL-LIFE-005`: close and reopen the inspector by its own id; its counter
+-- `VAL-LIFE-007`: close and reopen the inspector by its own id; its counter
 -- and remembered geometry survive, ImGui's transient state does not.
 actions.reopen = function()
 	close_window("inspector")
@@ -268,7 +245,7 @@ actions.reopen = function()
 	end)
 end
 
--- `VAL-LIFE-006`: the next render callback raises; every shown window has
+-- `VAL-LIFE-011`: the next render callback raises; every shown window has
 -- one, so every one of the plugin's windows fails the way the row expects.
 actions.blow_up = function()
 	blow_up = true
@@ -297,7 +274,7 @@ actions.inspector_unnamed = function()
 	end
 end
 
--- `VAL-LIFE-008` names 700x500 at (100,120) for this fixture's inspector;
+-- `VAL-LIFE-009` names 700x500 at (100,120) for this fixture's inspector;
 -- the title and size change in place, the HWND does not.
 actions.inspector_700 = function()
 	local handle = live["inspector"]
@@ -362,12 +339,12 @@ actions.bump_inspector = function()
 	counters["inspector"] = (counters["inspector"] or 0) + 1
 end
 
--- Windows beyond the eight, each freeing a slot first so the action always
--- works under the host's live cap.
+-- Windows beyond the four launch windows, each a one-action-away open with
+-- no close first: the four free slots absorb it, and two-window actions still
+-- fit under the host's live cap.
 
 -- `VAL-WIN-004`: min_size and max_size.
 actions.open_bounds = function()
-	free_slot("a")
 	open("bounds", "Probe Bounds", {
 		size = { width = 600, height = 400 },
 		min_size = { width = 400, height = 300 },
@@ -379,7 +356,6 @@ end
 -- `VAL-WIN-019` to `VAL-WIN-022`: the plugin's own 32-point bar, hidden
 -- chrome, edges that resize.
 actions.open_drag = function()
-	free_slot("c")
 	open("drag", "Probe Drag", {
 		size = { width = 640, height = 420 },
 		titlebar = "hidden",
@@ -388,18 +364,16 @@ actions.open_drag = function()
 	})
 end
 
--- `VAL-LIFE-009`: visible = false, recorded under its store key.
+-- `VAL-LIFE-016`: visible = false, recorded under its store key.
 actions.open_quiet = function()
-	free_slot("pos2")
 	open("quiet", "Probe Quiet", {
 		size = { width = 480, height = 360 },
 		visible = quiet_shown,
 	})
 end
 
--- `VAL-LIFE-008`: each side remembers its own size, never the other's.
+-- `VAL-LIFE-009`: each side remembers its own size, never the other's.
 actions.open_left = function()
-	free_slot("c")
 	open("left", "Probe Left", {
 		size = { width = 500, height = 400 },
 		remember = true,
@@ -407,7 +381,6 @@ actions.open_left = function()
 end
 
 actions.open_right = function()
-	free_slot("pos2")
 	open("right", "Probe Right", {
 		size = { width = 900, height = 700 },
 		remember = true,
@@ -415,8 +388,6 @@ actions.open_right = function()
 end
 
 actions.open_both_sides = function()
-	free_slot("c")
-	free_slot("pos2")
 	open("left", "Probe Left", {
 		size = { width = 500, height = 400 },
 		remember = true,
@@ -430,7 +401,6 @@ end
 -- `VAL-WIN-007`: dup is open, and a second open under the same id is refused
 -- with the id in the sentence; the plugin keeps running.
 actions.open_dup = function()
-	free_slot("b")
 	open("dup", "Probe Dup", { size = { width = 380, height = 280 } })
 	local ok, why = pcall(function()
 		zeron.imgui.open_window({ id = "dup", title = "Second Dup" })
@@ -441,7 +411,6 @@ end
 
 -- `VAL-WIN-008`: a closed id is reusable; the old handle stays rejected.
 actions.open_reuse = function()
-	free_slot("b")
 	open("reuse", "Probe Reuse", { size = { width = 400, height = 300 } })
 end
 

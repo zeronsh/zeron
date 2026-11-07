@@ -31,28 +31,25 @@ $env:ZERON_ZGX_PLUGIN_LOG = "1"
 
 ## Windows it opens at launch
 
-The host allows **8 native windows per plugin** (validation contract §5), so
-eight open at launch. They are the ones a row needs *before* a probe action
-runs.
+The host allows **8 native windows per plugin** (validation contract §5). Four
+open at launch, leaving four slots free for the one-action-away windows. They
+are the ones a row needs *before* a probe action runs.
 
 | id | title | size | options |
 | --- | --- | --- | --- |
 | `a` | `Probe A` | 520 × 360 | |
 | `b` | `Probe B` | 420 × 300 | |
-| `c` | `Probe C` | 560 × 340 | |
 | `inspector` | `Probe Inspector` | 720 × 480 | at (120, 80), `remember = true` |
-| `size` | `Probe Size` | 720 × 480 | `resizable = true` |
-| `pos` | `Probe Pos` | 400 × 300 | at (100, 120) |
-| `pos2` | `Probe Pos Two` | 400 × 300 | at (600, 420) |
 | `bare` | `Probe Bare` | 600 × 400 | `titlebar = "hidden"`, `decorations = false` |
 
 Nothing else opens until an action asks for it.
 
 ## Windows one action away
 
-Each action frees a slot first (it closes one launch window) so it works under
-the live cap. Every action is a menu item (`Probe: …`) and is also callable by
-name through the `probe_run` tool.
+Each action opens with a plain `open_window` and no close first: the four free
+slots absorb it, and two-window actions still fit under the live cap. Every
+action is a menu item (`Probe: …`) and is also callable by name through the
+`probe_run` tool.
 
 | id | title | size | options | action |
 | --- | --- | --- | --- | --- |
@@ -66,7 +63,7 @@ name through the `probe_run` tool.
 | `n1`…`n8` | `Probe N1`…`Probe N8` | growing | | `n_loop`, then `n_more` |
 
 `remember = true` is set only where a row measures restored geometry: the
-inspector (`VAL-LIFE-005`, `VAL-LIFE-008`), and left/right (`VAL-LIFE-008`).
+inspector (`VAL-LIFE-007`, `VAL-LIFE-009`), and left/right (`VAL-LIFE-009`).
 Every other window opens at the size its request names.
 
 ## Probe actions
@@ -76,26 +73,26 @@ returns `{ action, ok }`; an unknown name raises a sentence naming it.
 
 | action | what it does | rows |
 | --- | --- | --- |
-| `reopen` | closes `inspector`, then reopens it by the same id with the same options after 300 ms | VAL-LIFE-005, VAL-DOCK-006 |
-| `blow_up` | the next `on_render` raises `error("probe render failure")` | VAL-LIFE-006 |
-| `close_inspector` | `inspector:close()` | VAL-WIN-006, VAL-LIFE-005 |
+| `reopen` | closes `inspector`, then reopens it by the same id with the same options after 300 ms | VAL-LIFE-007, VAL-DOCK-006 |
+| `blow_up` | the next `on_render` raises `error("probe render failure")` | VAL-LIFE-011 |
+| `close_inspector` | `inspector:close()` | VAL-WIN-006 |
 | `inspector_as_a` | `set_title("A Inspector")`, `set_size(400 × 300)` | VAL-WIN-006 |
 | `inspector_unnamed` | `set_title("Inspector")` | VAL-WIN-006 second run |
-| `inspector_700` | `set_size(700 × 500)` | VAL-LIFE-008 |
+| `inspector_700` | `set_size(700 × 500)` | VAL-LIFE-009 |
 | `rename_inspector` | `set_title("Renamed Probe")` | VAL-WIN-012 |
 | `resize_inspector` | `set_size(1000 × 640)` | VAL-WIN-012 |
 | `bump_inspector` | increments the inspector's own counter | VAL-WIN-016 |
 | `hide_inspector` / `show_inspector` / `focus_inspector` / `minimize_inspector` / `restore_inspector` | the five window controls | VAL-WIN-011, VAL-WIN-017 |
-| `open_bounds` | closes `a`, opens `bounds` | VAL-WIN-004 |
-| `open_drag` | closes `c`, opens `drag` | VAL-WIN-019…022 |
-| `open_quiet` | closes `pos2`, opens `quiet` hidden | VAL-LIFE-009 |
-| `open_left` / `open_right` / `open_both_sides` | opens the remembered side windows | VAL-LIFE-008, VAL-DOCK-003…005 |
-| `open_dup` | closes `b`, opens `dup`, then attempts `dup` again and records the refusal | VAL-WIN-007 |
+| `open_bounds` | opens `bounds` | VAL-WIN-004 |
+| `open_drag` | opens `drag` | VAL-WIN-019…022 |
+| `open_quiet` | opens `quiet` hidden | VAL-LIFE-016 |
+| `open_left` / `open_right` / `open_both_sides` | opens the remembered side windows | VAL-LIFE-009, VAL-DOCK-003…005 |
+| `open_dup` | opens `dup`, then attempts `dup` again and records the refusal | VAL-WIN-007 |
 | `open_reuse` / `reuse_cycle` | opens, closes and reopens `reuse` (title `Probe Reuse Again`) | VAL-WIN-008 |
 | `n_loop` | closes every window, then opens `n1`… until the host refuses | VAL-WIN-009 |
 | `n_more` | closes the highest `n` and opens the next | VAL-WIN-009 |
-| `close_all_windows` | closes every window; the plugin stays loaded | VAL-LIFE-005, VAL-WIN-010 |
-| `open_a` / `open_b` / `open_c` | reopen a launch window after a close | VAL-WIN-005, VAL-WIN-016 |
+| `close_all_windows` | closes every window; the plugin stays loaded | VAL-WIN-010 |
+| `open_a` / `open_b` / `open_c` | open a probe window (`a`, `b` or `c`) after a close | VAL-WIN-005, VAL-WIN-016 |
 
 ## Tools
 
@@ -108,7 +105,7 @@ returns `{ action, ok }`; an unknown name raises a sentence naming it.
 
 Both are listed in `zeron-plugin.json`, so a probe reaches them through
 Zeron's MCP server, and they keep answering after every window is closed
-(`VAL-LIFE-005`).
+(`VAL-LIFE-007`).
 
 ## What each window draws
 
@@ -141,7 +138,7 @@ Store keys, all under `imgui.windows.<window id>.*`:
 
 With `ZERON_ZGX_PLUGIN_LOG=1` the fixture prints, each line starting `probe:`:
 
-* `probe: ready windows=a,b,c,inspector,size,pos,pos2,bare ticks=0`
+* `probe: ready windows=a,b,bare,inspector ticks=0`
 * `probe: opened:<id>:<title>` and `probe: open:<id> refused: <sentence>`
 * `probe: closed:closecall <id>` — exactly one per close (the line
   `VAL-WIN-013` counts), from the plugin's own `close()` or the OS chrome
@@ -152,18 +149,18 @@ With `ZERON_ZGX_PLUGIN_LOG=1` the fixture prints, each line starting `probe:`:
 
 ## The cap, and why not all rows' windows at once
 
-The contract names windows for 11+ simultaneous rows (`a`, `b`, `c`,
-`inspector`, `size`, `pos`, `pos2`, `bare`, `drag`, `quiet`, `left`, `right`),
-while the canonical limit is 8 per plugin. The eight above are the ones rows
-need before any action runs; the rest are one `probe_run`/menu action away and
-each action frees its slot. The fixture logs the host's refusal, naming the
-limit, whenever a request exceeds it.
+The contract names windows for more simultaneous rows than the four launch
+windows, while the canonical limit is 8 per plugin. The four above are the
+ones rows need before any action runs; the rest are one `probe_run`/menu
+action away and each opens with no close first, leaving four slots free for
+them. The fixture logs the host's refusal, naming the limit, whenever a
+request exceeds it.
 
 ## Tests
 
 `cargo test --bin zeron-zgx fixtures_tests` loads this folder exactly as the
 bridge loads a snapshot (its `init.luau` beside its own SDK copy) with a fake
-host, and asserts its manifest, the eight launch windows' ids/titles/sizes/
+host, and asserts its manifest, the four launch windows' ids/titles/sizes/
 options, that no other window opens unasked, every probe action, the
 `probe_status`/`probe_run` tools, the per-window counters, the timer, the
 store keys and the single `closed:closecall` log path.
