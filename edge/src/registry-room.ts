@@ -13,7 +13,9 @@
  * Persistence model:
  * - `rows` — the state. Written synchronously inside the message event (write
  *   rate is index-scale: renames, status flips — never transcript traffic).
- * - `meta` — seq counter, gcFloor, per-device push attribution, backup marks.
+ *   A push writes nothing else: the head is derived from the rows.
+ * - `meta` — a lagging seq copy, gcFloor, per-device push attribution, backup
+ *   marks. Per-push bookkeeping waits for the alarm's flush (≤ 5 min).
  * - presence — memory-only by construction (15s client beats, rebroadcast).
  *
  * Cloud runners (the Worker stamps RUNNER_DEVICE_HEADER for runner bearers)
@@ -21,7 +23,8 @@
  * and every op they push must be on a row they host (registry-runner.ts).
  *
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
- * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
+ * auto-response pair; the one alarm does the bookkeeping flush and, daily,
+ * tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { chatHost, parentOf, runnerCanSee, runnerOpRefusal, type RunnerScope } from "./registry-runner";
@@ -46,6 +49,11 @@ const TOMBSTONE_RETAIN_MS = 30 * DAY_MS;
 const MAX_BATCH_OPS = 500;
 /** Serialized inbound frame budget. */
 const MAX_FRAME_BYTES = 1_000_000;
+/** How long per-push bookkeeping (the stored seq copy, per-device push
+ * counts) may lag. Writing it on every push was 3 of a
+ * one-row push's 5 billed rows; an active room now pays a few rows per
+ * flush instead. */
+const BOOKKEEPING_FLUSH_MS = 5 * 60_000;
 
 interface SocketState {
   userId: string;
@@ -109,6 +117,12 @@ export class RegistryRoom implements DurableObject {
   /** Every statement goes through here, so /stats can say what this object
    * has written since it started. */
   private readonly sql: WriteMeter;
+  /** device → push counts not yet in `meta.pushOutcomes`; /stats merges
+   * them. Eviction can lose the counts since the last flush: diagnostics. */
+  private readonly unflushedOutcomes = new Map<string, PushOutcome>();
+  /** When the bookkeeping flush is due; undefined = nothing to flush. The
+   * alarm it arms is durable, so evicting this field loses no flush. */
+  private flushAt?: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -147,8 +161,15 @@ export class RegistryRoom implements DurableObject {
     );
   }
 
+  /** The room's head comes from what the table holds, so it can never
+   * disagree with the rows: the highest row's seq, or the GC floor when
+   * tombstone GC removed the top rows (the floor is their max seq). Neither
+   * can regress. `meta.seq` is a lagging copy for older releases (see
+   * `flushBookkeeping`); `/reset` clears both, so the head drops to 0 there
+   * as before. */
   private seq(): number {
-    return Number(this.getMeta("seq") ?? "0");
+    const top = [...this.sql.exec("SELECT MAX(seq) AS top FROM rows")][0]?.top as number | null;
+    return Math.max(top ?? 0, this.gcFloor(), Number(this.getMeta("seq") ?? "0"));
   }
 
   private gcFloor(): number {
@@ -307,7 +328,7 @@ export class RegistryRoom implements DurableObject {
         connectedSockets: this.ctx.getWebSockets().length,
         // The ONLY per-device attribution surface — kept from the 2026-08-05
         // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>,
+        pushOutcomes: this.mergedOutcomes(),
         lastBackupSeq: Number(this.getMeta("backupSeq") ?? "0"),
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
         pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
@@ -440,6 +461,8 @@ export class RegistryRoom implements DurableObject {
       // rowToSeedOp) — the ws4 repair recipe, built in.
       this.sql.exec("DELETE FROM rows");
       this.sql.exec("DELETE FROM meta");
+      this.unflushedOutcomes.clear();
+      this.flushAt = undefined;
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "registry reset");
@@ -609,8 +632,14 @@ export class RegistryRoom implements DurableObject {
       touched.set(key, row);
     }
     if (applied > 0) {
+      // The rows are the only thing a push must store: their seq IS the new
+      // head (see `seq`). One event's writes commit together.
       for (const row of touched.values()) this.saveRow(row);
-      this.setMeta("seq", String(nextSeq));
+      // Rollback gate: a release that reads the stored seq must find it
+      // current in every room before it runs (see env.ts).
+      if (this.env.REGISTRY_ROOM_WRITE_THROUGH === "1") this.setMeta("seq", String(nextSeq));
+      // The backup deadline is a day out and the flush recordPush arms is
+      // sooner; the flush re-arms the alarm for the backup.
       this.markBackupDirty();
     }
     this.recordPush(device, true);
@@ -692,24 +721,20 @@ export class RegistryRoom implements DurableObject {
     if (targets.length === 0) {
       for (const note of notes) log.push({ at: now, chatId: note.chatId, category: note.category, device: "", result: "no targets" });
     }
-    this.appendPushLog(log);
+    // One stored write per batch that notifies: with deliveries to make, the
+    // entries go in once they carry their results.
     if (sends.length > 0) {
-      this.ctx.waitUntil(
-        Promise.all(sends.map((send) => send())).then(() => this.appendPushLog([], log))
-      );
+      this.ctx.waitUntil(Promise.all(sends.map((send) => send())).then(() => this.appendPushLog(log)));
+    } else {
+      this.appendPushLog(log);
     }
   }
 
   /** Keep the last few deliveries; `updated` entries (same objects, results
    * filled in after sending) replace their pending copies. */
-  private appendPushLog(entries: PushLogEntry[], updated: PushLogEntry[] = []): void {
-    let log = JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[];
-    for (const u of updated) {
-      const i = log.findIndex((e) => e.at === u.at && e.chatId === u.chatId && e.device === u.device && e.category === u.category);
-      if (i >= 0) log[i] = u;
-    }
-    log = [...log, ...entries].slice(-PUSH_LOG_MAX);
-    this.setMeta("pushLog", JSON.stringify(log));
+  private appendPushLog(entries: PushLogEntry[]): void {
+    const log = JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[];
+    this.setMeta("pushLog", JSON.stringify([...log, ...entries].slice(-PUSH_LOG_MAX)));
   }
 
   private handlePresence(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {
@@ -724,34 +749,94 @@ export class RegistryRoom implements DurableObject {
     }
   }
 
+  /** Per-device attribution on /stats. An accepted push is counted in
+   * memory and stored by the flush, so its count and `lastOkAt` are best
+   * effort: an object evicted before its flush (an idle room hibernates
+   * within seconds) loses them. A rejection, the signal the 2026-08-05
+   * incident was debugged by, is rare and stored at once with the rest. */
   private recordPush(device: string, ok: boolean): void {
     const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
+    const entry = this.unflushedOutcomes.get(key) ?? { ok: 0, rejected: 0, lastOkAt: 0 };
     if (ok) {
       entry.ok += 1;
       entry.lastOkAt = Date.now();
     } else {
       entry.rejected += 1;
     }
-    outcomes[key] = entry;
-    this.setMeta("pushOutcomes", JSON.stringify(outcomes));
+    this.unflushedOutcomes.set(key, entry);
+    if (ok) {
+      this.armFlush();
+    } else {
+      this.setMeta("pushOutcomes", JSON.stringify(this.mergedOutcomes()));
+      this.unflushedOutcomes.clear();
+    }
   }
 
+  /** Stored push counts plus the ones still in memory. */
+  private mergedOutcomes(): Record<string, PushOutcome> {
+    const outcomes = JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>;
+    for (const [key, delta] of this.unflushedOutcomes) {
+      const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
+      entry.ok += delta.ok;
+      entry.rejected += delta.rejected;
+      entry.lastOkAt = Math.max(entry.lastOkAt, delta.lastOkAt);
+      outcomes[key] = entry;
+    }
+    return outcomes;
+  }
+
+  /** Arm the bookkeeping flush unless it already is. */
+  private armFlush(): void {
+    if (this.flushAt !== undefined) return;
+    this.flushAt = Date.now() + BOOKKEEPING_FLUSH_MS;
+    void this.scheduleAlarm();
+  }
+
+  /** Store what pushes only kept in memory: the seq copy older releases
+   * read, and the accepted-push counts. Each only when it changed. */
+  private flushBookkeeping(): void {
+    const head = this.seq();
+    if (head !== Number(this.getMeta("seq") ?? "0")) this.setMeta("seq", String(head));
+    if (this.unflushedOutcomes.size > 0) {
+      this.setMeta("pushOutcomes", JSON.stringify(this.mergedOutcomes()));
+      this.unflushedOutcomes.clear();
+    }
+    this.flushAt = undefined;
+  }
+
+  /** Mark the table for the nightly backup, once per backup cycle: the flag
+   * and its deadline only clear together, so a room with both is already
+   * marked. */
   private markBackupDirty(): void {
-    this.setMeta("backupDirty", "1");
-    void this.ctx.storage.getAlarm().then((existing) => {
-      if (existing === null) {
-        this.sql.alarm();
-        void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
-      }
-    });
+    if (this.getMeta("backupDirty") !== "1") this.setMeta("backupDirty", "1");
+    if (this.getMeta("backupDue") === undefined) this.setMeta("backupDue", String(Date.now() + DAY_MS));
   }
 
-  /** Daily alarm: tombstone GC + nightly R2 backup of the full table. */
-  async alarm(): Promise<void> {
-    if (this.getMeta("backupDirty") !== "1") return; // idle: stop the chain
+  /** The one durable alarm serves the bookkeeping flush and the nightly
+   * backup: arm it for whichever is due first, unless it already is. */
+  private async scheduleAlarm(): Promise<void> {
+    const backup =
+      this.getMeta("backupDirty") === "1" ? Number(this.getMeta("backupDue") ?? Date.now() + DAY_MS) : Infinity;
+    const next = Math.min(backup, this.flushAt ?? Infinity);
+    if (!Number.isFinite(next)) return;
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing !== null && existing <= next) return;
+    this.sql.alarm();
+    await this.ctx.storage.setAlarm(next);
+  }
 
+  /** The flush, and once a day the tombstone GC + R2 backup of the table. */
+  async alarm(): Promise<void> {
+    this.flushBookkeeping();
+    const due = Number(this.getMeta("backupDue") ?? "0");
+    // A room marked by a release before the deadline existed has no
+    // deadline: its alarm was armed for the backup, so back up now.
+    if (this.getMeta("backupDirty") === "1" && due <= Date.now()) await this.backup();
+    // Idle: nothing re-arms, and the chain stops.
+    await this.scheduleAlarm();
+  }
+
+  private async backup(): Promise<void> {
     // 1. Tombstone GC. Raising gcFloor to the purged rows' max seq forces a
     //    full resync for any cursor that might have missed a purged delete.
     const horizon = Date.now() - TOMBSTONE_RETAIN_MS;
@@ -781,6 +866,7 @@ export class RegistryRoom implements DurableObject {
       this.setMeta("backupSeq", String(seq));
     }
     this.setMeta("backupDirty", "0");
+    this.sql.exec("DELETE FROM meta WHERE key = 'backupDue'");
   }
 }
 
