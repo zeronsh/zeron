@@ -655,7 +655,8 @@ local function filter_notice(): Node
 end
 
 -- You, at the foot: your name, else your email; signed out, the
--- workspace's ("Local", as Zeron's: kept on this device).
+-- workspace's ("Local", as Zeron's: kept on this device); nothing until the
+-- engine has said which.
 type User = { id: string?, name: string }
 local function user(): User
 	local u = auth.user:get()
@@ -667,6 +668,9 @@ local function user(): User
 		local settings_store: any = boundary.load("@app/screens/settings/store")
 		local avatar = if settings_store then settings_store.photo_file(settings_store.photo()) else ""
 		return { id = u.id, name = if name and name ~= "" then name else fallback, avatar = if avatar ~= "" then avatar else nil }
+	end
+	if auth.state:get() == "restoring" then
+		return { name = "" }
 	end
 	return { name = locale.s("shell.sidebar.local") }
 end
