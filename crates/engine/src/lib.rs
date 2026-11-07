@@ -1291,7 +1291,12 @@ impl Engine {
         wake_update::start(runtime.core());
 
         tokio::select! {
-            result = shutdown_signal() => result?,
+            result = shutdown_signal() => {
+                // Stopped from outside mid-trial (a sleep, a restart): not the
+                // release's fault, and the record should say so.
+                zeron_update::transaction::note_trial_interrupted();
+                result?
+            }
             requested = stop_rx.recv() => {
                 if requested.is_some() {
                     tracing::info!("headless shutdown requested over IPC");
