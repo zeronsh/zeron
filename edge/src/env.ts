@@ -19,6 +19,11 @@ export interface Env {
   WORKOS_CLIENT_ID: string;
   /** "workos" (verify AuthKit JWTs) or "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
+  /** "1": RegistryRoom also stores its seq on every push. Set this and wait
+   * out one bookkeeping flush (5 min) before rolling back past the release
+   * that derives the seq from the rows: older code reads the stored copy,
+   * and a stale one would stamp new rows below cursors clients already hold. */
+  REGISTRY_ROOM_WRITE_THROUGH?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;
