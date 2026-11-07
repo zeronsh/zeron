@@ -83,3 +83,39 @@ test("wallpaper: a new chat's art holds still as the sidebar folds and the panel
 	expect(nx).to_be(x)
 	expect(app:error()).to_be_nil()
 end)
+
+-- The art's layer as the shell's tree shows it: its node and whether it's
+-- hidden ("" when there's none).
+local function layer(app: any): (string, boolean)
+	for line in app:tree("#shell"):gmatch("[^\n]+") do
+		if line:find(" #wallpaper-layer", 1, true) then
+			return line:match("@(%d+)") or "", line:find(" hidden", 1, true) ~= nil
+		end
+	end
+	return "", false
+end
+
+test("wallpaper: a new chat's picture stays built while a session shows, and is back at once", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 900)
+	app:frames(30)
+	app:set_state("shell_wallpaper_image", { path = "assets/art/plate-1-night.jpg", name = "night", w = 2100, h = 700, x = 0.5, y = 0.5, zoom = 1 })
+	app:set_state("shell_wallpaper", "image")
+	app:set_state("shell_wallpaper_effect", "dither")
+	app:frames(30)
+	local node, hidden = layer(app)
+	expect(node).never.to_be("")
+	expect(hidden).to_be(false)
+	-- A session: the art is hidden, not torn down (it was, and a new chat
+	-- then decoded it and faded it in anew, a third of a second late).
+	app:command("shell.session_1")
+	app:frames(30)
+	expect(app:state("shell_route_path")).never.to_be("/")
+	expect({ layer(app) }).to_equal({ node, true })
+	-- A new chat again: the same art, showing from the first frames.
+	app:command("shell.new_chat")
+	app:frames(2)
+	expect({ layer(app) }).to_equal({ node, false })
+	expect(app:count("#wallpaper-layer")).to_be(1)
+	expect(app:error()).to_be_nil()
+end)

@@ -172,10 +172,17 @@ function M.Wallpaper(props: Props): Node
 	local function effect(): string
 		return read(props.effect, "none")
 	end
-	-- What stands in it ("" nothing).
+	local function shown(): boolean
+		return props.shown == nil or props.shown()
+	end
+	-- What stands in it ("" nothing). A picture stays while the page is
+	-- away (hidden): it shows again at once, decoded and drawn, not faded
+	-- in anew each time a new chat opens. A plugin's art goes (it may move).
 	local function what(): string
-		local shown = props.shown == nil or props.shown()
-		return if shown then props.key() else ""
+		if shown() or (props.picture and props.picture()) then
+			return props.key()
+		end
+		return ""
 	end
 	-- What stands in it and the effect it's drawn through ("" nothing).
 	local function key(): string
@@ -202,62 +209,74 @@ function M.Wallpaper(props: Props): Node
 	-- old as the old fades out. What stands there is built straight in the
 	-- layer's box (no presence of its own between: a plugin's `ui.change`
 	-- doesn't reach a place inside a nested presence).
-	return ui.presence(key, function(k: string): Node
-		if k == "" then
-			return ui.div {}
-		end
-		local how, w = string.match(k, "^([^|]*)|(.*)$")
-		how = string.match(how or "", "^[^:]*") or "none"
-		local el = ui.ref()
-		local picture = if props.picture then props.picture() else nil
-		-- What changes in place: set on its layer as it changes.
-		ui.effect(function()
-			local p = effects.params { strength = strength(), threshold = threshold(), faded = faded() }
-			local node: any = el:peek()
-			if node then
-				anime.utils.set(node, { layerParam0 = p[1][1], layerParam1 = p[1][2], layerParam3 = p[1][4] })
-			end
-		end)
-		-- The art's box: the window's width from the box's right edge, moved
-		-- right by what stands beside the box; the effect drawn over it (on
-		-- the picture's grid: the box is what the picture covers).
-		return ui.div {
-			ref = el,
-			-- (Named, for tests.)
-			id = "wallpaper-layer",
-			absolute = true,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			w = props.width or "100%",
-			x = props.beside,
-			overflow = "hidden",
-			provide = props.provide,
-			layer_shader = effects.shader(how),
-			layer_params = effects.params {
-				strength = strength(),
-				threshold = threshold(),
-				light = light(),
-				faded = faded(),
-				picture = picture,
-			},
-			props.content(w or ""),
-		}
-	end, {
+	-- (Hidden, not gone, while the page is away.)
+	return ui.div {
 		absolute = true,
 		left = 0,
 		right = 0,
 		top = 0,
 		bottom = 0,
 		pointer_events = "none",
-		-- The new art fades in as itself (the box the effect already draws
-		-- through, not a box of its own inside it) over the old leaving.
-		-- The old holds on as the new comes (an ease in against the new's
-		-- ease out), so the two together never let the card show between:
-		-- both easing out dimmed the art by a fifth mid-way.
-		enter = { opacity = { 0, 1 }, duration = FADE, ease = "out(3)" },
-		exit = { opacity = 0, duration = FADE, ease = "in(3)" },
-	})
+		opacity = function(): number
+			return if shown() then 1 else 0
+		end,
+		ui.presence(key, function(k: string): Node
+			if k == "" then
+				return ui.div {}
+			end
+			local how, w = string.match(k, "^([^|]*)|(.*)$")
+			how = string.match(how or "", "^[^:]*") or "none"
+			local el = ui.ref()
+			local picture = if props.picture then props.picture() else nil
+			-- What changes in place: set on its layer as it changes.
+			ui.effect(function()
+				local p = effects.params { strength = strength(), threshold = threshold(), faded = faded() }
+				local node: any = el:peek()
+				if node then
+					anime.utils.set(node, { layerParam0 = p[1][1], layerParam1 = p[1][2], layerParam3 = p[1][4] })
+				end
+			end)
+			-- The art's box: the window's width from the box's right edge, moved
+			-- right by what stands beside the box; the effect drawn over it (on
+			-- the picture's grid: the box is what the picture covers).
+			return ui.div {
+				ref = el,
+				-- (Named, for tests.)
+				id = "wallpaper-layer",
+				absolute = true,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				w = props.width or "100%",
+				x = props.beside,
+				overflow = "hidden",
+				provide = props.provide,
+				layer_shader = effects.shader(how),
+				layer_params = effects.params {
+					strength = strength(),
+					threshold = threshold(),
+					light = light(),
+					faded = faded(),
+					picture = picture,
+				},
+				props.content(w or ""),
+			}
+		end, {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			pointer_events = "none",
+			-- The new art fades in as itself (the box the effect already draws
+			-- through, not a box of its own inside it) over the old leaving.
+			-- The old holds on as the new comes (an ease in against the new's
+			-- ease out), so the two together never let the card show between:
+			-- both easing out dimmed the art by a fifth mid-way.
+			enter = { opacity = { 0, 1 }, duration = FADE, ease = "out(3)" },
+			exit = { opacity = 0, duration = FADE, ease = "in(3)" },
+		}),
+	}
 end
 
 return M
