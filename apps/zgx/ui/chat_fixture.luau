@@ -342,6 +342,19 @@ stub.queue = function(id: string, op: any, failed: (() -> ())?)
 		end
 	end
 end
+-- The engine's copy of a steered message landing (a moment after the
+-- steer): the queued row's id is its prompt's in the transcript, and it
+-- leaves the queue.
+ui.command {
+	id = "steer_lands",
+	title = "The steered message joins the transcript",
+	run = function()
+		store.messages:push { id = "q1", role = "user", text = "Queued words", attachments = {} }
+		if opened then
+			publish(opened, { queue = {} })
+		end
+	end,
+}
 ui.command {
 	id = "steer_fails",
 	title = "The next steer doesn't go",

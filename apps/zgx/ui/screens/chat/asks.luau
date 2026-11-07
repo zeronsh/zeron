@@ -17,6 +17,7 @@
 
 local store = require("@app/screens/chat/store")
 local Carried = require("@app/screens/chat/carried")
+local T = require("@ds/transcript")
 
 local M = {}
 
@@ -112,6 +113,9 @@ export type Bind = {
 	asked: State<any>,
 	-- A notice, when a queued message's send or steer doesn't go.
 	say: ((tone: string, key: string) -> ())?,
+	-- Its transcript's name (ds/transcript's: a side chat's); none, the
+	-- chat page's.
+	name: string?,
 }
 
 function M.bind(b: Bind): { [string]: any }
@@ -202,11 +206,15 @@ function M.bind(b: Bind): { [string]: any }
 		on_queue_send = function(item: string)
 			local id = b.id()
 			if id then
-				store.queue(id, { op = "send", item = item }, function()
-					if b.say then
-						b.say("danger", "chat.composer.didnt_send")
-					end
-				end)
+				-- Its prompt glides to the top and holds the runway, as a
+				-- sent one does (the host's copy has the queued row's id).
+				T.steer(function()
+					store.queue(id, { op = "send", item = item }, function()
+						if b.say then
+							b.say("danger", "chat.composer.didnt_send")
+						end
+					end)
+				end, item, b.name)
 			end
 		end,
 		on_queue_remove = function(item: string)

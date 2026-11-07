@@ -273,6 +273,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		chosen = chosen,
 		asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		-- (A steer glides in its own transcript, as its sends do.)
+		name = name,
 		say = function(tone: string, key: string)
 			notice:set({ tone = tone, text = locale.s(key), dismissable = true })
 		end,
