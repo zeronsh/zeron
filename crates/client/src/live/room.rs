@@ -711,6 +711,8 @@ pub(crate) struct RoomDeps {
     pub route: RelayRoute,
     /// Newest relay journal row [`load_local`] replayed.
     pub journaled: i64,
+    /// Holds the first join until the platform has said whether there's a network.
+    pub path: super::path_gate::PathGate,
 }
 
 impl Room {
@@ -851,9 +853,14 @@ impl Room {
         let device_id = deps.device_id.clone();
         let on_status = deps.on_status.clone();
         let on_applied = deps.on_applied.clone();
+        let path = deps.path.clone();
         crate::runtime::shared().spawn(async move {
             let mut backoff = JOIN_RETRY_BASE;
             let client = loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = path.ready() => {}
+                }
                 let Some(room) = weak.upgrade() else { return };
                 let cursor = room.persister.cursor();
                 let status = room.status.clone();

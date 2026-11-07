@@ -78,6 +78,10 @@ pub(crate) struct ClientInner {
     connectivity_tracker: Mutex<ConnectivityTracker>,
     connectivity: RwLock<Connectivity>,
     path_online: AtomicBool,
+    /// The platform's path reports, None until its first: connects wait on it.
+    path_report: tokio::sync::watch::Sender<Option<bool>>,
+    /// When this client was built, for how long a connect waits on that first report.
+    started_at: tokio::time::Instant,
     foreground: AtomicBool,
     synced: AtomicBool,
     pub(crate) harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
@@ -197,6 +201,11 @@ impl ClientInner {
             core.ensure_room(self);
             core.refresh_relay(self);
         }
+    }
+
+    /// What a connect waits on before it dials: see [`crate::live::path_gate`].
+    pub(crate) fn path_gate(&self) -> crate::live::path_gate::PathGate {
+        crate::live::path_gate::PathGate::new(self.path_report.subscribe(), self.started_at)
     }
 
     /// Whether `device` has beaten recently enough to be worth a dial.
@@ -642,6 +651,8 @@ impl Client {
                 ..Default::default()
             }),
             path_online: AtomicBool::new(true),
+            path_report: tokio::sync::watch::Sender::new(None),
+            started_at: tokio::time::Instant::now(),
             foreground: AtomicBool::new(true),
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
@@ -1665,6 +1676,12 @@ impl Client {
     /// "unsatisfied" — ambiguity stays online.
     pub fn set_network_online(&self, online: bool) {
         let was = self.inner.path_online.swap(online, Ordering::AcqRel);
+        // The first report releases the connects waiting on it, whatever it says.
+        self.inner.path_report.send_if_modified(|path| {
+            let changed = *path != Some(online);
+            *path = Some(online);
+            changed
+        });
         if !self.inner.is_demo() {
             // Parks/un-parks every sync backoff in the process (zeron-sync).
             zeron_sync::wake::set_path_online(online);
