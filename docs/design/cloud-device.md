@@ -363,7 +363,7 @@ secret later without touching records' format.
 | `codex` | ChatGPT OAuth token set from `codex login` (`id_token`, `access_token`, `refresh_token`, `account_id`) | `POST https://auth.openai.com/oauth/token` (`grant_type=refresh_token`, Codex public client id) |
 | `claude` | Claude Code credential blob from a sign-in through Claude's own OAuth flow (`claudeAiOauth`), or a long-lived `claude setup-token` token | `POST https://platform.claude.com/v1/oauth/token` (`grant_type=refresh_token`, Claude Code client id); setup tokens never refresh |
 | `github` | GitHub App user token + refresh token (never granted; see "GitHub") | `POST https://github.com/login/oauth/access_token` with `GITHUB_APP_CLIENT_ID/SECRET` (vault secrets) |
-| `anthropic-key` | User's own Anthropic API key | none (static) |
+| `anthropic-key` | User's own Anthropic API key, optionally with the base URL of the LLM gateway or proxy it is for (`https://`, no `/v1`; sealed with the key, its host shown in the label) | none (static) |
 | `openai-key` | User's own OpenAI API key | none (static) |
 
 **Claude subscriptions.** Anthropic's published Claude Code terms restrict third parties from
@@ -388,7 +388,12 @@ API key (`anthropic-key`).
   github.com; the *vault* polls GitHub and stores the result, so the token never transits a
   device. Separately, the user installs the App on the accounts / repositories Cloud may reach
   (`githubInstallUrl` in the vault status → `github.com/apps/{slug}/installations/new`).
-- **API keys**: pasted on the laptop, uploaded once.
+- **API keys**: pasted on the laptop (or the phone), uploaded once. An Anthropic key may come
+  with a base URL; uploading the same key again (with another base URL, or none) replaces its
+  account. Both apps judge the base URL as it is typed by one rule set
+  (`VaultProvider::check_base_url`, `zeron-proto`), so a refusal reads the same on the desktop
+  dialog, the phone's sheet and the engine, and both list a gateway key by its host
+  (`api_key_label` over the vault's `…abcd · host` label).
 
 The vault only refreshes. It owns each refresh token from upload on.
 
@@ -396,8 +401,9 @@ The vault only refreshes. It owns each refresh token from upload on.
 
 `POST /vault/{orgId}/grant {provider, deviceId, ts, sig}` (sig by the device key, same scheme
 as runner tokens with prefix `zeron-vault-grant`) → `{provider, accessToken, expiresAt,
-accountId?, generation}`. A grant requires: the device is enrolled and not revoked, the device
-is in the credential's `authorizedDevices`, the user is not disabled, and the global kill switch
+accountId?, baseUrl?, generation}` (`baseUrl`: an `anthropic-key` that names one). A grant
+requires: the device is enrolled and not revoked, the device is in the credential's
+`authorizedDevices`, the user is not disabled, and the global kill switch
 (`VAULT_DISABLED=1`) is off. Grants are the provider's own access token, refreshed by the vault
 when within 10 minutes of expiry (Codex: when `last_refresh` is older than 7 days or the JWT has
 <1 h left). The consumer caches a grant until expiry (offline fallback) and never sees a
@@ -492,8 +498,10 @@ refresh contract changes is caught within a day, before users' grants start fail
   Codex from a vault grant (managed `CODEX_HOME` with the access token, empty refresh token;
   re-granted before expiry), Claude from a vault grant (Claude Code's credential file with the
   access token and an empty refresh token, rewritten before expiry), else the native sandbox
-  login, else `anthropic-key`. GitHub grants (App installation tokens for the session
-  repository's owner, requested with `repo`) become `GH_TOKEN`/`GITHUB_TOKEN` at spawn and
+  login, else `anthropic-key` (`ANTHROPIC_API_KEY`, plus `ANTHROPIC_BASE_URL` when the key
+  names a gateway — only then, so a subscription login never reaches a key's gateway).
+  GitHub grants (App installation tokens for the session repository's owner, requested
+  with `repo`) become `GH_TOKEN`/`GITHUB_TOKEN` at spawn and
   are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
   wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git`
   keeps working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a

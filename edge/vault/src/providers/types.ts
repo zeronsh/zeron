@@ -46,6 +46,7 @@ export interface GrantMaterial {
   readonly account?: string;
   readonly scopes?: readonly string[];
   readonly subscriptionType?: string;
+  readonly baseUrl?: string;
 }
 
 export interface ProviderAdapter<S> {
