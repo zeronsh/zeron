@@ -569,8 +569,8 @@ fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
                 MenuSection("Move to section", actions.sections.map { (id, name) ->
                     MenuChoice(name, row.sectionId == id, leading = { ZIcon(ZIcons.Folder, null, Modifier.size(20.dp)) }) { model.move(row.id, id) }
                 } + listOf(
-                    MenuChoice("No section", row.sectionId == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }) { model.move(row.id, null) },
-                    MenuChoice("New section…", false, leading = { ZIcon(ZIcons.Plus, null, Modifier.size(20.dp)) }) { actions.newSection(row.id) },
+                    MenuChoice("No section", row.sectionId == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }, fixed = true) { model.move(row.id, null) },
+                    MenuChoice("New section…", false, leading = { ZIcon(ZIcons.Plus, null, Modifier.size(20.dp)) }, fixed = true) { actions.newSection(row.id) },
                 )),
             ),
         )

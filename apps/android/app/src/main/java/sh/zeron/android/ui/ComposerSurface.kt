@@ -146,6 +146,8 @@ class MenuChoice(
     val selected: Boolean = false,
     val supporting: String? = null,
     val leading: (@Composable () -> Unit)? = null,
+    /** Stays put when a long menu is sorted ("No section", "New section…"). */
+    val fixed: Boolean = false,
     val onClick: () -> Unit,
 )
 
