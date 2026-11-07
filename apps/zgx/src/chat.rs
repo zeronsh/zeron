@@ -479,6 +479,9 @@ struct Open {
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
     queue: Vec<Json>,
+    /// Its messages on their way and not yet taken by its agent, as the engine's
+    /// `WatchWaitingMessages` lists them (none from an engine without it).
+    waiting: Vec<Json>,
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
@@ -1020,17 +1023,7 @@ impl Chats {
             return;
         }
         let harnesses: Vec<Json> = match list {
-            Ok(list) => list
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|h| {
-                    h["id"].as_str() != Some("mock")
-                        && h["installed"].as_bool() != Some(false)
-                        && h["enabled"].as_bool() != Some(false)
-                })
-                .cloned()
-                .collect(),
+            Ok(list) => list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect(),
             Err(error) => {
                 // (Unreachable: this device's catalog stands in, as before.)
                 eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
@@ -1087,17 +1080,7 @@ impl Chats {
             }
             let params = json!({ "targetDeviceId": device, "includeRegistry": true });
             let Ok(list) = engine::get().call("ListHarnesses", params).await else { continue };
-            let harnesses: Vec<Json> = list
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|h| {
-                    h["id"].as_str() != Some("mock")
-                        && h["installed"].as_bool() != Some(false)
-                        && h["enabled"].as_bool() != Some(false)
-                })
-                .cloned()
-                .collect();
+            let harnesses: Vec<Json> = list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect();
             let mut models = HashMap::new();
             for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
                 let params = json!({ "harness": id, "targetDeviceId": device });
@@ -1476,8 +1459,20 @@ impl View {
                 view.publish_session();
             }
         });
+        // (An engine from before it ends the watch at once: nothing waits, as before.)
+        let weak = Rc::downgrade(self);
+        let waiting = rpc.watch("WatchWaitingMessages", json!({ "chatId": id }), move |item| {
+            if let Some(view) = weak.upgrade()
+                && view.generation.get() == generation
+            {
+                if let Some(open) = view.open.borrow_mut().as_mut() {
+                    open.waiting = item["items"].as_array().cloned().unwrap_or_default();
+                }
+                view.publish_session();
+            }
+        });
         if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.watches = vec![transcript, queue];
+            open.watches = vec![transcript, queue, waiting];
         }
     }
 
@@ -4274,6 +4269,11 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         .iter()
         .map(|q| {
             let mut fields = vec![("id", s(&q["id"])), ("text", s(&q["text"]))];
+            // When it was queued (seconds): one that waited long is said so
+            // before it goes.
+            if let Some(ms) = q["issuedAt"].as_f64() {
+                fields.push(("at", Value::Num(ms / 1000.)));
+            }
             let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));
@@ -4309,6 +4309,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),
         ("ask", ask),
         ("queue", Value::List(queue.into())),
+        ("waiting", waiting_value(&open.waiting)),
         ("todos", todos(open)),
         ("tasks", Value::List(tasks.into())),
     ];
@@ -4449,6 +4450,43 @@ fn seconds(value: &Json) -> Option<i64> {
         out -= sign * (oh * 3600 + om * 60);
     }
     Some(out)
+}
+
+/// A chat's messages not yet taken by its agent: each its id, the message it
+/// becomes, its words, when it went out and when it stops being run (seconds,
+/// as the scripts' times are), whether it's still uploading here, and why it
+/// stopped trying, if it did.
+fn waiting_value(items: &[Json]) -> Value {
+    let secs = |v: &Json| v.as_f64().map_or(Value::Nil, |ms| Value::Num(ms / 1000.));
+    let s = |v: &Json| v.as_str().filter(|t| !t.is_empty()).map_or(Value::Nil, Value::from);
+    Value::List(
+        items
+            .iter()
+            .map(|w| {
+                Value::record([
+                    ("id", s(&w["id"])),
+                    ("message", s(&w["messageId"])),
+                    ("text", s(&w["prompt"])),
+                    ("sent", secs(&w["sentAt"])),
+                    ("expires", secs(&w["expiresAt"])),
+                    ("held", Value::Bool(w["held"].as_bool() == Some(true))),
+                    ("failure", s(&w["failure"])),
+                ])
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+/// Whether a device's agent is one its composer offers. On a Cloud session's
+/// machine, one Cloud has no account for still is: the chat already runs it, so
+/// its model must read as itself (a new chat on Cloud, picked by the logical
+/// device, still offers only those it can run).
+fn offered(h: &Json, device: &str) -> bool {
+    let session_machine = device.starts_with("cloud-");
+    h["id"].as_str() != Some("mock")
+        && h["installed"].as_bool() != Some(false)
+        && (session_machine || h["enabled"].as_bool() != Some(false))
 }
 
 fn stale(updated: &Json) -> bool {
@@ -5640,6 +5678,40 @@ mod tests {
         // Failed, then shown on another try: the stumble isn't drawn.
         let retried = blocks(&reply(vec![mcp("s1", true), mcp("s2", false), image("i1", "a.png")]));
         assert_eq!(kinds(&retried), ["images"]);
+    }
+
+    #[test]
+    fn waiting_messages_read_in_seconds_with_their_failure() {
+        let items = vec![
+            json!({ "id": "c1", "chatId": "s2", "messageId": "m1", "prompt": "Ship it", "issuedBy": "mac",
+                "sentAt": 1_800_000_000_000_i64, "expiresAt": 1_800_604_800_000_i64 }),
+            json!({ "id": "o1", "chatId": "s2", "prompt": "With files", "issuedBy": "mac", "sentAt": 1_800_000_000_000_i64,
+                "held": true, "failure": "too many files are waiting for Cloud machines to collect them; retry once one has" }),
+        ];
+        let out: Json = serde_json::from_str(&super::waiting_value(&items).to_json()).unwrap();
+        assert_eq!(out[0]["text"], "Ship it");
+        assert_eq!(out[0]["message"], "m1");
+        assert_eq!(out[0]["sent"], 1_800_000_000.0);
+        assert_eq!(out[0]["expires"], 1_800_604_800.0);
+        assert_eq!(out[0]["held"], false);
+        assert!(out[0]["failure"].is_null());
+        assert_eq!(out[1]["held"], true);
+        assert!(out[1]["expires"].is_null());
+        assert!(out[1]["failure"].as_str().unwrap().starts_with("too many files"));
+    }
+
+    #[test]
+    fn a_cloud_chats_own_agent_stays_offered_without_an_account() {
+        let codex = json!({ "id": "codex", "installed": true, "enabled": false });
+        // On the chat's own machine: listed, so its model reads as itself.
+        assert!(super::offered(&codex, "cloud-s-chat-1"));
+        // Anywhere else (a computer, the logical Cloud device a new chat picks
+        // from): only what can run there.
+        assert!(!super::offered(&codex, "cloud"));
+        assert!(!super::offered(&codex, "mac"));
+        assert!(!super::offered(&json!({ "id": "mock" }), "cloud-s-chat-1"));
+        assert!(!super::offered(&json!({ "id": "claude-code", "installed": false }), "cloud-s-chat-1"));
+        assert!(super::offered(&json!({ "id": "claude-code" }), "mac"));
     }
 
     #[test]

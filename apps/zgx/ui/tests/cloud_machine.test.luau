@@ -6,6 +6,7 @@
 -- default size is on ui/shell_fixture.luau.
 
 local logic = require("../screens/chat/cloud_machine")
+local TurnState = require("../screens/chat/turn_state")
 
 -- (All findable by one filter: `zgx test ui "Cloud machine:"`.)
 local named_test = test
@@ -244,13 +245,135 @@ test("a machine in a turn waits for it to end before it restarts", function()
 	expect(p.none_fit).to_be(false)
 end)
 
-test("the default's options are every size, with specs and rate, none disabled", function()
-	local options = logic.default_options(MACHINES)
-	expect(#options).to_be(4)
-	expect(options[4].value).to_be("xlarge")
-	expect(options[4].label).to_be("Extra large")
-	expect(options[4].description).to_be("8 vCPU · 32 GB memory · 400 GB disk · 5.56× credits")
-	expect((options[4] :: any).disabled).to_be(nil)
+test("the default's rows are every size on the grid, the one chosen Current", function()
+	local rows = logic.default_rows(MACHINES, "large")
+	expect(#rows).to_be(4)
+	expect(rows[4].name).to_be("Extra large")
+	expect(table.concat(rows[4].cells, "|")).to_be("8 vCPU|32 GB memory|400 GB disk|5.56× credits")
+	expect(rows[4].trail).to_be(nil)
+	expect(rows[3].current).to_be(true)
+	expect(rows[3].trail).to_be("Current")
+	-- (Nothing's out of reach as a default.)
+	expect((rows[1] :: any).disabled).to_be(nil)
+end)
+
+-- ── The working word ───────────────────────────────────────────────────────
+
+local function turn(fields: any): string?
+	local t: any = { streaming = true, live = false, started = NOW - 120, now = NOW }
+	for k, v in fields do
+		t[k] = v
+	end
+	local said = TurnState.of(t)
+	return if said then said.text else nil
+end
+
+test("a turn that's heard from keeps its working word", function()
+	expect(turn({ live = true })).to_be(nil)
+	expect(turn({ live = true, cloud = session({ state = "ready" }) })).to_be(nil)
+	expect(turn({ streaming = false })).to_be(nil)
+end)
+
+test("a reply its host stopped reporting reads as interrupted, not working", function()
+	expect(turn({})).to_be("Interrupted")
+	expect(turn({ cloud = session({ state = "ready" }) })).to_be("Interrupted")
+	-- (Just begun, it may be heard of before its session says so.)
+	expect(turn({ started = NOW - 5 })).to_be(nil)
+	expect(turn({ started = NOW - TurnState.GRACE - 1 })).to_be("Interrupted")
+end)
+
+test("a Cloud machine's state is said in the working word's place, even while it reads live", function()
+	expect(turn({ live = true, cloud = session({ state = "sleeping" }) })).to_be("Interrupted — its Cloud machine went to sleep")
+	expect(turn({ cloud = session({ state = "error" }) })).to_be("Interrupted — its Cloud machine failed")
+	expect(turn({ cloud = session({ wake_blocked = { reason = "disk_too_small", needed = 150 } }) })).to_be("Interrupted — its Cloud machine can't wake")
+	expect(turn({ cloud = session({ state = "data_expired" }) })).to_be("Interrupted — its Cloud machine's files are gone")
+	local resuming = TurnState.of({ streaming = true, live = false, now = NOW, cloud = session({ state = "starting" }) }) :: any
+	expect(resuming.text).to_be("Resuming — waking its Cloud machine…")
+	expect(resuming.spinner).to_be(true)
+end)
+
+test("a computer gone quiet is named", function()
+	expect(turn({ host_unreachable = true, host = "Build box" })).to_be("Interrupted — can't reach Build box")
+	expect(turn({ live = true, host_unreachable = true, host = "Build box" })).to_be("Interrupted — can't reach Build box")
+end)
+
+test("a prompt on its way says its machine is waking, and otherwise keeps Sending", function()
+	expect(turn({ sending = true })).to_be(nil)
+	expect(turn({ sending = true, cloud = session({ state = "starting" }) })).to_be("Waking its Cloud machine…")
+	expect(turn({ sending = true, cloud = session({ state = "sleeping" }) })).to_be(nil)
+	expect(turn({ sending = true, host_unreachable = true })).to_be(nil)
+end)
+
+-- ── Held sends and long waits ──────────────────────────────────────────────
+
+test("asleep is quiet, until there's something to send", function()
+	local s = session({ state = "sleeping" })
+	expect((logic.line(s) :: any).quiet).to_be(true)
+	expect((logic.line(s, { intent = true }) :: any).quiet).to_be(false)
+	expect((logic.line(session({ state = "starting" })) :: any).quiet).to_be(nil)
+end)
+
+test("a send is held for a machine that can't wake, or whose files are gone", function()
+	expect(logic.hold_reason(session({ wake_blocked = { reason = "disk_too_small", needed = 150 } }))).to_be("size")
+	expect(logic.hold_reason(session({ state = "data_expired" }))).to_be("fresh")
+	expect(logic.hold_reason(session({}))).to_be(nil)
+	expect(logic.hold_reason(session({ state = "ready" }))).to_be(nil)
+	expect(logic.hold_reason(nil)).to_be(nil)
+end)
+
+test("ages read in the largest whole unit", function()
+	expect(logic.age_words(90)).to_be("1 minute ago")
+	expect(logic.age_words(40 * 60)).to_be("40 minutes ago")
+	expect(logic.age_words(5 * 3600)).to_be("5 hours ago")
+	expect(logic.age_words(3 * 86400 + 60)).to_be("3 days ago")
+end)
+
+test("held messages are said in the alert's own line, no alert of their own", function()
+	local s = session({ wake_blocked = { reason = "disk_too_small", needed = 150 } })
+	local a = alert_of(s)
+	local d = logic.deck_alert(a, logic.picker(s, MACHINES, a), { held = 1, reason = "size" })
+	expect(d.detail).to_be("Your message will send once you pick a size")
+	expect(d.title).to_be("Machine can't wake")
+	local e = session({ state = "data_expired" })
+	expect(logic.deck_alert(alert_of(e), nil, { held = 2, reason = "fresh" }).detail).to_be("Your message will send once a fresh machine starts")
+end)
+
+test("what's on its way is read from the engine's waiting messages, past ones left out", function()
+	local now = NOW
+	local waiting, failed = logic.waiting_of({
+		{ id = "a", sent = now - 3 * DAY, expires = now + DAY },
+		{ id = "b", sent = now - 8 * DAY, expires = now - DAY },
+		{ id = "c", sent = now, failure = "too many files are waiting for Cloud machines to collect them; retry once one has", message = "m-c" },
+	}, now)
+	expect(#waiting).to_be(1)
+	expect(waiting[1].at).to_be(now - 3 * DAY)
+	expect((failed :: any).message).to_be("m-c")
+	-- (An engine without it: nothing waits.)
+	local none, no_failure = logic.waiting_of(nil, now)
+	expect(#none).to_be(0)
+	expect(no_failure).to_be(nil)
+end)
+
+test("the store's quota reads as a sentence, with another go", function()
+	expect(logic.send_failure_words("too many files are waiting for Cloud machines to collect them; retry once one has")).to_be("Too many files are waiting for Cloud machines to collect them. Try again once one has.")
+	expect(logic.send_failure_words("the upload failed")).to_be("The upload failed.")
+	local a = alert_of(session({ state = "sleeping" }), { send_failed = { failure = "the upload failed" } })
+	expect(a.kind).to_be("send_failed")
+	expect(a.action).to_be("retry_send")
+	expect(a.tone).to_be("danger")
+end)
+
+test("what waited long is said before it goes", function()
+	local held = alert_of(session({ state = "ready" }), { held_ready = { count = 1, age = 2 * 86400 } })
+	expect(held.kind).to_be("held_ready")
+	expect(held.summary).to_be("Written 2 days ago")
+	local queued = alert_of(session({ state = "sleeping" }), { queued_old = { count = 2, age = 3 * 86400 } })
+	expect(queued.kind).to_be("queued_old")
+	expect(queued.title).to_be("2 queued messages send when it wakes")
+	-- (Up, its queue runs as turns end: nothing to warn of.)
+	expect(alert_of(session({ state = "ready" }), { queued_old = { count = 2, age = 3 * 86400 } })).to_be(nil)
+	-- Worse things first.
+	expect(alert_of(session({ state = "error" }), { held_ready = { count = 1, age = 2 * 86400 } }).kind).to_be("failed")
 end)
 
 -- ── As the deck takes it ───────────────────────────────────────────────────
@@ -436,7 +559,7 @@ local function size(name: string): string
 end
 
 test("nothing opens itself: each alert waits in the pill for the person", function()
-	for _, case in { "sleeping", "waking", "failed", "blocked", "disk_warn", "expiring", "expired" } do
+	for _, case in { "waking", "failed", "blocked", "disk_warn", "expiring", "expired" } do
 		local app = on_cloud(case)
 		expect(app:has('role:button "Open Alerts"')).to_be(true)
 		expect(app:state("chat_tray")).to_be(nil)
@@ -479,17 +602,33 @@ test("the alerts are the composer's own", function()
 	expect(app:has(`#chat-composer >> {LIST}`)).to_be(true)
 end)
 
-test("a sleeping chat on Cloud says so, never that it can't reach the host", function()
-	local app = on_cloud("sleeping", true)
+test("asleep raises no pill of its own; with a draft, it's said", function()
+	local app = on_cloud("sleeping")
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
 	app:type('role:textbox "Message"', "Ship it")
 	app:frames(10)
+	expect(app:has('role:button "Open Alerts"')).to_be(true)
+	-- Let go of the draft: quiet again.
+	app:fill('role:textbox "Message"', "")
+	app:frames(10)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+end)
+
+test("a sleeping chat on Cloud says so, never that it can't reach the host", function()
+	local app = on_cloud("sleeping")
+	app:type('role:textbox "Message"', "Ship it")
+	app:frames(10)
+	open_deck(app)
 	expect(showing(app, in_deck('~"Cloud machine asleep"'))).to_be(true)
 	expect(app:has('~"Can\'t reach"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 
 test("the notice's Wake wakes it, and it reads as waking", function()
-	local app = on_cloud("sleeping", true)
+	local app = on_cloud("sleeping")
+	app:type('role:textbox "Message"', "Ship it")
+	app:frames(10)
+	open_deck(app)
 	app:click(in_deck('role:button "Wake"'))
 	app:frames(30)
 	expect(asked(app, "cloud.wake:s2:-")).to_be(true)
@@ -508,7 +647,7 @@ test("each of its states reads in the deck as it changes", function()
 end)
 
 test("a machine that's up says nothing, and the deck goes", function()
-	local app = on_cloud("sleeping", true)
+	local app = on_cloud("waking", true)
 	to_case(app, "ready")
 	expect(app:has('role:button "Open Alerts"')).to_be(false)
 	expect(app:has('role:tab "Fold Alerts"')).to_be(false)
@@ -740,7 +879,10 @@ test("a machine that won't go to sleep says so, and the size stays as it was", f
 end)
 
 test("files going soon is one quiet word; later on, only that it's asleep", function()
-	local app = on_cloud("expires_later", true)
+	local app = on_cloud("expires_later")
+	app:type('role:textbox "Message"', "Ship it")
+	app:frames(10)
+	open_deck(app)
 	expect(showing(app, in_deck('~"Cloud machine asleep"'))).to_be(true)
 	expect(app:has(in_deck('~"Its files are deleted"'))).to_be(false)
 	to_case(app, "expiring")
@@ -754,7 +896,10 @@ test("files going soon is one quiet word; later on, only that it's asleep", func
 end)
 
 test("files going, put away, leaves it saying it's asleep", function()
-	local app = on_cloud("expiring", true)
+	local app = on_cloud("expiring")
+	app:type('role:textbox "Message"', "Ship it")
+	app:frames(10)
+	open_deck(app)
 	app:click(in_deck('role:button "Dismiss Machine asleep"'))
 	app:frames(30)
 	expect(showing(app, in_deck('~"Cloud machine asleep"'))).to_be(true)
@@ -777,7 +922,10 @@ test("files gone explains itself and offers a fresh machine", function()
 end)
 
 test("an old edge shows state, and nothing of sizes", function()
-	local app = on_cloud("sleeping", true)
+	local app = on_cloud("sleeping")
+	app:type('role:textbox "Message"', "Ship it")
+	app:frames(10)
+	open_deck(app)
 	app:command("cloud_stub.old_edge")
 	app:frames(30)
 	expect(showing(app, in_deck('~"Cloud machine asleep"'))).to_be(true)
@@ -809,6 +957,211 @@ test("while waking, it follows closely", function()
 	local before = asked_like(app, "cloud.sessions")
 	app:wait("#never-shown", { timeout_ms = 3400 })
 	expect(asked_like(app, "cloud.sessions") > before).to_be(true)
+end)
+
+-- The transcript's foot, under the newest reply: what it says.
+local function says(app: any, words: string): boolean
+	return app:has(`#transcript >> ~"{words}"`)
+end
+
+-- s2 on Cloud as `case`, a reply under way, then its host gone quiet.
+local function stalled(case: string): any
+	local app = on_cloud(case)
+	app:command("start_reply")
+	app:frames(20)
+	app:command("reply_stalls")
+	app:frames(30)
+	return app
+end
+
+test("a reply whose machine went to sleep says so, not its working word", function()
+	local app = stalled("sleeping")
+	expect(says(app, "Interrupted — its Cloud machine went to sleep")).to_be(true)
+	-- (No working word beside it: that's what it stands in for.)
+	expect(app:has('#transcript >> "Working"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a machine that died mid-turn and is waking reads as resuming", function()
+	local app = stalled("waking")
+	expect(says(app, "Resuming — waking its Cloud machine…")).to_be(true)
+	expect(says(app, "Interrupted")).to_be(false)
+end)
+
+test("each dead state is said in the word's place", function()
+	for case, words in {
+		failed = "Interrupted — its Cloud machine failed",
+		blocked = "Interrupted — its Cloud machine can't wake",
+		expired = "Interrupted — its Cloud machine's files are gone",
+		ready = "Interrupted",
+	} do
+		local app = stalled(case)
+		expect(says(app, words)).to_be(true)
+	end
+end)
+
+test("a reply that's running on a machine that's up keeps its working word", function()
+	local app = on_cloud("ready")
+	app:command("start_reply")
+	app:frames(30)
+	expect(says(app, "Interrupted")).to_be(false)
+	expect(says(app, "Resuming")).to_be(false)
+	expect(app:has('#transcript >> "Working"')).to_be(true)
+end)
+
+test("on another computer gone quiet, the same: it's named", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 760)
+	app:command("go_s2")
+	app:frames(30)
+	app:command("session_on_old")
+	app:command("start_reply")
+	app:frames(20)
+	app:command("reply_stalls")
+	app:frames(30)
+	expect(says(app, "Interrupted — can't reach Old laptop")).to_be(true)
+end)
+
+test("on this computer, a turn that stopped reporting reads as interrupted", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 760)
+	app:command("go_s2")
+	app:frames(30)
+	app:command("start_reply")
+	app:frames(20)
+	expect(says(app, "Interrupted")).to_be(false)
+	app:command("reply_stalls")
+	app:frames(30)
+	expect(says(app, "Interrupted")).to_be(true)
+end)
+
+local function send_to(app: any, words: string)
+	app:type('role:textbox "Message"', words)
+	app:key("Enter")
+	app:frames(30)
+end
+
+local function sent(app: any, words: string): boolean
+	return string.find(app:state("calls") or "", `send:s2:{words}`, 1, true) ~= nil
+end
+
+-- The queue: from the folded pill, or, the deck open on another tab, its tab.
+local function open_queue(app: any)
+	if app:has('role:button "Open Queued"') then
+		app:click('role:button "Open Queued"')
+	else
+		app:click('role:tab "Open Queued"')
+	end
+	app:wait("#never-shown", { timeout_ms = 320 })
+	app:frames(10)
+end
+
+test("a send to a machine that can't wake is held, shown queued, and the alert says so", function()
+	local app = on_cloud("blocked")
+	send_to(app, "Fix the flaky test")
+	expect(sent(app, "Fix the flaky test")).to_be(false)
+	-- (Kept: nothing to type again.)
+	open_queue(app)
+	local row = 'role:listitem ~"Fix the flaky test"'
+	expect(app:has(row)).to_be(true)
+	expect(app:tree(`{row} >> role:button "Waits for a size"`)).to_contain("disabled")
+	app:click('role:tab "Open Alerts"')
+	app:frames(30)
+	expect(showing(app, in_deck('~"Your message will send once you pick a size"'))).to_be(true)
+	-- A size picked: it goes, on its own, once.
+	app:click(`{size("Extra large")} >> role:button "Wake here"`)
+	app:frames(30)
+	expect(sent(app, "Fix the flaky test")).to_be(true)
+	local _, count = string.gsub(app:state("calls"), "send:s2:Fix the flaky test", "")
+	expect(count).to_be(1)
+	expect(app:has(row)).to_be(false)
+end)
+
+test("a held message can be let go, and then nothing sends", function()
+	local app = on_cloud("blocked")
+	send_to(app, "Never mind")
+	open_queue(app)
+	app:click('role:listitem ~"Never mind" >> role:button "Remove"')
+	app:frames(30)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	app:click(`{size("Extra large")} >> role:button "Wake here"`)
+	app:frames(30)
+	expect(sent(app, "Never mind")).to_be(false)
+end)
+
+test("a send to a machine whose files are gone waits for a fresh one", function()
+	local app = on_cloud("expired")
+	send_to(app, "Carry on")
+	expect(sent(app, "Carry on")).to_be(false)
+	open_queue(app)
+	expect(app:has('role:listitem ~"Carry on" >> role:button "Waits for a fresh machine"')).to_be(true)
+	app:click('role:tab "Open Alerts"')
+	app:frames(30)
+	app:click(in_deck('role:button "Start a fresh machine"'))
+	app:frames(30)
+	expect(sent(app, "Carry on")).to_be(true)
+end)
+
+test("a held message that waited long doesn't send on its own: it's said, and sent by a press", function()
+	local app = on_cloud("blocked")
+	send_to(app, "From before")
+	app:command("cloud_stub.age_held")
+	app:frames(10)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	app:click(`{size("Extra large")} >> role:button "Wake here"`)
+	app:frames(30)
+	expect(sent(app, "From before")).to_be(false)
+	expect(showing(app, in_deck('~"A message is waiting to send"'))).to_be(true)
+	expect(showing(app, in_deck('role:listitem ~"Written 2 days ago"'))).to_be(true)
+	open_queue(app)
+	local row = 'role:listitem ~"From before"'
+	expect(app:has(`{row} >> ~"2 days ago"`)).to_be(true)
+	app:click(`{row} >> role:button "Send next"`)
+	app:frames(30)
+	expect(sent(app, "From before")).to_be(true)
+end)
+
+test("a message queued long ago is said before its machine wakes and sends it", function()
+	local app = on_cloud("sleeping")
+	app:command("queue_old")
+	app:frames(30)
+	expect(app:has('role:button "Open Alerts"')).to_be(true)
+	open_deck(app)
+	expect(showing(app, in_deck('~"A queued message sends when it wakes"'))).to_be(true)
+	expect(showing(app, in_deck('role:listitem ~"Queued 3 days ago"'))).to_be(true)
+	app:click('role:tab "Open Queued"')
+	app:frames(30)
+	expect(app:has('role:listitem ~"Old words" >> ~"3 days ago"')).to_be(true)
+end)
+
+test("a message sent long ago, not yet taken, is said before its machine wakes", function()
+	local app = on_cloud("sleeping")
+	app:command("waiting_old")
+	app:frames(30)
+	open_deck(app)
+	expect(showing(app, in_deck('role:listitem ~"A queued message sends when it wakes"'))).to_be(true)
+	expect(showing(app, in_deck('role:listitem ~"Queued 3 days ago"'))).to_be(true)
+end)
+
+test("one that waited past its week won't run, and isn't said", function()
+	local app = on_cloud("sleeping")
+	app:command("waiting_expired")
+	app:frames(30)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+end)
+
+test("a message the store refused says why in the chat, and goes again from there", function()
+	local app = on_cloud("sleeping")
+	app:command("waiting_store_full")
+	app:frames(30)
+	open_deck(app)
+	expect(showing(app, in_deck('role:listitem ~"A message didn\'t send"'))).to_be(true)
+	expect(showing(app, in_deck('~"Too many files are waiting for Cloud machines to collect them. Try again once one has."'))).to_be(true)
+	app:click(in_deck('role:button "Try again"'))
+	app:frames(30)
+	expect(app:state("calls")).to_contain("retry:s2:m-o1")
 end)
 
 -- ── Settings → Cloud ───────────────────────────────────────────────────────
@@ -846,10 +1199,48 @@ test("Settings → Cloud lists every size with its rate, none held back", functi
 		local radio = app:tree(`{group} >> role:radio "{name}"`)
 		expect(string.find(string.match(radio, "[^\n]+") or "", " disabled", 1, true)).to_be(nil)
 	end
-	expect(app:tree(group)).to_contain("8 vCPU · 32 GB memory · 400 GB disk · 5.56× credits")
-	expect(app:tree(group)).to_contain("1 vCPU · 2 GB memory · 20 GB disk · 0.5× credits")
+	for _, cell in { "8 vCPU", "32 GB memory", "400 GB disk", "5.56× credits" } do
+		expect(app:has(`{group} >> role:radio "Extra large" >> ~"{cell}"`)).to_be(true)
+	end
+	expect(app:has(`{group} >> role:radio "Standard" >> ~"Current"`)).to_be(true)
+	expect(app:has(`{group} >> role:radio "Large" >> ~"Current"`)).to_be(false)
 	expect(chosen_size(app, "Standard")).to_be(true)
 	expect(chosen_size(app, "Extra large")).to_be(false)
+end)
+
+-- Each size row's cell texts' right edges, in Settings.
+local function settings_cells(app: any): { { number } }
+	local rows: { { number } } = {}
+	local at: { number }? = nil
+	for line in app:tree(`{PAGE} >> role:radiogroup "Default machine"`):gmatch("[^\n]+") do
+		if line:match(' radio "') then
+			at = {}
+			table.insert(rows, at :: { number })
+		elseif at then
+			local x, w = line:match(' text "[^"]*" (%d+),%d+ (%d+)x')
+			if x and not line:find(" hidden", 1, true) and not line:find('"Current"', 1, true) then
+				table.insert(at :: { number }, tonumber(x) + tonumber(w))
+			end
+		end
+	end
+	return rows
+end
+
+test("Settings → Cloud's sizes are the alert's grid, at every width", function()
+	local app = settings()
+	for _, width in { 1200, 900, 760 } do
+		app:resize(width, 900)
+		app:frames(20)
+		local rows = settings_cells(app)
+		expect(#rows).to_be(4)
+		for _, r in rows do
+			expect(#r).to_be(#rows[1])
+			for c = 1, #r do
+				expect(r[c]).to_be(rows[1][c])
+			end
+		end
+	end
+	expect(app:error()).to_be(nil)
 end)
 
 test("picking a size asks the edge, and sticks", function()

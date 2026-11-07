@@ -27,6 +27,8 @@ local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local CloudTray = require("@app/screens/chat/cloud_tray")
+local Held = require("@app/screens/chat/held")
+local CloudMachine = require("@app/screens/chat/cloud_machine")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
 local Asks = require("@app/screens/chat/asks")
@@ -415,6 +417,15 @@ local function Composer(): Node
 		end
 		return out
 	end)
+	-- Its own goes as the chat changes (kept: a reload isn't a change).
+	local notice_for = ui.state("chat_notice_for", "?")
+	ui.effect(function()
+		local id = session_id:get() or ""
+		if notice_for:peek() ~= id then
+			notice_for:set(id)
+			own_notice:set(nil)
+		end
+	end)
 	-- Its Cloud machine, on a chat that has one: its state and its alert.
 	local machine = CloudTray.bind {
 		chat = function(): string?
@@ -427,14 +438,70 @@ local function Composer(): Node
 		running = function(): boolean
 			return running:get()
 		end,
+		queue = function(): { any }
+			return queue:get()
+		end,
+		waiting = function(): { any }?
+			local s = open()
+			return s and s.waiting
+		end,
+		retry = function(message: string?)
+			local id = session_id:peek()
+			if id and message then
+				store.retry(id, message)
+			end
+		end,
 	}
-	-- Its own goes as the chat changes (kept: a reload isn't a change).
-	local notice_for = ui.state("chat_notice_for", "?")
+	-- The queue it shows: its own (one that waited long says how long), then
+	-- what's held back for its machine (screens/chat/held), each removable.
+	local shown_queue = ui.computed(function(): { any }
+		local out: { any } = {}
+		local now = machine.now()
+		for _, q in queue:get() do
+			if q.at and now - q.at > CloudMachine.LONG_WAIT then
+				local row = table.clone(q)
+				row.age = CloudMachine.age_words(now - q.at)
+				table.insert(out, row)
+			else
+				table.insert(out, q)
+			end
+		end
+		local reason = machine.hold_reason()
+		for _, h in Held.of(session_id:get()) do
+			table.insert(out, {
+				id = Held.PREFIX .. h.id,
+				text = h.text,
+				waiting = if reason then CloudMachine.held_label(reason) else nil,
+				age = if now - h.at > CloudMachine.LONG_WAIT then CloudMachine.age_words(now - h.at) else nil,
+			})
+		end
+		return out
+	end)
+	-- A held message sent: out of the hold, to the chat. (Refused, it's held
+	-- again, and the composer says so.)
+	local function release(chat: string, id: string)
+		local e = Held.remove(chat, id)
+		if not e then
+			return
+		end
+		store.send(e.req :: any):after(function() end, function()
+			Held.add(chat, e)
+			own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
+		end)
+	end
+	-- The machine can take them now (a size picked, a fresh machine): what's
+	-- held goes, in order, unless it waited so long it's said first (its row's
+	-- Send, then).
 	ui.effect(function()
-		local id = session_id:get() or ""
-		if notice_for:peek() ~= id then
-			notice_for:set(id)
-			own_notice:set(nil)
+		local chat = session_id:get()
+		if not chat or machine.hold_reason() ~= nil or machine.session() == nil then
+			return
+		end
+		local now = machine.now()
+		for _, e in Held.of(chat) do
+			if now - e.at <= CloudMachine.LONG_WAIT then
+				release(chat, e.id)
+			end
 		end
 	end)
 	local notice = ui.computed(function(): any
@@ -469,7 +536,7 @@ local function Composer(): Node
 		end
 		return LinkNotice.of {
 			connection = now.connection,
-			cloud = machine.cloud_link(),
+			cloud = machine.cloud_link(string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
@@ -642,6 +709,11 @@ local function Composer(): Node
 						shared.text:set(text_out)
 					end
 				end)
+			end
+			-- Its machine can't take it yet: kept, in the queue, till it can.
+			if machine.hold_reason() then
+				Held.add(id, { id = store.new_id(), at = os.time(), text = words, req = req })
+				return
 			end
 			if running:peek() then
 				deliver(nil)
@@ -937,16 +1009,45 @@ local function Composer(): Node
 				return prefs.send_with:get()
 			end,
 			on_escape = store.escape,
-			queue = queue,
+			queue = shown_queue,
 			can_steer = function(): boolean
 				return running:get()
 			end,
-			on_queue_send = asks.on_queue_send,
-			on_queue_edit = edits.on_queue_edit,
+			-- (A held row is the hold's: sent, or let go, from there.)
+			on_queue_send = function(row: string)
+				local held, chat = Held.id_of(row), session_id:peek()
+				if held then
+					if chat and not machine.hold_reason() then
+						release(chat, held)
+					end
+					return
+				end
+				asks.on_queue_send(row)
+			end,
+			on_queue_edit = function(row: string)
+				if not Held.id_of(row) then
+					edits.on_queue_edit(row)
+				end
+			end,
 			on_queue_save = edits.on_queue_save,
 			on_queue_cancel = edits.on_queue_cancel,
-			on_queue_remove = asks.on_queue_remove,
-			on_queue_reorder = asks.on_queue_reorder,
+			on_queue_remove = function(row: string)
+				local held, chat = Held.id_of(row), session_id:peek()
+				if held then
+					if chat then
+						Held.remove(chat, held)
+					end
+					return
+				end
+				asks.on_queue_remove(row)
+			end,
+			-- (Held rows stay after the queue's own: only those move.)
+			on_queue_reorder = function(from: number, to: number)
+				local own = #queue:peek()
+				if from <= own and to <= own then
+					asks.on_queue_reorder(from, to)
+				end
+			end,
 			todos = asks.todos,
 			tasks = tasks,
 			-- A subagent's row opens it, a tab of the session's panel.

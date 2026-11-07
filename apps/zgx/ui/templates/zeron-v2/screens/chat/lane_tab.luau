@@ -11,6 +11,7 @@
 local ds = require("@ds")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
+local TurnGlue = require("@app/screens/chat/turn_glue")
 local store = require("@app/screens/chat/store")
 local prefs = require("@app/screens/settings/prefs")
 local locale = require("@ds/locale")
@@ -490,7 +491,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link()
+			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		on_dismiss_notice = function()
@@ -787,6 +788,9 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			Shared.attach_quote(q, chat)
 			focus:add(1)
 		end,
+		turn_state = if tab.kind == "subagent" then nil else TurnGlue.of(function(): any
+			return view.session:get()
+		end),
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,

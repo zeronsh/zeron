@@ -24,6 +24,8 @@
 --                              disk_warn, disk_critical, expiring, expires_today,
 --                              expired, gone
 --   cloud_stub.refuse_wake     the next wake is refused as too small
+--   cloud_stub.age_held        what's held back was written two days ago
+--   cloud_stub.clear_held      nothing's held back
 --   cloud_stub.refuse_machine  the default size can't be changed
 
 local auth = require("@account/auth")
@@ -32,6 +34,9 @@ local billing = require("@account/billing")
 local github = require("@account/github")
 
 local calls = ui.state("cloud_stub_calls", {} :: { string })
+-- (Kept across launches in the app: here, each fixture starts with none.)
+local Held = require("@app/screens/chat/held")
+Held.all:set({})
 local function log(entry: string)
 	calls:push(entry)
 end
@@ -353,6 +358,30 @@ ui.command {
 	title = "The default size can't be changed",
 	run = function()
 		refuse_machine:set(true)
+	end,
+}
+ui.command {
+	id = "cloud_stub.clear_held",
+	title = "Nothing's held back",
+	run = function()
+		Held.all:set({})
+	end,
+}
+ui.command {
+	id = "cloud_stub.age_held",
+	title = "What's held was written two days ago",
+	run = function()
+		local all = {}
+		for chat, list in Held.all:peek() do
+			local aged = {}
+			for _, e in list do
+				local x = table.clone(e)
+				x.at -= 2 * 86400
+				table.insert(aged, x)
+			end
+			all[chat] = aged
+		end
+		Held.all:set(all)
 	end,
 }
 ui.command {

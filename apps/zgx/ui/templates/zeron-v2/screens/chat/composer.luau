@@ -459,7 +459,7 @@ local function Composer(): Node
 		end
 		return LinkNotice.of {
 			connection = now.connection,
-			cloud = machine.cloud_link(),
+			cloud = machine.cloud_link(string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,

@@ -394,8 +394,22 @@ async fn scripted_edge(
 
 /// The edge's side of Cloud sessions (and the vault's GitHub reads), enough
 /// for the engine.
+/// Whether the test edge's `GET /cloud/{org}/models` answers (a test turns it
+/// off to see the last list kept stand in).
+static MODELS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 fn cloud_edge(request: &str, body: &str) -> (u16, String) {
     let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    if request.starts_with("GET /cloud/") && request.ends_with("/models") {
+        if !MODELS_UP.load(std::sync::atomic::Ordering::SeqCst) {
+            return (503, r#"{"error":"unavailable"}"#.into());
+        }
+        return (
+            200,
+            r#"{"models":{"claude-code":[{"id":"cloud-opus","label":"Cloud Opus","reasoningLevels":["low","high","ultrathink"],"options":[]}],"codex":[{"id":"cloud-codex","label":"Cloud Codex","reasoningLevels":["low"],"options":[]}]}}"#
+                .into(),
+        );
+    }
     if request.starts_with("GET ") && request.contains("/github/repos") {
         return (
             200,
@@ -691,6 +705,43 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
     assert!(
         refused.to_string().contains("Codex and Claude Code only"),
         "{refused}"
+    );
+
+    // Models for a chat on a session machine (asleep, or gone): Cloud's, as
+    // the edge lists them, whatever this computer has installed or signed in.
+    // Nothing dials the machine.
+    for (target, harness, id) in [
+        ("cloud-s-chat-1", "codex", "cloud-codex"),
+        ("cloud-s-chat-1", "claude-code", "cloud-opus"),
+        ("cloud-acct", "claude-code", "cloud-opus"),
+    ] {
+        let models: Vec<serde_json::Value> = client
+            .call_as(
+                methods::LIST_MODELS,
+                serde_json::json!({ "targetDeviceId": target, "harness": harness }),
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+        assert_eq!(ids, [id], "{target} {harness}");
+    }
+    // The edge out of reach: the last list read.
+    MODELS_UP.store(false, std::sync::atomic::Ordering::SeqCst);
+    let kept: Vec<serde_json::Value> = client
+        .call_as(
+            methods::LIST_MODELS,
+            serde_json::json!({ "targetDeviceId": "cloud-s-chat-1", "harness": "codex" }),
+        )
+        .await
+        .unwrap();
+    MODELS_UP.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(kept[0]["id"], "cloud-codex");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(r, _)| !r.contains("cloud-s-chat-1")),
+        "no request names the machine"
     );
 
     // The logical device has no engine: anything else fails fast.

@@ -528,6 +528,61 @@ ui.command {
 		store.messages:set_key({ n, "tools" }, tools)
 	end,
 }
+-- The reply's host stops reporting mid-turn (it died, or slept): the reply
+-- stays unfinished in the transcript, begun a while ago, and its session no
+-- longer says a turn runs.
+ui.command {
+	id = "reply_stalls",
+	title = "The reply's host stops reporting",
+	run = function()
+		local n = store.messages:len()
+		if n > 0 then
+			store.messages:set_key({ n, "started" }, ui.now() / 1000 - 120)
+		end
+		if opened then
+			publish(opened, { running = false })
+		end
+	end,
+}
+-- On its way to the chat and not yet taken, sent three days ago (the
+-- engine's WatchWaitingMessages); and one whose files the store refused.
+ui.command {
+	id = "waiting_old",
+	title = "A message sent three days ago, not yet taken",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "w1", message = "m-w1", text = "Sent long ago", sent = os.time() - 3 * 86400, expires = os.time() + 4 * 86400 } } })
+		end
+	end,
+}
+ui.command {
+	id = "waiting_expired",
+	title = "A message that waited past its week",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "w2", message = "m-w2", text = "Too late", sent = os.time() - 8 * 86400, expires = os.time() - 86400 } } })
+		end
+	end,
+}
+ui.command {
+	id = "waiting_store_full",
+	title = "A message whose files the store refused",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "o1", message = "m-o1", text = "With files", sent = os.time(), held = true, failure = "too many files are waiting for Cloud machines to collect them; retry once one has" } } })
+		end
+	end,
+}
+-- A message queued three days ago, still waiting.
+ui.command {
+	id = "queue_old",
+	title = "A message queued three days ago",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q-old", text = "Old words", at = os.time() - 3 * 86400 } } })
+		end
+	end,
+}
 ui.command {
 	id = "end_reply",
 	title = "The turn ends",

@@ -11,6 +11,7 @@
 local cloud = require("@account/cloud")
 local logic = require("@app/screens/chat/cloud_machine")
 local route = require("@app/screens/shell/route")
+local Held = require("@app/screens/chat/held")
 
 local M = {}
 
@@ -24,6 +25,13 @@ export type Bind = {
 	chat: () -> string?,
 	device: () -> string?,
 	running: (() -> boolean)?,
+	-- The chat's own queue (each `{ at? }`, seconds), what its machine sends as it
+	-- wakes: one that waited long is said before it goes.
+	queue: (() -> { any })?,
+	-- Its messages on their way and not yet taken (the session's `waiting`,
+	-- none from an older engine), and sending one again (its message id).
+	waiting: (() -> { any }?)?,
+	retry: ((message: string?) -> ())?,
 }
 
 function M.bind(c: Bind): any
@@ -66,6 +74,46 @@ function M.bind(c: Bind): any
 	function b.wake_state(): any
 		return cloud.wake_state(owner())
 	end
+	-- Why a send to this chat is kept back now, if it is.
+	function b.hold_reason(): string?
+		return logic.hold_reason(b.session())
+	end
+	function b.now(): number
+		-- (Read again as the hour turns: enough for "3 days ago", and nothing
+		-- ticks faster for it.)
+		HOUR:get()
+		return os.time()
+	end
+	-- What has waited past LONG_WAIT: how many, and the oldest's age.
+	local function waited(list: { any }, at: (any) -> number?): logic.Waiting?
+		local now, count, oldest = b.now(), 0, 0
+		for _, x in list do
+			local t = at(x)
+			if t and now - t > logic.LONG_WAIT then
+				count += 1
+				oldest = math.max(oldest, now - t)
+			end
+		end
+		return if count > 0 then { count = count, age = oldest } else nil
+	end
+	local sent_failed: () -> { failure: string, message: string? }?
+	-- What its machine runs as it wakes: its queue, and what's on its way to it
+	-- not yet taken (those that won't run any more left out).
+	local function about_to_go(): { any }
+		local out = {}
+		for _, q in (if c.queue then c.queue() else {}) do
+			table.insert(out, q)
+		end
+		local waiting = logic.waiting_of(if c.waiting then c.waiting() else nil, b.now())
+		for _, w in waiting do
+			table.insert(out, w)
+		end
+		return out
+	end
+	sent_failed = function(): { failure: string, message: string? }?
+		local _, failed = logic.waiting_of(if c.waiting then c.waiting() else nil, b.now())
+		return failed
+	end
 	b.alert = ui.computed(function(): logic.Alert?
 		local s = b.session()
 		if not s then
@@ -75,6 +123,15 @@ function M.bind(c: Bind): any
 		return logic.alert(s, {
 			now = HOUR:get() * 3600,
 			failure = b.wake_state().failure,
+			-- Held ones the machine can take now, but that waited long: a word
+			-- before they go. (Still held back: the alert that holds them says so.)
+			held_ready = if logic.hold_reason(s) then nil else waited(Held.of(s.chat), function(e: any): number?
+				return e.at
+			end),
+			send_failed = sent_failed(),
+			queued_old = waited(about_to_go(), function(q: any): number?
+				return q.at
+			end),
 			dismissed = function(kind: string, level: string): boolean
 				return logic.dismissed(put_away, s.chat, kind, level)
 			end,
@@ -94,17 +151,26 @@ function M.bind(c: Bind): any
 			return {}
 		end
 		local w = b.wake_state()
-		return { logic.deck_alert(a, b.picker:get(), { failure = w.failure, busy = w.busy }) }
+		local s = b.session()
+		return {
+			logic.deck_alert(a, b.picker:get(), {
+				failure = w.failure,
+				busy = w.busy,
+				held = if s then #Held.of(s.chat) else 0,
+				reason = logic.hold_reason(s),
+			}),
+		}
 	end)
 	-- For LinkNotice.of: whether this chat is one of Cloud's, and its line.
 	-- (Files going says it's asleep already: not two alerts for one machine.)
-	function b.cloud_link(): any
+	-- `intent`: something to send (a draft, a queue): asleep is said then.
+	function b.cloud_link(intent: boolean?): any
 		local s = b.session()
 		if not s then
 			return nil
 		end
 		local a = b.alert:get()
-		return { line = if a and a.kind == "expiring" then nil else logic.line(s) }
+		return { line = if a and a.kind == "expiring" then nil else logic.line(s, { intent = intent }) }
 	end
 	function b.dismiss()
 		local s, a = b.session(), b.alert:peek()
@@ -147,6 +213,9 @@ function M.bind(c: Bind): any
 			cloud.wake(s.chat)
 		elseif action == "new_chat" then
 			route.new_chat(s.space)
+		elseif action == "retry_send" and c.retry then
+			local failed = sent_failed()
+			c.retry(if failed then failed.message else nil)
 		end
 	end
 	-- What the deck's told: a size's row, or the alert's own action.

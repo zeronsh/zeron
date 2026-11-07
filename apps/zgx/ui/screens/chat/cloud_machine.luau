@@ -3,12 +3,17 @@
 -- draws it (screens/chat/cloud_tray, Settings → Cloud) only reads these, so
 -- the drawing can change with none of this moving.
 --
---   line(session)                  the deck's notice: its state
+--   line(session, opts)            the deck's notice: its state (asleep, quiet
+--                                  unless there's something to send)
+--   hold_reason(session)           why a send to it is kept back: "size" or
+--                                  "fresh", or nil
+--   age_words(seconds)             "3 days ago"
 --   alert(session, opts)           the one thing to raise over the composer
 --   picker(session, machines, a, opts)  the sizes for that alert, each enabled
 --                                  or not and why, and whether any will do
 --   deck_alert(alert, picker, opts)  that alert as the deck's alerts take it
---   default_options(machines)      Settings → Cloud's default size choices
+--   default_rows(machines, chosen) Settings → Cloud's default sizes, on the
+--                                  alert's grid
 --   dismissed / dismiss / settle   dismissal: an alert put away stays away
 --                                  until its level worsens
 --
@@ -24,7 +29,10 @@ local function say(key: string, english: string, args: { [string]: any }?): stri
 	return ui.t(`chat.cloud_machine.{key}`, args):get()
 end
 
-export type Notice = { text: string, tone: string?, spinner: boolean?, action: string? }
+export type Notice = { text: string, tone: string?, spinner: boolean?, action: string?, quiet: boolean? }
+
+-- How long a message may wait before it's said, and never sent on its own.
+M.LONG_WAIT = 3600
 
 -- ── Numbers ────────────────────────────────────────────────────────────────
 
@@ -96,14 +104,18 @@ end
 -- an alert for. Nil where the alert says it all (`alert`), or the state says
 -- nothing: a machine that's up has nothing to say, as a notice is an alert and
 -- would sit in the pill for as long as the chat's open. `action`: its button,
--- waking it.
-function M.line(s: any): Notice?
+-- waking it. Asleep is a Cloud chat's ordinary state: quiet (read with the
+-- alerts, raising none), as the composer's old line said a host was out of
+-- reach only to someone with something to send (link_notice's `intent`), and
+-- said once there's a draft or a queue (`opts.intent`).
+function M.line(s: any, opts: { intent: boolean? }?): Notice?
+	local intent = opts ~= nil and opts.intent == true
 	local state = s.state
 	if state == "data_expired" or state == "error" or (s.wake_blocked and s.wake_blocked.reason == "disk_too_small") then
 		return nil
 	end
 	if state == "sleeping" then
-		return { text = say("asleep", "Cloud machine asleep — it wakes when you send"), action = say("wake", "Wake") }
+		return { text = say("asleep", "Cloud machine asleep — it wakes when you send"), action = say("wake", "Wake"), quiet = not intent }
 	elseif state == "provisioning" or state == "starting" then
 		local stage = stage_words(s.stage)
 		if stage then
@@ -121,6 +133,75 @@ function M.line(s: any): Notice?
 		return { text = say("deleting", "Deleting its Cloud machine…"), spinner = true }
 	end
 	return nil
+end
+
+-- ── Held sends ─────────────────────────────────────────────────────────────
+
+-- Why a send to this session is kept back rather than sent: its machine can't
+-- wake until a bigger size is picked ("size"), or its files are gone and only a
+-- fresh machine will run it ("fresh"). Nil: send it.
+function M.hold_reason(s: any?): string?
+	if not s then
+		return nil
+	end
+	if s.state == "data_expired" then
+		return "fresh"
+	end
+	if s.wake_blocked and s.wake_blocked.reason == "disk_too_small" then
+		return "size"
+	end
+	return nil
+end
+
+-- What a held message's row says in its action's place.
+function M.held_label(reason: string): string
+	return if reason == "fresh" then say("held_fresh_short", "Waits for a fresh machine") else say("held_size_short", "Waits for a size")
+end
+
+-- The alert's line while messages are held.
+function M.held_words(reason: string, count: number): string
+	if reason == "fresh" then
+		return say("held_fresh", "Your message will send once a fresh machine starts", { n = count })
+	end
+	return say("held_size", "Your message will send once you pick a size", { n = count })
+end
+
+-- Why a message stopped trying, in words: the engine's sentence, as a sentence.
+-- The store's quota (sync's STORE_FULL) is said plainly.
+function M.send_failure_words(failure: string): string
+	if string.find(failure, "too many files are waiting", 1, true) then
+		return say("store_full", "Too many files are waiting for Cloud machines to collect them. Try again once one has.")
+	end
+	local first = string.upper(string.sub(failure, 1, 1)) .. string.sub(failure, 2)
+	return if string.match(first, "[%.!?]$") then first else first .. "."
+end
+
+-- What waits on its way to a chat (the engine's waiting messages, as the queue
+-- takes them): those that still will run (not past `expires`), at when sent,
+-- and the first that stopped trying, if one did.
+function M.waiting_of(list: { any }?, now: number): ({ { at: number } }, { failure: string, message: string? }?)
+	local out, failed = {}, nil
+	for _, w in list or {} do
+		if w.failure then
+			failed = failed or { failure = w.failure, message = w.message }
+		elseif w.sent and not (w.expires and w.expires <= now) then
+			table.insert(out, { at = w.sent })
+		end
+	end
+	return out, failed
+end
+
+-- "40 minutes ago", "5 hours ago", "3 days ago".
+function M.age_words(secs: number): string
+	if secs < 3600 then
+		local n = math.max(1, secs // 60)
+		return say("ago_minutes", if n == 1 then "1 minute ago" else `{n} minutes ago`, { n = n })
+	elseif secs < 86400 then
+		local n = secs // 3600
+		return say("ago_hours", if n == 1 then "1 hour ago" else `{n} hours ago`, { n = n })
+	end
+	local n = secs // 86400
+	return say("ago_days", if n == 1 then "1 day ago" else `{n} days ago`, { n = n })
 end
 
 -- ── The alert ──────────────────────────────────────────────────────────────
@@ -162,7 +243,8 @@ function M.percent_full(disk: any): number
 end
 
 export type Alert = {
-	-- wake_blocked, wake_failed, failed, data_expired, expiring, disk.
+	-- wake_blocked, wake_failed, failed, data_expired, send_failed, held_ready, queued_old,
+	-- expiring, disk.
 	kind: string,
 	-- What dismissal compares: a kind that can be put away has one.
 	level: string?,
@@ -202,8 +284,15 @@ end
 --   > its disk is critical > its files going soon > its disk filling
 --
 -- Opts: `now` (Unix seconds), `failure` (the last wake's word), `dismissed`
--- (`level -> bool`, whether a kind at a level is put away).
-function M.alert(s: any, opts: { now: number, failure: string?, dismissed: ((kind: string, level: string) -> boolean)? }): Alert?
+-- (`level -> bool`, whether a kind at a level is put away). `send_failed`: a
+-- message on its way that stopped trying (the engine's waiting messages): why,
+-- and another go. `held_ready`: held
+-- messages whose machine can take them now but that waited past LONG_WAIT, so
+-- they don't send without a word (`{ count, age }`, age in seconds, the
+-- oldest's). `queued_old`: the same of its own queue, which its machine sends
+-- as it wakes.
+export type Waiting = { count: number, age: number }
+function M.alert(s: any, opts: { now: number, failure: string?, dismissed: ((kind: string, level: string) -> boolean)?, send_failed: { failure: string }?, held_ready: Waiting?, queued_old: Waiting? }): Alert?
 	local function put_away(kind: string, level: string): boolean
 		return opts.dismissed ~= nil and opts.dismissed(kind, level)
 	end
@@ -255,6 +344,44 @@ function M.alert(s: any, opts: { now: number, failure: string?, dismissed: ((kin
 			action = "retry",
 			action_label = say("retry", "Try again"),
 			dismissable = true,
+		}
+	end
+	-- A message that stopped trying on its way (its files couldn't go up): why,
+	-- and another go.
+	if opts.send_failed then
+		local why = M.send_failure_words(opts.send_failed.failure)
+		return {
+			kind = "send_failed",
+			tone = "danger",
+			title = say("send_failed_title", "A message didn't send"),
+			summary = why,
+			body = why,
+			action = "retry_send",
+			action_label = say("retry", "Try again"),
+		}
+	end
+	-- Messages that waited long, before they go: a word first, not a surprise.
+	local held = opts.held_ready
+	if held and held.count > 0 then
+		local ago = M.age_words(held.age)
+		return {
+			kind = "held_ready",
+			tone = "info",
+			title = say("held_ready_title", if held.count == 1 then "A message is waiting to send" else `{held.count} messages are waiting to send`, { n = held.count }),
+			summary = say("held_ready_summary", `Written {ago}`, { ago = ago }),
+			body = say("held_ready_body", `Written {ago}, before this chat's machine could run it. It doesn't send on its own after so long: send it from the queue, or remove it.`, { ago = ago }),
+		}
+	end
+	local queued = opts.queued_old
+	local wakes = s.state == "sleeping" or s.state == "stopping" or s.state == "starting" or s.state == "provisioning"
+	if queued and queued.count > 0 and wakes then
+		local ago = M.age_words(queued.age)
+		return {
+			kind = "queued_old",
+			tone = "info",
+			title = say("queued_old_title", if queued.count == 1 then "A queued message sends when it wakes" else `{queued.count} queued messages send when it wakes`, { n = queued.count }),
+			summary = say("queued_old_summary", `Queued {ago}`, { ago = ago }),
+			body = say("queued_old_body", `Queued {ago}, they send as soon as this chat's machine wakes. Remove any you no longer want from the queue first.`, { ago = ago }),
 		}
 	end
 	local function disk_alert(): Alert?
@@ -389,14 +516,20 @@ function M.picker(s: any, machines: { any }, a: Alert, opts: { running: boolean?
 	}
 end
 
--- A size's choice in Settings → Cloud's default.
-function M.default_options(machines: { any }): { { value: string, label: string, description: string } }
-	local out = {}
+-- Settings → Cloud's default sizes, on the alert's grid (M.GRID): every size,
+-- none out of reach; the one new chats start on says so in the trailing slot.
+export type DefaultRow = { id: string, name: string, cells: { string }, current: boolean, trail: string? }
+function M.default_rows(machines: { any }, chosen: string?): { DefaultRow }
+	local out: { DefaultRow } = {}
 	for _, m in machines do
+		local vcpu, memory, disk = M.cells(m)
+		local current = m.id == chosen
 		table.insert(out, {
-			value = m.id,
-			label = M.machine_name(m),
-			description = say("default_option", `{M.specs(m)} · {M.rate(m.rate)} credits`, { specs = M.specs(m), rate = M.rate(m.rate) }),
+			id = m.id,
+			name = M.machine_name(m),
+			cells = { vcpu, memory, disk, say("rate", `{M.rate(m.rate)} credits`, { rate = M.rate(m.rate) }) },
+			current = current,
+			trail = if current then say("current", "Current") else nil,
 		})
 	end
 	return out
@@ -432,7 +565,8 @@ function M.size_of(id: string): string?
 	return nil
 end
 
--- What the alert's action does: "fresh", "retry", "wake" or "new_chat".
+-- What the alert's action does: "fresh", "retry", "wake", "retry_send" or
+-- "new_chat".
 function M.way_on(a: Alert, p: Picker?): (string?, string?)
 	if p and p.action then
 		return p.action, p.action_label
@@ -442,8 +576,9 @@ end
 
 -- The alert, with the sizes under it, as ds/composer_dock's Alert: plain data.
 -- `failure`: why a pick was just refused. `busy`: an action's on its way, so
--- nothing more can be taken until it lands.
-function M.deck_alert(a: Alert, p: Picker?, opts: { failure: string?, busy: boolean? }?): { [string]: any }
+-- nothing more can be taken until it lands. `held`: how many messages it keeps
+-- back, said in its row's line (no alert of their own).
+function M.deck_alert(a: Alert, p: Picker?, opts: { failure: string?, busy: boolean?, held: number?, reason: string? }?): { [string]: any }
 	local o = opts or {}
 	local more: { any }? = nil
 	if p then
@@ -468,8 +603,11 @@ function M.deck_alert(a: Alert, p: Picker?, opts: { failure: string?, busy: bool
 		id = M.ALERT_ID,
 		tone = if a.tone == "neutral" then "info" else a.tone,
 		title = a.title,
-		-- (Said in full under it, it isn't said twice.)
-		detail = if a.summary ~= body then a.summary else nil,
+		-- (Said in full under it, it isn't said twice. Held messages: that.)
+		detail = if (o.held or 0) > 0 and o.reason
+			then M.held_words(o.reason, o.held :: number)
+			elseif a.summary ~= body then a.summary
+			else nil,
 		body = body,
 		more = more,
 		grid = if more then M.GRID else nil,

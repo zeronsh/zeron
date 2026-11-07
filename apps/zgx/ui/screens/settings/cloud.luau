@@ -288,21 +288,74 @@ local function usage(): Node
 	}
 end
 
-local MachineChoice = ui.component(function(): Node
-	local value = ui.use_state(cloud.machine())
-	ui.effect(function()
-		local now = cloud.machine()
-		if value:peek() ~= now then
-			value:set(now)
-		end
-	end)
-	return ds.RadioGroup {
-		value = value,
-		label = ui.t("settings.cloud.machine.title"),
-		options = machine_logic.default_options(cloud.machines()),
-		on_change = function(id: string)
-			cloud.set_machine(id)
+-- The sizes, on the same grid as a chat's size list (ds/grid, the columns
+-- screens/chat/cloud_machine's GRID): a radio group, a row a size; the one new
+-- chats start on says "Current" in the trailing slot. Picked: the edge is asked,
+-- shown at once, put back if it refuses (account/cloud).
+local Grid = require("@ds/grid")
+
+local SizeRow = ui.component(function(props: { row: State<machine_logic.DefaultRow>, width: State<number> }): Node
+	local row, width = props.row, props.width
+	local grid = machine_logic.GRID :: Grid.Grid
+	local function chosen(): boolean
+		return row:get().current
+	end
+	local parts: { [any]: any } = {
+		role = "radio",
+		label = function(): string
+			return row:get().name
 		end,
+		checked = chosen,
+		focusable = true,
+		w_full = true,
+		min_h = 36,
+		px = "$space.2",
+		gap = "$space.2",
+		items = "center",
+		rounded = "$radius.md",
+		cursor = "pointer",
+		hover = { bg = "$hover" },
+		focus = require("@ds/control").ring,
+		on_click = function()
+			if not chosen() then
+				cloud.set_machine(row:peek().id)
+			end
+		end,
+		Grid.name(grid, function(): string
+			return row:get().name
+		end),
+	}
+	for _, cell in Grid.cells(grid, width, function(): { string }?
+		return row:get().cells
+	end) do
+		table.insert(parts, cell)
+	end
+	table.insert(parts, Grid.gap())
+	table.insert(parts, Grid.trail(function(): string?
+		return row:get().trail
+	end, chosen))
+	return ui.row(parts)
+end)
+
+local MachineChoice = ui.component(function(): Node
+	local width = ui.use_state(0)
+	local rows = ui.computed(function(): { machine_logic.DefaultRow }
+		return machine_logic.default_rows(cloud.machines(), cloud.machine())
+	end)
+	return ui.column {
+		role = "radiogroup",
+		label = ui.t("settings.cloud.machine.title"),
+		focus_group = "vertical",
+		w_full = true,
+		on_resize = Grid.measure(width),
+		ui.each(rows, function(_r: machine_logic.DefaultRow, _i: number, row: State<machine_logic.DefaultRow>): Node
+			return SizeRow { row = row, width = width }
+		end, {
+			key = function(r: machine_logic.DefaultRow): string
+				return r.id
+			end,
+			w_full = true,
+		}),
 	}
 end)
 
@@ -326,14 +379,10 @@ local function default_machine(): Node
 			ds.Settings.Group {
 				ui.column {
 					w_full = true,
-					px = "$space.4",
-					py = "$space.3",
+					px = "$space.2",
+					py = "$space.2",
 					gap = "$space.2",
-					-- (Its options are fixed as it's built: built again as the sizes
-					-- on offer change.)
-					ui.presence(ids, function(): Node
-						return MachineChoice {}
-					end, { w_full = true }),
+					MachineChoice {},
 					ui.show(function(): boolean
 						return cloud.now:get().machine_failure ~= nil
 					end, ui.text {
