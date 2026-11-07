@@ -274,13 +274,21 @@ impl Engine {
         let mut delay = Duration::from_millis(250);
         let mut said = None::<String>;
         let mut said_unreachable = false;
+        // The token the engine last refused, if it refused the last dial.
+        let mut refused = None::<Option<String>>;
         loop {
             let token = rpc::read_token(&config.data_dir);
-            match rpc::connect(config.port, token).await {
+            // Refused again with the same token: nothing will change by
+            // dialling as often (a data dir with a copy of an engine's token,
+            // which that engine replaced as it started again).
+            let stale = refused.as_ref() == Some(&token);
+            let mut refused_now = false;
+            match rpc::connect(config.port, token.clone()).await {
                 Ok(rpc) => {
                     delay = Duration::from_millis(250);
                     said = None;
                     said_unreachable = false;
+                    refused = None;
                     self.answered.set(true);
                     eprintln!("zeron-zgx: engine: connected");
                     *self.rpc.borrow_mut() = Some(rpc.clone());
@@ -305,15 +313,28 @@ impl Engine {
                     eprintln!("zeron-zgx: engine: connection ended ({reason})");
                 }
                 Err(DialError::Refused) => {
+                    refused = None;
                     // (Started one, or an engine is about to let go of the
                     // data dir: it's a moment away, not worth backing off.)
                     if spawner.start_if_due(config) || spawner.held() {
                         delay = Duration::from_millis(500);
                     }
                 }
-                // A new engine is writing its token: try again shortly.
-                Err(DialError::Unauthorized) => {}
+                // A new engine is writing its token: try again shortly. The
+                // same token refused twice: said once, and tried less often.
+                Err(DialError::Unauthorized) => {
+                    if stale && said.as_deref() != Some(STALE_TOKEN) {
+                        eprintln!(
+                            "zeron-zgx: engine: {STALE_TOKEN} ({}): trying it again less often",
+                            config.data_dir.join("ipc-token").display()
+                        );
+                        said = Some(STALE_TOKEN.to_string());
+                    }
+                    refused = Some(token);
+                    refused_now = true;
+                }
                 Err(DialError::Other(error)) => {
+                    refused = None;
                     if said.as_deref() != Some(&error) {
                         eprintln!("zeron-zgx: engine: can't connect: {error}");
                         said = Some(error);
@@ -327,10 +348,33 @@ impl Engine {
                     listener();
                 }
             }
-            zgx::timer::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(3));
+            // While its token stays one the engine refused, only the file is
+            // looked at (every few seconds, no dial): a new token is tried as
+            // it comes, the old one again only at the long wait's end.
+            let waited = Instant::now();
+            loop {
+                zgx::timer::sleep(delay.min(TOKEN_LOOK)).await;
+                let changed = refused.as_ref().is_some_and(|was| *was != rpc::read_token(&config.data_dir));
+                if changed || waited.elapsed() >= delay {
+                    break;
+                }
+            }
+            delay = next_delay(delay, stale && refused_now);
         }
     }
+}
+
+/// What a refused dial says when the token was the one refused before.
+const STALE_TOKEN: &str = "the engine refuses this window's token";
+/// How often a refused token's file is looked at for a new one.
+const TOKEN_LOOK: Duration = Duration::from_secs(3);
+/// The longest wait between dials with a token already refused.
+const STALE_TOKEN_WAIT: Duration = Duration::from_secs(60);
+
+/// The wait before the dial after this one: doubling, to 3 s, as it always
+/// has; to a minute while the engine keeps refusing the same token.
+fn next_delay(delay: Duration, stale_token: bool) -> Duration {
+    (delay * 2).min(if stale_token { STALE_TOKEN_WAIT } else { Duration::from_secs(3) })
 }
 
 /// Whether a call keeps waiting for a connection past its time.
@@ -361,6 +405,28 @@ mod tests {
     use super::*;
 
     const LONG: Duration = Duration::from_secs(3600);
+
+    /// A window whose data dir holds a copy of an engine's token (a test
+    /// window on the user's engine) once dialled every 3 s for as long as it
+    /// ran after that engine started again, each a refused handshake in the
+    /// engine's log: the same token refused again backs off to a minute.
+    /// Anything else retries as it always has, to 3 s.
+    #[test]
+    fn a_token_refused_again_is_dialled_less_often() {
+        let dials_in_ten_minutes = |stale: bool| {
+            let (mut delay, mut at, mut dials) = (Duration::from_millis(250), Duration::ZERO, 0);
+            while at < Duration::from_secs(600) {
+                dials += 1;
+                at += delay;
+                delay = next_delay(delay, stale);
+            }
+            dials
+        };
+        assert!(dials_in_ten_minutes(false) >= 195, "an engine starting is retried as before");
+        assert!(dials_in_ten_minutes(true) <= 20, "{} dials", dials_in_ten_minutes(true));
+        assert_eq!(next_delay(Duration::from_secs(3), false), Duration::from_secs(3));
+        assert_eq!(next_delay(Duration::from_secs(40), true), STALE_TOKEN_WAIT);
+    }
 
     /// Starting up, an engine this app can start is on its way, however long
     /// the one before it takes to leave: nothing gives up on it.
