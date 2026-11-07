@@ -1911,9 +1911,14 @@ return function(props: Props): Node
 		-- (The window's edges a little more than the gap between cards: the
 		-- same to the eye.)
 		pb = ui.raw(WINDOW_EDGE, "the window's edge"),
-		pl = motion.tween(ui.computed(function(): number
-			return if fit.current:get().sidebar then INSET else WINDOW_EDGE
-		end), motion.sidebar),
+		-- (The gap between cards beside the sidebar's, the window's edge
+		-- without it: the one going to the other only over the sidebar's
+		-- last points, so the gap beside its edge holds as it folds.)
+		pl = function(): number
+			-- (Its column, the window's gap before its card included.)
+			local shown = math.min(shell_view.sidebar_shown:get(), WINDOW_EDGE)
+			return ui.raw(WINDOW_EDGE - (WINDOW_EDGE - INSET) * shown / WINDOW_EDGE, "the window's edge, or the gap beside the sidebar")
+		end,
 		pr = ui.raw(WINDOW_EDGE, "the window's edge"),
 		pointer_events = "none",
 		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
