@@ -2643,13 +2643,12 @@ async fn a_send_for_the_queue_still_goes_over_https_on_a_network_with_no_sockets
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(client.stats().pending_pushes > 0);
-    assert!(pushes.lock().unwrap().is_empty(), "ten seconds of failed dials isn't a network without sockets");
-    assert!(!client.socketless(), "a network coming back answers HTTPS first");
-    tokio::time::sleep(Duration::from_secs(120)).await;
-    assert!(client.socketless());
-    assert_eq!(*pushes.lock().unwrap(), vec!["outbox-1".to_string()], "and it's never lost");
+    assert!(pushes.lock().unwrap().is_empty(), "a socket may still answer");
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert!(!client.socketless(), "twenty seconds of failed dials isn't a network without sockets");
+    assert_eq!(*pushes.lock().unwrap(), vec!["outbox-1".to_string()], "but the send doesn't wait for that");
     assert_eq!(client.stats().pending_pushes, 0);
     assert_eq!(*sink.retired.lock().unwrap(), vec!["outbox-1".to_string()]);
     drop(client);
@@ -3023,4 +3022,101 @@ async fn old_reader_with_the_host_away_stays_quiet() {
     let (d, f) = (dials.load(Relaxed), fetches.load(Relaxed));
     client.shutdown().await;
     assert!(d <= 3 && f <= 2, "dials={d} fetches={f}");
+}
+
+// ── review: flag-off parked row vs a newer checkpoint ───────────────────────
+
+/// Rows park until the room's newer checkpoint ("v2") is imported.
+#[derive(Default)]
+struct NeedsNewerCheckpoint {
+    filled: std::sync::atomic::AtomicBool,
+    cursor: std::sync::atomic::AtomicU64,
+}
+
+impl ChatDocSink for NeedsNewerCheckpoint {
+    fn cursor_is_verified(&self) -> bool {
+        true
+    }
+    fn apply_row(&self, _bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        if self.filled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.cursor.store(cursor, std::sync::atomic::Ordering::SeqCst);
+            RowImportOutcome::Applied
+        } else {
+            RowImportOutcome::PendingDependencies
+        }
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], _cursor: u64) -> Result<(), String> {
+        if bytes == b"v2" {
+            self.filled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+    fn contains_frontier(&self, frontier: &[u8]) -> bool {
+        frontier != b"f2" || self.filled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn advance_cursor(&self, _cursor: u64) {}
+}
+
+/// The room's checkpoint version: 1 until the host posts its compensating one.
+struct VersionedFetcher {
+    version: Arc<std::sync::atomic::AtomicU64>,
+}
+impl CheckpointFetcher for VersionedFetcher {
+    fn fetch(&self) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let v = self.version.load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move { Ok(format!("v{v}").into_bytes()) })
+    }
+}
+
+/// A healthy room: every dial is answered, every rows request served.
+struct HealthyRoom {
+    version: Arc<std::sync::atomic::AtomicU64>,
+}
+impl BinConnector for HealthyRoom {
+    fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+        let (pipe, mut end) = pipe_pair();
+        let version = self.version.clone();
+        tokio::spawn(async move {
+            let _ = expect_kind(&mut end, frame_type::HELLO).await;
+            let v = version.load(std::sync::atomic::Ordering::SeqCst);
+            let state = serde_json::json!({"headSeq": 1, "seqFloor": 0, "checkpointSeq": 0,
+                "checkpointSize": 8, "rowCount": 1, "rowBytes": 1});
+            send(&end, frame_type::STATE, state, format!("f{v}").as_bytes()).await;
+            while let Some(bytes) = end.rx.recv().await {
+                let Some(frame) = decode(&bytes) else { continue };
+                if frame.kind == frame_type::ROWS_REQ {
+                    send(&end, frame_type::ROW,
+                        serde_json::json!({"seq": 1, "device": "host", "batchId": "b1"}), &[1]).await;
+                    send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 1}), &[]).await;
+                }
+            }
+        });
+        Box::pin(async move { Ok(pipe) })
+    }
+}
+
+/// Flags off (no relay handle), gen 2: a host push was rejected, so the next row
+/// parks until the host's compensating checkpoint lands. The checkpoint lands a
+/// little after the reader first parked. The reader must eventually read it.
+#[tokio::test(start_paused = true)]
+async fn review_flag_off_parked_row_reads_a_checkpoint_posted_after_it_parked() {
+    let sink = Arc::new(NeedsNewerCheckpoint::default());
+    let version = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let client = ChatClient::connect_with_tuned(
+        Arc::new(HealthyRoom { version: version.clone() }),
+        sink.clone(),
+        Arc::new(VersionedFetcher { version: version.clone() }),
+        "viewer",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    // The host's compensating checkpoint lands 30 s later.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    version.store(2, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    let cursor = client.stats().cursor;
+    client.shutdown().await;
+    assert_eq!(cursor, 1, "the parked row never imported: the newer checkpoint was never read");
 }

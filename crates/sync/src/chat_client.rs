@@ -563,6 +563,8 @@ const FALLBACK_AFTER_FAILED_DIALS: u64 = 3;
 /// answers HTTPS first. Calling that socketless tells the room to treat this device as an
 /// old reader, which moves the chat off relaying for every device for ten minutes.
 const FALLBACK_AFTER_FAILING_FOR: Duration = Duration::from_secs(30);
+/// How long a send for the queue waits for a socket before going over HTTPS.
+const QUEUE_HOLD_WHILE_DIALING: Duration = Duration::from_secs(5);
 
 const ROOM_NO_ANSWER: u8 = 0;
 const ROOM_NO_LAYER: u8 = 1;
@@ -572,6 +574,9 @@ const ROOM_HAS_LAYER: u8 = 2;
 /// it waits. Backs off so a chat whose host stays away lets its room hibernate.
 const RELAY_PARK_RECHECK: Duration = Duration::from_secs(5);
 const RELAY_PARK_RECHECK_MAX: Duration = Duration::from_secs(300);
+/// From this wait on, a parked row's recheck joins the room again, to hear whether
+/// its checkpoint has changed.
+const PARKED_REHELLO: Duration = Duration::from_secs(160);
 
 impl ChatClient {
     /// Connect (fixed URL — dev/tests).
@@ -1649,6 +1654,13 @@ impl Actor {
                     }
                 }
                 _ = tokio::time::sleep_until(park_recheck), if lock(&self.shared).relay_parked => {
+                    // The room may have taken a newer checkpoint since (a host making up
+                    // for a rejected push), and only a hello says so: a session's rows
+                    // requests never do. A parked row that's waited this long joins
+                    // again. The checkpoint is fetched only if its frontier changed.
+                    if park_wait >= PARKED_REHELLO {
+                        return SessionEnd::Reconnect;
+                    }
                     if let Some(relay) = &self.relay {
                         relay.ask_peers();
                     }
@@ -1801,11 +1813,13 @@ impl Actor {
         let socketless = self.flags.socketless.load(Relaxed);
         // These belong in the room's queue, and a socket is the only way in. A
         // stored row here could depend on ops only peers hold, and it would park on
-        // any old reader in the room, which then redials and re-downloads for as
-        // long as it stays. So the outbox holds them until a socket answers, or
-        // until this network is known to have no sockets.
-        let hold_for_queue =
-            !socketless && self.relay.as_ref().is_some_and(|relay| relay.queue_pushes());
+        // any old reader in the room. So the outbox holds them while a socket may
+        // still answer: not once dials have kept failing for a few seconds. A send
+        // then goes as a stored row, as it does without the layer, rather than wait
+        // half a minute for this network to be called socketless.
+        let hold_for_queue = !socketless
+            && failing_for < QUEUE_HOLD_WHILE_DIALING
+            && self.relay.as_ref().is_some_and(|relay| relay.queue_pushes());
         let flags = self.flags.clone();
         let task = tokio::spawn(async move {
             let batches: Vec<PendingPush> = if hold_for_queue {
