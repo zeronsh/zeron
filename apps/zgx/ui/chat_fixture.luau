@@ -156,6 +156,29 @@ end
 -- runs again on one; the host's transcript doesn't start over).
 local kept_open = ui.state("fixture_opened", nil :: string?)
 local opened: string? = kept_open:peek()
+-- `tail_first`: a chat opens as the engine opens one it no longer holds
+-- (`openingTail`): its newest rows first, its whole history (`history`)
+-- a moment later, the session ready from the first.
+local TAIL_FIRST = ui.state("fixture_tail_first", 0)
+ui.command {
+	id = "tail_first",
+	title = "Chats open with their newest rows first",
+	run = function()
+		TAIL_FIRST:set(16)
+	end,
+}
+local pending_history: { any }? = nil
+ui.command {
+	id = "history",
+	title = "The open chat's whole history arrives",
+	run = function()
+		local whole = pending_history
+		pending_history = nil
+		if whole then
+			store.messages:set(whole)
+		end
+	end,
+}
 stub.open = function(id: string?)
 	-- (As the host: the chat open already, nothing changes.)
 	if id == opened then
@@ -167,7 +190,15 @@ stub.open = function(id: string?)
 	if not id then
 		return
 	end
-	store.messages:set(TRANSCRIPTS[id] or {})
+	local whole = TRANSCRIPTS[id] or {}
+	local tail = TAIL_FIRST:peek()
+	if tail > 0 and #whole > tail then
+		pending_history = whole
+		store.messages:set(table.move(whole, #whole - tail + 1, #whole, 1, {}))
+	else
+		pending_history = nil
+		store.messages:set(whole)
+	end
 	store.draft:set { id = "", text = "" }
 	publish(id)
 end
