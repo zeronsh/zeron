@@ -16,16 +16,8 @@
 use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Value};
 
-/// `system.reduced_transparency` for `host`'s scripts, kept as the system's;
-/// and `system.popups_blur`: whether a popup's glass (a menu, a popover, a
-/// tooltip, each a window of its own) can blur what's under it. On Windows
-/// it can't: zgx gives popup windows no system backdrop there (DWM draws a
-/// never-activated window's flat, popup_window/win32.rs), and a window of its
-/// own has nothing of the app's to blur, so what's behind showed through
-/// sharp (a wallpaper's dither through the model picker). macOS's popups
-/// have AppKit's material; Linux's, zgx's blur.
+/// `system.reduced_transparency` for `host`'s scripts, kept as the system's.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
-    host.shared("system.popups_blur", !cfg!(windows));
     let shared = host.shared("system.reduced_transparency", false);
     #[cfg(windows)]
     {
