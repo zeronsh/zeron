@@ -4,7 +4,16 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { MAX_ATTACHMENT_BYTES, SHA256_HEADER, attachmentKey } from "../../src/attachment-blobs";
+import {
+  DEFAULT_QUOTA_BYTES,
+  DEFAULT_QUOTA_OBJECTS,
+  MAX_ATTACHMENT_BYTES,
+  SHA256_HEADER,
+  attachmentKey,
+  handleAttachmentBlob,
+  quotaOf
+} from "../../src/attachment-blobs";
+import type { Env } from "../../src/env";
 import { encodeHlc, type Op } from "../../src/registry-core";
 import { call, newUser, userBearer, type TestUser } from "./cloud-helpers";
 
@@ -210,5 +219,76 @@ describe("attachment bytes", () => {
     const bad = await call("GET", `/blob/${chat}/attachments/a.b`, user);
     expect(bad.status).toBe(404);
     await bad.body?.cancel();
+  });
+});
+
+describe("the per-user quota", () => {
+  /** The route as the Worker runs it, with these limits. */
+  const limited = (bytes: number, objects: number) => {
+    const quotaEnv = {
+      ...(env as unknown as Env),
+      ATTACHMENT_QUOTA_BYTES: String(bytes),
+      ATTACHMENT_QUOTA_OBJECTS: String(objects)
+    };
+    return async (method: string, userId: string, chat: string, upload: string, body?: Uint8Array) => {
+      const request = new Request(`https://edge.test/blob/${chat}/attachments/${upload}`, {
+        method,
+        body,
+        headers: body ? { "content-length": String(body.length) } : {}
+      });
+      const reply = await handleAttachmentBlob(request, quotaEnv, { userId, orgId: "org1", kind: "user" }, chat, upload);
+      return { status: reply.status, body: (await reply.json().catch(() => ({}))) as Record<string, unknown> };
+    };
+  };
+
+  it("defaults to 1 GiB and 500 files, and takes its limits from the environment", () => {
+    expect(quotaOf({})).toEqual({ bytes: DEFAULT_QUOTA_BYTES, objects: DEFAULT_QUOTA_OBJECTS });
+    expect(DEFAULT_QUOTA_BYTES).toBe(1024 * 1024 * 1024);
+    expect(DEFAULT_QUOTA_OBJECTS).toBe(500);
+    expect(quotaOf({ ATTACHMENT_QUOTA_BYTES: "10", ATTACHMENT_QUOTA_OBJECTS: "2" })).toEqual({ bytes: 10, objects: 2 });
+    // Nonsense falls back rather than locking everyone out.
+    expect(quotaOf({ ATTACHMENT_QUOTA_BYTES: "0", ATTACHMENT_QUOTA_OBJECTS: "lots" })).toEqual({
+      bytes: DEFAULT_QUOTA_BYTES,
+      objects: DEFAULT_QUOTA_OBJECTS
+    });
+  });
+
+  it("refuses a file past the count, and a collected one frees its place", async () => {
+    const call = limited(1024 * 1024, 2);
+    const user = `q-${rand()}`;
+    const chat = `chat-${rand()}`;
+    expect((await call("PUT", user, chat, "a", PNG)).status).toBe(200);
+    expect((await call("PUT", user, chat, "b", PNG)).status).toBe(200);
+    const over = await call("PUT", user, chat, "c", PNG);
+    expect(over.status).toBe(507);
+    expect(over.body).toMatchObject({ error: "quota_exceeded", usedObjects: 2, limitObjects: 2 });
+    expect(await env.BLOBS.head(attachmentKey(user, chat, "c"))).toBeNull();
+
+    // Sending the same file again replaces it: no new place needed.
+    expect((await call("PUT", user, chat, "b", PNG)).status).toBe(200);
+
+    expect((await call("DELETE", user, chat, "a")).status).toBe(200);
+    expect((await call("PUT", user, chat, "c", PNG)).status).toBe(200);
+  });
+
+  it("refuses a file past the bytes", async () => {
+    const call = limited(100, 50);
+    const user = `q-${rand()}`;
+    const chat = `chat-${rand()}`;
+    expect((await call("PUT", user, chat, "a", new Uint8Array(60))).status).toBe(200);
+    const over = await call("PUT", user, chat, "b", new Uint8Array(41));
+    expect(over.status).toBe(507);
+    expect(over.body).toMatchObject({ usedBytes: 60, limitBytes: 100 });
+    expect((await call("PUT", user, chat, "b", new Uint8Array(40))).status).toBe(200);
+  });
+
+  it("counts each user's files on their own", async () => {
+    const call = limited(1024 * 1024, 1);
+    const chat = `chat-${rand()}`;
+    const first = `q-${rand()}`;
+    const second = `q-${rand()}`;
+    expect((await call("PUT", first, chat, "a", PNG)).status).toBe(200);
+    expect((await call("PUT", second, chat, "a", PNG)).status).toBe(200);
+    expect((await call("PUT", first, chat, "b", PNG)).status).toBe(507);
   });
 });

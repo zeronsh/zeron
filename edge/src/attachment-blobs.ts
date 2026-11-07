@@ -11,9 +11,15 @@
  * chat it hosts (or a delegate it started; runner-access.ts).
  *
  * Retention: the machine's DELETE is the normal end. The bucket's lifecycle
- * rule on `attachments/` (7 days, see docs/design/cloud-attachments.md) catches
- * whatever a machine never collected. A message waits at most a day before it
- * expires, so an object outlives anything still able to want it.
+ * rule on `attachments/` (14 days, see docs/design/cloud-attachments.md) catches
+ * whatever a machine never collected. A message to a Cloud machine waits at most
+ * 7 days before it expires, so an object outlives anything still able to want it,
+ * a retry included.
+ *
+ * Quota: what a user has stored and not yet collected is capped, in bytes and in
+ * files (`ATTACHMENT_QUOTA_*`). Collected, deleted and expired files free their
+ * space. The check runs before each upload, so uploads racing each other can
+ * pass it together.
  */
 import type { Verified } from "./auth";
 import type { Env } from "./env";
@@ -30,12 +36,50 @@ export const SHA256_HEADER = "x-zeron-sha256";
 export const attachmentKey = (userId: string, chatId: string, uploadId: string): string =>
   `attachments/${userId}/${chatId}/${uploadId}`;
 
+export const DEFAULT_QUOTA_BYTES = 1024 * 1024 * 1024;
+export const DEFAULT_QUOTA_OBJECTS = 500;
+
+type QuotaEnv = Pick<Env, "ATTACHMENT_QUOTA_BYTES" | "ATTACHMENT_QUOTA_OBJECTS">;
+
+const positive = (value: string | undefined, fallback: number): number => {
+  const n = Number(value);
+  return value !== undefined && Number.isSafeInteger(n) && n > 0 ? n : fallback;
+};
+
+export const quotaOf = (env: QuotaEnv) => ({
+  bytes: positive(env.ATTACHMENT_QUOTA_BYTES, DEFAULT_QUOTA_BYTES),
+  objects: positive(env.ATTACHMENT_QUOTA_OBJECTS, DEFAULT_QUOTA_OBJECTS)
+});
+
+/** What a user has stored, `except` the key about to be replaced. Stops counting
+ * once past `stopAfter` files: the answer is "over" either way. */
+const usageOf = async (
+  bucket: R2Bucket,
+  userId: string,
+  except: string,
+  stopAfter: number
+): Promise<{ bytes: number; objects: number }> => {
+  let bytes = 0;
+  let objects = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix: `attachments/${userId}/`, cursor, limit: 1000 });
+    for (const object of page.objects) {
+      if (object.key === except) continue;
+      bytes += object.size;
+      objects += 1;
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor && objects <= stopAfter);
+  return { bytes, objects };
+};
+
 const hex = (bytes: ArrayBuffer): string =>
   [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 export const handleAttachmentBlob = async (
   request: Request,
-  env: Pick<Env, "BLOBS" | "REGISTRY_ROOMS">,
+  env: Pick<Env, "BLOBS" | "REGISTRY_ROOMS"> & QuotaEnv,
   auth: Verified,
   chatId: string,
   uploadId: string
@@ -55,6 +99,21 @@ export const handleAttachmentBlob = async (
       if (length > MAX_ATTACHMENT_BYTES) return json({ error: "too_large" }, 413);
       const sha256 = request.headers.get(SHA256_HEADER)?.toLowerCase();
       if (sha256 !== undefined && !SHA256_RE.test(sha256)) return json({ error: "bad_checksum" }, 400);
+      const quota = quotaOf(env);
+      const used = await usageOf(env.BLOBS, auth.userId, key, quota.objects);
+      if (used.objects + 1 > quota.objects || used.bytes + length > quota.bytes) {
+        return json(
+          {
+            error: "quota_exceeded",
+            message: "Too many files are waiting for Cloud machines to collect them.",
+            usedBytes: used.bytes,
+            usedObjects: used.objects,
+            limitBytes: quota.bytes,
+            limitObjects: quota.objects
+          },
+          507
+        );
+      }
       try {
         await env.BLOBS.put(key, request.body ?? new Uint8Array(), {
           ...(sha256 ? { sha256 } : {}),

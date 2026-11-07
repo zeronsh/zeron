@@ -173,7 +173,11 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<EdgeState>>) 
         }
     }
     if path.ends_with("/nudge") {
-        state.lock().unwrap().log.push(("NUDGE".into(), path.clone()));
+        state
+            .lock()
+            .unwrap()
+            .log
+            .push(("NUDGE".into(), path.clone()));
     }
     let (status, reply, sum) = if path.contains("/attachments/") {
         let mut s = state.lock().unwrap();
@@ -750,7 +754,10 @@ async fn a_row_on_a_machines_disk_waits_for_the_turn_the_kill_cut_off() {
     doc.push_message(&zeron_doc::SessionMessageEntry {
         id: "m1".into(),
         role: MessageRole::User,
-        parts: vec![MessagePart::Text { id: "t0".into(), text: "the killed turn".into() }],
+        parts: vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "the killed turn".into(),
+        }],
         created_at: now - 60_000,
         device_id: HOST.into(),
         status: Some(MessageStatus::Complete),
@@ -761,7 +768,10 @@ async fn a_row_on_a_machines_disk_waits_for_the_turn_the_kill_cut_off() {
     doc.push_message(&zeron_doc::SessionMessageEntry {
         id: "a1".into(),
         role: MessageRole::Assistant,
-        parts: vec![MessagePart::Text { id: "t0".into(), text: "partial".into() }],
+        parts: vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "partial".into(),
+        }],
         created_at: now - 30_000,
         device_id: HOST.into(),
         status: Some(MessageStatus::Streaming),
@@ -769,10 +779,13 @@ async fn a_row_on_a_machines_disk_waits_for_the_turn_the_kill_cut_off() {
         duration_ms: None,
     })
     .unwrap();
-    doc.push_queued(&QueuedMessage::new("row-1", "and then this", "phone")).unwrap();
+    doc.push_queued(&QueuedMessage::new("row-1", "and then this", "phone"))
+        .unwrap();
     let store_dir = dir.join("orgs/dev-org/dev-user");
     let store = zeron_sync::DocsStore::open(&store_dir).unwrap();
-    store.save_snapshot(CHAT, &doc.export_snapshot().unwrap()).unwrap();
+    store
+        .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+        .unwrap();
     drop(store);
     zeron_engine::RunJournal::open(store_dir.join("journals"))
         .unwrap()
@@ -1060,11 +1073,17 @@ async fn a_row_queued_during_a_turn_waits_for_its_bytes_too() {
     let id = queue_row_with_image(&core, "up-1").await;
 
     let handle = core.doc_host.open(CHAT).unwrap();
-    assert!(handle.doc().read_queue().unwrap().is_empty(), "off the chat");
+    assert!(
+        handle.doc().read_queue().unwrap().is_empty(),
+        "off the chat"
+    );
     let status = held(&core).remove(0);
     assert!(status.queue_row);
     assert_eq!(status.message_id.as_deref(), Some(id.as_str()));
-    assert!(status.prompt.contains(&pending_ref("up-1")), "shows its image");
+    assert!(
+        status.prompt.contains(&pending_ref("up-1")),
+        "shows its image"
+    );
 
     wait_for(
         || !handle.doc().read_queue().unwrap().is_empty(),
@@ -1107,7 +1126,13 @@ async fn a_refused_row_says_so_and_a_retry_sends_it() {
 async fn a_row_for_a_computer_goes_straight_into_the_chat() {
     let tmp = tempfile::tempdir().unwrap();
     let edge = FakeEdge::start().await;
-    let core = sender(&tmp.path().join("laptop"), Some(&edge), "desktop-at-home", true).await;
+    let core = sender(
+        &tmp.path().join("laptop"),
+        Some(&edge),
+        "desktop-at-home",
+        true,
+    )
+    .await;
     stage(&core, "up-1").await;
     queue_row_with_image(&core, "up-1").await;
     let handle = core.doc_host.open(CHAT).unwrap();
@@ -1224,5 +1249,186 @@ async fn no_edge_means_the_peer_path() {
     send(&core, "m1", "up-1").await;
     assert_eq!(commands(&core).len(), 1);
     assert!(held(&core).is_empty());
+    core.shutdown().await;
+}
+
+// ---- how long a message waits, and how old it is
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn ttl_of(command: &SessionCommandEntry) -> i64 {
+    command.expires_at.expect("an expiry") - command.issued_at
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_a_cloud_chat_waits_a_week_and_others_a_day() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    send_text(&core, "m1", "plain").await;
+    assert_eq!(ttl_of(&commands(&core)[0]), 7 * DAY_MS);
+    // One that waited in the outbox gets its week from when it went out.
+    stage(&core, "up-1").await;
+    send(&core, "m2", "up-1").await;
+    wait_for(|| commands(&core).len() == 2, "the held send").await;
+    assert_eq!(ttl_of(&commands(&core)[1]), 7 * DAY_MS);
+    core.shutdown().await;
+
+    let core = sender(
+        &tmp.path().join("other"),
+        Some(&edge),
+        "desktop-at-home",
+        true,
+    )
+    .await;
+    send_text(&core, "m1", "plain").await;
+    assert_eq!(ttl_of(&commands(&core)[0]), DAY_MS);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_held_for_days_still_runs_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.store("up-days", PNG);
+    let core = assemble(&tmp.path().join("machine"), HOST, Some(&edge));
+    create_chat(&core, HOST).await;
+
+    // Sent three days ago, to a machine asleep since.
+    let sent = now() - 3 * DAY_MS;
+    let mut waited = entry("cmd-1", run_payload("m1", "up-days"), sent);
+    waited.expires_at = Some(sent + 7 * DAY_MS);
+    arrive(&core, &waited);
+
+    wait_for(|| replies(&core) == 1, "the message to run").await;
+    assert_eq!(commands(&core)[0].status, SessionCommandStatus::Applied);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(replies(&core), 1, "once");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_past_a_week_expires_and_a_retry_sends_it_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.store("up-week", PNG);
+    let machine = assemble(&tmp.path().join("machine"), HOST, Some(&edge));
+    create_chat(&machine, HOST).await;
+    let sent = now() - 8 * DAY_MS;
+    let mut stale = entry("cmd-1", run_payload("m1", "up-week"), sent);
+    stale.expires_at = Some(sent + 7 * DAY_MS);
+    arrive(&machine, &stale);
+    wait_for(
+        || commands(&machine)[0].status == SessionCommandStatus::Expired,
+        "the message to expire",
+    )
+    .await;
+    assert_eq!(replies(&machine), 0, "never run that late");
+    machine.shutdown().await;
+
+    // Its sender reads it expired, and the user's retry sends it afresh.
+    let laptop = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&laptop, "up-week").await;
+    let mut expired = stale.clone();
+    expired.status = SessionCommandStatus::Expired;
+    arrive(&laptop, &expired);
+    laptop.doc_host.retry_delivery(CHAT).unwrap();
+    wait_for(|| commands(&laptop).len() == 2, "a fresh attempt").await;
+    let fresh = &commands(&laptop)[1];
+    assert_eq!(fresh.status, SessionCommandStatus::Pending);
+    assert_eq!(ttl_of(fresh), 7 * DAY_MS);
+    assert!(fresh.issued_at > sent + 7 * DAY_MS);
+    laptop.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_store_says_so_and_a_retry_sends_it_once_there_is_room() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.fail_puts(&[507]);
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&core, "up-1").await;
+    send(&core, "m1", "up-1").await;
+    wait_for(
+        || held(&core).first().is_some_and(|s| s.failure.is_some()),
+        "the failure",
+    )
+    .await;
+    let why = held(&core)[0].failure.clone().unwrap();
+    assert!(why.contains("waiting for Cloud machines"), "{why}");
+    assert!(commands(&core).is_empty(), "not sent, and not dropped");
+
+    // Space freed up: the retry goes through.
+    core.doc_host.retry_delivery(CHAT).unwrap();
+    wait_for(|| commands(&core).len() == 1, "the retried message").await;
+    assert_eq!(edge.stored("up-1").as_deref(), Some(PNG));
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_messages_say_how_old_each_is() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.fail_puts(&[413]);
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut stream = client
+        .subscribe(
+            methods::WATCH_WAITING_MESSAGES,
+            serde_json::json!({ "chatId": CHAT }),
+        )
+        .await
+        .expect("watch");
+    let first = stream.recv().await.expect("a first frame");
+    assert_eq!(first["items"], serde_json::json!([]));
+
+    // One sent two days ago and still not taken, and one held here.
+    let sent = now() - 2 * DAY_MS;
+    let mut old = entry("cmd-old", run_payload("m-old", "up-old"), sent);
+    old.expires_at = Some(sent + 7 * DAY_MS);
+    arrive(&core, &old);
+    stage(&core, "up-1").await;
+    send(&core, "m-new", "up-1").await;
+    wait_for(
+        || held(&core).first().is_some_and(|s| s.failure.is_some()),
+        "the held send to fail",
+    )
+    .await;
+
+    let waiting = core.doc_host.waiting_messages(CHAT).unwrap();
+    assert_eq!(waiting.len(), 2, "{waiting:?}");
+    assert_eq!(waiting[0].message_id.as_deref(), Some("m-old"));
+    assert_eq!(waiting[0].sent_at, sent);
+    assert_eq!(waiting[0].expires_at, Some(sent + 7 * DAY_MS));
+    assert!(!waiting[0].held);
+    assert_eq!(waiting[1].message_id.as_deref(), Some("m-new"));
+    assert!(waiting[1].held);
+    assert!(waiting[1].failure.is_some());
+
+    // The watch follows both.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, stream.recv())
+            .await
+            .expect("a frame with both")
+            .expect("the stream");
+        if frame["items"]
+            .as_array()
+            .is_some_and(|items| items.len() == 2)
+        {
+            assert_eq!(frame["items"][0]["sentAt"], sent);
+            break;
+        }
+    }
+
+    // Once the host has written the message, it's no longer waiting.
+    let handle = core.doc_host.open(CHAT).unwrap();
+    handle
+        .doc()
+        .set_command_status("cmd-old", SessionCommandStatus::Applied, None)
+        .unwrap();
+    let waiting = core.doc_host.waiting_messages(CHAT).unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert!(waiting[0].held);
     core.shutdown().await;
 }

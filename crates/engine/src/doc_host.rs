@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use zeron_doc::{
-    COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
+    CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
     evaluate_command, join_continuation_entries,
@@ -583,6 +583,8 @@ pub struct ChatDocHandle {
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
     queue_tx: watch::Sender<Vec<QueuedMessage>>,
+    /// Bumped on every change to the doc (`WatchWaitingMessages` follows it).
+    changes: watch::Receiver<u64>,
     /// Serializes everything that TAKES from the queue. Both the doc-change
     /// task and the turn-end status watcher call `drain_queue`, and nothing
     /// keeps those two apart: without this they interleave across the
@@ -1820,6 +1822,7 @@ impl DocHost {
             transcript_import: Mutex::default(),
             transcript_history,
             queue_tx,
+            changes: changed_rx.clone(),
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
@@ -3684,7 +3687,7 @@ impl DocHost {
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now,
             based_on,
-            expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+            expires_at: Some(now + self.command_ttl(chat_id)),
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
@@ -4951,7 +4954,7 @@ impl DocHost {
                     turn_id: Some(m.id.clone()),
                     frontier: None,
                 }),
-                expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+                expires_at: Some(now + self.command_ttl(chat_id)),
                 status: SessionCommandStatus::Pending,
                 resolution: None,
             };

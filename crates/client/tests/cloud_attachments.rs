@@ -177,6 +177,16 @@ fn room_prompts(edge: &MockEdge) -> Vec<String> {
     commands.chain(rows).collect()
 }
 
+fn room_commands(edge: &MockEdge) -> Vec<zeron_doc::SessionCommandEntry> {
+    let doc = LoroDoc::new();
+    for row in edge.rows(CHAT) {
+        let _ = doc.import(&row.bytes);
+    }
+    SessionDoc::from_doc(doc)
+        .read_commands()
+        .unwrap_or_default()
+}
+
 fn upload_of(session: &SessionHandle) -> String {
     let reference = session.snapshot().pending[0].images[0].clone();
     zeron_client::attachments::parse_pending_ref(&reference)
@@ -208,6 +218,12 @@ async fn a_send_waits_for_its_bytes_to_be_stored_and_shows_meanwhile() {
     assert_eq!(edge.stored(&upload).as_deref(), Some(IMAGE));
     assert!(edge.store_puts() >= 2, "retried");
     assert!(room_prompts(&edge)[0].contains(&format!("pending://{upload}/")));
+    let command = room_commands(&edge).remove(0);
+    assert_eq!(
+        command.expires_at.unwrap() - command.issued_at,
+        zeron_doc::CLOUD_COMMAND_TTL_MS,
+        "a Cloud machine's message waits a week"
+    );
     wait_for("the escort stash to go", || {
         !dir.path().join(format!("uploads/{upload}.bin")).exists()
     })

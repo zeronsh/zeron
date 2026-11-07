@@ -615,6 +615,12 @@ impl SessionCore {
         payload: SessionCommandPayload,
     ) -> Result<String> {
         let now = now_ms();
+        // A Cloud machine may be asleep for days: its messages wait a week.
+        let cloud = self
+            .client()
+            .ok()
+            .and_then(|client| client.workspace.chat(&self.chat_id))
+            .is_some_and(|chat| zeron_proto::is_cloud_device(&chat.device_id, ""));
         let entry = SessionCommandEntry {
             id,
             payload,
@@ -624,7 +630,7 @@ impl SessionCore {
                 turn_id: Some(turn_id),
                 frontier: None,
             }),
-            expires_at: Some(now + zeron_doc::COMMAND_DEFAULT_TTL_MS),
+            expires_at: Some(now + zeron_doc::command_ttl_ms(cloud)),
             status: SessionCommandStatus::Pending,
             resolution: None,
         };

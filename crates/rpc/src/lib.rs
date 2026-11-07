@@ -154,6 +154,10 @@ pub mod methods {
     /// (`zeron_proto::HeldSendStatus` list): current set first, then every
     /// change. No params; IPC-only.
     pub const WATCH_HELD_SENDS: &str = "WatchHeldSends";
+    /// One chat's messages not yet taken by its agent
+    /// (`zeron_proto::WaitingMessage` list), `{chatId}`: current set first, then
+    /// every change. IPC-only.
+    pub const WATCH_WAITING_MESSAGES: &str = "WatchWaitingMessages";
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";

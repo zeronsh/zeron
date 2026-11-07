@@ -3532,6 +3532,38 @@ impl RpcService for EngineRpc {
             methods::WATCH_HELD_SENDS => Ok(RpcReply::Stream(watch_stream(
                 self.doc_host.watch_held_sends(),
             ))),
+            methods::WATCH_WAITING_MESSAGES => {
+                let p: ChatParams = parse_params(params)?;
+                let (changes, held) = self
+                    .doc_host
+                    .watch_waiting_messages(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let host = self.doc_host.clone();
+                let chat = p.chat_id;
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold(
+                        (changes, held, true),
+                        move |(mut changes, mut held, first)| {
+                            let host = host.clone();
+                            let chat = chat.clone();
+                            async move {
+                                if !first {
+                                    tokio::select! {
+                                        changed = changes.changed() => changed.ok()?,
+                                        changed = held.changed() => changed.ok()?,
+                                    }
+                                }
+                                changes.borrow_and_update();
+                                held.borrow_and_update();
+                                let items = host.waiting_messages(&chat).unwrap_or_default();
+                                let value = serde_json::json!({ "items": items });
+                                Some((value, (changes, held, false)))
+                            }
+                        },
+                    )
+                    .boxed(),
+                ))
+            }
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self

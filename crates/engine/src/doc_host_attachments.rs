@@ -18,10 +18,10 @@
 use std::time::Duration;
 
 use zeron_doc::{
-    COMMAND_DEFAULT_TTL_MS, CommandBasedOn, QueuedMessage, SessionCommandEntry,
+    CLOUD_COMMAND_TTL_MS, CommandBasedOn, QueuedMessage, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus,
 };
-use zeron_proto::HeldSendStatus;
+use zeron_proto::{HeldSendStatus, WaitingMessage};
 use zeron_sync::attachment_store::{
     self, Fetched, HELD_SEND_AUTO_RETRY_MS, HELD_SEND_FAILED_RETENTION_MS, HeldBody, HeldPayload,
     HeldSend, HeldUpload, PutError,
@@ -57,6 +57,102 @@ enum AttachmentRoute {
 }
 
 impl DocHost {
+    /// How long a command to this chat may wait before it expires: a week for a
+    /// Cloud machine, which may be asleep or waiting on its person for days, a
+    /// day elsewhere.
+    pub(super) fn command_ttl(&self, chat_id: &str) -> i64 {
+        let cloud = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| zeron_proto::is_cloud_device(&chat.device_id, ""));
+        zeron_doc::command_ttl_ms(cloud)
+    }
+
+    /// A chat's messages not yet taken by its agent: unresolved runs and steers
+    /// in its doc, then what this device still holds for it.
+    pub fn waiting_messages(&self, chat_id: &str) -> Result<Vec<WaitingMessage>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let landed: std::collections::HashSet<String> = handle
+            .doc
+            .read_entries()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        let mut waiting: Vec<WaitingMessage> = handle
+            .doc
+            .read_commands()?
+            .into_iter()
+            .filter(|c| c.status == SessionCommandStatus::Pending)
+            .filter_map(|c| {
+                let (message_id, prompt) = match &c.payload {
+                    SessionCommandPayload::Run {
+                        request,
+                        message_id,
+                    } => (Some(message_id.clone()), request.prompt.clone()),
+                    SessionCommandPayload::Steer { prompt, message_id } => {
+                        (message_id.clone(), prompt.clone())
+                    }
+                    _ => return None,
+                };
+                if message_id.as_ref().is_some_and(|id| landed.contains(id)) {
+                    return None;
+                }
+                Some(WaitingMessage {
+                    expires_at: Some(c.effective_expiry()),
+                    id: c.id,
+                    chat_id: chat_id.to_string(),
+                    message_id,
+                    prompt,
+                    issued_by: c.issued_by,
+                    sent_at: c.issued_at,
+                    held: false,
+                    failure: None,
+                })
+            })
+            .collect();
+        for send in self.inner.store.held_sends_for(chat_id)? {
+            let (message_id, prompt) = match &send.payload.body {
+                HeldBody::Row { item } => (
+                    Some(item.id.clone()),
+                    super::queued_message_prompt(&item.text, &item.attachments),
+                ),
+                HeldBody::Command { .. } => (
+                    send.payload.message_id().map(str::to_string),
+                    send.payload.prompt().to_string(),
+                ),
+            };
+            waiting.push(WaitingMessage {
+                id: send.id,
+                chat_id: chat_id.to_string(),
+                message_id,
+                prompt,
+                issued_by: self.inner.config.device_id.clone(),
+                sent_at: send.created_at,
+                expires_at: None,
+                held: true,
+                failure: send.failure,
+            });
+        }
+        Ok(waiting)
+    }
+
+    /// [`Self::waiting_messages`], again on every change to the chat's doc or
+    /// to this device's outbox.
+    pub fn watch_waiting_messages(
+        &self,
+        chat_id: &str,
+    ) -> Result<
+        (
+            tokio::sync::watch::Receiver<u64>,
+            tokio::sync::watch::Receiver<Vec<HeldSendStatus>>,
+        ),
+        EngineError,
+    > {
+        let handle = self.open(chat_id)?;
+        Ok((handle.changes.clone(), self.watch_held_sends()))
+    }
+
     fn attachment_route(&self, chat_id: &str) -> AttachmentRoute {
         if self.inner.config.edge.is_none() {
             return AttachmentRoute::Peer;
@@ -504,7 +600,7 @@ impl DocHost {
                         // The clock of a message starts when it goes out.
                         issued_at: now,
                         based_on,
-                        expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+                        expires_at: Some(now + self.command_ttl(&send.chat_id)),
                         status: SessionCommandStatus::Pending,
                         resolution: None,
                     };
@@ -604,7 +700,7 @@ impl DocHost {
         };
         let url = attachment_store::blob_url(&edge.url, chat, upload_id);
         let give_up =
-            tokio::time::Instant::now() + Duration::from_millis(COMMAND_DEFAULT_TTL_MS as u64);
+            tokio::time::Instant::now() + Duration::from_millis(CLOUD_COMMAND_TTL_MS as u64);
         let mut wake = zeron_sync::wake::subscribe();
         let mut online = zeron_sync::wake::subscribe_online();
         let mut backoff = TRANSFER_BACKOFF_BASE;

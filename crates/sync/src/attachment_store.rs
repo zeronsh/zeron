@@ -24,9 +24,14 @@ pub const MAX_STORED_ATTACHMENT_BYTES: u64 = 32 * 1024 * 1024;
 pub const SHA256_HEADER: &str = "x-zeron-sha256";
 
 /// How long a held send keeps retrying by itself. Past it, sending needs the
-/// user's say-so: the same day a queued command gets before it expires, and an
-/// explicit retry is the consent to send it after all.
-pub const HELD_SEND_AUTO_RETRY_MS: i64 = zeron_doc::COMMAND_DEFAULT_TTL_MS;
+/// user's say-so: the same week a command to a Cloud chat gets before it
+/// expires, and an explicit retry is the consent to send it after all.
+pub const HELD_SEND_AUTO_RETRY_MS: i64 = zeron_doc::CLOUD_COMMAND_TTL_MS;
+
+/// What a send says when the store is full. It frees up as machines collect what
+/// they're sent.
+pub const STORE_FULL: &str =
+    "too many files are waiting for Cloud machines to collect them; retry once one has";
 
 /// A failed held send the user never retried is dropped after this long, with
 /// its local copy of the bytes. It reads as a failed message in its chat all
@@ -169,6 +174,7 @@ fn put_status_error(status: u16) -> Option<PutError> {
         413 => Some(PutError::Permanent(
             "the file is too large to send to this machine".into(),
         )),
+        507 => Some(PutError::Permanent(STORE_FULL.into())),
         400 | 403 | 411 => Some(PutError::Permanent(format!(
             "the file was refused (HTTP {status})"
         ))),
@@ -292,6 +298,10 @@ mod tests {
             put_status_error(413),
             Some(PutError::Permanent(_))
         ));
+        assert_eq!(
+            put_status_error(507),
+            Some(PutError::Permanent(STORE_FULL.into()))
+        );
         assert!(matches!(
             put_status_error(403),
             Some(PutError::Permanent(_))

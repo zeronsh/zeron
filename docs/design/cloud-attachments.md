@@ -31,12 +31,25 @@ Later sends of the same chat queue behind a held one, so nothing overtakes it. C
 It now applies only when nothing is on the way. A machine past the cap asks the store first,
 and only a definite "nothing there" rejects the message. While the store has the bytes, or
 can't be asked (an outage, a token refreshing), the message keeps waiting, bounded by the
-command's own one-day expiry. An expired message can still be retried by the user.
+command's own expiry. An expired message can still be retried by the user.
+
+## How long a message waits
+
+A command to a Cloud-hosted chat expires after **7 days**; every other chat keeps its day
+(`zeron_doc::command_ttl_ms`). A machine can be asleep, or waiting on its person to pick a
+size, for days, and the message should still run, once, when it comes back. The sender stamps
+the expiry, so a host of any version honors it. Past it, the message reads as expired in its
+chat, with a retry.
+
+An old message is about to run when its machine comes back, so the composer says so first.
+`WatchWaitingMessages {chatId}` lists the chat's messages not yet taken: each one's `sentAt`,
+`expiresAt`, sender, and whether it's still held here uploading. On mobile, a pending send's
+`sent_at_ms` carries the same age.
 
 ## Failure
 
-The outbox retries by itself for a day. It stops on a permanent answer (too large, refused,
-the staged file gone) or when the day runs out, and the message then shows as failed in its
+The outbox retries by itself for the same 7 days. It stops on a permanent answer (too large,
+refused, the store full, the staged file gone) or when the week runs out, and the message then shows as failed in its
 chat with the reason and a retry ("Not delivered: … — click to retry"). A failed send
 doesn't hold up later ones. One nobody retries is dropped after a week, since there's no way
 yet to dismiss one.
@@ -65,24 +78,35 @@ engine's existing upload cap, 32 MiB, refused from the `content-length` before a
 stored. Each object carries a SHA-256 that R2 checks on the way in and the machine checks on
 the way out.
 
+## Quota
+
+What one user has stored and not yet collected is capped: **1 GiB** and **500 files** by
+default, set with the edge's `ATTACHMENT_QUOTA_BYTES` and `ATTACHMENT_QUOTA_OBJECTS`. An upload
+past either gets `507 quota_exceeded`, and the message shows as failed in its chat ("too many
+files are waiting for Cloud machines to collect them; retry once one has") with a retry. It's
+never dropped. A file frees its space when its machine collects and deletes it, or when the
+lifecycle rule expires it. The check runs before each upload, so uploads racing each other can
+pass it together. The 32 MiB limit per file is unchanged.
+
 ## Retention
 
 - **After delivery:** the machine deletes the object as soon as its copy is on disk.
 - **Fallback:** an R2 lifecycle rule expires anything left under `attachments/` after
-  **7 days**. A message waits at most a day before expiring, so that leaves room for a retry.
-  A missed delete only costs storage until then.
+  **14 days**: the 7 days a message can wait, and a week more for a retry once it has expired
+  (a phone keeps no copy of its own after the upload, so its retry relies on this one). A missed
+  delete only costs storage until then.
 
 The rule is bucket configuration, not code, so it has to be applied once per bucket:
 
 ```sh
-npx wrangler r2 bucket lifecycle add zeron-staging-blobs attachments-expire attachments/ --expire-days 7
-npx wrangler r2 bucket lifecycle add comet-native-blobs attachments-expire attachments/ --expire-days 7
+npx wrangler r2 bucket lifecycle add zeron-staging-blobs attachments-expire attachments/ --expire-days 14
+npx wrangler r2 bucket lifecycle add comet-native-blobs attachments-expire attachments/ --expire-days 14
 ```
 
 **Cost.** Objects normally live for minutes. Assuming 1,000 attachments a day at 2 MB:
 about 30,000 writes a month ($0.14), about 30,000 reads ($0.01), deletes free, no egress,
-and storage rounds to nothing. If every delete failed, the 7-day rule caps storage at about
-14 GB ($0.21 a month). These are estimates from R2's published prices, not measurements. The
+and storage rounds to nothing. If every delete failed, the 14-day rule caps storage at about
+28 GB ($0.42 a month), and no one user can hold more than their quota. These are estimates from R2's published prices, not measurements. The
 normal case fits inside R2's free allowance.
 
 ## Mobile
