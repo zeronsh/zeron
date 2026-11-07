@@ -934,7 +934,7 @@ async fn an_online_launch_dials_as_soon_as_the_network_is_reported() {
     }
     let unreported = start.elapsed();
     assert!(
-        unreported < Duration::from_millis(600),
+        unreported < Duration::from_millis(1400),
         "a platform that never reports waited {unreported:?}"
     );
     eprintln!("first dial: reported online {reported:?}, never reported {unreported:?}");

@@ -12,9 +12,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-/// How long a connect waits for the platform's first path report. iOS's arrives in about
-/// 100 ms; a platform that never reports loses no more than this.
-pub(crate) const FIRST_REPORT_PATIENCE: Duration = Duration::from_millis(250);
+/// How long a connect waits for the platform's first path report. On an iPhone Air it
+/// arrived 111 to 275 ms after the client started (11 launches), and its arrival releases
+/// the wait at once, so this only bounds a platform that never reports.
+pub(crate) const FIRST_REPORT_PATIENCE: Duration = Duration::from_secs(1);
 /// A connect parked on "offline" tries anyway after this: the monitor can be wrong.
 pub(crate) const OFFLINE_SAFETY: Duration = Duration::from_secs(30);
 
