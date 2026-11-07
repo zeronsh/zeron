@@ -203,7 +203,6 @@ test("table: a gesture on the page stays the page's as a table slides under it",
 	local app = only("many")
 	app:hover("#below")
 	app:wheel("#below", { dy = 40, mouse = true })
-	app:hover(".md-table")
 	app:wheel(".md-table", { dy = 40, mouse = true })
 	expect(across(app)).to_be(0)
 	expect(down(app)).to_be(80)
