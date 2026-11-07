@@ -59,9 +59,10 @@ end)
 
 test("a model never picked on the new page doesn't become the last chat's", function()
 	local app = open()
-	-- Nothing picked here: no model yet (the agent's own default).
+	-- Nothing picked here: the catalog's first (Opus), as a reload shows.
 	local mine = shown(app)
-	expect(app:state("chat_model")).to_be_nil()
+	expect(app:state("chat_model")).to_be("opus")
+	-- The last chat seen runs Sonnet: not taken.
 	go(app, "go_s1")
 	go(app, "go_s2")
 	go(app, "go_new")
