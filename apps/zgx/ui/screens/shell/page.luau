@@ -49,6 +49,9 @@ local TITLE_H = 38
 -- and under it.
 local TOP_BAR = 42
 local WINDOW_EDGE = 5
+-- The window's gap before the sidebar's card, part of the sidebar's move
+-- (screens/shell/sidebar `before`).
+local SIDEBAR_GAP = 5
 -- The panel's Expand on the top bar (the bar's controls' size).
 local EXPAND = 24
 -- What the title line's right end keeps for the bar's controls there. (The
@@ -663,6 +666,18 @@ return function(props: Props): Node
 	local function tree_part(): number
 		return if fit.current:get().files then TREE else 0
 	end
+	-- The window `v` wide less its gaps round the cards beside a sidebar `sd`
+	-- wide (none: the window's edge before the page; one: its gap before
+	-- the sidebar's card and the gap between cards after it; then the gap
+	-- before the panel's card and the window's edge after it): what the
+	-- chat's card and the panel split 50/50. Zeron's columns had no gaps;
+	-- left in, they all came off the chat, its card 18 points short of the
+	-- panel at "half" each. (The leasts count them already: the chat's 300
+	-- and a split's floor are its column's, gaps and all, as Wing set them.)
+	local function less_gaps(v: number, sd: number): number
+		local before = if sd > 0 then SIDEBAR_GAP + INSET else WINDOW_EDGE
+		return v - before - INSET - WINDOW_EDGE
+	end
 	-- (Expanded over the session (the panel's Expand): all of the page's
 	-- room, the chat's column narrowing to nothing.)
 	local row_ref = ui.ref()
@@ -716,9 +731,22 @@ return function(props: Props): Node
 		local r = right_w:peek()
 		-- (Its share of a window `v` wide beside a sidebar `sd` wide.)
 		local function share(v: number, sd: number): number
-			return fit.content_split(math.max(v - sd - reserve(), 0), floor)
+			return fit.content_split(math.max(less_gaps(v, sd) - sd - reserve(), 0), floor)
 		end
-		if pref ~= was.pref then
+		-- (The sidebar folded or brought back, the window as it was.)
+		local toggled = (side > 0) ~= (was.side > 0) and vw == was.vw and floor == was.floor
+		if toggled and floor <= fit.CHAT_PANEL_MIN and not shell_view.expanded:peek() then
+			-- The sidebar folded or back: the chat and this split again, as
+			-- Zeron's `toggle_sidebar` re-split them (`resplit_panels`), a
+			-- width dragged forgotten as there. Below, it eases there.
+			if chosen:peek() then
+				chosen:set(false)
+			end
+			local part = share(vw, side)
+			alloc.pref = part
+			files_w:set(reserve() + part)
+			r = math.min(part, allowed)
+		elseif pref ~= was.pref then
 			-- Split or dragged: what it would take, as far as there's room.
 			r = math.min(pref, allowed)
 		elseif not chosen:peek() and floor <= fit.CHAT_PANEL_MIN and floor == was.floor and vw ~= was.vw then
@@ -783,7 +811,7 @@ return function(props: Props): Node
 		local floor = fit.page_floor:peek()
 		if floor <= fit.CHAT_PANEL_MIN then
 			local side, keep = sidebar_settled(), reserve()
-			local part = fit.content_split(math.max(vw - side - keep, 0), floor)
+			local part = fit.content_split(math.max(less_gaps(vw, side) - side - keep, 0), floor)
 			files_w:set(keep + part)
 			r = math.min(part, fit.panel_room(vw, side, tree_part(), floor))
 		end
@@ -804,10 +832,9 @@ return function(props: Props): Node
 	-- It opens at its share, unless a width was chosen since its toggle
 	-- (its edge dragged, then another chat's panel shown, or the fit hiding
 	-- it for room and bringing it back). Its toggle, opening or closing it,
-	-- forgets that width. (Not as the sidebar opens or closes, as Zeron
-	-- does: halving it then squeezed a panel the chat had room beside, its
-	-- tree going to float. It gives way only as it must, above, and comes
-	-- back as the sidebar goes.)
+	-- forgets that width. (The sidebar folding or coming back splits them
+	-- again too, above, as Zeron's does: Gaël's call over Wing's earlier
+	-- rule, where the chat took all the sidebar gave and the panel held.)
 	local split = { on = shown:peek(), open = props.files:peek(), owner = owner(true) }
 	ui.effect(function()
 		local on = shown:get()
@@ -927,6 +954,7 @@ return function(props: Props): Node
 			shown = shown:peek(),
 			expanded = expanded(),
 			sidebar = f.sidebar and not shell_view.collapsed:peek(),
+			side = if f.sidebar and not shell_view.collapsed:peek() then f.sidebar_limit else 0,
 			files = f.files,
 			owner = owner(true),
 		}
@@ -939,6 +967,7 @@ return function(props: Props): Node
 			shown = shown:get(),
 			expanded = expanded(),
 			sidebar = f.sidebar and not shell_view.collapsed:get(),
+			side = if f.sidebar and not shell_view.collapsed:get() then f.sidebar_limit else 0,
 			files = f.files,
 			owner = owner(false),
 		}
@@ -1023,7 +1052,14 @@ return function(props: Props): Node
 				holding:set(false)
 			end
 			off:set(showing - to)
-			local params = motion.panel(0)
+			-- (Split again as the sidebar folds or comes back: on the sidebar's
+			-- own clock, its curve and its time for its column's travel, so the
+			-- chat between them only ever widens or narrows, as in Zeron, where
+			-- both rode one tween. On the panel's quicker curve, the chat
+			-- narrowed a little first as the sidebar folded, then widened.)
+			local params = if now.sidebar ~= was.sidebar and not opened
+				then motion.column(math.max(now.side, was.side) + SIDEBAR_GAP, 0)
+				else motion.panel(0)
 			local this: any = nil
 			params.onComplete = function()
 				if easing == this then

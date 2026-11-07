@@ -301,6 +301,17 @@ fn content_split(available: f32) -> f32 {
     (available / 2.).max(RIGHT_PANE_MIN).min((available - CHAT_PANEL_MIN).max(RIGHT_PANE_MIN))
 }
 
+/// The panel's share in a window `vw` wide beside a sidebar `side` wide
+/// (its card's width; 0 folded): Zeron's split of what the sidebar and the
+/// window's gaps round the cards leave the chat and the panel. (The window's
+/// gap before the sidebar's card and the gap between cards after it, or the
+/// window's edge alone; the gap before the panel and the window's edge
+/// after it. Zeron's columns had none.)
+fn share_of(vw: f32, side: f32) -> f32 {
+    let gaps = if side > 0.5 { SIDEBAR_EDGE + 4. } else { 5. } + 4. + 5.;
+    content_split(vw - side - gaps)
+}
+
 /// A window resized continuously keeps the chat and the panel at half each,
 /// as Zeron's does (`observe_viewport_width`), at once: the change shared
 /// between them, each keeping its least. Everything in it moves one way,
@@ -396,9 +407,9 @@ fn a_window_resize_keeps_the_chat_and_the_panel_at_half_each() {
                     // At rest between the fit's changes, the panel at its
                     // share of what the sidebar leaves.
                     let panel = app.bounds("#shell-files").width;
-                    let room = w - if side > 0.5 { side - SIDEBAR_EDGE } else { 0. };
-                    if !easing && fit(w).1 && (panel - content_split(room)).abs() > 1. {
-                        faults.push(format!("step {step}, at {w}: the panel is {panel}, its share {}", content_split(room)));
+                    let card = if side > 0.5 { side - SIDEBAR_EDGE } else { 0. };
+                    if !easing && fit(w).1 && (panel - share_of(w, card)).abs() > 1. {
+                        faults.push(format!("step {step}, at {w}: the panel is {panel}, its share {}", share_of(w, card)));
                     }
                 }
                 last = Some((w, xs, side, more));
@@ -461,42 +472,48 @@ fn a_narrow_panel_keeps_its_tree_beside_the_file() {
     assert!((app.bounds("#shell-files").width - 420.).abs() < 0.5, "it stays where it was let go");
 }
 
-/// The sidebar opening beside an open panel takes only what the chat needs:
-/// with room for the chat's least, the panel keeps its width; short of it,
-/// the panel gives just that much; the sidebar closing again gives it back.
-/// (It was halved to a fresh share, squeezing a panel the chat had room
-/// beside.)
+/// The sidebar folding or coming back splits the chat and the panel again,
+/// 50/50, as Zeron's `toggle_sidebar` did (`resplit_panels`), a width dragged
+/// on the panel's edge forgotten as there; and it eases there on the
+/// sidebar's own clock, so the chat between them only ever widens (or
+/// narrows) a frame at a time, never the other way first, and the panel
+/// steps a little each frame. (Gaël's call over Wing's earlier rule, where
+/// the sidebar took only what the chat needed and the panel held.)
 #[test]
-fn the_sidebar_opening_takes_only_what_the_chat_needs_from_the_panel() {
-    // (The panel opens at half the chat's and its room: at 1500, 750, with 944 of
-    // room beside the sidebar; at 1000, 500, with 444.)
-    for (width, keeps) in [(1500., true), (1000., false)] {
+fn the_sidebar_toggled_splits_the_chat_and_the_panel_again_easing() {
+    for (width, dragged) in [(1340., false), (1340., true), (1000., false)] {
         let mut app = mount();
         app.ui.scene.borrow_mut().resize(width, 800.);
         app.frames(30);
         app.click("#shell-sidebar >> role:button \"Fix the build\"");
         app.frames(20);
-        assert!(app.host.run_command("shell.toggle_sidebar"));
-        app.frames(60);
         app.click("#titlebar >> role:button \"Panel\"");
         app.frames(60);
-        let before = app.bounds("#shell-files").width;
-        assert!(app.host.run_command("shell.toggle_sidebar"));
-        app.frames(60);
-        let side = app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
-        let after = app.bounds("#shell-files").width;
-        let chat = width - side - after;
-        assert!(chat >= CHAT_PANEL_MIN - 0.5, "{width}: the chat has {chat}");
-        if keeps {
-            assert!((after - before).abs() < 0.5, "{width}: the panel went {before} → {after} with room for the chat");
-        } else {
-            assert!(after < before - 0.5, "{width}: the panel should give way ({before} → {after})");
-            assert!((chat - CHAT_PANEL_MIN).abs() < 1., "{width}: it gave more than the chat needed (chat {chat})");
+        if dragged {
+            drag(&mut app, "\"Resize files\"", -80.);
+            app.frames(40);
         }
-        assert!(app.host.run_command("shell.toggle_sidebar"));
-        app.frames(60);
-        let back = app.bounds("#shell-files").width;
-        assert!((back - before).abs() < 0.5, "{width}: the sidebar gone, the panel is {back}, was {before}");
+        for (folding, card) in [(true, 0.), (false, 256.)] {
+            let chat = |app: &mut TestApp| app.bounds("#shell-page-room").width;
+            let mut chats = vec![chat(&mut app)];
+            let mut panels = vec![app.bounds("#shell-files").width];
+            assert!(app.host.run_command("shell.toggle_sidebar"));
+            for _ in 0..24 {
+                app.frame();
+                chats.push(chat(&mut app));
+                panels.push(app.bounds("#shell-files").width);
+            }
+            let what = format!("{width}{}, the sidebar {}", if dragged { " dragged" } else { "" }, if folding { "folding" } else { "back" });
+            let way = if folding { 1. } else { -1. };
+            assert!(chats.windows(2).all(|w| (w[1] - w[0]) * way >= -0.05), "{what}: the chat one way: {chats:?}");
+            let jump = panels.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0., f32::max);
+            let moved = (panels[panels.len() - 1] - panels[0]).abs();
+            assert!(moved > 20. && jump < moved * 0.6, "{what}: the panel eases there: {panels:?}");
+            let panel = *panels.last().unwrap();
+            assert!((panel - share_of(width, card)).abs() < 0.5, "{what}: the panel at its share {}: {panel}", share_of(width, card));
+            assert!((chats.last().unwrap() - panel).abs() < 0.5 || panel <= RIGHT_PANE_MIN + 0.5, "{what}: the chat {} beside the panel {panel}", chats.last().unwrap());
+            app.frames(30);
+        }
     }
 }
 
@@ -536,7 +553,7 @@ fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
     app.frames(60);
     let side = app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
     let split = app.bounds("#shell-files").width;
-    assert!((split - content_split(1500. - side)).abs() < 0.5, "it opens at its share: {split}");
+    assert!((split - share_of(1500., side)).abs() < 0.5, "it opens at its share: {split}");
     drag(&mut app, "\"Resize files\"", 140.);
     app.frames(60);
     let dragged = app.bounds("#shell-files").width;
@@ -555,7 +572,7 @@ fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
         drag(&mut app, "\"Resize files\"", 120.);
         app.frames(60);
         let reopened = app.bounds("#shell-files").width;
-        let share = content_split(1400. - side);
+        let share = share_of(1400., side);
         assert!((reopened - share).abs() < 0.5, "reopened at {reopened}, its share is {share} (dragged to {dragged})");
     }
 }
@@ -607,7 +624,7 @@ fn double_clicking_a_seam_puts_it_back() {
     }
     let sidebar = |app: &mut TestApp| app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
     let panel = |app: &mut TestApp| app.bounds("#shell-files").width;
-    let share = content_split(1500. - 256.);
+    let share = share_of(1500., 256.);
     // (The panel's width chosen first: the sidebar's reset forgets it too.)
     drag(&mut app, "\"Resize files\"", 100.);
     app.frames(30);
@@ -638,7 +655,7 @@ fn double_clicking_a_seam_puts_it_back() {
     // (Forgotten: the window resized, it keeps to its share.)
     app.ui.scene.borrow_mut().resize(1400., 800.);
     app.frames(30);
-    assert!((panel(&mut app) - content_split(1400. - 256.)).abs() < 0.5, "it keeps to its share: {}", panel(&mut app));
+    assert!((panel(&mut app) - share_of(1400., 256.)).abs() < 0.5, "it keeps to its share: {}", panel(&mut app));
 }
 
 /// The light in a seam's gap, `label`'s: its opacity. (Inside the seam, or,
