@@ -692,6 +692,28 @@ M.Panel = ui.component(function(props: Props): Node
 	local function active(): string?
 		return state.of(key:get()).active
 	end
+	-- (The shell told whether its active tab is a file tab with its tree out:
+	-- the tree then takes a column of its own beside the chat.)
+	if shell_view and shell_view.panel_files then
+		local told = shell_view.panel_files
+		ui.effect(function()
+			local id = active()
+			local docked = false
+			for _, t in tabs() do
+				if t.id == id then
+					docked = t.kind == "files" and Files.tree_shown:get() == true
+				end
+			end
+			if told:peek() ~= docked then
+				told:set(docked)
+			end
+		end)
+		ui.on_cleanup(function()
+			if told:peek() then
+				told:set(false)
+			end
+		end)
+	end
 
 	-- Closing: a file tab with unsaved changes asks first; a terminal with
 	-- something running asks too (its kind says).

@@ -628,7 +628,8 @@ return function(props: Props): Node
 	-- Its docked tree's room while the window's fit shows Zeron's Files:
 	-- the tree's own width, so that as the tree goes to float over the file
 	-- the panel narrows by just that, and the file stays where it was.
-	local TREE = fit.TREE
+	local TREE = fit.tree_width
+	local tree_dragging = shell_view.tree_dragging
 	-- The width it would take, its tree docked: as last split (opening, a
 	-- neighbour opening or closing) or dragged. Kept across launches.
 	local files_w = ui.persist("shell_files_width", FILES_W)
@@ -664,7 +665,7 @@ return function(props: Props): Node
 		return if f.sidebar and not shell_view.collapsed:get() then f.sidebar_limit else 0
 	end
 	local function tree_part(): number
-		return if fit.current:get().files then TREE else 0
+		return if fit.current:get().files then TREE() else 0
 	end
 	-- The window `v` wide less its gaps round the cards beside a sidebar `sd`
 	-- wide (none: the window's edge before the page; one: its gap before
@@ -701,17 +702,11 @@ return function(props: Props): Node
 	-- narrowing, the chat gives up its room first, down to its least, and
 	-- then this; widening, while the chat is at its least, this takes the
 	-- room back first, up to what it would take, then the chat grows.
-	-- The tree's room inside `files_w`: a session's panel keeps it for its
-	-- tree (docked, or floating with the panel narrowed by it); a plugin's
-	-- page has no tree, so its panel is the whole width. (It took TREE off
-	-- there too, opening a tree's width narrower than a session's, often
-	-- under its least.)
-	local function reserve(): number
-		return if on_plugin() then 0 else TREE
-	end
-	local right_w = ui.state("shell_panel_right_now", math.max(files_w:peek() - reserve(), 0))
+	-- (`files_w` is its part beside the tree: the tree's column, while a file
+	-- tab shows it, is on top, `tree_part`.)
+	local right_w = ui.state("shell_panel_right_now", math.max(files_w:peek(), 0))
 	local function right_pref(): number
-		return math.max(files_w:get() - reserve(), 0)
+		return math.max(files_w:get(), 0)
 	end
 	local alloc = { vw = fit.viewport:peek(), side = sidebar_settled(), tree = tree_part(), pref = right_pref(), floor = fit.page_floor:peek() }
 	ui.effect(function()
@@ -729,22 +724,34 @@ return function(props: Props): Node
 		end
 		local allowed = fit.panel_room(vw, side, tree, floor)
 		local r = right_w:peek()
-		-- (Its share of a window `v` wide beside a sidebar `sd` wide.)
-		local function share(v: number, sd: number): number
-			return fit.content_split(math.max(less_gaps(v, sd) - sd - reserve(), 0), floor)
+		-- (Its share of a window `v` wide beside a sidebar `sd` wide and the
+		-- tree's column `t` wide, the current one's by default.)
+		local function share(v: number, sd: number, t: number?): number
+			return fit.content_split(math.max(less_gaps(v, sd) - sd - (t or tree), 0), floor)
 		end
 		-- (The sidebar folded or brought back, the window as it was.)
 		local toggled = (side > 0) ~= (was.side > 0) and vw == was.vw and floor == was.floor
-		if toggled and floor <= fit.CHAT_PANEL_MIN and not shell_view.expanded:peek() then
-			-- The sidebar folded or back: the chat and this split again, as
-			-- Zeron's `toggle_sidebar` re-split them (`resplit_panels`), a
-			-- width dragged forgotten as there. Below, it eases there.
+		-- (The tree's column come or gone (a file tab shown or left, its tree
+		-- out or in, the fit's room for it), or its width put back.)
+		local tree_moved = tree ~= was.tree and vw == was.vw and floor == was.floor
+		if tree_moved and tree_dragging:peek() then
+			-- Its edge under the hand: the tree and the file trade width, the
+			-- panel as wide as it was.
+			local part = math.max(pref - (tree - was.tree), 0)
+			alloc.pref = part
+			files_w:set(part)
+			r = math.min(part, allowed)
+		elseif (toggled or tree_moved) and floor <= fit.CHAT_PANEL_MIN and not shell_view.expanded:peek() then
+			-- The sidebar folded or back, or the tree's column come or gone:
+			-- the chat and this split again, as Zeron's `toggle_sidebar` and
+			-- Files' toggle re-split them (`resplit_panels`), a width dragged
+			-- forgotten as there. Below, it eases there.
 			if chosen:peek() then
 				chosen:set(false)
 			end
 			local part = share(vw, side)
 			alloc.pref = part
-			files_w:set(reserve() + part)
+			files_w:set(part)
 			r = math.min(part, allowed)
 		elseif pref ~= was.pref then
 			-- Split or dragged: what it would take, as far as there's room.
@@ -753,12 +760,12 @@ return function(props: Props): Node
 			-- At its share: the change shared out, at once (the window's edge is
 			-- under the hand). What it would take moves with it, so a sidebar
 			-- coming or going gives it back what it gave.
-			local by = share(vw, side) - share(was.vw, was.side)
+			local by = share(vw, side) - share(was.vw, was.side, was.tree)
 			r = math.min(r + by, allowed)
 			local moved_pref = math.max(pref + by, 0)
 			if moved_pref ~= pref then
 				alloc.pref = moved_pref
-				files_w:set(reserve() + moved_pref)
+				files_w:set(moved_pref)
 			end
 		elseif r > allowed then
 			-- No room left for the chat's least: it gives way. (Beside a split, as
@@ -810,9 +817,9 @@ return function(props: Props): Node
 		local r = math.max(fit.RIGHT_PANE_MIN - tree_part(), 0)
 		local floor = fit.page_floor:peek()
 		if floor <= fit.CHAT_PANEL_MIN then
-			local side, keep = sidebar_settled(), reserve()
+			local side, keep = sidebar_settled(), tree_part()
 			local part = fit.content_split(math.max(less_gaps(vw, side) - side - keep, 0), floor)
-			files_w:set(keep + part)
+			files_w:set(part)
 			r = math.min(part, fit.panel_room(vw, side, tree_part(), floor))
 		end
 		if r ~= right_w:peek() then
@@ -923,8 +930,10 @@ return function(props: Props): Node
 	local goal = ui.use_state(open_w:peek())
 	local holding = ui.use_state(false)
 	-- (The width its content showed at as it began to close, and its
-	-- content's width as each frame laid it out: `inner_w`'s.)
+	-- content's width as each frame laid it out: `inner_w`'s. And the width
+	-- it showed at as its tree's column began to go.)
 	local left_at: number? = nil
+	local keep_at: number? = nil
 	local showing_w = 0
 	-- What's in it (its tabs and what they show) and the page's own content
 	-- (held under the panel expanded over it: `page_hold`), for their drift
@@ -1020,15 +1029,23 @@ return function(props: Props): Node
 				easing = nil
 			end
 			holding:set(false)
+			keep_at = nil
+			if shell_view.tree_step:peek() ~= nil then
+				shell_view.tree_step:set(nil)
+			end
 			off:set(0)
 			base = to
-		elseif resizing then
-			-- Its edge dragged: under the pointer, no step left.
+		elseif resizing or tree_dragging:peek() then
+			-- Its edge dragged, or its tree's: under the pointer, no step left.
 			if easing then
 				easing:cancel()
 				easing = nil
 			end
 			holding:set(false)
+			keep_at = nil
+			if shell_view.tree_step:peek() ~= nil then
+				shell_view.tree_step:set(nil)
+			end
 			off:set(0)
 			base = to
 		elseif flipped or not (resized or (now.expanded and not opened)) then
@@ -1047,9 +1064,30 @@ return function(props: Props): Node
 			if now.shown ~= was.shown then
 				-- (Closing, at the width it shows now: expanded, the wide one.)
 				left_at = if now.shown then nil else showing_w
+				keep_at = nil
 				holding:set(true)
+			elseif now.files ~= was.files and not opened then
+				-- (Its tree's column coming, as a file tab with its tree shows:
+				-- laid out at the width it's going to, the tree standing where it
+				-- lands as the edge uncovers it. Going: at the width it shows,
+				-- the tree kept docked as the edge covers it, laid out again once
+				-- it's covered. As the panel opens and closes.)
+				-- (Under a live window resize, the window's edge in the hand, it
+				-- follows the panel's edge instead, the tree's room with it.)
+				local held = not resized
+				keep_at = if now.files or not held then nil else showing_w
+				shell_view.panel_w:set(showing)
+				shell_view.tree_step:set({ from = showing, to = to, coming = now.files, held = held })
+				holding:set(held)
 			elseif opened then
+				keep_at = nil
 				holding:set(false)
+			end
+			-- (Its tree's column still coming or going, the room split again
+			-- under it: where it goes now.)
+			local ts = shell_view.tree_step:peek()
+			if ts and ts.to ~= to and now.files == was.files then
+				shell_view.tree_step:set({ from = ts.from, to = to, coming = ts.coming, held = ts.held })
 			end
 			off:set(showing - to)
 			-- (Split again as the sidebar folds or comes back: on the sidebar's
@@ -1059,12 +1097,19 @@ return function(props: Props): Node
 			-- narrowed a little first as the sidebar folded, then widened.)
 			local params = if now.sidebar ~= was.sidebar and not opened
 				then motion.column(math.max(now.side, was.side) + SIDEBAR_GAP, 0)
+				-- (The tree's column under a live resize: the columns' gentler
+				-- start, gliding beside the window's edge.)
+				elseif now.files ~= was.files and resized and not opened then motion.column(showing - to, 0)
 				else motion.panel(0)
 			local this: any = nil
 			params.onComplete = function()
 				if easing == this then
 					easing = nil
 					stepping:set(false)
+					keep_at = nil
+					if shell_view.tree_step:peek() ~= nil then
+						shell_view.tree_step:set(nil)
+					end
 					holding:set(false)
 					-- (The page under the panel expanded: hidden, not left at the
 					-- fade's floor as a sliver of its edge.)
@@ -1096,6 +1141,30 @@ return function(props: Props): Node
 		end
 		open_w:set(base + off:peek() + edge_drag.nudge:peek())
 	end)
+	-- (Its width each frame, for the files pane while its tree's column
+	-- comes or goes.)
+	ui.effect(function()
+		local w = open_w:get()
+		if shell_view.tree_step:peek() ~= nil and shell_view.panel_w:peek() ~= w then
+			shell_view.panel_w:set(w)
+		end
+	end)
+	-- (Whether it's stepping, for the files pane: its tree, its column gone,
+	-- stays docked under the closing edge until it lands.)
+	ui.effect(function()
+		local on = stepping:get()
+		if shell_view.panel_moving:peek() ~= on then
+			shell_view.panel_moving:set(on)
+		end
+	end)
+	-- (Whether the tree has its column now, for the files pane: it docks at
+	-- once then, the panel's edge sweeping over it.)
+	ui.effect(function()
+		local on = fit.current:get().files
+		if shell_view.tree_column:peek() ~= on then
+			shell_view.tree_column:set(on)
+		end
+	end)
 	-- (Following the step as it eases, and its edge's bounce.)
 	ui.effect(function()
 		local o = off:get()
@@ -1115,22 +1184,27 @@ return function(props: Props): Node
 			w = open_w:get()
 		else
 			local g = goal:get()
-			w = if g > 0 then g else left_at or rest_w:get()
+			w = if g > 0 then math.max(g, keep_at or 0) else left_at or rest_w:get()
 		end
 		showing_w = w
 		return w
 	end
 	-- The widest it may be asked to be: what leaves the page what it wants.
+	-- The narrowest: its least beside the tree's column, while there is one
+	-- (the file keeps Zeron's right pane's least, 360).
+	local function least_w(): number
+		return FILES_MIN + (if fit.current:peek().files then TREE() else 0)
+	end
 	local function most_w(): number
-		return math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
+		return math.max(least_w(), fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
 	end
 	-- Its width asked for (its edge dragged, or keyed): never past what
 	-- leaves the page what it wants; kept as the width it takes with its tree
 	-- docked.
 	local function set_width(want: number)
-		local tree = if fit.current:peek().files then TREE else 0
-		local w = math.clamp(want, FILES_MIN, most_w())
-		files_w:set(reserve() + w - tree)
+		local tree = if fit.current:peek().files then TREE() else 0
+		local w = math.clamp(want, least_w(), most_w())
+		files_w:set(w - tree)
 		if not chosen:peek() then
 			chosen:set(true)
 		end
@@ -1297,7 +1371,7 @@ return function(props: Props): Node
 			on_pointer_move = function(e)
 				if resizing then
 					local want = from_w - (e.x - from_x)
-					edge_drag.at(want, FILES_MIN, most_w())
+					edge_drag.at(want, least_w(), most_w())
 					set_width(want)
 				end
 			end,
