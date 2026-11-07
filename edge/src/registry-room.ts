@@ -27,6 +27,7 @@ import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { chatHost, parentOf, runnerCanSee, runnerOpRefusal, type RunnerScope } from "./registry-runner";
 import { AUTH_USER_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER, apnsConfig, type Env } from "./env";
 import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
+import { WriteMeter } from "./write-meter";
 import {
   apnsPayload,
   chatForNotification,
@@ -105,20 +106,24 @@ export class RegistryRoom implements DurableObject {
   private readonly env: Env;
   /** device → last presence beat (epoch ms). Memory-only. */
   private readonly presence = new Map<string, number>();
+  /** Every statement goes through here, so /stats can say what this object
+   * has written since it started. */
+  private readonly sql: WriteMeter;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
-    ctx.storage.sql.exec(
+    this.sql = new WriteMeter(ctx.storage.sql);
+    this.sql.exec(
       "CREATE TABLE IF NOT EXISTS rows (kind TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL, deleted INTEGER NOT NULL, del_hlc TEXT, fields TEXT NOT NULL, clocks TEXT NOT NULL, PRIMARY KEY (kind, id))"
     );
-    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS rows_seq ON rows (seq)");
-    ctx.storage.sql.exec(
+    this.sql.exec("CREATE INDEX IF NOT EXISTS rows_seq ON rows (seq)");
+    this.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
     // Push targets are private to this room: never rows (those broadcast to
     // every socket, sync to every device and back up to R2).
-    ctx.storage.sql.exec(
+    this.sql.exec(
       "CREATE TABLE IF NOT EXISTS push_targets (device TEXT PRIMARY KEY, token TEXT NOT NULL, environment TEXT NOT NULL, prefs TEXT NOT NULL, updated_at INTEGER NOT NULL)"
     );
     // Same protocol-level keepalive as SessionRoom — and the same caveat: a
@@ -130,12 +135,12 @@ export class RegistryRoom implements DurableObject {
   // ── meta helpers ──────────────────────────────────────────────────────────
 
   private getMeta(key: string): string | undefined {
-    const rows = [...this.ctx.storage.sql.exec("SELECT value FROM meta WHERE key = ?", key)];
+    const rows = [...this.sql.exec("SELECT value FROM meta WHERE key = ?", key)];
     return rows[0]?.value as string | undefined;
   }
 
   private setMeta(key: string, value: string): void {
-    this.ctx.storage.sql.exec(
+    this.sql.exec(
       "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       key,
       value
@@ -154,7 +159,7 @@ export class RegistryRoom implements DurableObject {
 
   private loadRow(kind: string, id: string): Row | undefined {
     const rows = [
-      ...this.ctx.storage.sql.exec(
+      ...this.sql.exec(
         "SELECT seq, deleted, del_hlc, fields, clocks FROM rows WHERE kind = ? AND id = ?",
         kind,
         id
@@ -174,7 +179,7 @@ export class RegistryRoom implements DurableObject {
   }
 
   private saveRow(row: Row): void {
-    this.ctx.storage.sql.exec(
+    this.sql.exec(
       "INSERT INTO rows (kind, id, seq, deleted, del_hlc, fields, clocks) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET seq = excluded.seq, deleted = excluded.deleted, del_hlc = excluded.del_hlc, fields = excluded.fields, clocks = excluded.clocks",
       row.kind,
       row.id,
@@ -201,7 +206,7 @@ export class RegistryRoom implements DurableObject {
     const spaces = new Set<string>();
     const hosted = new Set<string>();
     const parents: [string, string][] = [];
-    for (const raw of this.ctx.storage.sql.exec<{ id: string; fields: string }>(
+    for (const raw of this.sql.exec<{ id: string; fields: string }>(
       "SELECT id, fields FROM rows WHERE kind = 'chats' AND deleted = 0"
     )) {
       try {
@@ -223,7 +228,7 @@ export class RegistryRoom implements DurableObject {
    * that delegated work to it (the Worker's device-room gate). */
   private parentHosts(device: string): string[] {
     const hosts = new Set<string>();
-    for (const raw of this.ctx.storage.sql.exec<{ fields: string }>(
+    for (const raw of this.sql.exec<{ fields: string }>(
       "SELECT fields FROM rows WHERE kind = 'chats' AND deleted = 0"
     )) {
       try {
@@ -240,7 +245,7 @@ export class RegistryRoom implements DurableObject {
 
   private rowsSince(cursor: number): Row[] {
     const out: Row[] = [];
-    for (const raw of this.ctx.storage.sql.exec(
+    for (const raw of this.sql.exec(
       "SELECT kind, id, seq, deleted, del_hlc, fields, clocks FROM rows WHERE seq > ? ORDER BY seq",
       cursor
     )) {
@@ -289,10 +294,10 @@ export class RegistryRoom implements DurableObject {
     }
 
     if (url.pathname === "/stats" && request.method === "GET") {
-      const rowCount = [...this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM rows")][0]
+      const rowCount = [...this.sql.exec("SELECT COUNT(*) AS n FROM rows")][0]
         ?.n as number;
       const tombstones = [
-        ...this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM rows WHERE deleted = 1")
+        ...this.sql.exec("SELECT COUNT(*) AS n FROM rows WHERE deleted = 1")
       ][0]?.n as number;
       return json({
         seq: this.seq(),
@@ -307,7 +312,10 @@ export class RegistryRoom implements DurableObject {
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
         pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
         pushConfigured: apnsConfig(this.env) !== undefined,
-        pushLog: JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[]
+        pushLog: JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[],
+        // Billed rows (index entries and alarms included) since this object
+        // last started.
+        writesSinceStart: this.sql.snapshot()
       });
     }
 
@@ -317,7 +325,7 @@ export class RegistryRoom implements DurableObject {
       const device = url.searchParams.get("device") ?? "";
       if (device === "") return json({ error: "bad_request", message: "device required" }, 400);
       if (request.method === "DELETE") {
-        this.ctx.storage.sql.exec("DELETE FROM push_targets WHERE device = ?", device);
+        this.sql.exec("DELETE FROM push_targets WHERE device = ?", device);
         return json({ ok: true });
       }
       if (request.method === "POST") {
@@ -332,7 +340,7 @@ export class RegistryRoom implements DurableObject {
         if (!TOKEN_RE.test(token) || environment === undefined) {
           return json({ error: "bad_request", message: "token and environment required" }, 400);
         }
-        this.ctx.storage.sql.exec(
+        this.sql.exec(
           "INSERT INTO push_targets (device, token, environment, prefs, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(device) DO UPDATE SET token = excluded.token, environment = excluded.environment, prefs = excluded.prefs, updated_at = excluded.updated_at",
           device,
           token,
@@ -430,8 +438,8 @@ export class RegistryRoom implements DurableObject {
       // detects `state.seq < cursor` on its next hello and re-seeds the table
       // from its local rows with their ORIGINAL clocks (registry-core
       // rowToSeedOp) — the ws4 repair recipe, built in.
-      this.ctx.storage.sql.exec("DELETE FROM rows");
-      this.ctx.storage.sql.exec("DELETE FROM meta");
+      this.sql.exec("DELETE FROM rows");
+      this.sql.exec("DELETE FROM meta");
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "registry reset");
@@ -630,7 +638,7 @@ export class RegistryRoom implements DurableObject {
   // ── push notifications ───────────────────────────────────────────────────
 
   private pushTargets(): PushTarget[] {
-    return [...this.ctx.storage.sql.exec("SELECT device, token, environment, prefs FROM push_targets")].map((raw) => ({
+    return [...this.sql.exec("SELECT device, token, environment, prefs FROM push_targets")].map((raw) => ({
       device: raw.device as string,
       token: raw.token as string,
       environment: (raw.environment as string) === "sandbox" ? "sandbox" : "production",
@@ -673,7 +681,7 @@ export class RegistryRoom implements DurableObject {
             const r = await sendApns(config, target.environment, target.token, apnsPayload(note.chatId, note.title, note.category), note.chatId);
             entry.result = r.reason ? `${r.status} ${r.reason}` : String(r.status);
             if (isDeadToken(r)) {
-              this.ctx.storage.sql.exec("DELETE FROM push_targets WHERE device = ? AND token = ?", target.device, target.token);
+              this.sql.exec("DELETE FROM push_targets WHERE device = ? AND token = ?", target.device, target.token);
             }
           } catch (err) {
             entry.result = `error ${(err as Error).message}`;
@@ -733,7 +741,10 @@ export class RegistryRoom implements DurableObject {
   private markBackupDirty(): void {
     this.setMeta("backupDirty", "1");
     void this.ctx.storage.getAlarm().then((existing) => {
-      if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
+      if (existing === null) {
+        this.sql.alarm();
+        void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
+      }
     });
   }
 
@@ -746,14 +757,14 @@ export class RegistryRoom implements DurableObject {
     const horizon = Date.now() - TOMBSTONE_RETAIN_MS;
     const horizonHlc = `${String(horizon).padStart(13, "0")}-`;
     let purgedMaxSeq = 0;
-    for (const raw of this.ctx.storage.sql.exec(
+    for (const raw of this.sql.exec(
       "SELECT seq FROM rows WHERE deleted = 1 AND del_hlc < ?",
       horizonHlc
     )) {
       purgedMaxSeq = Math.max(purgedMaxSeq, raw.seq as number);
     }
     if (purgedMaxSeq > 0) {
-      this.ctx.storage.sql.exec("DELETE FROM rows WHERE deleted = 1 AND del_hlc < ?", horizonHlc);
+      this.sql.exec("DELETE FROM rows WHERE deleted = 1 AND del_hlc < ?", horizonHlc);
       this.setMeta("gcFloor", String(Math.max(this.gcFloor(), purgedMaxSeq)));
       this.setMeta("lastGcAt", String(Date.now()));
     }
