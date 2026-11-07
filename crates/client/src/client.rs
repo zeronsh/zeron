@@ -136,10 +136,6 @@ impl ClientInner {
         self.path_online.load(Ordering::Acquire)
     }
 
-    pub(crate) fn is_foreground(&self) -> bool {
-        self.foreground.load(Ordering::Acquire)
-    }
-
     /// Re-derive the workspace snapshot; on change, notify and refresh every
     /// open composer (host presence / live status feed them).
     pub(crate) fn recompute_workspace(self: &Arc<Self>) {

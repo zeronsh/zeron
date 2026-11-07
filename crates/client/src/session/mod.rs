@@ -363,7 +363,6 @@ impl SessionCore {
                 relay_layer: client.config.relay_layer,
                 route: self.relay_route(client, &chat),
                 journaled: self.journaled.load(Ordering::Acquire),
-                direct: live.direct().cloned(),
             },
         );
         let mut slot = lock(&self.room);
@@ -388,16 +387,6 @@ impl SessionCore {
         let device = workspace.device(&chat.device_id);
         let host_online = device.is_some_and(|d| d.online);
         let on_screen = self.view_attached();
-        let now = now_ms();
-        let turn_running = workspace
-            .session(&self.chat_id)
-            .is_some_and(|row| row.host_indicator == ChatIndicator::Working);
-        let room_activity = self.room().map_or(0, |room| room.last_activity_ms());
-        let recently = room_activity.max(self.attached_at_ms.load(Ordering::Acquire));
-        let active = turn_running
-            || self.snapshot().streaming
-            || self.has_pending_sends()
-            || now - recently < crate::live::chat_link::LINK_IDLE.as_millis() as i64;
         let generation = chat.room_gen.unwrap_or(1);
         crate::live::room::RelayRoute {
             generation,
@@ -406,14 +395,6 @@ impl SessionCore {
                 .is_some_and(|d| d.capabilities.iter().any(|c| c == CHAT_RELAY_CAPABILITY)),
             on_screen,
             host_online,
-            link: crate::live::chat_link::LinkWanted {
-                relayed: generation >= zeron_proto::relay_gen::RELAY_ROOM_GEN,
-                on_screen,
-                foreground: client.is_foreground(),
-                network: client.network_online(),
-                host_online,
-                active,
-            },
         }
     }
 
@@ -1177,7 +1158,7 @@ impl SessionHandle {
         if attached != was
             && let Ok(client) = self.core.client()
         {
-            // A chat on screen gets its direct link; one that left gives it up.
+            // On screen or not decides what the room may read while the host is away.
             self.core.refresh_relay(&client);
             self.core.recompute_composer(&client);
         }

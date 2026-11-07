@@ -5,12 +5,17 @@ How a phone follows a relayed chat, and what Android has to do to catch up with 
 local-first guarantee. This covers what's different when the device is a phone: no engine, suspended
 without warning, killed without warning, and paying for every byte.
 
+> **Relay only (2026-11-07).** Peer-to-peer is parked: a phone has no direct link to a chat's host,
+> and the room carries everything. The link and its pacing are kept on `zeron/relay-mobile-direct-link`.
+> Terminals still use their own direct path, as they do on `main`. Where this document still talks
+> about a chat's link, it's describing the parked design or the test runs made with it.
+
 ## In one paragraph
 
 A phone is a viewer that never hosts. It says it runs the layer to the registry and to each room, reads
 relayed frames, journals them until a save holds them, sends through the outbox into the room's queue,
-catches up from the host by version exchange, reads a checkpoint when only the room can help, and opens
-a direct link only while someone is watching a chat do something. All of that is in `crates/client`.
+catches up from the host by version exchange, and reads a checkpoint when only the room can help. All
+of that is in `crates/client`.
 The platform's job is to report what the OS is doing, and to show one new state.
 
 ## What Android gets for free
@@ -26,7 +31,6 @@ Everything below lives in `crates/client` and `crates/sync`, and runs the moment
 | Sends: outbox, then `enqueue` for a relayed chat whose host reads the queue, `push` otherwise | `ChatClient::push_kind`, `RelayHandle::set_queue_pushes` |
 | Catch-up by version exchange, with resumable transfers | `crates/sync/src/chat_relay.rs` |
 | Cloud checkpoints, at most one download per checkpoint, none off screen | `fetch_once`, `relay_defer_checkpoint`, `Room::set_route` |
-| The direct link, its retry pacing, and letting go of the connection | `live/chat_link.rs` |
 | No serving other viewers: only the host can pull from a phone | `RelayHandle::set_serve_host_only` |
 | Following a generation flip, a host move, or a host losing the capability, without rejoining | `SessionCore::refresh_relay` |
 | Why an empty transcript is empty | `ComposerState::transcript_load` |
@@ -69,11 +73,11 @@ did on stored rows.
 
 | Call | iOS | Android | Why the layer needs it |
 |---|---|---|---|
-| `onForeground()` | `sceneWillEnterForeground` | `ProcessLifecycleOwner.onStart` (`ZeronApplication.kt`) | Redials the chat on screen after 8 s away, probes the rest, retries the link |
-| `onBackground()` | `sceneDidEnterBackground` | `ProcessLifecycleOwner.onStop` | Saves every doc, which retires the journal, and stops direct links |
+| `onForeground()` | `sceneWillEnterForeground` | `ProcessLifecycleOwner.onStart` (`ZeronApplication.kt`) | Redials the chat on screen after 8 s away, probes the rest |
+| `onBackground()` | `sceneDidEnterBackground` | `ProcessLifecycleOwner.onStop` | Saves every doc, which retires the journal |
 | `setNetworkOnline` | `NWPathMonitor` status | `registerDefaultNetworkCallback` | Parks dials instead of burning them, and drives the Offline state |
-| `networkPathChanged` | `NWPathMonitor` interface change | `onCapabilitiesChanged` / `onLost` on the default network | Drops connections whose path is gone, and retries the link now |
-| `setViewAttached(true/false)` | `CoreSessionSource.attach/detach` | The session screen's composition | **Decides who gets a link and who may read a checkpoint.** A screen that stays attached off screen keeps a radio up |
+| `networkPathChanged` | `NWPathMonitor` interface change | `onCapabilitiesChanged` / `onLost` on the default network | Drops connections whose path is gone, and the room redials |
+| `setViewAttached(true/false)` | `CoreSessionSource.attach/detach` | The session screen's composition | **Decides who may read a checkpoint while the host is away**, and which room syncs first |
 
 Check two things on Android that iOS doesn't have:
 
@@ -110,12 +114,12 @@ Nothing else in the UI changes. The composer's existing banner states cover send
 | Event | What the phone does | Radio and data |
 |---|---|---|
 | Launch | Opens the local store, restores the registry, opens 4 warm sessions from local snapshots | Each warm room dials once |
-| Chat opened | Local snapshot and journal first, so content is on screen before any socket. Room kicked, link opened if a turn's running or just attached | Link for 60 s, longer if active |
-| Chat left on screen, idle | After 60 s the link closes and, if no terminal uses it, so does the connection | Nothing until something happens. The room's socket probes every 15 min |
-| Background | Saves docs, stops links. The OS suspends the rest | None |
+| Chat opened | Local snapshot and journal first, so content is on screen before any socket. Room kicked | One socket probe |
+| Chat left on screen, idle | Nothing beyond the room's socket | Nothing until something happens. The room's socket probes every 15 min |
+| Background | Saves docs. The OS suspends the rest | None |
 | Killed | Nothing runs. Outbox and journal are on disk | None |
 | Relaunch | Delivery resumes any send with a pending receipt without waiting for a screen | One room per pending chat |
-| Network switch | `networkPathChanged`: connections close, the room redials, the link retries | One pairing |
+| Network switch | `networkPathChanged`: connections close, the room redials | One socket |
 | Foreground after 8 s or more | The chat on screen redials at once instead of waiting out a 10 s probe | One socket and a version exchange |
 | Push notification | Alert only: it doesn't wake the app, so nothing syncs until it's tapped | None |
 
@@ -222,9 +226,9 @@ holds what's waiting. Read the phone's own store to see the journal and the outb
 | 5 | Network off, chat never opened | `OFFLINE` text |
 | 6 | Room with a checkpoint, host stopped | Loads once. Count downloads across 5 relaunches |
 | 7 | Background for 30 s during a turn, return | Caught up within seconds of returning, no duplicates |
-| 8 | Wi-Fi to cellular mid-stream, on a device | Link drops, room carries it, link returns. Nothing's lost |
+| 8 | Wi-Fi to cellular mid-stream, on a device | The room redials on the new path. Nothing's lost |
 | 9 | Debug switch off, in an account with a host on the layer | Host's chats stay on or return to generation 2 |
-| 10 | Leave a chat on screen, idle, for 2 minutes | `chat link down` in the log, no further traffic |
+| 10 | Leave a chat on screen, idle, for 2 minutes | No traffic beyond the room's socket probe |
 
 For a link on an emulator, expect pairing to depend on your NAT. Falling back to the room is a pass.
 

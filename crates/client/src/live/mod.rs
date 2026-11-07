@@ -13,7 +13,6 @@
 //! short — the legacy client's one-shot chat join left chats dark until a
 //! relaunch.
 
-pub(crate) mod chat_link;
 pub(crate) mod delivery;
 pub(crate) mod direct;
 pub(crate) mod escort;

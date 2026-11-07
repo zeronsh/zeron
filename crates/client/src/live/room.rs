@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use loro::VersionVector;
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::SessionDoc;
 use zeron_proto::relay_gen::RELAY_ROOM_GEN;
@@ -23,7 +23,6 @@ use zeron_sync::{
     ChatClient, ChatDocSink, ChatEvent, CheckpointFetcher, DocsStore, SyncError, UrlProvider,
 };
 
-use super::chat_link::{self, LinkWanted};
 use super::urls::PullReader;
 use super::{Bearer, JOIN_RETRY_BASE, JOIN_RETRY_CAP, urls};
 use crate::lock;
@@ -236,8 +235,9 @@ impl Persister {
     }
 }
 
-/// What the room's relay task and direct link need to know, kept current as the
-/// chat's row, its host and this screen change.
+/// What the room's relay task needs to know, kept current as the chat's row, its
+/// host and this screen change. A phone has no direct link to the host: the room
+/// carries everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RelayRoute {
     pub generation: u32,
@@ -247,7 +247,6 @@ pub(crate) struct RelayRoute {
     pub host_reads_queue: bool,
     pub on_screen: bool,
     pub host_online: bool,
-    pub link: LinkWanted,
 }
 
 /// How long a chat on screen waits on its host before reading a deferred checkpoint.
@@ -265,8 +264,6 @@ pub(crate) struct ViewerSink {
     pub(crate) relay: bool,
     /// May a checkpoint wait for the host? Set from the [`RelayRoute`].
     pub(crate) defer_checkpoint: Arc<AtomicBool>,
-    /// When a relayed update last landed or left (ms), for the link's idle clock.
-    pub(crate) last_activity_ms: Arc<AtomicI64>,
 }
 
 impl ViewerSink {
@@ -426,7 +423,6 @@ impl ChatDocSink for ViewerSink {
             }
             // A catch-up can be the whole chat: save it now, not in a second.
             self.persister.dirty(history);
-            self.last_activity_ms.store(crate::now_ms(), Ordering::Release);
             (self.on_applied)();
         }
         if status.pending.is_some() {
@@ -661,12 +657,6 @@ impl RoomRelay {
         // only while the host can answer.
         self.defer_checkpoint
             .store(relayed && (!route.on_screen || route.host_online), Ordering::Release);
-        self.link_wanted.send_if_modified(|current| {
-            let next = route.link.wanted();
-            let changed = *current != next;
-            *current = next;
-            changed
-        });
     }
 }
 
@@ -685,12 +675,10 @@ pub(crate) struct Room {
 struct RoomRelay {
     handle: RelayHandle,
     host: Arc<Mutex<String>>,
-    /// The chat is on the relay generation: a local commit also takes the direct
-    /// link, and its follow-up announces go out. Stored chats pay for none of it.
+    /// The chat is on the relay generation: a local commit's follow-up announces go
+    /// out. Stored chats pay for none of it.
     relayed: Arc<AtomicBool>,
     defer_checkpoint: Arc<AtomicBool>,
-    last_activity_ms: Arc<AtomicI64>,
-    link_wanted: watch::Sender<bool>,
     /// Since when a chat on screen has been waiting with its checkpoint deferred.
     deferred_since: Mutex<Option<std::time::Instant>>,
     applied: Mutex<Option<RelayRoute>>,
@@ -723,8 +711,6 @@ pub(crate) struct RoomDeps {
     pub route: RelayRoute,
     /// Newest relay journal row [`load_local`] replayed.
     pub journaled: i64,
-    /// The direct peers, when they started.
-    pub direct: Option<zeron_preview::viewer::ViewerPeers>,
 }
 
 impl Room {
@@ -753,32 +739,18 @@ impl Room {
             on_applied: deps.on_applied.clone(),
             relay: deps.relay_layer,
             defer_checkpoint: Arc::new(AtomicBool::new(false)),
-            last_activity_ms: Arc::new(AtomicI64::new(0)),
         });
         let relay = deps.relay_layer.then(|| {
             // Calls arrive from platform threads, and this spawns its task.
             let _runtime = crate::runtime::handle().enter();
             let handle = RelayHandle::spawn(&deps.device_id, sink.clone(), RelayPolicy::default());
             handle.set_serve_host_only(true);
-            let (link_wanted, wanted) = watch::channel(false);
             let host = Arc::new(Mutex::new(deps.route.host.clone()));
-            if let Some(direct) = deps.direct.clone() {
-                chat_link::spawn(
-                    handle.clone(),
-                    direct,
-                    chat_id.to_owned(),
-                    host.clone(),
-                    wanted,
-                    cancel.clone(),
-                );
-            }
             RoomRelay {
                 handle,
                 host,
                 relayed: Arc::new(AtomicBool::new(false)),
                 defer_checkpoint: sink.defer_checkpoint.clone(),
-                last_activity_ms: sink.last_activity_ms.clone(),
-                link_wanted,
                 deferred_since: Mutex::new(None),
                 applied: Mutex::new(None),
             }
@@ -798,12 +770,11 @@ impl Room {
         let store = deps.store.clone();
         let publish_chat = chat_id.to_owned();
         let publish_persister = persister.clone();
-        // The durable copy above is what counts: this one only saves a host that's
-        // on a direct link the trip through the room, and whichever lands second
-        // imports as nothing.
+        // The durable copy above is what counts: this one only schedules the
+        // follow-up announce that lets the host check it has everything.
         let shortcut = relay
             .as_ref()
-            .map(|r| (r.handle.clone(), r.relayed.clone(), r.last_activity_ms.clone()));
+            .map(|r| (r.handle.clone(), r.relayed.clone()));
         let local_updates = doc
             .doc()
             .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
@@ -816,10 +787,9 @@ impl Room {
                     Some(client) => client.enqueue_batch(batch_id, bytes.clone()),
                     None => slot.unsent.push((batch_id, bytes.clone())),
                 }
-                if let Some((relay, relayed, activity)) = &shortcut
+                if let Some((relay, relayed)) = &shortcut
                     && relayed.load(Ordering::Acquire)
                 {
-                    activity.store(crate::now_ms(), Ordering::Release);
                     relay.local_update(bytes.clone(), false);
                 }
                 publish_persister.dirty(false);
@@ -858,12 +828,6 @@ impl Room {
         }
     }
 
-    /// When a relayed update last landed here or left here (ms), if ever.
-    pub(crate) fn last_activity_ms(&self) -> i64 {
-        self.relay
-            .as_ref()
-            .map_or(0, |relay| relay.last_activity_ms.load(Ordering::Acquire))
-    }
 
     fn spawn_join(self: &Arc<Self>, sink: Arc<ViewerSink>, host: Arc<Mutex<String>>, deps: RoomDeps) {
         let url: Arc<dyn UrlProvider> = Arc::new(ChatUrl {
@@ -1041,7 +1005,6 @@ mod tests {
             on_applied: Arc::new(|| {}),
             relay: true,
             defer_checkpoint: Arc::new(AtomicBool::new(false)),
-            last_activity_ms: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -1143,25 +1106,14 @@ mod tests {
         let store = Arc::new(DocsStore::open(dir.path()).unwrap());
         let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
         let sink = Arc::new(sink(store, &doc, "chat"));
-        let (link_wanted, wanted) = watch::channel(false);
         let handle = RelayHandle::spawn("ios", sink.clone(), RelayPolicy::default());
         let relay = RoomRelay {
             handle: handle.clone(),
             host: Arc::new(Mutex::new(String::new())),
             relayed: Arc::new(AtomicBool::new(false)),
             defer_checkpoint: sink.defer_checkpoint.clone(),
-            last_activity_ms: sink.last_activity_ms.clone(),
-            link_wanted,
             deferred_since: Mutex::new(None),
             applied: Mutex::new(None),
-        };
-        let everything = LinkWanted {
-            relayed: true,
-            on_screen: true,
-            foreground: true,
-            network: true,
-            host_online: true,
-            active: true,
         };
         let route = RelayRoute {
             generation: 3,
@@ -1169,27 +1121,23 @@ mod tests {
             host_reads_queue: true,
             on_screen: true,
             host_online: true,
-            link: everything,
         };
         relay.apply_route(&route);
         assert!(relay.relayed.load(Ordering::Acquire));
         assert_eq!(*lock(&relay.host), "mac");
-        assert!(*wanted.borrow());
         assert!(relay.defer_checkpoint.load(Ordering::Acquire), "the host can answer");
 
         // On screen with the host gone, only the room can help.
-        relay.apply_route(&RelayRoute { host_online: false, link: LinkWanted { host_online: false, ..everything }, ..route.clone() });
+        relay.apply_route(&RelayRoute { host_online: false, ..route.clone() });
         assert!(!relay.defer_checkpoint.load(Ordering::Acquire));
-        assert!(!*wanted.borrow(), "no link to a host that isn't there");
 
         // Off screen, nobody's waiting for it.
         relay.apply_route(&RelayRoute { host_online: false, on_screen: false, ..route.clone() });
         assert!(relay.defer_checkpoint.load(Ordering::Acquire));
 
         // Stored: nothing relay-shaped is left.
-        relay.apply_route(&RelayRoute { generation: 2, link: LinkWanted { relayed: false, ..everything }, ..route });
+        relay.apply_route(&RelayRoute { generation: 2, ..route });
         assert!(!relay.relayed.load(Ordering::Acquire));
         assert!(!relay.defer_checkpoint.load(Ordering::Acquire));
-        assert!(!*wanted.borrow());
     }
 }
