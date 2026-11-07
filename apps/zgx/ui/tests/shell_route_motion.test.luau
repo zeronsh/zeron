@@ -161,13 +161,16 @@ test("arriving after the window resized on a chat with no panel, the panel stand
 	end
 end)
 
--- The panel's own motion (ds/motion `panel`, `content`):
--- what's in it is laid out once, at the width it's going to (closing, the
--- one it rested at), and stands at the window's right as its edge sweeps
--- over it; under the panel expanding over it, the page keeps its width,
--- clipped, and takes its own back in one go, rather than squeezing to
--- nothing and growing from it. (Each drifts and fades as it comes and
--- goes: src/route_motion_tests.rs reads that.)
+-- The panel's own motion (ds/motion `panel`, `content`), as Zeron's
+-- `panel_content_tween`: opening, what's in it is laid out once, at the
+-- width it's going to (closing, the one it showed at, expanded or not),
+-- and stands at the window's right as its edge sweeps over it; between two
+-- open widths (expanding, collapsing) it follows its edge a frame at a
+-- time, never jumping to the far width at once. Under the panel expanding
+-- over it, the page keeps its width, clipped, and takes its own back in
+-- one go, rather than squeezing to nothing and growing from it. (Each
+-- stands still and only fades a little as it comes and goes:
+-- src/route_motion_tests.rs reads that.)
 -- (Its width while it's laid out: shut, the panel leaves layout.)
 local function width_of(app: any, id: string): number?
 	for line in app:tree("#shell"):gmatch("[^\n]+") do
@@ -177,7 +180,7 @@ local function width_of(app: any, id: string): number?
 	end
 	return nil
 end
-test("the panel's content and the page under it keep one width as the panel opens, expands, collapses and closes", function()
+test("the panel's content keeps one width as the panel opens and closes, follows it as it expands and collapses, and the page under it keeps one", function()
 	local app = open()
 	show_chat(app, "Fix the build")
 	app:frames(20)
@@ -209,15 +212,33 @@ test("the panel's content and the page under it keep one width as the panel open
 	-- (The page beside it follows its edge, as upstream chose: #1207.)
 	expect(#opening[PAGE] > 4).to_be(true)
 	local beside = opening[PAGE][#opening[PAGE]]
+	-- From `from` to `to` a frame at a time, one way, never more than half
+	-- the way in a frame.
+	local function follows(seen: { [string]: { number } }, step: string, from: number, to: number)
+		local list = seen[CONTENT] or {}
+		local all = `{step}: {table.concat(list, ", ")}`
+		expect(#list >= 4).to_be(true)
+		expect(list[#list]).to_be(to)
+		local was = from
+		for _, w in list do
+			expect(math.abs(w - was) <= math.abs(to - from) / 2 and (w - was) * (to - from) >= 0 and all or "").to_be(all)
+			was = w
+		end
+	end
 	local expanding = widths("#panel-expand", { CONTENT, PAGE })
-	local wide = one(expanding, CONTENT, "expanding")
-	expect(wide > rest).to_be(true)
+	local wide = (expanding[CONTENT] or {})[#(expanding[CONTENT] or {})] or 0
+	expect(wide > rest + 200).to_be(true)
+	follows(expanding, "expanding", rest, wide)
 	expect(one(expanding, PAGE, "expanding")).to_be(beside)
 	local collapsing = widths("#panel-expand", { CONTENT, PAGE })
-	expect(one(collapsing, CONTENT, "collapsing")).to_be(rest)
+	follows(collapsing, "collapsing", wide, rest)
 	expect(one(collapsing, PAGE, "collapsing")).to_be(beside)
 	local closing = widths('#titlebar >> role:button "Panel"', { CONTENT })
 	expect(one(closing, CONTENT, "closing")).to_be(rest)
 	expect(panel_width(app)).to_be(0)
 	expect(width_of(app, CONTENT)).to_be_nil()
+	-- Closed from expanded: at the wide width it showed.
+	widths('#titlebar >> role:button "Panel"', { CONTENT })
+	widths("#panel-expand", { CONTENT })
+	expect(one(widths('#titlebar >> role:button "Panel"', { CONTENT }), CONTENT, "closing expanded")).to_be(wide)
 end)
