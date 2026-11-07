@@ -1416,6 +1416,14 @@ for _, id in { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9" } do
 		end,
 	}
 end
+-- A new chat with no project asked of it (⌘N, the sidebar's New chat).
+ui.command {
+	id = "go_new",
+	title = "New chat",
+	run = function()
+		route.new_chat()
+	end,
+}
 ui.command {
 	id = "go_home",
 	title = "A new chat",
