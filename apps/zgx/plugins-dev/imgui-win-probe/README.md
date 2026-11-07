@@ -31,8 +31,8 @@ $env:ZERON_ZGX_PLUGIN_LOG = "1"
 
 ## Windows it opens at launch
 
-The host allows **8 native windows per plugin** (validation contract §5). Four
-open at launch, leaving four slots free for the one-action-away windows. They
+The host allows **8 native windows per plugin** (validation contract §5). Five
+open at launch, leaving three slots free for the one-action-away windows. They
 are the ones a row needs *before* a probe action runs.
 
 | id | title | size | options |
@@ -41,19 +41,28 @@ are the ones a row needs *before* a probe action runs.
 | `b` | `Probe B` | 420 × 300 | |
 | `inspector` | `Probe Inspector` | 720 × 480 | at (120, 80), `remember = true` |
 | `bare` | `Probe Bare` | 600 × 400 | `titlebar = "hidden"`, `decorations = false` |
+| `actions` | `Probe Actions` | 420 × 1000 | one `ui.button` per advertised probe action |
+
+The `actions` window is the **dev-route drive surface**: on Windows/Linux Zeron
+has no pointer-reachable menu bar, so each advertised action gets a button
+labelled with the action's own name. Pressing a button queues the same
+`run_action` the `Probe Actions` menu item and `probe_run { action = "…" }`
+call, and the host runs it after the frame ends, so the one-action-away
+open-a-window actions (`open_bounds` and friends) work from a click.
 
 Nothing else opens until an action asks for it.
 
 ## Windows one action away
 
-Each action opens with a plain `open_window` and no close first: the four free
-slots absorb it, and two-window actions still fit under the live cap. Every
-action is an item in Zeron's one `Probe Actions` menu bar menu, titled by the
-action's own name, and is also callable by name through the `probe_run` tool.
+Each action opens with a plain `open_window` and no close first: the three
+free slots absorb it, and two-window actions still fit under the live cap.
+Every action is an item in Zeron's one `Probe Actions` menu bar menu, titled
+by the action's own name, is a button in the `Probe Actions` window, and is
+also callable by name through the `probe_run` tool.
 
 | id | title | size | options | action |
 | --- | --- | --- | --- | --- |
-| `bounds` | `Probe Bounds` | 600 × 400 | `min_size` 400 × 300, `max_size` 900 × 600, resizable | `open_bounds` |
+| `bounds` | `Probe Bounds` | 400 × 300 | `min_size` 400 × 300, `max_size` 900 × 600, resizable | `open_bounds` |
 | `drag` | `Probe Drag` | 640 × 420 | `titlebar = "hidden"`, `decorations = false`, resizable | `open_drag` |
 | `size` | `Probe Size` | 720 × 480 | resizable | `open_size` |
 | `pos` | `Probe Pos` | 400 × 300 | at (100, 120) | `open_pos` |
@@ -122,6 +131,12 @@ by window id, never shared, so a click in one window cannot change another
 (`VAL-WIN-016`). The frame count advances once per render callback and stops
 while the window is hidden or minimized (`VAL-WIN-017`).
 
+The `actions` window instead draws a `Probe Actions` text line and one button
+per advertised action, labelled with the action's name. Its buttons run the
+same action table as the menu and the tool; a press is queued and executed
+after the frame, because a window cannot be opened while its frame context is
+still active.
+
 Only `ui.text` and `ui.button` exist in the host today; the single-line text
 fields the input rows name, and the plugin-drawn drag gesture on `drag`, arrive
 with the `basic-widgets`, `input-fidelity` and `custom-chrome-sdk` features.
@@ -145,7 +160,7 @@ Store keys, all under `imgui.windows.<window id>.*`:
 
 With `ZERON_ZGX_PLUGIN_LOG=1` the fixture prints, each line starting `probe:`:
 
-* `probe: ready windows=a,b,bare,inspector ticks=0`
+* `probe: ready windows=a,actions,b,bare,inspector ticks=0`
 * `probe: opened:<id>:<title>` and `probe: open:<id> refused: <sentence>`
 * `probe: closed:closecall <id>` — exactly one per close (the line
   `VAL-WIN-013` counts), from the plugin's own `close()` or the OS chrome
@@ -156,18 +171,19 @@ With `ZERON_ZGX_PLUGIN_LOG=1` the fixture prints, each line starting `probe:`:
 
 ## The cap, and why not all rows' windows at once
 
-The contract names windows for more simultaneous rows than the four launch
-windows, while the canonical limit is 8 per plugin. The four above are the
+The contract names windows for more simultaneous rows than the five launch
+windows, while the canonical limit is 8 per plugin. The five above are the
 ones rows need before any action runs; the rest are one `probe_run`/menu
-action away and each opens with no close first, leaving four slots free for
-them. The fixture logs the host's refusal, naming the limit, whenever a
-request exceeds it.
+action/`Probe Actions` button away and each opens with no close first, leaving
+three slots free for them. The fixture logs the host's refusal, naming the
+limit, whenever a request exceeds it.
 
 ## Tests
 
 `cargo test --bin zeron-zgx fixtures_tests` loads this folder exactly as the
 bridge loads a snapshot (its `init.luau` beside its own SDK copy) with a fake
-host, and asserts its manifest, the four launch windows' ids/titles/sizes/
-options, that no other window opens unasked, every probe action, the
+host, and asserts its manifest, the five launch windows' ids/titles/sizes/
+options (including the actions window and its one-button-per-action list),
+that no other window opens unasked, every probe action, the
 `probe_status`/`probe_run` tools, the per-window counters, the timer, the
 store keys and the single `closed:closecall` log path.

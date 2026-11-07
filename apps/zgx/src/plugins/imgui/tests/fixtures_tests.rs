@@ -35,10 +35,10 @@ const FIXTURES: &[&str] = &[
     "imgui-win-probe-legacy",
 ];
 
-/// The main probe's launch set, in the order its `init.luau` opens them: four
-/// windows so four slots stay free under the canonical 8-window cap, and
+/// The main probe's launch set, in the order its `init.luau` opens them: five
+/// windows so three slots stay free under the canonical 8-window cap, and
 /// every other contract window opens via a probe action with no close first.
-const LAUNCH: &[&str] = &["a", "b", "inspector", "bare"];
+const LAUNCH: &[&str] = &["a", "b", "inspector", "bare", "actions"];
 
 /// Every probe action the main fixture advertises, in its `init.luau` order.
 /// Each must be an item in the one "Probe Actions" menu bar menu, titled by
@@ -50,14 +50,14 @@ const ACTIONS: &[&str] = &[
     "inspector_as_a",
     "inspector_unnamed",
     "inspector_700",
+    "rename_inspector",
+    "resize_inspector",
+    "bump_inspector",
     "hide_inspector",
     "show_inspector",
     "focus_inspector",
     "minimize_inspector",
     "restore_inspector",
-    "rename_inspector",
-    "resize_inspector",
-    "bump_inspector",
     "open_bounds",
     "open_drag",
     "open_quiet",
@@ -141,6 +141,10 @@ struct Fake {
     refusals_left: Rc<Cell<usize>>,
     /// What a `button` answers: true is a release frame.
     pressed: Rc<Cell<bool>>,
+    /// When set, only this label's button answers true (the pointer is over
+    /// exactly one button); when unset, every button answers `pressed`, which
+    /// is what the simple probe windows' single Ping button needs.
+    pressed_label: Rc<RefCell<Option<String>>>,
 }
 
 fn ok() -> Value {
@@ -179,10 +183,13 @@ impl Fake {
                 ])
             }
             // The release frame: the fixture's branch runs then and only then.
-            "button" => Value::record([
-                ("ok", Value::Bool(true)),
-                ("value", Value::Bool(self.pressed.get())),
-            ]),
+            "button" => {
+                let pressed = match &*self.pressed_label.borrow() {
+                    Some(want) => asked["label"].as_str() == Some(want.as_str()),
+                    None => self.pressed.get(),
+                };
+                Value::record([("ok", Value::Bool(true)), ("value", Value::Bool(pressed))])
+            }
             "text" => Value::record([
                 ("ok", Value::Bool(true)),
                 (
@@ -385,7 +392,7 @@ fn status(app: &TestApp, fake: &Fake, calls: &FrameCalls) -> Json {
 }
 
 /// A fixture loaded to steady state with its frame queue, ready to drive one
-/// probe action from the four launch windows (so its four free slots absorb
+/// probe action from the five launch windows (so its three free slots absorb
 /// the action without a close first).
 fn driven(id: &str) -> (TestApp, Fake, FrameCalls) {
     let (app, fake) = harness(id, 0);
@@ -488,10 +495,10 @@ fn every_fixture_declares_the_manifest_the_rows_expect() {
     );
 }
 
-/// The four windows the contract needs at once, with the exact specs its
+/// The launch windows the contract needs at once, with the exact specs its
 /// rows measure, and nothing else until an action asks.
 #[test]
-fn the_main_probe_opens_the_four_windows_the_rows_need() {
+fn the_main_probe_opens_the_launch_windows_the_rows_need() {
     let (app, fake) = harness("imgui-win-probe", 0);
     app.frames(30);
     assert_eq!(
@@ -536,6 +543,13 @@ fn the_main_probe_opens_the_four_windows_the_rows_need() {
     assert_eq!(bare["titlebar"], Json::from("hidden"), "{bare}");
     assert_eq!(bare["decorations"], Json::Bool(false), "{bare}");
 
+    // The fifth launch window is the pointer-drive surface the rows reach
+    // without Zeron's menu bar: sized so all 32 buttons fit without scrolling.
+    let actions = &opened(&fake, "actions")[0];
+    assert_eq!(actions["title"], Json::from("Probe Actions"), "{actions}");
+    assert_eq!(number(&actions["size"]["width"]), 420.0, "{actions}");
+    assert_eq!(number(&actions["size"]["height"]), 1000.0, "{actions}");
+
     // Every launch window asked for a render callback, so the pump has one
     // to push frames into.
     let renders = ops(&fake, "render");
@@ -549,7 +563,7 @@ fn the_main_probe_opens_the_four_windows_the_rows_need() {
     }
 
     // Nothing else opens unasked: the rest of the contract's windows wait for
-    // a probe action (the per-plugin cap is 8 and four slots stay free).
+    // a probe action (the per-plugin cap is 8 and three slots stay free).
     for extra in [
         "bounds", "c", "drag", "quiet", "left", "right", "dup", "reuse", "size", "pos", "pos2",
         "n1",
@@ -579,6 +593,53 @@ fn the_main_probe_opens_the_four_windows_the_rows_need() {
             .iter()
             .any(|set| set["key"].as_str() == Some("imgui.windows.drag.prefs")),
         "drag prefs: {stores:?}"
+    );
+}
+
+/// The fifth launch window drives every advertised action from a button: one
+/// button per action, labelled with its own name, whose press runs the same
+/// `run_action` the menu and `probe_run` call, deferred until the frame is
+/// over so opening a window is allowed.
+#[test]
+fn the_actions_window_draws_and_drives_every_advertised_action() {
+    let (app, fake, calls) = driven("imgui-win-probe");
+
+    // One frame of the actions window draws a button per advertised action,
+    // in the advertised order.
+    push_frame(&app, &calls, "actions", 1.0);
+    let labels: Vec<String> = ops(&fake, "button")
+        .into_iter()
+        .filter_map(|asked| asked["label"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        labels, ACTIONS,
+        "one button per advertised action, in order"
+    );
+
+    // Pressing the open_bounds button runs the same open_bounds action the
+    // menu and the tool run: after the deferred call, bounds opens at its
+    // measured spec with nothing closed first.
+    *fake.pressed_label.borrow_mut() = Some("open_bounds".to_string());
+    push_frame(&app, &calls, "actions", 2.0);
+    app.frames(30);
+    let bounds = opened(&fake, "bounds");
+    assert_eq!(
+        bounds.len(),
+        1,
+        "the open_bounds button opened bounds: {bounds:?}"
+    );
+    let spec = &bounds[0];
+    assert_eq!(number(&spec["size"]["width"]), 400.0, "{spec}");
+    assert_eq!(number(&spec["size"]["height"]), 300.0, "{spec}");
+    assert_eq!(number(&spec["min_size"]["width"]), 400.0, "{spec}");
+    assert_eq!(number(&spec["min_size"]["height"]), 300.0, "{spec}");
+    assert_eq!(number(&spec["max_size"]["width"]), 900.0, "{spec}");
+    assert_eq!(number(&spec["max_size"]["height"]), 600.0, "{spec}");
+    assert_eq!(spec["resizable"], Json::Bool(true), "{spec}");
+    assert!(
+        ops(&fake, "close").is_empty(),
+        "the actions window closed a window first: {:?}",
+        fake.ops.borrow()
     );
 }
 

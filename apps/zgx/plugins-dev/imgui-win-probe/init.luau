@@ -8,12 +8,13 @@
 -- a `probe_run` tool call, so a person clicking and a scripted probe both
 -- reach every row.
 --
--- The host allows eight native windows per plugin (contract §5). Four open
--- at launch — Probe A, Probe B, the inspector and the bare window — leaving
--- four slots free, so every other window is one action away and opens with a
--- plain `open_window` and no close first (`open_bounds`, `open_drag`,
--- `open_quiet`, `open_left`, `open_right`, `open_both_sides`, `open_dup`,
--- `open_reuse`). README.md maps every row to the window and action it uses.
+-- The host allows eight native windows per plugin (contract §5). Five open
+-- at launch — Probe A, Probe B, the inspector, the bare window and the
+-- "Probe Actions" pointer-drive surface — leaving three slots free, so every
+-- other window is one action away and opens with a plain `open_window` and no
+-- close first (`open_bounds`, `open_drag`, `open_quiet`, `open_left`,
+-- `open_right`, `open_both_sides`, `open_dup`, `open_reuse`). README.md maps
+-- every row to the window and action it uses.
 --
 -- What the probe reports about itself, without needing a window: the
 -- `probe_status` tool returns its own JSON (windows, frames, counters,
@@ -100,12 +101,16 @@ end
 -- reads open, its frame count, its own click counter, the timer's value and
 -- a Ping button that increments that window's counter alone. That is what
 -- `VAL-WIN-016`, `VAL-WIN-017` and the lifecycle rows read.
-local function draw(window: string, view: any)
+local function frame_head(window: string)
 	frames[window] = (frames[window] or 0) + 1
 	if blow_up then
 		-- `VAL-LIFE-011`: the host must close the windows and keep Zeron up.
 		error("probe render failure")
 	end
+end
+
+local function draw(window: string, view: any)
+	frame_head(window)
 	view.text(`window {window}`)
 	view.text(`open {tostring(shown(window))}`)
 	view.text(`frame {frames[window]}`)
@@ -120,8 +125,9 @@ end
 -- Opens one window and wires its render and close callbacks. A refusal is
 -- kept (`last_refusal`, `probe_status`) and said, never raised: the row that
 -- asks for a window the host refuses must see the sentence, not a broken
--- plugin.
-local function open(window: string, title: string, options: { [string]: any }): any
+-- plugin. `body` replaces the default probe body when a window draws
+-- something else (the actions window's button list).
+local function open(window: string, title: string, options: { [string]: any }, body: ((string, any) -> ())?): any
 	options.id = window
 	options.title = title
 	local handle: any = nil
@@ -137,7 +143,7 @@ local function open(window: string, title: string, options: { [string]: any }): 
 	counters[window] = counters[window] or 0
 	frames[window] = frames[window] or 0
 	handle:on_render(function(view: any)
-		draw(window, view)
+		(body or draw)(window, view)
 	end)
 	-- Runs once per close, from the plugin's own close() or the OS chrome.
 	-- It logs the line `VAL-WIN-013` counts and retitles a sibling so a
@@ -168,9 +174,10 @@ end
 
 -- The four the contract needs at once: `VAL-WIN-001` (inspector, 720x480),
 -- `VAL-WIN-005`/`VAL-WIN-016`/`VAL-WIN-017` (a and b, distinct windows) and
--- `VAL-WIN-019` (bare, the plugin's own chrome). Four slots stay free, so
--- the rest open one action away with no close first. `remember` is on only
--- where a row measures restored geometry: inspector, left and right.
+-- `VAL-WIN-019` (bare, the plugin's own chrome). With the actions window that
+-- opens below, three slots stay free, so the rest open one action away with
+-- no close first. `remember` is on only where a row measures restored
+-- geometry: inspector, left and right.
 open("a", "Probe A", { size = { width = 520, height = 360 } })
 open("b", "Probe B", { size = { width = 420, height = 300 } })
 open("inspector", "Probe Inspector", {
@@ -340,14 +347,16 @@ actions.bump_inspector = function()
 	counters["inspector"] = (counters["inspector"] or 0) + 1
 end
 
--- Windows beyond the four launch windows, each a one-action-away open with
--- no close first: the four free slots absorb it, and two-window actions still
+-- Windows beyond the five launch windows, each a one-action-away open with
+-- no close first: the three free slots absorb it, and two-window actions still
 -- fit under the host's live cap.
 
--- `VAL-WIN-004`: min_size and max_size.
+-- `VAL-WIN-004`: min_size and max_size. The requested size is the minimum
+-- (400 × 300), so a native probe clicking `open_bounds` sees the window
+-- appear at its measured lower bound before it asks the OS to shrink it.
 actions.open_bounds = function()
 	open("bounds", "Probe Bounds", {
-		size = { width = 600, height = 400 },
+		size = { width = 400, height = 300 },
 		min_size = { width = 400, height = 300 },
 		max_size = { width = 900, height = 600 },
 		resizable = true,
@@ -524,8 +533,12 @@ end
 -- each titled by the action's own name, so a person or a probe with a
 -- pointer can drive them the way the rows describe ("the probe triggers the
 -- fixture's menu action `reopen`") without an engine. `probe_run` is the
--- scripted route to the same table.
+-- scripted route to the same table. `advertised` keeps the action names in
+-- the order they are advertised; the actions window walks the same list.
+local advertised: { string } = {}
+
 local function menu(action: string)
+	table.insert(advertised, action)
 	ui.command {
 		id = action,
 		title = action,
@@ -568,6 +581,27 @@ menu("close_all_windows")
 menu("open_a")
 menu("open_b")
 menu("open_c")
+
+-- The fifth launch window: a pointer-reachable drive surface for every
+-- advertised action, drawn with only `text` and `button`. Each button is
+-- labelled with the action's own name and runs the same `run_action` the
+-- menu and the tool use. The run is deferred until the frame is over:
+-- opening a window from inside `on_render` cannot succeed while that frame's
+-- context is active, so the press is queued for the script's own timer.
+local function draw_actions(_window: string, view: any)
+	frame_head("actions")
+	view.text("Probe Actions")
+	for _, action in ipairs(advertised) do
+		if view.button(action) then
+			local one = action
+			later(function()
+				run_action(one)
+			end)
+		end
+	end
+end
+
+open("actions", "Probe Actions", { size = { width = 420, height = 1000 } }, draw_actions)
 
 zeron.tool {
 	name = "probe_status",
