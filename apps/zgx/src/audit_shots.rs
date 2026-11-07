@@ -132,6 +132,8 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
         crate::plugins::dev_plugins(&host);
         // (Agent visuals, run as a window runs them: ui/visuals_fixture.)
         crate::visuals::register(&host);
+        // (A picture's tones, for a new chat's ASCII.)
+        crate::images::install_tones(&host);
         host.shared("zgx.window.size", zgx_script::window_size_value(shot.size.0, shot.size.1));
         host
     })

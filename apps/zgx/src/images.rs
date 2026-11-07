@@ -5,6 +5,10 @@
 //!   image.copy { path }     its pixels on the clipboard, read and decoded
 //!                           off the window's thread; true once it took them
 //!   image.reveal { path }   shown in Finder (elsewhere, its folder opened)
+//!   image.tones { path }    its tonal range, { lo, hi }: the 2nd and 98th
+//!                           percentiles of its lightness (0 to 1), read off
+//!                           the window's thread and kept by path (a new
+//!                           chat's ASCII stretches its glyphs across it)
 //!
 //! (A picture's size and whether its file is there are zgx's own now:
 //! `ui.image_size`, and `ui.image`'s `on_error` and `fallback`.)
@@ -18,6 +22,7 @@ use zgx_script::{ScriptHost, Value};
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn install(host: &ScriptHost, platform: Rc<RefCell<Option<PlatformService>>>) {
+    install_tones(host);
     host.async_action("image.copy", move |arg| {
         let platform = platform.clone();
         async move {
@@ -36,6 +41,58 @@ pub fn install(host: &ScriptHost, platform: Rc<RefCell<Option<PlatformService>>>
         reveal(Path::new(&path)).map_err(|e| e.to_string())?;
         Ok(Value::Nil)
     });
+}
+
+/// `image.tones`, alone: what a headless window (the audit shots) needs.
+pub fn install_tones(host: &ScriptHost) {
+    host.async_action("image.tones", |arg| async move {
+        let path = path_of(&arg)?;
+        let (lo, hi) = off_thread(move || tones(&path)).await.ok_or("The image couldn't be read")??;
+        Ok(Value::record([("lo", Value::from(lo as f64)), ("hi", Value::from(hi as f64))]))
+    });
+}
+
+/// The 2nd and 98th percentiles of a picture's lightness (its sRGB values
+/// weighed as Rec. 709 weighs them, 0 to 1), from about 65,000 of its
+/// pixels; kept by path, as a picture kept for a background never changes.
+fn tones(path: &str) -> Result<(f32, f32), String> {
+    static KEPT: std::sync::Mutex<Vec<(String, (f32, f32))>> = std::sync::Mutex::new(Vec::new());
+    if let Some((_, t)) = KEPT.lock().ok().and_then(|k| k.iter().find(|(p, _)| p == path).cloned()) {
+        return Ok(t);
+    }
+    let image = decode(path)?;
+    let t = range(image.pixels(), (image.width() * image.height()) as usize);
+    if let Ok(mut kept) = KEPT.lock() {
+        if kept.len() >= 8 {
+            kept.remove(0);
+        }
+        kept.push((path.to_string(), t));
+    }
+    Ok(t)
+}
+
+/// The 2nd and 98th percentiles of the lightness of `n` RGBA pixels.
+fn range(rgba: &[u8], n: usize) -> (f32, f32) {
+    let step = (n / 65_536).max(1);
+    let mut counts = [0u32; 256];
+    let mut total = 0u32;
+    for px in rgba.chunks_exact(4).step_by(step) {
+        let l = 0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32;
+        counts[(l.round() as usize).min(255)] += 1;
+        total += 1;
+    }
+    let at = |share: f32| {
+        let want = (total as f32 * share).ceil() as u32;
+        let mut seen = 0;
+        for (i, c) in counts.iter().enumerate() {
+            seen += c;
+            if seen >= want.max(1) {
+                return i as f32 / 255.;
+            }
+        }
+        1.
+    };
+    (at(0.02), at(0.98))
 }
 
 fn path_of(arg: &Value) -> Result<String, String> {
@@ -125,6 +182,19 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(gone, "pid {pid} stayed behind");
+    }
+
+    #[test]
+    fn a_pictures_tones_span_its_lightness_past_its_extremes() {
+        // A ramp from 20 to 220: its extremes' 2% are left out at each end.
+        let rgba: Vec<u8> = (0..1000)
+            .flat_map(|i| {
+                let v = (20 + i / 5) as u8;
+                [v, v, v, 255]
+            })
+            .collect();
+        let (lo, hi) = range(&rgba, 1000);
+        assert!((lo - 24. / 255.).abs() < 1.5 / 255. && (hi - 216. / 255.).abs() < 1.5 / 255., "{lo} {hi}");
     }
 
     #[test]
