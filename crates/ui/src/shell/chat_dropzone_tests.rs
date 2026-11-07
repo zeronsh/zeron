@@ -314,11 +314,63 @@ fn file_tab_drops_attach_to_side_chat_transcript_and_main_without_reordering(
         assert!(text(&shell.composer, cx).contains("zeron-file:src/tab.rs"));
         assert_eq!(shell.right_tabs[&shell.panel_key(cx)], original_tabs);
     });
-    // Chat tabs have no workspace path and must not insert a mention.
-    let before = shell.read_with(cx, |shell, cx| text(&shell.side_chats[&2].composer, cx));
+}
+
+/// A saved side-chat tab dropped on another conversation, side or main,
+/// becomes a chat chip there without reordering the strip. It never mentions
+/// itself, and an unsaved side chat has no chat the agent could read yet.
+#[gpui::test]
+fn side_chat_tab_drops_mention_the_chat_in_other_conversations(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    let original_tabs = shell.read_with(cx, |shell, cx| {
+        shell.right_tabs[&shell.panel_key(cx)].clone()
+    });
+    assert_eq!(
+        original_tabs[1..],
+        [RightSurface::SideChat(1), RightSurface::SideChat(2)]
+    );
+    let link = zeron_proto::chat_mentions::chat_mention_link("saved-side", "Side chat").unwrap();
+    let side_body = |cx: &mut VisualTestContext, id: u64| {
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.activate_right_surface(RightSurface::SideChat(id), window, cx);
+                shell.right_tween = None;
+            });
+            window.draw(cx).clear();
+            let bounds = shell.read(cx).side_chats[&id]
+                .composer
+                .read(cx)
+                .surface_bounds()
+                .get()
+                .unwrap();
+            gpui::point(bounds.center().x, px(150.))
+        })
+    };
+    let main = gpui::point(px(200.), px(150.));
+
+    let to = side_body(cx, 2);
+    drag(cx, "right-surface-tab-1", to);
+    drag(cx, "right-surface-tab-1", main);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(
+            text(&shell.side_chats[&2].composer, cx)
+                .matches(&link)
+                .count(),
+            1
+        );
+        assert_eq!(text(&shell.composer, cx).matches(&link).count(), 1);
+        assert!(text(&shell.side_chats[&1].composer, cx).is_empty());
+        assert_eq!(shell.right_tabs[&shell.panel_key(cx)], original_tabs);
+    });
+
+    // The unsaved side chat mentions nothing; nor does a tab on its own chat.
+    let main_before = shell.read_with(cx, |shell, cx| text(&shell.composer, cx));
+    drag(cx, "right-surface-tab-2", main);
+    let to = side_body(cx, 1);
     drag(cx, "right-surface-tab-1", to);
     shell.read_with(cx, |shell, cx| {
-        assert_eq!(text(&shell.side_chats[&2].composer, cx), before);
+        assert_eq!(text(&shell.composer, cx), main_before);
+        assert!(text(&shell.side_chats[&1].composer, cx).is_empty());
         assert_eq!(shell.right_tabs[&shell.panel_key(cx)], original_tabs);
     });
 }

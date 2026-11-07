@@ -3,10 +3,12 @@ use super::*;
 impl Shell {
     /// The entire conversation receives attachments in its own composer,
     /// regardless of which pane had keyboard focus when the drag started.
+    /// `own_chat` is the conversation's chat, which never mentions itself.
     pub(super) fn chat_dropzone(
         &self,
         id: impl Into<gpui::ElementId>,
         composer: Entity<Composer>,
+        own_chat: Option<String>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let images = composer.clone();
@@ -48,10 +50,18 @@ impl Shell {
                     cx.notify();
                 },
             ))
+            // A side-chat tab becomes a chat chip, like a sidebar session.
             .on_drop::<RightTabDrag>(cx.listener(
                 move |this, payload: &RightTabDrag, window, cx| {
                     if let Some(path) = &payload.workspace_path {
                         this.attach_workspace_drag(path, &composer, window, cx);
+                    }
+                    if let Some((chat_id, title)) = &payload.chat
+                        && own_chat.as_ref() != Some(chat_id)
+                    {
+                        composer.update(cx, |composer, cx| {
+                            composer.add_chat_mention(chat_id, title, window, cx)
+                        });
                     }
                     cx.notify();
                 },
@@ -85,8 +95,12 @@ impl Shell {
             .child("Drop to attach")
     }
 
-    /// The hint while a sidebar session is carried over a chat.
-    pub(super) fn mention_drop_overlay(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    /// The hint while a sidebar session or a side-chat tab is carried over a
+    /// chat other than its own.
+    pub(super) fn mention_drop_overlay(
+        theme: &Theme,
+        own_chat: Option<String>,
+    ) -> gpui::Stateful<gpui::Div> {
         div()
             .id("mention-drop-overlay")
             .absolute()
@@ -99,6 +113,17 @@ impl Shell {
             .text_size(crate::typography::ui_rems(13.0))
             .text_color(theme.text)
             .drag_over::<SidebarSessionDrag>(|style, _, _, _| style.opacity(1.0))
+            .drag_over::<RightTabDrag>(move |style, tab, _, _| {
+                if tab
+                    .chat
+                    .as_ref()
+                    .is_some_and(|(id, _)| own_chat.as_ref() != Some(id))
+                {
+                    style.opacity(1.0)
+                } else {
+                    style
+                }
+            })
             .child("Drop to mention")
     }
 }
