@@ -78,6 +78,8 @@ struct Shared {
     relays: Mutex<HashMap<String, RelayState>>,
     /// Per device: client sockets opened on its device room (dials, host or not).
     relay_dials: Mutex<HashMap<String, usize>>,
+    /// Every connection a client made to the edge: sockets and plain requests alike.
+    connections: std::sync::atomic::AtomicUsize,
     nudge_status: Mutex<u16>,
     nudge_status_by_chat: Mutex<HashMap<String, u16>>,
     nudges: Mutex<Vec<(String, usize)>>,
@@ -129,6 +131,7 @@ impl MockEdge {
             refuse_chat: Mutex::new(false),
             relays: Mutex::new(HashMap::new()),
             relay_dials: Mutex::new(HashMap::new()),
+            connections: Default::default(),
             nudge_status: Mutex::new(200),
             nudge_status_by_chat: Mutex::new(HashMap::new()),
             nudges: Mutex::new(Vec::new()),
@@ -151,6 +154,14 @@ impl MockEdge {
                 let shared = accept_shared.clone();
                 let registry_url = registry_url.clone();
                 tokio::spawn(async move {
+                    // Count what a client sends the edge. A `HEAD /` is the preview's local
+                    // port discovery finding this listener on localhost, not a dial.
+                    let mut peek = [0u8; 5];
+                    if let Ok(n) = stream.peek(&mut peek).await
+                        && &peek[..n] != b"HEAD "
+                    {
+                        shared.connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let mut first = [0u8; 4];
                     if *shared.http.lock().unwrap() && serve_plain_get(&mut stream, &shared).await {
                         return;
@@ -421,6 +432,11 @@ impl MockEdge {
             .get(chat)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Every connection the edge has accepted so far, of any kind.
+    pub fn connections(&self) -> usize {
+        self.shared.connections.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// How many times a client dialed `device`'s room, whether its host was there or not.

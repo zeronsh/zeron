@@ -47,6 +47,12 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+/// The largest checkpoint a chat room takes (`MAX_CHECKPOINT_BYTES` in the edge).
+const ROOM_CHECKPOINT_LIMIT: usize = 32 * 1024 * 1024;
+
+fn checkpoint_fits(bytes: usize) -> bool {
+    bytes <= ROOM_CHECKPOINT_LIMIT
+}
 
 /// An edit client renews every 20s. Sixty seconds tolerates two missed
 /// heartbeats without turning a vanished client into an invisible permanent
@@ -237,7 +243,7 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
 }
 
 mod relay;
-pub use relay::{CHAT_LINK_PREFIX, ChatLinkService, relay_layer_enabled};
+pub use relay::relay_layer_enabled;
 
 #[derive(Debug, Clone)]
 pub struct DocHostConfig {
@@ -251,7 +257,6 @@ pub struct DocHostConfig {
 
 struct DocHostInner {
     /// Opens direct links to other devices. Set only with the relay layer on.
-    chat_links: std::sync::OnceLock<zeron_preview::PreviewService>,
     store: Arc<DocsStore>,
     config: DocHostConfig,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
@@ -1081,7 +1086,6 @@ impl DocHost {
                 store,
                 config,
                 sessions: Mutex::new(None),
-                chat_links: std::sync::OnceLock::new(),
                 quiesced: AtomicBool::new(false),
                 quiesce_generation: AtomicU64::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
@@ -1570,6 +1574,10 @@ impl DocHost {
     /// Materialize one authoritative local document without acquiring a network
     /// connection. Durable publication is installed before exposing any writer.
     pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        // A chat with no id has no room to sync with: it dialed one forever.
+        if chat_id.is_empty() {
+            return Err(EngineError::Other("a chat needs an id".into()));
+        }
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another
@@ -1750,6 +1758,22 @@ impl DocHost {
             for bytes in received {
                 if let Err(err) = doc.doc().import(&bytes) {
                     tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a kept update");
+                }
+            }
+            // Updates that came ahead of their history. Once all of them are in, none
+            // is needed again; until then all stay.
+            let parked_key = crate::chat2_host::parked_inbox(chat_id);
+            let (parked, newest) = self.inner.store.pending_chat_inbox(&parked_key)?;
+            if !parked.is_empty() {
+                let mut waiting = false;
+                for bytes in &parked {
+                    match doc.doc().import(bytes) {
+                        Ok(status) => waiting |= status.pending.is_some(),
+                        Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a parked update"),
+                    }
+                }
+                if !waiting {
+                    self.inner.store.retire_chat_inbox(&parked_key, newest)?;
                 }
             }
         }
@@ -2383,9 +2407,6 @@ impl DocHost {
 
     async fn stop_sync(&self, handle: &ChatDocHandle) {
         lock(&handle.sync_cancel).cancel();
-        if let Some(state) = &*lock(&handle.relay) {
-            state.stop_link();
-        }
         let client = lock(&handle.chat2).take();
         if let Some(client) = client {
             client.shutdown().await;
@@ -3152,6 +3173,14 @@ impl DocHost {
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
+        // On a relayed chat only its host stores a checkpoint: a viewer's is behind
+        // the host's as often as not, and the room may hold nothing else.
+        if let Some(workspace) = self.workspace()
+            && let Ok(Some(chat)) = workspace.chat(&handle.chat_id)
+            && !relay::posts_checkpoint(reason, chat.room_gen.unwrap_or(1), workspace.is_host(&handle.chat_id))
+        {
+            return;
+        }
         // A relaying host's socket closes when idle, and it still owes checkpoints.
         let relay_state = lock(&handle.relay).clone();
         // So does a build with the layer off, healing what one with it on left.
@@ -3167,7 +3196,7 @@ impl DocHost {
         // have less than what it would replace.
         if relay_era
             && let Some(state) = &relay_state
-            && (!state.checkpoint_may_run() || !state.caught_up())
+            && (!state.checkpoint_may_run() || !state.caught_up() || state.refused_as_too_large())
         {
             return;
         }
@@ -3209,6 +3238,15 @@ impl DocHost {
             let Ok(Some((snapshot, frontier, covered_rejections))) = prepared else {
                 return;
             };
+            // The room refuses it, and only after receiving all of it: a chat past the
+            // limit sent that much on every retry.
+            if !checkpoint_fits(snapshot.len()) {
+                tracing::warn!(chat = %chat_id, bytes = snapshot.len(), reason, "chat2 checkpoint too big for the room; not sent");
+                if let Some(state) = &relay_state {
+                    state.checkpoint_refused(413, "", None);
+                }
+                return;
+            }
 
             let Ok(bearer) = edge.bearer().await else {
                 return;
@@ -3371,7 +3409,7 @@ impl DocHost {
         if handle.messages_tx.receiver_count() > 0 || handle.queue_tx.receiver_count() > 0 {
             return true;
         }
-        if !handle.relay_lets_socket_close() || handle.relay_has_links() {
+        if !handle.relay_lets_socket_close() {
             return true;
         }
         // The handle itself holds one doc ref; more means a live writer.
@@ -6953,6 +6991,26 @@ mod publication_eviction_tests {
         let same = host.open("local").unwrap();
         assert!(Arc::ptr_eq(&handle, &same));
         assert!(handle.sync_requested.load(Ordering::Acquire));
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_without_an_id_is_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "writer".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        assert!(host.open("").is_err());
+        assert!(host.open_local("").is_err());
+        let steer = SessionCommandPayload::Steer { prompt: "hi".into(), message_id: None };
+        assert!(host.queue_command_with_transfers("", steer, Vec::new()).is_err());
+        assert!(lock(&host.inner.handles).is_empty());
         host.shutdown_workers().await;
     }
 

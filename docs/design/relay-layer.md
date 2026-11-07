@@ -15,16 +15,16 @@ owner has decided:
 - No backups for non-Cloud chats. With a laptop off, other devices see only what
   they already synced.
 - The sidebar stays stored, with less churn.
-- Devices connect peer to peer over WebRTC where they can, for latency. The DO
-  stays as the fallback and the offline queue.
+- The DO relays and holds the offline queue. Direct peer-to-peer links are parked: see
+  [Direct links, parked](#direct-links-parked).
 - Nothing ships unless old clients keep working.
 - Relaying doesn't remove local-first. See [Local-first](#local-first).
 
 ## The idea in one paragraph
 
 **Delivery stops being a guarantee and becomes a hint.** A chat's ops reach other
-devices however they can: a direct link, the DO's relay, or the stored queue.
-None of those has to be reliable, because Loro imports are idempotent and devices
+devices through the DO's relay or the stored queue.
+Neither has to be reliable, because Loro imports are idempotent and devices
 compare version vectors (VVs) to find and fetch whatever they missed. Loss, reorder
 and duplicates only cost time. The one thing that must stay durable is what only
 one device holds and another is waiting for: a message sent to a host that's
@@ -35,8 +35,8 @@ it.
 
 | Device | Its own ops go | Why |
 |---|---|---|
-| Host, generation 3 | Direct links and DO relay. Not stored on the edge. | The host's doc is the source of truth. Anyone behind asks it. |
-| Other devices, generation 3 | Durable queue on the DO, plus a direct copy to the host | A sent message must survive the host being offline. The copy is for latency. |
+| Host, generation 3 | DO relay. Not stored on the edge. | The host's doc is the source of truth. Anyone behind asks it. |
+| Other devices, generation 3 | Durable queue on the DO | A sent message must survive the host being offline. |
 | Anyone, generation 2 | Stored rows, as today | Unchanged. |
 
 ## Local-first
@@ -46,7 +46,7 @@ before, up to what it has stored, with no network and with the host offline.** T
 holds on generation 3 exactly as it does on generation 2: what changes is who else has a
 copy, not whether this device keeps its own.
 
-- Everything a device imports, by any path (direct link, the room's relay, the queue,
+- Everything a device imports, by any path (the room's relay, the queue,
   catch-up from a peer, stored rows, a checkpoint), goes into its doc, and its doc is saved
   to its local store within about a second.
 - That gap is closed for what only came by relay. Nothing on the edge can give those ops
@@ -74,7 +74,7 @@ client flag off, `hello` is byte-identical to today's.
 
 | Type | Frame | Direction | What it does |
 |---|---|---|---|
-| 0x0c | `relay` | both | One update. Forwarded to live relay-capable sockets except the sender and `skip`. Never stored. |
+| 0x0c | `relay` | both | One update. Forwarded to live relay-capable sockets except the sender. Never stored. |
 | 0x0d | `announce` | both | Payload is the sender's VV. `hello: true` asks peers to answer if the sender is behind. |
 | 0x0e | `syncReq` | both | Directed by `to`. Payload is the requester's VV, or `xfer` and `offset` to continue a transfer. |
 | 0x0f | `syncData` | both | Directed by `to`. A fragment of one update blob: `xfer`, `offset`, `total`. |
@@ -86,9 +86,6 @@ client flag off, `hello` is byte-identical to today's.
 | 0x15 | `legacyPeer` | s→c | A reader that can't take relay frames is here. See [Old clients](#what-old-clients-see). |
 
 Queue rows reach sockets as `relay` frames that also carry `queued` and `batchId`.
-
-Over a direct link the same frames travel length-prefixed, and the link itself
-identifies the sender.
 
 ### Reaching a host that isn't in the room
 
@@ -159,10 +156,13 @@ Deleting rows in the middle of `rows` would leave holes in the seq space, and an
 client treats a hole as a gap to repair and redials forever. With a separate table
 the old log stays a valid, quiet log, and deletes can't touch existing rows.
 
-1. A viewer sends `enqueue`. The row and its host wake commit in one transaction,
-   then `queued` goes back. The viewer's outbox retires the batch only then.
-2. The row goes live to connected relay-capable sockets. An offline host learns of
-   it through the existing wake path.
+1. A viewer sends `enqueue`. Connected relay-capable sockets get a copy at once, before the
+   write: anything a room sends once a write has begun waits for that write to be durable, and
+   that wait sat between every send and its host. The copy is only a hint, like any relay frame.
+2. The row and its host wake commit in one transaction, then `queued` goes back. The viewer's
+   outbox retires the batch only then. An offline host learns of the row through the existing
+   wake path. A write that never lands leaves the sender retrying, and a host that already
+   imported the early copy imports it again as a no-op.
 3. The host imports it, saves its snapshot, and only then sends `delivered`. A crash
    in between redelivers the row, and importing it again is a no-op.
 4. The DO deletes the row, but only for the device the registry says hosts the chat. A
@@ -215,10 +215,12 @@ one, and they stop needing the nightly backup, since their rooms stop changing.
 
 ### Only a checkpoint that moves forward
 
-A checkpoint can be all the room holds, so a relay-era one can't replace it with less. A host
-posts one only after this process has seen its doc catch up with the room. The DO refuses one
-with an empty version over an existing checkpoint, or one whose version doesn't include the
-stored one (`409 stale`, after which the host reads what the room has). A version vector is the
+A checkpoint can be all the room holds, so while the layer is on no checkpoint can replace it
+with less, relay-era or not: an ordinary one, from a device that isn't the host or from an older
+build, is behind the host's as often as not. On generation 3 only the chat's host posts one at
+all. A host posts one only after this process has seen its doc catch up with the room. The DO
+refuses one with an empty version over an existing checkpoint, or one whose version doesn't
+include the stored one (`409 stale`, after which the host reads what the room has). A version vector is the
 only thing the DO decodes, and only to compare. A chat over the size limit gets a `413`, stops
 being retried against the sleep gate, and logs: refusing to sleep would only keep the machine
 billing, and no checkpoint will ever land.
@@ -253,7 +255,8 @@ The host may set 3 when all of these hold:
   the chat's host, and the host of its parent chat. Other Cloud machines never open
   this chat, so they don't count;
 - no client without the layer has joined the account's registry room in the last 14 days;
-- the chat's saved snapshot is under 24 MiB. A checkpoint has to be able to bring any reader up
+- the chat's snapshot is known to be under 24 MiB: the larger of what was loaded and what the
+  last save wrote. A chat opened from disk is known from its load; one with neither waits. A checkpoint has to be able to bring any reader up
   to date, and the room takes at most 32 MiB. A chat that grows past 24 MiB goes back to stored
   rows while there's still room for its heal.
 
@@ -349,128 +352,53 @@ separate, later decision with its own review.
 | Host offline, viewer sends | Queued and acked. The wake waits for the host. Other devices see it through the queue. |
 | Host offline, fresh device | Sees the last checkpoint if any, plus the queue. Accepted by product decision. |
 | Host offline and device-hosted chat with no checkpoint | An empty chat until the host returns, on a device that has never loaded it. A device that has keeps what it has: see [Local-first](#local-first). |
-| Direct link dies | A closed link falls back at once. A silent one takes up to 10 s to be declared dead, and frames sent in that time were kept off the room; `announce{hello}` then recovers them. The redial retries with backoff. |
-| Both paths down | Local-first as today. Sync resumes on reconnect. |
+| Room unreachable | Local-first as today. Sync resumes on reconnect. |
 | Viewer's `delivered` is lost | The row is redelivered next join. Import is a no-op. |
 | Chat moves to a new host | The new host reads the queue and acks. Sync is symmetric, so it also collects what the old host published. |
 | Edge flag turned off while hosts are in relay mode | `state` loses `relay`, the host follows the downgrade rule, and queued rows move into `rows` once its heal lands. |
-| A checkpoint keeps failing | Retried with backoff. Until it lands, old readers stay behind, a downgrade can't finish and a Cloud machine won't sleep. A chat too big to checkpoint is the exception: it doesn't hold the socket or the sleep, and logs. Flips stop at 24 MiB so this should only be reachable by one huge update. |
+| A checkpoint keeps failing | Retried with backoff. Until it lands, old readers stay behind, a downgrade can't finish and a Cloud machine won't sleep. A chat too big to checkpoint is the exception: it doesn't hold the socket or the sleep, and logs. A snapshot over the room's 32 MiB isn't sent at all (the room only refuses it after receiving all of it), and once the room has refused a chat's checkpoint as too big its relay checkpoints stop. Flips stop at 24 MiB so this should only be reachable by one huge update. |
 | Oversized update | The existing row cap and rejection path still apply to stored paths. A `relay` or `syncData` frame over the cap is refused by the runtime; VV sync re-fragments it. |
 
-## WebRTC
+## Latency
 
-### What exists and why the old stack went away
+Everything goes through the DO, so a send pays device → DO → host, and the reply host → DO →
+device. Measured with real engines (2026-11-07): a Mac on a home network viewing a chat hosted on
+a server in another region, mock agent, both on a test worker, p50:
 
-Two different things have the name. `ARCHITECTURE.md` (line 300) and
-`docs/research/feature-inventory.md` say the WebRTC mesh for device control was replaced
-by the DeviceRoom relay, and that the predecessor app had already made that move before this
-repo began. **Neither records why**, and the commit history here doesn't either, so the
-reasons can't be recovered from this repo. Nothing from that stack remains.
+| | Before | After |
+|---|---|---|
+| Send to first token on the viewer (n=30) | 257 ms | 172 ms |
+| The same after 15 s idle (n=8) | 299 ms | 163 ms |
+| Steer round trip (n=25) | 313 ms | 195 ms |
+| Viewer send to host receive (n=39) | 90 ms | 46 ms |
+| Host publish to viewer receive, every frame while streaming (n=770 / 902) | 50 ms | 49 ms |
 
-What's in the repo today is newer and works: `crates/preview` is a `webrtc`-based
-stack with a stream multiplexer (`mux`), signalling over the `PreviewRoom` DO, and STUN
-through public servers with no TURN. Terminals on other devices use it through
-`crates/term-link`, on desktop and on phones (`zeron-mobile` runs that code), and fall
-back to the device relay mid-session with no gap. **We don't build a stack; we add a
-stream service to one that already ships.**
+Two changes made the difference:
 
-### Design
+- **The room forwards a queued send before writing it** (see [Offline queue](#offline-queue)). That halved the
+  viewer-to-host leg.
+- **The first change after a pause commits at once.** A turn's text was committed a window (120 ms)
+  after its first change, so a turn's first token and a steer's echo waited that long. Now a change
+  commits at once unless one went out less than a window ago, and then a window after it. Streaming
+  still commits at most once per window, so a long turn costs the same.
 
-A viewer showing a chat opens `chatlink/{chatId}` (engine: `doc_host/relay.rs`, protocol: `run_link` in
-`crates/sync/src/chat_relay.rs`) to the host through
-`PreviewService::open_peer_stream`, which pairs if needed. The host's handler accepts
-only chats it hosts, and only from the owner's non-Cloud devices. The link carries
-`relay`, `announce`, `syncReq` and `syncData`.
+What's left of a send to first token, by hop (n=39, p50): 2 ms to the viewer's socket, 46 ms through
+the room to the host, 17 ms to start the turn, 26 ms to the agent's first token, 2 ms to commit, 26 ms
+through the room to the viewer. The DO lives in one region, so the two room legs are about one
+device-to-region round trip; nothing in the room's own handling adds measurably to that. A hibernated
+room showed no extra cost: after 15 s idle the first token came no later than on a warm room.
 
-Sending a host op: down every open link, then to the DO with `skip` naming those
-devices, so each device gets one copy and a joiner in a race gets it from somewhere.
-Sending a viewer op: down the link to the host for latency, plus `enqueue` for
-durability. Whichever arrives second is a no-op.
+## Direct links, parked
 
-Links are opened only for chats on screen, not for all warm chats, so background chats
-use no extra keepalive traffic.
+Peer-to-peer links carried the same frames over the WebRTC stack in `crates/preview`. They worked,
+and they saved 40-130 ms on a send or steer, but the owner parked them to ship the relay alone and
+make it as good as it can be. Nothing here waits on a link or prefers one. The code is on the branch
+`zeron/relay-direct-link`, ready to come back: a link is only ever a second path for frames the relay
+already carries, so it can return without changing anything durable.
 
-### Signalling
-
-Already solved. SDP goes through `PreviewRoom`, which authenticates the user and limits
-each Cloud machine to answering devices that contacted it.
-
-### How often it will fail
-
-Vendor and secondary sources cluster around 75-85% of sessions connecting directly with
-STUN. Fresh pairings measured on real networks (2026-11-06), on one account:
-
-| Pair | Direct | Pairing p50 | RTT |
-|---|---|---|---|
-| Mac on home NAT ↔ public server | 60/60 | 1.1 s | 69 ms |
-| Mac on home NAT ↔ Boat machine | 30/30 | 1.6 s | 152 ms |
-| Public server ↔ Boat machine | 30/30 | 1.1 s | 79 ms |
-| Mac ↔ Mac on one LAN (paired over Tailscale) | 30/30 | 0.7 s | 23 ms |
-| Public server ↔ a laptop on a phone hotspot | 25/30 | 5.2 s | 540 ms |
-| Home NAT ↔ the same hotspot | 26/30 | 5.8 s | 465 ms |
-| Home NAT ↔ a simulated Linux NAT | 0/30 | | |
-
-The hotspot had a weak signal, so those two rows may be worse than a typical cell connection.
-The simulated NAT fails because a packet arriving first creates a conntrack entry and the NAT
-moves the outbound port. Real Linux-based routers may do the same. A failed attempt costs a
-30 s wait, and the chat stays on the room throughout. Measure per platform before any wider
-rollout, because this is one account on a few networks.
-
-### TURN
-
-Not needed. The DO is the fallback, so a device that can't pair directly just stays on the
-relay. For the record, Cloudflare's TURN lists at $0.05/GB with 1,000 GB free per month.
-
-### Mobile and battery
-
-The phone already runs this stack for terminals. A link is open only while a chat is on
-screen, and iOS suspends it in the background anyway, at which point the phone reconnects
-on return like any other socket. Each open link adds ICE and DTLS keepalives. Those are
-small but not measured here. [relay-mobile.md](relay-mobile.md) covers what a phone does. iOS
-runs the layer. Android doesn't yet, and until it does, an Android phone seen in the last 14 days
-keeps its account's chats on generation 2.
-
-### Cloud machines
-
-A viewer always starts the pairing, and `PreviewRoom` already lets a Cloud machine answer
-only devices that contacted it. Boat machines pair directly from a home NAT and from a public server (see above), so Cloud links
-work on that provider. Two Cloud machines don't pair with each other, by design: neither has
-contacted the other, and a link's host refuses Cloud peers. When a Cloud
-machine sleeps the link ends, and reads then come from its checkpoint.
-
-### Latency
-
-The direct path skips the trip through the DO's region.
-
-- **Relay path:** device → nearest Cloudflare location → the DO's region → nearest
-  location → device. A DO lives in one region, so two devices in the same room pay for
-  that trip even when they sit side by side.
-- **Direct path, same LAN:** a low-single-digit millisecond path, and the most likely
-  case for a laptop and a desktop or phone at home.
-- **Direct path, different networks:** the internet path between the two, usually
-  shorter than going through the DO's region, though not always.
-
-Measured with a mock agent on real networks (2026-11-06), p50, direct against relay:
-
-| Pair | Commit to viewer | First token after send | Steer round trip |
-|---|---|---|---|
-| Mac on home NAT ↔ public server | 30-42 ms / 52-54 ms | 236-283 ms / 332-382 ms | 211-244 ms / 322-336 ms |
-| Mac ↔ Mac on one LAN (over Tailscale) | not measured | 218-222 ms / 350-357 ms | 166-228 ms / 347-363 ms |
-| Mac on home NAT ↔ Boat machine | not measured | 281-300 ms / 328-339 ms | 296-309 ms / 335-342 ms |
-| Public server ↔ hotspot, weak signal | not measured | 664-699 ms / 566-763 ms | 574 ms / 639-715 ms |
-
-Streaming text arrives in 120 ms commits, which is about the size of a token's whole wait (p50 94-111 ms
-direct, 118-125 ms relay on the first row), so a 10-20 ms saving while streaming won't be seen. A send or
-steer saves 40-130 ms on the good networks, and that's where a person could feel it. On a slow radio
-link the saving disappears. These round trips also include the rest of a turn's start, which a real agent
-makes much longer.
-
-### Is it sound?
-
-Yes, for this reason: **the direct path carries the same idempotent frames as the relay
-and is never the only copy of anything durable.** It can fail at any time, in any order,
-and the worst outcome is the delay until the next `announce`. The design doesn't depend
-on how reliable it is.
+What those runs left behind for the stack terminals use is on its own: a connection now outlives a
+signaling socket ending, and a device ignores another's private LAN addresses when their public
+addresses differ.
 
 ## Sidebar churn
 
@@ -490,8 +418,8 @@ Moving fields to live-only frames is riskier, for these reasons:
 
 ## Testing before any real user
 
-Done on a deployed test worker with real engines on real networks (2026-11-06): pairing and latency
-per the tables above, link and network failures with recovery, restarts of every role, the room dropped,
+Done on a deployed test worker with real engines on real networks (2026-11-06 and 07): latency per
+the table above, network failures with recovery, restarts of every role, the room dropped,
 released v0.2.137 and v0.2.116 in the account, the offline queue including a host change, local-first after
 SIGKILL, a real Cloud machine, and chaos with real `gpt-6.1-terra` turns.
 
@@ -503,7 +431,6 @@ Still needed, in this order:
    large chat over the relay, with no HTTP checkpoint to fall back on.
 4. Real iOS and Android builds from the App Store against a generation 3 chat. The iOS
    simulator has been run with the code from `main`; Android hasn't.
-5. Direct-link success rate per platform, from real traffic.
 
 ## Rollout
 
@@ -528,10 +455,14 @@ that can't heal will never store them.
 3. Only then turn the engine flag off, if you want it off. A build from this PR on with the flag off
    still owes a heal for a chat it hosts on generation 3, and moves it back after. That's the only thing
    the flag-off path does, and an account that never ran the layer has no such chat.
-4. **Never go below this PR's code while a room may hold a queue or a chat may be unhealed.** Older edge
-   code can't read the queue, and those senders have retired their outboxes. Older engine code can't
-   heal, so its next stored row parks on every reader. Keep this PR's edge and engine code deployed
-   for at least 14 days after step 1.
+4. **Never go below this PR's edge code while a room may hold a queue or a chat may be unhealed.** Older
+   edge code can't read the queue, and those senders have retired their outboxes. Keep it deployed for at
+   least 14 days after step 1.
+5. An engine can go back further than that, one device at a time: an app downgrade. A host on an older
+   build can't heal, so the room would keep what's queued for good. Instead, when a device without the
+   layer joins and the registry says it hosts the chat, the room moves the queue into rows for it: the
+   host holds every op those messages depend on. Its next stored rows still park on old readers until
+   it upgrades and heals, as they would have anyway.
 
 ## What's built
 
@@ -542,7 +473,6 @@ Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine.
 - The room's relay frames, offline queue and old-client signals (`edge/src/chat-room.ts`, `chat-relay.ts`).
 - The relay task: version exchange, resumable transfers, parked rows (`crates/sync/src/chat_relay.rs`,
   `chat_client.rs`).
-- Direct links on the existing WebRTC stack, with fallback to the room.
 - The host's side: moving a chat between generations, the downgrade rule, the outbox rules
   (`crates/engine/src/doc_host/relay.rs`, `crates/proto/src/relay_gen.rs`).
 
@@ -561,10 +491,9 @@ Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine.
 
 **Known limits:**
 
-- A viewer on a chat whose host has no socket, no wake route and no direct link stays where it is.
+- A device that opens a chat for the first time writes two metadata ops of its own (`SessionDoc::init`),
+  which go out as one queue row. It doesn't wake a sleeping Cloud machine (checked for 150 s), and the
+  host imports it as a no-op when it next wakes. On generation 2 the same open stores one row.
+
+- A viewer on a chat whose host has no socket and no wake route stays where it is.
 - An old client reading only over HTTP doesn't wake an absent host: its read carries no host hint.
-
-## Sources
-
-- TURN usage estimates: [metered.ca](https://www.metered.ca/blog/what-is-a-turn-server/), [getstream.io](https://getstream.io/resources/projects/webrtc/advanced/stun-turn/), [bloggeek.me](https://bloggeek.me/webrtcglossary/turn/)
-- TURN pricing: [Cloudflare Realtime TURN FAQ](https://developers.cloudflare.com/realtime/turn/faq/), [Cloudflare Realtime pricing](https://developers.cloudflare.com/realtime/sfu/pricing/)

@@ -1,17 +1,14 @@
 //! The relay layer's device half (docs/design/relay-layer.md).
 //!
-//! Delivery here is a hint, not a guarantee. A chat's ops travel over whatever
-//! is up: a direct peer-to-peer link or the room's relay. Any path may lose,
-//! reorder or repeat them. Loro imports are idempotent, and devices compare
-//! version vectors to find and fetch what they missed, so a failure only costs
-//! time. Nothing in this file is ever the only copy of anything durable: a host's
+//! Delivery here is a hint, not a guarantee. A chat's ops travel over the room's
+//! relay, which may lose, reorder or repeat them. Loro imports are idempotent, and
+//! devices compare version vectors to find and fetch what they missed, so a failure
+//! only costs time. Nothing in this file is ever the only copy of anything durable: a host's
 //! ops live in its doc, and another device's sends stay in its outbox until the
 //! room's offline queue has acked them.
 //!
 //! [`RelayHandle`] owns one task per chat, with no socket of its own.
-//! [`crate::chat_client::ChatClient`] feeds it the room's frames, and
-//! [`run_link`] feeds it a direct link's. It keeps running while the room is
-//! down, so a direct link still works through an edge outage.
+//! [`crate::chat_client::ChatClient`] feeds it the room's frames.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -19,7 +16,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
@@ -49,15 +45,10 @@ const MAX_FRUITLESS_ROUNDS: u32 = 3;
 /// Stalled rounds in a row before waiting for a peer to announce instead.
 const MAX_STALLS: u32 = 3;
 const MAX_DELIVERED_IDS: usize = 100;
-/// Frames queued toward one path before later ones are dropped. They heal.
+/// Frames queued toward the room before later ones are dropped. They heal.
 pub const PATH_QUEUE: usize = 256;
-
-/// A direct link's keepalive. A dead link would otherwise swallow frames that
-/// the `skip` list kept off the room, so it must be noticed quickly.
-const LINK_PROBE: Duration = Duration::from_secs(4);
-const LINK_DEAD: Duration = Duration::from_secs(10);
-/// A link frame carries at most one sync fragment or one update.
-const LINK_MAX_FRAME: usize = 2 * 1024 * 1024;
+/// A queue read the room's full channel refused is asked again after this.
+const QUEUE_REQ_RETRY: Duration = Duration::from_millis(200);
 
 /// What a device does with the room's offline queue.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -83,19 +74,12 @@ pub enum RelayEvent {
     LegacyPeer,
     /// A remote update landed.
     Applied,
-    /// A direct link came up or went down.
-    LinksChanged,
 }
 
 enum Input {
     Local { bytes: Vec<u8>, to_room: bool },
     RoomUp(mpsc::Sender<Vec<u8>>),
     RoomFrame(WireFrame),
-    LinkUp { peer: String, id: u64, tx: mpsc::Sender<Vec<u8>> },
-    /// Only ends the link with this id: an old link timing out mustn't take its
-    /// replacement with it.
-    LinkDown { peer: String, id: u64 },
-    LinkFrame { peer: String, frame: WireFrame },
     Exported { to: String, bytes: Option<Vec<u8>> },
     Policy(RelayPolicy),
     Host(Option<String>),
@@ -105,12 +89,9 @@ enum Input {
 
 #[derive(Default)]
 struct Counters {
-    direct_frames_sent: AtomicU64,
     room_frames_sent: AtomicU64,
-    direct_frames_received: AtomicU64,
     room_frames_received: AtomicU64,
     sync_rounds: AtomicU64,
-    links: AtomicU64,
     /// Queue reads asked for and answered, for catch-up to wait on.
     queue_reads_asked: AtomicU64,
     queue_reads_done: AtomicU64,
@@ -128,15 +109,12 @@ struct Counters {
     started: Option<std::time::Instant>,
 }
 
-/// What's gone over each path, for tests and rollout measurements.
+/// What's gone through the room, for tests and rollout measurements.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RelayStats {
-    pub direct_frames_sent: u64,
     pub room_frames_sent: u64,
-    pub direct_frames_received: u64,
     pub room_frames_received: u64,
     pub sync_rounds: u64,
-    pub links: u64,
 }
 
 /// One chat's relay task. Dropping every clone ends it.
@@ -161,7 +139,6 @@ impl RelayHandle {
             policy,
             host: None,
             room: None,
-            links: HashMap::new(),
             peers: HashMap::new(),
             want: None,
             round: None,
@@ -173,6 +150,7 @@ impl RelayHandle {
             exports: HashMap::new(),
             unconfirmed: Vec::new(),
             parked_queue: false,
+            queue_req_owed: false,
             events: events.clone(),
             counters: counters.clone(),
             input: tx.downgrade(),
@@ -191,8 +169,8 @@ impl RelayHandle {
     }
 
     /// A local commit. `to_room`: the host, whose ops the room relays. Another
-    /// device's ops reach the room through its outbox; here they only take the
-    /// direct link, for latency.
+    /// device's ops reach the room through its outbox, so here they only lead to an
+    /// announce.
     pub fn local_update(&self, bytes: Vec<u8>, to_room: bool) {
         let _ = self.tx.send(Input::Local { bytes, to_room });
     }
@@ -219,7 +197,7 @@ impl RelayHandle {
         self.counters.queue_pushes.store(queue, Relaxed);
     }
 
-    pub(crate) fn queue_pushes(&self) -> bool {
+    pub fn queue_pushes(&self) -> bool {
         self.counters.queue_pushes.load(Relaxed)
     }
 
@@ -281,12 +259,9 @@ impl RelayHandle {
 
     pub fn stats(&self) -> RelayStats {
         RelayStats {
-            direct_frames_sent: self.counters.direct_frames_sent.load(Relaxed),
             room_frames_sent: self.counters.room_frames_sent.load(Relaxed),
-            direct_frames_received: self.counters.direct_frames_received.load(Relaxed),
             room_frames_received: self.counters.room_frames_received.load(Relaxed),
             sync_rounds: self.counters.sync_rounds.load(Relaxed),
-            links: self.counters.links.load(Relaxed),
         }
     }
 }
@@ -306,7 +281,6 @@ struct Driver {
     policy: RelayPolicy,
     host: Option<String>,
     room: Option<mpsc::Sender<Vec<u8>>>,
-    links: HashMap<String, (u64, mpsc::Sender<Vec<u8>>)>,
     /// Each peer's last announced version.
     peers: HashMap<String, Vec<u8>>,
     want: Option<(String, Instant)>,
@@ -324,6 +298,9 @@ struct Driver {
     unconfirmed: Vec<String>,
     /// A queue row parked on missing history: re-read the queue once it's filled.
     parked_queue: bool,
+    /// A queue read that didn't fit in the room's channel: it's counted as asked,
+    /// so it has to go out, or catch-up would wait on it for the whole session.
+    queue_req_owed: bool,
     events: broadcast::Sender<RelayEvent>,
     counters: Arc<Counters>,
     input: mpsc::WeakUnboundedSender<Input>,
@@ -356,6 +333,7 @@ impl Driver {
             self.announce_settle,
             (!self.unconfirmed.is_empty() && self.room_open())
                 .then(|| Instant::now() + DELIVERED_POLL),
+            (self.queue_req_owed && self.room_open()).then(|| Instant::now() + QUEUE_REQ_RETRY),
             self.exports.values().map(|(_, at)| *at + EXPORT_TTL).min(),
         ]
         .into_iter()
@@ -374,12 +352,11 @@ impl Driver {
                 self.room = Some(tx);
                 // A round over the old socket won't finish, and waiting out its
                 // stall would turn a brief drop into a minute's delay.
-                if self.round.as_ref().is_some_and(|r| !self.links.contains_key(&r.peer)) {
-                    self.round = None;
-                }
+                self.round = None;
                 // Read what waits for us, and say where we are: whoever has more
                 // answers, and whatever a dropped socket lost comes back.
-                self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[]));
+                self.queue_req_owed = false;
+                self.send_queue_req();
                 self.announce(true);
             }
             Input::RoomFrame(frame) => {
@@ -391,32 +368,6 @@ impl Driver {
                 } else if let Some(from) = frame.header["device"].as_str().map(str::to_string) {
                     self.frame(from, frame, now);
                 }
-            }
-            Input::LinkUp { peer, id, tx } => {
-                self.links.insert(peer.clone(), (id, tx));
-                self.counters.links.store(self.links.len() as u64, Relaxed);
-                let _ = self.events.send(RelayEvent::LinksChanged);
-                self.announce_to_link(&peer, true);
-            }
-            Input::LinkDown { peer, id } => {
-                if self.links.get(&peer).is_none_or(|(current, _)| *current != id) {
-                    return;
-                }
-                self.links.remove(&peer);
-                self.counters.links.store(self.links.len() as u64, Relaxed);
-                let _ = self.events.send(RelayEvent::LinksChanged);
-                // A round over that link won't finish. Waiting out its stall would
-                // turn a dead link into a minute's delay.
-                if self.round.as_ref().is_some_and(|r| r.peer == peer) {
-                    self.round = None;
-                    self.want = Some((peer, now));
-                }
-                // Frames that went down the dead link were kept off the room.
-                self.announce(true);
-            }
-            Input::LinkFrame { peer, frame } => {
-                self.counters.direct_frames_received.fetch_add(1, Relaxed);
-                self.frame(peer, frame, now);
             }
             Input::Exported { to, bytes } => {
                 self.exporting.remove(&to);
@@ -431,7 +382,7 @@ impl Driver {
                 }
             }
             Input::Host(host) => self.host = host,
-            Input::ReadQueue => self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[])),
+            Input::ReadQueue => self.send_queue_req(),
             Input::AskPeers => {
                 self.fruitless = 0;
                 self.announce(true);
@@ -475,24 +426,17 @@ impl Driver {
             self.announce(false);
         }
         self.exports.retain(|_, (_, at)| now < *at + EXPORT_TTL);
+        if self.queue_req_owed && self.room_open() {
+            self.queue_req_owed = false;
+            self.send_queue_req();
+        }
         self.confirm_saved();
     }
 
     fn local(&mut self, bytes: Vec<u8>, to_room: bool, now: Instant) {
         // Too big for one frame: the announce below brings peers to fetch it.
-        if bytes.len() <= MAX_PUSH_BYTES {
-            let direct = wire::encode(frame_type::RELAY, &json!({}), &bytes);
-            let mut skip = Vec::new();
-            for (peer, (_, link)) in &self.links {
-                if link.try_send(direct.clone()).is_ok() {
-                    self.counters.direct_frames_sent.fetch_add(1, Relaxed);
-                    skip.push(peer.clone());
-                }
-            }
-            if to_room {
-                let header = if skip.is_empty() { json!({}) } else { json!({ "skip": skip }) };
-                self.to_room(wire::encode(frame_type::RELAY, &header, &bytes));
-            }
+        if to_room && bytes.len() <= MAX_PUSH_BYTES {
+            self.to_room(wire::encode(frame_type::RELAY, &json!({}), &bytes));
         }
         self.announce_soon.get_or_insert(now + ANNOUNCE_SOON);
         self.announce_settle = Some(now + ANNOUNCE_SETTLE);
@@ -533,17 +477,28 @@ impl Driver {
 
     fn announced(&mut self, from: String, frame: WireFrame, now: Instant) {
         let hello = frame.header["hello"].as_bool() == Some(true);
+        // That peer has just joined. A round asked of it before then went nowhere (the
+        // room only forwards to who's there), and nothing it sent has come back: ask
+        // again now rather than wait out the stall.
+        if hello && let Some(round) = self.round.as_mut().filter(|round| round.peer == from) {
+            if round.xfer.is_empty() && round.buf.is_empty() {
+                self.round = None;
+                self.want = Some((from.clone(), now));
+            } else {
+                // Mid-transfer: the window in flight may be lost. Ask for the rest
+                // from here; a peer that lost its export says so and it starts over.
+                round.last_progress = now;
+                let (xfer, offset) = (round.xfer.clone(), round.buf.len());
+                self.direct(&from, frame_type::SYNC_REQ, json!({ "xfer": xfer, "offset": offset }), &[]);
+            }
+        }
         if self.sink.relay_lacks(&frame.payload) {
             self.fruitless = 0;
             let at = if hello { now } else { now + GAP_GRACE };
             self.want_soon(from.clone(), at);
         }
         if hello && self.sink.relay_behind(&frame.payload) {
-            if self.links.contains_key(&from) {
-                self.announce_to_link(&from, false);
-            } else {
-                self.announce(false);
-            }
+            self.announce(false);
         }
         self.peers.insert(from, frame.payload);
     }
@@ -654,13 +609,7 @@ impl Driver {
         let gone = frame.header["gone"].as_bool() == Some(true);
         let in_round = self.round.as_ref().is_some_and(|r| r.peer == from);
         if gone {
-            // A link to a task with no doc is no use to anyone: drop it, so the
-            // ask goes through the room to wherever that device's chat is now.
             let no_doc = frame.header["noDoc"].as_bool() == Some(true);
-            if no_doc && self.links.remove(&from).is_some() {
-                self.counters.links.store(self.links.len() as u64, Relaxed);
-                let _ = self.events.send(RelayEvent::LinksChanged);
-            }
             if in_round {
                 self.round = None;
                 if no_doc {
@@ -744,7 +693,14 @@ impl Driver {
     /// the answer to a read still under way.
     fn read_queue_again(&mut self) {
         self.counters.queue_reads_asked.fetch_add(1, Relaxed);
-        self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[]));
+        self.send_queue_req();
+    }
+
+    /// One queue read, already counted as asked. Owed again if it didn't go out.
+    fn send_queue_req(&mut self) {
+        if !self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[])) {
+            self.queue_req_owed = true;
+        }
     }
 
     fn confirm_saved(&mut self) {
@@ -762,46 +718,23 @@ impl Driver {
             return;
         };
         let header = if hello { json!({ "hello": true }) } else { json!({}) };
-        let frame = wire::encode(frame_type::ANNOUNCE, &header, &version);
-        for (_, link) in self.links.values() {
-            if link.try_send(frame.clone()).is_ok() {
-                self.counters.direct_frames_sent.fetch_add(1, Relaxed);
-            }
-        }
-        self.to_room(frame);
+        self.to_room(wire::encode(frame_type::ANNOUNCE, &header, &version));
     }
 
-    fn announce_to_link(&mut self, peer: &str, hello: bool) {
-        let Some(version) = self.sink.relay_version() else {
-            return;
-        };
-        let header = if hello { json!({ "hello": true }) } else { json!({}) };
-        let frame = wire::encode(frame_type::ANNOUNCE, &header, &version);
-        if let Some((_, link)) = self.links.get(peer)
-            && link.try_send(frame).is_ok()
-        {
-            self.counters.direct_frames_sent.fetch_add(1, Relaxed);
-        }
-    }
-
-    /// To one device: its direct link if up, otherwise through the room.
+    /// To one device, through the room.
     fn direct(&mut self, to: &str, kind: u8, mut header: Value, payload: &[u8]) {
-        if let Some((_, link)) = self.links.get(to)
-            && link.try_send(wire::encode(kind, &header, payload)).is_ok()
-        {
-            self.counters.direct_frames_sent.fetch_add(1, Relaxed);
-            return;
-        }
         header["to"] = json!(to);
         self.to_room(wire::encode(kind, &header, payload));
     }
 
-    fn to_room(&mut self, frame: Vec<u8>) {
+    fn to_room(&mut self, frame: Vec<u8>) -> bool {
         if let Some(room) = &self.room
             && room.try_send(frame).is_ok()
         {
             self.counters.room_frames_sent.fetch_add(1, Relaxed);
+            return true;
         }
+        false
     }
 }
 
@@ -810,80 +743,6 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
-}
-
-/// Carry one chat over a direct link until it dies or `stop` fires. Both ends
-/// run this. The stream is reliable and ordered while it lives, but it's still
-/// only a hint: losing it costs the time until the room path takes over.
-pub async fn run_link<I>(io: I, peer: String, relay: RelayHandle, stop: tokio_util::sync::CancellationToken)
-where
-    I: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    let (mut reader, mut writer) = tokio::io::split(io);
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(PATH_QUEUE);
-    static NEXT_LINK: AtomicU64 = AtomicU64::new(1);
-    let id = NEXT_LINK.fetch_add(1, Relaxed);
-    let _ = relay.tx.send(Input::LinkUp { peer: peer.clone(), id, tx });
-    let write = async {
-        let probe = wire::encode(frame_type::PROBE, &json!({}), &[]);
-        let mut beat = tokio::time::interval(LINK_PROBE);
-        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            let frame = tokio::select! {
-                frame = rx.recv() => match frame {
-                    Some(frame) => frame,
-                    None => return,
-                },
-                _ = beat.tick() => probe.clone(),
-            };
-            let len = (frame.len() as u32).to_le_bytes();
-            if writer.write_all(&len).await.is_err()
-                || writer.write_all(&frame).await.is_err()
-                || writer.flush().await.is_err()
-            {
-                return;
-            }
-        }
-    };
-    let read = async {
-        loop {
-            let mut len = [0u8; 4];
-            match tokio::time::timeout(LINK_DEAD, reader.read_exact(&mut len)).await {
-                Ok(Ok(_)) => {}
-                _ => return,
-            }
-            let len = u32::from_le_bytes(len) as usize;
-            if len > LINK_MAX_FRAME {
-                tracing::warn!(len, "chat link: oversized frame; closing");
-                return;
-            }
-            let mut bytes = vec![0u8; len];
-            match tokio::time::timeout(SYNC_STALL, reader.read_exact(&mut bytes)).await {
-                Ok(Ok(_)) => {}
-                _ => return,
-            }
-            let Some(frame) = wire::decode(&bytes) else {
-                tracing::warn!("chat link: bad frame; closing");
-                return;
-            };
-            if frame.kind == frame_type::PROBE {
-                continue;
-            }
-            if relay
-                .tx
-                .send(Input::LinkFrame { peer: peer.clone(), frame })
-                .is_err()
-            {
-                return;
-            }
-        }
-    };
-    tokio::select! {
-        _ = stop.cancelled() => {}
-        _ = write => {}
-        _ = read => {}
-    }
-    let _ = relay.tx.send(Input::LinkDown { peer, id });
 }
 
 #[cfg(test)]

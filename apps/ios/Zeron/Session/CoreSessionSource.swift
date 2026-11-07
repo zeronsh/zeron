@@ -130,6 +130,10 @@ final class CoreSessionSource: SessionSource {
             next.banner = .failed(sendFailure)
         } else if c.sendState == .failed {
             next.banner = .notDelivered
+        } else if app?.connectivity?.state == .offline, c.sendState != nil {
+            // This phone has no network: it can't know whether the host is there, and
+            // the send waits on the network first. Saying the host is offline blamed it.
+            next.banner = .offline
         } else if c.sendState == .queued {
             // A Cloud chat's message waits for its machine to start or wake —
             // the transcript's setup step says so, as on the desktop.

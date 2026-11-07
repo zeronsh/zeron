@@ -172,19 +172,6 @@ describe("relay frames", () => {
     viewer.socket.close();
   });
 
-  it("honours skip, so a device on a direct link gets one copy", async () => {
-    const name = crypto.randomUUID();
-    await enableRelay(name);
-    const host = await connect(name, "host", { relay: true });
-    const direct = await connect(name, "direct", { relay: true });
-    const other = await connect(name, "other", { relay: true });
-    host.sendFrame(FRAME.relay, { skip: ["direct"] }, bytes(3));
-    await other.nextOf(FRAME.relay);
-    await direct.settled();
-    expect(direct.frames.filter(f => f.type === FRAME.relay)).toEqual([]);
-    for (const client of [host, direct, other]) client.socket.close();
-  });
-
   it("directs sync frames to their target alone, and drops them if it's gone", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);
@@ -265,6 +252,28 @@ describe("offline queue", () => {
     expect((await phone.nextOf(FRAME.queued)).header).toEqual({ batchId: "m1", dup: true });
     expect(await queueCount(name)).toBe(1);
     phone.socket.close();
+  });
+
+  it("reaches a live host once, ahead of the sender's ack, and a replay doesn't go again", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const laptop = await connect(name, "laptop", { relay: true });
+    const phone = await connect(name, "phone", { relay: true, host: "laptop" });
+    phone.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(5));
+    const live = await laptop.nextOf(FRAME.relay);
+    expect(live.header).toEqual({ device: "phone", queued: true, batchId: "m1" });
+    await phone.nextOf(FRAME.queued);
+    phone.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(5));
+    expect((await phone.nextOf(FRAME.queued)).header).toEqual({ batchId: "m1", dup: true });
+    await laptop.settled();
+    expect(laptop.frames.filter(f => f.type === FRAME.relay), "no second copy").toHaveLength(0);
+    // Rejected sends never go early.
+    phone.sendFrame(FRAME.enqueue, { batchId: "empty" }, new Uint8Array(0));
+    await phone.nextOf(FRAME.error);
+    await laptop.settled();
+    expect(laptop.frames.filter(f => f.type === FRAME.relay), "no second copy").toHaveLength(0);
+    expect(await queueCount(name)).toBe(1);
+    for (const client of [laptop, phone]) client.socket.close();
   });
 
   it("goes live to connected peers and leaves when the host confirms", async () => {
@@ -453,6 +462,38 @@ describe("nobody is left waiting on a host that isn't there", () => {
     const phone = await connect(name, "phone", { org });
     await expect.poll(() => wakeFor(name)).toBe("laptop");
     phone.socket.close();
+  });
+
+  it("a host back on a build without the layer gets what was queued for it", async () => {
+    const name = crypto.randomUUID();
+    const org = crypto.randomUUID();
+    await enableRelay(name);
+    const registry = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(`reg1/${org}/${user}`));
+    await runInDurableObject(registry, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO rows (kind, id, seq, deleted, del_hlc, fields, clocks) VALUES ('chats', ?, 1, 0, NULL, ?, '{}')",
+        name,
+        JSON.stringify({ deviceId: "laptop" })
+      );
+    });
+    // The host relays, so the room remembers it, then goes away.
+    const host = await connect(name, "laptop", { relay: true, relaying: true });
+    host.sendFrame(FRAME.relay, {}, bytes(4));
+    await host.settled();
+    host.socket.close();
+    const phone = await connect(name, "phone", { relay: true, host: "laptop" });
+    phone.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(5));
+    await phone.nextOf(FRAME.queued);
+    // Someone else without the layer arriving doesn't drain it: no heal has landed.
+    const other = await connect(name, "old-phone", { org });
+    await other.settled();
+    expect(await queueCount(name)).toBe(1);
+    // The host itself, downgraded, does.
+    const old = await connect(name, "laptop", { org });
+    const row = await old.nextOf(FRAME.row);
+    expect(row.header.batchId).toBe("m1");
+    expect(await queueCount(name)).toBe(0);
+    for (const client of [phone, other, old]) client.socket.close();
   });
 
   it("the edge flag alone wakes nobody: a stored chat's readers need no host", async () => {

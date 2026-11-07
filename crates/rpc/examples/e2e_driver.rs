@@ -243,6 +243,112 @@ async fn relay_layer(
     pass("B, without the layer, can still send and follow a turn");
 }
 
+/// Text a snapshot can't compress much: its size is what it says.
+fn incompressible(len: usize) -> String {
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    (0..len)
+        .map(|_| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            char::from(b'a' + ((seed >> 58) as u8 % 26))
+        })
+        .collect()
+}
+
+/// The chat's row on `client`, by id.
+async fn chat_generation(client: &RpcClient, chat_id: &str) -> Option<u64> {
+    wait_stream(client, methods::WATCH_CHATS, serde_json::json!({}), "chat list", |item| {
+        let chat = item
+            .as_array()?
+            .iter()
+            .find(|chat| chat.get("id").and_then(|v| v.as_str()) == Some(chat_id))?;
+        Some(chat.get("roomGen").and_then(|v| v.as_u64()))
+    })
+    .await
+}
+
+async fn create_chat(client: &RpcClient, space_id: &str) -> String {
+    let chat_id = uuid::Uuid::new_v4().to_string();
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": chat_id,
+                "spaceId": space_id,
+                "config": { "harness": "mock", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+            }),
+        )
+        .await
+        .unwrap_or_else(|err| fail(&format!("createChat: {err}")));
+    chat_id
+}
+
+/// A chat too big to relay never moves to generation 3: not after its first save,
+/// and not when its host restarts and reopens it, before any save. The engines run
+/// with a 64 KiB relay limit, so a 100 KB message makes a whale.
+async fn whale_chat(a: &RpcClient, b: &RpcClient, space_id: &str, a_port: u16, a_dir: Option<&std::path::Path>) {
+    let chat_id = create_chat(a, space_id).await;
+    queue_run(a, &chat_id, &incompressible(100_000)).await;
+    wait_for_replies(b, &chat_id, 1, "whale reply on B").await;
+    tokio::time::sleep(Duration::from_secs(14)).await;
+    if chat_generation(a, &chat_id).await != Some(2) {
+        fail("a chat over the relay limit moved to generation 3");
+    }
+    pass("a chat over the relay limit stays on stored rows");
+    let Ok(restart) = std::env::var("ZERON_E2E_RESTART_A") else {
+        return;
+    };
+    let restarted = std::process::Command::new("bash").arg(&restart).status();
+    if !restarted.is_ok_and(|status| status.success()) {
+        fail("couldn't restart A");
+    }
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    let a = loop {
+        match connect_ipc(a_port, a_dir).await {
+            Ok(client) => break client,
+            Err(_) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(250)).await,
+            Err(err) => fail(&format!("reconnecting to A: {err}")),
+        }
+    };
+    // Reopened, with nothing new to save: its size is known only from the load.
+    wait_for_replies(&a, &chat_id, 1, "whale on A after its restart").await;
+    tokio::time::sleep(Duration::from_secs(14)).await;
+    if chat_generation(&a, &chat_id).await != Some(2) {
+        fail("a reopened chat over the relay limit moved to generation 3 before its first save");
+    }
+    pass("reopened, it still stays on stored rows");
+}
+
+/// A message too big for a stored row is rejected, and reaches the other device
+/// through the host's checkpoint. The turns after it depend on it: the other
+/// device must take them in, not wait on history it can't get.
+async fn rejected_push(a: &RpcClient, b: &RpcClient, space_id: &str) {
+    let chat_id = create_chat(a, space_id).await;
+    queue_run(a, &chat_id, "before").await;
+    wait_for_replies(b, &chat_id, 1, "first reply on B").await;
+    queue_run(a, &chat_id, &incompressible(1_100_000)).await;
+    wait_for_replies(a, &chat_id, 2, "the oversized turn on A").await;
+    queue_run(a, &chat_id, "after").await;
+    wait_for_replies(b, &chat_id, 3, "the turns after a rejected push, on B").await;
+    let mut transcript = Vec::new();
+    let longest = wait_stream(
+        b,
+        methods::WATCH_DOC_MESSAGES,
+        serde_json::json!({ "chatId": chat_id }),
+        "the oversized message on B",
+        |item| {
+            apply_transcript_item(&mut transcript, item).ok()?;
+            let longest = transcript
+                .iter()
+                .map(|entry| serde_json::to_string(entry).map_or(0, |text| text.len()))
+                .max()?;
+            (longest > 1_000_000).then_some(longest)
+        },
+    )
+    .await;
+    pass(&format!("a rejected push reached B by checkpoint ({longest} bytes), and the turns after it too"));
+}
+
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
@@ -433,6 +539,11 @@ async fn main() {
 
     if std::env::var("ZERON_E2E_RELAY").as_deref() == Ok("1") {
         relay_layer(&a, &b, &chat_id, b_port, b_dir.as_deref()).await;
+        if std::env::var("ZERON_E2E_RESTART_B").is_err() {
+            whale_chat(&a, &b, &space_id, a_port, a_dir.as_deref()).await;
+        }
+    } else {
+        rejected_push(&a, &b, &space_id).await;
     }
 
     println!("PASS: two-device e2e smoke complete");

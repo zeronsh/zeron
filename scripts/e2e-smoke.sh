@@ -35,6 +35,7 @@ B_PID=""
 STATUS=1
 
 cleanup() {
+  [[ -f "$LOG_DIR/a.pid" ]] && A_PID="$(cat "$LOG_DIR/a.pid")"
   [[ -f "$LOG_DIR/b.pid" ]] && B_PID="$(cat "$LOG_DIR/b.pid")"
   for pid in "$A_PID" "$B_PID"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -109,11 +110,13 @@ DRIVER="$ROOT/target/debug/examples/e2e_driver"
 rm -rf "$A_DIR" "$B_DIR"
 mkdir -p "$A_DIR" "$B_DIR"
 
+# A debug build takes ZERON_RELAY_SNAPSHOT_LIMIT, so a small chat can stand in for one
+# too big to relay (the driver's whale check).
 start_engine() { # start_engine <data_dir> <ipc_port> <name> <log> <relay layer>
   ZERON_DATA_DIR="$1" ZERON_IPC_PORT="$2" ZERON_DEVICE_NAME="$3" \
     ZERON_EDGE_URL="$EDGE_URL" ZERON_EDGE_TOKEN="$TOKEN" ZERON_ORG_ID="$ORG" \
-    ZERON_HARNESS=mock RUST_LOG=info ZERON_RELAY_LAYER="$5" \
-    "$ZERON" headless >"$4" 2>&1 &
+    ZERON_HARNESS=mock RUST_LOG=info ZERON_RELAY_LAYER="$5" ZERON_RELAY_SNAPSHOT_LIMIT=65536 \
+    "$ZERON" headless >>"$4" 2>&1 &
 }
 
 start_engine "$A_DIR" "$A_PORT" "e2e-device-a" "$LOG_DIR/engine-a.log" "${ZERON_E2E_RELAY_A:-}"; A_PID=$!
@@ -125,6 +128,16 @@ echo "engines: A pid=$A_PID ipc=:$A_PORT  B pid=$B_PID ipc=:$B_PORT"
 
 if [[ "${ZERON_E2E_RELAY_A:-}" == "1" && "${ZERON_E2E_RELAY_B:-}" == "1" ]]; then
   export ZERON_E2E_RELAY=1 ZERON_E2E_EDGE_URL="$EDGE_URL" ZERON_E2E_TOKEN="$TOKEN"
+  echo "$A_PID" > "$LOG_DIR/a.pid"
+  export ZERON_E2E_RESTART_A="$LOG_DIR/restart-a.sh"
+  cat > "$ZERON_E2E_RESTART_A" <<RESTART
+kill "\$(cat '$LOG_DIR/a.pid')"
+while kill -0 "\$(cat '$LOG_DIR/a.pid')" 2>/dev/null; do sleep 0.2; done
+$(declare -f start_engine)
+EDGE_URL='$EDGE_URL' TOKEN='$TOKEN' ORG='$ORG' ZERON='$ZERON'
+start_engine '$A_DIR' '$A_PORT' e2e-device-a '$LOG_DIR/engine-a.log' 1
+echo \$! > '$LOG_DIR/a.pid'
+RESTART
   if [[ "${ZERON_E2E_OLD_RETURNS:-}" == "1" ]]; then
     echo "$B_PID" > "$LOG_DIR/b.pid"
     export ZERON_E2E_RESTART_B="$LOG_DIR/restart-b.sh"

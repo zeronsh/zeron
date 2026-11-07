@@ -883,6 +883,64 @@ async fn a_pr_watch_waits_for_its_hosts_presence_instead_of_dialing() {
     client.shutdown();
 }
 
+/// Launched with no network, a phone used to dial its registry and its warm rooms before
+/// the OS's first path report parked them: 22 refused dials and pulls in 120 ms on a real
+/// iPhone in airplane mode. It waits for that first report now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launch_with_no_network_dials_nothing_until_the_network_comes_back() {
+    let edge = MockEdge::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    // The OS's first report lands a moment after launch: no network.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client.set_network_online(false);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(edge.connections(), 0, "dialed with no network");
+
+    let back = Instant::now();
+    client.set_network_online(true);
+    while edge.connections() == 0 {
+        assert!(back.elapsed() < Duration::from_secs(2), "didn't dial once the network was back");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    client.shutdown();
+}
+
+/// The wait on the first path report mustn't slow an online launch: it dials as soon as
+/// the report says there's a network, and a platform that never reports loses at most
+/// the patience.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_online_launch_dials_as_soon_as_the_network_is_reported() {
+    let edge = MockEdge::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let start = Instant::now();
+    let client = phone(&edge, dir.path());
+    client.set_network_online(true);
+    while edge.connections() == 0 {
+        assert!(start.elapsed() < Duration::from_secs(2), "never dialed");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let reported = start.elapsed();
+    assert!(reported < Duration::from_millis(150), "an online launch waited {reported:?}");
+    client.shutdown();
+
+    let edge = MockEdge::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let start = Instant::now();
+    let client = phone(&edge, dir.path());
+    while edge.connections() == 0 {
+        assert!(start.elapsed() < Duration::from_secs(2), "never dialed without a report");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let unreported = start.elapsed();
+    assert!(
+        unreported < Duration::from_millis(1400),
+        "a platform that never reports waited {unreported:?}"
+    );
+    eprintln!("first dial: reported online {reported:?}, never reported {unreported:?}");
+    client.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phone_born_sessions_reach_the_host_before_their_first_command() {
     let edge = MockEdge::start().await;

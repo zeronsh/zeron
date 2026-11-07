@@ -16,6 +16,7 @@
 pub(crate) mod delivery;
 pub(crate) mod direct;
 pub(crate) mod escort;
+pub(crate) mod path_gate;
 pub(crate) mod relay;
 pub(crate) mod room;
 pub(crate) mod urls;
@@ -265,8 +266,21 @@ impl LiveBackend {
             zeron_sync::registry::announce_relay_layer();
         }
         // Signaling first: pairing with a host can then start the moment a
-        // terminal wants it.
-        let _ = self.direct.set(direct::start(inner));
+        // terminal wants it. It dials the edge too, so it waits on the platform's
+        // first path report like every other connect.
+        let path = inner.path_gate();
+        let weak = Arc::downgrade(inner);
+        let cancel = self.cancel.clone();
+        crate::runtime::shared().spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = path.ready() => {}
+            }
+            let Some(inner) = weak.upgrade() else { return };
+            if let Some(live) = inner.live() {
+                let _ = live.direct.set(direct::start(&inner));
+            }
+        });
         self.spawn_registry(inner);
         self.spawn_registry_saver(inner);
         self.escorts.respawn(inner);
@@ -464,9 +478,14 @@ impl LiveBackend {
         });
         let doc = inner.workspace.doc().clone();
         let device_id = inner.config.device_id.clone();
+        let path = inner.path_gate();
         crate::runtime::shared().spawn(async move {
             let mut backoff = JOIN_RETRY_BASE;
             let client = loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = path.ready() => {}
+                }
                 let attempt = RegistryClient::connect_via_transport(
                     provider.clone(),
                     doc.clone(),

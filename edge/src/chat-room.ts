@@ -35,7 +35,7 @@ import {
 import { decodeFrame, encodeFrame, FRAME, RELAY_FRAME_TYPES } from "./chat-frames";
 import {
   decodeVersion, drainQueueIntoRows, enqueueRow, ensureRelayQueue, hasRelayQueue, markDelivered,
-  markDeliveredByOthers, queueLength, queueRows, versionIncludes
+  markDeliveredByOthers, queueHolds, queueLength, queueRows, versionIncludes
 } from "./chat-relay";
 import { AUTH_ORG_HEADER, AUTH_USER_HEADER, type Env } from "./env";
 import {
@@ -166,7 +166,7 @@ export class ChatRoom implements DurableObject {
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = { userId, device, chatId, hostDevice };
       const orgId = request.headers.get(AUTH_ORG_HEADER);
-      if (orgId && this.relayEnabled()) state.orgId = orgId;
+      if (orgId) state.orgId = orgId;
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
@@ -193,8 +193,12 @@ export class ChatRoom implements DurableObject {
       // A relay-era checkpoint prunes nothing, whatever floor the host last saw.
       const relayEra = url.searchParams.get("atFloor") === "1";
       const atFloor = this.relayEnabled() && relayEra;
-      // It can also be all that's stored, so it may not go backwards.
-      if (relayEra && !this.checkpointMovesForward(frontier)) return json({ error: "stale" }, 409);
+      // A relay-era checkpoint can be all that's stored, so while the layer is on no
+      // checkpoint may replace the room's with less: an ordinary one from a viewer or
+      // an older build is behind as often as not.
+      if ((relayEra || this.relayEnabled()) && !this.checkpointMovesForward(frontier)) {
+        return json({ error: "stale" }, 409);
+      }
       const covered = atFloor ? seqFloor(sql) : seqCovered;
       const outcome = commitCheckpoint(sql, this.blobs, covered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
@@ -505,6 +509,7 @@ export class ChatRoom implements DurableObject {
     } else if (!layer) {
       this.drainStaleQueue();
     }
+    if (!state.relay) this.drainForLegacyHost(state);
     // Only for a chat in the relay era: a stored chat's readers need no host.
     if (layer && (header.gen === 3 || this.relayDirty())) this.wakeAbsentHost(state);
     const sql = this.ctx.storage.sql;
@@ -662,6 +667,26 @@ export class ChatRoom implements DurableObject {
     this.storeDrained(drainQueueIntoRows(sql, Date.now()));
   }
 
+  /** The chat's host is back on a build without the layer. It can't heal, so the
+   * drains above would wait for good, and what's queued is messages sent to it. It
+   * holds every op those messages depend on, so it can always read them as rows. An
+   * old reader may still park on them until a heal; it would have anyway. */
+  private drainForLegacyHost(state: SocketState): void {
+    if (!this.relayDirty() || !state.orgId) return;
+    const sql = this.ctx.storage.sql;
+    if (!hasRelayQueue(sql)) return;
+    this.ctx.waitUntil(
+      this.chatHost(state).then(host => {
+        if (host !== state.device || !hasRelayQueue(sql)) return;
+        this.storeDrained(drainQueueIntoRows(sql, Date.now()));
+        if (!this.relayEnabled()) {
+          sql.exec("DROP TABLE relay_queue");
+          this.relayQueueReady = false;
+        }
+      })
+    );
+  }
+
   /** The layer was turned off with rows still queued: nothing can read the queue
    * now, and those senders have retired their outboxes. Costs one schema read per
    * object lifetime. A room that never had the layer does nothing else. Waits for
@@ -733,7 +758,7 @@ export class ChatRoom implements DurableObject {
     }
     if (!this.admitRelay(state.device, payload.byteLength)) return;
     if (type === FRAME.relay) this.markRelayDirty();
-    const { to, skip, ...rest } = header;
+    const { to, ...rest } = header;
     const forwarded = { ...rest, device: state.device };
     if (type === FRAME.syncReq || type === FRAME.syncData) {
       if (typeof to !== "string") return;
@@ -742,10 +767,7 @@ export class ChatRoom implements DurableObject {
       }
       return;
     }
-    const skipped = Array.isArray(skip) ? skip : [];
-    for (const peer of this.relaySockets(ws)) {
-      if (!skipped.includes(peer.device)) send(peer.socket, type, forwarded, payload);
-    }
+    for (const peer of this.relaySockets(ws)) send(peer.socket, type, forwarded, payload);
     // A host's announce follows its commits. Telling it each time an old reader
     // is still here keeps it storing for as long as that reader stays.
     if (type === FRAME.announce && this.legacyPeerCount() > 0) {
@@ -782,7 +804,23 @@ export class ChatRoom implements DurableObject {
       send(ws, FRAME.error, { code: "quota", message: "per-device push quota exceeded", batchId });
       return;
     }
-    const sql = this.relaySql();
+    // Live peers get it before the write. Anything sent once a write has begun waits
+    // until the write is durable, which put that wait between every send and its
+    // host. The copy is only a hint: what the sender is told, and what a host that
+    // isn't here reads, still waits for the queue. A write that never lands leaves
+    // a host holding a message whose sender retries it, and importing it twice is a
+    // no-op. Only a row this write could accept goes early.
+    const sql = this.ctx.storage.sql;
+    const early =
+      payload.byteLength > 0 &&
+      payload.byteLength <= MAX_ROW_BYTES &&
+      !((this.relayQueueReady || hasRelayQueue(sql)) && queueHolds(sql, batchId));
+    if (early) {
+      for (const peer of this.relaySockets(ws)) {
+        send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
+      }
+    }
+    this.relaySql();
     const host = state.hostDevice ?? "";
     const chat = state.chatId ?? "";
     // The row and its wake commit together, as a stored row and its wake do:
@@ -803,8 +841,10 @@ export class ChatRoom implements DurableObject {
     if (host && host !== state.device) this.ctx.waitUntil(this.flushWake());
     this.recordPush(state.device, true);
     if (!outcome.dup) {
-      for (const peer of this.relaySockets(ws)) {
-        send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
+      if (!early) {
+        for (const peer of this.relaySockets(ws)) {
+          send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
+        }
       }
       // A socket without the layer never hears relay frames: it reads rows.
       if (this.hasLegacySocket()) this.drainQueueForLegacy();

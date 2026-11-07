@@ -363,6 +363,7 @@ impl SessionCore {
                 relay_layer: client.config.relay_layer,
                 route: self.relay_route(client, &chat),
                 journaled: self.journaled.load(Ordering::Acquire),
+                path: client.path_gate(),
             },
         );
         let mut slot = lock(&self.room);
