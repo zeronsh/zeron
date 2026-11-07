@@ -5,7 +5,8 @@
 -- is made once and follows where the shell is: the draft and what it
 -- carries are each chat's own (screens/chat/shared), its model, effort
 -- and access the session's (changed there, they change the session) or,
--- on a new chat, those the last new chat used.
+-- on a new chat, the new chat's own: those last chosen there, never a
+-- chat's.
 --
 -- In a session it sends to that session (queued while a turn runs, which
 -- Stop ends), and shows what the agent asks (an approval, a question) in
@@ -46,22 +47,34 @@ local DOCK: SpringOptions = { stiffness = 730, damping = 54 }
 -- column's).
 local FOOT = require("@app/screens/chat/dock").GAP
 
--- What a new chat starts with: what the last one used.
+-- What a new chat starts with: what was last chosen on the new-chat page
+-- (its settings, its own: a chat shown or made never changes them), kept
+-- across launches. Each is put back as it was, none included, as the page
+-- is come back to.
 local defaults = ui.persist("chat_new_defaults", {
 	model = nil :: string?,
 	effort = nil :: string?,
 	fast = false,
+	options = nil :: { [string]: string }?,
 	access = "full" :: string?,
 	plan = false,
 	checkout = "worktree" :: string?,
 	device = nil :: string?,
+	-- Where (nil: none picked yet; screens/chat/where picks one).
+	project = nil :: string?,
+	branch = nil :: string?,
 })
+-- A new chat's own value of each choice where its default is none: what
+-- the composer shows then.
+local NONE: { [string]: any } = { fast = false, options = {}, plan = false }
 
 -- The last default a plugin chose that was taken (its time, ms): one is
 -- taken once, across restarts, never again over a pick made since.
 local plugin_default_seen = ui.persist("chat_new_defaults_plugin", 0)
 
 local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
+-- Where a new chat is made, kept with them.
+local WHERE = { "checkout", "device", "project", "branch" }
 -- Those a session takes only with a message sent (shared.picks keeps them
 -- meanwhile); the rest change it as they're picked.
 local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
@@ -158,18 +171,26 @@ local function Composer(): Node
 		ui.batch(function()
 			if id == nil then
 				if was:peek() ~= nil then
+					-- Its own settings, each as it was left (none too: never
+					-- what the chat just shown had).
 					local d = defaults:peek()
 					for _, k in FIELDS do
 						local v = (d :: any)[k]
-						if v ~= nil and not equal(locals[k]:peek(), v) then
+						if v == nil then
+							v = NONE[k]
+						end
+						if not equal(locals[k]:peek(), v) then
 							locals[k]:set(v)
 						end
 					end
 					checkout:set(d.checkout)
+					branch:set(d.branch)
 					-- (A device asked of this new chat, a device's "+" in the
-					-- sidebar, over the one last used.)
+					-- sidebar, over the one last used; a project asked of it,
+					-- a project's "+", over the one last picked here.)
 					device:set(route.take_device() or d.device)
-					project:set(route.current:peek().project)
+					local asked = route.take_project()
+					project:set(if asked then asked.project elseif d.project ~= nil then d.project else route.current:peek().project)
 				end
 			elseif s then
 				-- (Its own pick, unsent, over what the session runs with.)
@@ -223,19 +244,18 @@ local function Composer(): Node
 			end)
 		end
 	end)
-	-- A new chat's project follows the route's: as the route comes home, or
-	-- its project changes there. (Kept, so a reload, the route as it was,
-	-- leaves a project picked in the composer alone.)
-	local route_was = ui.state("chat_composer_route", "")
+	-- A project asked of a new chat already showing (a project's "+", the
+	-- palette's New chat in…): picked. (One asked on the way here is the
+	-- arrival's, above; a project picked here is otherwise the page's own,
+	-- whatever the route last asked for.)
 	ui.effect(function()
-		local now = route.current:get()
-		local key = `{now.name}:{now.project or ""}`
-		if route_was:peek() == key then
+		local pick = route.project_pick:get()
+		if pick == nil or session_id:peek() ~= nil or was:peek() ~= nil then
 			return
 		end
-		route_was:set(key)
-		if now.name == "home" and project:peek() ~= now.project then
-			project:set(now.project)
+		local asked = route.take_project()
+		if asked and project:peek() ~= asked.project then
+			project:set(asked.project)
 		end
 	end)
 	-- A device asked of a new chat already showing (a device's "+" in the
@@ -265,20 +285,32 @@ local function Composer(): Node
 		for _, k in FIELDS do
 			picked[k] = locals[k]:get()
 		end
-		local where: { [string]: any } = { checkout = checkout:get(), device = device:get() }
+		local where: { [string]: any } = {
+			checkout = checkout:get(),
+			device = device:get(),
+			project = project:get(),
+			branch = branch:get(),
+		}
 		local id = session_id:peek()
 		if id == nil then
+			-- (Only once the page's own are out: never the chat left's, on
+			-- their way out.)
+			if was:peek() ~= nil then
+				return
+			end
 			local d = table.clone(defaults:peek()) :: any
 			local changed = false
-			for k, v in picked do
+			for _, k in FIELDS do
+				local v = picked[k]
 				if not equal(d[k], v) then
 					d[k] = v
 					changed = true
 				end
 			end
-			for k, v in where do
-				if d[k] ~= v then
-					d[k] = v
+			-- (By name: a choice of none is a nil a table's loop skips.)
+			for _, k in WHERE do
+				if d[k] ~= where[k] then
+					d[k] = where[k]
 					changed = true
 				end
 			end
