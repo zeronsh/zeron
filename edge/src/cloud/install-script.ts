@@ -99,6 +99,10 @@ else
   tar -xzf "$tmp/zeron.tar.gz" -C "$tmp/unpacked" --strip-components=1
   # Probe before switching: a binary that cannot start must not replace one that can.
   "$tmp/unpacked/zeron" --version >/dev/null
+  # The desktop app's background engine (78 MB): never run here (the unit runs
+  # \`zeron headless\`, which links the engine), and every byte on this disk is
+  # copied back in on every wake. The engine's updater leaves it out too.
+  rm -f "$tmp/unpacked/zeron-engine"
   rm -rf "$dest"
   mv "$tmp/unpacked" "$dest"
 fi

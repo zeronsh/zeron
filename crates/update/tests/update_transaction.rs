@@ -126,6 +126,8 @@ struct Rig {
     mac: Option<MacRig>,
     /// A Windows install: its folder and the new exe's.
     windows: Option<(PathBuf, PathBuf)>,
+    /// `ZERON_DEVICE_PLATFORM` for the engine's starts.
+    platform: Option<&'static str>,
 }
 
 struct MacRig {
@@ -152,7 +154,7 @@ impl Rig {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let data = root.join(".zeron");
         let app = data.join("app");
-        let rig = Self { _dir: dir, data, app, mac: None, windows: None };
+        let rig = Self { _dir: dir, data, app, mac: None, windows: None, platform: None };
         std::fs::create_dir_all(docs(&rig.data).parent().unwrap()).unwrap();
         std::fs::write(docs(&rig.data), ORIGINAL).unwrap();
         std::fs::write(docs(&rig.data).with_file_name("docs.sqlite3-wal"), "the wal").unwrap();
@@ -262,7 +264,11 @@ impl Rig {
             .args(["--exact", "fake_engine", "--test-threads=1", "--nocapture"])
             .env(DATA_ENV, &self.data)
             .env_remove("ZERON_UPDATE_CRASH_AT")
+            .env_remove("ZERON_DEVICE_PLATFORM")
             .stdout(std::process::Stdio::null());
+        if let Some(platform) = self.platform {
+            command.env("ZERON_DEVICE_PLATFORM", platform);
+        }
         if let Some(step) = crash_at {
             command.env("ZERON_UPDATE_CRASH_AT", step);
         }
@@ -384,6 +390,94 @@ mod versioned {
         rig.run_until_settled();
         rig.assert_updated(&id);
         assert_eq!(rig.record().report().state, zeron_update::UpdateState::Updated);
+    }
+
+    impl Rig {
+        /// Versions installed long ago, never run here.
+        fn install_old(&self, versions: &[&str]) {
+            for version in versions {
+                std::fs::create_dir_all(self.app.join(version)).unwrap();
+                std::fs::write(self.app.join(version).join("zeron"), version).unwrap();
+            }
+        }
+
+        /// What `app/` holds once a moment after the commit has passed (the old
+        /// version's watchdog runs from its folder until then).
+        fn app_settles_to(&self, expected: &[&str]) {
+            let left = || -> Vec<String> {
+                let mut names: Vec<String> = std::fs::read_dir(&self.app)
+                    .unwrap()
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            };
+            // The engine's own later tidy, as this platform has it.
+            let kept = if self.platform == Some("cloud") { 0 } else { 1 };
+            let record = self.record();
+            let abandoned = matches!(record.phase, Phase::RolledBack | Phase::Failed)
+                .then_some(record.target.as_str());
+            let waited = Instant::now();
+            while left() != expected && waited.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(100));
+                zeron_update::prune_installed_versions(&self.app, kept, abandoned);
+            }
+            assert_eq!(left(), expected, "platform {:?}", self.platform);
+        }
+    }
+
+    /// Every version a machine ever ran used to stay on its disk. A Cloud machine's
+    /// disk is copied back in on every wake, with all of it read in beside the
+    /// engine that's starting, so each one kept slowed every wake after.
+    #[test]
+    fn a_settled_update_keeps_the_version_before_except_on_cloud() {
+        for (platform, expected) in [
+            (None, &["1.0.0", "2.0.0", "current"][..]),
+            (Some("cloud"), &["2.0.0", "current"][..]),
+        ] {
+            let mut rig = Rig::new("ok");
+            rig.platform = platform;
+            rig.install_old(&["0.8.0", "0.9.0"]);
+            // The desktop's background engine, as the release ships it.
+            for version in ["1.0.0", "2.0.0"] {
+                std::fs::write(rig.app.join(version).join("zeron-engine"), "desktop").unwrap();
+            }
+            let id = rig.request(Rig::service(), 60);
+            rig.run_until_settled();
+            rig.assert_updated(&id);
+            rig.app_settles_to(expected);
+            // A Cloud machine never runs it, and copies it back in on every wake.
+            assert_eq!(
+                rig.app.join("2.0.0/zeron-engine").exists(),
+                platform.is_none(),
+                "platform {platform:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_it_went_back_from_is_removed() {
+        let mut rig = Rig::new("exit-1");
+        rig.platform = Some("cloud");
+        let id = rig.request(Rig::service(), 60);
+        rig.run_until_settled();
+        rig.assert_back_on_the_old_version(&id, Phase::RolledBack);
+        rig.app_settles_to(&["1.0.0", "current"]);
+    }
+
+    /// Machines that piled versions up before this get tidied on their next start.
+    #[test]
+    fn a_start_after_a_settled_update_removes_what_piled_up() {
+        let mut rig = Rig::new("ok");
+        rig.platform = Some("cloud");
+        let id = rig.request(Rig::service(), 60);
+        rig.run_until_settled();
+        rig.assert_updated(&id);
+        rig.app_settles_to(&["2.0.0", "current"]);
+        rig.install_old(&["0.8.0", "1.0.0"]);
+        rig.start(None);
+        rig.app_settles_to(&["2.0.0", "current"]);
     }
 
     /// A wake updates before it answers. A bad release's rollback has to end with

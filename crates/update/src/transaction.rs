@@ -243,10 +243,14 @@ impl Layout {
 
     /// What's left once the update has settled either way. Nothing in use is
     /// deleted: a process whose image is gone is what AppleSystemPolicy rejects
-    /// (#1037), and Windows refuses anyway.
-    fn tidy(&self) {
+    /// (#1037), and Windows refuses anyway. `abandoned` is the version an update
+    /// gave up on, when it did.
+    fn tidy(&self, abandoned: Option<&str>) {
         match self {
-            Self::Versioned { .. } => {}
+            Self::Versioned { app_root } => {
+                crate::prune_installed_versions(app_root, crate::older_versions_kept(), abandoned);
+                crate::strip_cloud_unused_installed(app_root);
+            }
             Self::MacBundle { bundle, .. } => crate::prune_retired_mac_bundles(bundle),
             Self::WindowsFolder { incoming, .. } => {
                 if let Some(folder) = incoming.parent() {
@@ -328,6 +332,11 @@ impl Transaction {
 
     pub fn in_progress(&self) -> bool {
         !self.phase.finished()
+    }
+
+    /// The version this update gave up on, once it has.
+    fn abandoned(&self) -> Option<&str> {
+        matches!(self.phase, Phase::RolledBack | Phase::Failed).then_some(self.target.as_str())
     }
 }
 
@@ -907,7 +916,7 @@ fn settle_committed(data_dir: &Path, id: &str) -> anyhow::Result<()> {
     finish(data_dir, transaction, Phase::Updated, None)?;
     crash_point("commit-recorded");
     discard_snapshots(data_dir);
-    layout.tidy();
+    layout.tidy(None);
     Ok(())
 }
 
@@ -916,7 +925,7 @@ fn settle_committed(data_dir: &Path, id: &str) -> anyhow::Result<()> {
 /// old bundle.
 pub fn tidy_latest(data_dir: &Path) {
     if let Some(latest) = read(data_dir).filter(|update| !update.in_progress()) {
-        latest.layout.tidy();
+        latest.layout.tidy(latest.abandoned());
     }
 }
 
@@ -956,7 +965,7 @@ pub fn boot<G>(
         // Nothing's in progress, so no backup is needed any more, including
         // one a crash left behind. Cheap when there's none.
         discard_snapshots(data_dir);
-        transaction.layout.tidy();
+        transaction.layout.tidy(transaction.abandoned());
         return Ok(());
     }
     let Some(who) = transaction.layout.whoami(&transaction) else {
@@ -1015,10 +1024,9 @@ pub fn boot<G>(
                 "Zeron {} was installed while this update was running, so the update stopped there.",
                 who.me
             );
-            let layout = transaction.layout.clone();
-            finish(data_dir, transaction, Phase::Failed, Some(reason))?;
+            let done = finish(data_dir, transaction, Phase::Failed, Some(reason))?;
             discard_snapshots(data_dir);
-            layout.tidy();
+            done.layout.tidy(done.abandoned());
             Ok(())
         }
         Step::WaitForRestore => {
@@ -1053,10 +1061,9 @@ fn start_trial<G>(
 ) -> anyhow::Result<()> {
     let give_up = |transaction: Transaction, why: String, cause: String| {
         tracing::error!(%cause, "update stopped before the new version ran");
-        let layout = transaction.layout.clone();
-        finish(data_dir, transaction, Phase::Failed, Some(why))?;
+        let done = finish(data_dir, transaction, Phase::Failed, Some(why))?;
         discard_snapshots(data_dir);
-        layout.tidy();
+        done.layout.tidy(done.abandoned());
         Ok(())
     };
     let exe_name = std::env::current_exe()?
@@ -1189,8 +1196,7 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
     }
     let from = transaction.from.clone();
     let target = transaction.target.clone();
-    let layout = transaction.layout.clone();
-    finish(
+    let done = finish(
         data_dir,
         transaction,
         Phase::RolledBack,
@@ -1198,7 +1204,7 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
     )?;
     crash_point("rollback-recorded");
     discard_snapshots(data_dir);
-    layout.tidy();
+    done.layout.tidy(done.abandoned());
     Ok(())
 }
 

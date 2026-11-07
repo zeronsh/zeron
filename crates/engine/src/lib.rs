@@ -769,6 +769,7 @@ struct HeadlessRpc {
     inner: Arc<dyn RpcService>,
     doc_host: DocHost,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    data_dir: PathBuf,
 }
 
 #[async_trait]
@@ -780,7 +781,7 @@ impl RpcService for HeadlessRpc {
                 Ok(()) => {
                     // Asleep it can't make room: leave it fitting its size.
                     // Bounded, and never in the sleep's way.
-                    cloud_disk::pre_sleep_cleanup().await;
+                    cloud_disk::pre_sleep_cleanup(&self.data_dir).await;
                     serde_json::json!({ "quiesced": true })
                 }
                 Err(busy) => serde_json::json!({ "quiesced": false, "busy": busy }),
@@ -1277,6 +1278,7 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             doc_host: runtime.core().doc_host.clone(),
             stop_tx,
+            data_dir: config.data_dir.clone(),
         });
         let server = serve_ipc(config.ipc_port, &config.data_dir, service).await?;
         // Only a port this process actually serves goes to agents: the
