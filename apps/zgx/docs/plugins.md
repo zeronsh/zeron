@@ -57,9 +57,9 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `service` | run its service (the manifest's `service`) on this device, with no window open, for its windows and agents here and on your other devices |
 | `usage.read` | read each agent account's usage: its windows (session, week, …), how much is used, when each resets, its plan. Not who the account is. See [Your agents](#your-agents-usage-accounts-and-models) |
 | `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
-| `accounts.switch` | make another saved account the active one for a provider, on this device or one it names |
+| `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
 | `models.read` | read each harness's models, efforts and options, and a chat's model |
-| `models.set` | set a chat's model, effort and options, and what new chats start with |
+| `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
 
 ## Reaching the network
 
