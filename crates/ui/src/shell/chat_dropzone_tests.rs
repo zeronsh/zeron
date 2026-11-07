@@ -28,7 +28,7 @@ impl Render for DropHost {
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(div().h(px(40.)).child(shell.render_right_tab_strip(cx)))
+                .child(div().h(px(40.)).child(shell.render_right_tab_strip(None, cx)))
                 // Supply the tree/search payload without needing an engine
                 // to enumerate a checkout. Targets and file tabs are real UI.
                 .child(

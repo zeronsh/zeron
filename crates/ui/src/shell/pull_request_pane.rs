@@ -394,6 +394,8 @@ impl Shell {
             Some(_) => {}
             None => {
                 self.pull_request_pane.drag = Some(RightTabDragState {
+                    pane: None,
+                    over_pane: None,
                     from,
                     over,
                     epoch: 0,
