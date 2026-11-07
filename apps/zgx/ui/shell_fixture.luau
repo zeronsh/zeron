@@ -1346,6 +1346,13 @@ end
 ui.command { id = "fixture.edit_project", title = "Fixture: edit project", menu = "Fixture", run = function()
 	editor().open("borealis")
 end }
+-- (Each copy of Atlas after `atlas_cloned_on_box`: tests/project_default.)
+ui.command { id = "fixture.edit_project_atlas", title = "Fixture: edit Atlas", menu = "Fixture", run = function()
+	editor().open("atlas")
+end }
+ui.command { id = "fixture.edit_project_atlas_clone", title = "Fixture: edit Atlas's clone", menu = "Fixture", run = function()
+	editor().open("atlas-clone")
+end }
 ui.command { id = "fixture.edit_project_emoji", title = "Fixture: edit project, emoji", menu = "Fixture", run = function()
 	editor().open("borealis", { kind = "emoji", emoji = "🚀", hue = "amber" })
 end }
