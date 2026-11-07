@@ -203,21 +203,35 @@ impl ClientInner {
         }
     }
 
+    /// Whether `device` has beaten recently enough to be worth a dial.
+    pub(crate) fn presence_fresh(&self, device: &str) -> bool {
+        self.workspace
+            .presence()
+            .get(device)
+            .is_some_and(|at| now_ms() - at < crate::connectivity::PRESENCE_FRESH_MS)
+    }
+
     /// Live: a presence beat arrived (or the local beat ticked).
     pub(crate) fn presence_changed(self: &Arc<Self>) {
         let Some(live) = self.live() else { return };
         if let Some(presence) = live.presence() {
             let before = self.workspace.presence();
             let now = now_ms();
-            for (device, at) in &presence {
-                let was_fresh = before
-                    .get(device)
-                    .is_some_and(|b| now - b < crate::connectivity::PRESENCE_FRESH_MS);
-                if !was_fresh && now - at < crate::connectivity::PRESENCE_FRESH_MS {
-                    live.relay.peer_alive(device);
-                }
-            }
+            let back: Vec<String> = presence
+                .iter()
+                .filter(|(device, at)| {
+                    let was_fresh = before
+                        .get(*device)
+                        .is_some_and(|b| now - b < crate::connectivity::PRESENCE_FRESH_MS);
+                    !was_fresh && now - **at < crate::connectivity::PRESENCE_FRESH_MS
+                })
+                .map(|(device, _)| device.clone())
+                .collect();
+            // Stored first: whatever `peer_alive` wakes reads the new presence.
             self.workspace.replace_presence(presence);
+            for device in &back {
+                live.relay.peer_alive(device);
+            }
         }
         self.recompute_workspace();
     }

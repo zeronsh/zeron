@@ -76,6 +76,8 @@ struct Shared {
     /// Refuse chat2 joins (outage simulation).
     refuse_chat: Mutex<bool>,
     relays: Mutex<HashMap<String, RelayState>>,
+    /// Per device: client sockets opened on its device room (dials, host or not).
+    relay_dials: Mutex<HashMap<String, usize>>,
     nudge_status: Mutex<u16>,
     nudge_status_by_chat: Mutex<HashMap<String, u16>>,
     nudges: Mutex<Vec<(String, usize)>>,
@@ -125,6 +127,7 @@ impl MockEdge {
             sockets: Mutex::new(HashMap::new()),
             refuse_chat: Mutex::new(false),
             relays: Mutex::new(HashMap::new()),
+            relay_dials: Mutex::new(HashMap::new()),
             nudge_status: Mutex::new(200),
             nudge_status_by_chat: Mutex::new(HashMap::new()),
             nudges: Mutex::new(Vec::new()),
@@ -409,6 +412,17 @@ impl MockEdge {
             .lock()
             .unwrap()
             .get(chat)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// How many times a client dialed `device`'s room, whether its host was there or not.
+    pub fn relay_client_dials(&self, device: &str) -> usize {
+        self.shared
+            .relay_dials
+            .lock()
+            .unwrap()
+            .get(device)
             .copied()
             .unwrap_or(0)
     }
@@ -891,6 +905,7 @@ async fn serve_relay(ws: Ws, device: String, query: HashMap<String, String>, sha
             st.host = Some(tx.clone());
         } else {
             st.clients.insert(conn_id.clone(), tx.clone());
+            *shared.relay_dials.lock().unwrap().entry(device.clone()).or_default() += 1;
         }
     }
     let writer = tokio::spawn(async move {

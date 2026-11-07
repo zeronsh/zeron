@@ -802,6 +802,87 @@ async fn host_rpcs_ride_the_device_relay() {
     client.shutdown();
 }
 
+/// A chat on a branch keeps a PR-status watch on its host. With the host offline that
+/// watch used to dial its device room every few seconds for as long as the app was in
+/// front, and a phone with several such chats never stopped. It waits on presence now:
+/// no dial while the host is away, a dial the moment it beats, and the PR it last
+/// showed stays on screen after the host goes again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pr_watch_waits_for_its_hosts_presence_instead_of_dialing() {
+    async fn until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !f() {
+            assert!(start.elapsed() < Duration::from_secs(secs), "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    let pr = |client: &Client| {
+        client
+            .workspace()
+            .session(CHAT)
+            .and_then(|r| r.pull_request.clone())
+            .map(|pr| pr.number)
+    };
+
+    let edge = MockEdge::start().await;
+    // The host's rows are in the registry, but it never beats and has no engine up.
+    let doc = Arc::new(Mutex::new(RegistryDoc::new(HOST)));
+    {
+        let (device, space, chat) = host_rows(Utc::now());
+        let mut doc = doc.lock().unwrap();
+        doc.upsert_device(&device).unwrap();
+        doc.upsert_space(&space).unwrap();
+        doc.upsert_chat(&chat).unwrap();
+    }
+    let host = RegistryClient::connect(&edge.registry.url(), doc.clone(), HOST)
+        .await
+        .unwrap();
+    host.nudge();
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    until("the chat to list", 10, || client.workspace().session(CHAT).is_some()).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(edge.relay_client_dials(HOST), 0, "dialed a host with no presence");
+
+    // The host comes up and beats: the watch dials straight away.
+    let relay = zeron_rpc::HostRelay::spawn(
+        zeron_rpc::HostRelayConfig::new(
+            edge.edge_url(),
+            HOST,
+            Arc::new(zeron_rpc::StaticToken("t".into())),
+        ),
+        Arc::new(HostService::default()),
+        Arc::new(|_| true),
+    );
+    until("the host's relay", 10, || edge.relay_host_connected(HOST)).await;
+    let beat = Instant::now();
+    host.set_presence(zeron_client_now());
+    until("the PR status", 10, || pr(&client) == Some(7)).await;
+    assert!(
+        beat.elapsed() < Duration::from_secs(3),
+        "the watch waited {:?} after the host's beat",
+        beat.elapsed()
+    );
+
+    // The host goes away: its engine stops, and its last beat ages past fresh.
+    drop(relay);
+    host.set_presence(zeron_client_now() - 60_000);
+    until("the host to read offline", 10, || {
+        client.workspace().device(HOST).is_some_and(|d| !d.online)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let settled = edge.relay_client_dials(HOST);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(
+        edge.relay_client_dials(HOST),
+        settled,
+        "kept dialing a host that went offline"
+    );
+    assert_eq!(pr(&client), Some(7), "the PR left the chat with its host");
+    client.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phone_born_sessions_reach_the_host_before_their_first_command() {
     let edge = MockEdge::start().await;
