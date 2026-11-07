@@ -905,15 +905,16 @@ test("with no file and no room for one, the tree takes the whole pane until a fi
 	local pane = width("#files-pane")
 	expect(pane < 288 + 240).to_be(true)
 	expect(math.abs(width("#files-tree-beside") - pane) <= 1).to_be(true)
-	-- A file chosen: the tree's own width, the file beside it.
+	-- A file chosen: the tree's own width (Zeron's Files', 286), the file
+	-- beside it.
 	app:click('"notes.md"')
 	app:frames(60)
-	expect(width("#files-tree-beside")).to_be(288)
+	expect(width("#files-tree-beside")).to_be(286)
 	expect(width("#file-viewer") > 0).to_be(true)
 	-- Roomy, the tree's own width beside the file's side, and what that side says.
 	app:resize(1000, 700)
 	app:frames(60)
-	expect(width("#files-tree-beside")).to_be(288)
+	expect(width("#files-tree-beside")).to_be(286)
 	expect(app:error()).to_be_nil()
 end)
 

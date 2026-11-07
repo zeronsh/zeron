@@ -381,6 +381,7 @@
       "taken": "已被使用"
     },
     "files_pane": {
+      "resize_tree": "调整文件树宽度",
       "toggle_tree": "切换文件树",
       "toggle_tree_tip": "切换文件树  {keys}",
       "close_tree": "关闭文件树"

@@ -85,6 +85,19 @@ local LIMIT = 8 * 1024 * 1024
 
 -- Whether the tree shows beside the file: remembered, as the app would.
 local tree_shown = ui.persist("files_tree", true)
+-- (Read by the panel: its tree out has a column of its own beside the chat.)
+M.tree_shown = tree_shown
+-- The shell's layout, if it's there (a fixture mounts the files alone): the
+-- tree's width, dragged, and its column beside the chat.
+local shell_view: any = nil
+do
+	local ok, found = pcall(function()
+		return (require :: any)("@app/screens/shell/view")
+	end)
+	if ok then
+		shell_view = found
+	end
+end
 
 type Where = { key: string, target: api.Target, name: string }
 
@@ -317,6 +330,31 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 		hook = "files.pane",
 		shown = tree_shown,
 		room = w.pane_room,
+		width = if shell_view then shell_view.tree_width else nil,
+		least = if shell_view then shell_view.TREE_MIN else nil,
+		most = if shell_view then shell_view.TREE_MAX else nil,
+		default = if shell_view then shell_view.TREE_DEFAULT else nil,
+		dragging = if shell_view then shell_view.tree_dragging else nil,
+		column = if shell_view
+			then function(): boolean?
+				return shell_view.tree_column:get()
+			end
+			else nil,
+		moving = if shell_view
+			then function(): boolean
+				return shell_view.panel_moving:get()
+			end
+			else nil,
+		step = if shell_view
+			then function(): { from: number, to: number, coming: boolean, held: boolean, now: number }?
+				local s = shell_view.tree_step:get()
+				if s == nil then
+					return nil
+				end
+				return { from = s.from, to = s.to, coming = s.coming, held = s.held, now = shell_view.panel_w:get() }
+			end
+			else nil,
+
 		head = "line",
 		w_full = true,
 		grow = 1,

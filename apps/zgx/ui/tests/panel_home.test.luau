@@ -70,6 +70,8 @@ test("the home's letter keys work from + in the strip", function()
 	open_home(app)
 	app:click("#panel-open-files")
 	expect(app:wait('#panel-strip >> role:tab', { timeout_ms = 15000 })).to_be(true)
+	-- (The file tab's tree takes its column: the panel widens to it first.)
+	app:frames(30)
 	app:click('role:button "New Tab"')
 	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
 	app:key("b")
@@ -559,30 +561,34 @@ test("a part folded stays folded for its session, across sessions and a reload; 
 	expect(app:has('role:button "Open side chat Why does the sync test flake?"')).to_be(true)
 end)
 
--- Where a node's top is in the window.
-local function top_of(app: any, target: string): number?
-	for line in app:tree(target):gmatch("[^\n]+") do
-		local y = line:match(" %-?%d+,(%-?%d+) %d+x%d+")
-		if y then
-			return tonumber(y)
-		end
-	end
-	return nil
+-- A box from the test tree's first line under `target`: y, h.
+local function span_of(app: any, target: string): (number, number)
+	local line = string.match(app:tree(target), "[^\n]+") or ""
+	local y, h = line:match(" %-?%d+,(%-?%d+) %d+x(%d+)")
+	return tonumber(y) or 0, tonumber(h) or 0
 end
 
-test("the home stands near the panel's top and stays put as its parts open, close and grow", function()
+-- Whether the home's block stands in the page's middle, or, taller than
+-- the page, at its top.
+local function centred(app: any): boolean
+	local py, ph = span_of(app, "#panel-empty")
+	local by, bh = span_of(app, "#panel-home-block")
+	if bh >= ph then
+		return by == py
+	end
+	return math.abs((by - py) - (py + ph - by - bh)) <= 1
+end
+
+test("the home stands in the panel's middle as its parts open, close and grow", function()
 	local app = home()
-	local y0 = top_of(app, "#panel-home-device") :: number
-	-- Near the panel's top, just under the strip (a small share of the
-	-- panel's height, 16–48): the home holds a lot now.
-	expect(y0 > 40 and y0 < 160).to_be(true)
+	expect(centred(app)).to_be(true)
 	app:click("#panel-home-subagents-head")
 	app:frames(30)
-	expect(top_of(app, "#panel-home-device")).to_be(y0)
+	expect(centred(app)).to_be(true)
 	app:click("#panel-home-subagents-head")
 	app:command("many")
 	app:frames(30)
-	expect(top_of(app, "#panel-home-device")).to_be(y0)
+	expect(centred(app)).to_be(true)
 end)
 
 -- Where a node's left edge is in the window.

@@ -664,7 +664,7 @@ end
 
 -- `visible`: whether the shell currently shows the panel (including window fit).
 -- Not given, a standalone panel is visible. Used by the app's ⌘W.
-export type Props = { project: any?, session: any?, page: any?, visible: (() -> boolean)?, on_last_closed: (() -> ())?, [any]: any }
+export type Props = { project: any?, session: any?, page: any?, visible: (() -> boolean)?, on_last_closed: (() -> ())?, content: { [any]: any }?, [any]: any }
 
 
 M.Panel = ui.component(function(props: Props): Node
@@ -692,6 +692,28 @@ M.Panel = ui.component(function(props: Props): Node
 	local function active(): string?
 		return state.of(key:get()).active
 	end
+	-- (The shell told whether its active tab is a file tab with its tree out:
+	-- the tree then takes a column of its own beside the chat.)
+	if shell_view and shell_view.panel_files then
+		local told = shell_view.panel_files
+		ui.effect(function()
+			local id = active()
+			local docked = false
+			for _, t in tabs() do
+				if t.id == id then
+					docked = t.kind == "files" and Files.tree_shown:get() == true
+				end
+			end
+			if told:peek() ~= docked then
+				told:set(docked)
+			end
+		end)
+		ui.on_cleanup(function()
+			if told:peek() then
+				told:set(false)
+			end
+		end)
+	end
 
 	-- Closing: a file tab with unsaved changes asks first; a terminal with
 	-- something running asks too (its kind says).
@@ -717,8 +739,10 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 		-- Its last tab gone, the panel closes for this session (as the
 		-- shipping app's `collapse_surfaces_if_empty`), leaving expanded with
-		-- it; opened again, it shows its empty page. Only if Settings →
-		-- General says so (off by default: it stays open on its home).
+		-- it, easing shut as the title bar's toggle closes it; opened again,
+		-- it shows its empty page. Settings → General can keep it open on its
+		-- home instead (on by default). Only a person's close comes here:
+		-- switching sessions or tearing the panel down closes no tab.
 		local close_with_last = require("@app/screens/settings/prefs").close_panel_with_last_tab:peek() == true
 		if tab and close_with_last and #state.of(k).tabs == 0 then
 			local on_last = props.on_last_closed
@@ -1474,7 +1498,7 @@ M.Panel = ui.component(function(props: Props): Node
 
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "no_project" and k ~= "visible" and k ~= "on_last_closed" and k ~= "children" then
+		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "no_project" and k ~= "visible" and k ~= "on_last_closed" and k ~= "children" and k ~= "content" then
 			box[k] = v
 		end
 	end
@@ -1555,7 +1579,31 @@ M.Panel = ui.component(function(props: Props): Node
 	box.ref = box.ref or own
 	measured = box.ref
 	box.relative = true
-	-- (Its card, its tabs at the top of it.)
+	-- (Its card, its tabs at the top of it. The card is the panel's box, its
+	-- edges following it as it moves; what it holds is laid out by `content`
+	-- when the shell gives it (a width it keeps while the edge sweeps over
+	-- it, where it stands, its motion: screens/shell/page), else the card's.)
+	local inner: { [any]: any } = {
+		w_full = true,
+		grow = 1,
+		min_h = 0,
+		ui.column { w_full = true, shrink = 0, hidden = closed, strip },
+		panes,
+	}
+	-- (The card's edge, inside its box.)
+	local CARD_EDGE = 1
+	for k, v in props.content or {} do
+		inner[k] = v
+	end
+	if inner.w ~= nil then
+		-- (The shell's width is the panel's: the card's edge comes off it.)
+		local w = inner.w
+		inner.w_full = nil
+		inner.w = function(): number
+			local v = if type(w) == "function" then w() else w
+			return ui.raw(math.max(v - 2 * CARD_EDGE, 0), "the width the shell lays it out at, inside the card's edge")
+		end
+	end
 	box[#box + 1] = ui.column {
 		w_full = true,
 		grow = 1,
@@ -1564,10 +1612,9 @@ M.Panel = ui.component(function(props: Props): Node
 		overflow = "hidden",
 		rounded = "$zeron.inset.radius",
 		bg = "$zeron.inset.bg",
-		border = 1,
+		border = CARD_EDGE,
 		border_color = "$zeron.inset.edge",
-		ui.column { w_full = true, shrink = 0, hidden = closed, strip },
-		panes,
+		ui.column(inner),
 	}
 	box[#box + 1] = question
 	return ui.column(box)

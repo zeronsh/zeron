@@ -52,8 +52,16 @@ M.right_pane_takeover_width = policy.right_pane_takeover_width
 export type Column = policy.Column
 export type Fit = policy.Fit
 
--- What a file tab's tree adds to the panel's width: nothing. It stands beside the
--- file inside the panel, whatever the panel's width.
+-- What a file tab's tree adds to the panel's width, while it's out: its own
+-- width, as Zeron's Files column had beside the right pane (286, its edge
+-- dragged between 220 and 440), so the chat and the file split what's left.
+-- (Overrides Wing's v3, 798ce694, "the panel no longer grows for it", at
+-- Gaël's request: in the panel's half, the file beside it was 245 points at
+-- 1340, 75 at 1000.) Any other tab, or the tree in: nothing.
+function M.tree_width(): number
+	return math.clamp(view.tree_width:get(), view.TREE_MIN, view.TREE_MAX)
+end
+-- (Zeron v2's single page keeps its tree inside the panel: nothing added.)
 M.TREE = 0
 
 -- When each column was last opened (asked for): an order, newest highest.
@@ -141,8 +149,9 @@ M.current = ui.computed(function(): Fit
 	local on_page = c.name == "plugin"
 	local on_home = c.name == "home"
 	local open_panel = (on_session or on_page or on_home) and view.files:get()
-	-- (A page has no files to dock a tree for.)
-	local open_tree = on_session and view.files:get()
+	-- (A page has no files to dock a tree for; a session's panel docks it
+	-- while a file tab with its tree out is the one shown.)
+	local open_tree = on_session and view.files:get() and view.panel_files:get()
 	if vw <= 0 then
 		return { sidebar = open_sidebar, right = open_panel, files = false, sidebar_limit = width }
 	end
@@ -166,27 +175,43 @@ M.current = ui.computed(function(): Fit
 	if floor > M.CHAT_PANEL_MIN then
 		open_tree = false
 	end
-	return M.panels(
+	local f = M.panels(
 		vw,
 		width,
 		{ open = open_sidebar, at = M.sidebar_at:get() },
 		{ open = open_panel, at = if id then M.panel_at:get()[id] or 0 else 0 },
-		-- (Its docked tree first of all: it gives way by floating over the
-		-- file, not by closing, so it never costs the sidebar its place.
+		-- (Its docked tree first of all: short of room for its column, it
+		-- stays in the panel's share beside the file, as before, so it never
+		-- costs the sidebar its place.
 		-- Ranked by when it opened, as Zeron's separate Files column is, it
 		-- hid the sidebar in windows with room for sidebar, chat and panel,
 		-- and the panel then opened at the sidebar's share too.)
 		{ open = open_tree, at = -math.huge },
 		view.expanded:get(),
-		M.TREE
+		M.tree_width()
 	)
+	-- (Nor does it narrow the sidebar to fit: room for the tree's column
+	-- only beside the sidebar at its own width. Else the sidebar's width
+	-- moved as a file tab was picked or left, and with a reload.)
+	if f.files and f.sidebar and f.sidebar_limit < math.min(width, M.SIDEBAR_MAX) - 0.5 then
+		return M.panels(
+			vw,
+			width,
+			{ open = open_sidebar, at = M.sidebar_at:get() },
+			{ open = open_panel, at = if id then M.panel_at:get()[id] or 0 else 0 },
+			{ open = false, at = -math.huge },
+			view.expanded:get(),
+			M.tree_width()
+		)
+	end
+	return f
 end)
 
 -- The panel's room for its docked tree (Files' allowance), while the fit
 -- shows it; and the panel's width from its share: that and Right's share
 -- of what the sidebar and the tree leave the chat and it.
 function M.files_part(f: Fit): number
-	return if f.files then M.TREE else 0
+	return if f.files then M.tree_width() else 0
 end
 function M.panel_share(f: Fit, viewport: number, sidebar: number): number
 	local files = M.files_part(f)

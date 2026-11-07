@@ -1279,10 +1279,14 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: at its top, level with the transcript's first
-	-- message beside it, so a part opening or closing grows it downward and
-	-- nothing above moves. Taller than the panel, it scrolls.
+	-- Where it stands: in the middle of the panel, a column no wider than
+	-- a sentence, as a new chat's composer stands in its page. What it's in
+	-- is at least as tall as the scroll's window (measured: a percentage
+	-- in a scroll's content has nothing to be a share of) and centres it,
+	-- so taller than the panel it starts at the top and scrolls, nothing
+	-- pushed out of reach above.
 	local view = ui.ref()
+	local room = ui.use_state(0)
 	return ui.scroll {
 		ref = view,
 		id = "panel-empty",
@@ -1300,13 +1304,27 @@ M.Page = ui.component(function(props: Props): Node
 		-- (What plugins' rows on it read: the session, and the letters it
 		-- passes on.)
 		provide = { session = sid, panel_key = passed },
+		on_resize = function(size: { w: number, h: number })
+			if room:peek() ~= size.h then
+				room:set(size.h)
+			end
+		end,
 		ui.column {
 			w_full = true,
-			max_w = 380,
-			px = "$space.4",
-			pb = "$space.6",
-			gap = "$space.5",
-			table.unpack(parts),
+			min_h = function(): number
+				return room:get()
+			end,
+			items = "center",
+			justify = "center",
+			ui.column {
+				id = "panel-home-block",
+				w_full = true,
+				max_w = 380,
+				px = "$space.4",
+				py = "$space.6",
+				gap = "$space.5",
+				table.unpack(parts),
+			},
 		},
 	}
 end)

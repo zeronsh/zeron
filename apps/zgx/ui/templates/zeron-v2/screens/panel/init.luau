@@ -661,8 +661,8 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 		-- Its last tab gone, the panel closes for this session (as the
 		-- shipping app's `collapse_surfaces_if_empty`), leaving expanded with
-		-- it; opened again, it shows its empty page. Only if Settings →
-		-- General says so (off by default: it stays open on its home).
+		-- it; opened again, it shows its empty page. Settings → General can
+		-- keep it open on its home instead (on by default).
 		local close_with_last = require("@app/screens/settings/prefs").close_panel_with_last_tab:peek() == true
 		if tab and close_with_last and #state.of(k).tabs == 0 then
 			local on_last = props.on_last_closed

@@ -716,26 +716,33 @@ local function connection_line(): Node
 			id = "connection-line",
 			w_full = true,
 			shrink = 0,
-			px = "$space.3",
+			-- (Its dot on the foot's left edge: Star on GitHub's glyph's, the
+			-- filter's and the empty list's words'. Its words on Star on
+			-- GitHub's: the dot or the ring in a slot as wide as the star,
+			-- as far from them.)
+			px = "$space.2",
 			pb = "$space.2",
-			gap = "$space.2",
+			gap = "$zeron.space.tight",
 			items = "center",
-			ui.presence(function(): string
-				return if connection() == "reconnecting" then "ring" else "dot"
-			end, function(glyph: string): Node
-				if glyph == "ring" then
-					return ui.div { shrink = 0, status.StatusIcon { kind = "connecting", size = 10 } }
-				end
-				return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
-			end),
-			ui.text {
+			ui.row {
+				shrink = 0,
+				w = 12,
+				items = "center",
+				ui.presence(function(): string
+					return if connection() == "reconnecting" then "ring" else "dot"
+				end, function(glyph: string): Node
+					if glyph == "ring" then
+						return ui.div { shrink = 0, status.StatusIcon { kind = "connecting", size = 10 } }
+					end
+					return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
+				end),
+			},
+			ds.FadeText {
 				function(): string
 					local key = CONNECTION[connection() or ""]
-				return if key then locale.s(key) else ""
+					return if key then locale.s(key) else ""
 				end,
 				grow = 1,
-				min_w = 0,
-				truncate = true,
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
 			},
@@ -1544,6 +1551,13 @@ M.Sidebar = ui.component(function(props: Props): Node
 		details = shared.details,
 		places = shared.places :: any,
 		width = shared.width,
+		shown = if props.island then nil else view.sidebar_shown,
+		before = if props.island then nil else 5,
+		-- (Its edge double-clicked: the chat and the panel split again, as
+		-- Zeron's `reset_panel_widths`.)
+		on_reset = function()
+			view.seam_reset:set(view.seam_reset:peek() + 1)
+		end,
 		collapsed = props.collapsed,
 		limit = props.limit,
 		direct = props.direct,
@@ -1622,10 +1636,14 @@ M.Sidebar = ui.component(function(props: Props): Node
 		h_full = true,
 		shrink = 0,
 		relative = true,
-		-- (The window's gap before its card, closing with it.)
-		pl = motion.tween(ui.computed(function(): number
-			return if fit.current:get().sidebar then 5 else 0
-		end), motion.sidebar),
+		-- (The window's gap before its card: there as long as the card is,
+		-- going only with its last 5 points, so the card's left edge stands
+		-- still as it folds and comes back. It once closed on the sidebar's
+		-- clock, the whole card sliding 5 points.)
+		pl = function(): number
+			local shown = view.sidebar_shown:get()
+			return ui.raw(math.min(5, shown), "the window's gap before its card")
+		end,
 		-- (That gap's top moves the window, as the bar beside it does.)
 		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,
