@@ -2232,10 +2232,7 @@ fn input_int_clamps_to_min_and_max() {
     tap_key(&probe, Key::Enter);
     run_frame(&probe, draw.clone()).expect("enter");
     assert_eq!(seen.borrow().last().copied(), Some(100.0), "clamped to max");
-    assert!(
-        !seen.borrow().iter().any(|value| *value == 999.0),
-        "999 never recorded"
-    );
+    assert!(!seen.borrow().contains(&999.0), "999 never recorded");
     for value in seen.borrow().iter() {
         assert!(
             (0.0..=100.0).contains(value) && value.fract() == 0.0,
@@ -3192,7 +3189,7 @@ fn spacing_adds_exactly_one_item_spacing() {
                 .frame_widget("spacing", seq, &no_arg())
                 .expect("spacing");
             *b.borrow_mut() = rect_of(&probe.text(seq, "B"));
-            gap.set((*b.borrow()).1 - (*a.borrow()).3);
+            gap.set(b.borrow().1 - a.borrow().3);
             let _ = probe.frame_script_end(seq, None, false);
         })
         .expect("a frame");
@@ -3207,7 +3204,7 @@ fn spacing_adds_exactly_one_item_spacing() {
         run_frame(&control, move |probe, seq| {
             *ca.borrow_mut() = rect_of(&probe.text(seq, "A"));
             *cb.borrow_mut() = rect_of(&probe.text(seq, "B"));
-            gap.set((*cb.borrow()).1 - (*ca.borrow()).3);
+            gap.set(cb.borrow().1 - ca.borrow().3);
             let _ = probe.frame_script_end(seq, None, false);
         })
         .expect("a frame");

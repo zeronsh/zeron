@@ -57,7 +57,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ffi::{CString, c_char};
+use std::ffi::CString;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -503,9 +503,7 @@ impl FrameState {
             error_absent,
         ) = {
             let live = self.live.borrow();
-            let Some(frame) = live.as_ref() else {
-                return None;
-            };
+            let frame = live.as_ref()?;
             (
                 frame.child_open,
                 frame.group_open,
@@ -1942,7 +1940,8 @@ fn end_group(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> 
 }
 
 fn c_label(value: &str) -> Result<CString, String> {
-    CString::new(value).map_err(|_| format!("zeron.imgui can't use a label with a NUL byte in it"))
+    CString::new(value)
+        .map_err(|_| "zeron.imgui can't use a label with a NUL byte in it".to_string())
 }
 
 fn table_flags(arg: &Value, op: &str) -> Result<i32, String> {
@@ -2709,7 +2708,7 @@ fn set_drag_drop_payload(
     let set = ui.with_bound_context(|| unsafe {
         dear_imgui_rs::sys::igSetDragDropPayload(
             kind_c.as_ptr(),
-            1_usize as *const std::os::raw::c_void,
+            std::ptr::dangling::<std::os::raw::c_void>(),
             0,
             dear_imgui_rs::sys::ImGuiCond_None,
         )
