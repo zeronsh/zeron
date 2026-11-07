@@ -7213,6 +7213,7 @@ fn access_row_text(label: &'static str, description: &'static str, theme: &Theme
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compact::CompactGroup;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     #[test]
@@ -10336,23 +10337,84 @@ mod tests {
                 assert_eq!(
                     picker.compact_groups(cx),
                     vec![
-                        (Some(HarnessId::Codex), 0),
-                        (Some(HarnessId::ClaudeCode), 2)
+                        (CompactGroup::Harness(HarnessId::Codex), 0),
+                        (CompactGroup::Harness(HarnessId::ClaudeCode), 2)
                     ]
                 );
                 picker.toggle_model_favorite(HarnessId::Codex, "gpt-a", cx);
                 assert_eq!(
                     picker.compact_groups(cx),
                     vec![
-                        (None, 0),
-                        (Some(HarnessId::Codex), 1),
-                        (Some(HarnessId::ClaudeCode), 2),
+                        (CompactGroup::Starred, 0),
+                        (CompactGroup::Harness(HarnessId::Codex), 1),
+                        (CompactGroup::Harness(HarnessId::ClaudeCode), 2),
                     ]
                 );
                 let rows = picker.model_rows(cx);
                 assert_eq!(
                     (rows[0].harness, rows[0].model.id.as_str()),
                     (HarnessId::Codex, "gpt-a")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_list_tabs_split_opencode_by_model_provider(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let served = |id: &str, label: &str, provider: &str| Model {
+            description: Some(provider.into()),
+            ..bare_model(id, label)
+        };
+        let provider = |name: &str| CompactGroup::Provider(name.to_owned().into());
+        handle
+            .update(cx, |picker, _, cx| {
+                picker.harnesses = Loadable::Ready(vec![
+                    descriptor(HarnessId::Opencode, "OpenCode"),
+                    descriptor(HarnessId::Codex, "Codex"),
+                ]);
+                picker.models.insert(
+                    HarnessId::Opencode,
+                    Loadable::Ready(vec![
+                        served("anthropic/haiku", "Haiku", "Anthropic"),
+                        served("anthropic/opus", "Opus", "Anthropic"),
+                        served("openai/gpt-5", "GPT-5", "OpenAI"),
+                    ]),
+                );
+                picker.models.insert(
+                    HarnessId::Codex,
+                    Loadable::Ready(vec![bare_model("gpt-codex", "Codex")]),
+                );
+                picker.pick_harness(HarnessId::Opencode, cx);
+                picker.pick_model("openai/gpt-5".into(), cx);
+                picker.show_compact_models(cx);
+                assert_eq!(
+                    picker.compact_groups(cx),
+                    vec![
+                        (provider("Anthropic"), 0),
+                        (provider("OpenAI"), 2),
+                        (CompactGroup::Harness(HarnessId::Codex), 3),
+                    ]
+                );
+                assert_eq!(picker.active, 2);
+                picker.toggle_model_favorite(HarnessId::Opencode, "openai/gpt-5", cx);
+                assert_eq!(
+                    picker.compact_groups(cx),
+                    vec![
+                        (CompactGroup::Starred, 0),
+                        (CompactGroup::Harness(HarnessId::Opencode), 1),
+                        (CompactGroup::Harness(HarnessId::Codex), 3),
+                    ]
                 );
             })
             .unwrap();
@@ -10438,7 +10500,10 @@ mod tests {
                 assert_eq!(picker.model_rows_len(cx), 0);
                 picker.search.update(cx, |input, cx| input.set_text("", cx));
                 // A running turn locks the provider to one tab, its own.
-                assert_eq!(picker.compact_groups(cx), vec![(Some(HarnessId::Codex), 0)]);
+                assert_eq!(
+                    picker.compact_groups(cx),
+                    vec![(CompactGroup::Harness(HarnessId::Codex), 0)]
+                );
                 picker.compact_model_list = false;
                 picker.focus_on_mount = true;
             })

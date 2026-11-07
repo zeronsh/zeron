@@ -83,6 +83,13 @@ enum EffortStops {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum CompactGroup {
+    Starred,
+    Harness(HarnessId),
+    Provider(SharedString),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CompactPage {
     Panel,
@@ -392,18 +399,12 @@ impl Pickers {
     }
 
     /// Where each provider's group starts in the unsearched list: starred
-    /// models first, then one run per provider.
-    pub(super) fn compact_groups(&self, cx: &App) -> Vec<(Option<HarnessId>, usize)> {
-        let rows = self.model_rows(cx);
-        let mut groups: Vec<(Option<HarnessId>, usize)> = Vec::new();
-        for (ix, row) in rows.iter().enumerate() {
-            let group =
-                (!self.defaults.is_favorite(row.harness, &row.model.id)).then_some(row.harness);
-            if groups.last().is_none_or(|(last, _)| *last != group) {
-                groups.push((group, ix));
-            }
-        }
-        groups
+    /// models first, then one run per provider, with OpenCode split into one
+    /// run per model provider once it offers more than one.
+    pub(super) fn compact_groups(&self, cx: &App) -> Vec<(CompactGroup, usize)> {
+        compact_group_starts(&self.model_rows(cx), |row| {
+            self.defaults.is_favorite(row.harness, &row.model.id)
+        })
     }
 
     /// The model list's top row: back to the panel, then the providers as
@@ -423,20 +424,24 @@ impl Pickers {
             / (COMPACT_ROW_HEIGHT + popover::MENU_GAP))
             .round()
             .max(0.0) as usize;
-        let current = groups
-            .iter()
-            .rev()
-            .find(|(_, start)| *start <= top)
-            .map(|(group, _)| *group);
         // Many providers overflow the strip: keep the viewed tab in sight
         // as the list scrolls, without fighting a manual sideways scroll.
-        let viewed_ix = groups.iter().position(|(group, _)| current == Some(*group));
+        let viewed_ix = groups.iter().rposition(|(_, start)| *start <= top);
         if viewed_ix != self.compact_strip_viewed {
             self.compact_strip_viewed = viewed_ix;
             if let Some(ix) = viewed_ix {
                 self.compact_strip_scroll.scroll_to_item(ix);
             }
         }
+        let descriptors = self.rail_descriptors(cx);
+        let harness_name = |harness: HarnessId| -> SharedString {
+            descriptors
+                .iter()
+                .find(|d| d.id == harness)
+                .map(|d| d.name.clone())
+                .unwrap_or_default()
+                .into()
+        };
         let strip = (!groups.is_empty()).then(|| {
             let tabs = div()
                 .id("compact-group-strip")
@@ -448,53 +453,80 @@ impl Pickers {
                 .gap(px(popover::MENU_GAP))
                 .overflow_x_scroll()
                 .track_scroll(&self.compact_strip_scroll)
-                .children(groups.into_iter().map(|(group, start)| {
-                    let viewed = current == Some(group);
-                    let (icon, tint, name): (&'static str, Option<gpui::Hsla>, SharedString) =
-                        match group {
-                            None => (crate::icons::STAR_BOLD, None, "Starred".into()),
-                            Some(harness) => {
-                                let (icon, tint) = harness_brand_icon(harness);
-                                let name = self
-                                    .rail_descriptors(cx)
-                                    .into_iter()
-                                    .find(|d| d.id == harness)
-                                    .map(|d| d.name)
-                                    .unwrap_or_default();
-                                (icon, tint, name.into())
-                            }
-                        };
-                    let hint = name.clone();
-                    div()
-                        .id(SharedString::from(format!("compact-group-{start}")))
-                        .role(gpui::Role::Button)
-                        .aria_label(SharedString::from(format!("Jump to {name}")))
-                        .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
-                        // A row-height square with the rows' corners, so the
-                        // strip sits on the card's grid like the list below.
-                        .flex_none()
-                        .size(px(COMPACT_ROW_HEIGHT))
-                        .rounded(px(popover::MENU_ITEM_RADIUS))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .when(viewed, |el| el.bg(crate::theme::ink(0.08)))
-                        .when(!viewed, |el| {
-                            el.opacity(0.7)
-                                .hover(|s| s.bg(crate::theme::ink(0.05)).opacity(1.0))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.compact_keyboard = false;
-                            this.active = start;
-                            this.model_scroll
-                                .scroll_to_item_strict(start, gpui::ScrollStrategy::Top);
-                            cx.notify();
-                        }))
-                        .child(crate::icons::icon(icon).size(px(14.0)).text_color(
-                            tint.unwrap_or(if viewed { theme.text } else { theme.text_muted }),
-                        ))
-                }));
+                .children(
+                    groups
+                        .into_iter()
+                        .enumerate()
+                        .map(|(tab_ix, (group, start))| {
+                            let viewed = viewed_ix == Some(tab_ix);
+                            let muted = if viewed { theme.text } else { theme.text_muted };
+                            let (name, hint, content) = match group {
+                                CompactGroup::Starred => (
+                                    SharedString::from("Starred"),
+                                    SharedString::from("Starred"),
+                                    crate::icons::icon(crate::icons::STAR_BOLD)
+                                        .size(px(14.0))
+                                        .text_color(muted)
+                                        .into_any_element(),
+                                ),
+                                CompactGroup::Harness(harness) => {
+                                    let (icon, tint) = harness_brand_icon(harness);
+                                    let name = harness_name(harness);
+                                    (
+                                        name.clone(),
+                                        name,
+                                        crate::icons::icon(icon)
+                                            .size(px(14.0))
+                                            .text_color(tint.unwrap_or(muted))
+                                            .into_any_element(),
+                                    )
+                                }
+                                CompactGroup::Provider(name) => (
+                                    name.clone(),
+                                    SharedString::from(format!(
+                                        "{name} · {}",
+                                        harness_name(HarnessId::Opencode)
+                                    )),
+                                    div()
+                                        .px(px(8.0))
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(muted)
+                                        .child(name)
+                                        .into_any_element(),
+                                ),
+                            };
+                            div()
+                                .id(SharedString::from(format!("compact-group-{start}")))
+                                .role(gpui::Role::Button)
+                                .aria_label(SharedString::from(format!("Jump to {name}")))
+                                .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
+                                // Row-height tabs, at least square, with the rows'
+                                // corners, so the strip sits on the card's grid like
+                                // the list below.
+                                .flex_none()
+                                .h(px(COMPACT_ROW_HEIGHT))
+                                .min_w(px(COMPACT_ROW_HEIGHT))
+                                .rounded(px(popover::MENU_ITEM_RADIUS))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .when(viewed, |el| el.bg(crate::theme::ink(0.08)))
+                                .when(!viewed, |el| {
+                                    el.opacity(0.7)
+                                        .hover(|s| s.bg(crate::theme::ink(0.05)).opacity(1.0))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.compact_keyboard = false;
+                                    this.active = start;
+                                    this.model_scroll
+                                        .scroll_to_item_strict(start, gpui::ScrollStrategy::Top);
+                                    cx.notify();
+                                }))
+                                .child(content)
+                        }),
+                );
             // Each side fades over the tabs hidden past it, up to one tab
             // pitch, reaching zero exactly at the clip edge.
             crate::edge_fade::edge_faded(
@@ -1416,6 +1448,58 @@ fn effort_fraction(x: f32, width: f32) -> f32 {
 fn effort_index(x: f32, width: f32, count: usize) -> Option<usize> {
     (count > 0)
         .then(|| (effort_fraction(x, width) * count.saturating_sub(1) as f32).round() as usize)
+}
+
+fn opencode_provider(row: &ModelRowData) -> Option<&str> {
+    (row.harness == HarnessId::Opencode && !row.selected_only)
+        .then(|| row.model.id.split_once('/'))
+        .flatten()
+        .map(|(provider, _)| provider)
+}
+
+fn compact_group_starts(
+    rows: &[ModelRowData],
+    is_favorite: impl Fn(&ModelRowData) -> bool,
+) -> Vec<(CompactGroup, usize)> {
+    let mut providers = rows
+        .iter()
+        .filter(|row| !is_favorite(row))
+        .filter_map(opencode_provider);
+    let split_opencode = providers
+        .next()
+        .is_some_and(|first| providers.any(|provider| provider != first));
+    let mut groups = Vec::new();
+    let mut last = None;
+    for (ix, row) in rows.iter().enumerate() {
+        let key = if is_favorite(row) {
+            (None, None)
+        } else {
+            (
+                Some(row.harness),
+                opencode_provider(row).filter(|_| split_opencode),
+            )
+        };
+        if last == Some(key) {
+            continue;
+        }
+        last = Some(key);
+        let group = match key {
+            (None, _) => CompactGroup::Starred,
+            (Some(harness), None) => CompactGroup::Harness(harness),
+            (Some(_), Some(provider)) => CompactGroup::Provider(
+                row.model
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(provider)
+                    .to_owned()
+                    .into(),
+            ),
+        };
+        groups.push((group, ix));
+    }
+    groups
 }
 
 #[cfg(test)]
