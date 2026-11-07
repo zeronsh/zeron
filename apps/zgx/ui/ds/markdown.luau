@@ -23,7 +23,8 @@
 --   never wrap (a long one scrolls sideways, fading at the edge it runs
 --   past).
 -- - A table sits in a hairline frame, its header quieter than its cells,
---   its columns as wide as their widest cell; wide, it scrolls sideways.
+--   its columns share the width by content, wrapping down to readable
+--   minimums; only below those minimums does it scroll sideways.
 -- - A quote is set back by a soft bar, in the secondary ink.
 --
 -- The text is selectable through whatever holds it (a transcript puts
@@ -1143,47 +1144,113 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 	elseif b.t == "hr" then
 		return ui.div { w_full = true, h = 1, my = "$space.2", bg = "$border" }
 	elseif b.t == "table" then
-		-- Column by column, so each is as wide as its widest cell; cells keep
-		-- to one line (one height a row), and the last column takes what's
-		-- left of the frame.
+		-- Measure max-content with the same rich runs (including code chips),
+		-- independently of the available width. Refs follow font/theme changes
+		-- during layout, before paint. This zero-height measuring row neither
+		-- paints nor participates in selection, find, or the streaming veil.
 		local box = ui.ref()
-		local cell = {
-			wrap = false,
-			h = 36,
-			px = "$space.4",
-			text_size = "$zeron.prose.small.size",
-			line_height = 36,
-		}
-		local cols: { Node } = {}
-		for c, head in b.head do
-			local head_style = table.clone(cell) :: { [string]: any }
-			head_style.weight = "$font.weight.medium"
-			head_style.color = "$text.secondary"
-			head_style.border_sides = { 0, 0, 1, 0 }
-			head_style.border_color = "$border"
-			local cells: { Node } = { runs(head, head_style, ctx) }
-			for r, row in b.rows do
-				local style = table.clone(cell) :: { [string]: any }
-				style.border_sides = { 0, 0, if r < #b.rows then 1 else 0, 0 }
-				style.border_color = "$border.subtle"
-				table.insert(cells, runs(row[c] or {}, style, ctx))
-			end
-			table.insert(cols, ui.column { shrink = 0, grow = if c == #b.head then 1 else 0, cells })
+		local count = #b.head
+		for _, row in b.rows do
+			count = math.max(count, #row)
 		end
-		return ui.scroll_x {
-			class = "md-table",
-			ref = box,
+		local refs: { Ref } = {}
+		local measured: { Node } = {}
+		local cell = {
+			text_size = SMALL_SIZE,
+			line_height = SMALL_LINE,
+		}
+		for c = 1, count do
+			local ref = ui.ref()
+			refs[c] = ref
+			local style = table.clone(cell) :: { [string]: any }
+			style.wrap = false
+			style.weight = "$font.weight.medium"
+			local cells = { runs(b.head[c] or {}, style, nil) }
+			for _, row in b.rows do
+				table.insert(cells, runs(row[c] or {}, { wrap = false, text_size = SMALL_SIZE, line_height = SMALL_LINE }, nil))
+			end
+			table.insert(measured, ui.column { ref = ref, w = "max-content", shrink = 0, cells })
+		end
+		-- ZUI's table geometry: max(content, 48) + 2 * 12 padding;
+		-- shrink each column to min(natural, 96), then scroll the whole table.
+		local function natural(c: number): number
+			return math.max(48, refs[c].width or 0) + 24
+		end
+		local function minimum(c: number): number
+			return math.min(natural(c), 96)
+		end
+		local rows: { Node } = {}
+		local function row(cells_: { { MarkdownRun } }, header: boolean, last: boolean): Node
+			local cells: { Node } = {}
+			for c = 1, count do
+				local style = table.clone(cell) :: { [string]: any }
+				style.min_w = 0
+				style.w_full = true
+				if header then
+					style.weight = "$font.weight.medium"
+					style.color = "$text.secondary"
+				end
+				table.insert(cells, ui.div {
+					class = "md-table-cell",
+					grow = function(): number return natural(c) end,
+					shrink = function(): number return natural(c) end,
+					basis = 0,
+					min_w = function(): number return minimum(c) end,
+					p = 12,
+					overflow = "hidden",
+					runs(cells_[c] or {}, style, ctx),
+				})
+			end
+			return ui.row {
+				class = "md-table-row",
+				w_full = true,
+				shrink = 0,
+				items = "stretch",
+				border_sides = { 0, 0, if last then 0 else 1, 0 },
+				border_color = if header then "$border" else "$border.subtle",
+				cells,
+			}
+		end
+		table.insert(rows, row(b.head, true, #b.rows == 0))
+		for r, cells in b.rows do
+			table.insert(rows, row(cells, false, r == #b.rows))
+		end
+		return ui.column {
 			w_full = true,
-			rounded = "$radius.xl",
-			border = 1,
-			border_color = "$border",
-			fade_x = { 16, 32 },
-			fade_overflow = true,
-			ui.row {
-				min_w = function(): number
-					return math.max(0, (box.width or 0) - 2)
-				end,
-				cols,
+			min_w = 0,
+			-- Outside the scroller: intrinsic measuring boxes must not add
+			-- their unwrapped widths to its horizontal scroll extent.
+			ui.div {
+				w = 0,
+				h = 0,
+				shrink = 0,
+				overflow = "hidden",
+				opacity = 0,
+				selectable = false,
+				aria_hidden = true,
+				pointer_events = "none",
+				ui.row { w = "max-content", measured },
+			},
+			ui.scroll_x {
+				class = "md-table",
+				ref = box,
+				w_full = true,
+				min_w = 0,
+				rounded = "$radius.xl",
+				border = 1,
+				border_color = "$border",
+				fade_x = { 16, 32 },
+				fade_overflow = true,
+				ui.column {
+					w = function(): number
+						local total = 0
+						for c = 1, count do
+							total += minimum(c)
+						end
+						return math.max(total, (box.width or 0) - 2)
+					end,
+					rows,
+				},
 			},
 		}
 	elseif (b.t == "img" or b.t == "pics") and ctx and ctx.pictures then
@@ -1371,7 +1438,7 @@ local function estimate(b: any): number
 		end
 		return math.max(h, 22)
 	elseif t == "table" then
-		return (#(b.rows or {}) + 1) * 36
+		return (#(b.rows or {}) + 1) * 44
 	elseif t == "img" then
 		-- (A picture held at its placeholder's height: the column at 16:10.)
 		return 412
