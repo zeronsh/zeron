@@ -512,7 +512,10 @@ impl LiveBackend {
                     _ = cancel.cancelled() => return,
                     _ = beat.tick() => {
                         let Some(inner) = weak.upgrade() else { return };
-                        if let Some(live) = inner.live()
+                        // Not suspended isn't the same as in use: Android can leave a
+                        // backgrounded process running for hours, and each beat wakes the radio.
+                        if inner.is_foreground()
+                            && let Some(live) = inner.live()
                             && let Some(client) = lock(&live.registry).as_ref()
                         {
                             client.set_presence(now_ms());
