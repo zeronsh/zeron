@@ -235,6 +235,8 @@ local model = {
 	places = { pinned = {}, sections = {} } :: any,
 }
 
+-- (`fixture.sessions_loading`: an engine that hasn't answered yet, nothing heard.)
+local unheard = false
 local function publish()
 	local chats = {}
 	for _, c in model.chats do
@@ -249,7 +251,7 @@ local function publish()
 		table.insert(sections, { id = s.id, name = s.name, sessions = table.clone(s.sessions), collapsed = s.collapsed == true })
 	end
 	sessions.now:set({
-		state = "ready",
+		state = if unheard then "loading" else "ready",
 		here = model.here,
 		devices = model.devices,
 		projects = model.projects,
@@ -417,6 +419,28 @@ local icons_refused: string? = nil
 -- Cloud's machines among the devices, as the engine lists them: two
 -- sessions' (their platform, id and capability say Cloud's), never a device
 -- to pick.
+ui.command {
+	id = "fixture.sessions_loading",
+	title = "Fixture: an engine that hasn't answered, no chats heard",
+	run = function()
+		unheard = true
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.no_sessions",
+	title = "Fixture: an engine that answered, with no chats",
+	run = function()
+		unheard = false
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
 ui.command {
 	id = "fixture.cloud_machines",
 	title = "Fixture: Cloud sessions' machines among the devices",

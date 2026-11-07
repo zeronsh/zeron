@@ -1,6 +1,6 @@
 -- A launch before the engine has answered: nobody is called signed out, in
--- the sidebar's foot or on the Account page, however long it takes; the engine
--- saying so is what shows it. On the shell in ui/shell_fixture.luau, Settings'
+-- the sidebar's foot or on the Account page, nor told they have no sessions,
+-- however long it takes; the engine saying so is what shows it. On the shell in ui/shell_fixture.luau, Settings'
 -- host calls answered by ui/settings_stub.luau.
 
 local SIDE = "#shell-sidebar"
@@ -45,4 +45,14 @@ test("signed out, said by the engine: the Account page offers signing in", funct
 	app:click(`#settings-nav >> role:tab "Account"`)
 	app:frames(30)
 	expect(shows(app, "#settings-page", SIGNED_OUT_PAGE)).to_be(true)
+end)
+
+test("loading: the sidebar doesn't say there are no sessions", function()
+	local app = open("fixture.sessions_loading")
+	expect(app:has("#sidebar-empty")).to_be(false)
+end)
+
+test("answered with none: the sidebar says so", function()
+	local app = open("fixture.no_sessions")
+	expect(app:has("#sidebar-empty")).to_be(true)
 end)

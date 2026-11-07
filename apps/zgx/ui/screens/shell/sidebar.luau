@@ -1426,6 +1426,9 @@ M.Sidebar = ui.component(function(props: Props): Node
 		collapsed = props.collapsed,
 		limit = props.limit,
 		direct = props.direct,
+		loading = function(): boolean
+			return sessions.now:get().state ~= "ready"
+		end,
 		island = props.island,
 		selected = shared.selected,
 		projects = projects,
