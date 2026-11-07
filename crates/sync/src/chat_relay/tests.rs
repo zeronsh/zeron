@@ -681,6 +681,30 @@ async fn a_round_with_a_peer_that_left_gives_way_to_one_that_is_here() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_round_asked_of_a_host_that_wasnt_there_restarts_when_it_joins() {
+    // A phone back from the background asks the host, whose socket had closed. The
+    // ask goes nowhere. The host's join must start a new round, not wait for a stall.
+    let room = Room::default();
+    let host = Device::host("host");
+    host.commit("written while the phone was away");
+    let phone = Device::viewer("phone");
+    let _phone_socket = room.join("phone", &phone.relay);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    phone.relay.room_frame(wire::WireFrame {
+        kind: frame_type::ANNOUNCE,
+        header: json!({ "device": "host" }),
+        payload: host.doc.oplog_vv().encode(),
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(phone.body(), "", "the host isn't there yet");
+    let joined = tokio::time::Instant::now();
+    let _host_socket = room.join("host", &host.relay);
+    converged(&[&host, &phone]).await;
+    let took = joined.elapsed();
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_peer_that_keeps_stalling_stops_being_asked() {
     let room = Room::default();
     let viewer = Device::viewer("viewer");

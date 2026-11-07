@@ -35,7 +35,7 @@ import {
 import { decodeFrame, encodeFrame, FRAME, RELAY_FRAME_TYPES } from "./chat-frames";
 import {
   decodeVersion, drainQueueIntoRows, enqueueRow, ensureRelayQueue, hasRelayQueue, markDelivered,
-  markDeliveredByOthers, queueLength, queueRows, versionIncludes
+  markDeliveredByOthers, queueHolds, queueLength, queueRows, versionIncludes
 } from "./chat-relay";
 import { AUTH_ORG_HEADER, AUTH_USER_HEADER, type Env } from "./env";
 import {
@@ -779,7 +779,23 @@ export class ChatRoom implements DurableObject {
       send(ws, FRAME.error, { code: "quota", message: "per-device push quota exceeded", batchId });
       return;
     }
-    const sql = this.relaySql();
+    // Live peers get it before the write. Anything sent once a write has begun waits
+    // until the write is durable, which put that wait between every send and its
+    // host. The copy is only a hint: what the sender is told, and what a host that
+    // isn't here reads, still waits for the queue. A write that never lands leaves
+    // a host holding a message whose sender retries it, and importing it twice is a
+    // no-op. Only a row this write could accept goes early.
+    const sql = this.ctx.storage.sql;
+    const early =
+      payload.byteLength > 0 &&
+      payload.byteLength <= MAX_ROW_BYTES &&
+      !((this.relayQueueReady || hasRelayQueue(sql)) && queueHolds(sql, batchId));
+    if (early) {
+      for (const peer of this.relaySockets(ws)) {
+        send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
+      }
+    }
+    this.relaySql();
     const host = state.hostDevice ?? "";
     const chat = state.chatId ?? "";
     // The row and its wake commit together, as a stored row and its wake do:
@@ -800,8 +816,10 @@ export class ChatRoom implements DurableObject {
     if (host && host !== state.device) this.ctx.waitUntil(this.flushWake());
     this.recordPush(state.device, true);
     if (!outcome.dup) {
-      for (const peer of this.relaySockets(ws)) {
-        send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
+      if (!early) {
+        for (const peer of this.relaySockets(ws)) {
+          send(peer.socket, FRAME.relay, { device: state.device, queued: true, batchId }, payload);
+        }
       }
       // A socket without the layer never hears relay frames: it reads rows.
       if (this.hasLegacySocket()) this.drainQueueForLegacy();

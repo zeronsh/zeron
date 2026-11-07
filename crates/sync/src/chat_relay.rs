@@ -194,7 +194,7 @@ impl RelayHandle {
         self.counters.queue_pushes.store(queue, Relaxed);
     }
 
-    pub(crate) fn queue_pushes(&self) -> bool {
+    pub fn queue_pushes(&self) -> bool {
         self.counters.queue_pushes.load(Relaxed)
     }
 
@@ -465,6 +465,18 @@ impl Driver {
 
     fn announced(&mut self, from: String, frame: WireFrame, now: Instant) {
         let hello = frame.header["hello"].as_bool() == Some(true);
+        // That peer has just joined. A round asked of it before then went nowhere (the
+        // room only forwards to who's there), and nothing it sent has come back: ask
+        // again now rather than wait out the stall.
+        if hello
+            && self
+                .round
+                .as_ref()
+                .is_some_and(|round| round.peer == from && round.xfer.is_empty() && round.buf.is_empty())
+        {
+            self.round = None;
+            self.want = Some((from.clone(), now));
+        }
         if self.sink.relay_lacks(&frame.payload) {
             self.fruitless = 0;
             let at = if hello { now } else { now + GAP_GRACE };

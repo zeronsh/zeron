@@ -156,10 +156,13 @@ Deleting rows in the middle of `rows` would leave holes in the seq space, and an
 client treats a hole as a gap to repair and redials forever. With a separate table
 the old log stays a valid, quiet log, and deletes can't touch existing rows.
 
-1. A viewer sends `enqueue`. The row and its host wake commit in one transaction,
-   then `queued` goes back. The viewer's outbox retires the batch only then.
-2. The row goes live to connected relay-capable sockets. An offline host learns of
-   it through the existing wake path.
+1. A viewer sends `enqueue`. Connected relay-capable sockets get a copy at once, before the
+   write: anything a room sends once a write has begun waits for that write to be durable, and
+   that wait sat between every send and its host. The copy is only a hint, like any relay frame.
+2. The row and its host wake commit in one transaction, then `queued` goes back. The viewer's
+   outbox retires the batch only then. An offline host learns of the row through the existing
+   wake path. A write that never lands leaves the sender retrying, and a host that already
+   imported the early copy imports it again as a no-op.
 3. The host imports it, saves its snapshot, and only then sends `delivered`. A crash
    in between redelivers the row, and importing it again is a no-op.
 4. The DO deletes the row, but only for the device the registry says hosts the chat. A
@@ -350,8 +353,37 @@ separate, later decision with its own review.
 | Viewer's `delivered` is lost | The row is redelivered next join. Import is a no-op. |
 | Chat moves to a new host | The new host reads the queue and acks. Sync is symmetric, so it also collects what the old host published. |
 | Edge flag turned off while hosts are in relay mode | `state` loses `relay`, the host follows the downgrade rule, and queued rows move into `rows` once its heal lands. |
-| A checkpoint keeps failing | Retried with backoff. Until it lands, old readers stay behind, a downgrade can't finish and a Cloud machine won't sleep. A chat too big to checkpoint is the exception: it doesn't hold the socket or the sleep, and logs. Flips stop at 24 MiB so this should only be reachable by one huge update. |
+| A checkpoint keeps failing | Retried with backoff. Until it lands, old readers stay behind, a downgrade can't finish and a Cloud machine won't sleep. A chat too big to checkpoint is the exception: it doesn't hold the socket or the sleep, and logs. A snapshot over the room's 32 MiB isn't sent at all (the room only refuses it after receiving all of it), and once the room has refused a chat's checkpoint as too big its relay checkpoints stop. Flips stop at 24 MiB so this should only be reachable by one huge update. |
 | Oversized update | The existing row cap and rejection path still apply to stored paths. A `relay` or `syncData` frame over the cap is refused by the runtime; VV sync re-fragments it. |
+
+## Latency
+
+Everything goes through the DO, so a send pays device → DO → host, and the reply host → DO →
+device. Measured with real engines (2026-11-07): a Mac on a home network viewing a chat hosted on
+a server in another region, mock agent, both on a test worker, p50:
+
+| | Before | After |
+|---|---|---|
+| Send to first token on the viewer (n=30) | 257 ms | 172 ms |
+| The same after 15 s idle (n=8) | 299 ms | 163 ms |
+| Steer round trip (n=25) | 313 ms | 195 ms |
+| Viewer send to host receive (n=39) | 90 ms | 46 ms |
+| Host publish to viewer receive, every frame while streaming (n=770 / 902) | 50 ms | 49 ms |
+
+Two changes made the difference:
+
+- **The room forwards a queued send before writing it** (see [Offline queue](#offline-queue)). That halved the
+  viewer-to-host leg.
+- **The first change after a pause commits at once.** A turn's text was committed a window (120 ms)
+  after its first change, so a turn's first token and a steer's echo waited that long. Now a change
+  commits at once unless one went out less than a window ago, and then a window after it. Streaming
+  still commits at most once per window, so a long turn costs the same.
+
+What's left of a send to first token, by hop (n=39, p50): 2 ms to the viewer's socket, 46 ms through
+the room to the host, 17 ms to start the turn, 26 ms to the agent's first token, 2 ms to commit, 26 ms
+through the room to the viewer. The DO lives in one region, so the two room legs are about one
+device-to-region round trip; nothing in the room's own handling adds measurably to that. A hibernated
+room showed no extra cost: after 15 s idle the first token came no later than on a warm room.
 
 ## Direct links, parked
 
@@ -383,8 +415,8 @@ Moving fields to live-only frames is riskier, for these reasons:
 
 ## Testing before any real user
 
-Done on a deployed test worker with real engines on real networks (2026-11-06): pairing and latency
-per the tables above, network failures with recovery, restarts of every role, the room dropped,
+Done on a deployed test worker with real engines on real networks (2026-11-06 and 07): latency per
+the table above, network failures with recovery, restarts of every role, the room dropped,
 released v0.2.137 and v0.2.116 in the account, the offline queue including a host change, local-first after
 SIGKILL, a real Cloud machine, and chaos with real `gpt-6.1-terra` turns.
 
@@ -451,6 +483,10 @@ Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine.
 - A sweep that re-evaluates chats that aren't open. Each host evaluates a chat when it opens it.
 
 **Known limits:**
+
+- A device that opens a chat for the first time writes two metadata ops of its own (`SessionDoc::init`),
+  which go out as one queue row. It doesn't wake a sleeping Cloud machine (checked for 150 s), and the
+  host imports it as a no-op when it next wakes. On generation 2 the same open stores one row.
 
 - A viewer on a chat whose host has no socket and no wake route stays where it is.
 - An old client reading only over HTTP doesn't wake an absent host: its read carries no host hint.
