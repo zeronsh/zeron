@@ -87,7 +87,7 @@ use wire::{
 };
 
 /// Appended to a chat's system prompt (where Zeron's server offers
-/// `wait_on_background`): the text Sonnet and Opus were live-probed acting
+/// `wait_on_background`: [`McpServer::waits_on_background`]): the text Sonnet and Opus were live-probed acting
 /// on. The CLI starts a turn of its own when a background task ends, so a
 /// turn that ends on one isn't the agent's last.
 const WAIT_ON_BACKGROUND_NOTE: &str = "\
@@ -522,7 +522,7 @@ impl ClaudeHarness {
             // neither reaches the model before it decides to end a turn:
             // live-probed on 2.1.319, Sonnet never called it with those
             // alone, and Sonnet and Opus both did with this note.
-            if request.mcp.as_ref().is_some_and(McpServer::in_chat) {
+            if request.mcp.as_ref().is_some_and(McpServer::waits_on_background) {
                 cmd.args(["--append-system-prompt", WAIT_ON_BACKGROUND_NOTE]);
             }
             // Delegation goes through that server's side chats only. A bare
@@ -787,6 +787,10 @@ fn parse_initialize_commands(response: &Value) -> Vec<SlashCommand> {
 impl Harness for ClaudeHarness {
     fn id(&self) -> HarnessId {
         HarnessId::ClaudeCode
+    }
+    /// Live-verified 2.1.319: a new turn 0.1 s after a background task ends.
+    fn wakes_on_background(&self) -> bool {
+        true
     }
     fn display_name(&self) -> &str {
         "Claude Code"
@@ -2335,11 +2339,15 @@ mod tests {
             args: vec!["mcp".into()],
             env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
         };
+        let waits = (McpServer::WAITS_ON_BACKGROUND_ENV, "1");
         assert_eq!(
-            appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1")]))).as_deref(),
+            appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), waits]))).as_deref(),
             Some(WAIT_ON_BACKGROUND_NOTE)
         );
-        // No chat's server: the tool isn't offered, so nothing is said of it.
+        // The tool not offered (no chat's server, or not one that waits):
+        // nothing is said of it.
+        assert_eq!(appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1")]))), None);
+        assert_eq!(appended(Some(server(&[waits]))), None);
         assert_eq!(appended(Some(server(&[]))), None);
         assert_eq!(appended(None), None);
     }

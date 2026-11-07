@@ -792,12 +792,22 @@ impl Tools {
         self.zeron.origin().side_chats_only
     }
 
+    /// Whether this server's agent is offered `wait_on_background`: a
+    /// chat's, on a runtime that wakes it as background work ends.
+    pub fn waits_on_background(&self) -> bool {
+        let origin = self.zeron.origin();
+        origin.chat_id.is_some() && origin.waits_on_background
+    }
+
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
+        let waits = self.waits_on_background();
         catalog()
             .into_iter()
-            .filter(|tool| {
-                in_chat || ![SHOW_VISUAL, SHOW_IMAGE, WAIT_ON_BACKGROUND].contains(&tool.name)
+            .filter(|tool| match tool.name {
+                SHOW_VISUAL | SHOW_IMAGE => in_chat,
+                WAIT_ON_BACKGROUND => waits,
+                _ => true,
             })
             .collect()
     }
@@ -2130,7 +2140,8 @@ mod tests {
             },
         );
         assert!(inside.has("show_image"));
-        assert!(inside.has("wait_on_background"));
+        // (Offered only where the runtime wakes its agent: its own test.)
+        assert!(!inside.has("wait_on_background"));
         let shown = inside
             .call("show_image", json!({ "path": path }))
             .await
@@ -2533,6 +2544,45 @@ mod tests {
             }
         }
         assert!(world.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_on_background_is_offered_only_where_the_runtime_wakes_its_agent() {
+        let world = Arc::new(World::default());
+        let offered = |chat: Option<&str>, waits: bool| {
+            let tools = tools(
+                world.clone(),
+                Origin {
+                    chat_id: chat.map(str::to_owned),
+                    waits_on_background: waits,
+                    ..Default::default()
+                },
+            );
+            (tools.has("wait_on_background"), tools.waits_on_background())
+        };
+        // A chat on a runtime that brings its agent back (Claude Code, Muse).
+        assert_eq!(offered(Some("chat-alpha-1"), true), (true, true));
+        // A chat on one that doesn't (Codex): a turn that ends is the agent
+        // done, so there's nothing to say.
+        assert_eq!(offered(Some("chat-alpha-1"), false), (false, false));
+        // No chat at all.
+        assert_eq!(offered(None, true), (false, false));
+        // Not offered, not callable either.
+        let codex = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                ..Default::default()
+            },
+        );
+        let call = crate::jsonrpc::handle_request(
+            &codex,
+            json!(1),
+            "tools/call",
+            json!({ "name": "wait_on_background", "arguments": { "task_ids": ["b1"] } }),
+        )
+        .await;
+        assert!(call["error"]["message"].as_str().unwrap().contains("unknown tool"), "{call}");
     }
 
     fn origin(chat: &str) -> Origin {

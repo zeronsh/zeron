@@ -203,6 +203,10 @@ impl Harness for MuseHarness {
     fn id(&self) -> HarnessId {
         HarnessId::Muse
     }
+    /// It starts a wake turn of its own when a background subagent ends.
+    fn wakes_on_background(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &str {
         "Muse Code"
     }

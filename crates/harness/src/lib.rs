@@ -291,6 +291,14 @@ pub trait Harness: Send + Sync {
     fn authoritative_prompt_end(&self) -> bool {
         self.deterministic_turn_end()
     }
+    /// Whether the runtime brings its agent back on its own when background
+    /// work ends (a new turn, unprompted), so a turn that ends on that work
+    /// isn't the agent's last: the driver declares it as the run goes
+    /// ([`TurnControl::set_wakes_on_background`]), and the host offers the
+    /// agent Zeron's `wait_on_background` only where this is true.
+    fn wakes_on_background(&self) -> bool {
+        false
+    }
     /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
     /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
     /// with its background work. Otherwise stopping a turn tears the runtime

@@ -63,8 +63,11 @@ content sits directly on the chat with no cards or boxed panels, text uses the i
 and type scale, and colors are theme tokens that work on frosted glass or opaque, light or dark. \
 The reader sees the visual above that reply, so don't announce or restate it. To show the \
 reader an image file (a screenshot, a rendered PNG), call `show_image` with its path; don't \
-draw images through `show_visual`.\n\
-\n\
+draw images through `show_visual`.";
+
+/// Appended to [`INSTRUCTIONS`] where the agent is offered
+/// `wait_on_background` ([`zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV`]).
+const WAITS_ON_BACKGROUND: &str = "\n\n\
 Before ending a turn while a background command you started is still running and you'll carry on \
 once it ends (tests, a build), call `wait_on_background` with its task id, so the person sees the \
 chat waiting rather than finished. Not for anything you leave running (a dev server, a watcher).";
@@ -75,14 +78,16 @@ const SIDE_CHATS_ONLY: &str = "\n\n\
 Your own subagent tools are turned off in Zeron's settings: where you would start a \
 subagent, delegate through Zeron chats instead, with `create_chats` (or `create_chat`).";
 
-/// What `initialize` tells the agent, with the side-chat rule when its host
-/// turned the agent's own subagents off.
-fn instructions(side_chats_only: bool) -> std::borrow::Cow<'static, str> {
-    if side_chats_only {
-        format!("{INSTRUCTIONS}{SIDE_CHATS_ONLY}").into()
-    } else {
-        INSTRUCTIONS.into()
+/// What `initialize` tells the agent: with when to say it waits where it's
+/// offered `wait_on_background`, and the side-chat rule when its host turned
+/// the agent's own subagents off.
+fn instructions(waits: bool, side_chats_only: bool) -> std::borrow::Cow<'static, str> {
+    if !waits && !side_chats_only {
+        return INSTRUCTIONS.into();
     }
+    let waits = if waits { WAITS_ON_BACKGROUND } else { "" };
+    let side_chats = if side_chats_only { SIDE_CHATS_ONLY } else { "" };
+    format!("{INSTRUCTIONS}{waits}{side_chats}").into()
 }
 
 const PARSE_ERROR: i64 = -32700;
@@ -229,7 +234,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": instructions(tools.side_chats_only()),
+                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only()),
                 }),
             )
         }
@@ -385,9 +390,20 @@ mod tests {
 
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {
-        assert_eq!(instructions(false), INSTRUCTIONS);
-        let side_chats = instructions(true);
+        assert_eq!(instructions(false, false), INSTRUCTIONS);
+        let side_chats = instructions(false, true);
         assert!(side_chats.starts_with(INSTRUCTIONS));
         assert!(side_chats.ends_with("with `create_chats` (or `create_chat`)."));
+    }
+
+    #[test]
+    fn only_an_agent_offered_wait_on_background_is_told_when_to_use_it() {
+        assert!(!INSTRUCTIONS.contains("wait_on_background"));
+        let waits = instructions(true, false);
+        assert!(waits.starts_with(INSTRUCTIONS));
+        assert!(waits.contains("call `wait_on_background`"));
+        let both = instructions(true, true);
+        assert!(both.contains("call `wait_on_background`"));
+        assert!(both.ends_with("with `create_chats` (or `create_chat`)."));
     }
 }

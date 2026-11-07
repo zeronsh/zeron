@@ -2462,7 +2462,15 @@ impl Inner {
     ///
     /// `side_chats_only`: the run's provider launches without its own
     /// subagents, so all delegation goes through this server.
-    fn zeron_mcp(&self, chat_id: &str, side_chats_only: bool) -> Option<zeron_proto::McpServer> {
+    /// Zeron's own MCP server for a chat's run. `waits`: the runtime wakes
+    /// its agent as background work ends ([`Harness::wakes_on_background`]),
+    /// so the agent is offered `wait_on_background`.
+    fn zeron_mcp(
+        &self,
+        chat_id: &str,
+        side_chats_only: bool,
+        waits: bool,
+    ) -> Option<zeron_proto::McpServer> {
         let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
         if port == 0 {
             return None;
@@ -2478,6 +2486,12 @@ impl Inner {
         if side_chats_only {
             env.insert(
                 zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.to_owned(),
+                "1".to_owned(),
+            );
+        }
+        if waits {
+            env.insert(
+                zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV.to_owned(),
                 "1".to_owned(),
             );
         }
@@ -3794,7 +3808,7 @@ async fn drive_run(
     // The host stamps its own MCP server onto every run it drives, so the
     // agent can spawn and talk to side chats through the engine it runs in.
     if request.mcp.is_none() {
-        request.mcp = inner.zeron_mcp(&chat_id, side_chats_only);
+        request.mcp = inner.zeron_mcp(&chat_id, side_chats_only, harness.wakes_on_background());
     }
     // Plugins' native MCP servers come from this host's own allowed plugins,
     // run from their verified snapshots — never from what a sender put here.

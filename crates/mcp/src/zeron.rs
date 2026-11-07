@@ -37,6 +37,10 @@ pub struct Origin {
     /// The host launched the agent without its own subagent tools
     /// ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
     pub side_chats_only: bool,
+    /// The agent's runtime brings it back on its own as background work
+    /// ends, so it may say it waits on that work
+    /// ([`zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV`]).
+    pub waits_on_background: bool,
 }
 
 impl Origin {
@@ -51,6 +55,9 @@ impl Origin {
             chat_id: read("ZERON_CHAT_ID"),
             device_id: read("ZERON_DEVICE_ID"),
             side_chats_only: read(zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV).as_deref()
+                == Some("1"),
+            waits_on_background: read(zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV)
+                .as_deref()
                 == Some("1"),
         }
     }
