@@ -90,6 +90,69 @@ impl Probe {
             .expect("a button call");
         matches!(answer.field("value"), Some(Value::Bool(true)))
     }
+
+    fn invisible_button(&self, seq: u64, id: &str, width: f64, height: f64) -> Value {
+        let arg = Value::record([
+            ("id", Value::from(id)),
+            (
+                "size",
+                Value::record([
+                    ("width", Value::from(width)),
+                    ("height", Value::from(height)),
+                ]),
+            ),
+        ]);
+        self.frame_widget("invisible_button", seq, &arg)
+            .expect("an invisible_button call")
+    }
+
+    fn is_item_hovered(&self, seq: u64) -> bool {
+        let answer = self
+            .frame_widget(
+                "is_item_hovered",
+                seq,
+                &Value::record(std::iter::empty::<(&str, Value)>()),
+            )
+            .expect("an is_item_hovered call");
+        matches!(answer.field("value"), Some(Value::Bool(true)))
+    }
+
+    fn is_item_active(&self, seq: u64) -> bool {
+        let answer = self
+            .frame_widget(
+                "is_item_active",
+                seq,
+                &Value::record(std::iter::empty::<(&str, Value)>()),
+            )
+            .expect("an is_item_active call");
+        matches!(answer.field("value"), Some(Value::Bool(true)))
+    }
+
+    fn mouse_delta(&self, seq: u64) -> (f32, f32) {
+        let answer = self
+            .frame_widget(
+                "mouse_delta",
+                seq,
+                &Value::record(std::iter::empty::<(&str, Value)>()),
+            )
+            .expect("a mouse_delta call");
+        let axis = |name: &str| match answer.field(name) {
+            Some(Value::Num(number)) => *number as f32,
+            _ => panic!("mouse_delta.{name} is not a number"),
+        };
+        (axis("x"), axis("y"))
+    }
+
+    fn is_mouse_dragging(&self, seq: u64, button: Option<&str>) -> bool {
+        let arg = match button {
+            Some(button) => Value::record([("button", Value::from(button))]),
+            None => Value::record(std::iter::empty::<(&str, Value)>()),
+        };
+        let answer = self
+            .frame_widget("is_mouse_dragging", seq, &arg)
+            .expect("an is_mouse_dragging call");
+        matches!(answer.field("value"), Some(Value::Bool(true)))
+    }
 }
 
 impl FrameWindow for Probe {
@@ -567,6 +630,241 @@ fn the_window_s_pointer_events_click_a_button() {
     });
     run_frame(&probe, draw.clone()).expect("frame 5");
     assert_eq!(clicks.get(), 1, "a cancelled press is not a click");
+}
+
+fn truth_of(value: &Value, field: &str) -> bool {
+    matches!(value.field(field), Some(Value::Bool(true)))
+}
+
+#[test]
+fn invisible_buttons_answer_hover_active_and_clicked() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("chrome");
+
+    let rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let seen = Rc::new(RefCell::new(Vec::<(bool, bool, bool, bool, bool)>::new()));
+    let draw = {
+        let (rect, seen) = (rect.clone(), seen.clone());
+        move |probe: &Probe, seq: u64| {
+            let answer = probe.invisible_button(seq, "drag", 300.0, 32.0);
+            *rect.borrow_mut() = rect_of(&answer);
+            let hovered = truth_of(&answer, "hovered");
+            let active = truth_of(&answer, "active");
+            let clicked = truth_of(&answer, "clicked");
+            let hovered_again = probe.is_item_hovered(seq);
+            let active_again = probe.is_item_active(seq);
+            seen.borrow_mut()
+                .push((hovered, active, clicked, hovered_again, active_again));
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+
+    run_frame(&probe, draw.clone()).expect("frame 0");
+    let (left, top, right, bottom) = *rect.borrow();
+    assert!(right > left && bottom > top, "the rect exists: {rect:?}");
+    assert_eq!(
+        seen.borrow()[0],
+        (false, false, false, false, false),
+        "no input"
+    );
+    let centre = [(left + right) / 2.0, (top + bottom) / 2.0];
+
+    probe.edit_io(|io| io.add_mouse_pos_event(centre));
+    run_frame(&probe, draw.clone()).expect("hover");
+    assert_eq!(
+        seen.borrow()[1],
+        (true, false, false, true, false),
+        "hovering reports hovered only"
+    );
+
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press");
+    assert_eq!(
+        seen.borrow()[2],
+        (true, true, false, true, true),
+        "pressing inside reports active while held"
+    );
+
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release inside");
+    assert_eq!(
+        seen.borrow()[3],
+        (true, false, true, true, false),
+        "releasing inside reports the click once"
+    );
+
+    run_frame(&probe, draw.clone()).expect("idle after click");
+    assert_eq!(
+        seen.borrow()[4],
+        (true, false, false, true, false),
+        "the click is the release frame alone"
+    );
+
+    probe.edit_io(|io| io.add_mouse_pos_event(centre));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    run_frame(&probe, draw.clone()).expect("press again");
+    probe.edit_io(|io| io.add_mouse_pos_event([right + 40.0, bottom + 40.0]));
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
+    run_frame(&probe, draw.clone()).expect("release outside");
+    let last = *seen.borrow().last().expect("a release outside frame");
+    assert!(
+        !last.2,
+        "release outside the rect reports no click: {last:?}"
+    );
+}
+
+#[test]
+fn invisible_buttons_draw_nothing_and_reserve_their_rect() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+
+    let empty = Probe::new("empty");
+    run_frame(&empty, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the empty frame");
+    let background = raster(&gpu, &empty);
+
+    let control = Probe::new("control");
+    let control_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let capture = control_rect.clone();
+    run_frame(&control, move |probe, seq| {
+        let answer = probe.text(seq, "after");
+        *capture.borrow_mut() = rect_of(&answer);
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the control frame");
+    let control_rect = *control_rect.borrow();
+
+    let probe = Probe::new("with");
+    let button_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let after_rect = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let (button, after) = (button_rect.clone(), after_rect.clone());
+    run_frame(&probe, move |probe, seq| {
+        let answer = probe.invisible_button(seq, "drag", 300.0, 32.0);
+        *button.borrow_mut() = rect_of(&answer);
+        let answer = probe.text(seq, "after");
+        *after.borrow_mut() = rect_of(&answer);
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the frame with the button");
+    let painted = raster(&gpu, &probe);
+
+    let button_rect = *button_rect.borrow();
+    let after_rect = *after_rect.borrow();
+    assert!(
+        (button_rect.1 - control_rect.1).abs() <= 0.5,
+        "the button starts where the control text would: {button_rect:?} vs {control_rect:?}"
+    );
+    assert!(
+        (button_rect.3 - button_rect.1 - 32.0).abs() <= 0.5,
+        "the button is 32 points tall: {button_rect:?}"
+    );
+    assert!(
+        (button_rect.2 - button_rect.0 - 300.0).abs() <= 0.5,
+        "the button is 300 points wide: {button_rect:?}"
+    );
+    assert!(
+        (after_rect.1 - control_rect.1 - 32.0).abs() <= 1.0,
+        "the following text moves down 32 points: after={after_rect:?} control={control_rect:?}"
+    );
+    assert!(
+        (after_rect.0 - control_rect.0).abs() <= 0.5,
+        "the following text keeps its column: after={after_rect:?} control={control_rect:?}"
+    );
+
+    let band = window_rect(button_rect);
+    assert!(
+        identical_pixels(&painted, &background, band),
+        "the invisible button drew a pixel in {band:?}"
+    );
+}
+
+#[test]
+fn invisible_buttons_refuse_unknown_or_wrong_options() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("refused");
+    run_frame(&probe, |probe, seq| {
+        let renamed = Value::record([
+            ("id", Value::from("drag")),
+            ("maxx", Value::from(100.0)),
+            (
+                "size",
+                Value::record([("width", Value::from(300.0)), ("height", Value::from(32.0))]),
+            ),
+        ]);
+        let error = probe
+            .frame_widget("invisible_button", seq, &renamed)
+            .expect_err("an unknown key must be refused");
+        assert!(error.contains("maxx"), "{error}");
+        assert!(error.contains("invisible_button"), "{error}");
+
+        let wrong = Value::record([
+            ("id", Value::from(4.0)),
+            (
+                "size",
+                Value::record([("width", Value::from(300.0)), ("height", Value::from(32.0))]),
+            ),
+        ]);
+        let error = probe
+            .frame_widget("invisible_button", seq, &wrong)
+            .expect_err("a wrong id type must be refused");
+        assert!(error.contains("id"), "{error}");
+        assert!(error.contains("text"), "{error}");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("the frame ran");
+}
+
+#[test]
+fn mouse_delta_and_dragging_read_the_io() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("mouse");
+
+    probe.edit_io(|io| io.add_mouse_pos_event([10.0, 10.0]));
+    run_frame(&probe, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("warmup 0");
+
+    probe.edit_io(|io| io.add_mouse_pos_event([40.0, 10.0]));
+    run_frame(&probe, |probe, seq| {
+        let (dx, dy) = probe.mouse_delta(seq);
+        assert!(
+            (dx - 30.0).abs() <= 0.5 && dy.abs() <= 0.5,
+            "delta was ({dx}, {dy})"
+        );
+        assert!(!probe.is_mouse_dragging(seq, None), "no button is held");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("warmup 1");
+
+    probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, true));
+    probe.edit_io(|io| io.add_mouse_pos_event([50.0, 10.0]));
+    run_frame(&probe, |probe, seq| {
+        assert!(
+            probe.is_mouse_dragging(seq, None),
+            "a held left button past the threshold is a drag"
+        );
+        assert!(
+            !probe.is_mouse_dragging(seq, Some("right")),
+            "the right button is not down"
+        );
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("drag frame");
+}
+
+fn identical_pixels(a: &Snapshot, b: &Snapshot, area: (u32, u32, u32, u32)) -> bool {
+    let (left, top, right, bottom) = area;
+    for y in top..bottom.min(a.height()).min(b.height()) {
+        for x in left..right.min(a.width()).min(b.width()) {
+            if a.pixel(x, y) != b.pixel(x, y) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 // VAL-WIDGET-022: a widget called with no live frame errors instead of

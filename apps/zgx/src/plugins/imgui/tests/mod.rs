@@ -1,3 +1,4 @@
+mod chrome_tests;
 mod dev_close_tests;
 mod fixtures_tests;
 mod frame_tests;

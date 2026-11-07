@@ -1,0 +1,8 @@
+{
+  "id": "imgui-custom-chrome",
+  "name": "ImGui Custom Chrome",
+  "version": "1.0.0",
+  "description": "A hidden-chrome window that draws its own title, drag bar and buttons from Luau, with hover, active and drag state.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"]
+}

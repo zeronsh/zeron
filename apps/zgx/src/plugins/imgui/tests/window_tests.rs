@@ -257,6 +257,21 @@ fn a_closed_window_reports_closed_and_refuses_every_control() {
 }
 
 #[test]
+fn begin_resize_never_reports_success_for_a_no_op() {
+    let spec = parse(r#"{"id":"inspector","title":"x"}"#).unwrap();
+    let state = state(&spec);
+    let error = state
+        .begin_resize()
+        .expect_err("begin_resize must not succeed");
+    assert!(error.contains("begin_resize"), "{error}");
+    assert!(error.contains("no platform"), "{error}");
+    assert!(error.contains("inspector"), "{error}");
+    state.begin_close();
+    let closed = state.begin_resize().expect_err("a closed window refuses");
+    assert!(closed.contains("closed"), "{closed}");
+}
+
+#[test]
 fn maximizing_and_toggling_track_state_and_restore_clears_it() {
     let spec = parse(r#"{"id":"inspector","title":"x"}"#).unwrap();
     let state = state(&spec);

@@ -574,6 +574,14 @@ impl WindowState {
         Ok(())
     }
 
+    pub(crate) fn begin_resize(&self) -> Result<(), String> {
+        self.require_open()?;
+        Err(format!(
+            "zeron.imgui can't begin_resize window \"{}\" from a plugin: no platform exposes a resize gesture for a plugin window. A window opened with titlebar=\"hidden\" resizes by its edges.",
+            self.key.id
+        ))
+    }
+
     pub(crate) fn set_title(&self, title: &str) -> Result<(), String> {
         self.require_open()?;
         if title.is_empty() {
@@ -935,7 +943,7 @@ impl PluginWindow {
         Ok(())
     }
 
-    pub fn begin_resize(&self) -> Result<(), String> {
+    pub fn begin_resize(&self, _edge: Option<&str>) -> Result<(), String> {
         self.state.require_open()?;
         if !self.is_shown() {
             return Err(format!(
@@ -943,8 +951,7 @@ impl PluginWindow {
                 self.key.id, self.key.plugin
             ));
         }
-        self.chrome_supported("resize")?;
-        Ok(())
+        self.state.begin_resize()
     }
 
     pub fn set_title(&self, title: &str) -> Result<(), String> {

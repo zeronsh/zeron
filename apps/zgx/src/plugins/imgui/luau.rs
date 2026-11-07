@@ -60,7 +60,15 @@ const WINDOW_OPS: &[&str] = &[
 ];
 
 /// The widgets a plugin may draw, applied to the open frame synchronously.
-const WIDGET_OPS: &[&str] = &["text", "button"];
+const WIDGET_OPS: &[&str] = &[
+    "text",
+    "button",
+    "invisible_button",
+    "is_item_hovered",
+    "is_item_active",
+    "mouse_delta",
+    "is_mouse_dragging",
+];
 
 /// Ends the frame the render callback was given.
 const FRAME_END: &str = "frame_end";
@@ -193,7 +201,7 @@ impl ImGuiWindows {
         }
         if !WINDOW_OPS.contains(&op.as_str()) {
             return failed(&format!(
-                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text and button."
+                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, is_maximized, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text, button, invisible_button, is_item_hovered, is_item_active, mouse_delta and is_mouse_dragging."
             ));
         }
         if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {
@@ -220,7 +228,13 @@ impl ImGuiWindows {
                 ("maximized", Value::Bool(window.is_maximized())),
             ]),
             "begin_drag" => answer(window.begin_drag()),
-            "begin_resize" => answer(window.begin_resize()),
+            "begin_resize" => match arg.field("edge") {
+                Some(Value::Str(edge)) => answer(window.begin_resize(Some(edge))),
+                Some(_) => failed(
+                    "zeron.imgui.begin_resize can't use edge: edge must be text, like \"se\"",
+                ),
+                None => answer(window.begin_resize(None)),
+            },
             "close" => answer(window.close()),
             "set_title" => match text(arg, "title") {
                 Some(title) => answer(window.set_title(&title)),

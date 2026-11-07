@@ -33,6 +33,7 @@ const FIXTURES: &[&str] = &[
     "imgui-no-permission",
     "imgui-win-probe-noperm",
     "imgui-win-probe-legacy",
+    "imgui-custom-chrome",
 ];
 
 /// The main probe's launch set, in the order its `init.luau` opens them: five

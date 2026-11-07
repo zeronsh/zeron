@@ -1253,6 +1253,18 @@ return function(id: string): any
 	--
 	-- A frame may spend 8 ms of CPU: a callback that overruns is stopped and
 	-- its frame thrown away, so one window can never freeze the app.
+	--
+	-- A window handle also has `maximize`, `restore`, `begin_drag` and
+	-- `begin_resize(edge)`; host-tracked `is_maximized` (it can drift after
+	-- an OS snap or a WM-initiated maximize). `begin_resize` always refuses:
+	-- no platform exposes a resize gesture for plugin windows; a
+	-- `titlebar = "hidden"` window already resizes by its edges.
+	-- In a render callback, `ui.invisible_button` answers
+	-- `{ hovered, active, clicked }` for a rect that draws nothing;
+	-- `ui.is_item_hovered()` and `ui.is_item_active()` answer for the last
+	-- item; `ui.mouse_delta()` is the pointer's movement this frame (x, y);
+	-- `ui.is_mouse_dragging(button?)` is Dear ImGui's drag test for
+	-- "left" (the default), "right", "middle", "extra1" or "extra2".
 	local imgui = {}
 	-- The window open under each id, and every handle made for it: a handle
 	-- kept from before a close stays inert (its methods raise) while a fresh
@@ -1310,7 +1322,7 @@ return function(id: string): any
 		return answer
 	end
 
-	-- What `on_render` is handed: `text` and `button`, each a synchronous
+	-- What `on_render` is handed: the widgets below, each a synchronous
 	-- call into the frame the host has open for this window. A refusal is
 	-- recorded in the frame's own marker (`imgui_refusal`), so `imgui_frame`
 	-- can tell the host the callback died on a widget the host turned down
@@ -1340,6 +1352,41 @@ return function(id: string): any
 		end
 		function view.button(label: any): boolean
 			local answer = call("button", { label = tostring(label) })
+			return answer.value == true
+		end
+		function view.invisible_button(...)
+			local first = ...
+			local second = select(2, ...)
+			local fields: { [string]: any } = {}
+			if type(second) ~= "table" and type(first) == "table" and (first.size ~= nil or first.id ~= nil) then
+				fields = table.clone(first)
+			else
+				if type(second) == "table" then
+					fields = table.clone(second)
+				end
+				fields.size = first
+			end
+			local answer = call("invisible_button", fields)
+			return {
+				hovered = answer.hovered == true,
+				active = answer.active == true,
+				clicked = answer.clicked == true,
+			}
+		end
+		function view.is_item_hovered(): boolean
+			local answer = call("is_item_hovered", {})
+			return answer.value == true
+		end
+		function view.is_item_active(): boolean
+			local answer = call("is_item_active", {})
+			return answer.value == true
+		end
+		function view.mouse_delta(): (number, number)
+			local answer = call("mouse_delta", {})
+			return answer.x, answer.y
+		end
+		function view.is_mouse_dragging(button: string?): boolean
+			local answer = call("is_mouse_dragging", if button == nil then {} else { button = button })
 			return answer.value == true
 		end
 		return view
@@ -1403,6 +1450,25 @@ return function(id: string): any
 		function handle.restore(_self: any)
 			live()
 			imgui_ask({ op = "restore", window = window })
+		end
+		function handle.maximize(_self: any)
+			live()
+			imgui_ask({ op = "maximize", window = window })
+		end
+		function handle.begin_drag(_self: any)
+			live()
+			imgui_ask({ op = "begin_drag", window = window })
+		end
+		function handle.begin_resize(_self: any, edge: string)
+			live()
+			imgui_ask({ op = "begin_resize", window = window, edge = tostring(edge) })
+		end
+		function handle.is_maximized(_self: any): boolean
+			if handle.__closed then
+				return false
+			end
+			local ok, answer = pcall(ui.call_sync, `{prefix}.imgui`, { op = "is_maximized", window = window })
+			return ok and type(answer) == "table" and answer.maximized == true
 		end
 		function handle.set_title(_self: any, title: string)
 			live()

@@ -571,6 +571,102 @@ zeron.place {
 }
 ```
 
+## Native Dear ImGui windows
+
+With `imgui.windows`, a plugin opens real operating-system windows of its own and draws a Dear ImGui interface in them from Luau. The window is made by the app; the script draws it once for every frame it is shown, through `zeron.imgui.open_window`.
+
+```json
+"permissions": ["imgui.windows"]
+```
+
+```lua
+local zeron = require("./zeron")("inspector")
+
+local w = zeron.imgui.open_window {
+	id = "inspector", title = "Inspector", size = { width = 720, height = 480 },
+}
+w:on_render(function(ui)
+	ui.text("Hello from Luau!")
+	if ui.button("Refresh") then print("refreshed") end
+end)
+```
+
+The callback runs while the window is shown, never while it is hidden or minimized. A frame may spend 8 ms of CPU; an overrun is stopped and its frame thrown away. Drawing outside the callback, with another window's `ui`, or after the window closed raises an error naming the widget; the plugin stays loaded.
+
+### Opening a window
+
+`zeron.imgui.open_window` takes these options:
+
+- `id`: your name for the window, unique per plugin (64 bytes at most, no `/`). Required.
+- `title`: the title the OS chrome and the task bar show. Required.
+- `size`: `{ width, height }` in logical points; default 720 × 480, clamped to 120 × 80 … 3840 × 2160.
+- `position`: `{ x, y }` for the client origin, where the platform honours placed windows.
+- `min_size` / `max_size`: `{ width, height }` bounds of your own.
+- `resizable`: true by default.
+- `visible`: false opens hidden and waits for `show`.
+- `titlebar`: `"standard"`, `"inset"` or `"hidden"`. `"hidden"` is a window with no platform title bar and no buttons, for a plugin-drawn bar; on Windows and Linux its edges still resize it.
+- `decorations`: the platform frame. With `titlebar = "standard"`, `decorations = false` is refused (nothing would resize that window); use `titlebar = "hidden"`.
+- `remember`: opts into per-window saved geometry (`plugin.<plugin>.<window>`). Off by default, so a requested size is the size a fresh window opens at.
+
+### Window controls
+
+A handle is used with `:`. Controls that change the window never unload the plugin; a window the plugin closed leaves its handles inert, and every method but `is_open` and `is_maximized` raises on one:
+
+```lua
+w:show(); w:hide(); w:focus(); w:minimize(); w:restore()
+w:maximize()
+w:close()
+w:set_title("Renamed"); w:set_size { width = 1000, height = 640 }
+local open, shown, minimized, maximized = w:is_open(), w:state().shown, w:state().minimized, w:is_maximized()
+w:begin_drag()
+w:begin_resize("se")
+```
+
+- `close()` asks the OS to close the window, exactly as its close button does, so `on_close` runs once. The plugin's own close and the OS chrome share that one path.
+- `maximize()` / `restore()` / `is_maximized()` are tracked by the host: nothing reads a maximized state back from the OS. The flag can drift after a Windows snap or a window-manager maximize; use it for a glyph, never to derive a restore size.
+- `begin_drag()` must be called from `on_render` while the pointer is pressed in your bar; the host starts the OS move. On Wayland the window cannot be moved programmatically at all, so it refuses there.
+- `begin_resize(edge)` always refuses: no platform exposes a resize gesture for a plugin window. A `titlebar = "hidden"` window already resizes by its edges on Windows and Linux, where those edges stay the OS's, not the plugin's.
+
+### Widgets in on_render
+
+The `ui` handed to `on_render` is dot-called. It has `text(value)`, `button(label)` (true on the release frame only), and the custom-chrome pieces:
+
+```lua
+local bar = ui.invisible_button { id = "drag", size = { width = 300, height = 32 } }
+local same = ui.invisible_button({ width = 300, height = 32 }, { id = "drag" })
+local hovered, active = ui.is_item_hovered(), ui.is_item_active()
+local dx, dy = ui.mouse_delta()
+local dragging = ui.is_mouse_dragging()
+local right = ui.is_mouse_dragging("right")
+```
+
+`invisible_button` draws no label and no pixel and reserves exactly its requested rect in the layout (the next item sits `height` points lower, no extra gap). It answers `{ hovered, active, clicked }` like Dear ImGui's `InvisibleButton`: hovered while the pointer is over it, active while the pointer stays down on it, clicked once on the release inside it. `is_item_hovered()` and `is_item_active()` agree with the last item in the same frame; `mouse_delta()` is that frame's pointer movement; `is_mouse_dragging(button?)` is Dear ImGui's drag test. Unknown keys and wrong types are refused with a sentence naming them.
+
+### A custom title bar
+
+`apps/zgx/plugins-dev/imgui-custom-chrome` is the whole recipe: a `titlebar = "hidden"` window that draws its own bar and buttons out of `invisible_button`, and uses `mouse_delta` and `is_mouse_dragging` for the drag. Its core:
+
+```lua
+local w = zeron.imgui.open_window { id = "chrome", title = "Custom Chrome", titlebar = "hidden" }
+local last_click = 0.0
+w:on_render(function(ui)
+	ui.text(if w:is_maximized() then "Custom Chrome (maximized)" else "Custom Chrome")
+	local bar = ui.invisible_button { id = "drag", size = { width = 404, height = 32 } }
+	if bar.active and ui.is_mouse_dragging() then
+		w:begin_drag()
+	end
+	if bar.clicked then
+		local now = os.clock()
+		if now - last_click < 0.4 then
+			last_click = 0.0
+			if w:is_maximized() then w:restore() else w:maximize() end
+		else
+			last_click = now
+		end
+	end
+end)
+```
+
 ## Zeron's components
 
 Zeron lends your plugin its design system: the same components Zeron's own screens are built from, from whichever template is active, so your plugin looks native in every theme and template. It needs no permission. Require the modules you use from `@ds/…` (not `@app/…`, which plugins can't reach):

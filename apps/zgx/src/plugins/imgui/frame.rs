@@ -59,7 +59,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use dear_imgui_rs::{Condition, Ui, WindowFlags};
+use dear_imgui_rs::{Condition, MouseButton, StyleVarVec2, Ui, WindowFlags};
 use zgx_script::Value;
 
 use super::render::PreparedFrame;
@@ -510,6 +510,56 @@ impl FrameState {
                     ("max", point(max)),
                 ]))
             }
+            "invisible_button" => {
+                if let Some(key) = unknown_key(
+                    arg,
+                    &["op", "window", "seq", "size", "width", "height", "id"],
+                ) {
+                    return Err(format!(
+                        "ui.{op} can't use {key}: {op} takes an id and a size, like ui.{op}({{ id = \"drag\", size = {{ width = 300, height = 32 }} }})"
+                    ));
+                }
+                let id = invisible_id(arg, op)?;
+                let size = item_size(arg, op)?;
+                let spacing = ui.push_style_var_y(StyleVarVec2::ItemSpacing, 0.0);
+                let clicked = ui.invisible_button(id, size);
+                spacing.pop();
+                let hovered = ui.is_item_hovered();
+                let active = ui.is_item_active();
+                let min = ui.item_rect_min();
+                let max = ui.item_rect_max();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("clicked", Value::Bool(clicked)),
+                    ("hovered", Value::Bool(hovered)),
+                    ("active", Value::Bool(active)),
+                    ("min", point(min)),
+                    ("max", point(max)),
+                ]))
+            }
+            "is_item_hovered" => Ok(Value::record([
+                ("ok", Value::Bool(true)),
+                ("value", Value::Bool(ui.is_item_hovered())),
+            ])),
+            "is_item_active" => Ok(Value::record([
+                ("ok", Value::Bool(true)),
+                ("value", Value::Bool(ui.is_item_active())),
+            ])),
+            "mouse_delta" => {
+                let delta = ui.io().mouse_delta();
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("x", Value::from(f64::from(delta[0]))),
+                    ("y", Value::from(f64::from(delta[1]))),
+                ]))
+            }
+            "is_mouse_dragging" => {
+                let button = mouse_button_arg(arg, op)?;
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("value", Value::Bool(ui.is_mouse_dragging(button))),
+                ]))
+            }
             _ => Err(format!("zeron.imgui has no widget \"{op}\".")),
         }
     }
@@ -859,4 +909,72 @@ fn point(at: [f32; 2]) -> Value {
         ("x", Value::from(f64::from(at[0]))),
         ("y", Value::from(f64::from(at[1]))),
     ])
+}
+
+fn unknown_key(value: &Value, allowed: &[&str]) -> Option<String> {
+    let Value::Map(fields) = value else {
+        return None;
+    };
+    fields
+        .iter()
+        .map(|(key, _)| key.as_ref())
+        .find(|key| !allowed.contains(key))
+        .map(str::to_string)
+}
+
+fn invisible_id(arg: &Value, op: &str) -> Result<String, String> {
+    match arg.field("id") {
+        Some(Value::Str(id)) if !id.is_empty() => Ok(id.to_string()),
+        Some(Value::Str(_)) => Err(format!("ui.{op} can't use id: id can't be empty")),
+        Some(_) => Err(format!(
+            "ui.{op} can't use id: id must be text, like \"drag\""
+        )),
+        None => Err(format!(
+            "ui.{op} needs an id, like ui.{op}({{ id = \"drag\", size = {{ width = 300, height = 32 }} }})"
+        )),
+    }
+}
+
+fn item_size(arg: &Value, op: &str) -> Result<[f32; 2], String> {
+    let from = match arg.field("size") {
+        None => arg,
+        Some(size @ Value::Map(_)) => size,
+        Some(_) => {
+            return Err(format!(
+                "ui.{op} can't use size: size must be a table with width and height"
+            ));
+        }
+    };
+    let axis = |name: &str| -> Result<f32, String> {
+        match from.field(name) {
+            Some(Value::Num(number)) if number.is_finite() && *number > 0.0 => Ok(*number as f32),
+            Some(Value::Num(_)) => Err(format!(
+                "ui.{op} can't use {name}: {name} must be more than zero"
+            )),
+            Some(_) => Err(format!("ui.{op} can't use {name}: {name} must be a number")),
+            None => Err(format!(
+                "ui.{op} needs a size, like ui.{op}({{ id = \"drag\", size = {{ width = 300, height = 32 }} }})"
+            )),
+        }
+    };
+    Ok([axis("width")?, axis("height")?])
+}
+
+fn mouse_button_arg(arg: &Value, op: &str) -> Result<MouseButton, String> {
+    match arg.field("button") {
+        None => Ok(MouseButton::Left),
+        Some(Value::Str(name)) => match name.as_ref() {
+            "left" => Ok(MouseButton::Left),
+            "right" => Ok(MouseButton::Right),
+            "middle" => Ok(MouseButton::Middle),
+            "extra1" => Ok(MouseButton::Extra1),
+            "extra2" => Ok(MouseButton::Extra2),
+            other => Err(format!(
+                "ui.{op} can't use button \"{other}\": button must be \"left\", \"right\", \"middle\", \"extra1\" or \"extra2\""
+            )),
+        },
+        Some(_) => Err(format!(
+            "ui.{op} can't use button: button must be \"left\", \"right\", \"middle\", \"extra1\" or \"extra2\""
+        )),
+    }
 }
