@@ -85,6 +85,19 @@ const WIDGET_OPS: &[&str] = &[
     "is_item_active",
     "mouse_delta",
     "is_mouse_dragging",
+    "same_line",
+    "new_line",
+    "spacing",
+    "dummy",
+    "indent",
+    "unindent",
+    "begin_child",
+    "end_child",
+    "columns",
+    "next_column",
+    "begin_group",
+    "end_group",
+    "set_next_item_width",
 ];
 
 /// Ends the frame the render callback was given.
@@ -218,7 +231,7 @@ impl ImGuiWindows {
         }
         if !WINDOW_OPS.contains(&op.as_str()) {
             return failed(&format!(
-                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, is_maximized, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text, text_colored, separator, button, small_button, checkbox, radio_button, input_text, input_text_multiline, input_int, input_float, slider_int, slider_float, drag_int, drag_float, progress_bar, combo, selectable, bullet_text, invisible_button, is_item_hovered, is_item_active, mouse_delta and is_mouse_dragging."
+                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, is_maximized, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text, text_colored, separator, button, small_button, checkbox, radio_button, input_text, input_text_multiline, input_int, input_float, slider_int, slider_float, drag_int, drag_float, progress_bar, combo, selectable, bullet_text, invisible_button, is_item_hovered, is_item_active, mouse_delta, is_mouse_dragging, same_line, new_line, spacing, dummy, indent, unindent, begin_child, end_child, columns, next_column, begin_group, end_group and set_next_item_width."
             ));
         }
         if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {
@@ -431,7 +444,7 @@ pub const PLUGIN_CLOSED: CloseReason = CloseReason::Closed;
 /// `plugin.<id>.calls` state, so the pump owns a list here and publishes it
 /// the way the bridge does. `failed` goes to the app's log, which is what a
 /// fixture run reads.
-pub fn dev_calls(host: &ScriptHost, id: &str) -> FrameCalls {
+pub fn dev_calls(host: &ScriptHost, id: &str, refused: impl Fn(&str) + 'static) -> FrameCalls {
     let shared: Shared = host.shared(
         &format!("plugin.{id}.calls"),
         crate::plugins::vlist(Vec::new()),
@@ -485,7 +498,7 @@ pub fn dev_calls(host: &ScriptHost, id: &str) -> FrameCalls {
             eprintln!("zeron-zgx: dev plugin {plugin}: {error}");
         }
     };
-    FrameCalls::new(push, take, failed)
+    FrameCalls::new(push, take, failed).with_refused(refused)
 }
 
 /// The close of a dev plugin's window, as its `on_close` hears it.
@@ -519,8 +532,12 @@ fn dev_close(calls: FrameCalls) -> impl Fn(&str) + 'static {
 /// as a frame — the dev plugin's own `plugin.<id>.calls` — rather than the
 /// stderr line it used to be alone (which stays, for a native probe to
 /// read).
-pub fn dev_listen(host: &ScriptHost, id: &str) -> (FrameCalls, impl Fn(&str) + 'static) {
-    let calls = dev_calls(host, id);
+pub fn dev_listen(
+    host: &ScriptHost,
+    id: &str,
+    refused: impl Fn(&str) + 'static,
+) -> (FrameCalls, impl Fn(&str) + 'static) {
+    let calls = dev_calls(host, id, refused);
     let closed = dev_close(calls.clone());
     let plugin = id.to_string();
     let handler = move |window: &str| {

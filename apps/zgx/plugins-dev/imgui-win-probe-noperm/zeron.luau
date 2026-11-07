@@ -1453,6 +1453,47 @@ return function(id: string): any
 			local answer = call("is_mouse_dragging", if button == nil then {} else { button = button })
 			return answer.value == true
 		end
+		function view.same_line()
+			call("same_line", {})
+		end
+		function view.new_line()
+			call("new_line", {})
+		end
+		function view.spacing()
+			call("spacing", {})
+		end
+		function view.dummy(size)
+			call("dummy", table.clone(size or {}))
+		end
+		function view.indent()
+			call("indent", {})
+		end
+		function view.unindent()
+			call("unindent", {})
+		end
+		function view.begin_child(id, size)
+			local fields = table.clone(size or {})
+			fields.id = tostring(id)
+			call("begin_child", fields)
+		end
+		function view.end_child()
+			call("end_child", {})
+		end
+		function view.columns(count)
+			call("columns", { count = count })
+		end
+		function view.next_column()
+			call("next_column", {})
+		end
+		function view.begin_group()
+			call("begin_group", {})
+		end
+		function view.end_group()
+			call("end_group", {})
+		end
+		function view.set_next_item_width(width)
+			call("set_next_item_width", { width = width })
+		end
 		return view
 	end
 

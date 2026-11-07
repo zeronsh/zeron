@@ -153,6 +153,15 @@ impl Probe {
             .expect("an is_mouse_dragging call");
         matches!(answer.field("value"), Some(Value::Bool(true)))
     }
+
+    fn style(&self) -> dear_imgui_rs::Style {
+        let mut context = self.context.borrow_mut();
+        context
+            .as_mut()
+            .expect("the probe's context")
+            .with_active(|context| context.style().clone())
+            .expect("an active context")
+    }
 }
 
 impl FrameWindow for Probe {
@@ -294,13 +303,17 @@ fn spend(ms: u64) {
 /// arrives with the frame that carried it, and later frames reuse what the
 /// renderer already holds.
 fn raster(gpu: &TestGpu, probe: &Probe) -> Snapshot {
+    raster_upto(gpu, probe, usize::MAX)
+}
+
+fn raster_upto(gpu: &TestGpu, probe: &Probe, count: usize) -> Snapshot {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = WgpuRenderer::new(gpu.device.clone(), gpu.queue.clone(), format);
     let target = OffscreenTarget::new(&gpu.device, (720, 480), format);
     let delivered = probe.delivered.borrow();
     assert!(!delivered.is_empty(), "a delivered frame");
     let mut painted = None;
-    for prepared in delivered.iter() {
+    for prepared in delivered.iter().take(count) {
         let (_, snapshot) =
             snapshot::render(&mut renderer, &gpu.device, &gpu.queue, &target, prepared)
                 .expect("an offscreen frame");
@@ -312,6 +325,15 @@ fn raster(gpu: &TestGpu, probe: &Probe) -> Snapshot {
 /// Pixels in `area` (left, top, right, bottom) that differ from `background`
 /// by 16 or more in any channel.
 fn differing(image: &Snapshot, background: &Snapshot, area: (u32, u32, u32, u32)) -> usize {
+    differing_above(image, background, area, 16)
+}
+
+fn differing_above(
+    image: &Snapshot,
+    background: &Snapshot,
+    area: (u32, u32, u32, u32),
+    threshold: u8,
+) -> usize {
     let (left, top, right, bottom) = area;
     let mut count = 0;
     for y in top..bottom.min(image.height()) {
@@ -323,7 +345,7 @@ fn differing(image: &Snapshot, background: &Snapshot, area: (u32, u32, u32, u32)
                 .iter()
                 .zip(was.iter())
                 .take(3)
-                .any(|(a, b)| a.abs_diff(*b) >= 16)
+                .any(|(a, b)| a.abs_diff(*b) >= threshold)
             {
                 count += 1;
             }
@@ -353,6 +375,14 @@ fn window_rect(rect: (f32, f32, f32, f32)) -> (u32, u32, u32, u32) {
         rect.2.ceil().max(0.0) as u32,
         rect.3.ceil().max(0.0) as u32,
     )
+}
+
+fn width_of(rect: (f32, f32, f32, f32)) -> f32 {
+    rect.2 - rect.0
+}
+
+fn height_of(rect: (f32, f32, f32, f32)) -> f32 {
+    rect.3 - rect.1
 }
 
 #[test]
@@ -2933,4 +2963,1139 @@ fn widget_options_and_colours_are_checked() {
     assert!(messages[1].contains("progress_bar"), "{}", messages[1]);
     assert!(messages[1].contains("1.5"), "{}", messages[1]);
     assert!(messages[2].contains("0 to 1"), "{}", messages[2]);
+}
+
+fn no_arg() -> Value {
+    Value::record(std::iter::empty::<(&str, Value)>())
+}
+
+fn sheet(probe: &Probe, seq: u64, out: &mut Vec<(f32, f32, f32, f32)>) {
+    out.push(rect_of(&probe.text(seq, "A")));
+
+    probe
+        .frame_widget("same_line", seq, &no_arg())
+        .expect("same_line");
+    out.push(rect_of(&probe.text(seq, "B")));
+
+    probe
+        .frame_widget("new_line", seq, &no_arg())
+        .expect("new_line");
+    out.push(rect_of(&probe.text(seq, "C")));
+
+    probe
+        .frame_widget("spacing", seq, &no_arg())
+        .expect("spacing");
+    out.push(rect_of(
+        &probe
+            .frame_widget(
+                "dummy",
+                seq,
+                &Value::record([("width", Value::from(40.0)), ("height", Value::from(60.0))]),
+            )
+            .expect("dummy"),
+    ));
+
+    probe
+        .frame_widget("indent", seq, &no_arg())
+        .expect("indent");
+    out.push(rect_of(&probe.text(seq, "D")));
+    probe
+        .frame_widget("unindent", seq, &no_arg())
+        .expect("unindent");
+
+    out.push(rect_of(
+        &probe
+            .frame_widget(
+                "begin_child",
+                seq,
+                &Value::record([
+                    ("id", Value::from("log")),
+                    ("width", Value::from(240.0)),
+                    ("height", Value::from(80.0)),
+                ]),
+            )
+            .expect("begin_child"),
+    ));
+    out.push(rect_of(&probe.text(seq, "inside")));
+    probe
+        .frame_widget("end_child", seq, &no_arg())
+        .expect("end_child");
+
+    probe
+        .frame_widget(
+            "columns",
+            seq,
+            &Value::record([("count", Value::from(2.0))]),
+        )
+        .expect("columns");
+    out.push(rect_of(&probe.text(seq, "left")));
+    probe
+        .frame_widget("next_column", seq, &no_arg())
+        .expect("next_column");
+    out.push(rect_of(&probe.text(seq, "right")));
+    probe
+        .frame_widget(
+            "columns",
+            seq,
+            &Value::record([("count", Value::from(1.0))]),
+        )
+        .expect("columns close");
+
+    probe
+        .frame_widget("begin_group", seq, &no_arg())
+        .expect("begin_group");
+    out.push(rect_of(&probe.text(seq, "group label")));
+    out.push(rect_of(
+        &probe
+            .frame_widget(
+                "button",
+                seq,
+                &Value::record([("label", Value::from("Go"))]),
+            )
+            .expect("button"),
+    ));
+    out.push(rect_of(
+        &probe
+            .frame_widget("end_group", seq, &no_arg())
+            .expect("end_group"),
+    ));
+
+    probe
+        .frame_widget(
+            "set_next_item_width",
+            seq,
+            &Value::record([("width", Value::from(160.0))]),
+        )
+        .expect("set_next_item_width");
+    out.push(rect_of(
+        &probe
+            .frame_widget(
+                "progress_bar",
+                seq,
+                &Value::record([("fraction", Value::from(0.5))]),
+            )
+            .expect("progress_bar"),
+    ));
+}
+
+#[test]
+fn same_line_puts_the_next_item_beside_the_previous() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("same-line");
+    let spacing = probe.style().item_spacing()[0];
+
+    let a = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let b = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (a, b) = (a.clone(), b.clone());
+        run_frame(&probe, move |probe, seq| {
+            *a.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            probe
+                .frame_widget("same_line", seq, &no_arg())
+                .expect("same_line");
+            *b.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (a, b) = (*a.borrow(), *b.borrow());
+    assert!((a.1 - b.1).abs() <= 0.5, "same row: {a:?} {b:?}");
+    assert!(
+        b.0 >= a.2 + spacing - 0.5,
+        "B starts after A plus spacing: {a:?} {b:?}"
+    );
+
+    let control = Probe::new("same-line-control");
+    let ca = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let cb = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (ca, cb) = (ca.clone(), cb.clone());
+        run_frame(&control, move |probe, seq| {
+            *ca.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            *cb.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (ca, cb) = (*ca.borrow(), *cb.borrow());
+    assert!(
+        cb.1 > ca.3,
+        "without the call B stays on the next row: {ca:?} {cb:?}"
+    );
+}
+
+#[test]
+fn new_line_breaks_the_row_back_to_the_column_edge() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("new-line");
+
+    let a = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let b = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (a, b) = (a.clone(), b.clone());
+        run_frame(&probe, move |probe, seq| {
+            *a.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            probe
+                .frame_widget("same_line", seq, &no_arg())
+                .expect("same_line");
+            probe
+                .frame_widget("new_line", seq, &no_arg())
+                .expect("new_line");
+            *b.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (a, b) = (*a.borrow(), *b.borrow());
+    assert!(
+        (b.0 - a.0).abs() <= 0.5,
+        "back to the column edge: {a:?} {b:?}"
+    );
+    assert!(b.1 > a.3, "B is below A: {a:?} {b:?}");
+
+    let control = Probe::new("new-line-control");
+    let ca = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let cb = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (ca, cb) = (ca.clone(), cb.clone());
+        run_frame(&control, move |probe, seq| {
+            *ca.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            probe
+                .frame_widget("same_line", seq, &no_arg())
+                .expect("same_line");
+            *cb.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (ca, cb) = (*ca.borrow(), *cb.borrow());
+    assert!(
+        cb.0 > ca.2,
+        "without new_line B stays beside A: {ca:?} {cb:?}"
+    );
+}
+
+#[test]
+fn spacing_adds_exactly_one_item_spacing() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("spacing");
+    let spacing = probe.style().item_spacing()[1];
+
+    let a_with = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let b_with = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let gap_with = Rc::new(Cell::new(0.0_f32));
+    {
+        let (a, b, gap) = (a_with.clone(), b_with.clone(), gap_with.clone());
+        run_frame(&probe, move |probe, seq| {
+            *a.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            probe
+                .frame_widget("spacing", seq, &no_arg())
+                .expect("spacing");
+            *b.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            gap.set((*b.borrow()).1 - (*a.borrow()).3);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+
+    let control = Probe::new("spacing-control");
+    let ca = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let cb = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let gap_control = Rc::new(Cell::new(0.0_f32));
+    {
+        let (ca, cb, gap) = (ca.clone(), cb.clone(), gap_control.clone());
+        run_frame(&control, move |probe, seq| {
+            *ca.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            *cb.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            gap.set((*cb.borrow()).1 - (*ca.borrow()).3);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+
+    assert!(
+        (gap_with.get() - gap_control.get() - spacing).abs() <= 0.5,
+        "spacing adds one item spacing: {} vs {} (want {spacing})",
+        gap_with.get(),
+        gap_control.get()
+    );
+}
+
+#[test]
+fn dummy_reserves_its_height_and_draws_nothing() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let probe = Probe::new("dummy");
+    let spacing = probe.style().item_spacing()[1];
+
+    let a = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let dummy = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let b = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (a, dummy, b) = (a.clone(), dummy.clone(), b.clone());
+        run_frame(&probe, move |probe, seq| {
+            *a.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            *dummy.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "dummy",
+                        seq,
+                        &Value::record([
+                            ("width", Value::from(40.0)),
+                            ("height", Value::from(60.0)),
+                        ]),
+                    )
+                    .expect("dummy"),
+            );
+            *b.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let painted = raster(&gpu, &probe);
+
+    let control = Probe::new("dummy-control");
+    let ca = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let cb = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (ca, cb) = (ca.clone(), cb.clone());
+        run_frame(&control, move |probe, seq| {
+            *ca.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            *cb.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+
+    let (b, cb) = (*b.borrow(), *cb.borrow());
+    assert!(
+        (b.1 - cb.1 - 60.0 - spacing).abs() <= 0.5,
+        "the next item moves down by the dummy height plus spacing: {b:?} {cb:?}"
+    );
+    assert!((b.0 - cb.0).abs() <= 0.5, "x is unchanged: {b:?} {cb:?}");
+
+    let empty = Probe::new("dummy-empty");
+    run_frame(&empty, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("empty");
+    let background = raster(&gpu, &empty);
+    assert!(
+        identical_pixels(&painted, &background, window_rect(*dummy.borrow())),
+        "the dummy band draws nothing"
+    );
+}
+
+#[test]
+fn indent_shifts_subsequent_items_by_one_step() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("indent");
+    let indent = probe.style().indent_spacing();
+
+    let a = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let b = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (a, b) = (a.clone(), b.clone());
+        run_frame(&probe, move |probe, seq| {
+            *a.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            probe
+                .frame_widget("indent", seq, &no_arg())
+                .expect("indent");
+            *b.borrow_mut() = rect_of(&probe.text(seq, "B"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (a, b) = (*a.borrow(), *b.borrow());
+    assert!(
+        (b.0 - a.0 - indent).abs() <= 0.5,
+        "shifted by one indent step: {a:?} {b:?} indent {indent}"
+    );
+    assert!(b.1 > a.3, "B is below A: {a:?} {b:?}");
+}
+
+#[test]
+fn unindent_removes_exactly_one_indent_level() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("unindent");
+    let indent = probe.style().indent_spacing();
+
+    let a = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let c = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (a, c) = (a.clone(), c.clone());
+        run_frame(&probe, move |probe, seq| {
+            *a.borrow_mut() = rect_of(&probe.text(seq, "A"));
+            probe
+                .frame_widget("indent", seq, &no_arg())
+                .expect("indent");
+            probe
+                .frame_widget("indent", seq, &no_arg())
+                .expect("indent");
+            probe
+                .frame_widget("unindent", seq, &no_arg())
+                .expect("unindent");
+            *c.borrow_mut() = rect_of(&probe.text(seq, "C"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (a, c) = (*a.borrow(), *c.borrow());
+    assert!(
+        (c.0 - a.0 - indent).abs() <= 0.5,
+        "one indent remains: {a:?} {c:?} indent {indent}"
+    );
+
+    let again = Probe::new("unindent-again");
+    let c2 = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let c2 = c2.clone();
+        run_frame(&again, move |probe, seq| {
+            probe.text(seq, "A");
+            probe
+                .frame_widget("indent", seq, &no_arg())
+                .expect("indent");
+            probe
+                .frame_widget("indent", seq, &no_arg())
+                .expect("indent");
+            probe
+                .frame_widget("unindent", seq, &no_arg())
+                .expect("unindent");
+            probe
+                .frame_widget("unindent", seq, &no_arg())
+                .expect("unindent");
+            *c2.borrow_mut() = rect_of(&probe.text(seq, "C"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    assert!(
+        (c2.borrow().0 - a.0).abs() <= 0.5,
+        "two unindents return to the column edge: {a:?} {c2:?}"
+    );
+}
+
+#[test]
+fn begin_child_clips_its_content() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let probe = Probe::new("child-clip");
+
+    let child = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let after = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (child, after) = (child.clone(), after.clone());
+        run_frame(&probe, move |probe, seq| {
+            *child.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "begin_child",
+                        seq,
+                        &Value::record([
+                            ("id", Value::from("log")),
+                            ("width", Value::from(240.0)),
+                            ("height", Value::from(80.0)),
+                        ]),
+                    )
+                    .expect("begin_child"),
+            );
+            for line in 0..40 {
+                probe.text(seq, &format!("line {line}"));
+            }
+            probe
+                .frame_widget("end_child", seq, &no_arg())
+                .expect("end_child");
+            *after.borrow_mut() = rect_of(&probe.text(seq, "after"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let painted = raster(&gpu, &probe);
+
+    let empty = Probe::new("child-clip-empty");
+    run_frame(&empty, |probe, seq| {
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("empty");
+    let background = raster(&gpu, &empty);
+
+    let child = *child.borrow();
+    let after_top = after.borrow().1.floor().max(0.0) as u32;
+    let area = window_rect(child);
+    let inside = differing(&painted, &background, area);
+    assert!(
+        inside >= 40,
+        "at least one line ink inside the child: {inside}"
+    );
+
+    let left = differing_above(
+        &painted,
+        &background,
+        (0, area.1, area.0.saturating_sub(1), area.3),
+        2,
+    );
+    let right = differing_above(
+        &painted,
+        &background,
+        (area.2 + 1, area.1, painted.width(), area.3),
+        2,
+    );
+    let below = differing_above(
+        &painted,
+        &background,
+        (area.0, area.3 + 1, area.2, after_top),
+        2,
+    );
+    assert_eq!(left, 0, "no ink left of the child: {child:?}");
+    assert_eq!(right, 0, "no ink right of the child: {child:?}");
+    assert_eq!(
+        below, 0,
+        "no clipped ink between the child and after: {child:?}"
+    );
+}
+
+#[test]
+fn a_child_region_scrolls_with_the_wheel() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let probe = Probe::new("child-scroll");
+
+    let child = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let draw = {
+        let child = child.clone();
+        move |probe: &Probe, seq: u64| {
+            *child.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "begin_child",
+                        seq,
+                        &Value::record([
+                            ("id", Value::from("log")),
+                            ("width", Value::from(240.0)),
+                            ("height", Value::from(80.0)),
+                        ]),
+                    )
+                    .expect("begin_child"),
+            );
+            for line in 0..40 {
+                probe.text(seq, &format!("line {line}"));
+            }
+            probe
+                .frame_widget("end_child", seq, &no_arg())
+                .expect("end_child");
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    };
+    run_frame(&probe, draw.clone()).expect("before");
+    let before = raster(&gpu, &probe);
+    let area = window_rect(*child.borrow());
+    let (left, top, right, bottom) = area;
+    let child_before = *child.borrow();
+
+    let centre = [(left + right) as f32 / 2.0, (top + bottom) as f32 / 2.0];
+    move_pointer(&probe, centre[0], centre[1]);
+    for _ in 0..3 {
+        probe.edit_io(|io| io.add_mouse_wheel_event([0.0, -1.0]));
+        run_frame(&probe, draw.clone()).expect("wheel");
+    }
+    for _ in 0..2 {
+        run_frame(&probe, draw.clone()).expect("idle");
+    }
+    let after = raster(&gpu, &probe);
+    let child_after = *child.borrow();
+    assert!(
+        (child_before.0 - child_after.0).abs() <= 0.5
+            && (child_before.1 - child_after.1).abs() <= 0.5
+            && (child_before.2 - child_after.2).abs() <= 0.5
+            && (child_before.3 - child_after.3).abs() <= 0.5,
+        "the child rect stays put, so the window did not scroll: {child_before:?} vs {child_after:?}"
+    );
+    let changed = differing(&after, &before, area);
+    let total = (right - left).saturating_mul(bottom - top) as usize;
+    assert!(
+        changed * 100 >= total * 5,
+        "at least 5% of the child changes when scrolled: {changed}/{total}"
+    );
+    let strip_bottom = (top + 12).min(bottom);
+    let strip_total = (right - left).saturating_mul(strip_bottom - top) as usize;
+    let strip_changed = differing(&after, &before, (left, top, right, strip_bottom));
+    assert!(
+        strip_changed * 20 >= strip_total,
+        "the first visible line moved inside the child: {strip_changed}/{strip_total}"
+    );
+}
+
+#[test]
+fn columns_split_into_equal_halves() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("columns");
+
+    let full = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let left = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let right = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (full, left, right) = (full.clone(), left.clone(), right.clone());
+        run_frame(&probe, move |probe, seq| {
+            *full.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "progress_bar",
+                        seq,
+                        &Value::record([("fraction", Value::from(0.5))]),
+                    )
+                    .expect("full width bar"),
+            );
+            probe
+                .frame_widget(
+                    "columns",
+                    seq,
+                    &Value::record([("count", Value::from(2.0))]),
+                )
+                .expect("columns");
+            *left.borrow_mut() = rect_of(&probe.text(seq, "left"));
+            probe
+                .frame_widget("next_column", seq, &no_arg())
+                .expect("next_column");
+            *right.borrow_mut() = rect_of(&probe.text(seq, "right"));
+            probe
+                .frame_widget(
+                    "columns",
+                    seq,
+                    &Value::record([("count", Value::from(1.0))]),
+                )
+                .expect("columns close");
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (full, left, right) = (*full.borrow(), *left.borrow(), *right.borrow());
+    let mid = (full.0 + full.2) / 2.0;
+    assert!(
+        (left.1 - right.1).abs() <= 0.5,
+        "same row: {left:?} {right:?}"
+    );
+    assert!(
+        left.2 <= mid && right.0 >= mid,
+        "each text stays in its half: {left:?} {right:?} mid {mid}"
+    );
+    assert!(
+        left.0 >= full.0 - 1.0 && right.2 <= full.2 + 1.0,
+        "the columns stay inside the content region: {full:?} {left:?} {right:?}"
+    );
+}
+
+#[test]
+fn a_group_advances_as_one_item() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("group");
+
+    let label = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let button = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let group = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let beside = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (label, button, group, beside) =
+            (label.clone(), button.clone(), group.clone(), beside.clone());
+        run_frame(&probe, move |probe, seq| {
+            probe
+                .frame_widget("begin_group", seq, &no_arg())
+                .expect("begin_group");
+            *label.borrow_mut() = rect_of(&probe.text(seq, "a long label for the group"));
+            *button.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "button",
+                        seq,
+                        &Value::record([("label", Value::from("Go"))]),
+                    )
+                    .expect("button"),
+            );
+            *group.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget("end_group", seq, &no_arg())
+                    .expect("end_group"),
+            );
+            probe
+                .frame_widget("same_line", seq, &no_arg())
+                .expect("same_line");
+            *beside.borrow_mut() = rect_of(&probe.text(seq, "beside"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (label, button, group, beside) = (
+        *label.borrow(),
+        *button.borrow(),
+        *group.borrow(),
+        *beside.borrow(),
+    );
+    assert!(
+        beside.0 >= group.2 - 0.5,
+        "beside starts at or right of the group edge: {group:?} {beside:?}"
+    );
+    assert!(
+        beside.1 >= label.1 && beside.1 < label.3,
+        "beside overlaps the group's first row: {label:?} {beside:?}"
+    );
+    assert!(
+        group.3 - group.1 >= 2.0 * (label.3 - label.1),
+        "the group covers both rows: {label:?} {button:?} {group:?}"
+    );
+
+    let control = Probe::new("group-control");
+    let clabel = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let cbeside = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (clabel, cbeside) = (clabel.clone(), cbeside.clone());
+        run_frame(&control, move |probe, seq| {
+            *clabel.borrow_mut() = rect_of(&probe.text(seq, "a long label for the group"));
+            probe
+                .frame_widget(
+                    "button",
+                    seq,
+                    &Value::record([("label", Value::from("Go"))]),
+                )
+                .expect("button");
+            probe
+                .frame_widget("same_line", seq, &no_arg())
+                .expect("same_line");
+            *cbeside.borrow_mut() = rect_of(&probe.text(seq, "beside"));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let (clabel, cbeside) = (*clabel.borrow(), *cbeside.borrow());
+    assert!(
+        cbeside.1 > clabel.3,
+        "without the group beside sits beside the button, below the label: {clabel:?} {cbeside:?}"
+    );
+}
+
+#[test]
+fn set_next_item_width_sizes_exactly_the_next_item() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("next-width");
+
+    let first = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let second = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (first, second) = (first.clone(), second.clone());
+        run_frame(&probe, move |probe, seq| {
+            probe
+                .frame_widget(
+                    "set_next_item_width",
+                    seq,
+                    &Value::record([("width", Value::from(160.0))]),
+                )
+                .expect("set_next_item_width");
+            *first.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "progress_bar",
+                        seq,
+                        &Value::record([("fraction", Value::from(0.5))]),
+                    )
+                    .expect("bar 1"),
+            );
+            *second.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "progress_bar",
+                        seq,
+                        &Value::record([("fraction", Value::from(0.5))]),
+                    )
+                    .expect("bar 2"),
+            );
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+
+    let control = Probe::new("next-width-control");
+    let full = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let full = full.clone();
+        run_frame(&control, move |probe, seq| {
+            *full.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "progress_bar",
+                        seq,
+                        &Value::record([("fraction", Value::from(0.5))]),
+                    )
+                    .expect("full width bar"),
+            );
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let content_width = width_of(*full.borrow());
+
+    assert!(
+        (width_of(*first.borrow()) - 160.0).abs() <= 0.5,
+        "the first bar is 160 wide: {:?}",
+        *first.borrow()
+    );
+    assert!(
+        (width_of(*second.borrow()) - content_width).abs() <= 1.0,
+        "the second bar is full width: {:?} content {content_width}",
+        *second.borrow()
+    );
+
+    let probe = Probe::new("next-width-input");
+    let control_width = Rc::new(Cell::new(0.0_f32));
+    {
+        let control_width = control_width.clone();
+        run_frame(&probe, move |probe, seq| {
+            let answer = probe
+                .frame_widget(
+                    "input_text",
+                    seq,
+                    &Value::record([("label", Value::from("name")), ("value", Value::from(""))]),
+                )
+                .expect("control input_text");
+            control_width.set(width_of(rect_of(&answer)));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("control frame");
+    }
+    let probe = Probe::new("next-width-input-wide");
+    let sized_width = Rc::new(Cell::new(0.0_f32));
+    {
+        let sized_width = sized_width.clone();
+        run_frame(&probe, move |probe, seq| {
+            probe
+                .frame_widget(
+                    "set_next_item_width",
+                    seq,
+                    &Value::record([("width", Value::from(160.0))]),
+                )
+                .expect("set_next_item_width");
+            let answer = probe
+                .frame_widget(
+                    "input_text",
+                    seq,
+                    &Value::record([("label", Value::from("name")), ("value", Value::from(""))]),
+                )
+                .expect("sized input_text");
+            sized_width.set(width_of(rect_of(&answer)));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("sized frame");
+    }
+    assert!(
+        (sized_width.get() - control_width.get() - (160.0 - content_width)).abs() <= 1.5,
+        "the width applies to the next item, not only bars: {} vs {} content {content_width}",
+        sized_width.get(),
+        control_width.get()
+    );
+}
+
+#[test]
+fn text_wraps_at_the_region_width() {
+    let _guard = imgui_guard();
+    let sentence = "wrapped words in a paragraph ".repeat(8);
+
+    let probe = Probe::new("wrap");
+    let child = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    let inside = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let (child, inside) = (child.clone(), inside.clone());
+        let sentence = sentence.clone();
+        run_frame(&probe, move |probe, seq| {
+            *child.borrow_mut() = rect_of(
+                &probe
+                    .frame_widget(
+                        "begin_child",
+                        seq,
+                        &Value::record([
+                            ("id", Value::from("narrow")),
+                            ("width", Value::from(120.0)),
+                            ("height", Value::from(200.0)),
+                        ]),
+                    )
+                    .expect("begin_child"),
+            );
+            *inside.borrow_mut() = rect_of(&probe.text(seq, &sentence));
+            probe
+                .frame_widget("end_child", seq, &no_arg())
+                .expect("end_child");
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+
+    let wide = Probe::new("wrap-wide");
+    let outside = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let outside = outside.clone();
+        let sentence = sentence.clone();
+        run_frame(&wide, move |probe, seq| {
+            *outside.borrow_mut() = rect_of(&probe.text(seq, &sentence));
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+
+    let inside = *inside.borrow();
+    let outside = *outside.borrow();
+    assert!(
+        height_of(inside) >= 3.0 * height_of(outside),
+        "the child wraps the text: inside {inside:?} outside {outside:?}"
+    );
+    assert!(
+        width_of(outside) > 300.0,
+        "the full-width text is one line: {outside:?}"
+    );
+    let child = *child.borrow();
+    let content_left = child.0 + 8.0;
+    assert!(
+        inside.2 - content_left <= 121.0,
+        "wrapped lines stay within the child width: inside {inside:?} child {child:?}"
+    );
+}
+
+#[test]
+fn items_lay_out_in_submission_order() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("order");
+
+    let rects = Rc::new(RefCell::new(Vec::<(f32, f32, f32, f32)>::new()));
+    let y = Rc::new(RefCell::new(Vec::<f32>::new()));
+    {
+        let (rects, y) = (rects.clone(), y.clone());
+        run_frame(&probe, move |probe, seq| {
+            for word in ["one", "two", "three"] {
+                let value = probe.text(seq, word);
+                rects.borrow_mut().push(rect_of(&value));
+                y.borrow_mut().push(rect_of(&value).1);
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let ys = y.borrow();
+    assert!(ys[0] < ys[1] && ys[1] < ys[2], "top to bottom: {ys:?}");
+    let r = rects.borrow();
+    assert!(
+        r[0].3 <= r[1].1 && r[1].3 <= r[2].1,
+        "no vertical overlap: {r:?}"
+    );
+
+    let reverse = Probe::new("order-reverse");
+    let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let seen = seen.clone();
+        run_frame(&reverse, move |probe, seq| {
+            for word in ["three", "two", "one"] {
+                probe.text(seq, word);
+                seen.borrow_mut().push(word.to_string());
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    assert_eq!(
+        *seen.borrow(),
+        vec!["three".to_string(), "two".to_string(), "one".to_string()],
+        "the draw order is the call order"
+    );
+}
+
+#[test]
+fn layout_is_deterministic_across_frames() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+    let probe = Probe::new("deterministic");
+    let rects60 = Rc::new(RefCell::new(None::<Vec<(f32, f32, f32, f32)>>));
+    let rects120 = Rc::new(RefCell::new(None::<Vec<(f32, f32, f32, f32)>>));
+
+    for _ in 0..120 {
+        let (r60, r120) = (rects60.clone(), rects120.clone());
+        run_frame(&probe, move |probe, seq| {
+            let mut rects = Vec::new();
+            sheet(probe, seq, &mut rects);
+            if seq == 60 {
+                *r60.borrow_mut() = Some(rects.clone());
+            }
+            if seq == 120 {
+                *r120.borrow_mut() = Some(rects);
+            }
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a deterministic frame");
+    }
+    let frame60 = raster_upto(&gpu, &probe, 60);
+    let frame120 = raster_upto(&gpu, &probe, 120);
+    assert_eq!(
+        frame60.pixels(),
+        frame120.pixels(),
+        "frame 60 and frame 120 render identically"
+    );
+    let r60 = rects60.borrow();
+    let r120 = rects120.borrow();
+    let (a, b) = (
+        r60.as_ref().expect("frame 60 rects"),
+        r120.as_ref().expect("frame 120 rects"),
+    );
+    assert_eq!(a.len(), b.len(), "the same items are drawn");
+    for (one, two) in a.iter().zip(b.iter()) {
+        assert!(
+            (one.0 - two.0).abs() <= 0.5
+                && (one.1 - two.1).abs() <= 0.5
+                && (one.2 - two.2).abs() <= 0.5
+                && (one.3 - two.3).abs() <= 0.5,
+            "no drift: {one:?} vs {two:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hidden_second_window_does_not_shift_layout() {
+    let _guard = imgui_guard();
+    let gpu = headless_gpu();
+
+    let a = Probe::new("a");
+    let b = Probe::new("b-hidden");
+    b.shown.set(false);
+    let rects_with = Rc::new(RefCell::new(None::<Vec<(f32, f32, f32, f32)>>));
+    for _ in 0..30 {
+        let rects = rects_with.clone();
+        run_frame(&a, move |probe, seq| {
+            let mut out = Vec::new();
+            sheet(probe, seq, &mut out);
+            *rects.borrow_mut() = Some(out);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a's frame with b hidden");
+    }
+    let snapshot_with = raster(&gpu, &a);
+
+    let a2 = Probe::new("a2");
+    let rects_without = Rc::new(RefCell::new(None::<Vec<(f32, f32, f32, f32)>>));
+    for _ in 0..30 {
+        let rects = rects_without.clone();
+        run_frame(&a2, move |probe, seq| {
+            let mut out = Vec::new();
+            sheet(probe, seq, &mut out);
+            *rects.borrow_mut() = Some(out);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a2's frame with no second window");
+    }
+    let snapshot_without = raster(&gpu, &a2);
+
+    assert_eq!(
+        snapshot_with.pixels(),
+        snapshot_without.pixels(),
+        "a hidden or absent second window does not change a's snapshot"
+    );
+    let with = rects_with.borrow();
+    let without = rects_without.borrow();
+    let (with, without) = (
+        with.as_ref().expect("with rects"),
+        without.as_ref().expect("without rects"),
+    );
+    assert_eq!(with.len(), without.len());
+    for (one, two) in with.iter().zip(without.iter()) {
+        assert!(
+            (one.0 - two.0).abs() <= 0.5
+                && (one.1 - two.1).abs() <= 0.5
+                && (one.2 - two.2).abs() <= 0.5
+                && (one.3 - two.3).abs() <= 0.5,
+            "same item rects: {one:?} vs {two:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unclosed_child_region_is_reported_once() {
+    let _guard = imgui_guard();
+    let probe = Probe::new("unclosed-child");
+
+    let end = run_frame(&probe, |probe, seq| {
+        probe
+            .frame_widget(
+                "begin_child",
+                seq,
+                &Value::record([
+                    ("id", Value::from("log")),
+                    ("width", Value::from(240.0)),
+                    ("height", Value::from(80.0)),
+                ]),
+            )
+            .expect("begin_child");
+        probe.text(seq, "inside");
+        let _ = probe.frame_script_end(seq, None, false);
+    })
+    .expect("a frame");
+    assert!(!end.painted, "the unbalanced frame is dropped: {end:?}");
+    assert!(end.refused, "the unclosed child is a refusal: {end:?}");
+    let error = end.error.as_deref().expect("an error");
+    assert!(error.contains("begin_child"), "{error}");
+    assert!(error.contains("end_child"), "{error}");
+    assert!(
+        probe.frame_state().report().last_error.as_deref() == Some(error),
+        "the error is recorded: {end:?}"
+    );
+
+    let recovered = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    run_frame(&probe, {
+        let recovered = recovered.clone();
+        move |probe, seq| {
+            let child = probe
+                .frame_widget(
+                    "begin_child",
+                    seq,
+                    &Value::record([
+                        ("id", Value::from("log")),
+                        ("width", Value::from(240.0)),
+                        ("height", Value::from(80.0)),
+                    ]),
+                )
+                .expect("begin_child");
+            probe.text(seq, "inside");
+            probe
+                .frame_widget("end_child", seq, &no_arg())
+                .expect("end_child");
+            *recovered.borrow_mut() = rect_of(&child);
+            let _ = probe.frame_script_end(seq, None, false);
+        }
+    })
+    .expect("the recovery frame");
+
+    let baseline = Probe::new("child-balanced");
+    let benchmark = Rc::new(RefCell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)));
+    {
+        let benchmark = benchmark.clone();
+        run_frame(&baseline, move |probe, seq| {
+            let child = probe
+                .frame_widget(
+                    "begin_child",
+                    seq,
+                    &Value::record([
+                        ("id", Value::from("log")),
+                        ("width", Value::from(240.0)),
+                        ("height", Value::from(80.0)),
+                    ]),
+                )
+                .expect("begin_child");
+            probe.text(seq, "inside");
+            probe
+                .frame_widget("end_child", seq, &no_arg())
+                .expect("end_child");
+            *benchmark.borrow_mut() = rect_of(&child);
+            let _ = probe.frame_script_end(seq, None, false);
+        })
+        .expect("a frame");
+    }
+    let recovered = *recovered.borrow();
+    let benchmark = *benchmark.borrow();
+    assert!(
+        (recovered.0 - benchmark.0).abs() <= 0.5
+            && (recovered.1 - benchmark.1).abs() <= 0.5
+            && (recovered.2 - benchmark.2).abs() <= 0.5
+            && (recovered.3 - benchmark.3).abs() <= 0.5,
+        "the next frame lays out like a balanced run: {recovered:?} vs {benchmark:?}"
+    );
 }

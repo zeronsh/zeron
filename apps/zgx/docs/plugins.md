@@ -667,6 +667,36 @@ local theme = ui.combo("theme", theme, { "dark", "light", "system" })
 
 `input_int` and `input_float` clamp the edited value to their `min`/`max`; `slider_int`/`slider_float` read the pointer across that range; `drag_int`/`drag_float` move by pointer delta times `speed` (`1` by default). `input_text` and `input_text_multiline` return the edited string and keep newlines; multiline needs `width` and `height`. `progress_bar` takes a fraction from 0 to 1, or it refuses the call. `combo` takes the current option and a list and returns the chosen value, never its index. Options have no other keys; a wrong type or an unknown key raises in `on_render`, the window stays open, and the earlier calls in that frame still draw.
 
+### Layout
+
+Widgets are laid out top to bottom in the order the callback makes them. The layout calls move where the next item sits:
+
+```lua
+ui.same_line()                                    -- next item beside the previous one
+ui.new_line()                                     -- break the row, back to the column's left edge
+ui.spacing()                                      -- one extra vertical item-spacing
+ui.dummy { width = 40, height = 60 }              -- reserve the space, draw nothing
+ui.indent()
+ui.unindent()                                     -- the column moves one IndentSpacing step
+ui.columns(2)                                     -- start two equal columns on this row
+ui.text("left")
+ui.next_column()                                  -- advance into the next column
+ui.text("right")
+ui.begin_child("log", { width = 240, height = 80, border = true })
+ui.text("inside")                                 -- wraps at the child's width, scrolls with the wheel
+ui.end_child()                                    -- required before on_render returns
+ui.begin_group()
+ui.text("a long label for the group")
+ui.button("Go")
+ui.end_group()
+ui.set_next_item_width(160)                       -- applies to exactly the next item
+ui.progress_bar(0.5)
+```
+
+`next_column()` is how a `columns(count)` block advances: after `ui.columns(2)` the next item draws in the first column, and `ui.next_column()` moves the cursor to the second. Each block starts a new set of columns on the current row and splits the remaining content width equally.
+
+A `begin_child` must be paired with `end_child` before the callback returns. An unclosed child is reported once, naming `begin_child` and (`missing`) `end_child`; the host closes the child at the frame's end, so the window keeps running and the next frame lays out normally. `begin_group` and `end_group` pair the same way and make everything between them advance as one item. `set_next_item_width` sizes only the next item; the one after returns to the region's width.
+
 ### A custom title bar
 
 `apps/zgx/plugins-dev/imgui-custom-chrome` is the whole recipe: a `titlebar = "hidden"` window that draws its own bar and buttons out of `invisible_button`, and uses `mouse_delta` and `is_mouse_dragging` for the drag. Its core:

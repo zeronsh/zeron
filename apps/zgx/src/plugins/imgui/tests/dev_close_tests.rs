@@ -189,7 +189,7 @@ fn a_dev_plugin_is_told_of_a_close_on_the_queue_that_carries_its_frames() {
         app.error()
     );
 
-    let (calls, closed) = luau::dev_listen(&app.host, "p");
+    let (calls, closed) = luau::dev_listen(&app.host, "p", |_| {});
     frame(&calls, "w", 1.0);
     closed("w");
 
@@ -233,7 +233,7 @@ fn a_dev_plugin_runs_on_close_once_and_its_retained_handle_is_inert() {
         app.error()
     );
 
-    let (calls, closed) = luau::dev_listen(&app.host, "p");
+    let (calls, closed) = luau::dev_listen(&app.host, "p", |_| {});
     // Both windows draw through the queue before anything closes.
     frame(&calls, "w", 1.0);
     frame(&calls, "s", 1.0);

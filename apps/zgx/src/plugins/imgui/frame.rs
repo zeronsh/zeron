@@ -56,6 +56,7 @@
 //! withdraws the plugin.
 
 use std::cell::{Cell, RefCell};
+use std::ffi::CString;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -255,6 +256,13 @@ pub trait FrameWindow {
     {
         self.frame_state().widget(self, op, seq, arg)
     }
+
+    fn frame_close_regions(&self, ui: *const Ui) -> Option<String>
+    where
+        Self: Sized,
+    {
+        self.frame_state().close_regions(ui)
+    }
 }
 
 /// One frame in flight: what the widgets are drawn into and what it has cost.
@@ -283,6 +291,9 @@ struct LiveFrame {
     error: Option<String>,
     /// Whether that was a widget call the host refused.
     refused: bool,
+    child_open: bool,
+    group_open: bool,
+    columns_open: bool,
 }
 
 /// One window's frame bookkeeping: the live frame, the counters and the last
@@ -405,6 +416,9 @@ impl FrameState {
             finished: false,
             error: None,
             refused: false,
+            child_open: false,
+            group_open: false,
+            columns_open: false,
         });
         Ok((seq, spec))
     }
@@ -433,6 +447,50 @@ impl FrameState {
         frame.refused = refused;
         frame.error = error;
         Ok(())
+    }
+
+    pub fn close_regions(&self, ui: *const Ui) -> Option<String> {
+        let (child_open, group_open, columns_open, error_absent) = {
+            let live = self.live.borrow();
+            let Some(frame) = live.as_ref() else {
+                return None;
+            };
+            (
+                frame.child_open,
+                frame.group_open,
+                frame.columns_open,
+                frame.error.is_none(),
+            )
+        };
+        if !ui.is_null() {
+            // SAFETY: the ui points into the frame that is still open here,
+            // on this thread, inside the same turn that began it.
+            let ui = unsafe { &*ui };
+            ui.with_bound_context(|| {
+                if child_open {
+                    unsafe { dear_imgui_rs::sys::igEndChild() };
+                }
+                if group_open {
+                    unsafe { dear_imgui_rs::sys::igEndGroup() };
+                }
+                if columns_open {
+                    unsafe { dear_imgui_rs::sys::igColumns(1, std::ptr::null(), false) };
+                }
+            });
+        }
+        {
+            let mut live = self.live.borrow_mut();
+            if let Some(frame) = live.as_mut() {
+                frame.child_open = false;
+                frame.group_open = false;
+                frame.columns_open = false;
+                if child_open && error_absent {
+                    frame.refused = true;
+                    frame.error = Some(unbalanced_child_sentence());
+                }
+            }
+        }
+        child_open.then(unbalanced_child_sentence)
     }
 
     /// Applies one widget call to the open frame.
@@ -489,7 +547,7 @@ impl FrameState {
         match op {
             "text" => {
                 let text = string_arg(arg, "text", op)?;
-                ui.text(text.as_str());
+                ui.text_wrapped(text.as_str());
                 let min = ui.item_rect_min();
                 let max = ui.item_rect_max();
                 Ok(Value::record([
@@ -527,6 +585,61 @@ impl FrameState {
                     ("min", point(ui.item_rect_min())),
                     ("max", point(ui.item_rect_max())),
                 ]))
+            }
+            "same_line" => {
+                ui.same_line();
+                Ok(Value::record([("ok", Value::Bool(true))]))
+            }
+            "new_line" => {
+                ui.new_line();
+                Ok(Value::record([("ok", Value::Bool(true))]))
+            }
+            "spacing" => {
+                ui.spacing();
+                Ok(Value::record([("ok", Value::Bool(true))]))
+            }
+            "dummy" => {
+                if let Some(key) = unknown_key(arg, &["op", "window", "seq", "width", "height"]) {
+                    return Err(format!(
+                        "ui.{op} can't use {key}: dummy takes width and height, like ui.dummy({{ width = 40, height = 60 }})"
+                    ));
+                }
+                let size = size_fields(arg, op, "dummy")?;
+                ui.dummy(size);
+                Ok(Value::record([
+                    ("ok", Value::Bool(true)),
+                    ("min", point(ui.item_rect_min())),
+                    ("max", point(ui.item_rect_max())),
+                ]))
+            }
+            "indent" => {
+                ui.indent();
+                Ok(Value::record([("ok", Value::Bool(true))]))
+            }
+            "unindent" => {
+                ui.unindent();
+                Ok(Value::record([("ok", Value::Bool(true))]))
+            }
+            "begin_child" => begin_child(ui, frame, arg, op),
+            "end_child" => end_child(ui, frame, op),
+            "columns" => columns(ui, frame, arg, op),
+            "next_column" => next_column(ui, frame, op),
+            "begin_group" => begin_group(ui, frame, op),
+            "end_group" => end_group(ui, frame, op),
+            "set_next_item_width" => {
+                if let Some(key) = unknown_key(arg, &["op", "window", "seq", "width"]) {
+                    return Err(format!(
+                        "ui.{op} can't use {key}: set_next_item_width takes a width, like ui.set_next_item_width(160)"
+                    ));
+                }
+                let width = number_arg(arg, "width", op)?;
+                if width <= 0.0 {
+                    return Err(format!(
+                        "ui.{op} needs width to be more than zero, not {width}."
+                    ));
+                }
+                ui.set_next_item_width(width as f32);
+                Ok(Value::record([("ok", Value::Bool(true))]))
             }
             "small_button" => {
                 let label = string_arg(arg, "label", op)?;
@@ -708,7 +821,7 @@ impl FrameState {
                         "ui.{op} needs a fraction from 0 to 1, not {fraction}."
                     ));
                 }
-                ui.progress_bar(fraction as f32).build();
+                ui.progress_bar(fraction as f32).size([0.0, 0.0]).build();
                 Ok(Value::record([
                     ("ok", Value::Bool(true)),
                     ("min", point(ui.item_rect_min())),
@@ -990,6 +1103,7 @@ pub struct FrameCalls {
     push: Rc<PushCall>,
     take: Rc<dyn Fn(&str)>,
     failed: Rc<dyn Fn(&str)>,
+    refused: Rc<dyn Fn(&str)>,
 }
 
 impl FrameCalls {
@@ -1002,7 +1116,17 @@ impl FrameCalls {
             push: Rc::new(push),
             take: Rc::new(take),
             failed: Rc::new(failed),
+            refused: Rc::new(|_| {}),
         }
+    }
+
+    pub fn with_refused(mut self, refused: impl Fn(&str) + 'static) -> Self {
+        self.refused = Rc::new(refused);
+        self
+    }
+
+    pub fn report_refused(&self, error: &str) {
+        (self.refused)(error)
     }
 
     /// Queues a call for the plugin. What the plugin does with it runs before
@@ -1066,6 +1190,9 @@ pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
                     ("budget", Value::from(BUDGET_MS)),
                 ],
             );
+            if let Some(error) = window.frame_close_regions(ui) {
+                calls.report_refused(&error);
+            }
         })
     }));
     let (built, panic) = match attempt {
@@ -1447,4 +1574,176 @@ fn mouse_button_arg(arg: &Value, op: &str) -> Result<MouseButton, String> {
             "ui.{op} can't use button: button must be \"left\", \"right\", \"middle\", \"extra1\" or \"extra2\""
         )),
     }
+}
+
+fn size_fields(arg: &Value, op: &str, example: &str) -> Result<[f32; 2], String> {
+    let axis = |name: &str| -> Result<f32, String> {
+        match arg.field(name) {
+            Some(Value::Num(number)) if number.is_finite() && *number > 0.0 => Ok(*number as f32),
+            Some(Value::Num(_)) => Err(format!(
+                "ui.{op} can't use {name}: {name} must be more than zero"
+            )),
+            Some(other) => Err(format!(
+                "ui.{op} can't use {name}: {name} must be a number, not {}.",
+                type_name(other)
+            )),
+            None => Err(format!("ui.{op} needs {name}, like {example}")),
+        }
+    };
+    Ok([axis("width")?, axis("height")?])
+}
+
+fn child_id(arg: &Value, op: &str) -> Result<String, String> {
+    match arg.field("id") {
+        Some(Value::Str(id)) if !id.is_empty() => Ok(id.to_string()),
+        Some(Value::Str(_)) => Err(format!("ui.{op} can't use id: id can't be empty")),
+        Some(other) => Err(format!(
+            "ui.{op} can't use id: id must be text, not {}.",
+            type_name(other)
+        )),
+        None => Err(format!(
+            "ui.{op} needs an id, like ui.begin_child(\"log\", {{ width = 240, height = 80 }})"
+        )),
+    }
+}
+
+fn unbalanced_child_sentence() -> String {
+    "ui.begin_child was called without ui.end_child; close the child before the callback returns."
+        .to_string()
+}
+
+fn begin_child(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(
+        arg,
+        &["op", "window", "seq", "id", "width", "height", "border"],
+    ) {
+        return Err(format!(
+            "ui.{op} can't use {key}: begin_child takes an id and a size, like ui.begin_child(\"log\", {{ width = 240, height = 80 }})"
+        ));
+    }
+    if frame.child_open {
+        return Err(format!(
+            "ui.{op} was called while another child region is open; close it with ui.end_child first."
+        ));
+    }
+    let id = child_id(arg, op)?;
+    let size = size_fields(
+        arg,
+        op,
+        "ui.begin_child(\"log\", { width = 240, height = 80 })",
+    )?;
+    let border = match arg.field("border") {
+        Some(Value::Bool(value)) => *value,
+        Some(other) => {
+            return Err(format!(
+                "ui.{op} can't use border: border must be true or false, not {}.",
+                type_name(other)
+            ));
+        }
+        None => false,
+    };
+    let id =
+        CString::new(id).map_err(|_| format!("ui.{op} can't use id: id can't hold NUL bytes"))?;
+    let flags = if border {
+        dear_imgui_rs::sys::ImGuiChildFlags_Borders
+    } else {
+        dear_imgui_rs::sys::ImGuiChildFlags_None
+    };
+    let size_sys = dear_imgui_rs::sys::ImVec2_c {
+        x: size[0],
+        y: size[1],
+    };
+    let began = ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igBeginChild_Str(id.as_ptr(), size_sys, flags, 0)
+    });
+    if !began {
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndChild() });
+        return Err(format!("ui.{op} couldn't open the child region here."));
+    }
+    frame.child_open = true;
+    let min = ui.window_pos();
+    let max = [min[0] + ui.window_size()[0], min[1] + ui.window_size()[1]];
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("min", point(min)),
+        ("max", point(max)),
+    ]))
+}
+
+fn end_child(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> {
+    if !frame.child_open {
+        return Err(format!(
+            "ui.{op} was called without a ui.begin_child to close."
+        ));
+    }
+    frame.child_open = false;
+    ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndChild() });
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn columns(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "count"]) {
+        return Err(format!(
+            "ui.{op} can't use {key}: columns takes a count, like ui.columns(2)"
+        ));
+    }
+    let count = number_arg(arg, "count", op)?;
+    if count.fract() != 0.0 || !(1.0..=64.0).contains(&count) {
+        return Err(format!(
+            "ui.{op} needs count to be a whole number from 1 to 64, not {count}."
+        ));
+    }
+    if count == 1.0 {
+        if frame.columns_open {
+            ui.with_bound_context(|| unsafe {
+                dear_imgui_rs::sys::igColumns(1, std::ptr::null(), false)
+            });
+            frame.columns_open = false;
+        }
+        return Ok(Value::record([("ok", Value::Bool(true))]));
+    }
+    if frame.columns_open {
+        return Err(format!(
+            "ui.{op} was called while a columns block is open; call ui.next_column until the last column."
+        ));
+    }
+    ui.with_bound_context(|| unsafe {
+        dear_imgui_rs::sys::igColumns(count as i32, std::ptr::null(), false)
+    });
+    frame.columns_open = true;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn next_column(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> {
+    if !frame.columns_open {
+        return Err(format!("ui.{op} was called outside a ui.columns block."));
+    }
+    ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igNextColumn() });
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn begin_group(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> {
+    if frame.group_open {
+        return Err(format!(
+            "ui.{op} was called while another group is open; close it with ui.end_group first."
+        ));
+    }
+    ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igBeginGroup() });
+    frame.group_open = true;
+    Ok(Value::record([("ok", Value::Bool(true))]))
+}
+
+fn end_group(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> {
+    if !frame.group_open {
+        return Err(format!(
+            "ui.{op} was called without a ui.begin_group to close."
+        ));
+    }
+    frame.group_open = false;
+    ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igEndGroup() });
+    Ok(Value::record([
+        ("ok", Value::Bool(true)),
+        ("min", point(ui.item_rect_min())),
+        ("max", point(ui.item_rect_max())),
+    ]))
 }

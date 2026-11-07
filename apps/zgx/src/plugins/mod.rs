@@ -904,7 +904,12 @@ pub fn dev_plugins(host: &ScriptHost, cx: Option<&mut WindowContext>) {
             // Its calls are the plugin's own `plugin.<id>.calls` state: a
             // dev plugin has no bridge to push into, so a frame and a
             // closed window go through the one channel the SDK drains.
-            let (calls, closed) = imgui::luau::dev_listen(host, &id);
+            let (calls, closed) = imgui::luau::dev_listen(host, &id, {
+                let said = id.clone();
+                imgui::luau::once(move |sentence| {
+                    eprintln!("zeron-zgx: dev plugin {said}: {sentence}");
+                })
+            });
             imgui::luau::serve(
                 host,
                 &id,
@@ -2421,6 +2426,7 @@ impl Bridge {
             // is reported as a broken plugin, with the script's own words.
             let frames = {
                 let (me, plugin) = (me.clone(), plugin.clone());
+                let (refused_me, refused_plugin) = (me.clone(), plugin.clone());
                 let take = {
                     let (me, plugin) = (me.clone(), plugin.clone());
                     move |call: &str| {
@@ -2442,7 +2448,13 @@ impl Bridge {
                         b.push_call(&plugin, call, kind, fields);
                     }
                 };
-                imgui::frame::FrameCalls::new(push, take, failed)
+                imgui::frame::FrameCalls::new(push, take, failed).with_refused(
+                    move |sentence: &str| {
+                        if let Some(b) = refused_me.upgrade() {
+                            b.widget_refused(&refused_plugin, sentence);
+                        }
+                    },
+                )
             };
             // A widget call the host refused (drawn outside a live frame,
             // or after the window closed): one line in the log and one on

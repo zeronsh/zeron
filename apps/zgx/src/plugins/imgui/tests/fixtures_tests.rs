@@ -398,7 +398,7 @@ fn status(app: &TestApp, fake: &Fake, calls: &FrameCalls) -> Json {
 fn driven(id: &str) -> (TestApp, Fake, FrameCalls) {
     let (app, fake) = harness(id, 0);
     app.frames(30);
-    let (calls, _closed) = luau::dev_listen(&app.host, id);
+    let (calls, _closed) = luau::dev_listen(&app.host, id, |_| {});
     (app, fake, calls)
 }
 
@@ -929,7 +929,7 @@ fn the_main_probe_offers_the_probe_actions_the_rows_drive() {
 fn the_main_probe_reports_per_window_state_ticks_and_store() {
     let (app, fake) = harness("imgui-win-probe", 0);
     app.frames(30);
-    let calls = luau::dev_listen(&app.host, "imgui-win-probe").0;
+    let calls = luau::dev_listen(&app.host, "imgui-win-probe", |_| {}).0;
 
     // One frame of a, then a release frame of a: only a's counter moves.
     push_frame(&app, &calls, "a", 1.0);
@@ -1022,7 +1022,7 @@ fn the_main_probe_reports_per_window_state_ticks_and_store() {
 fn the_main_probe_closes_once_and_retitles_a_sibling() {
     let (app, fake) = harness("imgui-win-probe", 0);
     app.frames(30);
-    let (_calls, closed) = luau::dev_listen(&app.host, "imgui-win-probe");
+    let (_calls, closed) = luau::dev_listen(&app.host, "imgui-win-probe", |_| {});
     fake.ops.borrow_mut().clear();
 
     closed("b");
@@ -1049,7 +1049,7 @@ fn the_main_probe_closes_once_and_retitles_a_sibling() {
 fn the_main_probe_reaches_the_cap_and_reuses_a_slot() {
     let (app, fake) = harness("imgui-win-probe", 0);
     app.frames(30);
-    let calls = luau::dev_listen(&app.host, "imgui-win-probe").0;
+    let calls = luau::dev_listen(&app.host, "imgui-win-probe", |_| {}).0;
 
     run_action(&app, &fake, &calls, "n_loop");
     app.frames(30);
@@ -1104,7 +1104,7 @@ fn the_second_probe_opens_the_same_id_at_its_own_geometry() {
 
     // B's tool answers on its own, and B closes its own window. The host
     // tells the plugin of the close on its call queue, which the test plays.
-    let (calls, closed) = luau::dev_listen(&second.host, "imgui-win-probe-b");
+    let (calls, closed) = luau::dev_listen(&second.host, "imgui-win-probe-b", |_| {});
     run_action(&second, &second_fake, &calls, "close_inspector");
     closed("inspector");
     second.frames(3);
@@ -1135,7 +1135,7 @@ fn the_broken_open_fixture_fails_its_first_frame() {
         "{granted:?}"
     );
 
-    let calls = luau::dev_listen(&app.host, "imgui-win-probe-broken-open").0;
+    let calls = luau::dev_listen(&app.host, "imgui-win-probe-broken-open", |_| {}).0;
     push_frame(&app, &calls, "broken", 1.0);
     let ends = fake.ends.borrow().clone();
     let end = ends
@@ -1195,7 +1195,7 @@ fn the_no_permission_fixture_asks_until_it_is_allowed() {
         "it draws once allowed"
     );
 
-    let calls = luau::dev_listen(&app.host, "imgui-no-permission").0;
+    let calls = luau::dev_listen(&app.host, "imgui-no-permission", |_| {}).0;
     push_frame(&app, &calls, "consent", 1.0);
     let drawn: Vec<String> = ops(&fake, "text")
         .iter()
