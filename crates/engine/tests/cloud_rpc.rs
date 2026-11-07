@@ -862,3 +862,135 @@ async fn provider_switch_is_refused_for_a_host_that_cannot_switch() {
     switch("own-chat", "codex").await.unwrap();
     core.shutdown().await;
 }
+
+/// A message that reached a Cloud chat's doc and then waited — its machine
+/// couldn't be woken — for longer than its clock gives it still goes once
+/// the person wakes the machine: it goes again, once, with its clock started
+/// now. One still within its time is left to go as it is.
+#[tokio::test]
+async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
+    use zeron_doc::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
+    let (edge_url, seen) = scripted_edge(|request, _| {
+        if request.contains("/wake") {
+            return (
+                200,
+                r#"{"chatId":"cloud-chat","deviceId":"cloud-s1","spaceId":"sp","state":"starting","createdAt":1,"machine":"xlarge"}"#
+                    .to_string(),
+            );
+        }
+        (404, r#"{"error":"not_found"}"#.to_string())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+    let cwd = dir.path().display().to_string();
+    core.workspace
+        .create_chat("cloud-chat", None, Some("cloud-session-1"), None, Some(cwd))
+        .unwrap();
+    let handle = core.doc_host.open("cloud-chat").unwrap();
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    let now = chrono::Utc::now().timestamp_millis();
+    let run = |prompt: &str, message: &str| SessionCommandPayload::Run {
+        request: zeron_proto::RunRequest {
+            mcp: None,
+            prompt: prompt.into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: "/tmp".into(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: true,
+            access: Default::default(),
+            plan: false,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
+        },
+        message_id: message.into(),
+    };
+    for (id, message, issued_at) in [
+        ("cmd-ten-days", "m-ten-days", now - 10 * DAY),
+        // Its clock runs out while the machine boots.
+        ("cmd-nearly", "m-nearly", now - DAY + 10 * 60 * 1000),
+        ("cmd-an-hour", "m-an-hour", now - 60 * 60 * 1000),
+    ] {
+        handle
+            .doc()
+            .queue_command(&SessionCommandEntry {
+                id: id.into(),
+                payload: run("Fix the flaky test", message),
+                issued_by: "phone".into(),
+                issued_at,
+                based_on: None,
+                expires_at: Some(issued_at + DAY),
+                status: SessionCommandStatus::Pending,
+                resolution: None,
+            })
+            .unwrap();
+    }
+    let attempts = |message: &str| -> Vec<SessionCommandEntry> {
+        handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .filter(|c| {
+                matches!(&c.payload,
+                    SessionCommandPayload::Run { message_id, .. } if message_id == message)
+            })
+            .collect()
+    };
+    let wake = || async {
+        let _: zeron_proto::CloudSession = client
+            .call_as(
+                methods::CLOUD_SESSION_WAKE,
+                serde_json::json!({ "chatId": "cloud-chat", "machine": "xlarge" }),
+            )
+            .await
+            .unwrap();
+    };
+
+    wake().await;
+    let old = attempts("m-ten-days");
+    assert_eq!(old.len(), 2, "the original and one re-issue: {old:?}");
+    assert_eq!(old[0].status, SessionCommandStatus::Rejected);
+    let why = old[0].resolution.clone().unwrap_or_default();
+    assert!(why.contains("ran out"), "{why}");
+    let again = &old[1];
+    assert_eq!(again.payload, old[0].payload, "the same message, as it was");
+    assert!(again.issued_at >= now, "its clock starts at the wake");
+    assert!(
+        again.effective_expiry() > chrono::Utc::now().timestamp_millis() + DAY / 2,
+        "a full clock from now: {again:?}"
+    );
+    assert_eq!(attempts("m-nearly").len(), 2, "one about to run out goes again too");
+    assert_eq!(
+        attempts("m-an-hour").len(),
+        1,
+        "one still within its time goes as it is"
+    );
+
+    // Woken again: nothing sends twice.
+    wake().await;
+    assert_eq!(attempts("m-ten-days").len(), 2);
+    assert_eq!(attempts("m-nearly").len(), 2);
+    assert_eq!(attempts("m-an-hour").len(), 1);
+    let wakes = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(request, _)| request.ends_with("/sessions/cloud-chat/wake"))
+        .count();
+    assert_eq!(wakes, 2, "both wakes reached the edge");
+    core.shutdown().await;
+}

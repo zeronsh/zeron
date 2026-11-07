@@ -2981,6 +2981,17 @@ impl RpcService for EngineRpc {
             .await;
         }
         if crate::cloud_client::handles(method) {
+            // The person wakes a chat's machine (a size picked, a fresh one):
+            // what waited for it goes with its clock started now, however
+            // long it waited. First, so the machine finds it as it boots.
+            if matches!(
+                method,
+                methods::CLOUD_SESSION_WAKE | methods::CLOUD_SESSION_RETRY
+            ) && let Ok(p) = serde_json::from_value::<ChatParams>(params.clone())
+                && let Err(err) = self.doc_host.restart_waiting_clocks(&p.chat_id)
+            {
+                tracing::warn!(chat = %p.chat_id, %err, "waiting messages not restarted for a wake");
+            }
             return Box::pin(crate::cloud_client::dispatch(
                 self.cloud(),
                 &self.agent_accounts,
