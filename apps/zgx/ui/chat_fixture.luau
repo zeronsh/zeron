@@ -179,8 +179,25 @@ local function settled(value: any): any
 		end,
 	}
 end
+-- `send_fails`: the next message doesn't go (an engine that refuses it).
+local SEND_FAILS = ui.state("fixture_send_fails", false)
+ui.command {
+	id = "send_fails",
+	title = "The next send doesn't go",
+	run = function()
+		SEND_FAILS:set(true)
+	end,
+}
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	if SEND_FAILS:peek() then
+		SEND_FAILS:set(false)
+		return {
+			after = function(_self: any, _ok: any, err: (any) -> ())
+				err({ message = "failed" })
+			end,
+		}
+	end
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end

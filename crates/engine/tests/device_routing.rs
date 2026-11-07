@@ -1874,6 +1874,131 @@ async fn remote_target_without_links_fails_clearly() {
     core.shutdown().await;
 }
 
+/// A screenshot alone, sent from another device while the host's turn runs:
+/// its bytes go up to the host through the relay, then that device's own
+/// engine writes the queue row (`QueueMessage` isn't routed, the row syncs).
+/// It used to refuse there, the files already on the host, and the app said
+/// "Your message didn't send".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_with_no_words_queued_on_another_device_reach_the_host() {
+    const CHAT: &str = "chat-files-alone";
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    for core in [&core_a, &core_b] {
+        core.workspace
+            .create_chat(CHAT, None, Some("device-b"), None, None)
+            .expect("create chat");
+        core.workspace
+            .rename_chat(CHAT, "Pre-titled")
+            .expect("avoid auto-title run");
+    }
+    let _host = core_b.start_host_relay(&relay_url);
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core_a.rpc_service());
+
+    // The bytes, up to the host through the relay, as the app's `upload`.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let sent = client
+            .call(
+                methods::UPLOAD_CHUNK,
+                serde_json::json!({
+                    "uploadId": "up-1",
+                    "seq": 0,
+                    "data": BASE64.encode(b"\x89PNG\r\n\x1a\n"),
+                    "targetDeviceId": "device-b",
+                }),
+            )
+            .await;
+        match sent {
+            Ok(_) => break,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let committed = client
+        .call(
+            methods::UPLOAD_COMMIT,
+            serde_json::json!({
+                "uploadId": "up-1",
+                "fileName": "shot.png",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("the upload lands on the host");
+    let on_host = committed["path"].as_str().expect("its path there").to_owned();
+
+    // Then the row, on this device's engine: the call that said no.
+    client
+        .call(
+            methods::QUEUE_MESSAGE,
+            serde_json::json!({
+                "chatId": CHAT,
+                "text": "",
+                "attachments": [on_host.clone()],
+                "holdForTurnEnd": true,
+            }),
+        )
+        .await
+        .expect("files with no words are queued");
+
+    // The row as it syncs to the host (no edge here: put there by hand).
+    let rows = core_a
+        .doc_host
+        .open(CHAT)
+        .expect("A chat")
+        .doc()
+        .read_queue()
+        .expect("A queue");
+    assert_eq!(rows.len(), 1, "the row survives being read back");
+    let on_b = core_b.doc_host.open(CHAT).expect("B chat");
+    on_b.doc().push_queued(&rows[0]).expect("row reaches B");
+
+    // Sent from here, or by the host's own drain, which may have it first:
+    // what counts is what the host then runs.
+    client
+        .call(
+            methods::SEND_QUEUED_MESSAGE_NOW,
+            serde_json::json!({
+                "chatId": CHAT,
+                "id": rows[0].id,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("send-now reaches B");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let prompt = on_b
+            .doc()
+            .read_entries()
+            .expect("B transcript")
+            .into_iter()
+            .find(|e| e.role == zeron_doc::MessageRole::User)
+            .map(|e| format!("{:?}", e.parts));
+        if let Some(prompt) = prompt {
+            assert!(prompt.contains("See the attached image(s)."), "got: {prompt}");
+            assert!(prompt.contains(&on_host), "got: {prompt}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "B never sent it");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
     let (relay_url, _relay) = fake_device_room().await;
