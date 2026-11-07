@@ -113,6 +113,12 @@ fn note_legacy_clients(devices: Vec<LegacyClient>) {
     *lock(&LEGACY_CLIENTS) = Some(devices);
 }
 
+/// A new registry connection, perhaps for another account: what an earlier one heard
+/// isn't this account's, so nothing is known until this one hears.
+fn forget_legacy_clients() {
+    *lock(&LEGACY_CLIENTS) = None;
+}
+
 // ── wire frames (JSON text; mirror edge/src/registry-room.ts) ───────────────
 
 #[derive(Serialize)]
@@ -378,6 +384,7 @@ impl RegistryClient {
         tuning: RegistryTuning,
         transport: Option<Arc<dyn RegistryTransport>>,
     ) -> Result<Self, SyncError> {
+        forget_legacy_clients();
         let (events, _) = broadcast::channel(256);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -1056,3 +1063,26 @@ impl Actor {
 
 #[cfg(any(test, feature = "mock-server"))]
 pub mod mock_server;
+
+#[cfg(test)]
+mod legacy_list_tests {
+    use super::*;
+
+    struct NoRoom;
+    impl TextConnector for NoRoom {
+        fn connect(&self) -> BoxFuture<'static, Result<TextPipe, SyncError>> {
+            Box::pin(async { Err(SyncError::Protocol("no room".into())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_registry_connection_forgets_another_accounts_old_clients() {
+        note_legacy_clients(vec![LegacyClient { device: "other-accounts-phone".into(), seen_at: 1 }]);
+        let doc = Arc::new(Mutex::new(RegistryDoc::new("laptop")));
+        let _ = RegistryClient::connect_with_tuned(Arc::new(NoRoom), doc, "laptop", RegistryTuning::default()).await;
+        assert!(
+            legacy_clients().is_none_or(|clients| !clients.iter().any(|c| c.device == "other-accounts-phone")),
+            "kept a list heard for another account"
+        );
+    }
+}

@@ -47,6 +47,8 @@ const MAX_STALLS: u32 = 3;
 const MAX_DELIVERED_IDS: usize = 100;
 /// Frames queued toward the room before later ones are dropped. They heal.
 pub const PATH_QUEUE: usize = 256;
+/// A queue read the room's full channel refused is asked again after this.
+const QUEUE_REQ_RETRY: Duration = Duration::from_millis(200);
 
 /// What a device does with the room's offline queue.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -148,6 +150,7 @@ impl RelayHandle {
             exports: HashMap::new(),
             unconfirmed: Vec::new(),
             parked_queue: false,
+            queue_req_owed: false,
             events: events.clone(),
             counters: counters.clone(),
             input: tx.downgrade(),
@@ -295,6 +298,9 @@ struct Driver {
     unconfirmed: Vec<String>,
     /// A queue row parked on missing history: re-read the queue once it's filled.
     parked_queue: bool,
+    /// A queue read that didn't fit in the room's channel: it's counted as asked,
+    /// so it has to go out, or catch-up would wait on it for the whole session.
+    queue_req_owed: bool,
     events: broadcast::Sender<RelayEvent>,
     counters: Arc<Counters>,
     input: mpsc::WeakUnboundedSender<Input>,
@@ -327,6 +333,7 @@ impl Driver {
             self.announce_settle,
             (!self.unconfirmed.is_empty() && self.room_open())
                 .then(|| Instant::now() + DELIVERED_POLL),
+            (self.queue_req_owed && self.room_open()).then(|| Instant::now() + QUEUE_REQ_RETRY),
             self.exports.values().map(|(_, at)| *at + EXPORT_TTL).min(),
         ]
         .into_iter()
@@ -348,7 +355,8 @@ impl Driver {
                 self.round = None;
                 // Read what waits for us, and say where we are: whoever has more
                 // answers, and whatever a dropped socket lost comes back.
-                self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[]));
+                self.queue_req_owed = false;
+                self.send_queue_req();
                 self.announce(true);
             }
             Input::RoomFrame(frame) => {
@@ -374,7 +382,7 @@ impl Driver {
                 }
             }
             Input::Host(host) => self.host = host,
-            Input::ReadQueue => self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[])),
+            Input::ReadQueue => self.send_queue_req(),
             Input::AskPeers => {
                 self.fruitless = 0;
                 self.announce(true);
@@ -418,6 +426,10 @@ impl Driver {
             self.announce(false);
         }
         self.exports.retain(|_, (_, at)| now < *at + EXPORT_TTL);
+        if self.queue_req_owed && self.room_open() {
+            self.queue_req_owed = false;
+            self.send_queue_req();
+        }
         self.confirm_saved();
     }
 
@@ -468,14 +480,17 @@ impl Driver {
         // That peer has just joined. A round asked of it before then went nowhere (the
         // room only forwards to who's there), and nothing it sent has come back: ask
         // again now rather than wait out the stall.
-        if hello
-            && self
-                .round
-                .as_ref()
-                .is_some_and(|round| round.peer == from && round.xfer.is_empty() && round.buf.is_empty())
-        {
-            self.round = None;
-            self.want = Some((from.clone(), now));
+        if hello && let Some(round) = self.round.as_mut().filter(|round| round.peer == from) {
+            if round.xfer.is_empty() && round.buf.is_empty() {
+                self.round = None;
+                self.want = Some((from.clone(), now));
+            } else {
+                // Mid-transfer: the window in flight may be lost. Ask for the rest
+                // from here; a peer that lost its export says so and it starts over.
+                round.last_progress = now;
+                let (xfer, offset) = (round.xfer.clone(), round.buf.len());
+                self.direct(&from, frame_type::SYNC_REQ, json!({ "xfer": xfer, "offset": offset }), &[]);
+            }
         }
         if self.sink.relay_lacks(&frame.payload) {
             self.fruitless = 0;
@@ -678,7 +693,14 @@ impl Driver {
     /// the answer to a read still under way.
     fn read_queue_again(&mut self) {
         self.counters.queue_reads_asked.fetch_add(1, Relaxed);
-        self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[]));
+        self.send_queue_req();
+    }
+
+    /// One queue read, already counted as asked. Owed again if it didn't go out.
+    fn send_queue_req(&mut self) {
+        if !self.to_room(wire::encode(frame_type::QUEUE_REQ, &json!({}), &[])) {
+            self.queue_req_owed = true;
+        }
     }
 
     fn confirm_saved(&mut self) {
@@ -705,12 +727,14 @@ impl Driver {
         self.to_room(wire::encode(kind, &header, payload));
     }
 
-    fn to_room(&mut self, frame: Vec<u8>) {
+    fn to_room(&mut self, frame: Vec<u8>) -> bool {
         if let Some(room) = &self.room
             && room.try_send(frame).is_ok()
         {
             self.counters.room_frames_sent.fetch_add(1, Relaxed);
+            return true;
         }
+        false
     }
 }
 

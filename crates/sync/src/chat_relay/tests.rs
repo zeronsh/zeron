@@ -85,6 +85,8 @@ struct RoomState {
     drop_relay: usize,
     /// Drop every `syncData` frame while set.
     drop_sync: bool,
+    /// Let this many more `syncData` frames through, then drop the rest.
+    sync_budget: Option<usize>,
     /// Hold each window of a transfer back this long, as a thin link would.
     slow_sync: Option<Duration>,
     /// Hold `relay` frames and release them in reverse.
@@ -157,6 +159,14 @@ impl Room {
             frame_type::SYNC_REQ | frame_type::SYNC_DATA => {
                 if frame.kind == frame_type::SYNC_DATA && room.drop_sync {
                     return;
+                }
+                if frame.kind == frame_type::SYNC_DATA
+                    && let Some(budget) = room.sync_budget.as_mut()
+                {
+                    if *budget == 0 {
+                        return;
+                    }
+                    *budget -= 1;
                 }
                 let to = frame.header["to"].as_str().expect("directed").to_string();
                 let mut header = frame.header.clone();
@@ -702,6 +712,53 @@ async fn a_round_asked_of_a_host_that_wasnt_there_restarts_when_it_joins() {
     converged(&[&host, &phone]).await;
     let took = joined.elapsed();
     assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_transfer_cut_off_by_a_reconnecting_host_resumes_when_it_rejoins() {
+    let room = Room::default();
+    let host = Device::host("host");
+    let mut text = String::new();
+    for i in 0..300_000u64 {
+        text.push_str(&format!("{:x}", i.wrapping_mul(0x9E3779B97F4A7C15)));
+    }
+    host.commit(&text);
+    let host_socket = room.join("host", &host.relay);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The first few fragments arrive, then the host's socket drops what's in flight.
+    room.0.lock().unwrap().sync_budget = Some(3);
+    let phone = Device::viewer("phone");
+    let _phone_socket = room.join("phone", &phone.relay);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(phone.body().is_empty(), "the transfer is cut off part way");
+    room.0.lock().unwrap().sync_budget = None;
+    host_socket.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let rejoined = tokio::time::Instant::now();
+    let _host_again = room.join("host", &host.relay);
+    converged(&[&host, &phone]).await;
+    let took = rejoined.elapsed();
+    assert!(took < Duration::from_secs(10), "took {took:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queue_read_the_room_had_no_room_for_goes_out_later() {
+    let host = Device::host("host");
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+    tx.try_send(Vec::new()).unwrap(); // the room's channel is full
+    host.relay.room_up(tx);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!host.relay.queue_settled());
+    let asked = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(bytes) = rx.recv().await {
+            if wire::decode(&bytes).is_some_and(|frame| frame.kind == frame_type::QUEUE_REQ) {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(asked, Ok(true), "the dropped queue read was never asked again");
 }
 
 #[tokio::test(start_paused = true)]

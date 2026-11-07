@@ -182,13 +182,46 @@ impl ChatRelayState {
     }
 
     /// Outbox entries to upload as stored rows: all but the relayed commits this
-    /// process still holds in its doc.
+    /// process still holds in its doc. A host in the relay era stores none until it
+    /// knows how: relaying, they're relayed (`adopt_unrelayed`); stopping, they wait
+    /// for the heal. After a crash the outbox holds commits that were relayed, and as
+    /// stored rows they'd depend on ops no checkpoint holds yet, so old readers would
+    /// park on them. A chat too big to heal can't wait for one.
     pub(crate) fn uploadable(&self, pending: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+        if self.holds_uploads() {
+            return Vec::new();
+        }
         let unretired = lock(&self.unretired);
         pending
             .into_iter()
             .filter(|(id, _)| !unretired.ids.contains(id))
             .collect()
+    }
+
+    fn holds_uploads(&self) -> bool {
+        self.hosting.load(Ordering::Acquire)
+            && (self.relaying()
+                || (self.heal_owed.load(Ordering::Acquire)
+                    && !self.healed.load(Ordering::Acquire)
+                    && !self.refused_as_too_large()))
+    }
+
+    /// Outbox entries a relaying host hasn't relayed in this process: commits from
+    /// before a restart. They go out as relayed commits and retire after a save.
+    pub(super) fn adopt_unrelayed(&self, pending: Vec<(String, Vec<u8>)>) -> usize {
+        if !self.relaying() {
+            return 0;
+        }
+        let mut unretired = lock(&self.unretired);
+        let mut adopted = 0;
+        for (id, bytes) in pending {
+            if !unretired.ids.contains(&id) {
+                self.relay.local_update(bytes, true);
+                unretired.ids.push(id);
+                adopted += 1;
+            }
+        }
+        adopted
     }
 
     /// A host that isn't relaying must also store what the queue brings it:
@@ -337,6 +370,15 @@ impl DocHost {
                             last_refresh = Some(now);
                             host.refresh_relay_mode(&handle, &state);
                         }
+                        if state.relaying()
+                            && let Ok(pending) = host.inner.store.pending_chat_updates(&handle.chat_id)
+                            && !pending.is_empty()
+                        {
+                            let adopted = state.adopt_unrelayed(pending);
+                            if adopted > 0 {
+                                tracing::info!(chat = %handle.chat_id, adopted, "chat relay: relayed commits left from before a restart");
+                            }
+                        }
                         let saved = handle.persistence.as_ref().is_some_and(|p| p.is_clean());
                         for id in state.retirable(saved) {
                             if let Err(err) = host.inner.store.acknowledge_chat_update(&handle.chat_id, &id) {
@@ -407,10 +449,8 @@ impl DocHost {
             .map(|parent| parent.device_id);
         // A chat close to the room's checkpoint limit can't keep the promise that a
         // checkpoint can always bring a reader up to date.
-        let small_enough = handle
-            .persistence
-            .as_ref()
-            .is_none_or(|saved| saved.snapshot_bytes() <= RELAY_SNAPSHOT_LIMIT);
+        let size = handle_size(handle);
+        let small_enough = size.is_none_or(|bytes| bytes <= relay_snapshot_limit());
         let allowed = small_enough
             && workspace.read_devices_seen().is_ok_and(|devices| {
                 relay_allowed(&devices, &chat.device_id, parent_host.as_deref(), chrono::Utc::now())
@@ -420,7 +460,15 @@ impl DocHost {
 
         // Moving on: only a room that has just said yes, and only once every
         // device can follow.
-        if is_host && generation == STORED_ROOM_GEN && allowed && legacy_known && answer == Some(true) {
+        // Not before this chat's size is known, either from what was loaded or from a
+        // save: until its first save, a chat opened from rows reads as empty.
+        if is_host
+            && generation == STORED_ROOM_GEN
+            && allowed
+            && size.is_some()
+            && legacy_known
+            && answer == Some(true)
+        {
             match workspace.set_chat_room_gen(chat_id, RELAY_ROOM_GEN) {
                 Ok(_) => {
                     tracing::info!(chat = %chat_id, "chat relay: moved to generation 3");
@@ -580,6 +628,37 @@ impl DocHost {
     }
 }
 
+/// Whether this device may post a checkpoint for a chat. On generation 3 only the
+/// host does: a viewer's ordinary checkpoint (a rejected push, a row threshold) is
+/// behind the host's as often as not, and it can be all the room holds.
+pub(super) fn posts_checkpoint(reason: &str, room_gen: u32, is_host: bool) -> bool {
+    is_host || room_gen < RELAY_ROOM_GEN || reason.starts_with("relay-")
+}
+
+/// [`RELAY_SNAPSHOT_LIMIT`]. A debug build takes `ZERON_RELAY_SNAPSHOT_LIMIT`, so the
+/// two-engine smoke can make a chat too big to relay without making it huge.
+fn relay_snapshot_limit() -> usize {
+    #[cfg(debug_assertions)]
+    if let Some(limit) = std::env::var("ZERON_RELAY_SNAPSHOT_LIMIT").ok().and_then(|v| v.parse().ok()) {
+        return limit;
+    }
+    RELAY_SNAPSHOT_LIMIT
+}
+
+fn handle_size(handle: &ChatDocHandle) -> Option<usize> {
+    chat_size(
+        handle.snapshot_bytes.load(Ordering::Relaxed),
+        handle.persistence.as_ref().map_or(0, |saved| saved.snapshot_bytes()),
+    )
+}
+
+/// A chat's snapshot size as best known: the larger of what was loaded and what the
+/// last save wrote. `None` until one of them has happened.
+fn chat_size(loaded: usize, saved: usize) -> Option<usize> {
+    let bytes = loaded.max(saved);
+    (bytes > 0).then_some(bytes)
+}
+
 /// Whether a device publishes a chat's ops by relay. Everything must agree:
 /// any doubt means stored rows, which every reader can follow.
 fn decide_relaying(
@@ -639,6 +718,42 @@ mod tests {
         ];
         let ids: Vec<String> = state.uploadable(pending).into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec!["stored".to_string(), "from-before-a-crash".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_host_relays_what_it_relayed_before_instead_of_storing_it() {
+        let state = state();
+        state.hosting.store(true, Ordering::Release);
+        state.relaying.store(true, Ordering::Release);
+        let pending = vec![("from-before-a-crash".to_string(), vec![3])];
+        assert!(state.uploadable(pending.clone()).is_empty(), "never as a stored row");
+        assert_eq!(state.adopt_unrelayed(pending.clone()), 1);
+        assert_eq!(state.adopt_unrelayed(pending), 0, "once");
+        assert!(state.retirable(true).is_empty());
+        assert_eq!(state.retirable(true), vec!["from-before-a-crash".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_host_that_stopped_relaying_stores_only_after_its_heal() {
+        let state = state();
+        state.hosting.store(true, Ordering::Release);
+        state.heal_owed.store(true, Ordering::Release);
+        let pending = vec![("from-before-a-crash".to_string(), vec![3])];
+        assert!(state.uploadable(pending.clone()).is_empty(), "rows before the heal would park on old readers");
+        state.healed.store(true, Ordering::Release);
+        assert_eq!(state.uploadable(pending.clone()).len(), 1);
+        state.healed.store(false, Ordering::Release);
+        state.checkpoint_refused(413, "", None);
+        assert_eq!(state.uploadable(pending).len(), 1, "a chat too big to heal stores anyway");
+    }
+
+    #[test]
+    fn only_the_host_checkpoints_a_relayed_chat() {
+        assert!(posts_checkpoint("threshold", RELAY_ROOM_GEN, true));
+        assert!(!posts_checkpoint("threshold", RELAY_ROOM_GEN, false));
+        assert!(!posts_checkpoint("durable-rejection", RELAY_ROOM_GEN, false));
+        assert!(posts_checkpoint("threshold", STORED_ROOM_GEN, false), "a stored chat, as before");
+        assert!(posts_checkpoint(HEAL_REASON, RELAY_ROOM_GEN, false));
     }
 
     #[test]
@@ -833,6 +948,30 @@ mod tests {
         assert!(lock(&handle.chat2).is_none(), "no client yet");
         host.refresh_relay_mode(&handle, &state);
         assert!(state.relay.queue_pushes(), "a send goes to the queue from the first push");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chat_loaded_from_disk_has_its_size_before_any_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let (host, store) = host_on("http://127.0.0.1:1", dir.path());
+        let doc = loro::LoroDoc::new();
+        doc.get_text("body").insert(0, &"x".repeat(200_000)).unwrap();
+        doc.commit();
+        let snapshot = doc.export(loro::ExportMode::Snapshot).unwrap();
+        store
+            .save_snapshot_with_cursor("big", &snapshot, 0, crate::chat2_host::CHAT2_DOC_EPOCH)
+            .unwrap();
+        let handle = host.open_local("big").unwrap();
+        assert_eq!(handle_size(&handle), Some(snapshot.len()), "known from the load, before a save");
+    }
+
+    #[test]
+    fn a_chat_flips_only_once_its_size_is_known_and_small() {
+        assert_eq!(chat_size(0, 0), None, "opened from rows, not saved yet");
+        assert_eq!(chat_size(40 << 20, 0), Some(40 << 20), "loaded big, not saved yet");
+        assert_eq!(chat_size(1000, 40 << 20), Some(40 << 20), "grew since it was loaded");
+        assert_eq!(chat_size(40 << 20, 1000), Some(40 << 20));
+        assert!(chat_size(40 << 20, 0).is_some_and(|bytes| bytes > RELAY_SNAPSHOT_LIMIT));
     }
 
     #[test]
