@@ -854,7 +854,7 @@ function M.view(): Node
 								end,
 								description = function()
 									local p = d:get().platform
-									return if p == "macos" then "macOS" elseif p == "linux" then "Linux" elseif p == "ios" then "iOS" else p
+									return if p == "macos" then "macOS" elseif p == "linux" then "Linux" elseif p == "windows" then "Windows" elseif p == "ios" then "iOS" elseif p == "android" then "Android" else p
 								end,
 								icon = device_icon(d:peek().platform),
 								badge = if d:peek().here then ds.Badge { ui.t("settings.profile.devices.this") } else nil,
