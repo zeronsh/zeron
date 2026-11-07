@@ -247,6 +247,8 @@ pub trait FrameWindow {
         self.frame_state().take_end()
     }
 
+    fn frame_after_run(&self) {}
+
     fn frame_widget(&self, op: &str, seq: u64, arg: &Value) -> Result<Value, String>
     where
         Self: Sized,
@@ -306,6 +308,14 @@ pub struct FrameState {
 impl FrameState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn live_ui(&self) -> Option<*const Ui> {
+        self.live
+            .borrow()
+            .as_ref()
+            .map(|frame| frame.ui)
+            .filter(|ui| !ui.is_null())
     }
 
     /// Whether a pump tick should ask this window for a frame.
@@ -754,6 +764,7 @@ pub fn run(window: &impl FrameWindow, calls: &FrameCalls) -> Option<FrameEnd> {
         Some(error) => window.frame_conclude_panic(error.clone()),
         None => window.frame_conclude(built),
     };
+    window.frame_after_run();
     calls.take(&call);
     if let Some(error) = &end.error {
         if end.refused {

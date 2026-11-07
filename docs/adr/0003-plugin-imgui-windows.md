@@ -157,6 +157,25 @@ still activate theirs, which is Dear ImGui's one-active-context constraint), the
 records the panic like any other failed frame and closes after the same three in a row, and the
 plugin is never withdrawn for a host failure. The pump keeps serving every other window.
 
+### Custom window chrome
+
+`titlebar = "hidden"` (with `decorations = false`) opens a content-filling window with no
+platform title bar or buttons. On Windows and X11 the outer ~5 logical points of each edge belong
+to the OS resize band: presses there never reach the plugin, and the framework moves or resizes
+the window from that band. `decorations = false` with `titlebar = "standard"` is refused at open
+time, because that pair would lose both the OS frame and the resize bands.
+
+Plugin-drawn chrome calls host ops rather than reading OS state. `begin_drag` asks for the
+platform move gesture while the pointer is pressed in the plugin's bar, then clears Dear ImGui's
+mouse-down state after the frame so the move loop's swallowed release never leaves a phantom
+press. Minimize, maximize and restore go through `set_minimized`/`set_maximized`; the host tracks
+maximize itself because zgx has no read API, so that value can drift after a Windows snap or a
+WM-initiated maximize and is never used to compute a restore rectangle. Close goes through
+`request_close`, so `on_close_requested` runs and `on_close` fires once. On Wayland, which forbids
+client-side placement and programmatic resize, `begin_drag`, `begin_resize`, `maximize` and
+`toggle_maximize` report "not supported on this platform" instead of silently doing nothing;
+macOS chrome is compile-verified only.
+
 ### Permission: `imgui.windows`
 
 Native ImGui windows require the new lowercase-dotted permission `imgui.windows`. The existing

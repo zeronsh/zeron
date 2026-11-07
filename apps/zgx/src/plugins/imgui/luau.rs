@@ -45,6 +45,11 @@ const WINDOW_OPS: &[&str] = &[
     "focus",
     "minimize",
     "restore",
+    "maximize",
+    "toggle_maximize",
+    "is_maximized",
+    "begin_drag",
+    "begin_resize",
     "set_title",
     "set_size",
     "close",
@@ -188,7 +193,7 @@ impl ImGuiWindows {
         }
         if !WINDOW_OPS.contains(&op.as_str()) {
             return failed(&format!(
-                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, set_title, set_size, close, is_open and state; a render callback has text and button."
+                "zeron.imgui has no op \"{op}\". A window has show, hide, focus, minimize, restore, maximize, toggle_maximize, begin_drag, begin_resize, set_title, set_size, close, is_open and state; a render callback has text and button."
             ));
         }
         if let Err(error) = permission::allowed(self.item().as_ref(), "use its native windows") {
@@ -208,6 +213,14 @@ impl ImGuiWindows {
             "focus" => answer(window.focus()),
             "minimize" => answer(window.minimize()),
             "restore" => answer(window.restore()),
+            "maximize" => answer(window.maximize()),
+            "toggle_maximize" => answer(window.toggle_maximize()),
+            "is_maximized" => Value::record([
+                ("ok", Value::Bool(true)),
+                ("maximized", Value::Bool(window.is_maximized())),
+            ]),
+            "begin_drag" => answer(window.begin_drag()),
+            "begin_resize" => answer(window.begin_resize()),
             "close" => answer(window.close()),
             "set_title" => match text(arg, "title") {
                 Some(title) => answer(window.set_title(&title)),
@@ -247,6 +260,7 @@ impl ImGuiWindows {
                     ("open", Value::Bool(window.is_open())),
                     ("shown", Value::Bool(window.is_shown())),
                     ("minimized", Value::Bool(window.is_minimized())),
+                    ("maximized", Value::Bool(window.is_maximized())),
                     ("title", Value::from(window.title().as_str())),
                     ("width", Value::from(width)),
                     ("height", Value::from(height)),

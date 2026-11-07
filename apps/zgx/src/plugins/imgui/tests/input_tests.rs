@@ -133,6 +133,27 @@ fn a_cancelled_gesture_releases_every_button() {
 }
 
 #[test]
+fn cancelling_after_a_drag_drops_the_press_and_the_pointer() {
+    let _guard = imgui_guard();
+    let mut context = context();
+    move_to(&mut context, 20.0, 30.0);
+    press(&mut context, PointerButton::Primary, true);
+    frame(&mut context);
+    assert!(io(&mut context, |io| io.mouse_down(MouseButton::Left)));
+
+    input::cancel(&mut context);
+    frame(&mut context);
+    assert!(!io(&mut context, |io| io.mouse_down(MouseButton::Left)));
+    assert!(!io(&mut context, |io| io.mouse_down(MouseButton::Right)));
+    assert!(!io(&mut context, |io| io.mouse_down(MouseButton::Middle)));
+    let pos = io(&mut context, |io| io.mouse_pos());
+    assert!(
+        pos[0] < -1000.0 && pos[1] < -1000.0,
+        "the pointer is out of range after the drag: {pos:?}"
+    );
+}
+
+#[test]
 fn events_that_are_not_the_pointer_are_left_for_the_input_layer() {
     let _guard = imgui_guard();
     let mut context = context();

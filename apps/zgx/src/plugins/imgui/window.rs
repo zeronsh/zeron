@@ -25,7 +25,9 @@ use zgx::compose::gpu_view;
 use zgx::gpu_view::GpuView;
 use zgx::reactive::Signal;
 use zgx::style::Styled;
-use zgx_desktop::{Tabbing, Titlebar, WindowBounds, WindowFactory, WindowHandle, WindowOptions};
+use zgx_desktop::{
+    Tabbing, Titlebar, WindowBounds, WindowFactory, WindowHandle, WindowInfo, WindowOptions,
+};
 use zgx_gpu::viewport::{Viewport, ViewportFrame};
 use zgx_script::Value;
 
@@ -33,7 +35,7 @@ use super::frame::{FrameCalls, FrameReport, FrameState, FrameWindow};
 use super::render::ImguiViewport;
 use super::runtime::FrameSpec;
 use super::runtime::WindowContext as ImGuiContext;
-use dear_imgui_rs::Ui;
+use dear_imgui_rs::{MouseButton, Ui};
 
 /// What a plugin hears when one of its windows closes: the window id it
 /// named, once per window.
@@ -145,8 +147,9 @@ pub struct WindowSpec {
     pub visible: bool,
     /// The title bar style; `Standard` is the platform's own.
     pub titlebar: Titlebar,
-    /// The platform's frame and buttons. Off with `titlebar = "standard"`
-    /// keeps the title out of the chrome but the window resizable.
+    /// The platform's frame and buttons. Off only with a custom titlebar;
+    /// with `titlebar = "standard"` a request without decorations is
+    /// refused, because nothing would resize that window.
     pub decorations: bool,
     /// Where the plugin's own window id remembers its frame. Off by default:
     /// persistence is opt-in, so a requested initial size is the size a
@@ -271,7 +274,7 @@ impl WindowSpec {
             }
             None => Titlebar::Standard,
         };
-        let decorations = match options.field("decorations") {
+        let mut decorations = match options.field("decorations") {
             Some(Value::Bool(decorations)) => *decorations,
             Some(_) => {
                 return Err(refuse(
@@ -282,6 +285,14 @@ impl WindowSpec {
             }
             None => true,
         };
+        if titlebar != Titlebar::Standard {
+            decorations = false;
+        }
+        if titlebar == Titlebar::Standard && !decorations {
+            return Err(format!(
+                "zeron.imgui.open_window can't use decorations for window \"{id}\": decorations=false with titlebar=\"standard\" leaves no edge to resize the window; use titlebar=\"hidden\"."
+            ));
+        }
         let remember = match options.field("remember") {
             Some(Value::Bool(remember)) => *remember,
             Some(_) => return Err(refuse("remember", &id, "remember must be true or false")),
@@ -452,6 +463,7 @@ pub(crate) struct WindowState {
     size: Cell<(f64, f64)>,
     visible: Cell<bool>,
     minimized: Cell<bool>,
+    maximized: Cell<bool>,
     open: Cell<bool>,
     /// Whether `begin_close` already ran: the notification happens once,
     /// however many paths close the window.
@@ -466,6 +478,7 @@ impl WindowState {
             size: Cell::new(spec.size),
             visible: Cell::new(spec.visible),
             minimized: Cell::new(false),
+            maximized: Cell::new(false),
             open: Cell::new(true),
             closed_once: Cell::new(false),
         }
@@ -493,6 +506,10 @@ impl WindowState {
 
     pub(crate) fn is_minimized(&self) -> bool {
         self.minimized.get()
+    }
+
+    pub(crate) fn is_maximized(&self) -> bool {
+        self.maximized.get()
     }
 
     /// The refusal a window that is closed hands every control: it names the
@@ -533,6 +550,27 @@ impl WindowState {
         self.require_open()?;
         self.visible.set(true);
         self.minimized.set(false);
+        self.maximized.set(false);
+        Ok(())
+    }
+
+    pub(crate) fn maximize(&self) -> Result<(), String> {
+        self.require_open()?;
+        self.visible.set(true);
+        self.minimized.set(false);
+        self.maximized.set(true);
+        Ok(())
+    }
+
+    pub(crate) fn toggle_maximize(&self) -> Result<(), String> {
+        self.require_open()?;
+        if self.maximized.get() {
+            self.maximized.set(false);
+        } else {
+            self.visible.set(true);
+            self.minimized.set(false);
+            self.maximized.set(true);
+        }
         Ok(())
     }
 
@@ -604,7 +642,7 @@ impl CloseReason {
 
 struct WindowGeometry {
     viewport: Signal<(f32, f32)>,
-    bounds: Signal<WindowBounds>,
+    info: WindowInfo,
 }
 
 /// One open plugin window: its native window, its GPU view, its Dear ImGui
@@ -629,6 +667,7 @@ pub struct PluginWindow {
     renderable: Cell<bool>,
     /// Device pixels per logical point, as the app last reported it.
     scale: Cell<f64>,
+    pending_pointer_clear: Cell<bool>,
     /// What to tell the plugin when the window closes (the bridge pushes an
     /// `imgui.close` call into the plugin's queue).
     notify: Option<CloseListener>,
@@ -662,6 +701,14 @@ impl PluginWindow {
 
     pub fn size(&self) -> (f64, f64) {
         self.state.size()
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.scale.get()
+    }
+
+    pub fn is_maximized(&self) -> bool {
+        self.state.is_maximized()
     }
 
     /// Frames this window's view has drawn. A hidden window's count stops.
@@ -711,12 +758,32 @@ impl PluginWindow {
         }
     }
 
-    pub(crate) fn attach_geometry(
-        &self,
-        viewport: Signal<(f32, f32)>,
-        bounds: Signal<WindowBounds>,
-    ) {
-        *self.geometry.borrow_mut() = Some(WindowGeometry { viewport, bounds });
+    pub(crate) fn attach_window_info(&self, viewport: Signal<(f32, f32)>, info: WindowInfo) {
+        *self.geometry.borrow_mut() = Some(WindowGeometry { viewport, info });
+    }
+
+    pub(crate) fn window_info(&self) -> Option<WindowInfo> {
+        self.geometry
+            .borrow()
+            .as_ref()
+            .map(|info| info.info.clone())
+    }
+
+    fn chrome_supported(&self, action: &str) -> Result<(), String> {
+        if let Some(geometry) = self.geometry.borrow().as_ref() {
+            let ready = geometry.info.ready.with_untracked(|ready| *ready);
+            let placement = geometry
+                .info
+                .capabilities
+                .with_untracked(|capabilities| capabilities.placement);
+            if ready && !placement {
+                return Err(format!(
+                    "zeron.imgui can't {action} for window \"{}\": not supported on this platform",
+                    self.key.id
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn geometry(&self) -> Option<(WindowBounds, (f64, f64))> {
@@ -725,7 +792,7 @@ impl PluginWindow {
         let logical = geometry
             .viewport
             .with_untracked(|(width, height)| (f64::from(*width), f64::from(*height)));
-        let bounds = geometry.bounds.with_untracked(|bounds| *bounds);
+        let bounds = geometry.info.bounds.with_untracked(|bounds| *bounds);
         if logical.0 <= 0.0 || logical.1 <= 0.0 || bounds.size.0 == 0 || bounds.size.1 == 0 {
             return None;
         }
@@ -818,9 +885,65 @@ impl PluginWindow {
     }
 
     pub fn restore(&self) -> Result<(), String> {
+        let was_maximized = self.state.is_maximized();
         self.state.restore()?;
         self.handle.set_minimized(false);
+        if was_maximized {
+            self.handle.set_maximized(false);
+        }
         self.handle.request_focus();
+        Ok(())
+    }
+
+    pub fn maximize(&self) -> Result<(), String> {
+        self.state.require_open()?;
+        self.chrome_supported("maximize")?;
+        self.state.maximize()?;
+        self.handle.set_maximized(true);
+        Ok(())
+    }
+
+    pub fn toggle_maximize(&self) -> Result<(), String> {
+        self.state.require_open()?;
+        self.chrome_supported("maximize")?;
+        self.state.toggle_maximize()?;
+        self.handle.set_maximized(self.state.is_maximized());
+        Ok(())
+    }
+
+    pub fn begin_drag(&self) -> Result<(), String> {
+        self.state.require_open()?;
+        if !self.is_shown() {
+            return Err(format!(
+                "Window \"{}\" of plugin \"{}\" is not shown.",
+                self.key.id, self.key.plugin
+            ));
+        }
+        self.chrome_supported("move")?;
+        if !self
+            .frames
+            .live_ui()
+            .is_some_and(|ui| unsafe { (&*ui).io().mouse_down(MouseButton::Left) })
+        {
+            return Err(format!(
+                "zeron.imgui can't move window \"{}\": call it from on_render while the pointer is pressed in its bar.",
+                self.key.id
+            ));
+        }
+        self.handle.drag_window();
+        self.pending_pointer_clear.set(true);
+        Ok(())
+    }
+
+    pub fn begin_resize(&self) -> Result<(), String> {
+        self.state.require_open()?;
+        if !self.is_shown() {
+            return Err(format!(
+                "Window \"{}\" of plugin \"{}\" is not shown.",
+                self.key.id, self.key.plugin
+            ));
+        }
+        self.chrome_supported("resize")?;
         Ok(())
     }
 
@@ -841,7 +964,10 @@ impl PluginWindow {
     /// no-op that returns `Ok`: a plugin may close a window it already
     /// closed (from `on_close`, say) without an error.
     pub fn close(&self) -> Result<(), String> {
-        self.close_with_reason(CloseReason::Closed);
+        self.state.require_open()?;
+        if !self.handle.is_closed() {
+            self.handle.request_close();
+        }
         Ok(())
     }
 
@@ -952,6 +1078,14 @@ impl FrameWindow for PluginWindow {
         let _ = self.close();
     }
 
+    fn frame_after_run(&self) {
+        if self.pending_pointer_clear.replace(false)
+            && self.with_context(super::input::cancel).is_some()
+        {
+            self.request_frame();
+        }
+    }
+
     fn frame_state(&self) -> &FrameState {
         &self.frames
     }
@@ -1019,7 +1153,7 @@ fn build_content(
     let Some(record) = slot.borrow().clone() else {
         return;
     };
-    record.attach_geometry(cx.viewport.clone(), cx.window_info.bounds.clone());
+    record.attach_window_info(cx.viewport.clone(), cx.window_info.clone());
     // The title bar's close button (and the window manager's) asks this
     // first: the plugin's `on_close` runs once, then the window goes.
     let closing = record;
@@ -1038,7 +1172,9 @@ pub struct WindowReport {
     pub open: bool,
     pub shown: bool,
     pub minimized: bool,
+    pub maximized: bool,
     pub size: (f64, f64),
+    pub scale: f64,
     pub frames: u64,
 }
 
@@ -1230,6 +1366,7 @@ impl Windows {
             frames: FrameState::new(),
             renderable: Cell::new(false),
             scale: Cell::new(self.scale()),
+            pending_pointer_clear: Cell::new(false),
             notify: self.listeners.borrow().get(plugin).cloned(),
         });
         *slot.borrow_mut() = Some(record.clone());
@@ -1308,7 +1445,9 @@ impl Windows {
                 open: window.is_open(),
                 shown: window.is_shown(),
                 minimized: window.is_minimized(),
+                maximized: window.is_maximized(),
                 size: window.size(),
+                scale: window.scale(),
                 frames: window.frames(),
             })
             .collect()

@@ -25,6 +25,16 @@ pub fn pointer(context: &mut WindowContext, event: &InputEvent) -> bool {
         .unwrap_or(false)
 }
 
+pub fn cancel(context: &mut WindowContext) {
+    let _ = context.with_active(|context| {
+        let io = context.io_mut();
+        io.add_mouse_pos_event([-f32::MAX, -f32::MAX]);
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            io.add_mouse_button_event(button, false);
+        }
+    });
+}
+
 /// The mapping itself, kept apart from the context so a test can drive it:
 /// events are queued on the IO as they happen and applied by the next frame,
 /// which is exactly what Dear ImGui expects.

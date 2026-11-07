@@ -123,6 +123,29 @@ fn a_titlebar_must_be_standard_inset_or_hidden() {
 }
 
 #[test]
+fn standard_without_decorations_is_refused_and_names_both_fields() {
+    let error =
+        parse_error(r#"{"id":"inspector","title":"x","titlebar":"standard","decorations":false}"#);
+    assert!(error.contains("decorations"), "{error}");
+    assert!(error.contains("titlebar"), "{error}");
+    assert!(error.contains("inspector"), "{error}");
+}
+
+#[test]
+fn hidden_chrome_drops_the_platform_frame() {
+    let spec =
+        parse(r#"{"id":"inspector","title":"x","titlebar":"hidden","decorations":false}"#).unwrap();
+    assert_eq!(spec.titlebar, Titlebar::Hidden);
+    assert!(!spec.decorations);
+    let implicit = parse(r#"{"id":"inspector","title":"x","titlebar":"hidden"}"#).unwrap();
+    assert_eq!(implicit.titlebar, Titlebar::Hidden);
+    assert!(
+        !implicit.decorations,
+        "hidden chrome must never keep the platform frame"
+    );
+}
+
+#[test]
 fn a_minimum_larger_than_the_maximum_names_min_size() {
     let error = parse_error(
         r#"{"id":"inspector","title":"x","min_size":{"width":900,"height":600},"max_size":{"width":400,"height":300}}"#,
@@ -223,12 +246,29 @@ fn a_closed_window_reports_closed_and_refuses_every_control() {
         state.hide().unwrap_err(),
         state.minimize().unwrap_err(),
         state.restore().unwrap_err(),
+        state.maximize().unwrap_err(),
+        state.toggle_maximize().unwrap_err(),
         state.set_title("again").unwrap_err(),
         state.set_size((1000.0, 640.0)).unwrap_err(),
     ] {
         assert!(error.contains("inspector"), "{error}");
         assert!(error.contains("closed"), "{error}");
     }
+}
+
+#[test]
+fn maximizing_and_toggling_track_state_and_restore_clears_it() {
+    let spec = parse(r#"{"id":"inspector","title":"x"}"#).unwrap();
+    let state = state(&spec);
+    state.maximize().unwrap();
+    assert!(state.is_open() && state.is_shown() && state.is_maximized());
+    state.toggle_maximize().unwrap();
+    assert!(!state.is_maximized());
+    state.toggle_maximize().unwrap();
+    assert!(state.is_maximized());
+    state.restore().unwrap();
+    assert!(state.is_open() && state.is_shown());
+    assert!(!state.is_minimized() && !state.is_maximized());
 }
 
 #[test]
