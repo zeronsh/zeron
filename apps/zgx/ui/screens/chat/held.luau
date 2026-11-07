@@ -2,13 +2,14 @@
 -- size too small, its files gone): each the send it was, its words, and when.
 -- Kept across launches, so nothing written is lost; shown in the chat's queue,
 -- removable there; sent once the machine can take them
--- (screens/chat/composer). Plain data, by chat.
+-- (screens/chat/composer). Plain data, by chat. One whose send was refused
+-- is back in its place, `refused`: it goes again only when the person sends it.
 --
---   Held.add(chat, { id, at, text, req })   Held.of(chat)   Held.remove(chat, id)
+--   Held.add(chat, { id, at, text, req, refused? })   Held.of(chat)   Held.remove(chat, id)
 
 local M = {}
 
-export type Entry = { id: string, at: number, text: string, req: { [string]: any } }
+export type Entry = { id: string, at: number, text: string, req: { [string]: any }, refused: boolean? }
 
 M.all = ui.persist("cloud_held_sends", {} :: { [string]: { Entry } })
 
@@ -22,10 +23,18 @@ function M.of(chat: string?): { Entry }
 	return M.all:get()[chat] or {}
 end
 
+-- In the order they were written (one put back goes back in its place).
 function M.add(chat: string, entry: Entry)
 	local next_all = table.clone(M.all:peek())
 	local list = table.clone(next_all[chat] or {})
-	table.insert(list, entry)
+	local at = #list + 1
+	for i, e in list do
+		if e.at > entry.at then
+			at = i
+			break
+		end
+	end
+	table.insert(list, at, entry)
 	next_all[chat] = list
 	M.all:set(next_all)
 end

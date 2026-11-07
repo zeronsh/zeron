@@ -1074,6 +1074,53 @@ test("a send to a machine that can't wake is held, shown queued, and the alert s
 	expect(app:has(row)).to_be(false)
 end)
 
+local function sends_of(app: any, words: string): number
+	local _, count = string.gsub(app:state("calls"), `send:s2:{words}`, "")
+	return count
+end
+
+-- A size picked with the next send refused: what was held is tried once.
+local function wake_refused(app: any, words: string)
+	send_to(app, words)
+	app:command("send_fails_next")
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	app:click(`{size("Extra large")} >> role:button "Wake here"`)
+	app:frames(60)
+end
+
+test("a held message whose send is refused stays, and goes again by its Send", function()
+	local app = on_cloud("blocked")
+	wake_refused(app, "Try me")
+	-- Tried once, not again and again; still there, and said.
+	expect(sends_of(app, "Try me")).to_be(1)
+	expect(app:has([[~"didn't send"]])).to_be(true)
+	open_queue(app)
+	local row = 'role:listitem ~"Try me"'
+	expect(app:has(row)).to_be(true)
+	app:frames(60)
+	expect(sends_of(app, "Try me")).to_be(1)
+	-- The person sends it: once more, and it's gone.
+	app:click(`{row} >> role:button "Send next"`)
+	app:frames(30)
+	expect(sends_of(app, "Try me")).to_be(2)
+	expect(app:has(row)).to_be(false)
+end)
+
+test("a refused held message's Edit takes its words back to the composer", function()
+	local app = on_cloud("blocked")
+	wake_refused(app, "Take me back")
+	open_queue(app)
+	local row = 'role:listitem ~"Take me back"'
+	app:hover(row)
+	app:frames(20)
+	app:click(`{row} >> role:button "Edit"`)
+	app:frames(30)
+	expect(app:text('role:textbox "Message"')).to_contain("Take me back")
+	expect(app:has(row)).to_be(false)
+	expect(sends_of(app, "Take me back")).to_be(1)
+end)
+
 test("a held message can be let go, and then nothing sends", function()
 	local app = on_cloud("blocked")
 	send_to(app, "Never mind")
@@ -1118,6 +1165,32 @@ test("a held message goes as soon as a size is picked, however long it waited", 
 	expect(sent(app, "From before")).to_be(true)
 	expect(app:has(in_deck('~"waiting to send"'))).to_be(false)
 	expect(app:has(row)).to_be(false)
+end)
+
+test("a message held ten days sends once, as new, once a size is picked", function()
+	local app = on_cloud("blocked")
+	send_to(app, "Ten days on")
+	app:command("cloud_stub.age_held_ten_days")
+	app:frames(10)
+	-- Past any message's week, and still held: nothing let it go.
+	open_queue(app)
+	expect(app:has('role:listitem ~"Ten days on"')).to_be(true)
+	expect(sent(app, "Ten days on")).to_be(false)
+	app:click('role:tab "Open Alerts"')
+	app:frames(30)
+	app:click(`{size("Extra large")} >> role:button "Wake here"`)
+	app:frames(60)
+	local calls = app:state("calls")
+	local _, count = string.gsub(calls, "send:s2:Ten days on", "")
+	expect(count).to_be(1)
+	-- Sent without the time it was written: its clock starts now.
+	expect(calls).never.to_contain("stamped:Ten days on")
+	expect(app:has('role:listitem ~"Ten days on"')).to_be(false)
+	-- And nothing sends it again: not another wake, not a reload of the hold.
+	app:command("cloud_stub.session.ready")
+	app:frames(30)
+	local _, after = string.gsub(app:state("calls"), "send:s2:Ten days on", "")
+	expect(after).to_be(1)
 end)
 
 test("a message queued long ago is said before its machine wakes and sends it", function()

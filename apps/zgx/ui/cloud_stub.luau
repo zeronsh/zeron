@@ -25,6 +25,7 @@
 --                              expired, gone
 --   cloud_stub.refuse_wake     the next wake is refused as too small
 --   cloud_stub.age_held        what's held back was written two days ago
+--   cloud_stub.age_held_ten_days  ... ten days ago (past any message's week)
 --   cloud_stub.clear_held      nothing's held back
 --   cloud_stub.refuse_machine  the default size can't be changed
 
@@ -367,21 +368,31 @@ ui.command {
 		Held.all:set({})
 	end,
 }
+local function age_held(days: number)
+	local all = {}
+	for chat, list in Held.all:peek() do
+		local aged = {}
+		for _, e in list do
+			local x = table.clone(e)
+			x.at -= days * 86400
+			table.insert(aged, x)
+		end
+		all[chat] = aged
+	end
+	Held.all:set(all)
+end
 ui.command {
 	id = "cloud_stub.age_held",
 	title = "What's held was written two days ago",
 	run = function()
-		local all = {}
-		for chat, list in Held.all:peek() do
-			local aged = {}
-			for _, e in list do
-				local x = table.clone(e)
-				x.at -= 2 * 86400
-				table.insert(aged, x)
-			end
-			all[chat] = aged
-		end
-		Held.all:set(all)
+		age_held(2)
+	end,
+}
+ui.command {
+	id = "cloud_stub.age_held_ten_days",
+	title = "What's held was written ten days ago",
+	run = function()
+		age_held(10)
 	end,
 }
 ui.command {

@@ -197,8 +197,26 @@ local function settled(value: any): any
 		end,
 	}
 end
+-- The next send refused, as a host that couldn't take it would.
+local send_fails = false
+ui.command {
+	id = "send_fails_next",
+	title = "The next send is refused",
+	run = function()
+		send_fails = true
+	end,
+}
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	-- A send carries no time of its own: the host starts its clock when it
+	-- gets it (a message held back goes with its week starting then).
+	if req.at or req.issued_at or req.sent_at or req.expires_at then
+		note(`stamped:{req.text}`)
+	end
+	if send_fails then
+		send_fails = false
+		return { after = function(_self: any, _ok: any, err: (any) -> ()) err({ message = "failed" }) end }
+	end
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end

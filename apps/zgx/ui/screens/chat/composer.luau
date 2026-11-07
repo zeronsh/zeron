@@ -471,20 +471,25 @@ local function Composer(): Node
 			table.insert(out, {
 				id = Held.PREFIX .. h.id,
 				text = h.text,
-				waiting = CloudMachine.held_label(reason),
+				-- (Refused, and its machine can take it: the person's to send.)
+				waiting = if h.refused and not reason then nil else CloudMachine.held_label(reason),
 			})
 		end
 		return out
 	end)
-	-- A held message sent: out of the hold, to the chat. (Refused, it's held
-	-- again, and the composer says so.)
+	-- A held message sent: out of the hold, to the chat. Refused, it's back in
+	-- its place, marked so it doesn't only go again at once (and again): its
+	-- row's Send sends it, Edit takes its words back, and the composer says
+	-- it didn't send. Never lost: only Remove lets it go.
 	local function release(chat: string, id: string)
 		local e = Held.remove(chat, id)
 		if not e then
 			return
 		end
 		store.send(e.req :: any):after(function() end, function()
-			Held.add(chat, e)
+			local back = table.clone(e)
+			back.refused = true
+			Held.add(chat, back)
 			own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
 		end)
 	end
@@ -496,7 +501,9 @@ local function Composer(): Node
 			return
 		end
 		for _, e in Held.of(chat) do
-			release(chat, e.id)
+			if not e.refused then
+				release(chat, e.id)
+			end
 		end
 	end)
 	local notice = ui.computed(function(): any
@@ -1009,14 +1016,27 @@ local function Composer(): Node
 				return running:get()
 			end,
 			-- (A held row is the hold's: it goes on its own, or is let go.)
+			-- (A held row goes on its own; one refused, by its Send.)
 			on_queue_send = function(row: string)
-				if not Held.id_of(row) then
+				local held, chat = Held.id_of(row), session_id:peek()
+				if not held then
 					asks.on_queue_send(row)
+				elseif chat and not machine.hold_reason() then
+					release(chat, held)
 				end
 			end,
+			-- (A refused held row's Edit: its words back in the composer,
+			-- after what's there.)
 			on_queue_edit = function(row: string)
-				if not Held.id_of(row) then
+				local held, chat = Held.id_of(row), session_id:peek()
+				if not held then
 					edits.on_queue_edit(row)
+					return
+				end
+				local e = if chat then Held.remove(chat, held) else nil
+				if e then
+					local words, draft = e.req.text or e.text, shared.text:peek()
+					shared.text:set(if draft == "" then words else `{draft}\n\n{words}`)
 				end
 			end,
 			on_queue_save = edits.on_queue_save,
