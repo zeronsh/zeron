@@ -1564,6 +1564,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		details = shared.details,
 		places = shared.places :: any,
 		width = shared.width,
+		shown = if props.island then nil else view.sidebar_shown,
+		before = if props.island then nil else 5,
 		-- (Its edge double-clicked: the chat and the panel split again, as
 		-- Zeron's `reset_panel_widths`.)
 		on_reset = function()
@@ -1647,10 +1649,14 @@ M.Sidebar = ui.component(function(props: Props): Node
 		h_full = true,
 		shrink = 0,
 		relative = true,
-		-- (The window's gap before its card, closing with it.)
-		pl = motion.tween(ui.computed(function(): number
-			return if fit.current:get().sidebar then 5 else 0
-		end), motion.sidebar),
+		-- (The window's gap before its card: there as long as the card is,
+		-- going only with its last 5 points, so the card's left edge stands
+		-- still as it folds and comes back. It once closed on the sidebar's
+		-- clock, the whole card sliding 5 points.)
+		pl = function(): number
+			local shown = view.sidebar_shown:get()
+			return ui.raw(math.min(5, shown), "the window's gap before its card")
+		end,
 		-- (That gap's top moves the window, as the bar beside it does.)
 		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,

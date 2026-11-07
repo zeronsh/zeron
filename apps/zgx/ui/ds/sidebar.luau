@@ -179,6 +179,15 @@ export type Props = {
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
+	-- Told its column's width as it shows (its card and `before`), each
+	-- frame as it folds or comes back (what stands beside it follows its
+	-- edge by it).
+	shown: State<number>?,
+	-- The window's gap before its card, which its column holds as it shows
+	-- (the app sets it in by that): part of its move, so the column moves on
+	-- one curve, and gone only with its last points, so the card's left edge
+	-- stands still as it folds.
+	before: number?,
 	-- Its edge double-clicked, after its width is back to its default: the
 	-- app re-splits what's beside it.
 	on_reset: (() -> ())?,
@@ -361,13 +370,19 @@ return ui.component(function(props: Props): Node
 	local function room_now(): number
 		return if limit then math.min(wide:peek(), limit()) else wide:peek()
 	end
+	local before = props.before or 0
 	local function target(): number
 		if collapsed:get() then
 			return 0
 		end
-		return room()
+		return room() + before
 	end
+	-- (Its column's width as it shows, `before` included; its card's,
+	-- what's past that.)
 	local shown_w = ui.use_state(target())
+	local function card_w(): number
+		return math.max(shown_w:get() - before, 0)
+	end
 	local resizing = false
 	local dragging = ui.use_state(false)
 	local edge_over = ui.use_state(false)
@@ -432,6 +447,15 @@ return ui.component(function(props: Props): Node
 			shown_w:set(w)
 		end
 	end)
+	if props.shown then
+		local told = props.shown
+		ui.effect(function()
+			local w = shown_w:get()
+			if told:peek() ~= w then
+				told:set(w)
+			end
+		end)
+	end
 	local selected = props.selected
 	-- (Reduce motion: there at once; ds/motion.)
 	local function eased(f: () -> number, how: any): any
@@ -4556,12 +4580,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 			-- (The scroll's room round its icons is part of the gap above it.)
 			gap = RAIL_GROUP - ROOM,
 			items = "center",
+			-- (It appears where it stands: a fade, no growing into place.)
 			opacity = ui.tween(ui.computed(function(): number
 				return if collapsed:get() then 1 else 0
 			end), { duration = 220, ease = "out(3)" }),
-			scale = motion.tween(ui.computed(function(): number
-				return if collapsed:get() then 1 else 0.96
-			end), { duration = 260, ease = "out(3)" }),
 			pointer_events = function()
 				return if collapsed:get() then "auto" else "none"
 			end,
@@ -4993,9 +5015,33 @@ fn layer(input:LayerInput)->vec4<f32> {
 	-- Its column: the top, a notice if it has one, the list, you at the foot
 	-- (collapsed, folded away: the rail keeps to what you work in, and what
 	-- you start).
+	-- (Its content stands at its width, at its left, as its edge folds over
+	-- it and uncovers it again: nothing in it moves, it only fades a little
+	-- (ds/motion `content`), as the panel's does.)
+	local body_el: any = nil
+	if not is_island then
+		local folded_was = collapsed:peek()
+		ui.effect(function()
+			local folded = collapsed:get()
+			if folded == folded_was then
+				return
+			end
+			folded_was = folded
+			if body_el then
+				anime.animate(body_el, motion.content(not folded))
+			end
+		end)
+	end
 	local body: { [any]: any } = {
+		id = if is_island then nil else "sidebar-content",
 		w = function(): number
 			return room()
+		end,
+		on_mount = function(el: any)
+			body_el = el
+			if not is_island then
+				anime.animate(el, motion.content(not collapsed:peek(), true))
+			end
 		end,
 		h_full = true,
 		shrink = 0,
@@ -5113,9 +5159,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 		id = if is_island then "rail" else nil,
 		w = if props.card
 			then "100%" :: any
-			else function(): number
-				return shown_w:get()
-			end,
+			else card_w,
 		-- Folded away, out of layout and out of reach (no row to tab to),
 		-- its scroll and folds kept for when it opens.
 		hidden = function(): boolean
@@ -5214,9 +5258,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 	local card_top = props.top or 0
 	return ui.div {
 		relative = true,
-		w = function(): number
-			return shown_w:get()
-		end,
+		w = card_w,
 		hidden = function(): boolean
 			return collapsed:get() and shown_w:get() <= 0
 		end,
