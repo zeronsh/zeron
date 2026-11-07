@@ -245,7 +245,7 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "notifications" => {}
             // The agents' usage, accounts and models: the engine checks each
             // ask against what this device allowed (`plugin.<id>.agents`).
-            "usage.read" | "accounts.read" | "accounts.switch" | "models.read" | "models.set" => {}
+            "usage.read" | "accounts.read" | "accounts.switch" | "models.read" | "models.set" | "messages.send" => {}
             // Its own tabs and pages: Zeron draws a placeholder of each,
             // which only this plugin may fill (replace).
             "panel.tabs" => out.push(Capability::OverrideElement(tab_selector(id))),

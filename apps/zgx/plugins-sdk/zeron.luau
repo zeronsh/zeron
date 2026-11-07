@@ -1238,6 +1238,37 @@ return function(id: string): any
 		return agents("set_default_model", { harness = s.harness, model = s.model, effort = s.effort })
 	end
 
+	-- A message into a chat ("messages.send"), as you'd send it from the
+	-- composer: a turn of its own when nothing runs; while a turn runs,
+	-- queued for its end (`mode = "queue"`, the default) or steering it
+	-- (`"steer"`). `attachments`: files' paths on the chat's device (they
+	-- need "files.read" too). A promise of { status, chat, delivery, id }.
+	function M.send_message(s: { chat: string, text: string, attachments: { string }?, mode: string? }): any
+		return agents("send_message", { chat = s.chat, text = s.text, attachments = s.attachments, mode = s.mode })
+	end
+
+	-- A new chat, sent its first message ("messages.send"): `device`,
+	-- `project` (a project's id), `harness`, `model`, `effort`, `cwd` as you'd
+	-- pick them. A promise of { status, chat, id }, `chat` the new chat's id.
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+		return agents("new_chat", {
+			prompt = s.prompt,
+			device = s.device,
+			project = s.project,
+			harness = s.harness,
+			model = s.model,
+			effort = s.effort,
+			cwd = s.cwd,
+		})
+	end
+
+	-- The question (or approval) a chat waits on, answered ("messages.send"):
+	-- `answers` by question id, `{ [question] = label or { labels } }` (or a
+	-- list of { question, labels }); `request` names one, else the latest.
+	function M.answer(s: { chat: string, answers: any, request: string? }): any
+		return agents("answer", { chat = s.chat, answers = s.answers, request = s.request })
+	end
+
 	-- `fn(data, event)` for each `event` on this device while a window is
 	-- open: "usage.changed", "usage.threshold" (`opts.below`: percent
 	-- remaining), "usage.reset", "limit.hit", "account.switched",

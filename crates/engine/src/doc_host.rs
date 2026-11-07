@@ -3609,6 +3609,25 @@ impl DocHost {
     /// over the peer link (retry until they land) while the command is
     /// already durably queued. The send is a local write — attachment bytes
     /// chase it, never gate it (2026-08-19 incident).
+    /// The question (or approval) `chat_id` waits on, latest first: its
+    /// request id, or `None` when nothing waits.
+    pub(crate) fn pending_input(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let entries = handle.doc.read_entries()?;
+        Ok(entries.iter().rev().flat_map(|e| e.parts.iter().rev()).find_map(|part| match part {
+            zeron_doc::MessagePart::Input { request_id, resolved: false, .. } => Some(request_id.clone()),
+            _ => None,
+        }))
+    }
+
+    /// Record who sent message (or queued row) `id` of `chat_id`, beside
+    /// its transcript (`SessionDoc::sent_by`; synced with the chat, shown
+    /// nowhere).
+    pub(crate) fn mark_sent_by(&self, chat_id: &str, id: &str, by: serde_json::Value) -> Result<(), EngineError> {
+        self.open(chat_id)?.doc.mark_sent_by(id, by)?;
+        Ok(())
+    }
+
     pub fn queue_command_with_transfers(
         &self,
         chat_id: &str,

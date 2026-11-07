@@ -49,6 +49,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "accounts.switch",
     "models.read",
     "models.set",
+    // Sending messages in your chats, starting chats and answering their
+    // questions, as you would from the composer (plugins/agents).
+    "messages.send",
 ];
 
 /// Ids the app keeps for itself.

@@ -359,6 +359,28 @@ local function service(id: string): any
 		return agents("set_model", s)
 	end
 
+	-- A message into a chat ("messages.send"), as you'd send it from the
+	-- composer: a turn of its own when nothing runs; while a turn runs,
+	-- queued for its end (`mode = "queue"`, the default) or steering it
+	-- (`"steer"`). `attachments`: files' paths on the chat's device (they
+	-- need "files.read" too). A promise of { status, chat, delivery, id }.
+	function M.send_message(s: { chat: string, text: string, attachments: { string }?, mode: string? }): any
+		return agents("send_message", s)
+	end
+
+	-- A new chat, sent its first message ("messages.send"): a promise of
+	-- { status, chat, id }, `chat` the new chat's id.
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+		return agents("new_chat", s)
+	end
+
+	-- The question (or approval) a chat waits on, answered ("messages.send"):
+	-- `answers` by question id, `{ [question] = label or { labels } }` (or a
+	-- list of { question, labels }); `request` names one, else the latest.
+	function M.answer(s: { chat: string, answers: any, request: string? }): any
+		return agents("answer", s)
+	end
+
 	-- A promise done after `seconds`.
 	function M.sleep(seconds: number): any
 		return op("sleep", { seconds = seconds })

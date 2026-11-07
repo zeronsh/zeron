@@ -2218,6 +2218,10 @@ impl Inner {
         if let (Some(message), Some(plugins)) = (problem, self.plugins.get()) {
             plugins.agents().observe_problem(chat_id, message);
         }
+        // Its final reply, told with its `turn.finished` (`messages.read`).
+        if let (AgentEvent::Done { result: Some(reply), .. }, Some(plugins)) = (event, self.plugins.get()) {
+            plugins.agents().observe_reply(chat_id, reply);
+        }
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
             let _ = hub.send(JournaledEvent {
                 seq,

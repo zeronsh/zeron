@@ -50,6 +50,8 @@ pub const OUTSIDE_SANDBOX: &[&str] = &[
     "ui.replace",
     "accounts.switch",
     "models.set",
+    // Sending messages as you, to your agents: what they then do is theirs.
+    "messages.send",
 ];
 
 /// The hosts of a plugin with "network" that names none: any public one.

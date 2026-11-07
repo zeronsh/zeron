@@ -4064,3 +4064,50 @@ end)
     assert!(problems.iter().any(|p| p.contains("Its usage.changed listener failed (3 times in a row)")), "{problems:?}");
     assert_eq!(app.error(), None);
 }
+
+#[test]
+fn keep_going_says_what_its_service_sent() {
+    let (mut app, heard) = shell_with_agents(vec![example("keep-going")], json!({}));
+    assert_eq!(app.error(), None, "the shell with the example failed");
+    tell(&mut app, "keep-going", "continued", json!({ "chat": "s-unknown", "delivery": "run" }));
+    let toasts = said(&heard, "plugin.keep-going.toast");
+    assert_eq!(toasts.len(), 1, "{toasts:?}");
+    assert!(toasts[0].contains("Sent \\\"continue\\\" to"), "{toasts:?}");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn a_window_sends_starts_and_answers_through_the_engine() {
+    let init = r#"
+local zeron = require("./zeron")("sender")
+zeron.send_message({ chat = "c1", text = "hello", mode = "steer" }):after(function(r)
+	zeron.toast(`sent {r.delivery}`)
+end)
+zeron.new_chat({ prompt = "Fix the build", harness = "claude-code", effort = "high" }):after(function(r)
+	zeron.toast(`started {r.chat}`)
+end)
+zeron.answer({ chat = "c1", answers = { q1 = "Yes" } }):after(nil, function(err)
+	zeron.toast(`answer {zeron.reason(err)}`)
+end)
+"#;
+    let (_dir, item) = own_plugin("sender", &["messages.send"], init);
+    let answers = json!({
+        "send_message": { "status": "sent", "chat": "c1", "delivery": "steer", "id": "m1" },
+        "new_chat": { "status": "sent", "chat": "c9", "id": "m2" },
+        "answer": { "refuse": "not_found: That chat isn't waiting on a question" },
+    });
+    let (mut app, heard) = shell_with_agents(vec![item], answers);
+    assert_eq!(app.error(), None);
+    app.frames(10);
+    let asked: Vec<serde_json::Value> = said(&heard, "agents").iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+    let send = asked.iter().find(|a| a["op"] == "send_message").expect("it sent");
+    assert_eq!((send["args"]["chat"].as_str(), send["args"]["text"].as_str(), send["args"]["mode"].as_str()), (Some("c1"), Some("hello"), Some("steer")));
+    let start = asked.iter().find(|a| a["op"] == "new_chat").expect("it started a chat");
+    assert_eq!((start["args"]["prompt"].as_str(), start["args"]["effort"].as_str()), (Some("Fix the build"), Some("high")));
+    assert!(asked.iter().any(|a| a["op"] == "answer" && a["args"]["answers"]["q1"] == "Yes"), "{asked:?}");
+    let toasts = said(&heard, "plugin.sender.toast");
+    for want in ["sent steer", "started c9", "answer not_found"] {
+        assert!(toasts.iter().any(|t| t.contains(want)), "{want}: {toasts:?}");
+    }
+    assert_eq!(app.error(), None);
+}
