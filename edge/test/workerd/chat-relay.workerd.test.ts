@@ -464,6 +464,38 @@ describe("nobody is left waiting on a host that isn't there", () => {
     phone.socket.close();
   });
 
+  it("a host back on a build without the layer gets what was queued for it", async () => {
+    const name = crypto.randomUUID();
+    const org = crypto.randomUUID();
+    await enableRelay(name);
+    const registry = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(`reg1/${org}/${user}`));
+    await runInDurableObject(registry, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO rows (kind, id, seq, deleted, del_hlc, fields, clocks) VALUES ('chats', ?, 1, 0, NULL, ?, '{}')",
+        name,
+        JSON.stringify({ deviceId: "laptop" })
+      );
+    });
+    // The host relays, so the room remembers it, then goes away.
+    const host = await connect(name, "laptop", { relay: true, relaying: true });
+    host.sendFrame(FRAME.relay, {}, bytes(4));
+    await host.settled();
+    host.socket.close();
+    const phone = await connect(name, "phone", { relay: true, host: "laptop" });
+    phone.sendFrame(FRAME.enqueue, { batchId: "m1" }, bytes(5));
+    await phone.nextOf(FRAME.queued);
+    // Someone else without the layer arriving doesn't drain it: no heal has landed.
+    const other = await connect(name, "old-phone", { org });
+    await other.settled();
+    expect(await queueCount(name)).toBe(1);
+    // The host itself, downgraded, does.
+    const old = await connect(name, "laptop", { org });
+    const row = await old.nextOf(FRAME.row);
+    expect(row.header.batchId).toBe("m1");
+    expect(await queueCount(name)).toBe(0);
+    for (const client of [phone, other, old]) client.socket.close();
+  });
+
   it("the edge flag alone wakes nobody: a stored chat's readers need no host", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);

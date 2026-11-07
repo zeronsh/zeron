@@ -166,7 +166,7 @@ export class ChatRoom implements DurableObject {
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = { userId, device, chatId, hostDevice };
       const orgId = request.headers.get(AUTH_ORG_HEADER);
-      if (orgId && this.relayEnabled()) state.orgId = orgId;
+      if (orgId) state.orgId = orgId;
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
@@ -193,8 +193,12 @@ export class ChatRoom implements DurableObject {
       // A relay-era checkpoint prunes nothing, whatever floor the host last saw.
       const relayEra = url.searchParams.get("atFloor") === "1";
       const atFloor = this.relayEnabled() && relayEra;
-      // It can also be all that's stored, so it may not go backwards.
-      if (relayEra && !this.checkpointMovesForward(frontier)) return json({ error: "stale" }, 409);
+      // A relay-era checkpoint can be all that's stored, so while the layer is on no
+      // checkpoint may replace the room's with less: an ordinary one from a viewer or
+      // an older build is behind as often as not.
+      if ((relayEra || this.relayEnabled()) && !this.checkpointMovesForward(frontier)) {
+        return json({ error: "stale" }, 409);
+      }
       const covered = atFloor ? seqFloor(sql) : seqCovered;
       const outcome = commitCheckpoint(sql, this.blobs, covered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
@@ -505,6 +509,7 @@ export class ChatRoom implements DurableObject {
     } else if (!layer) {
       this.drainStaleQueue();
     }
+    if (!state.relay) this.drainForLegacyHost(state);
     // Only for a chat in the relay era: a stored chat's readers need no host.
     if (layer && (header.gen === 3 || this.relayDirty())) this.wakeAbsentHost(state);
     const sql = this.ctx.storage.sql;
@@ -660,6 +665,26 @@ export class ChatRoom implements DurableObject {
     if (this.relayDirty()) return;
     const sql = this.relaySql();
     this.storeDrained(drainQueueIntoRows(sql, Date.now()));
+  }
+
+  /** The chat's host is back on a build without the layer. It can't heal, so the
+   * drains above would wait for good, and what's queued is messages sent to it. It
+   * holds every op those messages depend on, so it can always read them as rows. An
+   * old reader may still park on them until a heal; it would have anyway. */
+  private drainForLegacyHost(state: SocketState): void {
+    if (!this.relayDirty() || !state.orgId) return;
+    const sql = this.ctx.storage.sql;
+    if (!hasRelayQueue(sql)) return;
+    this.ctx.waitUntil(
+      this.chatHost(state).then(host => {
+        if (host !== state.device || !hasRelayQueue(sql)) return;
+        this.storeDrained(drainQueueIntoRows(sql, Date.now()));
+        if (!this.relayEnabled()) {
+          sql.exec("DROP TABLE relay_queue");
+          this.relayQueueReady = false;
+        }
+      })
+    );
   }
 
   /** The layer was turned off with rows still queued: nothing can read the queue
