@@ -210,7 +210,9 @@ pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
     // Browser annotations become plain text blocks for every provider.
     let text = crate::annotation::annotation_prompt(&crate::file_mentions::file_mention_prompt(
         &crate::attachment_mentions::attachment_mention_prompt(
-            &crate::chat_mentions::chat_mention_prompt(text),
+            &crate::chat_mentions::chat_mention_prompt(&crate::web_mentions::web_mention_prompt(
+                text,
+            )),
         ),
     ));
     if harness == crate::HarnessId::Codex {

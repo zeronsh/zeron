@@ -34,6 +34,8 @@ pub enum ChipKind {
     Chat,
     /// An element picked in the browser.
     Annotation,
+    /// A web page, dropped from a browser tab.
+    Web,
 }
 
 /// What a chip's icon is painted from: a monochrome glyph tinted like the
@@ -42,6 +44,9 @@ pub enum ChipKind {
 pub(crate) enum ChipIcon {
     Glyph(&'static str),
     FileTheme(SharedString),
+    /// A page's site icon, when this device has seen it; its address otherwise
+    /// falls back to a globe.
+    Favicon(SharedString),
 }
 
 /// The padding around the label in a chip's display `range`: the side
@@ -163,7 +168,8 @@ pub(super) fn chip_pad_overrides(spans: &[SentMentionSpan]) -> Vec<Range<usize>>
         .collect()
 }
 
-/// The icon of a chip. `path` names the file or folder for the file kinds.
+/// The icon of a chip. `path` names the file or folder for the file kinds,
+/// and the page's address for a web chip.
 pub(crate) fn chip_icon(
     kind: ChipKind,
     path: &str,
@@ -176,6 +182,7 @@ pub(crate) fn chip_icon(
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
         ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
         ChipKind::Annotation => ChipIcon::Glyph(crate::icons::CURSOR),
+        ChipKind::Web => ChipIcon::Favicon(SharedString::from(path.to_owned())),
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),
@@ -223,17 +230,24 @@ pub(crate) fn paint_chip(
         well_bounds.origin + point((well - side) / 2.0, (well - side) / 2.0),
         size(side, side),
     );
+    let glyph = |window: &mut Window, path: &'static str| {
+        let _ = window.paint_svg(
+            bounds,
+            path.into(),
+            None,
+            gpui::TransformationMatrix::default(),
+            theme.text_muted,
+            cx,
+        );
+    };
     match icon {
-        ChipIcon::Glyph(path) => {
-            let _ = window.paint_svg(
-                bounds,
-                (*path).into(),
-                None,
-                gpui::TransformationMatrix::default(),
-                theme.text_muted,
-                cx,
-            );
-        }
+        ChipIcon::Glyph(path) => glyph(window, path),
+        ChipIcon::Favicon(url) => match crate::favicons::cached(url) {
+            Some(image) => {
+                let _ = window.paint_image(bounds, px(2.0).into(), image, 0, false);
+            }
+            None => glyph(window, crate::icons::GLOBE),
+        },
         ChipIcon::FileTheme(path) => {
             if let Some(image) = crate::file_icons::raster(path, cx) {
                 let _ = window.paint_image(bounds, Default::default(), image, 0, false);

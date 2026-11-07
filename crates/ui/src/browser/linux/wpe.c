@@ -942,10 +942,51 @@ static void state(Page *p) {
     send_json('S', p->id, b);
 }
 static void changed(GObject *web, GParamSpec *spec, Page *p) { state(p); }
+static gboolean allowed(const char *uri);
+// The page an icon lookup started on, so a late answer can't label the next one.
+typedef struct {
+    guint id;
+    gchar *page;
+} IconQuery;
+static void icon_found(GObject *web, GAsyncResult *result, gpointer data) {
+    IconQuery *q = data;
+    GError *error = NULL;
+    JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(web), result, &error);
+    if (v && jsc_value_is_string(v)) {
+        gchar *url = jsc_value_to_string(v);
+        JsonBuilder *b = json_builder_new();
+        json_builder_begin_object(b);
+        member_string(b, "page", q->page);
+        member_string(b, "url", url);
+        json_builder_end_object(b);
+        send_json('O', q->id, b);
+        g_free(url);
+    }
+    g_clear_object(&v);
+    g_clear_error(&error);
+    g_free(q->page);
+    g_free(q);
+}
+// The host downloads the icon; WebKit's own favicon database stays off.
+static void discover_icon(Page *p) {
+    const char *uri = webkit_web_view_get_uri(p->web);
+    if (!allowed(uri))
+        return;
+    IconQuery *q = g_new0(IconQuery, 1);
+    q->id = p->id;
+    q->page = g_strdup(uri);
+    webkit_web_view_evaluate_javascript(
+        p->web,
+        "(() => { const link = document.querySelector('link[rel~=icon]'); return link ? "
+        "link.href : new URL('/favicon.ico', location.href).href; })()",
+        -1, NULL, NULL, NULL, icon_found, q);
+}
 static void loaded(WebKitWebView *web, WebKitLoadEvent event, Page *p) {
     if (event == WEBKIT_LOAD_STARTED)
         g_clear_pointer(&p->error, g_free);
     state(p);
+    if (event == WEBKIT_LOAD_FINISHED && !p->error)
+        discover_icon(p);
 }
 static gboolean failed(WebKitWebView *web, WebKitLoadEvent event, const char *uri, GError *error,
                        Page *p) {

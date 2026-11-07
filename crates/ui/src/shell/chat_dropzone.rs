@@ -52,6 +52,10 @@ impl Shell {
                 move |this, payload: &RightTabDrag, window, cx| {
                     if let Some(path) = &payload.workspace_path {
                         this.attach_workspace_drag(path, &composer, window, cx);
+                    } else if let Some(page) = &payload.web_page {
+                        composer.update(cx, |composer, cx| {
+                            composer.add_web_mention(&page.url, &page.title, window, cx)
+                        });
                     }
                     cx.notify();
                 },
@@ -99,6 +103,13 @@ impl Shell {
             .text_size(crate::typography::ui_rems(13.0))
             .text_color(theme.text)
             .drag_over::<SidebarSessionDrag>(|style, _, _, _| style.opacity(1.0))
+            .drag_over::<RightTabDrag>(|style, tab, _, _| {
+                if tab.web_page.is_some() {
+                    style.opacity(1.0)
+                } else {
+                    style
+                }
+            })
             .child("Drop to mention")
     }
 }
