@@ -152,6 +152,51 @@ impl TurnControl {
     pub fn background_output(&self, id: &str) -> Option<zeron_proto::BackgroundTaskOutput> {
         self.processes.output(id)
     }
+
+    /// Driver: this runtime wakes its agent on its own when background work
+    /// ends (a wake turn), so what the agent waits on can be shown as a wait
+    /// rather than a finish. Drivers that can't say so leave it off.
+    pub fn set_wakes_on_background(&self, wakes: bool) {
+        self.processes.set_wakes(wakes);
+    }
+
+    /// Driver: the runtime's background agents now, its whole set: each
+    /// reports back, so each is waited on.
+    pub fn set_background_agents(&self, agents: Vec<zeron_proto::WaitingOn>) {
+        self.processes.set_agents(agents);
+    }
+
+    /// Driver: the runtime started a turn nobody sent (a background task
+    /// ended and woke the agent).
+    pub fn note_wake(&self) {
+        self.processes.note_wake();
+    }
+
+    /// Host: resolves once per [`Self::note_wake`].
+    pub async fn woke(&self) {
+        self.processes.woke().await;
+    }
+
+    /// Host: the agent says it waits on these background processes (or, with
+    /// `waiting` false, no longer).
+    pub fn mark_awaited(
+        &self,
+        ids: &[String],
+        waiting: bool,
+    ) -> Result<background::MarkOutcome, background::MarkRefused> {
+        self.processes.mark(ids, waiting)
+    }
+
+    /// Host: the person's Stop waiting: the processes the agent marked are no
+    /// longer waited on.
+    pub fn clear_awaited(&self) {
+        self.processes.clear_marks();
+    }
+
+    /// Host: what the agent waits on now, as it changes.
+    pub fn watch_waiting(&self) -> tokio::sync::watch::Receiver<Vec<zeron_proto::WaitingOn>> {
+        self.processes.watch_waiting()
+    }
 }
 
 /// Run-config values compared as their wire meaning, not their JSON type:
@@ -245,6 +290,14 @@ pub trait Harness: Send + Sync {
     /// Unlike deterministic_turn_end, this need not cover autonomous activity.
     fn authoritative_prompt_end(&self) -> bool {
         self.deterministic_turn_end()
+    }
+    /// Whether the runtime brings its agent back on its own when background
+    /// work ends (a new turn, unprompted), so a turn that ends on that work
+    /// isn't the agent's last: the driver declares it as the run goes
+    /// ([`TurnControl::set_wakes_on_background`]), and the host offers the
+    /// agent Zeron's `wait_on_background` only where this is true.
+    fn wakes_on_background(&self) -> bool {
+        false
     }
     /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
     /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
@@ -364,7 +417,7 @@ pub(crate) mod adapter_install;
 pub mod approval;
 pub mod archive_install;
 mod background;
-pub use background::OutputSource;
+pub use background::{MarkOutcome, MarkRefused, OutputSource};
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;

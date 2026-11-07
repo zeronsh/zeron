@@ -18,6 +18,7 @@ require("@app/screens/settings/chimes")
 
 local general = require("@app/screens/settings/general")
 local appearance = require("@app/screens/settings/appearance")
+local activity_page = require("@app/screens/settings/activity")
 local notifications = require("@app/screens/settings/notifications")
 local profile = require("@app/screens/settings/profile")
 local providers = require("@app/screens/settings/providers")
@@ -61,6 +62,7 @@ end
 
 add(general, "settings-minimalistic", "Personal")
 add(appearance, "tuning", "Personal")
+add(activity_page, "inbox", "Personal")
 add(notifications, "bell", "Personal")
 add(files, "folder", "Personal")
 add(shortcuts, "keyboard", "Personal")

@@ -609,6 +609,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // A background process of the chat's stopped, on its host (the shipping
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
+    host.async_action("chat.stop_waiting", move |id| async move { stop_waiting(text(&id)).await.map_err(String::from) });
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -2409,6 +2410,24 @@ async fn stop_task(args: Value) -> Result<Value, Outcome> {
         .await
         .map_err(|e| engine::outcome(&e))?;
     Ok(Value::Bool(answer["stopping"].as_bool() == Some(true)))
+}
+
+/// The person's Stop waiting for a chat (`StopWaiting`), routed to its host:
+/// what its agent said it waits on no longer holds it.
+async fn stop_waiting(id: String) -> Result<Value, Outcome> {
+    if id.is_empty() {
+        return Err("missing");
+    }
+    let chats = CHATS.with(Rc::clone);
+    let mut params = json!({ "chatId": id });
+    if let Some(t) = chats.chat(&id).and_then(|c| chats.target(&c)) {
+        params["targetDeviceId"] = json!(t);
+    }
+    let answer = engine::get()
+        .call("StopWaiting", params)
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Bool(answer["stopped"].as_bool() == Some(true)))
 }
 
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
