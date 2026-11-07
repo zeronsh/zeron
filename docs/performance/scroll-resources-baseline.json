@@ -1,0 +1,2357 @@
+{
+  "host": "Linux-7.2.5-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "renderer": "Vulkan llvmpipe, 4 threads; Xvfb; nominal 60Hz fallback",
+  "cpu_units": "percent of ONE core; all app threads; engine excluded",
+  "ram_units": "MiB of process RSS/PSS; GPU memory excluded",
+  "sample_interval_s": 0.1,
+  "replays_per_phase": 2,
+  "binaries": {
+    "baseline": {
+      "path": "/tmp/zeron-scroll-resources/baseline",
+      "sha256": "1b21b902b305dbeadefa66b3d133868c77fdf580237fe26aaaeaf064a822faf0"
+    }
+  },
+  "ui_sha256": "66925935740696d764806b6f15ef595de40fe90e62f5e1e46b6e270d19160fa8",
+  "runs": [
+    {
+      "label": "baseline",
+      "launch": 0,
+      "phases": {
+        "idle_before": {
+          "elapsed_s": 3.0004796819994226,
+          "cpu_s": 0.040000000000000924,
+          "cpu_percent_one_core": 1.3331201754162927,
+          "memory_samples": 29,
+          "rss_mib_median": 245.921875,
+          "rss_mib_peak": 248.3203125,
+          "pss_mib_median": 215.54296875,
+          "pss_mib_peak": 217.94140625,
+          "result": null
+        },
+        "scroll_60": {
+          "elapsed_s": 8.825365483004134,
+          "cpu_s": 7.139999999999999,
+          "cpu_percent_one_core": 80.90316501622729,
+          "memory_samples": 85,
+          "rss_mib_median": 247.0625,
+          "rss_mib_peak": 252.6484375,
+          "pss_mib_median": 216.68359375,
+          "pss_mib_peak": 222.26953125,
+          "result": {
+            "data": {
+              "interval_ms": {
+                "least": 16.66,
+                "median": 16.67,
+                "most": 16.67
+              },
+              "late": {
+                "least": 0,
+                "median": 2,
+                "most": 2
+              },
+              "longest_gap_ms": {
+                "least": 23.75,
+                "median": 25.85,
+                "most": 25.85
+              },
+              "runs": [
+                {
+                  "events": 265,
+                  "first_frame": 634,
+                  "frames": 264,
+                  "interval_ms": 16.67,
+                  "last_frame": 897,
+                  "late": 0,
+                  "layout": {
+                    "measured": 34210,
+                    "micros": 54909,
+                    "top": [
+                      {
+                        "frames": 496,
+                        "micros": 27972,
+                        "node": 3,
+                        "self_micros": 4330,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 536,
+                        "micros": 2633,
+                        "node": 158,
+                        "self_micros": 2633,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 466,
+                        "micros": 9942,
+                        "node": 23,
+                        "self_micros": 2160,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 259,
+                        "micros": 30243,
+                        "node": 0,
+                        "self_micros": 2006,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 270,
+                        "micros": 5259,
+                        "node": 103,
+                        "self_micros": 1775,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 326,
+                        "micros": 15664,
+                        "node": 5,
+                        "self_micros": 1631,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 263,
+                        "micros": 11606,
+                        "node": 22,
+                        "self_micros": 1252,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 213,
+                        "micros": 18899,
+                        "node": 4,
+                        "self_micros": 757,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 23.75,
+                  "per_event_ms": {
+                    "max": 12.012,
+                    "mean": 5.024,
+                    "p50": 4.458,
+                    "p90": 7.718,
+                    "p95": 9.763,
+                    "p99": 11.28
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62336250,
+                      "max": 7.479,
+                      "mean": 3.781,
+                      "name": "present",
+                      "p50": 3.614,
+                      "p90": 4.23,
+                      "p95": 4.398,
+                      "p99": 6.203,
+                      "total_ms": 998.162
+                    },
+                    {
+                      "instructions": 191253024,
+                      "max": 3.647,
+                      "mean": 0.354,
+                      "name": "script",
+                      "p50": 0.106,
+                      "p90": 1.375,
+                      "p95": 2.485,
+                      "p99": 2.77,
+                      "total_ms": 93.566
+                    },
+                    {
+                      "instructions": 203406549,
+                      "max": 2.612,
+                      "mean": 0.315,
+                      "name": "update",
+                      "p50": 0.076,
+                      "p90": 1.314,
+                      "p95": 2.195,
+                      "p99": 2.424,
+                      "total_ms": 83.225
+                    },
+                    {
+                      "instructions": 245373098,
+                      "max": 1.316,
+                      "mean": 0.236,
+                      "name": "layout",
+                      "p50": 0.137,
+                      "p90": 0.594,
+                      "p95": 1.052,
+                      "p99": 1.295,
+                      "total_ms": 62.194
+                    },
+                    {
+                      "instructions": 234768814,
+                      "max": 2.95,
+                      "mean": 0.297,
+                      "name": "paint",
+                      "p50": 0.247,
+                      "p90": 0.331,
+                      "p95": 0.36,
+                      "p99": 2.165,
+                      "total_ms": 78.398
+                    },
+                    {
+                      "instructions": 79236703,
+                      "max": 0.117,
+                      "mean": 0.051,
+                      "name": "damage",
+                      "p50": 0.047,
+                      "p90": 0.07,
+                      "p95": 0.081,
+                      "p99": 0.093,
+                      "total_ms": 13.586
+                    },
+                    {
+                      "instructions": 2535625,
+                      "max": 0.068,
+                      "mean": 0.009,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.01,
+                      "p95": 0.012,
+                      "p99": 0.016,
+                      "total_ms": 2.306
+                    }
+                  ],
+                  "work_median_ms": 4.47,
+                  "work_most_frame": 739,
+                  "work_most_ms": 12.01,
+                  "work_ms": {
+                    "max": 12.012,
+                    "mean": 5.043,
+                    "p50": 4.462,
+                    "p90": 7.718,
+                    "p95": 9.763,
+                    "p99": 11.28
+                  }
+                },
+                {
+                  "events": 266,
+                  "first_frame": 898,
+                  "frames": 265,
+                  "interval_ms": 16.66,
+                  "last_frame": 1162,
+                  "late": 2,
+                  "layout": {
+                    "measured": 35579,
+                    "micros": 55445,
+                    "top": [
+                      {
+                        "frames": 499,
+                        "micros": 27540,
+                        "node": 3,
+                        "self_micros": 4286,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 535,
+                        "micros": 2581,
+                        "node": 158,
+                        "self_micros": 2581,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 470,
+                        "micros": 9659,
+                        "node": 23,
+                        "self_micros": 2162,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 264,
+                        "micros": 30223,
+                        "node": 0,
+                        "self_micros": 1990,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 276,
+                        "micros": 5239,
+                        "node": 103,
+                        "self_micros": 1760,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 336,
+                        "micros": 15529,
+                        "node": 5,
+                        "self_micros": 1649,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 262,
+                        "micros": 11363,
+                        "node": 22,
+                        "self_micros": 1303,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 217,
+                        "micros": 18676,
+                        "node": 4,
+                        "self_micros": 732,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 25.85,
+                  "per_event_ms": {
+                    "max": 13.4,
+                    "mean": 5.116,
+                    "p50": 4.427,
+                    "p90": 8.376,
+                    "p95": 9.755,
+                    "p99": 12.473
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62066661,
+                      "max": 7.918,
+                      "mean": 3.806,
+                      "name": "present",
+                      "p50": 3.598,
+                      "p90": 4.325,
+                      "p95": 4.618,
+                      "p99": 7.388,
+                      "total_ms": 1008.647
+                    },
+                    {
+                      "instructions": 207903820,
+                      "max": 3.612,
+                      "mean": 0.37,
+                      "name": "script",
+                      "p50": 0.106,
+                      "p90": 1.407,
+                      "p95": 2.394,
+                      "p99": 3.424,
+                      "total_ms": 98.173
+                    },
+                    {
+                      "instructions": 216775056,
+                      "max": 2.923,
+                      "mean": 0.328,
+                      "name": "update",
+                      "p50": 0.075,
+                      "p90": 1.39,
+                      "p95": 2.207,
+                      "p99": 2.512,
+                      "total_ms": 87.035
+                    },
+                    {
+                      "instructions": 255206726,
+                      "max": 1.397,
+                      "mean": 0.237,
+                      "name": "layout",
+                      "p50": 0.133,
+                      "p90": 0.691,
+                      "p95": 1.064,
+                      "p99": 1.19,
+                      "total_ms": 62.828
+                    },
+                    {
+                      "instructions": 231685955,
+                      "max": 3.873,
+                      "mean": 0.334,
+                      "name": "paint",
+                      "p50": 0.232,
+                      "p90": 0.324,
+                      "p95": 0.345,
+                      "p99": 3.38,
+                      "total_ms": 88.422
+                    },
+                    {
+                      "instructions": 79464451,
+                      "max": 0.111,
+                      "mean": 0.051,
+                      "name": "damage",
+                      "p50": 0.047,
+                      "p90": 0.07,
+                      "p95": 0.081,
+                      "p99": 0.1,
+                      "total_ms": 13.631
+                    },
+                    {
+                      "instructions": 2360273,
+                      "max": 0.014,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.01,
+                      "p95": 0.011,
+                      "p99": 0.013,
+                      "total_ms": 2.197
+                    }
+                  ],
+                  "work_median_ms": 4.43,
+                  "work_most_frame": 914,
+                  "work_most_ms": 13.4,
+                  "work_ms": {
+                    "max": 13.4,
+                    "mean": 5.136,
+                    "p50": 4.427,
+                    "p90": 8.423,
+                    "p95": 9.802,
+                    "p99": 12.473
+                  }
+                }
+              ],
+              "work_median_ms": {
+                "least": 4.43,
+                "median": 4.47,
+                "most": 4.47
+              }
+            },
+            "ok": true,
+            "text": "playing 241 events over 4000 ms, 2 times:\nrun 1: 264 frames, every 16.67 ms (median), longest gap 23.75 ms, 0 over 1.5 frames; work 4.46 ms median, 9.76 ms p95, 12.01 ms most (frame 739)\n265 input events: each 4.46 ms median, 9.76 ms p95, 12.01 ms most\nphases at p95: present 4.40 ms, script 2.48 ms, update 2.20 ms, layout 1.05 ms, paint 0.36 ms\nlayout: 34210 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.33 ms own over 496, @158 (overlay ds/transcript.luau:1682) 2.63 ms own over 536, @23 (presence screens/chat/session.luau:193) 2.16 ms own over 466\nrun 2: 265 frames, every 16.66 ms (median), longest gap 25.85 ms, 2 over 1.5 frames; work 4.43 ms median, 9.80 ms p95, 13.40 ms most (frame 914)\n266 input events: each 4.43 ms median, 9.76 ms p95, 13.40 ms most\nphases at p95: present 4.62 ms, script 2.39 ms, update 2.21 ms, layout 1.06 ms, paint 0.35 ms\nlayout: 35579 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.29 ms own over 499, @158 (overlay ds/transcript.luau:1682) 2.58 ms own over 535, @23 (presence screens/chat/session.luau:193) 2.16 ms own over 470\n2 runs: every 16.66\u201316.67 ms (median 16.67), late 0\u20132 (median 2), work median 4.43\u20134.47 ms (median 4.47), longest gap 23.75\u201325.85 ms (median 25.85)"
+          }
+        },
+        "scroll_120": {
+          "elapsed_s": 8.81688273799955,
+          "cpu_s": 7.289999999999999,
+          "cpu_percent_one_core": 82.68228371214583,
+          "memory_samples": 85,
+          "rss_mib_median": 253.9921875,
+          "rss_mib_peak": 264.4921875,
+          "pss_mib_median": 223.61328125,
+          "pss_mib_peak": 234.11328125,
+          "result": {
+            "data": {
+              "interval_ms": {
+                "least": 16.63,
+                "median": 16.66,
+                "most": 16.66
+              },
+              "late": {
+                "least": 2,
+                "median": 3,
+                "most": 3
+              },
+              "longest_gap_ms": {
+                "least": 29.11,
+                "median": 33.79,
+                "most": 33.79
+              },
+              "runs": [
+                {
+                  "events": 263,
+                  "first_frame": 1190,
+                  "frames": 262,
+                  "interval_ms": 16.63,
+                  "last_frame": 1451,
+                  "late": 2,
+                  "layout": {
+                    "measured": 36404,
+                    "micros": 58448,
+                    "top": [
+                      {
+                        "frames": 489,
+                        "micros": 28732,
+                        "node": 3,
+                        "self_micros": 4478,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 516,
+                        "micros": 2666,
+                        "node": 158,
+                        "self_micros": 2666,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 452,
+                        "micros": 10084,
+                        "node": 23,
+                        "self_micros": 2186,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 261,
+                        "micros": 31546,
+                        "node": 0,
+                        "self_micros": 2121,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 278,
+                        "micros": 5644,
+                        "node": 103,
+                        "self_micros": 1975,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 304,
+                        "micros": 15930,
+                        "node": 5,
+                        "self_micros": 1584,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 261,
+                        "micros": 11780,
+                        "node": 22,
+                        "self_micros": 1358,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 208,
+                        "micros": 18909,
+                        "node": 4,
+                        "self_micros": 812,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 33.79,
+                  "per_event_ms": {
+                    "max": 12.717,
+                    "mean": 5.245,
+                    "p50": 4.601,
+                    "p90": 8.926,
+                    "p95": 10.13,
+                    "p99": 11.851
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62699930,
+                      "max": 7.797,
+                      "mean": 3.852,
+                      "name": "present",
+                      "p50": 3.746,
+                      "p90": 4.29,
+                      "p95": 4.471,
+                      "p99": 6.494,
+                      "total_ms": 1009.204
+                    },
+                    {
+                      "instructions": 213790375,
+                      "max": 3.677,
+                      "mean": 0.395,
+                      "name": "script",
+                      "p50": 0.112,
+                      "p90": 2.034,
+                      "p95": 2.362,
+                      "p99": 3.12,
+                      "total_ms": 103.427
+                    },
+                    {
+                      "instructions": 227737329,
+                      "max": 3.38,
+                      "mean": 0.357,
+                      "name": "update",
+                      "p50": 0.085,
+                      "p90": 1.572,
+                      "p95": 2.212,
+                      "p99": 2.688,
+                      "total_ms": 93.584
+                    },
+                    {
+                      "instructions": 260843222,
+                      "max": 1.415,
+                      "mean": 0.253,
+                      "name": "layout",
+                      "p50": 0.143,
+                      "p90": 0.743,
+                      "p95": 1.088,
+                      "p99": 1.277,
+                      "total_ms": 66.342
+                    },
+                    {
+                      "instructions": 238179470,
+                      "max": 4.099,
+                      "mean": 0.345,
+                      "name": "paint",
+                      "p50": 0.264,
+                      "p90": 0.345,
+                      "p95": 0.394,
+                      "p99": 3.405,
+                      "total_ms": 90.518
+                    },
+                    {
+                      "instructions": 80016437,
+                      "max": 0.105,
+                      "mean": 0.054,
+                      "name": "damage",
+                      "p50": 0.049,
+                      "p90": 0.071,
+                      "p95": 0.082,
+                      "p99": 0.092,
+                      "total_ms": 14.051
+                    },
+                    {
+                      "instructions": 2333358,
+                      "max": 0.016,
+                      "mean": 0.009,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.011,
+                      "p95": 0.012,
+                      "p99": 0.014,
+                      "total_ms": 2.313
+                    }
+                  ],
+                  "work_median_ms": 4.6,
+                  "work_most_frame": 1275,
+                  "work_most_ms": 12.72,
+                  "work_ms": {
+                    "max": 12.717,
+                    "mean": 5.265,
+                    "p50": 4.601,
+                    "p90": 8.926,
+                    "p95": 10.13,
+                    "p99": 11.851
+                  }
+                },
+                {
+                  "events": 264,
+                  "first_frame": 1452,
+                  "frames": 263,
+                  "interval_ms": 16.66,
+                  "last_frame": 1714,
+                  "late": 3,
+                  "layout": {
+                    "measured": 36642,
+                    "micros": 57603,
+                    "top": [
+                      {
+                        "frames": 494,
+                        "micros": 28186,
+                        "node": 3,
+                        "self_micros": 4334,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 536,
+                        "micros": 2607,
+                        "node": 158,
+                        "self_micros": 2607,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 457,
+                        "micros": 9828,
+                        "node": 23,
+                        "self_micros": 2092,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 264,
+                        "micros": 31110,
+                        "node": 0,
+                        "self_micros": 2040,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 276,
+                        "micros": 5403,
+                        "node": 103,
+                        "self_micros": 1869,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 326,
+                        "micros": 15672,
+                        "node": 5,
+                        "self_micros": 1679,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 263,
+                        "micros": 11571,
+                        "node": 22,
+                        "self_micros": 1382,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 213,
+                        "micros": 18863,
+                        "node": 4,
+                        "self_micros": 790,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 29.11,
+                  "per_event_ms": {
+                    "max": 16.316,
+                    "mean": 5.273,
+                    "p50": 4.542,
+                    "p90": 8.887,
+                    "p95": 10.376,
+                    "p99": 13.103
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62326803,
+                      "max": 7.537,
+                      "mean": 3.863,
+                      "name": "present",
+                      "p50": 3.767,
+                      "p90": 4.388,
+                      "p95": 4.64,
+                      "p99": 6.622,
+                      "total_ms": 1015.918
+                    },
+                    {
+                      "instructions": 221511417,
+                      "max": 5.026,
+                      "mean": 0.397,
+                      "name": "script",
+                      "p50": 0.113,
+                      "p90": 2.034,
+                      "p95": 2.35,
+                      "p99": 3.676,
+                      "total_ms": 104.41
+                    },
+                    {
+                      "instructions": 229357958,
+                      "max": 3.337,
+                      "mean": 0.349,
+                      "name": "update",
+                      "p50": 0.077,
+                      "p90": 1.807,
+                      "p95": 2.233,
+                      "p99": 3,
+                      "total_ms": 91.752
+                    },
+                    {
+                      "instructions": 263058493,
+                      "max": 1.664,
+                      "mean": 0.248,
+                      "name": "layout",
+                      "p50": 0.137,
+                      "p90": 0.849,
+                      "p95": 1.071,
+                      "p99": 1.187,
+                      "total_ms": 65.261
+                    },
+                    {
+                      "instructions": 236344804,
+                      "max": 4.321,
+                      "mean": 0.375,
+                      "name": "paint",
+                      "p50": 0.258,
+                      "p90": 0.326,
+                      "p95": 0.361,
+                      "p99": 4.061,
+                      "total_ms": 98.606
+                    },
+                    {
+                      "instructions": 79123283,
+                      "max": 0.102,
+                      "mean": 0.053,
+                      "name": "damage",
+                      "p50": 0.048,
+                      "p90": 0.071,
+                      "p95": 0.082,
+                      "p99": 0.092,
+                      "total_ms": 13.915
+                    },
+                    {
+                      "instructions": 2341962,
+                      "max": 0.014,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.011,
+                      "p95": 0.011,
+                      "p99": 0.013,
+                      "total_ms": 2.214
+                    }
+                  ],
+                  "work_median_ms": 4.55,
+                  "work_most_frame": 1587,
+                  "work_most_ms": 16.32,
+                  "work_ms": {
+                    "max": 16.316,
+                    "mean": 5.293,
+                    "p50": 4.547,
+                    "p90": 8.887,
+                    "p95": 10.376,
+                    "p99": 13.103
+                  }
+                }
+              ],
+              "work_median_ms": {
+                "least": 4.55,
+                "median": 4.6,
+                "most": 4.6
+              }
+            },
+            "ok": true,
+            "text": "playing 481 events over 4000 ms, 2 times:\nrun 1: 262 frames, every 16.63 ms (median), longest gap 33.79 ms, 2 over 1.5 frames; work 4.60 ms median, 10.13 ms p95, 12.72 ms most (frame 1275)\n263 input events: each 4.60 ms median, 10.13 ms p95, 12.72 ms most\nphases at p95: present 4.47 ms, script 2.36 ms, update 2.21 ms, layout 1.09 ms, paint 0.39 ms\nlayout: 36404 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.48 ms own over 489, @158 (overlay ds/transcript.luau:1682) 2.67 ms own over 516, @23 (presence screens/chat/session.luau:193) 2.19 ms own over 452\nrun 2: 263 frames, every 16.66 ms (median), longest gap 29.11 ms, 3 over 1.5 frames; work 4.55 ms median, 10.38 ms p95, 16.32 ms most (frame 1587)\n264 input events: each 4.54 ms median, 10.38 ms p95, 16.32 ms most\nphases at p95: present 4.64 ms, script 2.35 ms, update 2.23 ms, layout 1.07 ms, paint 0.36 ms\nlayout: 36642 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.33 ms own over 494, @158 (overlay ds/transcript.luau:1682) 2.61 ms own over 536, @23 (presence screens/chat/session.luau:193) 2.09 ms own over 457\n2 runs: every 16.63\u201316.66 ms (median 16.66), late 2\u20133 (median 3), work median 4.55\u20134.6 ms (median 4.6), longest gap 29.11\u201333.79 ms (median 33.79)"
+          }
+        },
+        "idle_after": {
+          "elapsed_s": 3.0003539099998306,
+          "cpu_s": 0.05000000000000071,
+          "cpu_percent_one_core": 1.66647007319225,
+          "memory_samples": 29,
+          "rss_mib_median": 257.69140625,
+          "rss_mib_peak": 258.19140625,
+          "pss_mib_median": 227.3125,
+          "pss_mib_peak": 227.8125,
+          "result": null
+        }
+      }
+    },
+    {
+      "label": "baseline",
+      "launch": 1,
+      "phases": {
+        "idle_before": {
+          "elapsed_s": 3.000338482001098,
+          "cpu_s": 0.040000000000000924,
+          "cpu_percent_one_core": 1.3331829138598599,
+          "memory_samples": 30,
+          "rss_mib_median": 240.78125,
+          "rss_mib_peak": 244.1484375,
+          "pss_mib_median": 210.380859375,
+          "pss_mib_peak": 213.748046875,
+          "result": null
+        },
+        "scroll_60": {
+          "elapsed_s": 8.810019063996151,
+          "cpu_s": 7.08,
+          "cpu_percent_one_core": 80.36304971159247,
+          "memory_samples": 85,
+          "rss_mib_median": 242.21484375,
+          "rss_mib_peak": 246.53125,
+          "pss_mib_median": 211.814453125,
+          "pss_mib_peak": 216.130859375,
+          "result": {
+            "data": {
+              "interval_ms": {
+                "least": 16.63,
+                "median": 16.64,
+                "most": 16.64
+              },
+              "late": {
+                "least": 1,
+                "median": 2,
+                "most": 2
+              },
+              "longest_gap_ms": {
+                "least": 27.27,
+                "median": 34.37,
+                "most": 34.37
+              },
+              "runs": [
+                {
+                  "events": 262,
+                  "first_frame": 635,
+                  "frames": 262,
+                  "interval_ms": 16.63,
+                  "last_frame": 896,
+                  "late": 2,
+                  "layout": {
+                    "measured": 33403,
+                    "micros": 49928,
+                    "top": [
+                      {
+                        "frames": 493,
+                        "micros": 24876,
+                        "node": 3,
+                        "self_micros": 3979,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 514,
+                        "micros": 2199,
+                        "node": 158,
+                        "self_micros": 2199,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 473,
+                        "micros": 8304,
+                        "node": 23,
+                        "self_micros": 1819,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 250,
+                        "micros": 25991,
+                        "node": 0,
+                        "self_micros": 1589,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 345,
+                        "micros": 13627,
+                        "node": 5,
+                        "self_micros": 1503,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 255,
+                        "micros": 4351,
+                        "node": 103,
+                        "self_micros": 1455,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 250,
+                        "micros": 9880,
+                        "node": 22,
+                        "self_micros": 983,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 217,
+                        "micros": 17200,
+                        "node": 4,
+                        "self_micros": 710,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 34.37,
+                  "per_event_ms": {
+                    "max": 12.952,
+                    "mean": 5.044,
+                    "p50": 4.446,
+                    "p90": 8.119,
+                    "p95": 9.576,
+                    "p99": 11.292
+                  },
+                  "phases": [
+                    {
+                      "instructions": 61322704,
+                      "max": 7.833,
+                      "mean": 3.818,
+                      "name": "present",
+                      "p50": 3.72,
+                      "p90": 4.262,
+                      "p95": 4.614,
+                      "p99": 7.543,
+                      "total_ms": 1000.192
+                    },
+                    {
+                      "instructions": 188403039,
+                      "max": 3.585,
+                      "mean": 0.334,
+                      "name": "script",
+                      "p50": 0.101,
+                      "p90": 1.205,
+                      "p95": 2.262,
+                      "p99": 2.764,
+                      "total_ms": 87.42
+                    },
+                    {
+                      "instructions": 196884771,
+                      "max": 2.598,
+                      "mean": 0.297,
+                      "name": "update",
+                      "p50": 0.069,
+                      "p90": 1.11,
+                      "p95": 2.074,
+                      "p99": 2.434,
+                      "total_ms": 77.756
+                    },
+                    {
+                      "instructions": 239485930,
+                      "max": 1.279,
+                      "mean": 0.218,
+                      "name": "layout",
+                      "p50": 0.12,
+                      "p90": 0.535,
+                      "p95": 1.032,
+                      "p99": 1.186,
+                      "total_ms": 57.008
+                    },
+                    {
+                      "instructions": 232038688,
+                      "max": 3.66,
+                      "mean": 0.323,
+                      "name": "paint",
+                      "p50": 0.23,
+                      "p90": 0.337,
+                      "p95": 0.371,
+                      "p99": 3.347,
+                      "total_ms": 84.733
+                    },
+                    {
+                      "instructions": 78190674,
+                      "max": 0.104,
+                      "mean": 0.051,
+                      "name": "damage",
+                      "p50": 0.047,
+                      "p90": 0.07,
+                      "p95": 0.081,
+                      "p99": 0.093,
+                      "total_ms": 13.29
+                    },
+                    {
+                      "instructions": 2478236,
+                      "max": 0.093,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.007,
+                      "p90": 0.01,
+                      "p95": 0.012,
+                      "p99": 0.027,
+                      "total_ms": 2.075
+                    }
+                  ],
+                  "work_median_ms": 4.45,
+                  "work_most_frame": 758,
+                  "work_most_ms": 12.95,
+                  "work_ms": {
+                    "max": 12.952,
+                    "mean": 5.048,
+                    "p50": 4.45,
+                    "p90": 8.119,
+                    "p95": 9.576,
+                    "p99": 11.292
+                  }
+                },
+                {
+                  "events": 262,
+                  "first_frame": 897,
+                  "frames": 264,
+                  "interval_ms": 16.64,
+                  "last_frame": 1160,
+                  "late": 1,
+                  "layout": {
+                    "measured": 35320,
+                    "micros": 52870,
+                    "top": [
+                      {
+                        "frames": 491,
+                        "micros": 25131,
+                        "node": 3,
+                        "self_micros": 3879,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 510,
+                        "micros": 2250,
+                        "node": 158,
+                        "self_micros": 2250,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 462,
+                        "micros": 8443,
+                        "node": 23,
+                        "self_micros": 1805,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 248,
+                        "micros": 26086,
+                        "node": 0,
+                        "self_micros": 1572,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 330,
+                        "micros": 13734,
+                        "node": 5,
+                        "self_micros": 1532,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 256,
+                        "micros": 4491,
+                        "node": 103,
+                        "self_micros": 1515,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 257,
+                        "micros": 10141,
+                        "node": 22,
+                        "self_micros": 1049,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 214,
+                        "micros": 17275,
+                        "node": 4,
+                        "self_micros": 698,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 27.27,
+                  "per_event_ms": {
+                    "max": 14.685,
+                    "mean": 5.03,
+                    "p50": 4.323,
+                    "p90": 8.504,
+                    "p95": 9.948,
+                    "p99": 11.721
+                  },
+                  "phases": [
+                    {
+                      "instructions": 61281072,
+                      "max": 7.541,
+                      "mean": 3.672,
+                      "name": "present",
+                      "p50": 3.577,
+                      "p90": 4.178,
+                      "p95": 4.302,
+                      "p99": 6.965,
+                      "total_ms": 969.332
+                    },
+                    {
+                      "instructions": 209634635,
+                      "max": 3.547,
+                      "mean": 0.367,
+                      "name": "script",
+                      "p50": 0.105,
+                      "p90": 1.322,
+                      "p95": 2.335,
+                      "p99": 3.478,
+                      "total_ms": 96.83
+                    },
+                    {
+                      "instructions": 216528283,
+                      "max": 2.861,
+                      "mean": 0.322,
+                      "name": "update",
+                      "p50": 0.069,
+                      "p90": 1.315,
+                      "p95": 2.148,
+                      "p99": 2.659,
+                      "total_ms": 85.062
+                    },
+                    {
+                      "instructions": 253463849,
+                      "max": 1.534,
+                      "mean": 0.228,
+                      "name": "layout",
+                      "p50": 0.12,
+                      "p90": 0.652,
+                      "p95": 1.054,
+                      "p99": 1.337,
+                      "total_ms": 60.158
+                    },
+                    {
+                      "instructions": 231380848,
+                      "max": 4.338,
+                      "mean": 0.353,
+                      "name": "paint",
+                      "p50": 0.234,
+                      "p90": 0.32,
+                      "p95": 0.394,
+                      "p99": 3.955,
+                      "total_ms": 93.25
+                    },
+                    {
+                      "instructions": 78611546,
+                      "max": 0.098,
+                      "mean": 0.051,
+                      "name": "damage",
+                      "p50": 0.047,
+                      "p90": 0.072,
+                      "p95": 0.087,
+                      "p99": 0.094,
+                      "total_ms": 13.448
+                    },
+                    {
+                      "instructions": 2323387,
+                      "max": 0.028,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.007,
+                      "p90": 0.009,
+                      "p95": 0.011,
+                      "p99": 0.027,
+                      "total_ms": 2.014
+                    }
+                  ],
+                  "work_median_ms": 4.32,
+                  "work_most_frame": 1026,
+                  "work_most_ms": 14.68,
+                  "work_ms": {
+                    "max": 14.685,
+                    "mean": 5,
+                    "p50": 4.323,
+                    "p90": 8.504,
+                    "p95": 9.948,
+                    "p99": 11.721
+                  }
+                }
+              ],
+              "work_median_ms": {
+                "least": 4.32,
+                "median": 4.45,
+                "most": 4.45
+              }
+            },
+            "ok": true,
+            "text": "playing 241 events over 4000 ms, 2 times:\nrun 1: 262 frames, every 16.63 ms (median), longest gap 34.37 ms, 2 over 1.5 frames; work 4.45 ms median, 9.58 ms p95, 12.95 ms most (frame 758)\n262 input events: each 4.45 ms median, 9.58 ms p95, 12.95 ms most\nphases at p95: present 4.61 ms, script 2.26 ms, update 2.07 ms, layout 1.03 ms, paint 0.37 ms\nlayout: 33403 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 3.98 ms own over 493, @158 (overlay ds/transcript.luau:1682) 2.20 ms own over 514, @23 (presence screens/chat/session.luau:193) 1.82 ms own over 473\nrun 2: 264 frames, every 16.64 ms (median), longest gap 27.27 ms, 1 over 1.5 frames; work 4.32 ms median, 9.95 ms p95, 14.68 ms most (frame 1026)\n262 input events: each 4.32 ms median, 9.95 ms p95, 14.68 ms most\nphases at p95: present 4.30 ms, script 2.34 ms, update 2.15 ms, layout 1.05 ms, paint 0.39 ms\nlayout: 35320 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 3.88 ms own over 491, @158 (overlay ds/transcript.luau:1682) 2.25 ms own over 510, @23 (presence screens/chat/session.luau:193) 1.80 ms own over 462\n2 runs: every 16.63\u201316.64 ms (median 16.64), late 1\u20132 (median 2), work median 4.32\u20134.45 ms (median 4.45), longest gap 27.27\u201334.37 ms (median 34.37)"
+          }
+        },
+        "scroll_120": {
+          "elapsed_s": 8.822104038990801,
+          "cpu_s": 7.349999999999998,
+          "cpu_percent_one_core": 83.31345864337365,
+          "memory_samples": 85,
+          "rss_mib_median": 250.34375,
+          "rss_mib_peak": 257.66796875,
+          "pss_mib_median": 219.94140625,
+          "pss_mib_peak": 227.265625,
+          "result": {
+            "data": {
+              "interval_ms": {
+                "least": 16.64,
+                "median": 16.66,
+                "most": 16.66
+              },
+              "late": {
+                "least": 1,
+                "median": 2,
+                "most": 2
+              },
+              "longest_gap_ms": {
+                "least": 25.4,
+                "median": 33.67,
+                "most": 33.67
+              },
+              "runs": [
+                {
+                  "events": 263,
+                  "first_frame": 1189,
+                  "frames": 262,
+                  "interval_ms": 16.64,
+                  "last_frame": 1450,
+                  "late": 2,
+                  "layout": {
+                    "measured": 35866,
+                    "micros": 54274,
+                    "top": [
+                      {
+                        "frames": 490,
+                        "micros": 26084,
+                        "node": 3,
+                        "self_micros": 4028,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 514,
+                        "micros": 2383,
+                        "node": 158,
+                        "self_micros": 2383,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 455,
+                        "micros": 8764,
+                        "node": 23,
+                        "self_micros": 1835,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 255,
+                        "micros": 27825,
+                        "node": 0,
+                        "self_micros": 1726,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 264,
+                        "micros": 4901,
+                        "node": 103,
+                        "self_micros": 1658,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 305,
+                        "micros": 13979,
+                        "node": 5,
+                        "self_micros": 1418,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 253,
+                        "micros": 10418,
+                        "node": 22,
+                        "self_micros": 1048,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 222,
+                        "micros": 18546,
+                        "node": 4,
+                        "self_micros": 788,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 33.67,
+                  "per_event_ms": {
+                    "max": 11.376,
+                    "mean": 5.262,
+                    "p50": 4.605,
+                    "p90": 8.675,
+                    "p95": 10.068,
+                    "p99": 10.889
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62439819,
+                      "max": 7.854,
+                      "mean": 3.942,
+                      "name": "present",
+                      "p50": 3.833,
+                      "p90": 4.456,
+                      "p95": 4.609,
+                      "p99": 7.411,
+                      "total_ms": 1032.786
+                    },
+                    {
+                      "instructions": 211225014,
+                      "max": 3.822,
+                      "mean": 0.376,
+                      "name": "script",
+                      "p50": 0.108,
+                      "p90": 1.96,
+                      "p95": 2.323,
+                      "p99": 2.957,
+                      "total_ms": 98.611
+                    },
+                    {
+                      "instructions": 221945446,
+                      "max": 2.905,
+                      "mean": 0.336,
+                      "name": "update",
+                      "p50": 0.075,
+                      "p90": 1.388,
+                      "p95": 2.177,
+                      "p99": 2.673,
+                      "total_ms": 88.063
+                    },
+                    {
+                      "instructions": 257644712,
+                      "max": 1.396,
+                      "mean": 0.236,
+                      "name": "layout",
+                      "p50": 0.128,
+                      "p90": 0.693,
+                      "p95": 1.061,
+                      "p99": 1.236,
+                      "total_ms": 61.762
+                    },
+                    {
+                      "instructions": 238612017,
+                      "max": 4.514,
+                      "mean": 0.331,
+                      "name": "paint",
+                      "p50": 0.261,
+                      "p90": 0.326,
+                      "p95": 0.399,
+                      "p99": 3.268,
+                      "total_ms": 86.85
+                    },
+                    {
+                      "instructions": 80092923,
+                      "max": 0.104,
+                      "mean": 0.052,
+                      "name": "damage",
+                      "p50": 0.049,
+                      "p90": 0.071,
+                      "p95": 0.082,
+                      "p99": 0.094,
+                      "total_ms": 13.741
+                    },
+                    {
+                      "instructions": 2330757,
+                      "max": 0.029,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.007,
+                      "p90": 0.01,
+                      "p95": 0.011,
+                      "p99": 0.015,
+                      "total_ms": 2.044
+                    }
+                  ],
+                  "work_median_ms": 4.62,
+                  "work_most_frame": 1309,
+                  "work_most_ms": 11.38,
+                  "work_ms": {
+                    "max": 11.376,
+                    "mean": 5.282,
+                    "p50": 4.605,
+                    "p90": 8.675,
+                    "p95": 10.068,
+                    "p99": 10.889
+                  }
+                },
+                {
+                  "events": 265,
+                  "first_frame": 1451,
+                  "frames": 264,
+                  "interval_ms": 16.66,
+                  "last_frame": 1714,
+                  "late": 1,
+                  "layout": {
+                    "measured": 36704,
+                    "micros": 53609,
+                    "top": [
+                      {
+                        "frames": 498,
+                        "micros": 25135,
+                        "node": 3,
+                        "self_micros": 3936,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 517,
+                        "micros": 2298,
+                        "node": 158,
+                        "self_micros": 2298,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 483,
+                        "micros": 8603,
+                        "node": 23,
+                        "self_micros": 1853,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 259,
+                        "micros": 26991,
+                        "node": 0,
+                        "self_micros": 1664,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 264,
+                        "micros": 4559,
+                        "node": 103,
+                        "self_micros": 1539,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 346,
+                        "micros": 13666,
+                        "node": 5,
+                        "self_micros": 1466,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 255,
+                        "micros": 9974,
+                        "node": 22,
+                        "self_micros": 988,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 218,
+                        "micros": 17368,
+                        "node": 4,
+                        "self_micros": 706,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 25.4,
+                  "per_event_ms": {
+                    "max": 12.609,
+                    "mean": 5.14,
+                    "p50": 4.448,
+                    "p90": 8.666,
+                    "p95": 9.878,
+                    "p99": 12.312
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62431440,
+                      "max": 8.046,
+                      "mean": 3.815,
+                      "name": "present",
+                      "p50": 3.762,
+                      "p90": 4.309,
+                      "p95": 4.466,
+                      "p99": 7.382,
+                      "total_ms": 1007.031
+                    },
+                    {
+                      "instructions": 218450740,
+                      "max": 4.126,
+                      "mean": 0.375,
+                      "name": "script",
+                      "p50": 0.101,
+                      "p90": 1.858,
+                      "p95": 2.236,
+                      "p99": 3.708,
+                      "total_ms": 98.913
+                    },
+                    {
+                      "instructions": 228999453,
+                      "max": 3.3,
+                      "mean": 0.333,
+                      "name": "update",
+                      "p50": 0.067,
+                      "p90": 1.768,
+                      "p95": 2.192,
+                      "p99": 2.894,
+                      "total_ms": 87.785
+                    },
+                    {
+                      "instructions": 263180312,
+                      "max": 1.572,
+                      "mean": 0.231,
+                      "name": "layout",
+                      "p50": 0.119,
+                      "p90": 0.809,
+                      "p95": 1.08,
+                      "p99": 1.276,
+                      "total_ms": 61.073
+                    },
+                    {
+                      "instructions": 238213740,
+                      "max": 4.02,
+                      "mean": 0.347,
+                      "name": "paint",
+                      "p50": 0.245,
+                      "p90": 0.351,
+                      "p95": 0.393,
+                      "p99": 3.876,
+                      "total_ms": 91.522
+                    },
+                    {
+                      "instructions": 79383143,
+                      "max": 0.096,
+                      "mean": 0.052,
+                      "name": "damage",
+                      "p50": 0.048,
+                      "p90": 0.072,
+                      "p95": 0.083,
+                      "p99": 0.095,
+                      "total_ms": 13.767
+                    },
+                    {
+                      "instructions": 2357669,
+                      "max": 0.039,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.007,
+                      "p90": 0.009,
+                      "p95": 0.011,
+                      "p99": 0.022,
+                      "total_ms": 2.027
+                    }
+                  ],
+                  "work_median_ms": 4.46,
+                  "work_most_frame": 1524,
+                  "work_most_ms": 12.61,
+                  "work_ms": {
+                    "max": 12.609,
+                    "mean": 5.16,
+                    "p50": 4.45,
+                    "p90": 8.666,
+                    "p95": 9.878,
+                    "p99": 12.312
+                  }
+                }
+              ],
+              "work_median_ms": {
+                "least": 4.46,
+                "median": 4.62,
+                "most": 4.62
+              }
+            },
+            "ok": true,
+            "text": "playing 481 events over 4000 ms, 2 times:\nrun 1: 262 frames, every 16.64 ms (median), longest gap 33.67 ms, 2 over 1.5 frames; work 4.60 ms median, 10.07 ms p95, 11.38 ms most (frame 1309)\n263 input events: each 4.60 ms median, 10.07 ms p95, 11.38 ms most\nphases at p95: present 4.61 ms, script 2.32 ms, update 2.18 ms, layout 1.06 ms, paint 0.40 ms\nlayout: 35866 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.03 ms own over 490, @158 (overlay ds/transcript.luau:1682) 2.38 ms own over 514, @23 (presence screens/chat/session.luau:193) 1.84 ms own over 455\nrun 2: 264 frames, every 16.66 ms (median), longest gap 25.40 ms, 1 over 1.5 frames; work 4.45 ms median, 9.88 ms p95, 12.61 ms most (frame 1524)\n265 input events: each 4.45 ms median, 9.88 ms p95, 12.61 ms most\nphases at p95: present 4.47 ms, script 2.24 ms, update 2.19 ms, layout 1.08 ms, paint 0.39 ms\nlayout: 36704 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 3.94 ms own over 498, @158 (overlay ds/transcript.luau:1682) 2.30 ms own over 517, @23 (presence screens/chat/session.luau:193) 1.85 ms own over 483\n2 runs: every 16.64\u201316.66 ms (median 16.66), late 1\u20132 (median 2), work median 4.46\u20134.62 ms (median 4.62), longest gap 25.4\u201333.67 ms (median 33.67)"
+          }
+        },
+        "idle_after": {
+          "elapsed_s": 3.00037413102109,
+          "cpu_s": 0.0400000000000027,
+          "cpu_percent_one_core": 1.3331670736139118,
+          "memory_samples": 29,
+          "rss_mib_median": 253.48046875,
+          "rss_mib_peak": 253.48828125,
+          "pss_mib_median": 223.0771484375,
+          "pss_mib_peak": 223.0859375,
+          "result": null
+        }
+      }
+    },
+    {
+      "label": "baseline",
+      "launch": 2,
+      "phases": {
+        "idle_before": {
+          "elapsed_s": 3.000452597014373,
+          "cpu_s": 0.05000000000000071,
+          "cpu_percent_one_core": 1.66641526180929,
+          "memory_samples": 30,
+          "rss_mib_median": 239.80078125,
+          "rss_mib_peak": 241.76171875,
+          "pss_mib_median": 209.3291015625,
+          "pss_mib_peak": 211.2900390625,
+          "result": null
+        },
+        "scroll_60": {
+          "elapsed_s": 8.81064452699502,
+          "cpu_s": 7.050000000000001,
+          "cpu_percent_one_core": 80.01684755751339,
+          "memory_samples": 85,
+          "rss_mib_median": 242.796875,
+          "rss_mib_peak": 246.8828125,
+          "pss_mib_median": 212.3251953125,
+          "pss_mib_peak": 216.4111328125,
+          "result": {
+            "data": {
+              "interval_ms": {
+                "least": 16.6,
+                "median": 16.65,
+                "most": 16.65
+              },
+              "late": {
+                "least": 1,
+                "median": 3,
+                "most": 3
+              },
+              "longest_gap_ms": {
+                "least": 25.39,
+                "median": 35.55,
+                "most": 35.55
+              },
+              "runs": [
+                {
+                  "events": 262,
+                  "first_frame": 632,
+                  "frames": 262,
+                  "interval_ms": 16.6,
+                  "last_frame": 893,
+                  "late": 3,
+                  "layout": {
+                    "measured": 33399,
+                    "micros": 53107,
+                    "top": [
+                      {
+                        "frames": 492,
+                        "micros": 26830,
+                        "node": 3,
+                        "self_micros": 4435,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 512,
+                        "micros": 2380,
+                        "node": 158,
+                        "self_micros": 2380,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 259,
+                        "micros": 29335,
+                        "node": 0,
+                        "self_micros": 2012,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 450,
+                        "micros": 9033,
+                        "node": 23,
+                        "self_micros": 1906,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 263,
+                        "micros": 4948,
+                        "node": 103,
+                        "self_micros": 1680,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 311,
+                        "micros": 14395,
+                        "node": 5,
+                        "self_micros": 1524,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 261,
+                        "micros": 10752,
+                        "node": 22,
+                        "self_micros": 1074,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 231,
+                        "micros": 19703,
+                        "node": 4,
+                        "self_micros": 955,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 35.55,
+                  "per_event_ms": {
+                    "max": 13.335,
+                    "mean": 5.144,
+                    "p50": 4.522,
+                    "p90": 7.988,
+                    "p95": 9.886,
+                    "p99": 11.469
+                  },
+                  "phases": [
+                    {
+                      "instructions": 61431237,
+                      "max": 8.095,
+                      "mean": 3.86,
+                      "name": "present",
+                      "p50": 3.726,
+                      "p90": 4.207,
+                      "p95": 4.868,
+                      "p99": 7.506,
+                      "total_ms": 1011.249
+                    },
+                    {
+                      "instructions": 186167742,
+                      "max": 3.48,
+                      "mean": 0.344,
+                      "name": "script",
+                      "p50": 0.108,
+                      "p90": 1.35,
+                      "p95": 2.394,
+                      "p99": 2.791,
+                      "total_ms": 90.035
+                    },
+                    {
+                      "instructions": 196958148,
+                      "max": 2.586,
+                      "mean": 0.309,
+                      "name": "update",
+                      "p50": 0.081,
+                      "p90": 1.248,
+                      "p95": 2.086,
+                      "p99": 2.441,
+                      "total_ms": 80.951
+                    },
+                    {
+                      "instructions": 239829130,
+                      "max": 1.748,
+                      "mean": 0.23,
+                      "name": "layout",
+                      "p50": 0.13,
+                      "p90": 0.54,
+                      "p95": 1.03,
+                      "p99": 1.304,
+                      "total_ms": 60.329
+                    },
+                    {
+                      "instructions": 232635275,
+                      "max": 3.983,
+                      "mean": 0.346,
+                      "name": "paint",
+                      "p50": 0.254,
+                      "p90": 0.316,
+                      "p95": 0.348,
+                      "p99": 3.668,
+                      "total_ms": 90.545
+                    },
+                    {
+                      "instructions": 78196069,
+                      "max": 0.117,
+                      "mean": 0.05,
+                      "name": "damage",
+                      "p50": 0.047,
+                      "p90": 0.069,
+                      "p95": 0.081,
+                      "p99": 0.092,
+                      "total_ms": 13.188
+                    },
+                    {
+                      "instructions": 2479083,
+                      "max": 0.071,
+                      "mean": 0.009,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.011,
+                      "p95": 0.017,
+                      "p99": 0.033,
+                      "total_ms": 2.337
+                    }
+                  ],
+                  "work_median_ms": 4.53,
+                  "work_most_frame": 755,
+                  "work_most_ms": 13.33,
+                  "work_ms": {
+                    "max": 13.335,
+                    "mean": 5.147,
+                    "p50": 4.531,
+                    "p90": 7.988,
+                    "p95": 9.886,
+                    "p99": 11.469
+                  }
+                },
+                {
+                  "events": 262,
+                  "first_frame": 894,
+                  "frames": 264,
+                  "interval_ms": 16.65,
+                  "last_frame": 1157,
+                  "late": 1,
+                  "layout": {
+                    "measured": 35318,
+                    "micros": 54754,
+                    "top": [
+                      {
+                        "frames": 492,
+                        "micros": 26868,
+                        "node": 3,
+                        "self_micros": 4293,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 519,
+                        "micros": 2403,
+                        "node": 158,
+                        "self_micros": 2403,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 260,
+                        "micros": 29509,
+                        "node": 0,
+                        "self_micros": 2049,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 470,
+                        "micros": 9199,
+                        "node": 23,
+                        "self_micros": 1929,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 272,
+                        "micros": 5110,
+                        "node": 103,
+                        "self_micros": 1785,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 298,
+                        "micros": 14517,
+                        "node": 5,
+                        "self_micros": 1476,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 253,
+                        "micros": 11019,
+                        "node": 22,
+                        "self_micros": 1083,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 230,
+                        "micros": 19849,
+                        "node": 4,
+                        "self_micros": 942,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 25.39,
+                  "per_event_ms": {
+                    "max": 12.731,
+                    "mean": 5.043,
+                    "p50": 4.379,
+                    "p90": 8.433,
+                    "p95": 10.048,
+                    "p99": 11.434
+                  },
+                  "phases": [
+                    {
+                      "instructions": 61321816,
+                      "max": 7.357,
+                      "mean": 3.704,
+                      "name": "present",
+                      "p50": 3.584,
+                      "p90": 4.103,
+                      "p95": 4.401,
+                      "p99": 7.122,
+                      "total_ms": 977.824
+                    },
+                    {
+                      "instructions": 207695143,
+                      "max": 3.703,
+                      "mean": 0.371,
+                      "name": "script",
+                      "p50": 0.111,
+                      "p90": 1.392,
+                      "p95": 2.405,
+                      "p99": 3.116,
+                      "total_ms": 98.065
+                    },
+                    {
+                      "instructions": 216950335,
+                      "max": 2.991,
+                      "mean": 0.333,
+                      "name": "update",
+                      "p50": 0.082,
+                      "p90": 1.312,
+                      "p95": 2.199,
+                      "p99": 2.498,
+                      "total_ms": 87.935
+                    },
+                    {
+                      "instructions": 253318704,
+                      "max": 1.38,
+                      "mean": 0.236,
+                      "name": "layout",
+                      "p50": 0.131,
+                      "p90": 0.711,
+                      "p95": 1.056,
+                      "p99": 1.23,
+                      "total_ms": 62.187
+                    },
+                    {
+                      "instructions": 229617732,
+                      "max": 4.364,
+                      "mean": 0.322,
+                      "name": "paint",
+                      "p50": 0.243,
+                      "p90": 0.323,
+                      "p95": 0.362,
+                      "p99": 2.699,
+                      "total_ms": 84.95
+                    },
+                    {
+                      "instructions": 78616999,
+                      "max": 0.1,
+                      "mean": 0.051,
+                      "name": "damage",
+                      "p50": 0.047,
+                      "p90": 0.071,
+                      "p95": 0.082,
+                      "p99": 0.095,
+                      "total_ms": 13.446
+                    },
+                    {
+                      "instructions": 2321507,
+                      "max": 0.025,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.01,
+                      "p95": 0.012,
+                      "p99": 0.022,
+                      "total_ms": 2.23
+                    }
+                  ],
+                  "work_median_ms": 4.38,
+                  "work_most_frame": 1086,
+                  "work_most_ms": 12.73,
+                  "work_ms": {
+                    "max": 12.731,
+                    "mean": 5.025,
+                    "p50": 4.374,
+                    "p90": 8.433,
+                    "p95": 10.048,
+                    "p99": 11.434
+                  }
+                }
+              ],
+              "work_median_ms": {
+                "least": 4.38,
+                "median": 4.53,
+                "most": 4.53
+              }
+            },
+            "ok": true,
+            "text": "playing 241 events over 4000 ms, 2 times:\nrun 1: 262 frames, every 16.60 ms (median), longest gap 35.55 ms, 3 over 1.5 frames; work 4.53 ms median, 9.89 ms p95, 13.33 ms most (frame 755)\n262 input events: each 4.52 ms median, 9.89 ms p95, 13.33 ms most\nphases at p95: present 4.87 ms, script 2.39 ms, update 2.09 ms, layout 1.03 ms, paint 0.35 ms\nlayout: 33399 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.44 ms own over 492, @158 (overlay ds/transcript.luau:1682) 2.38 ms own over 512, @0 2.01 ms own over 259\nrun 2: 264 frames, every 16.65 ms (median), longest gap 25.39 ms, 1 over 1.5 frames; work 4.37 ms median, 10.05 ms p95, 12.73 ms most (frame 1086)\n262 input events: each 4.38 ms median, 10.05 ms p95, 12.73 ms most\nphases at p95: present 4.40 ms, script 2.40 ms, update 2.20 ms, layout 1.06 ms, paint 0.36 ms\nlayout: 35318 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.29 ms own over 492, @158 (overlay ds/transcript.luau:1682) 2.40 ms own over 519, @0 2.05 ms own over 260\n2 runs: every 16.6\u201316.65 ms (median 16.65), late 1\u20133 (median 3), work median 4.38\u20134.53 ms (median 4.53), longest gap 25.39\u201335.55 ms (median 35.55)"
+          }
+        },
+        "scroll_120": {
+          "elapsed_s": 8.814598534983816,
+          "cpu_s": 7.25,
+          "cpu_percent_one_core": 82.24991723929162,
+          "memory_samples": 85,
+          "rss_mib_median": 253.2578125,
+          "rss_mib_peak": 260.55859375,
+          "pss_mib_median": 222.7861328125,
+          "pss_mib_peak": 230.0869140625,
+          "result": {
+            "data": {
+              "interval_ms": {
+                "least": 16.63,
+                "median": 16.66,
+                "most": 16.66
+              },
+              "late": {
+                "least": 0,
+                "median": 3,
+                "most": 3
+              },
+              "longest_gap_ms": {
+                "least": 24.43,
+                "median": 27.46,
+                "most": 27.46
+              },
+              "runs": [
+                {
+                  "events": 263,
+                  "first_frame": 1185,
+                  "frames": 262,
+                  "interval_ms": 16.66,
+                  "last_frame": 1446,
+                  "late": 3,
+                  "layout": {
+                    "measured": 36405,
+                    "micros": 58416,
+                    "top": [
+                      {
+                        "frames": 490,
+                        "micros": 28345,
+                        "node": 3,
+                        "self_micros": 4542,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 507,
+                        "micros": 2496,
+                        "node": 158,
+                        "self_micros": 2496,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 263,
+                        "micros": 31574,
+                        "node": 0,
+                        "self_micros": 2316,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 452,
+                        "micros": 9716,
+                        "node": 23,
+                        "self_micros": 1987,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 268,
+                        "micros": 5463,
+                        "node": 103,
+                        "self_micros": 1888,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 308,
+                        "micros": 15420,
+                        "node": 5,
+                        "self_micros": 1615,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 247,
+                        "micros": 11373,
+                        "node": 22,
+                        "self_micros": 1125,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 230,
+                        "micros": 20831,
+                        "node": 4,
+                        "self_micros": 975,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 27.46,
+                  "per_event_ms": {
+                    "max": 15.584,
+                    "mean": 5.427,
+                    "p50": 4.594,
+                    "p90": 9.291,
+                    "p95": 10.433,
+                    "p99": 13.552
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62077855,
+                      "max": 12.705,
+                      "mean": 3.989,
+                      "name": "present",
+                      "p50": 3.8,
+                      "p90": 4.427,
+                      "p95": 5.509,
+                      "p99": 8.727,
+                      "total_ms": 1044.99
+                    },
+                    {
+                      "instructions": 216427476,
+                      "max": 3.677,
+                      "mean": 0.406,
+                      "name": "script",
+                      "p50": 0.121,
+                      "p90": 2.132,
+                      "p95": 2.348,
+                      "p99": 3.029,
+                      "total_ms": 106.378
+                    },
+                    {
+                      "instructions": 227507907,
+                      "max": 2.856,
+                      "mean": 0.36,
+                      "name": "update",
+                      "p50": 0.088,
+                      "p90": 1.847,
+                      "p95": 2.231,
+                      "p99": 2.742,
+                      "total_ms": 94.416
+                    },
+                    {
+                      "instructions": 261192552,
+                      "max": 1.522,
+                      "mean": 0.253,
+                      "name": "layout",
+                      "p50": 0.143,
+                      "p90": 0.796,
+                      "p95": 1.082,
+                      "p99": 1.356,
+                      "total_ms": 66.407
+                    },
+                    {
+                      "instructions": 238365277,
+                      "max": 4.372,
+                      "mean": 0.376,
+                      "name": "paint",
+                      "p50": 0.264,
+                      "p90": 0.343,
+                      "p95": 0.623,
+                      "p99": 3.188,
+                      "total_ms": 98.516
+                    },
+                    {
+                      "instructions": 79817440,
+                      "max": 0.205,
+                      "mean": 0.054,
+                      "name": "damage",
+                      "p50": 0.049,
+                      "p90": 0.073,
+                      "p95": 0.084,
+                      "p99": 0.12,
+                      "total_ms": 14.162
+                    },
+                    {
+                      "instructions": 2334826,
+                      "max": 0.029,
+                      "mean": 0.009,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.012,
+                      "p95": 0.019,
+                      "p99": 0.024,
+                      "total_ms": 2.466
+                    }
+                  ],
+                  "work_median_ms": 4.6,
+                  "work_most_frame": 1208,
+                  "work_most_ms": 15.58,
+                  "work_ms": {
+                    "max": 15.584,
+                    "mean": 5.448,
+                    "p50": 4.594,
+                    "p90": 9.291,
+                    "p95": 10.433,
+                    "p99": 13.552
+                  }
+                },
+                {
+                  "events": 265,
+                  "first_frame": 1447,
+                  "frames": 264,
+                  "interval_ms": 16.63,
+                  "last_frame": 1710,
+                  "late": 0,
+                  "layout": {
+                    "measured": 36704,
+                    "micros": 55512,
+                    "top": [
+                      {
+                        "frames": 499,
+                        "micros": 26495,
+                        "node": 3,
+                        "self_micros": 4225,
+                        "what": "@3 (overlay chat_fixture.luau:1342)"
+                      },
+                      {
+                        "frames": 525,
+                        "micros": 2351,
+                        "node": 158,
+                        "self_micros": 2351,
+                        "what": "@158 (overlay ds/transcript.luau:1682)"
+                      },
+                      {
+                        "frames": 265,
+                        "micros": 29375,
+                        "node": 0,
+                        "self_micros": 2046,
+                        "what": "@0"
+                      },
+                      {
+                        "frames": 471,
+                        "micros": 8986,
+                        "node": 23,
+                        "self_micros": 1909,
+                        "what": "@23 (presence screens/chat/session.luau:193)"
+                      },
+                      {
+                        "frames": 282,
+                        "micros": 5067,
+                        "node": 103,
+                        "self_micros": 1739,
+                        "what": "@103 (column screens/chat/session.luau:231)"
+                      },
+                      {
+                        "frames": 307,
+                        "micros": 14257,
+                        "node": 5,
+                        "self_micros": 1475,
+                        "what": "@5 (presence chat_fixture.luau:1349)"
+                      },
+                      {
+                        "frames": 249,
+                        "micros": 10444,
+                        "node": 22,
+                        "self_micros": 959,
+                        "what": "@22 #chat-session (column #chat-session screens/chat/session.luau:172)"
+                      },
+                      {
+                        "frames": 234,
+                        "micros": 19613,
+                        "node": 4,
+                        "self_micros": 923,
+                        "what": "@4 (column chat_fixture.luau:1345)"
+                      }
+                    ]
+                  },
+                  "longest_gap_ms": 24.43,
+                  "per_event_ms": {
+                    "max": 12.319,
+                    "mean": 5.103,
+                    "p50": 4.415,
+                    "p90": 8.682,
+                    "p95": 10.195,
+                    "p99": 11.704
+                  },
+                  "phases": [
+                    {
+                      "instructions": 62302326,
+                      "max": 7.041,
+                      "mean": 3.724,
+                      "name": "present",
+                      "p50": 3.575,
+                      "p90": 4.119,
+                      "p95": 4.36,
+                      "p99": 6.575,
+                      "total_ms": 983.162
+                    },
+                    {
+                      "instructions": 217909855,
+                      "max": 3.869,
+                      "mean": 0.39,
+                      "name": "script",
+                      "p50": 0.115,
+                      "p90": 1.908,
+                      "p95": 2.299,
+                      "p99": 3.736,
+                      "total_ms": 103.04
+                    },
+                    {
+                      "instructions": 229386237,
+                      "max": 3.075,
+                      "mean": 0.348,
+                      "name": "update",
+                      "p50": 0.079,
+                      "p90": 1.716,
+                      "p95": 2.248,
+                      "p99": 2.962,
+                      "total_ms": 91.852
+                    },
+                    {
+                      "instructions": 263254198,
+                      "max": 1.546,
+                      "mean": 0.239,
+                      "name": "layout",
+                      "p50": 0.129,
+                      "p90": 0.78,
+                      "p95": 1.07,
+                      "p99": 1.22,
+                      "total_ms": 63.08
+                    },
+                    {
+                      "instructions": 234098135,
+                      "max": 4.454,
+                      "mean": 0.361,
+                      "name": "paint",
+                      "p50": 0.24,
+                      "p90": 0.328,
+                      "p95": 0.371,
+                      "p99": 4.245,
+                      "total_ms": 95.228
+                    },
+                    {
+                      "instructions": 79791203,
+                      "max": 0.101,
+                      "mean": 0.052,
+                      "name": "damage",
+                      "p50": 0.048,
+                      "p90": 0.071,
+                      "p95": 0.082,
+                      "p99": 0.094,
+                      "total_ms": 13.819
+                    },
+                    {
+                      "instructions": 2349672,
+                      "max": 0.023,
+                      "mean": 0.008,
+                      "name": "input",
+                      "p50": 0.008,
+                      "p90": 0.01,
+                      "p95": 0.011,
+                      "p99": 0.021,
+                      "total_ms": 2.177
+                    }
+                  ],
+                  "work_median_ms": 4.42,
+                  "work_most_frame": 1571,
+                  "work_most_ms": 12.32,
+                  "work_ms": {
+                    "max": 12.319,
+                    "mean": 5.123,
+                    "p50": 4.417,
+                    "p90": 8.682,
+                    "p95": 10.195,
+                    "p99": 11.704
+                  }
+                }
+              ],
+              "work_median_ms": {
+                "least": 4.42,
+                "median": 4.6,
+                "most": 4.6
+              }
+            },
+            "ok": true,
+            "text": "playing 481 events over 4000 ms, 2 times:\nrun 1: 262 frames, every 16.66 ms (median), longest gap 27.46 ms, 3 over 1.5 frames; work 4.59 ms median, 10.43 ms p95, 15.58 ms most (frame 1208)\n263 input events: each 4.59 ms median, 10.43 ms p95, 15.58 ms most\nphases at p95: present 5.51 ms, script 2.35 ms, update 2.23 ms, layout 1.08 ms, paint 0.62 ms\nlayout: 36405 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.54 ms own over 490, @158 (overlay ds/transcript.luau:1682) 2.50 ms own over 507, @0 2.32 ms own over 263\nrun 2: 264 frames, every 16.63 ms (median), longest gap 24.43 ms, 0 over 1.5 frames; work 4.42 ms median, 10.19 ms p95, 12.32 ms most (frame 1571)\n265 input events: each 4.41 ms median, 10.19 ms p95, 12.32 ms most\nphases at p95: present 4.36 ms, script 2.30 ms, update 2.25 ms, layout 1.07 ms, paint 0.37 ms\nlayout: 36704 nodes measured afresh; costliest: @3 (overlay chat_fixture.luau:1342) 4.23 ms own over 499, @158 (overlay ds/transcript.luau:1682) 2.35 ms own over 525, @0 2.05 ms own over 265\n2 runs: every 16.63\u201316.66 ms (median 16.66), late 0\u20133 (median 3), work median 4.42\u20134.6 ms (median 4.6), longest gap 24.43\u201327.46 ms (median 27.46)"
+          }
+        },
+        "idle_after": {
+          "elapsed_s": 3.0006006339972373,
+          "cpu_s": 0.05000000000000071,
+          "cpu_percent_one_core": 1.666333047906926,
+          "memory_samples": 29,
+          "rss_mib_median": 256.3203125,
+          "rss_mib_peak": 266.40625,
+          "pss_mib_median": 225.8486328125,
+          "pss_mib_peak": 235.9345703125,
+          "result": null
+        }
+      }
+    }
+  ]
+}
