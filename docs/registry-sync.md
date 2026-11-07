@@ -90,12 +90,38 @@ Server→client:
 ## Cursor + recovery
 
 - `seq` bumps once per accepted batch; every touched row is stamped with it. Delta sync is
-  `SELECT * WHERE seq > cursor`.
+  `SELECT * WHERE seq > cursor`. The room's head is derived from the table (`MAX(seq)`, or
+  `gcFloor` when GC removed the top rows), so it can't disagree with the rows.
 - Server behind the client (`state.seq < cursor`, e.g. wiped DO storage): the client keeps
   its rows and re-seeds the server from them with **original per-field clocks** (`clocks`
   on the op) — the ws4 manual repair recipe, automated and lossless.
 - Local-only rows on a full resync re-seed the same way; unpushed writes always live in
   the pending queue and replay over whatever the server returns.
+
+## Write cost
+
+The room is billed per SQLite row written, index entries included. A push writes only the
+rows it moves: two billed rows each (the row and its `rows_seq` entry). Nothing is stored
+per push besides: the stored copy of `seq`, the per-device push counts and the push log
+are kept in memory and flushed by the alarm at most every five minutes, and the backup
+mark is written once per backup cycle. `/stats` shows `writesSinceStart`, the billed rows
+the object wrote since it last started.
+
+Writers keep their rows quiet too:
+
+- A session row is restamped (`updatedAt`) only while it says something that expires
+  (a live status, running subagents, background processes, a wait), and at most every
+  `SESSION_HEARTBEAT_MS` (25 s; quiet rows every 30 s). Shipped readers drop such a row
+  after 45 s with no other signal, so this is as slow as they allow. A session parked idle
+  after its turn is not restamped at all; it used to be every 15 s for 30 minutes.
+- `lastMessagePreview`/`lastMessageAt` are written when a message is sent and when a
+  segment ends, never per streamed delta.
+- Host stamps that repeat every turn (harness session, source context, branch, checkout,
+  cwd, `roomGen`) push only fields whose value changed.
+
+Rolling the edge back past the derived head needs `REGISTRY_ROOM_WRITE_THROUGH=1` and one
+flush (five minutes) first: older code reads the stored `seq`, and a stale one would stamp
+new rows below cursors clients already hold.
 
 ## Migration (instant, on first boot after update)
 

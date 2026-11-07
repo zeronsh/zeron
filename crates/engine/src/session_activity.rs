@@ -49,7 +49,8 @@ impl SessionsEngine {
                 );
                 // Unrelated native transitions must not turn terminal leases
                 // into per-event registry writes. Refresh them at most every
-                // ten seconds unless an actual program report changed.
+                // heartbeat (each refresh is a stored write) unless an actual
+                // program report changed.
                 for row in &mut current {
                     if let Some(old) = previous_by_id.get(row.chat_id.as_str())
                         && old.terminal_activity == row.terminal_activity
@@ -57,7 +58,8 @@ impl SessionsEngine {
                             .terminal_activity
                             .as_ref()
                             .is_some_and(|a| a.report.state.active())
-                        && (now - old.updated_at).num_milliseconds() < 10_000
+                        && (now - old.updated_at).num_milliseconds()
+                            < zeron_proto::view::SESSION_HEARTBEAT_MS
                     {
                         let native_at = native
                             .borrow()

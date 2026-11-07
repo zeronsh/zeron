@@ -151,12 +151,25 @@ struct Tally {
 struct Observed {
     known: HashMap<(String, String), Value>,
     tally: Tally,
+    /// When a reader last received a live (Working/AwaitingInput) session
+    /// row, and the longest it then went without a newer one: what a
+    /// shipped reader's 45 s staleness gate sees.
+    live_since: Option<std::time::Instant>,
+    longest_live_gap: Duration,
 }
 
 impl Observed {
     fn note(&mut self, row: &Value, count: bool) {
         let kind = row["kind"].as_str().unwrap_or("").to_string();
         let id = row["id"].as_str().unwrap_or("").to_string();
+        if count && kind == "sessions" {
+            let now = std::time::Instant::now();
+            if let Some(since) = self.live_since {
+                self.longest_live_gap = self.longest_live_gap.max(now - since);
+            }
+            let live = matches!(row["fields"]["status"].as_str(), Some("working" | "awaitingInput"));
+            self.live_since = live.then_some(now);
+        }
         let clocks = row["clocks"].clone();
         if count {
             *self.tally.rows.entry(kind.clone()).or_default() += 1;
@@ -343,11 +356,14 @@ async fn registry_writes_per_turn_and_parked_minute() {
         assistant_message_id: "a-w".into(),
     })
     .unwrap();
+    // The first half streams; the second is a quiet stretch inside the turn
+    // (a long tool call), where only the liveness tick keeps the row fresh.
     let started = tokio::time::Instant::now();
-    while started.elapsed() < Duration::from_secs(turn_secs) {
+    while started.elapsed() < Duration::from_secs(turn_secs / 2) {
         feed.send(AgentEvent::TextDelta { text: "more words. ".into() }).unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    tokio::time::sleep(Duration::from_secs(turn_secs - turn_secs / 2)).await;
     feed.send(AgentEvent::Done {
         status: DoneStatus::Completed,
         result: None,
@@ -370,6 +386,13 @@ async fn registry_writes_per_turn_and_parked_minute() {
     println!("registry writes, org {org}");
     report("streaming turn", turn_secs + 3, &s0, &s1, &t0, &t1);
     report("parked after the turn", parked_secs, &s1, &s2, &t1, &t2);
+    let gap = observed.lock().unwrap().longest_live_gap;
+    println!("longest a reader held a live session row without a newer one: {gap:?}");
+    // What shipped readers need: a live row is never 45 s old.
+    assert!(
+        gap < Duration::from_millis(zeron_proto::view::SESSION_STALE_MS as u64),
+        "a live session row went {gap:?} without a restamp"
+    );
 
     drop(feed);
     host.shutdown().await;
