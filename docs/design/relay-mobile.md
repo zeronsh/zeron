@@ -99,6 +99,10 @@ Use exactly these strings: they're the desktop's. iOS draws them centered where 
 put it over `Transcript(...)` in `SessionScreen.kt`. A chat with messages stored here is always `READY`, and it
 never shows these. Don't add a spinner to the warning states: nothing is happening, and that's the point.
 
+One more line: `Composer.kt` has `val running = c.live.turnRunning`, which decides the stop button. Make it
+`c.live.turnRunning && c.live.canInterrupt`, as iOS's `CoreSessionSource` does. A turn saved mid-stream with no path
+or no host reads as still running otherwise, with a stop that would wait in the doc and could land on a later turn.
+
 Nothing else in the UI changes. The composer's existing banner states cover sends.
 
 ## Lifecycle: what happens when
@@ -160,12 +164,15 @@ that engines share.
 - `Mux::stream_count` and `ViewerPeers::release_if_idle` are new.
 - A send waiting on a path or a host doesn't age into "Not delivered". This applies to stored chats too, and the 120 s
   clock starts when the path returns.
+- A streaming tail with no path or no host doesn't read as working, on stored chats too.
+- A device counts as socketless only after 30 s of failing dials, not just three. See [Traps](#traps).
+- `CHAT_LINK_PREFIX` moved to `zeron_proto::relay_gen`.
 
 ## Old and new together
 
 | Mix | What happens | Proven by |
 |---|---|---|
-| A shipped phone in an account of new devices | Its registry `hello` has no `relay`, so the room lists it, hosts see the list and hold chats on stored rows. Arriving at a chat on 3 brings the host back to heal | See [test status](#test-status) |
+| A shipped phone in an account of new devices | Its registry `hello` has no `relay`, so the room lists it, hosts see the list and hold chats on stored rows. Arriving at a chat on 3 brings the host back to heal. With the host away it sits quiet on what it has, and heals on the host's return | App built from `main`, on a simulator, against real workerd. See [test status](#test-status) |
 | A new phone with old devices | It says `relay: 1`, the old device's row lacks the capability, so nothing flips. It behaves as a stored client | `an_edge_with_the_flag_off…`, `a_chats_generation_decides…` |
 | A host moves back to an older build | Its row loses `chat-relay-v1`, and sends go back to rows at once | `a_chats_generation_decides…` |
 | Flip 2 → 3 → 2 mid-session | Each send goes where the current generation says. None is lost | `a_chats_generation_decides…` |
@@ -221,6 +228,12 @@ holds what's waiting. Read the phone's own store to see the journal and the outb
 
 For a link on an emulator, expect pairing to depend on your NAT. Falling back to the room is a pass.
 
+**To prove what the link carries,** cut only the room: a forwarder that closes and refuses `/chat2/` connections while a
+file exists, and passes everything else, so signaling and the registry stay up. Run a turn. If the phone's copy grows, the
+link carried it. Cutting the whole edge proves nothing, because signaling goes with it (see [Traps](#traps)). To reach a
+host on another machine with a local edge, tunnel it: `ssh -R 27681:127.0.0.1:27650 -L 27871:127.0.0.1:27871 <machine>`, with
+`ZERON_EDGE_URL=http://localhost:27681` on the engine. That gave a real internet path between a simulator and a server.
+
 **4. Measure on a real device before relying on it:** data used by a day of warm rooms, and battery with a chat left on
 screen. Neither has been measured on any phone.
 
@@ -251,5 +264,22 @@ These cost real time on iOS, or would have.
   `svc data disable`.
 - **`Not delivered` used to appear while offline.** It was on a 120 s clock from when the message was sent, and it
   looked like loss. It now counts only time with a path and a host.
+- **A simulator doesn't suspend a backgrounded app when you'd expect.** It kept receiving frames 12 s after another app
+  took the front, which proves nothing. Freeze the process instead (`kill -STOP`, then `-CONT`), and cut its sockets at the
+  forwarder. On Android, `adb shell am set-inactive` and Doze are closer to the real thing, and the same doubt applies.
+- **Playing an old phone pins the account for 14 days.** The room's list keeps a device that's been seen without the layer,
+  so after one such run every chat stays on stored rows, and a "link never came up" follows from that. Only that same device
+  saying `relay: 1` clears it, so a reinstall with a new device id doesn't. Between runs, wipe the rig's edge storage.
+- **A second space at the same path is the first one.** `createChat` then fails with "no such space". `relay_rig` makes
+  a folder per chat for this reason.
+- **Signaling going down takes the direct links with it.** `ViewerPeers`' signaling loop clears its peers when its socket
+  drops, so an edge outage ends the link too, and frames wait for the room. Nothing's lost, and this matches what engines do.
+- **Three failed dials used to mean "socketless".** They can take 2 s, and a network coming back answers HTTPS first. The
+  next pull then said `fallback=1`, the room treated the phone as an old reader, and the chat left relaying for every device
+  for 10 minutes. It now takes 30 s of failing dials. A phone on a poor network could have done this often.
+- **A rig's engine can reach things it shouldn't.** With no `ZERON_EDGE_URL` it uses production. A fresh data dir with a real
+  `HOME` also snapshots real agent logins. Use a private `HOME`, a `PATH` without agent CLIs, and the mock harness.
+- **`Syncing…` right after a host stops is correct.** Presence stays fresh for 45 s after the last beat, and the 20 s patience
+  usually ends the wait first.
 
 ## Test status

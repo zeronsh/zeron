@@ -413,9 +413,9 @@ relay. For the record, Cloudflare's TURN lists at $0.05/GB with 1,000 GB free pe
 The phone already runs this stack for terminals. A link is open only while a chat is on
 screen, and iOS suspends it in the background anyway, at which point the phone reconnects
 on return like any other socket. Each open link adds ICE and DTLS keepalives. Those are
-small but not measured here. Phones aren't part of this first implementation: the sink
-hooks are defaulted so `crates/client` still builds unchanged, and a phone seen in the last
-14 days keeps its account's chats on generation 2 until mobile ships this.
+small but not measured here. [relay-mobile.md](relay-mobile.md) covers what a phone does. iOS
+runs the layer. Android doesn't yet, and until it does, an Android phone seen in the last 14 days
+keeps its account's chats on generation 2.
 
 ### Cloud machines
 
@@ -539,8 +539,8 @@ Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine.
 
 **Not built:**
 
-- Mobile. `crates/client` still works as it does today, and a phone seen in the last 14 days holds its
-  account's chats on generation 2.
+- Android. `crates/client` has the layer and iOS runs it ([relay-mobile.md](relay-mobile.md)). Android has
+  yet to turn it on, and a phone without it seen in the last 14 days holds its account's chats on generation 2.
 - Sidebar churn.
 - Removing old rows, or backups for device-hosted chats. The nightly backup still runs for a room whose
   rows change, which a generation 3 room's mostly don't.
