@@ -28,6 +28,7 @@ local art = require("@app/screens/shell/art")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
+local CloudTray = require("@app/screens/chat/cloud_tray")
 local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
@@ -400,6 +401,20 @@ local function Composer(): Node
 		local s = open()
 		return if s and s.tasks then s.tasks else {}
 	end)
+	-- Its Cloud machine, on a chat that has one: its state and its alert.
+	local machine = CloudTray.bind {
+		chat = function(): string?
+			return session_id:get()
+		end,
+		device = function(): string?
+			local s = open()
+			return s and s.device
+		end,
+		running = function(): boolean
+			local s = open()
+			return s ~= nil and s.running == true
+		end,
+	}
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
@@ -444,6 +459,7 @@ local function Composer(): Node
 		end
 		return LinkNotice.of {
 			connection = now.connection,
+			cloud = machine.cloud_link(string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
@@ -1173,6 +1189,11 @@ local function Composer(): Node
 			on_dismiss_notice = function()
 				own_notice:set(nil)
 			end,
+			-- (The only notice with an action: a sleeping machine's Wake.)
+			on_notice_action = machine.wake,
+			alerts = machine.alerts,
+			on_alert_action = machine.on_alert,
+			on_dismiss_alert = machine.dismiss,
 			disabled = function(): boolean
 				local s = store.session:get()
 				local id = session_id:get()

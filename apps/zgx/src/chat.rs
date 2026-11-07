@@ -479,6 +479,9 @@ struct Open {
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
     queue: Vec<Json>,
+    /// Its messages on their way and not yet taken by its agent, as the engine's
+    /// `WatchWaitingMessages` lists them (none from an engine without it).
+    waiting: Vec<Json>,
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
@@ -638,6 +641,14 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("chat.retry", move |args| {
         let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
+    });
+    // A send in this device's outbox (still uploading, or stopped) taken out
+    // for good: `{ id, item, message? }` → whether it was there to take
+    // ("unsupported": an engine from before it can).
+    let pick = which.clone();
+    host.async_action("chat.remove_held", move |args| {
+        let v = pick(&args);
+        async move { crate::plugins::preview::refuse("chat.remove_held")?; v.remove_held(args).await.map_err(String::from) }
     });
     let pick = which.clone();
     host.async_action("chat.queue_edit", move |args| {
@@ -1020,17 +1031,7 @@ impl Chats {
             return;
         }
         let harnesses: Vec<Json> = match list {
-            Ok(list) => list
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|h| {
-                    h["id"].as_str() != Some("mock")
-                        && h["installed"].as_bool() != Some(false)
-                        && h["enabled"].as_bool() != Some(false)
-                })
-                .cloned()
-                .collect(),
+            Ok(list) => list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect(),
             Err(error) => {
                 // (Unreachable: this device's catalog stands in, as before.)
                 eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
@@ -1087,17 +1088,7 @@ impl Chats {
             }
             let params = json!({ "targetDeviceId": device, "includeRegistry": true });
             let Ok(list) = engine::get().call("ListHarnesses", params).await else { continue };
-            let harnesses: Vec<Json> = list
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|h| {
-                    h["id"].as_str() != Some("mock")
-                        && h["installed"].as_bool() != Some(false)
-                        && h["enabled"].as_bool() != Some(false)
-                })
-                .cloned()
-                .collect();
+            let harnesses: Vec<Json> = list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect();
             let mut models = HashMap::new();
             for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
                 let params = json!({ "harness": id, "targetDeviceId": device });
@@ -1476,8 +1467,20 @@ impl View {
                 view.publish_session();
             }
         });
+        // (An engine from before it ends the watch at once: nothing waits, as before.)
+        let weak = Rc::downgrade(self);
+        let waiting = rpc.watch("WatchWaitingMessages", json!({ "chatId": id }), move |item| {
+            if let Some(view) = weak.upgrade()
+                && view.generation.get() == generation
+            {
+                if let Some(open) = view.open.borrow_mut().as_mut() {
+                    open.waiting = item["items"].as_array().cloned().unwrap_or_default();
+                }
+                view.publish_session();
+            }
+        });
         if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.watches = vec![transcript, queue];
+            open.watches = vec![transcript, queue, waiting];
         }
     }
 
@@ -2046,6 +2049,23 @@ impl View {
                 pending.remove(id);
             }
         }
+    }
+
+    /// A send taken out of this device's outbox (`RemoveHeldSend`, #1256): it
+    /// never goes out. Its prompt shown here as on its way goes with it.
+    async fn remove_held(self: &Rc<Self>, args: Value) -> Result<Value, Outcome> {
+        let id = args.field("id").map(text).unwrap_or_default();
+        let item = args.field("item").map(text).unwrap_or_default();
+        let reply = engine::get()
+            .call("RemoveHeldSend", json!({ "chatId": id, "id": item }))
+            .await
+            .map_err(|e| held_removal_failure(&e))?;
+        let removed = reply["removed"].as_bool() == Some(true);
+        if removed && let Some(message) = args.field("message").map(text).filter(|m| !m.is_empty()) {
+            self.forget_pending(&id, &message);
+            self.publish_messages();
+        }
+        Ok(Value::Bool(removed))
     }
 
     /// A failed prompt sent again (its run as it was), sending meanwhile.
@@ -4274,6 +4294,11 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         .iter()
         .map(|q| {
             let mut fields = vec![("id", s(&q["id"])), ("text", s(&q["text"]))];
+            // When it was queued (seconds): one that waited long is said so
+            // before it goes.
+            if let Some(ms) = q["issuedAt"].as_f64() {
+                fields.push(("at", Value::Num(ms / 1000.)));
+            }
             let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));
@@ -4309,6 +4334,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),
         ("ask", ask),
         ("queue", Value::List(queue.into())),
+        ("waiting", waiting_value(&open.waiting)),
         ("todos", todos(open)),
         ("tasks", Value::List(tasks.into())),
     ];
@@ -4449,6 +4475,61 @@ fn seconds(value: &Json) -> Option<i64> {
         out -= sign * (oh * 3600 + om * 60);
     }
     Some(out)
+}
+
+/// Why `RemoveHeldSend` didn't answer: "unsupported" from an engine from before
+/// it (which can't take a send back), else as any call's.
+fn held_removal_failure(error: &str) -> Outcome {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("unknown method") || lower.contains("unknownmethod") {
+        "unsupported"
+    } else {
+        engine::outcome(error)
+    }
+}
+
+/// A chat's messages not yet taken by its agent: each its id, the message it
+/// becomes, its words (without the attachments' trailer: the files' names,
+/// when there are no words), when it went out and when it stops being run
+/// (seconds, as the scripts' times are), whether it's still in this device's
+/// outbox, and why it stopped trying, if it did.
+fn waiting_value(items: &[Json]) -> Value {
+    let secs = |v: &Json| v.as_f64().map_or(Value::Nil, |ms| Value::Num(ms / 1000.));
+    let s = |v: &Json| v.as_str().filter(|t| !t.is_empty()).map_or(Value::Nil, Value::from);
+    let words = |v: &Json| {
+        let (words, paths) = split_attachments(v.as_str().unwrap_or_default());
+        let names = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect::<Vec<_>>().join(", ");
+        let shown = if words.trim().is_empty() { names } else { words };
+        if shown.is_empty() { Value::Nil } else { Value::from(shown.as_str()) }
+    };
+    Value::List(
+        items
+            .iter()
+            .map(|w| {
+                Value::record([
+                    ("id", s(&w["id"])),
+                    ("message", s(&w["messageId"])),
+                    ("text", words(&w["prompt"])),
+                    ("sent", secs(&w["sentAt"])),
+                    ("expires", secs(&w["expiresAt"])),
+                    ("held", Value::Bool(w["held"].as_bool() == Some(true))),
+                    ("failure", s(&w["failure"])),
+                ])
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+/// Whether a device's agent is one its composer offers. On a Cloud session's
+/// machine, one Cloud has no account for still is: the chat already runs it, so
+/// its model must read as itself (a new chat on Cloud, picked by the logical
+/// device, still offers only those it can run).
+fn offered(h: &Json, device: &str) -> bool {
+    let session_machine = device.starts_with("cloud-");
+    h["id"].as_str() != Some("mock")
+        && h["installed"].as_bool() != Some(false)
+        && (session_machine || h["enabled"].as_bool() != Some(false))
 }
 
 fn stale(updated: &Json) -> bool {
@@ -5640,6 +5721,59 @@ mod tests {
         // Failed, then shown on another try: the stumble isn't drawn.
         let retried = blocks(&reply(vec![mcp("s1", true), mcp("s2", false), image("i1", "a.png")]));
         assert_eq!(kinds(&retried), ["images"]);
+    }
+
+    #[test]
+    fn waiting_messages_read_in_seconds_with_their_failure() {
+        let items = vec![
+            json!({ "id": "c1", "chatId": "s2", "messageId": "m1", "prompt": "Ship it", "issuedBy": "mac",
+                "sentAt": 1_800_000_000_000_i64, "expiresAt": 1_800_604_800_000_i64 }),
+            json!({ "id": "o1", "chatId": "s2", "prompt": "With files", "issuedBy": "mac", "sentAt": 1_800_000_000_000_i64,
+                "held": true, "failure": "too many files are waiting for Cloud machines to collect them; retry once one has" }),
+        ];
+        let out: Json = serde_json::from_str(&super::waiting_value(&items).to_json()).unwrap();
+        assert_eq!(out[0]["text"], "Ship it");
+        assert_eq!(out[0]["message"], "m1");
+        assert_eq!(out[0]["sent"], 1_800_000_000.0);
+        assert_eq!(out[0]["expires"], 1_800_604_800.0);
+        assert_eq!(out[0]["held"], false);
+        assert!(out[0]["failure"].is_null());
+        assert_eq!(out[1]["held"], true);
+        assert!(out[1]["expires"].is_null());
+        assert!(out[1]["failure"].as_str().unwrap().starts_with("too many files"));
+    }
+
+    #[test]
+    fn an_outbox_send_reads_as_its_words_or_its_files() {
+        let trailer = "\n\nAttached images (local files — open them to view):\n- /tmp/up/a.png\n- /tmp/up/b.pdf";
+        let items = vec![
+            json!({ "id": "o1", "prompt": format!("Look at these{trailer}"), "held": true }),
+            json!({ "id": "o2", "prompt": format!("See the attached image(s).{trailer}"), "held": true }),
+        ];
+        let out: Json = serde_json::from_str(&super::waiting_value(&items).to_json()).unwrap();
+        assert_eq!(out[0]["text"], "Look at these");
+        assert_eq!(out[1]["text"], "a.png, b.pdf");
+    }
+
+    #[test]
+    fn an_engine_without_removal_says_so() {
+        assert_eq!(super::held_removal_failure("unknown method: RemoveHeldSend"), "unsupported");
+        assert_eq!(super::held_removal_failure("offline"), "offline");
+        assert_eq!(super::held_removal_failure("chat not found"), "failed");
+    }
+
+    #[test]
+    fn a_cloud_chats_own_agent_stays_offered_without_an_account() {
+        let codex = json!({ "id": "codex", "installed": true, "enabled": false });
+        // On the chat's own machine: listed, so its model reads as itself.
+        assert!(super::offered(&codex, "cloud-s-chat-1"));
+        // Anywhere else (a computer, the logical Cloud device a new chat picks
+        // from): only what can run there.
+        assert!(!super::offered(&codex, "cloud"));
+        assert!(!super::offered(&codex, "mac"));
+        assert!(!super::offered(&json!({ "id": "mock" }), "cloud-s-chat-1"));
+        assert!(!super::offered(&json!({ "id": "claude-code", "installed": false }), "cloud-s-chat-1"));
+        assert!(super::offered(&json!({ "id": "claude-code" }), "mac"));
     }
 
     #[test]
