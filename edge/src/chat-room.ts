@@ -16,6 +16,7 @@
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; alarms retry accepted rows' host wakes and back up to R2.
  */
+import { PushDiagnostics } from "./push-diagnostics";
 import { createBlobStore, type BlobStore } from "./blobs";
 import {
   appendRow,
@@ -62,12 +63,6 @@ interface SocketState {
   hostDevice?: string;
 }
 
-interface PushOutcome {
-  ok: number;
-  rejected: number;
-  lastOkAt: number;
-}
-
 interface QuotaWindow {
   since: number;
   pushes: number;
@@ -76,6 +71,7 @@ interface QuotaWindow {
 
 export class ChatRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
+  private readonly pushDiagnostics: PushDiagnostics;
   private readonly env: Env;
   private readonly blobs: BlobStore;
   /** device → last presence beat (epoch ms). Memory-only by construction. */
@@ -88,6 +84,7 @@ export class ChatRoom implements DurableObject {
     this.ctx = ctx;
     this.env = env;
     ensureChatLog(ctx.storage.sql);
+    this.pushDiagnostics = new PushDiagnostics(ctx.storage.sql);
     ensureChatWakes(ctx.storage.sql);
     this.blobs = createBlobStore(ctx.storage.sql);
     // Runtime-answered keepalive; proves nothing about this DO's health.
@@ -321,11 +318,9 @@ export class ChatRoom implements DurableObject {
         connectedSockets: this.ctx.getWebSockets().length,
         presence: Object.fromEntries(this.presence),
         // The ONLY per-device attribution surface — kept from the 2026-08-05
-        // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-          string,
-          PushOutcome
-        >,
+        // incident tooling (SessionRoom's /stats pushOutcomes). Success
+        // totals are checkpointed best-effort; live stats include pending counts.
+        pushOutcomes: this.pushDiagnostics.snapshot(),
         lastBackupSeq: Number(getMeta(sql, "backupSeq") ?? "0")
       });
     }
@@ -336,6 +331,7 @@ export class ChatRoom implements DurableObject {
       // same shape as the registry reset recipe.
       sql.exec("DELETE FROM rows");
       sql.exec("DELETE FROM meta");
+      this.pushDiagnostics.reset();
       sql.exec("DELETE FROM blobs");
       sql.exec("DELETE FROM chat_wake");
       for (const ws of this.ctx.getWebSockets()) {
@@ -531,21 +527,7 @@ export class ChatRoom implements DurableObject {
   }
 
   private recordPush(device: string, ok: boolean): void {
-    const sql = this.ctx.storage.sql;
-    const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-      string,
-      PushOutcome
-    >;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
-    if (ok) {
-      entry.ok += 1;
-      entry.lastOkAt = Date.now();
-    } else {
-      entry.rejected += 1;
-    }
-    outcomes[key] = entry;
-    setMeta(sql, "pushOutcomes", JSON.stringify(outcomes));
+    this.pushDiagnostics.record(device, ok);
   }
 
   /** SQL rows, wake receipt, and alarm are one SQLite storage transaction.

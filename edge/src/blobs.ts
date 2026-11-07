@@ -18,11 +18,15 @@ export const createBlobStore = (sql: SqlStorage): BlobStore => {
   );
   return {
     put(name, bytes) {
-      sql.exec("DELETE FROM blobs WHERE name = ?", name);
       for (let i = 0, idx = 0; i === 0 || i < bytes.length; i += CHUNK_BYTES, idx++) {
         const chunk = bytes.subarray(i, Math.min(i + CHUNK_BYTES, bytes.length));
-        sql.exec("INSERT INTO blobs (name, idx, bytes) VALUES (?, ?, ?)", name, idx, chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+        sql.exec(
+          "INSERT INTO blobs (name, idx, bytes) VALUES (?, ?, ?) ON CONFLICT(name, idx) DO UPDATE SET bytes = excluded.bytes WHERE blobs.bytes IS NOT excluded.bytes",
+          name, idx, chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength)
+        );
       }
+      // Keep one chunk even for empty blobs; only remove the old suffix.
+      sql.exec("DELETE FROM blobs WHERE name = ? AND idx >= ?", name, Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES)));
     },
     get(name) {
       const rows = [...sql.exec("SELECT bytes FROM blobs WHERE name = ? ORDER BY idx", name)];
