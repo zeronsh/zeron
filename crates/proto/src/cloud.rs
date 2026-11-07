@@ -244,6 +244,10 @@ pub struct CloudSession {
     /// How far a waking machine has got, where the edge says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Unix ms the machine last found its chat store damaged and rebuilt it
+    /// from the server copy of its chats. Older edges omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_recovered_at: Option<f64>,
 }
 
 /// `CloudSessions` reply.

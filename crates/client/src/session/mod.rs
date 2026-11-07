@@ -465,6 +465,10 @@ impl SessionCore {
                 }
             });
         let cloud_booting = machine == MachineWait::Booting;
+        let restored_at_ms = workspace
+            .session(&self.chat_id)
+            .filter(|row| zeron_proto::is_cloud_device(&row.device_id, ""))
+            .and_then(|row| client.cloud_store_restored(&row.device_id, now));
         drop(workspace);
         let mut transcript_event = None;
         let send_before;
@@ -497,11 +501,13 @@ impl SessionCore {
                 working: indicator_working || streaming,
                 working_since_ms,
                 cloud_booting,
+                restored_at_ms,
             };
             let placeholder_changed = refresh_setup_placeholder(&mut st, machine);
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
                 || previous.hydrated != st.hydrated
+                || previous.restored_at_ms != live.restored_at_ms
                 || placeholder_changed;
             if change.is_some()
                 || echoes_changed
@@ -896,6 +902,8 @@ struct LiveFlags {
     /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
     #[allow(dead_code)]
     cloud_booting: bool,
+    /// Its Cloud machine rebuilt its chat store then (a note until dismissed).
+    restored_at_ms: Option<i64>,
 }
 
 /// While a Cloud chat's machine is being started or woken for the latest
@@ -1018,6 +1026,7 @@ fn build_snapshot(
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
+        restored_at_ms: live.restored_at_ms,
         delta: SnapshotDelta::default(),
         index: Arc::new(index),
     };
@@ -1066,6 +1075,21 @@ impl SessionHandle {
     /// The current transcript (O(1): an `Arc` clone).
     pub fn snapshot(&self) -> Arc<SessionSnapshot> {
         self.core.snapshot()
+    }
+
+    /// Stop showing that the chat's Cloud machine rebuilt its chat store
+    /// ([`SessionSnapshot::restored_at_ms`]), for every chat on it, until it
+    /// rebuilds again. Kept across launches.
+    pub fn dismiss_restored_note(&self) {
+        let Ok(client) = self.core.client() else { return };
+        let device_id = client
+            .workspace
+            .snapshot()
+            .session(&self.core.chat_id)
+            .map(|row| row.device_id.clone());
+        if let Some(device_id) = device_id {
+            client.dismiss_cloud_store_restored(&device_id);
+        }
     }
 
     /// Transcript subscription for Rust consumers (the layout engine). The
