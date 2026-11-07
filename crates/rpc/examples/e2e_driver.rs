@@ -243,6 +243,17 @@ async fn relay_layer(
     pass("B, without the layer, can still send and follow a turn");
 }
 
+/// Text a snapshot can't compress much: its size is what it says.
+fn incompressible(len: usize) -> String {
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    (0..len)
+        .map(|_| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            char::from(b'a' + ((seed >> 58) as u8 % 26))
+        })
+        .collect()
+}
+
 /// The chat's row on `client`, by id.
 async fn chat_generation(client: &RpcClient, chat_id: &str) -> Option<u64> {
     wait_stream(client, methods::WATCH_CHATS, serde_json::json!({}), "chat list", |item| {
@@ -277,7 +288,7 @@ async fn create_chat(client: &RpcClient, space_id: &str) -> String {
 /// with a 64 KiB relay limit, so a 100 KB message makes a whale.
 async fn whale_chat(a: &RpcClient, b: &RpcClient, space_id: &str, a_port: u16, a_dir: Option<&std::path::Path>) {
     let chat_id = create_chat(a, space_id).await;
-    queue_run(a, &chat_id, &"w".repeat(100_000)).await;
+    queue_run(a, &chat_id, &incompressible(100_000)).await;
     wait_for_replies(b, &chat_id, 1, "whale reply on B").await;
     tokio::time::sleep(Duration::from_secs(14)).await;
     if chat_generation(a, &chat_id).await != Some(2) {
@@ -315,7 +326,7 @@ async fn rejected_push(a: &RpcClient, b: &RpcClient, space_id: &str) {
     let chat_id = create_chat(a, space_id).await;
     queue_run(a, &chat_id, "before").await;
     wait_for_replies(b, &chat_id, 1, "first reply on B").await;
-    queue_run(a, &chat_id, &"r".repeat(1_100_000)).await;
+    queue_run(a, &chat_id, &incompressible(1_100_000)).await;
     wait_for_replies(a, &chat_id, 2, "the oversized turn on A").await;
     queue_run(a, &chat_id, "after").await;
     wait_for_replies(b, &chat_id, 3, "the turns after a rejected push, on B").await;

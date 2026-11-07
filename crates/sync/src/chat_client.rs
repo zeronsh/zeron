@@ -366,6 +366,9 @@ struct Shared {
     parked_checkpoint_tried: bool,
     /// The checkpoint that read was of, to notice a newer one.
     room_frontier: Vec<u8>,
+    /// How long a parked row next waits before it's read again. It outlives the
+    /// session, so rejoining to hear about a newer checkpoint keeps backing off.
+    park_wait: Option<Duration>,
     /// The room's checkpoint isn't in this doc, and the sink chose to wait.
     checkpoint_deferred: bool,
 }
@@ -457,7 +460,12 @@ fn apply_remote_row(
     };
     let mut shared = lock(shared);
     match outcome {
-        RowImportOutcome::Applied => shared.cursor = shared.cursor.max(cursor),
+        RowImportOutcome::Applied => {
+            shared.cursor = shared.cursor.max(cursor);
+            if !shared.relay_parked {
+                shared.park_wait = None;
+            }
+        }
         RowImportOutcome::PendingDependencies
             if shared.parked_checkpoint_tried
                 || (shared.relay_session
@@ -576,7 +584,7 @@ const RELAY_PARK_RECHECK: Duration = Duration::from_secs(5);
 const RELAY_PARK_RECHECK_MAX: Duration = Duration::from_secs(300);
 /// From this wait on, a parked row's recheck joins the room again, to hear whether
 /// its checkpoint has changed.
-const PARKED_REHELLO: Duration = Duration::from_secs(160);
+const PARKED_REHELLO: Duration = Duration::from_secs(20);
 
 impl ChatClient {
     /// Connect (fixed URL — dev/tests).
@@ -1545,7 +1553,7 @@ impl Actor {
         let mut gap_repairs = 0u32;
         let mut refresh_in_flight: Option<(u64, tokio::time::Instant)> = None;
         let mut refresh_gap_deadline = None;
-        let mut park_wait = RELAY_PARK_RECHECK;
+        let mut park_wait = lock(&self.shared).park_wait.unwrap_or(RELAY_PARK_RECHECK);
         let mut park_recheck = tokio::time::Instant::now();
         if !self.maybe_repair_gap(&mut pipe, &mut gap_repairs).await {
             return SessionEnd::Reconnect;
@@ -1659,6 +1667,7 @@ impl Actor {
                     // requests never do. A parked row that's waited this long joins
                     // again. The checkpoint is fetched only if its frontier changed.
                     if park_wait >= PARKED_REHELLO {
+                        lock(&self.shared).park_wait = Some((park_wait * 2).min(RELAY_PARK_RECHECK_MAX));
                         return SessionEnd::Reconnect;
                     }
                     if let Some(relay) = &self.relay {
@@ -1681,6 +1690,7 @@ impl Actor {
                     }
                     park_recheck = tokio::time::Instant::now() + park_wait;
                     park_wait = (park_wait * 2).min(RELAY_PARK_RECHECK_MAX);
+                    lock(&self.shared).park_wait = Some(park_wait);
                 }
                 beat = self.presence_rx.recv() => {
                     if let Some((at, payload)) = beat {
