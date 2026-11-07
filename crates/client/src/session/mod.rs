@@ -422,6 +422,11 @@ impl SessionCore {
         oldest_state(&lock(&self.state).pending)
     }
 
+    /// When this device's oldest unadopted send was made, if one waits.
+    pub(crate) fn oldest_pending_send_ms(&self) -> Option<i64> {
+        lock(&self.state).pending.iter().map(|p| p.sent_at_ms).min()
+    }
+
     pub(crate) fn has_pending_sends(&self) -> bool {
         !lock(&self.state).pending.is_empty()
             || self.room().is_some_and(|room| room.has_pending_pushes())
@@ -443,11 +448,21 @@ impl SessionCore {
                 )
             });
         // A Cloud chat whose machine isn't up yet: it is being started (or
-        // woken) for the latest message.
-        let cloud_booting = workspace.session(&self.chat_id).is_some_and(|row| {
-            zeron_proto::is_cloud_device(&row.device_id, "")
-                && !workspace.device(&row.device_id).is_some_and(|d| d.online)
-        });
+        // woken) for the latest message. Or it is up, and installs a release
+        // before it answers (its edge says so: `cloud_stage`).
+        let machine = workspace
+            .session(&self.chat_id)
+            .filter(|row| zeron_proto::is_cloud_device(&row.device_id, ""))
+            .map_or(MachineWait::Up, |row| {
+                if client.cloud_machine_updating(&row.device_id) {
+                    MachineWait::Updating
+                } else if !workspace.device(&row.device_id).is_some_and(|d| d.online) {
+                    MachineWait::Booting
+                } else {
+                    MachineWait::Up
+                }
+            });
+        let cloud_booting = machine == MachineWait::Booting;
         drop(workspace);
         let mut transcript_event = None;
         let send_before;
@@ -465,7 +480,10 @@ impl SessionCore {
             if dirty.meta {
                 st.context_usage = self.doc.context_usage();
             }
-            let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
+            // A send its machine is updating for isn't late: it gets there.
+            let held = machine == MachineWait::Updating;
+            let echoes_changed =
+                derive_pending(&mut st, &client.config.device_id, degraded, held, now);
             send_after = oldest_state(&st.pending);
             let previous = self.snapshot();
             let streaming = st
@@ -478,7 +496,7 @@ impl SessionCore {
                 working_since_ms,
                 cloud_booting,
             };
-            let placeholder_changed = refresh_setup_placeholder(&mut st, cloud_booting);
+            let placeholder_changed = refresh_setup_placeholder(&mut st, machine);
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
                 || previous.hydrated != st.hydrated
@@ -726,7 +744,15 @@ fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
 
 /// Own run/steer commands whose message hasn't landed = pending echoes.
 /// Returns whether the echo set/states changed.
-fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64) -> bool {
+/// `held`: the chat's Cloud machine is updating before it answers, so a send
+/// waiting on it isn't failed for its age (one that was refused still is).
+fn derive_pending(
+    st: &mut CoreState,
+    device_id: &str,
+    degraded: bool,
+    held: bool,
+    now: i64,
+) -> bool {
     struct Attempt {
         text: String,
         kind: PendingKind,
@@ -785,8 +811,13 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
             .copied()
             .unwrap_or(attempt.first_issued);
         let parsed = attachments::parse_user_message(&attempt.text);
+        let dead = attempt.dead && !attempt.live;
+        let mut state = send_state(started, degraded, dead, now);
+        if held && !dead && state == SendState::Failed {
+            state = send_state(now, degraded, false, now);
+        }
         next.push(PendingSend {
-            state: send_state(started, degraded, attempt.dead && !attempt.live, now),
+            state,
             message_id,
             text: attempt.text.clone(),
             visible_text: parsed.text,
@@ -843,6 +874,17 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     changed
 }
 
+/// Where a Cloud chat's machine is with the latest message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MachineWait {
+    /// Up (or not a Cloud chat): nothing to show.
+    Up,
+    /// Being started or woken.
+    Booting,
+    /// Up, and installing a release before it answers.
+    Updating,
+}
+
 #[derive(Clone, Copy)]
 struct LiveFlags {
     working: bool,
@@ -855,10 +897,11 @@ struct LiveFlags {
 /// While a Cloud chat's machine is being started or woken for the latest
 /// message, that message gets the machine's first setup step right away —
 /// "Starting a machine" (a new chat) or "Waking the machine" — as the
-/// desktop shows it. The entry has the id the machine's own setup entry will
+/// desktop shows it, and "Updating the machine" while it installs a release
+/// before it answers. The entry has the id the machine's own setup entry will
 /// have (`cloud_setup_entry_id`), so the real steps replace it in place; it
 /// goes as soon as anything follows the message. Returns whether it changed.
-fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
+fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
     // Decide first (reading the transcript), then build (minting a rev).
     let wanted = {
         let transcript = st.tracker.entries();
@@ -868,7 +911,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
             .rev()
             .find_map(|p| st.echoes.get(&p.message_id))
             .or_else(|| transcript.iter().rev().find(|e| e.role() == MessageRole::User));
-        latest_user.filter(|_| cloud_booting).and_then(|message| {
+        latest_user.filter(|_| machine != MachineWait::Up).and_then(|message| {
             let setup_id = zeron_proto::cloud_setup_entry_id(&message.id);
             // Nothing after the message in the doc, and no setup entry yet.
             let answered = transcript.iter().any(|e| e.id == setup_id)
@@ -877,7 +920,13 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
                     .position(|e| e.id == message.id)
                     .is_some_and(|ix| ix + 1 < transcript.len());
             let waking = transcript.iter().any(|e| e.role() == MessageRole::Assistant);
-            let name = if waking { "Waking the machine" } else { "Starting a machine" };
+            let name = if machine == MachineWait::Updating {
+                "Updating the machine"
+            } else if waking {
+                "Waking the machine"
+            } else {
+                "Starting a machine"
+            };
             (!answered).then(|| (message.id.clone(), setup_id, name, message.message.created_at))
         })
     };
@@ -1616,7 +1665,7 @@ mod setup_placeholder_tests {
     #[test]
     fn a_new_cloud_chat_shows_its_machine_starting_until_the_machine_is_up() {
         let mut st = state_with_pending_send();
-        assert!(refresh_setup_placeholder(&mut st, true));
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Booting));
         let placeholder = st.setup_placeholder.clone().expect("placeholder under the message");
         assert_eq!(placeholder.id, zeron_proto::cloud_setup_entry_id("m1"));
         assert!(placeholder.is_streaming());
@@ -1625,17 +1674,71 @@ mod setup_placeholder_tests {
             Some(MessagePart::Tool { call: zeron_proto::ToolCall::Unknown { name, .. }, .. }) if name == "Starting a machine"
         ));
         // Unchanged: the same entry (row reuse), no change reported.
-        assert!(!refresh_setup_placeholder(&mut st, true));
+        assert!(!refresh_setup_placeholder(&mut st, MachineWait::Booting));
         assert!(Arc::ptr_eq(&placeholder, st.setup_placeholder.as_ref().unwrap()));
         // The machine is up: the placeholder goes (its own entry takes over).
-        assert!(refresh_setup_placeholder(&mut st, false));
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
         assert!(st.setup_placeholder.is_none());
     }
 
     #[test]
     fn a_chat_on_a_machine_that_is_up_shows_no_placeholder() {
         let mut st = state_with_pending_send();
-        assert!(!refresh_setup_placeholder(&mut st, false));
+        assert!(!refresh_setup_placeholder(&mut st, MachineWait::Up));
         assert!(st.setup_placeholder.is_none());
+    }
+
+    fn step_name(st: &CoreState) -> Option<String> {
+        match st.setup_placeholder.as_ref()?.message.parts.first() {
+            Some(MessagePart::Tool { call: zeron_proto::ToolCall::Unknown { name, .. }, .. }) => {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_woken_machine_that_updates_before_it_answers_says_so() {
+        let mut st = state_with_pending_send();
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Booting));
+        assert_eq!(step_name(&st).as_deref(), Some("Starting a machine"));
+        // Its heartbeat is back, and it installs a release: the same step,
+        // saying what it waits on now.
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Updating));
+        assert_eq!(st.setup_placeholder.as_ref().unwrap().id, zeron_proto::cloud_setup_entry_id("m1"));
+        assert_eq!(step_name(&st).as_deref(), Some("Updating the machine"));
+        assert!(!refresh_setup_placeholder(&mut st, MachineWait::Updating));
+        // Done: the machine's own steps take over.
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
+        assert!(st.setup_placeholder.is_none());
+    }
+
+    #[test]
+    fn a_send_its_machine_updates_for_is_not_failed_for_its_age() {
+        let mut st = state_with_pending_send();
+        st.pending.clear();
+        st.echoes.clear();
+        st.commands = vec![zeron_doc::SessionCommandEntry {
+            id: "cmd1".into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: "read the readme".into(),
+                message_id: Some("m1".into()),
+            },
+            issued_by: "phone".into(),
+            issued_at: 1_000,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        }];
+        let late = 1_000 + crate::connectivity::UNDELIVERED_GRACE_MS + 1;
+        derive_pending(&mut st, "phone", false, false, late);
+        assert_eq!(st.pending[0].state, SendState::Failed, "late, nothing holds it");
+        derive_pending(&mut st, "phone", false, true, late);
+        assert_eq!(st.pending[0].state, SendState::Sending, "its machine updates first");
+        // A send that was refused failed, update or not.
+        st.commands[0].status = SessionCommandStatus::Rejected;
+        derive_pending(&mut st, "phone", false, true, late);
+        assert_eq!(st.pending[0].state, SendState::Failed);
     }
 }
