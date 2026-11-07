@@ -18,8 +18,12 @@
 //!                                  balance, available }
 //!   cloud.repos                  the repositories Cloud can open, newest push
 //!                                first: { { name, private, branch, clone_url,
-//!                                pushed } }; `github_not_connected` without
-//!                                a GitHub connection for Cloud
+//!                                pushed, account?, accounts?, installation? } }
+//!                                (`account`: the GitHub login a new chat would
+//!                                use; `installation`: the GitHub App's, which
+//!                                gives the access; all absent from an older
+//!                                vault); `github_not_connected` without a
+//!                                GitHub connection for Cloud
 //!   cloud.branches({ repo, default? })
 //!                                the branches a Cloud chat of `repo` can start
 //!                                from, the default first, as `chat.refs`
@@ -203,11 +207,22 @@ fn repos_value(listed: &Json) -> Value {
                     ("clone_url", str_or_nil(&r["cloneUrl"])),
                     // (Seconds, as the scripts' times are.)
                     ("pushed", Value::from(r["pushedAt"].as_f64().unwrap_or(0.0) / 1000.0)),
+                    ("account", str_or_nil(&r["account"])),
+                    ("accounts", accounts_value(&r["accounts"])),
+                    ("installation", num(&r["installationId"])),
                 ])
             })
             .collect::<Vec<_>>()
             .into(),
     )
+}
+
+/// The logins that reach a repository; nil from an older vault.
+fn accounts_value(accounts: &Json) -> Value {
+    let Some(list) = accounts.as_array() else {
+        return Value::Nil;
+    };
+    Value::List(list.iter().filter_map(|a| a.as_str().map(Value::from)).collect::<Vec<_>>().into())
 }
 
 /// A Cloud repository's branches: the default first (as `current`, the
@@ -323,5 +338,22 @@ mod tests {
         assert_eq!(out[0]["private"], true);
         assert_eq!(out[0]["branch"], "main");
         assert_eq!(out[0]["pushed"], 5.0);
+    }
+
+    #[test]
+    fn repos_name_who_reaches_them_when_the_vault_says() {
+        let listed = json!({ "repos": [
+            { "fullName": "a/both", "pushedAt": 2000, "account": "work-me",
+              "accounts": ["work-me", "home-me"], "installationId": 100 },
+            // As a vault from before several logins answers.
+            { "fullName": "a/old", "pushedAt": 1000 },
+        ] });
+        let out: Json = serde_json::from_str(&repos_value(&listed).to_json()).unwrap();
+        assert_eq!(out[0]["account"], "work-me");
+        assert_eq!(out[0]["accounts"], json!(["work-me", "home-me"]));
+        assert_eq!(out[0]["installation"], 100.0);
+        assert!(out[1]["account"].is_null());
+        assert!(out[1]["accounts"].is_null());
+        assert!(out[1]["installation"].is_null());
     }
 }
