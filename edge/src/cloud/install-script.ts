@@ -268,7 +268,8 @@ export const QUIESCE_BUSY_EXIT = 75;
  * (nothing re-runs the installer): the wait for `network-online.target` goes
  * (the engine retries its own connections, and that wait can hold `systemctl
  * start` on a resumed machine), a crash restarts in a second, and the boot
- * unit appears. Best effort: only the stop decides the exit status.
+ * unit appears. Then everything written is flushed to the disk, as the
+ * provider's snapshot follows. Best effort: only the stop decides the exit status.
  * `ZERON_CLOUD_UNIT_DIR` exists for the unit tier.
  */
 export const STOP_ENGINE_COMMAND = [
@@ -286,5 +287,12 @@ export const STOP_ENGINE_COMMAND = [
   `  sudo systemctl enable ${CLOUD_BOOT_UNIT_NAME} >/dev/null 2>&1`,
   `  sudo systemctl start ${CLOUD_BOOT_UNIT_NAME}`,
   `fi`,
-  `sudo systemctl stop ${CLOUD_UNIT_NAME}`
+  `sudo systemctl stop ${CLOUD_UNIT_NAME}`,
+  // The provider snapshots the disk next, from outside the machine: what the
+  // engine wrote on its way out (its databases' last checkpoint) must be on the
+  // disk by then, not in the page cache. A snapshot without it has held a
+  // database with pages from two moments, unreadable on the next wake.
+  `s=$?`,
+  `sync`,
+  `exit $s`
 ].join("\n");
