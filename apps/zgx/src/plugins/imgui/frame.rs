@@ -486,7 +486,22 @@ impl FrameState {
     }
 
     pub fn close_regions(&self, ui: *const Ui) -> Option<String> {
-        let (child_open, group_open, columns_open, tables, tree_depth, list_box_open, popup_open, menu_open, menu_bar_open, tab_item_open, tab_bar_open, drag_source_open, drag_target_open, error_absent) = {
+        let (
+            child_open,
+            group_open,
+            columns_open,
+            tables,
+            tree_depth,
+            list_box_open,
+            popup_open,
+            menu_open,
+            menu_bar_open,
+            tab_item_open,
+            tab_bar_open,
+            drag_source_open,
+            drag_target_open,
+            error_absent,
+        ) = {
             let live = self.live.borrow();
             let Some(frame) = live.as_ref() else {
                 return None;
@@ -527,10 +542,7 @@ impl FrameState {
         } else if menu_bar_open {
             Some(unbalanced_region_sentence("begin_menu_bar", "end_menu_bar"))
         } else if tab_item_open {
-            Some(unbalanced_region_sentence(
-                "begin_tab_item",
-                "end_tab_item",
-            ))
+            Some(unbalanced_region_sentence("begin_tab_item", "end_tab_item"))
         } else if tab_bar_open {
             Some(unbalanced_region_sentence("begin_tab_bar", "end_tab_bar"))
         } else {
@@ -1930,8 +1942,7 @@ fn end_group(ui: &Ui, frame: &mut LiveFrame, op: &str) -> Result<Value, String> 
 }
 
 fn c_label(value: &str) -> Result<CString, String> {
-    CString::new(value)
-        .map_err(|_| format!("zeron.imgui can't use a label with a NUL byte in it"))
+    CString::new(value).map_err(|_| format!("zeron.imgui can't use a label with a NUL byte in it"))
 }
 
 fn table_flags(arg: &Value, op: &str) -> Result<i32, String> {
@@ -2027,10 +2038,7 @@ fn table_setup_column(
     arg: &Value,
     op: &str,
 ) -> Result<Value, String> {
-    if let Some(key) = unknown_key(
-        arg,
-        &["op", "window", "seq", "label", "width", "sortable"],
-    ) {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "label", "width", "sortable"]) {
         return Err(format!(
             "ui.{op} can't use {key}: {op} takes label, width and sortable, like ui.table_setup_column({{ label = \"Name\", width = 200 }})"
         ));
@@ -2095,7 +2103,8 @@ fn table_headers_row(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value,
     }
     let min = ui.cursor_pos();
     ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igTableHeadersRow() });
-    let height = ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igTableGetHeaderRowHeight() });
+    let height =
+        ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igTableGetHeaderRowHeight() });
     Ok(Value::record([
         ("ok", Value::Bool(true)),
         ("min", point(min)),
@@ -2108,10 +2117,7 @@ fn table_next_row(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, St
         return Ok(Value::record([("ok", Value::Bool(true))]));
     }
     ui.with_bound_context(|| unsafe {
-        dear_imgui_rs::sys::igTableNextRow(
-            dear_imgui_rs::sys::ImGuiTableRowFlags_None,
-            0.0,
-        )
+        dear_imgui_rs::sys::igTableNextRow(dear_imgui_rs::sys::ImGuiTableRowFlags_None, 0.0)
     });
     Ok(Value::record([("ok", Value::Bool(true))]))
 }
@@ -2126,7 +2132,10 @@ fn table_next_column(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value,
 
 fn table_sort_specs(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
     if !current_table_open(frame) {
-        return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)]));
+        return Ok(Value::record([
+            ("ok", Value::Bool(true)),
+            ("value", Value::Nil),
+        ]));
     }
     let Some((column_index, direction)) = ui.with_bound_context(|| {
         let specs = unsafe { dear_imgui_rs::sys::igTableGetSortSpecs() };
@@ -2140,7 +2149,10 @@ fn table_sort_specs(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, 
         let spec = unsafe { &*(*specs).Specs };
         Some((spec.ColumnUserID as usize, spec.SortDirection as u8))
     }) else {
-        return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)]));
+        return Ok(Value::record([
+            ("ok", Value::Bool(true)),
+            ("value", Value::Nil),
+        ]));
     };
     let Some(label) = frame
         .tables
@@ -2148,12 +2160,20 @@ fn table_sort_specs(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, 
         .and_then(|table| table.columns.get(column_index))
         .map(|column| column.label.clone())
     else {
-        return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)]));
+        return Ok(Value::record([
+            ("ok", Value::Bool(true)),
+            ("value", Value::Nil),
+        ]));
     };
     let direction = match direction {
         value if value == dear_imgui_rs::sys::ImGuiSortDirection_Ascending as u8 => "ascending",
         value if value == dear_imgui_rs::sys::ImGuiSortDirection_Descending as u8 => "descending",
-        _ => return Ok(Value::record([("ok", Value::Bool(true)), ("value", Value::Nil)])),
+        _ => {
+            return Ok(Value::record([
+                ("ok", Value::Bool(true)),
+                ("value", Value::Nil),
+            ]));
+        }
     };
     Ok(Value::record([
         ("ok", Value::Bool(true)),
@@ -2189,10 +2209,7 @@ fn begin_tab_bar(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Resul
         ));
     }
     let open = ui.with_bound_context(|| unsafe {
-        dear_imgui_rs::sys::igBeginTabBar(
-            id.as_ptr(),
-            dear_imgui_rs::sys::ImGuiTabBarFlags_None,
-        )
+        dear_imgui_rs::sys::igBeginTabBar(id.as_ptr(), dear_imgui_rs::sys::ImGuiTabBarFlags_None)
     });
     frame.tab_bar_open = open;
     Ok(Value::record([
@@ -2271,9 +2288,8 @@ fn begin_menu(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<V
     }
     let label = string_arg(arg, "label", op)?;
     let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
-    let open = ui.with_bound_context(|| unsafe {
-        dear_imgui_rs::sys::igBeginMenu(label_c.as_ptr(), true)
-    });
+    let open = ui
+        .with_bound_context(|| unsafe { dear_imgui_rs::sys::igBeginMenu(label_c.as_ptr(), true) });
     frame.menu_open = open;
     Ok(Value::record([
         ("ok", Value::Bool(true)),
@@ -2451,7 +2467,10 @@ fn tree_node(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Va
     let label = string_arg(arg, "label", op)?;
     let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
     let open = ui.with_bound_context(|| unsafe {
-        dear_imgui_rs::sys::igTreeNodeEx_Str(label_c.as_ptr(), dear_imgui_rs::sys::ImGuiTreeNodeFlags_None)
+        dear_imgui_rs::sys::igTreeNodeEx_Str(
+            label_c.as_ptr(),
+            dear_imgui_rs::sys::ImGuiTreeNodeFlags_None,
+        )
     });
     if open {
         frame.tree_depth += 1;
@@ -2492,10 +2511,7 @@ fn collapsing_header(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
 }
 
 fn begin_list_box(ui: &Ui, frame: &mut LiveFrame, arg: &Value, op: &str) -> Result<Value, String> {
-    if let Some(key) = unknown_key(
-        arg,
-        &["op", "window", "seq", "id", "width", "height"],
-    ) {
+    if let Some(key) = unknown_key(arg, &["op", "window", "seq", "id", "width", "height"]) {
         return Err(format!(
             "ui.{op} can't use {key}: {op} takes id, width and height, like ui.begin_list_box(\"##kinds\", {{ width = 180, height = 120 }})"
         ));
@@ -2560,7 +2576,11 @@ fn color_edit3(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
     let label_c = c_label(&label).map_err(|error| format!("ui.{op} can't use label: {error}"))?;
     let value = match arg.field("value") {
         Some(value) => color_table(value, op)?,
-        None => return Err(format!("ui.{op} needs a colour value, like {{ r = 0.2, g = 0.4, b = 0.9 }}.")),
+        None => {
+            return Err(format!(
+                "ui.{op} needs a colour value, like {{ r = 0.2, g = 0.4, b = 0.9 }}."
+            ));
+        }
     };
     let options = option_map(arg, op, &["display_mode"])?;
     let mode = opt_string(options, "display_mode", op)?.unwrap_or_else(|| "rgb".to_string());
@@ -2578,11 +2598,14 @@ fn color_edit3(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
     Ok(Value::record([
         ("ok", Value::Bool(true)),
         ("changed", Value::Bool(changed)),
-        ("value", Value::record([
-            ("r", Value::from(f64::from(edited[0]))),
-            ("g", Value::from(f64::from(edited[1]))),
-            ("b", Value::from(f64::from(edited[2]))),
-        ])),
+        (
+            "value",
+            Value::record([
+                ("r", Value::from(f64::from(edited[0]))),
+                ("g", Value::from(f64::from(edited[1]))),
+                ("b", Value::from(f64::from(edited[2]))),
+            ]),
+        ),
     ]))
 }
 
@@ -2599,7 +2622,11 @@ fn color_button(ui: &Ui, arg: &Value, op: &str) -> Result<Value, String> {
     let id_c = c_label(&id).map_err(|error| format!("ui.{op} can't use id: {error}"))?;
     let colour = match arg.field("value") {
         Some(value) => color_table(value, op)?,
-        None => return Err(format!("ui.{op} needs a colour, like {{ r = 0.2, g = 0.4, b = 0.9 }}.")),
+        None => {
+            return Err(format!(
+                "ui.{op} needs a colour, like {{ r = 0.2, g = 0.4, b = 0.9 }}."
+            ));
+        }
     };
     let width = match arg.field("width") {
         Some(Value::Num(number)) if number.is_finite() && *number >= 0.0 => *number as f32,
@@ -2688,10 +2715,7 @@ fn set_drag_drop_payload(
         )
     });
     if set {
-        state
-            .drag_payloads
-            .borrow_mut()
-            .insert(kind, payload);
+        state.drag_payloads.borrow_mut().insert(kind, payload);
     }
     Ok(Value::record([
         ("ok", Value::Bool(true)),
@@ -2708,9 +2732,7 @@ fn end_drag_drop_source(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Val
 }
 
 fn begin_drag_drop_target(ui: &Ui, frame: &mut LiveFrame, _op: &str) -> Result<Value, String> {
-    let open = ui.with_bound_context(|| unsafe {
-        dear_imgui_rs::sys::igBeginDragDropTarget()
-    });
+    let open = ui.with_bound_context(|| unsafe { dear_imgui_rs::sys::igBeginDragDropTarget() });
     frame.drag_target_open = open;
     Ok(Value::record([
         ("ok", Value::Bool(true)),
@@ -2746,7 +2768,12 @@ fn accept_drag_drop_payload(
         .is_null()
     });
     let payload = if accepted {
-        state.drag_payloads.borrow().get(&kind).cloned().unwrap_or(Value::Nil)
+        state
+            .drag_payloads
+            .borrow()
+            .get(&kind)
+            .cloned()
+            .unwrap_or(Value::Nil)
     } else {
         Value::Nil
     };
@@ -2810,7 +2837,10 @@ fn shortcut_key(value: &str, op: &str) -> Result<dear_imgui_rs::Key, String> {
             )),
         };
     }
-    if let Some(number) = value.strip_prefix('F').and_then(|rest| rest.parse::<u8>().ok()) {
+    if let Some(number) = value
+        .strip_prefix('F')
+        .and_then(|rest| rest.parse::<u8>().ok())
+    {
         return match number {
             1 => Ok(dear_imgui_rs::Key::F1),
             2 => Ok(dear_imgui_rs::Key::F2),

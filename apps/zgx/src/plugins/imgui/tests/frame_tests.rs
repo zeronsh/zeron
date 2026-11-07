@@ -4148,10 +4148,7 @@ fn draw_probe_table(probe: &Probe, seq: u64) -> (Value, Value) {
         .frame_widget(
             "table_setup_column",
             seq,
-            &Value::record([
-                ("label", Value::from("Size")),
-                ("width", Value::from(90.0)),
-            ]),
+            &Value::record([("label", Value::from("Size")), ("width", Value::from(90.0))]),
         )
         .expect("column Size");
     probe
@@ -4257,10 +4254,7 @@ fn a_clicked_table_row_selectable_reports_once() {
                 .frame_widget(
                     "begin_table",
                     seq,
-                    &Value::record([
-                        ("id", Value::from("rows")),
-                        ("columns", Value::from(2.0)),
-                    ]),
+                    &Value::record([("id", Value::from("rows")), ("columns", Value::from(2.0))]),
                 )
                 .expect("begin_table");
             probe
@@ -4331,26 +4325,41 @@ fn a_menu_opens_on_click_and_its_item_fires_once() {
     let fired = Rc::new(Cell::new(0));
 
     let draw = {
-        let (file, item_rect, open, fired) = (file.clone(), item_rect.clone(), open.clone(), fired.clone());
+        let (file, item_rect, open, fired) =
+            (file.clone(), item_rect.clone(), open.clone(), fired.clone());
         move |probe: &Probe, seq: u64| {
-            probe.frame_widget("begin_menu_bar", seq, &no_arg()).expect("menu bar");
+            probe
+                .frame_widget("begin_menu_bar", seq, &no_arg())
+                .expect("menu bar");
             let menu = probe
-                .frame_widget("begin_menu", seq, &Value::record([("label", Value::from("File"))]))
+                .frame_widget(
+                    "begin_menu",
+                    seq,
+                    &Value::record([("label", Value::from("File"))]),
+                )
                 .expect("File menu");
             *file.borrow_mut() = rect_of(&menu);
             let was_open = matches!(menu.field("open"), Some(Value::Bool(true)));
             *open.borrow_mut() = was_open;
             if was_open {
                 let item = probe
-                    .frame_widget("menu_item", seq, &Value::record([("label", Value::from("Open"))]))
+                    .frame_widget(
+                        "menu_item",
+                        seq,
+                        &Value::record([("label", Value::from("Open"))]),
+                    )
                     .expect("menu item");
                 *item_rect.borrow_mut() = rect_of(&item);
                 if matches!(item.field("value"), Some(Value::Bool(true))) {
                     fired.set(fired.get() + 1);
                 }
             }
-            probe.frame_widget("end_menu", seq, &no_arg()).expect("end menu");
-            probe.frame_widget("end_menu_bar", seq, &no_arg()).expect("end menu bar");
+            probe
+                .frame_widget("end_menu", seq, &no_arg())
+                .expect("end menu");
+            probe
+                .frame_widget("end_menu_bar", seq, &no_arg())
+                .expect("end menu bar");
             let _ = probe.frame_script_end(seq, None, false);
         }
     };
@@ -4421,7 +4430,9 @@ fn a_list_box_selects_the_clicked_row() {
                 }
             }
             *rects.borrow_mut() = captured;
-            probe.frame_widget("end_list_box", seq, &no_arg()).expect("end list box");
+            probe
+                .frame_widget("end_list_box", seq, &no_arg())
+                .expect("end list box");
             let _ = probe.frame_script_end(seq, None, false);
         }
     };
@@ -4435,7 +4446,8 @@ fn a_list_box_selects_the_clicked_row() {
     probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
     run_frame(&probe, draw.clone()).expect("release");
     assert_eq!(&*chosen.borrow(), "delta", "the third row became chosen");
-}#[test]
+}
+#[test]
 fn a_context_menu_opens_on_right_click_and_not_left() {
     let _guard = imgui_guard();
     let right = Probe::new("ctx-right");
@@ -4449,16 +4461,25 @@ fn a_context_menu_opens_on_right_click_and_not_left() {
                 .frame_widget(
                     "selectable",
                     seq,
-                    &Value::record([("label", Value::from("row-a")), ("selected", Value::Bool(false))]),
+                    &Value::record([
+                        ("label", Value::from("row-a")),
+                        ("selected", Value::Bool(false)),
+                    ]),
                 )
                 .expect("selectable");
             *rect.borrow_mut() = rect_of(&answer);
             let popup = probe
-                .frame_widget("begin_popup_context_item", seq, &Value::record([("id", Value::from("ctx"))]))
+                .frame_widget(
+                    "begin_popup_context_item",
+                    seq,
+                    &Value::record([("id", Value::from("ctx"))]),
+                )
                 .expect("context popup");
             *open.borrow_mut() = matches!(popup.field("open"), Some(Value::Bool(true)));
             if matches!(popup.field("open"), Some(Value::Bool(true))) {
-                probe.frame_widget("end_popup", seq, &no_arg()).expect("end popup");
+                probe
+                    .frame_widget("end_popup", seq, &no_arg())
+                    .expect("end popup");
             }
             let _ = probe.frame_script_end(seq, None, false);
         }
@@ -4486,15 +4507,24 @@ fn a_context_menu_opens_on_right_click_and_not_left() {
                 .frame_widget(
                     "selectable",
                     seq,
-                    &Value::record([("label", Value::from("row-a")), ("selected", Value::Bool(false))]),
+                    &Value::record([
+                        ("label", Value::from("row-a")),
+                        ("selected", Value::Bool(false)),
+                    ]),
                 )
                 .expect("selectable");
             let popup = probe
-                .frame_widget("begin_popup_context_item", seq, &Value::record([("id", Value::from("ctx"))]))
+                .frame_widget(
+                    "begin_popup_context_item",
+                    seq,
+                    &Value::record([("id", Value::from("ctx"))]),
+                )
                 .expect("context popup");
             *open_left.borrow_mut() = matches!(popup.field("open"), Some(Value::Bool(true)));
             if matches!(popup.field("open"), Some(Value::Bool(true))) {
-                probe.frame_widget("end_popup", seq, &no_arg()).expect("end popup");
+                probe
+                    .frame_widget("end_popup", seq, &no_arg())
+                    .expect("end popup");
             }
             let _ = probe.frame_script_end(seq, None, false);
         })
@@ -4536,7 +4566,11 @@ fn a_modal_popup_blocks_behind_and_reports_its_choice() {
         );
         move |probe: &Probe, seq: u64| {
             let button = probe
-                .frame_widget("button", seq, &Value::record([("label", Value::from("Behind"))]))
+                .frame_widget(
+                    "button",
+                    seq,
+                    &Value::record([("label", Value::from("Behind"))]),
+                )
                 .expect("behind button");
             *behind_rect.borrow_mut() = rect_of(&button);
             if matches!(button.field("value"), Some(Value::Bool(true))) {
@@ -4544,7 +4578,11 @@ fn a_modal_popup_blocks_behind_and_reports_its_choice() {
             }
             if modal_open.get() {
                 probe
-                    .frame_widget("open_popup", seq, &Value::record([("id", Value::from("confirm"))]))
+                    .frame_widget(
+                        "open_popup",
+                        seq,
+                        &Value::record([("id", Value::from("confirm"))]),
+                    )
                     .expect("open modal");
                 let popup = probe
                     .frame_widget(
@@ -4552,13 +4590,20 @@ fn a_modal_popup_blocks_behind_and_reports_its_choice() {
                         seq,
                         &Value::record([
                             ("id", Value::from("confirm")),
-                            ("options", Value::record([("always_auto_resize", Value::Bool(true))])),
+                            (
+                                "options",
+                                Value::record([("always_auto_resize", Value::Bool(true))]),
+                            ),
                         ]),
                     )
                     .expect("modal");
                 if matches!(popup.field("open"), Some(Value::Bool(true))) {
                     let ok = probe
-                        .frame_widget("button", seq, &Value::record([("label", Value::from("OK"))]))
+                        .frame_widget(
+                            "button",
+                            seq,
+                            &Value::record([("label", Value::from("OK"))]),
+                        )
                         .expect("OK");
                     *ok_rect.borrow_mut() = rect_of(&ok);
                     if matches!(ok.field("value"), Some(Value::Bool(true))) {
@@ -4566,13 +4611,19 @@ fn a_modal_popup_blocks_behind_and_reports_its_choice() {
                         modal_open.set(false);
                     }
                     let cancel = probe
-                        .frame_widget("button", seq, &Value::record([("label", Value::from("Cancel"))]))
+                        .frame_widget(
+                            "button",
+                            seq,
+                            &Value::record([("label", Value::from("Cancel"))]),
+                        )
                         .expect("Cancel");
                     if matches!(cancel.field("value"), Some(Value::Bool(true))) {
                         *confirm.borrow_mut() = Some("cancel".to_string());
                         modal_open.set(false);
                     }
-                    probe.frame_widget("end_popup", seq, &no_arg()).expect("end popup");
+                    probe
+                        .frame_widget("end_popup", seq, &no_arg())
+                        .expect("end popup");
                 }
             }
             let _ = probe.frame_script_end(seq, None, false);
@@ -4598,7 +4649,11 @@ fn a_modal_popup_blocks_behind_and_reports_its_choice() {
     run_frame(&probe, draw.clone()).expect("press OK");
     probe.edit_io(|io| io.add_mouse_button_event(MouseButton::Left, false));
     run_frame(&probe, draw.clone()).expect("release OK");
-    assert_eq!(confirm.borrow().as_deref(), Some("ok"), "OK reports the choice");
+    assert_eq!(
+        confirm.borrow().as_deref(),
+        Some("ok"),
+        "OK reports the choice"
+    );
     assert!(!modal_open.get(), "the modal closed");
 
     run_frame(&probe, draw.clone()).expect("settle after close");
@@ -4629,7 +4684,11 @@ fn a_shortcut_fires_only_its_chord() {
                         (
                             "mods",
                             Value::List(
-                                ["ctrl"].iter().map(|m| Value::from(*m)).collect::<Vec<_>>().into(),
+                                ["ctrl"]
+                                    .iter()
+                                    .map(|m| Value::from(*m))
+                                    .collect::<Vec<_>>()
+                                    .into(),
                             ),
                         ),
                         ("key", Value::from("K")),
@@ -4672,12 +4731,20 @@ fn date_and_time_pickers_are_refused_naming_the_version() {
     let probe = Probe::new("refusals");
     run_frame(&probe, |probe, seq| {
         let date = probe
-            .frame_widget("date_picker", seq, &Value::record([("id", Value::from("start"))]))
+            .frame_widget(
+                "date_picker",
+                seq,
+                &Value::record([("id", Value::from("start"))]),
+            )
             .expect_err("date_picker must be refused");
         assert!(date.contains("date_picker"), "{date}");
         assert!(date.contains("1.93"), "{date}");
         let time = probe
-            .frame_widget("time_picker", seq, &Value::record([("id", Value::from("start"))]))
+            .frame_widget(
+                "time_picker",
+                seq,
+                &Value::record([("id", Value::from("start"))]),
+            )
             .expect_err("time_picker must be refused");
         assert!(time.contains("time_picker"), "{time}");
         assert!(time.contains("1.93"), "{time}");
