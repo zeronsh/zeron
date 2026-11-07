@@ -1276,7 +1276,13 @@ return function(props: Props): Node
 						content = {
 							id = "shell-files-content",
 							w = inner_w,
-							self = "end",
+							-- (At the card's right, out of its flow: laid out at its
+							-- width while the card's edge sweeps over it, a clip
+							-- meant, not content overflowing the card.)
+							absolute = true,
+							right = 0,
+							top = 0,
+							bottom = 0,
 							on_mount = function(el: any)
 								content_el = el
 								anime.animate(el, motion.content(shown:peek(), true))
