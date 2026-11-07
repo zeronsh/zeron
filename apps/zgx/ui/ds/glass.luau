@@ -42,12 +42,11 @@ function M.style(props: { [any]: any }, kind: Kind?): { [any]: any }
 		return props
 	end
 	props.rounded = props.rounded or "$radius.lg"
-	-- (Where popups can't blur what's under them, Windows', solid too.)
 	props.bg = function()
-		return if material.menus_see_through() then "$zeron.menu.tint" else "$zeron.menu.solid"
+		return if material.see_through() then "$zeron.menu.tint" else "$zeron.menu.solid"
 	end
 	props.backdrop_blur = function()
-		return if material.menus_see_through() then "$zeron.menu.blur" else 0
+		return if material.see_through() then "$zeron.menu.blur" else 0
 	end
 	props.border = 1
 	props.border_color = "$border"
