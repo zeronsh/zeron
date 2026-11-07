@@ -4835,9 +4835,13 @@ impl DocHost {
         if let Some(chat2) = lock(&handle.chat2).as_ref() {
             chat2.redial();
         }
-        self.nudge_remote_host(chat_id);
-        self.retry_held_sends(chat_id)?;
+        // A message still in the outbox isn't there for the host to find, and a
+        // woken machine bills: the send wakes it once its bytes are stored.
         let held_messages = self.held_message_ids(chat_id);
+        if held_messages.is_empty() {
+            self.nudge_remote_host(chat_id);
+        }
+        self.retry_held_sends(chat_id)?;
         let peer_transfers = self.peer_transfers_needed(chat_id);
         let commands = handle.doc.read_commands()?;
         let pending: Vec<SessionCommandEntry> = commands

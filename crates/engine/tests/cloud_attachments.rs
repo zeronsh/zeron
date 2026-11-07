@@ -172,6 +172,9 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<EdgeState>>) 
             Ok(n) => body.extend_from_slice(&chunk[..n]),
         }
     }
+    if path.ends_with("/nudge") {
+        state.lock().unwrap().log.push(("NUDGE".into(), path.clone()));
+    }
     let (status, reply, sum) = if path.contains("/attachments/") {
         let mut s = state.lock().unwrap();
         s.log.push((method.clone(), path.clone()));
@@ -908,6 +911,39 @@ async fn a_send_after_a_held_one_does_not_overtake_it() {
         "the queued row to follow",
     )
     .await;
+    core.shutdown().await;
+}
+
+/// Seen on staging: a retry from the chat woke the sleeping machine while the
+/// upload was still refused, for a message it had no way to see. It billed its
+/// whole idle window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_still_refused_leaves_the_machine_asleep() {
+    let tmp = tempfile::tempdir().unwrap();
+    let edge = FakeEdge::start().await;
+    edge.fail_puts(&[403, 403]);
+    let core = sender(&tmp.path().join("laptop"), Some(&edge), HOST, true).await;
+    stage(&core, "up-1").await;
+    send(&core, "m1", "up-1").await;
+    wait_for(
+        || held(&core).first().is_some_and(|s| s.failure.is_some()),
+        "the failure to surface",
+    )
+    .await;
+
+    core.doc_host.retry_delivery(CHAT).unwrap();
+    wait_for(|| edge.count("PUT") == 2, "the retry's upload").await;
+    wait_for(
+        || held(&core).first().is_some_and(|s| s.failure.is_some()),
+        "the failure again",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(edge.count("NUDGE"), 0, "nothing there for it to find");
+
+    core.doc_host.retry_delivery(CHAT).unwrap();
+    wait_for(|| commands(&core).len() == 1, "the message").await;
+    wait_for(|| edge.count("NUDGE") >= 1, "the wake").await;
     core.shutdown().await;
 }
 
