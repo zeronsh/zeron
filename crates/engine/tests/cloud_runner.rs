@@ -841,7 +841,8 @@ async fn a_boots_timeline_goes_to_the_edge_once_at_the_runs_first_output() {
             Ok("runner-bearer".into())
         }
     }
-    wake_trace::enable();
+    let data = tempfile::tempdir().unwrap();
+    wake_trace::enable(data.path());
     wake_trace::report_to(&edge.url(), Arc::new(Bearer));
     wake_trace::mark(Stage::Token);
     wake_trace::mark_command(1_000);

@@ -195,6 +195,9 @@ async fn prepare_checkout_with(
     if path.join(".git").exists() {
         // The disk survived a stop: this boot is a wake.
         record_setup("wake", "Woke the machine".into());
+        if let Some(version) = crate::wake_trace::updated_to() {
+            record_setup("update", format!("Updated Zeron to {version}"));
+        }
         return Ok(());
     }
     record_setup("start", "Started a machine".into());
@@ -514,11 +517,9 @@ pub const ENROLL_ENV: &str = "ZERON_RUNNER_ENROLL";
 pub const PLATFORM_ENV: &str = "ZERON_DEVICE_PLATFORM";
 /// How often a runner reports activity to its CloudDevice DO.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
-/// How long after boot a Cloud machine keeps out of the way of the message that
-/// woke it: no engine update applies and no restart into a newer installed one
-/// (the restart cuts off what's waiting, and a trial then holds all new work until
-/// it's proven), and no agent CLI is checked (a check can start an install, which
-/// holds the run back until it ends).
+/// How long after boot a Cloud machine keeps its agent CLIs' update checks out of
+/// the way of the message that woke it: a check can start an install, which holds
+/// the run back until it ends.
 pub const CLOUD_BOOT_SETTLE: Duration = Duration::from_secs(120);
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -747,11 +748,6 @@ impl RunnerIdentity {
             repo: repo.map(str::to_owned),
         }
     }
-}
-
-/// Whether background upkeep may do what could get in a waking run's way.
-pub fn settled_after_boot(cloud: bool, since_boot: Duration) -> bool {
-    !cloud || since_boot >= CLOUD_BOOT_SETTLE
 }
 
 pub(crate) fn http_client() -> reqwest::Client {
@@ -1249,14 +1245,6 @@ impl Drop for CloudRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_a_cloud_machine_waits_out_its_boot_before_upkeep() {
-        assert!(settled_after_boot(false, Duration::ZERO));
-        assert!(!settled_after_boot(true, Duration::ZERO));
-        assert!(!settled_after_boot(true, CLOUD_BOOT_SETTLE - Duration::from_secs(1)));
-        assert!(settled_after_boot(true, CLOUD_BOOT_SETTLE));
-    }
 
     fn session_vars(name: &str) -> Option<String> {
         match name {

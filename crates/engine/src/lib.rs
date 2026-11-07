@@ -67,6 +67,7 @@ pub mod rpc;
 pub mod run_journal;
 pub mod runner;
 pub mod wake_trace;
+pub mod wake_update;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
@@ -342,7 +343,9 @@ impl EngineCore {
         // A new version on trial may yet be undone, and recovering clears the
         // journals' marks of what to resume, which a rollback doesn't restore.
         // It waits for the commit (`update_trial`), with all other new work.
-        if zeron_update::transaction::in_trial() {
+        // A Cloud machine looking for a release does the same (`wake_update`): an
+        // update would cut off whatever started now.
+        if zeron_update::transaction::in_trial() || wake_update::armed() {
             doc_host.hold_work();
         } else {
             match sessions.recover_stale() {
@@ -473,6 +476,20 @@ impl EngineCore {
 
     pub fn workspace_scope(&self) -> WorkspaceScope {
         self.workspace_scope
+    }
+
+    /// When an update may restart this engine: never under a live run or an open
+    /// terminal. On a Cloud machine, a message waiting counts too: nothing is
+    /// running yet, and a restart would land just as its turn starts.
+    pub fn update_quiescence(&self, cloud: bool) -> zeron_update::QuiescentCheck {
+        let sessions = self.sessions.clone();
+        let terminals = self.terminals.clone();
+        let doc_host = cloud.then(|| self.doc_host.clone());
+        Arc::new(move || {
+            !sessions.any_active()
+                && !terminals.any_open()
+                && !doc_host.as_ref().is_some_and(DocHost::has_waiting_commands)
+        })
     }
 
     /// Attach the auth service (before building the RPC service / relays).
@@ -1125,20 +1142,7 @@ impl Engine {
         // Spawned for every install: application updates must not depend on
         // workspace sync being enabled — the feed is the public release feed
         // (served without authentication), not an edge feature.
-        let quiescent: zeron_update::QuiescentCheck = {
-            let sessions = core.sessions.clone();
-            let terminals = core.terminals.clone();
-            // A Cloud machine is woken by a message: right after boot "nothing
-            // is running" only means its run hasn't started yet, and an update
-            // applied then restarts the engine under the waiting message.
-            let booted = std::time::Instant::now();
-            let cloud = runner::is_cloud_platform();
-            Arc::new(move || {
-                !sessions.any_active()
-                    && !terminals.any_open()
-                    && runner::settled_after_boot(cloud, booted.elapsed())
-            })
-        };
+        let quiescent = core.update_quiescence(runner::is_cloud_platform());
         core.harness_updates.set_compatibility_feed(format!(
             "{}/releases/harness-compatibility.json",
             config.edge_url.trim_end_matches('/')
@@ -1224,7 +1228,7 @@ impl Engine {
         // Cloud runner: runner.json wins; else ZERON_RUNNER_ENROLL enrolls
         // first (retrying network failures; a rejected code is fatal).
         if let Some(identity) = runner::bootstrap(&config.data_dir, &config.edge_url).await? {
-            wake_trace::enable();
+            wake_trace::enable(&config.data_dir);
             if identity.edge_url() != config.edge_url.trim_end_matches('/') {
                 tracing::info!(edge = %identity.edge_url(), "runner: using the edge this device enrolled with");
                 config.edge_url = identity.edge_url().to_string();
@@ -1239,6 +1243,7 @@ impl Engine {
                     "runner: Cloud session machine");
             }
             runner::set_session(session);
+            wake_update::arm();
         }
         let auth = Self::build_auth(&config).await;
         let mut auth_state = auth.watch_state();
@@ -1281,6 +1286,7 @@ impl Engine {
             .sessions
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
         update_trial::prove_and_commit(runtime.core(), &config);
+        wake_update::start(runtime.core());
 
         tokio::select! {
             result = shutdown_signal() => result?,

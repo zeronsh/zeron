@@ -188,7 +188,37 @@ export interface EngineTiming {
   agentStarted?: number;
   /** Its first text, thought or tool call (includes the model's own wait). */
   firstOutput?: number;
+  /** Its look for a newer release answered, before it would answer anyone. */
+  updateChecked?: number;
+  /** There was one: it began installing it (the stage `updating`). */
+  updateStarted?: number;
+  /** Installed: it asked for the restart into it. */
+  updateRestart?: number;
+  /** The engine after that restart began. */
+  resumed?: number;
+  /** The wait ended, on whichever version: work may start. */
+  released?: number;
+  /** The version that answered. */
+  version?: string;
+  updatedFrom?: string;
+  updatedTo?: string;
+  /** How the look ended: `current`, `updated`, `wentBack`, `installFailed`... */
+  updateResult?: string;
 }
+
+/** The stage a machine can report while it wakes (`CloudSession.stage`). */
+export const WAKE_STAGES = ["updating"] as const;
+export type WakeStage = (typeof WAKE_STAGES)[number];
+/** A stage nobody cleared (an engine that died mid-update) stops showing. */
+export const WAKE_STAGE_TTL_MS = 10 * 60_000;
+
+/** `POST /runner/wake-stage {stage}`: undefined when it isn't one. */
+export const parseWakeStage = (body: unknown): { stage: WakeStage | null } | undefined => {
+  if (typeof body !== "object" || body === null) return undefined;
+  const { stage } = body as { stage?: unknown };
+  if (stage === null || stage === undefined) return { stage: null };
+  return (WAKE_STAGES as readonly unknown[]).includes(stage) ? { stage: stage as WakeStage } : undefined;
+};
 
 const ENGINE_KEYS = [
   "sent",
@@ -201,8 +231,17 @@ const ENGINE_KEYS = [
   "command",
   "agentSpawn",
   "agentStarted",
-  "firstOutput"
+  "firstOutput",
+  "updateChecked",
+  "updateStarted",
+  "updateRestart",
+  "resumed",
+  "released"
 ] as const satisfies readonly (keyof EngineTiming)[];
+
+const ENGINE_LABELS = ["version", "updatedFrom", "updatedTo", "updateResult"] as const satisfies readonly (keyof EngineTiming)[];
+/** A version or a result's name: never free text from a machine. */
+const LABEL_RE = /^[A-Za-z0-9._+-]{1,64}$/;
 
 /** A runner token may be stolen: only known keys and plausible times get in. */
 export const parseEngineTiming = (body: unknown, now: number): EngineTiming | undefined => {
@@ -214,6 +253,12 @@ export const parseEngineTiming = (body: unknown, now: number): EngineTiming | un
     if (value === undefined || value === null) continue;
     if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
     if (value < 0 || value > now + 86_400_000) return undefined;
+    timing[key] = value;
+  }
+  for (const key of ENGINE_LABELS) {
+    const value = raw[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string" || !LABEL_RE.test(value)) return undefined;
     timing[key] = value;
   }
   return timing;
@@ -234,6 +279,11 @@ const timeline = (trace: WakeTrace, engine: EngineTiming | undefined): readonly 
   ["online", trace.online],
   ["relay", engine?.relay],
   ["nudge", engine?.nudge],
+  ["updateChecked", engine?.updateChecked],
+  ["updateStarted", engine?.updateStarted],
+  ["updateRestart", engine?.updateRestart],
+  ["resumed", engine?.resumed],
+  ["released", engine?.released],
   ["command", engine?.command],
   ["agentSpawn", engine?.agentSpawn],
   ["agentStarted", engine?.agentStarted],
@@ -250,6 +300,11 @@ export interface WakeTiming {
   readonly asleepMs?: number;
   readonly engineExit?: number | null;
   readonly engineRetried?: boolean;
+  /** The version that answered, and what happened about a newer one. */
+  readonly version?: string;
+  readonly updatedFrom?: string;
+  readonly updatedTo?: string;
+  readonly updateResult?: string;
 }
 
 /** The ledger's `wake_timing` detail: one JSON object, safe to compare. */
@@ -264,6 +319,12 @@ export const wakeTiming = (trace: WakeTrace, engine?: EngineTiming): WakeTiming 
     at,
     spans: Object.fromEntries([
       ...span("sent", "requested"),
+      ...span("engineRun", "updateChecked"),
+      ...span("updateStarted", "updateRestart"),
+      ...span("updateRestart", "resumed"),
+      ...span("resumed", "released"),
+      ...span("updateStarted", "released"),
+      ...span("engineRun", "released"),
       ...span("requested", "online"),
       ...span("requested", "ready"),
       ...span("online", "command"),
@@ -277,6 +338,10 @@ export const wakeTiming = (trace: WakeTrace, engine?: EngineTiming): WakeTiming 
     requestedAt: trace.requested,
     ...(trace.asleepMs === undefined ? {} : { asleepMs: trace.asleepMs }),
     ...(trace.stages?.engineExit === undefined ? {} : { engineExit: trace.stages.engineExit }),
-    ...(trace.stages?.engineRetried === undefined ? {} : { engineRetried: true })
+    ...(trace.stages?.engineRetried === undefined ? {} : { engineRetried: true }),
+    ...(engine?.version === undefined ? {} : { version: engine.version }),
+    ...(engine?.updatedFrom === undefined ? {} : { updatedFrom: engine.updatedFrom }),
+    ...(engine?.updatedTo === undefined ? {} : { updatedTo: engine.updatedTo }),
+    ...(engine?.updateResult === undefined ? {} : { updateResult: engine.updateResult })
   };
 };

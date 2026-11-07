@@ -34,8 +34,11 @@ pub const CLOUD_HARNESSES: &[&str] = &["codex", "claude-code"];
 /// A Cloud session machine's own setup steps — started or woke, cloned the
 /// project, checked out the session branch — shown as tool chips that open
 /// the first answer after it boots: `ToolCall::Unknown { name, input }` whose
-/// input carries this key (`"start"`, `"wake"`, `"clone"`, `"branch"`).
+/// input carries this key (`"start"`, `"wake"`, `"update"`, `"clone"`, `"branch"`).
 pub const CLOUD_SETUP_KEY: &str = "cloudSetup";
+
+/// [`CloudSession::stage`] while its machine installs a release before answering.
+pub const CLOUD_STAGE_UPDATING: &str = "updating";
 
 /// The setup step a tool call records, if it is one ([`CLOUD_SETUP_KEY`]).
 pub fn cloud_setup_step(call: &crate::ToolCall) -> Option<&str> {

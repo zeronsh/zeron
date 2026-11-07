@@ -386,6 +386,40 @@ mod versioned {
         assert_eq!(rig.record().report().state, zeron_update::UpdateState::Updated);
     }
 
+    /// A wake updates before it answers. A bad release's rollback has to end with
+    /// the old version up and answering, and with that boot not trying it again,
+    /// or a machine would go round for as long as the release stayed out.
+    #[test]
+    fn a_boot_doesnt_try_again_a_release_it_went_back_from() {
+        for (behavior, deadline) in [("exit-1", 60), ("gives-up", 60), ("hang", 2)] {
+            let rig = Rig::new(behavior);
+            let reason = |latest| zeron_update::boot_skip_reason(&rig.data, latest, "1.0.0");
+            assert_eq!(reason("2.0.0"), None, "{behavior}: nothing against it yet");
+            let id = rig.request(Rig::service(), deadline);
+            assert_eq!(reason("2.0.0"), Some(zeron_update::BootSkipReason::InProgress), "{behavior}");
+            rig.run_until_settled();
+            rig.assert_back_on_the_old_version(&id, Phase::RolledBack);
+            assert_eq!(reason("2.0.0"), Some(zeron_update::BootSkipReason::WentBack), "{behavior}");
+            // The next release is a new chance.
+            assert_eq!(reason("2.0.1"), None, "{behavior}");
+        }
+    }
+
+    #[test]
+    fn a_trial_something_waits_on_gets_a_shorter_deadline() {
+        let rig = Rig::new("ok");
+        let requested = transaction::request_within(
+            &rig.data,
+            rig.layout(),
+            "1.0.0",
+            "2.0.0",
+            Rig::service(),
+            Duration::from_secs(5 * 60),
+        )
+        .unwrap();
+        assert_eq!(requested.deadline_secs, 5 * 60);
+    }
+
     #[test]
     fn a_new_binary_that_exits_at_once_goes_back() {
         let rig = Rig::new("exit-1");

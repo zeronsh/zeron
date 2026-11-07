@@ -655,6 +655,53 @@ describe("idle sleep, waking on sends and the awake cap", () => {
       expect(wakes[0]!.at.resumed).toBeGreaterThanOrEqual(0);
     });
 
+    it("tells the app a longer wake is updating, until the engine says otherwise", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      await waitForSession(u, chatId, "ready");
+      expect((await session(u, chatId)) as unknown as { stage?: string }).not.toHaveProperty("stage");
+
+      expect((await call("POST", "/runner/wake-stage", userBearer(u), { stage: "updating" })).status).toBe(403);
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: "anything" })).status).toBe(400);
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: "updating" })).status).toBe(200);
+      expect(((await session(u, chatId)) as unknown as { stage?: string }).stage).toBe("updating");
+
+      // One nobody clears (the engine died mid-update) stops showing.
+      await withSession(u, chatId, (s) => {
+        (s as unknown as { wakeStage: { at: number } }).wakeStage.at = Date.now() - 11 * 60_000;
+      });
+      expect((await session(u, chatId)) as unknown as { stage?: string }).not.toHaveProperty("stage");
+
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: "updating" })).status).toBe(200);
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: null })).status).toBe(200);
+      expect((await session(u, chatId)) as unknown as { stage?: string }).not.toHaveProperty("stage");
+    });
+
+    it("records which version answered, across an update's restart", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      await waitForSession(u, chatId, "ready");
+      const [up] = await wakesOf(u);
+      const body = {
+        updateStarted: up!.requestedAt + 1_000,
+        updateRestart: up!.requestedAt + 13_000,
+        resumed: up!.requestedAt + 15_000,
+        released: up!.requestedAt + 23_000,
+        version: "0.2.140",
+        updatedFrom: "0.2.139",
+        updatedTo: "0.2.140",
+        updateResult: "updated"
+      };
+      expect((await call("POST", "/runner/wake-timing", bearer, body)).status).toBe(200);
+      const [wake] = (await wakesOf(u)) as unknown as (Wake & { version: string; updateResult: string })[];
+      expect(wake).toMatchObject({ version: "0.2.140", updateResult: "updated" });
+      expect(wake!.spans.updateStartedToReleased).toBe(22_000);
+    });
+
     it("writes nothing for a machine that wasn't woken", async () => {
       const u = newUser();
       const { deviceId, key } = await readySession(u);

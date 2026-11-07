@@ -7,16 +7,23 @@
 //! the provider's restore took to reach it), `exec` of this binary (systemd,
 //! then the lazy disk loading it), then the engine's own road to the run.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     /// `Engine::run` began: the binary is loaded and running.
     EngineRun,
+    /// The look for a newer release answered (`wake_update`).
+    UpdateChecked,
+    /// There is one, and it's on the disk: restarting into it.
+    UpdateRestart,
+    /// The wait for an update ended, on whichever version: work may start.
+    Released,
     /// The first runner token (the edge reads this as "online").
     Token,
     /// The host relay joined the device room.
@@ -33,9 +40,31 @@ pub enum Stage {
     FirstOutput,
 }
 
-#[derive(Default, Serialize, Clone, Debug, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Timeline {
+    /// The version that answered, and the one it updated to on the way, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_to: Option<String>,
+    /// How the wake's look for a release ended (`wake_update::gate`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_checked: Option<i64>,
+    /// It found a release and began installing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_started: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_restart: Option<i64>,
+    /// The engine after that restart began.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resumed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    released: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sent: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +92,15 @@ struct Timeline {
 impl Timeline {
     const fn new() -> Self {
         Self {
+            version: None,
+            updated_from: None,
+            updated_to: None,
+            update_result: None,
+            update_checked: None,
+            update_started: None,
+            update_restart: None,
+            resumed: None,
+            released: None,
             sent: None,
             machine_boot: None,
             process_start: None,
@@ -81,6 +119,9 @@ impl Timeline {
     fn mark(&mut self, stage: Stage, now: i64) {
         let slot = match stage {
             Stage::EngineRun => &mut self.engine_run,
+            Stage::UpdateChecked => &mut self.update_checked,
+            Stage::UpdateRestart => &mut self.update_restart,
+            Stage::Released => &mut self.released,
             Stage::Token => &mut self.token,
             Stage::Relay => &mut self.relay,
             Stage::Nudge => &mut self.nudge,
@@ -94,14 +135,26 @@ impl Timeline {
 }
 
 struct Reporter {
-    url: String,
+    edge_url: String,
     tokens: Arc<dyn zeron_rpc::TokenSource>,
+}
+
+/// Carries a wake's timeline across the restart into an update.
+const PERSIST_FILE: &str = "wake-trace.json";
+/// A file older than this is some earlier wake's.
+const PERSIST_FRESH_MS: i64 = 15 * 60_000;
+
+#[derive(Serialize, Deserialize)]
+struct Persisted {
+    at: i64,
+    timeline: Timeline,
 }
 
 struct Trace {
     timeline: Timeline,
     reporter: Option<Reporter>,
     reported: bool,
+    data_dir: Option<PathBuf>,
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -109,6 +162,7 @@ static TRACE: Mutex<Trace> = Mutex::new(Trace {
     timeline: Timeline::new(),
     reporter: None,
     reported: false,
+    data_dir: None,
 });
 
 fn now_ms() -> i64 {
@@ -119,22 +173,140 @@ fn with_trace<T>(change: impl FnOnce(&mut Trace) -> T) -> T {
     change(&mut TRACE.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// This process is a Cloud runner: start keeping time.
-pub fn enable() {
+/// This process is a Cloud runner: start keeping time, carrying on from the wake
+/// that restarted into it, if one did.
+pub fn enable(data_dir: &Path) {
     let now = now_ms();
     let (machine_boot, process_start) = process_times(now);
+    let earlier = read_persisted(data_dir, now);
     with_trace(|trace| {
-        trace.timeline.machine_boot = machine_boot;
-        trace.timeline.process_start = process_start;
+        trace.data_dir = Some(data_dir.to_path_buf());
+        trace.timeline = merged(earlier, machine_boot, process_start, now);
     });
     ENABLED.store(true, Ordering::Release);
     mark(Stage::EngineRun);
 }
 
+/// What this start knows: an earlier part of the same wake keeps its times, as the
+/// wake began there, and this start is when it resumed.
+fn merged(
+    earlier: Option<Timeline>,
+    machine_boot: Option<i64>,
+    process_start: Option<i64>,
+    now: i64,
+) -> Timeline {
+    let version = Some(zeron_update::current_version().to_owned());
+    match earlier {
+        Some(mut timeline) => {
+            timeline.version = version;
+            timeline.resumed = Some(now);
+            timeline
+        }
+        None => Timeline {
+            version,
+            machine_boot,
+            process_start,
+            ..Timeline::new()
+        },
+    }
+}
+
+/// Left in place until the wait is over ([`forget_persisted`]): a new version that
+/// dies on trial hands over to the old one, which is still the same wake.
+fn read_persisted(data_dir: &Path, now: i64) -> Option<Timeline> {
+    let bytes = std::fs::read(data_dir.join(PERSIST_FILE)).ok()?;
+    let persisted: Persisted = serde_json::from_slice(&bytes).ok()?;
+    (now - persisted.at < PERSIST_FRESH_MS).then_some(persisted.timeline)
+}
+
+/// The wait for an update is over: the next start is another wake.
+pub fn forget_persisted() {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(data_dir) = with_trace(|trace| trace.data_dir.clone()) {
+        let _ = std::fs::remove_file(data_dir.join(PERSIST_FILE));
+    }
+}
+
+/// Before a restart into an update: the next start carries on from here.
+pub fn persist() {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let (data_dir, timeline) = with_trace(|trace| (trace.data_dir.clone(), trace.timeline.clone()));
+    let Some(data_dir) = data_dir else {
+        return;
+    };
+    let persisted = Persisted {
+        at: now_ms(),
+        timeline,
+    };
+    let written = serde_json::to_vec(&persisted)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| std::fs::write(data_dir.join(PERSIST_FILE), bytes));
+    if let Err(err) = written {
+        tracing::debug!(error = %err, "couldn't save the wake's timeline");
+    }
+}
+
+/// It found `version` and is installing it.
+pub fn note_updating(version: &str) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let now = now_ms();
+    with_trace(|trace| {
+        trace.timeline.update_started.get_or_insert(now);
+        trace.timeline.updated_from = Some(zeron_update::current_version().to_owned());
+        trace.timeline.updated_to = Some(version.to_owned());
+    });
+}
+
+/// How its look for a release ended.
+pub fn note_result(result: &str) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    with_trace(|trace| trace.timeline.update_result = Some(result.to_owned()));
+}
+
+/// This wake went to install a release.
+pub fn was_updating() -> bool {
+    ENABLED.load(Ordering::Acquire) && with_trace(|trace| trace.timeline.update_started.is_some())
+}
+
+/// The release this very process is, when a wake updated to it.
+pub fn updated_to() -> Option<String> {
+    if !ENABLED.load(Ordering::Acquire) {
+        return None;
+    }
+    with_trace(|trace| trace.timeline.updated_to.clone())
+        .filter(|version| version == zeron_update::current_version())
+}
+
+/// Tell the edge how far this wake has got, so a longer one reads as what it is.
+/// Best effort, and never in the wake's way.
+pub fn announce_stage(stage: Option<&'static str>) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let reporter = with_trace(|trace| {
+        trace
+            .reporter
+            .as_ref()
+            .map(|reporter| (reporter.edge_url.clone(), reporter.tokens.clone()))
+    });
+    if let Some((edge_url, tokens)) = reporter {
+        let url = format!("{edge_url}/runner/wake-stage");
+        tokio::spawn(send(url, tokens, serde_json::json!({ "stage": stage })));
+    }
+}
+
 /// Where the report goes, once the runner has its edge and tokens.
 pub fn report_to(edge_url: &str, tokens: Arc<dyn zeron_rpc::TokenSource>) {
-    let url = format!("{}/runner/wake-timing", edge_url.trim_end_matches('/'));
-    with_trace(|trace| trace.reporter = Some(Reporter { url, tokens }));
+    let edge_url = edge_url.trim_end_matches('/').to_owned();
+    with_trace(|trace| trace.reporter = Some(Reporter { edge_url, tokens }));
 }
 
 pub fn mark(stage: Stage) {
@@ -174,10 +346,13 @@ pub fn note_agent_event(session_started: bool) {
         trace.reported = true;
         trace.timeline.mark(Stage::FirstOutput, now_ms());
         let body = trace.timeline.clone();
-        trace
-            .reporter
-            .as_ref()
-            .map(|reporter| (reporter.url.clone(), reporter.tokens.clone(), body))
+        trace.reporter.as_ref().map(|reporter| {
+            (
+                format!("{}/runner/wake-timing", reporter.edge_url),
+                reporter.tokens.clone(),
+                body,
+            )
+        })
     });
     if let Some((url, tokens, body)) = report {
         tokio::spawn(send(url, tokens, body));
@@ -185,7 +360,7 @@ pub fn note_agent_event(session_started: bool) {
 }
 
 /// Best effort, and never in a run's way.
-async fn send(url: String, tokens: Arc<dyn zeron_rpc::TokenSource>, body: Timeline) {
+async fn send(url: String, tokens: Arc<dyn zeron_rpc::TokenSource>, body: impl Serialize) {
     let http = crate::runner::http_client();
     for attempt in 0..3 {
         if attempt > 0 {
@@ -197,14 +372,14 @@ async fn send(url: String, tokens: Arc<dyn zeron_rpc::TokenSource>, body: Timeli
         match http.post(&url).bearer_auth(token).json(&body).send().await {
             Ok(res) if res.status().is_success() => return,
             Ok(res) => {
-                tracing::debug!(status = res.status().as_u16(), "wake timing report refused");
+                tracing::debug!(status = res.status().as_u16(), %url, "wake report refused");
                 // Too old an edge, or a device it no longer knows: retrying
                 // can't change that.
                 if res.status().is_client_error() {
                     return;
                 }
             }
-            Err(err) => tracing::debug!(error = %err, "wake timing report failed"),
+            Err(err) => tracing::debug!(error = %err, %url, "wake report failed"),
         }
     }
 }
@@ -263,6 +438,56 @@ mod tests {
             serde_json::to_value(&timeline).unwrap(),
             serde_json::json!({ "sent": 1, "machineBoot": 3, "agentStarted": 12 })
         );
+    }
+
+    #[test]
+    fn a_wake_keeps_its_timeline_across_the_restart_into_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = Timeline::new();
+        first.mark(Stage::Token, 100);
+        first.machine_boot = Some(50);
+        first.updated_to = Some("9.9.9".into());
+        first.update_started = Some(110);
+        std::fs::write(
+            dir.path().join(PERSIST_FILE),
+            serde_json::to_vec(&Persisted {
+                at: 1_000,
+                timeline: first,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let earlier = read_persisted(dir.path(), 2_000);
+        assert!(earlier.is_some());
+        // Still there for the old version, if this one dies on trial.
+        assert_eq!(read_persisted(dir.path(), 2_100), earlier);
+        let merged = merged(earlier, Some(1_900), Some(1_950), 2_000);
+        assert_eq!(merged.token, Some(100), "the wake began before the restart");
+        assert_eq!(merged.machine_boot, Some(50));
+        assert_eq!(merged.resumed, Some(2_000));
+        assert_eq!(merged.update_started, Some(110));
+        assert_eq!(
+            merged.version.as_deref(),
+            Some(zeron_update::current_version())
+        );
+
+        // Some earlier wake's, left by a restart that never happened.
+        std::fs::write(
+            dir.path().join(PERSIST_FILE),
+            serde_json::to_vec(&Persisted {
+                at: 1_000,
+                timeline: Timeline::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_persisted(dir.path(), 1_000 + PERSIST_FRESH_MS), None);
+        assert_eq!(merged_fresh().resumed, None);
+    }
+
+    fn merged_fresh() -> Timeline {
+        merged(None, Some(1), Some(2), 3)
     }
 
     #[test]

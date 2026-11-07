@@ -105,7 +105,7 @@ import {
   type WorkflowKind
 } from "./policy";
 import { activeProviderName, sandboxProvider } from "./providers";
-import { wakeTiming, type EngineTiming, type WakeStages, type WakeTrace } from "./wake";
+import { WAKE_STAGE_TTL_MS, wakeTiming, type EngineTiming, type WakeStage, type WakeStages, type WakeTrace } from "./wake";
 import {
   CREDIT_PACK,
   PLANS,
@@ -215,6 +215,8 @@ export interface CloudSessionView {
   /** Unix ms the provider deletes its disk, while it sleeps (a refresh pushes
    * this out; past it with `state: "data_expired"` it is gone). */
   readonly expiresAt?: number;
+  /** A longer wake's reason, while it lasts: its engine says what it's doing. */
+  readonly stage?: WakeStage;
 }
 
 export type CloudResult<T> =
@@ -379,6 +381,8 @@ interface SessionRecord {
   awaitingOnline?: boolean;
   /** The wake in progress, until its engine reports its side of it. */
   wakeTrace?: WakeTrace;
+  /** What its engine says it's doing before it answers, and since when. */
+  wakeStage?: { stage: WakeStage; at: number };
   lastActiveAt?: number;
   lastHeartbeatAt?: number;
   activeRuns: number;
@@ -730,6 +734,7 @@ export class CloudAccount extends DurableObject<Env> {
       ...(s.provider && s.sandboxId ? { sandbox: { provider: s.provider, id: s.sandboxId } } : {}),
       machine: this.shownMachine(s),
       ...(disk ? { disk } : {}),
+      ...(s.wakeStage && Date.now() - s.wakeStage.at < WAKE_STAGE_TTL_MS ? { stage: s.wakeStage.stage } : {}),
       ...(s.wakeBlocked ? { wakeBlocked: { reason: s.wakeBlocked.reason, neededGiB: s.wakeBlocked.neededGiB } } : {}),
       ...(expiresAt === undefined ? {} : { expiresAt })
     };
@@ -1838,6 +1843,8 @@ export class CloudAccount extends DurableObject<Env> {
     if (!s || !s.runnerKey || !this.matches(runner)) {
       return fail(403, "revoked", "This Cloud device is not enrolled.");
     }
+    // It's answering: whatever it was doing first is over.
+    s.wakeStage = undefined;
     const trace = s.wakeTrace;
     if (trace && !trace.engine) {
       if (trace.stages) {
@@ -1849,6 +1856,17 @@ export class CloudAccount extends DurableObject<Env> {
       }
       await this.saveSession(s);
     }
+    return { ok: true, value: { ok: true } };
+  }
+
+  /** `POST /runner/wake-stage` (runner bearer, already verified). */
+  async wakeStage(runner: CloudCaller & { deviceId: string }, stage: WakeStage | null): Promise<CloudResult<{ ok: true }>> {
+    const s = this.sessionByDevice(runner.deviceId);
+    if (!s || !s.runnerKey || !this.matches(runner)) {
+      return fail(403, "revoked", "This Cloud device is not enrolled.");
+    }
+    s.wakeStage = stage ? { stage, at: Date.now() } : undefined;
+    await this.saveSession(s);
     return { ok: true, value: { ok: true } };
   }
 
@@ -2561,6 +2579,7 @@ export class CloudAccount extends DurableObject<Env> {
     s.state = "sleeping";
     s.awakeSince = undefined;
     s.wakeTrace = undefined;
+    s.wakeStage = undefined;
     s.activeRuns = 0;
     s.clients = 0;
     s.idleCheckAt = undefined;

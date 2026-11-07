@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SandboxError, type ExecResult, type SandboxProvider, type SandboxState } from "./sandbox-provider";
-import { ENGINE_START_GRACE_MS, fastWake, parseEngineTiming, wakePollMs, wakeTiming } from "./wake";
+import { ENGINE_START_GRACE_MS, fastWake, parseEngineTiming, parseWakeStage, wakePollMs, wakeTiming } from "./wake";
 
 /** A provider on a scripted clock: every state read and timer moves it. */
 const scripted = (script: {
@@ -253,6 +253,41 @@ describe("wake timing", () => {
     expect(timing).toMatchObject({ requestedAt: 10_000, asleepMs: 60_000, engineExit: 0 });
   });
 
+  it("shows the time an update added, and which version answered", () => {
+    const timing = wakeTiming(
+      { requested: 1_000 },
+      {
+        engineRun: 2_000,
+        updateChecked: 2_100,
+        updateStarted: 2_100,
+        updateRestart: 14_100,
+        resumed: 16_000,
+        released: 24_000,
+        version: "0.2.140",
+        updatedFrom: "0.2.139",
+        updatedTo: "0.2.140",
+        updateResult: "updated"
+      }
+    );
+    expect(timing.spans).toMatchObject({
+      engineRunToUpdateChecked: 100,
+      updateStartedToUpdateRestart: 12_000,
+      updateRestartToResumed: 1_900,
+      resumedToReleased: 8_000,
+      updateStartedToReleased: 21_900,
+      engineRunToReleased: 22_000
+    });
+    expect(timing).toMatchObject({ version: "0.2.140", updatedFrom: "0.2.139", updatedTo: "0.2.140", updateResult: "updated" });
+  });
+
+  it("takes a known stage from a runner, or none", () => {
+    expect(parseWakeStage({ stage: "updating" })).toEqual({ stage: "updating" });
+    expect(parseWakeStage({ stage: null })).toEqual({ stage: null });
+    expect(parseWakeStage({})).toEqual({ stage: null });
+    expect(parseWakeStage({ stage: "hacking" })).toBeUndefined();
+    expect(parseWakeStage("updating")).toBeUndefined();
+  });
+
   it("writes what it has when the engine reports nothing", () => {
     const timing = wakeTiming({ requested: 5, online: 8 });
     expect(timing.at).toEqual({ requested: 0, online: 3 });
@@ -267,5 +302,8 @@ describe("wake timing", () => {
     expect(parseEngineTiming({ token: -1 }, now)).toBeUndefined();
     expect(parseEngineTiming({ token: now + 86_400_001 }, now)).toBeUndefined();
     expect(parseEngineTiming("nope", now)).toBeUndefined();
+    expect(parseEngineTiming({ version: "0.2.140", updateResult: "wentBack" }, now)).toEqual({ version: "0.2.140", updateResult: "wentBack" });
+    expect(parseEngineTiming({ version: "<script>" }, now)).toBeUndefined();
+    expect(parseEngineTiming({ updateResult: 5 }, now)).toBeUndefined();
   });
 });

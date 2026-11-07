@@ -398,9 +398,29 @@ that needs a newer one, until something installs it. `zeron update` works from t
 switches `current`, its restart fails (it looks for the user unit), and the next start runs the new
 version.
 
-On a Cloud machine nothing restarts the engine for an update in the first two minutes after boot:
-`runner::settled_after_boot` holds both the auto-update and the restart into a newer installed
-binary, since "nothing running" that early means the message that woke it hasn't started its run.
+**A wake updates before it answers** (`crates/engine/src/wake_update.rs`), so a machine that sleeps
+most of the time still answers on the latest release. Before it starts any work, including turns a
+dying machine left to resume, the engine looks for a release (`manifest.json`, within 5 s). The token
+and the rooms go on meanwhile, so with nothing to update the check only costs what it outlasts them
+by. With something newer it installs it (120 s), restarts, and the update trial below takes over,
+which holds work until the new version is proven. A wake on the latest release, including a first
+boot, goes straight on.
+
+The message always gets answered. A check that hangs or fails, a failed or slow download, a refused
+restart and a restart that never comes all lift the hold on the version already running, and the
+background updater tries again once it's idle. It can't loop: a release it went back from or failed
+to install isn't tried again from a boot, and one that merely failed to download waits 6 hours
+(`update-boot-skip.json`). A new version that fails its trial gives way to the old one, which finds
+the rollback, doesn't try again, and answers. One that hangs gives way after 5 minutes, not the 10 an
+update nobody is waiting on gets.
+
+Nothing running is cut off. Nothing starts a turn while work is held, and a terminal someone opened
+ends the attempt. Past the wake, an update arriving mid-turn goes to the background path, which
+waits until no run or terminal is live and, on Cloud, no message is waiting.
+
+A longer wake reads as updating: the engine says so (`POST /runner/wake-stage`), `CloudSession.stage`
+is `updating` while it lasts (a stage nobody clears stops showing after 10 minutes), the desktop's
+waiting word follows it, and the answer's setup steps include "Updated Zeron to X".
 
 ### Waking
 
@@ -414,7 +434,8 @@ agent in under 5 s; today's floor is below.
 | Engine started | us | `zeron-cloud-boot.service` (active through the snapshot, so it starts on any resume) races the exec; the unit no longer waits on `network-online.target` |
 | Binary loads | Boat's lazy disk | `~/.zeron/app` isn't in the base image, so it downloads on every resume; Boat's playbook (`~/.ascii/playbook.json`) fetches what we opened first, first |
 | First token, room joined | us | connect timeout 3 s and 250 ms retries (a restored machine often loses its first connection) |
-| Command → agent running | us | grants and git identity primed at boot; for 2 minutes after boot no agent CLI check (its install would hold the run) and no engine update applies |
+| Release check | us | one small request beside the rest of the boot; a newer release is installed first ("Engine updates on Cloud") |
+| Command → agent running | us | grants and git identity primed at boot; for 2 minutes after boot no agent CLI check (its install would hold the run) |
 
 The sleep's stop command brings machines provisioned before these units up to date, since
 nothing re-runs the installer.
@@ -426,7 +447,9 @@ reports its side (`POST /runner/wake-timing`, once per wake, at the run's first 
 after the wake was requested (`sent` is negative and on the sender's clock); `spans` has the
 totals; `asleepMs` says whether a longer idle window would have caught it. A wake with no `sent`
 had no send behind it (an explicit wake, or a dark machine brought back to recover its turn); a
-refresh writes no timeline.
+refresh writes no timeline. `updateResult` says how its look for a release ended (`current`, `updated`,
+`wentBack`, `installFailed`...), `version` which version answered, and `spans.updateStartedToReleased`
+what an update added.
 
 ### Portability
 
@@ -729,6 +752,8 @@ the bearer's `org_id`.
 | `GET /vault/{orgId}/github/repos?q=` | user | → `{repos: GithubRepo[]}` (the vault calls GitHub) |
 | `POST /runner/enroll` | none | `{orgId, userId, deviceId, code, publicKey}` → `{ok: true}` |
 | `POST /runner/token` | none | `{orgId, userId, deviceId, ts, sig}` → `{accessToken, expiresAt}` |
+| `POST /runner/wake-timing` | runner | `{sent?, token?, firstOutput?, version?, updateResult?, …}` (`EngineTiming`, `wake.ts`) → `{ok: true}`: its side of the wake, counted once |
+| `POST /runner/wake-stage` | runner | `{stage: "updating" \| null}` → `{ok: true}`: shown as `CloudSession.stage` |
 | `POST /runner/heartbeat` | runner | `{activeRuns, clients, backgroundRuns?, waitingRuns?, diskUsedBytes?, diskTotalBytes?}` → `{ok: true, diskCapacityGiB?}` (per session device) |
 | `GET /vault/{orgId}` | user | → `VaultStatusView` |
 | `PUT /vault/{orgId}/credentials/{provider}` | user | `PutCredentialRequest` → `VaultStatusView` |
