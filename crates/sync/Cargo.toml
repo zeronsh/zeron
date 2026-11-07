@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 zeron-doc.workspace = true
 loro.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
 loro-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -30,8 +32,6 @@ mock-server = []
 
 [dev-dependencies]
 chrono.workspace = true
-# chat2_live example only (live checkpoint fetch against a deployed worker).
-reqwest.workspace = true
 zeron-proto.workspace = true
 tempfile.workspace = true
 # `start_paused` virtual-clock tests (the 2026-07-30 sync-stall regressions).

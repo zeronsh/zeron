@@ -1,3 +1,4 @@
+import { handleAttachmentBlob } from "../../src/attachment-blobs";
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
@@ -176,7 +177,10 @@ export default {
     }
     const chat = chatRoute(request, env, auth.userId);
     if (chat) return chat;
-    if (parts[0] === "blob" && parts[1] && parts[2]) {
+    if (parts[0] === "blob" && parts.length === 4 && parts[2] === "attachments" && id.test(parts[1]) && id.test(parts[3])) {
+      return handleAttachmentBlob(request, env, auth, parts[1], parts[3]);
+    }
+    if (parts[0] === "blob" && parts[1] && parts[2] && parts.length === 3) {
       const notHost = await runnerChatGate(env, auth, parts[1]);
       if (notHost) return notHost;
       const key = `blob/${auth.userId}/${parts[1]}/${parts[2]}`;

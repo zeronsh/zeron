@@ -1922,6 +1922,58 @@ pub struct TransferProgress {
     pub total: u64,
 }
 
+/// A send waiting for its attachment bytes to reach the edge's store before it
+/// enters the chat (`WatchHeldSends`). It survives restarts, so a restarted
+/// interface can still show the message and what it's waiting on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldSendStatus {
+    pub id: String,
+    pub chat_id: String,
+    /// The transcript message it becomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// As the transcript would show it, attachment trailer included.
+    pub prompt: String,
+    /// It becomes a queue row, not a message going out now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue_row: bool,
+    /// Epoch millis.
+    pub created_at: i64,
+    /// Why it stopped trying; it waits for the user's retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+/// A message on its way to a chat's agent and not yet taken (`WatchWaitingMessages`):
+/// in the chat's doc for its host to run, or held here while its files upload. A
+/// composer can say how old one is before it runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingMessage {
+    /// The command's id, or the outbox row's.
+    pub id: String,
+    pub chat_id: String,
+    /// The transcript message it becomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// As the transcript would show it, attachment trailer included.
+    pub prompt: String,
+    /// The device that sent it.
+    pub issued_by: String,
+    /// Epoch millis: when it went out to the chat (held: when it was sent).
+    pub sent_at: i64,
+    /// Epoch millis past which it won't run. Held sends have none yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// Still in this device's outbox, its files uploading.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    /// Why a held send stopped trying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
 /// Live edge-connectivity posture (the `WatchConnectivity` stream): the truth
 /// the connection pill, composer honesty, and queued-send badges render.
 /// Derived engine-side from the registry room's reconnect state, the OS
