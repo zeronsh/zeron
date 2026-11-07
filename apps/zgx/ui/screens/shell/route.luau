@@ -26,6 +26,11 @@
 --                           composer's pick there; `placed`)
 --   route.device_pick:get() that device, until the new chat's composer takes
 --                           it ({ device }; `take_device()` reads and clears)
+--   route.project_pick:get() the project a new chat was asked for (a
+--                           project's "+"), until its composer takes it
+--                           ({ project }; `take_project()` reads and clears);
+--                           otherwise the composer keeps the one last
+--                           picked on the new-chat page
 --   route.settings(page?)   to settings (a page's id; "general" first)
 --   route.leave_settings()  back where the chats were
 --   route.plugin_page(plugin, page)  to a plugin's page (`plugin`, `page`:
@@ -337,10 +342,11 @@ end)
 
 -- What a new chat's composer has picked: where its panel works. (Not `chosen`: that's
 -- what someone chose, which a first launch with no projects asks them for.)
+-- On a new chat it's the composer's pick, the route's until it has made one.
 M.new_chat_project = ui.state("shell_new_chat_project", nil :: string?)
 M.project = steady(function(): Project?
 	local c = M.chat:get()
-	local p = project_of(c.project or (if c.name == "home" then M.new_chat_project:get() else nil))
+	local p = project_of(if c.name == "home" then (M.new_chat_project:get() or c.project) else c.project)
 	if not p then
 		return nil
 	end
@@ -497,6 +503,14 @@ end)
 -- the composer is there already or arrives with the move home. (A named
 -- state: a reload in between keeps it.)
 M.device_pick = ui.state("shell_device_pick", nil :: { device: string }?)
+M.project_pick = ui.state("shell_project_pick", nil :: { project: string? }?)
+function M.take_project(): { project: string? }?
+	local pick = M.project_pick:peek()
+	if pick then
+		M.project_pick:set(nil)
+	end
+	return pick
+end
 function M.take_device(): string?
 	local pick = M.device_pick:peek()
 	if pick then
@@ -552,6 +566,12 @@ function M.new_chat(project: string?, device: string?)
 			chosen:set(project)
 		elseif unchosen then
 			chosen:set(nil)
+		end
+		-- (Asked for: the new chat's composer takes it over the project
+		-- last picked there. A fresh table each time, so the same one asked
+		-- again is heard.)
+		if project or unchosen then
+			M.project_pick:set({ project = project })
 		end
 		if on then
 			-- (A fresh table each time, so the same device asked again is
