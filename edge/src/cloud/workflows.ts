@@ -30,7 +30,7 @@ import {
 } from "./install-script";
 import { cloudAccountName, parseMachine, parseTemplate, parseTtlSeconds } from "./policy";
 import { sandboxProvider } from "./providers";
-import { fastWake } from "./wake";
+import { MAX_WAKE_KICKS, fastWake, slowWakeMs, type WakeStages } from "./wake";
 import {
   SandboxError,
   classifyFailure,
@@ -205,7 +205,7 @@ const awaitSignal = async (
   type: "enrolled" | "online",
   suffix: string,
   check: () => Promise<boolean>,
-  timeout: "90 seconds" | "5 minutes" | "10 minutes"
+  timeout: "90 seconds" | "5 minutes" | "10 minutes" | number
 ): Promise<boolean> => {
   if (await step.do(`check-${type}${suffix}`, DO_STEP, check)) return true;
   try {
@@ -355,12 +355,48 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
       // A size changes only on a resume, so a machine already up (a wake after
       // a failure that left it running) stops first.
       if (machine) await stopSandbox(step, provider, p.sandboxId, "change the machine's size");
-      const wake = await step.do("wake-up", FAST_WAKE_STEP, () =>
-        providerCall("wake the Cloud sandbox", () =>
-          fastWake(provider, p.sandboxId, { ttlSeconds, startCommand: START_ENGINE_COMMAND, ...(machine ? { machine } : {}) })
-        )
-      );
+      const slowMs = slowWakeMs(this.env.CLOUD_WAKE_SLOW_SECONDS);
+      const wakeUp = (name: string) =>
+        step.do(name, FAST_WAKE_STEP, () =>
+          providerCall("wake the Cloud sandbox", () =>
+            fastWake(provider, p.sandboxId, {
+              ttlSeconds,
+              startCommand: START_ENGINE_COMMAND,
+              deadlineMs: slowMs,
+              ...(machine ? { machine } : {})
+            })
+          )
+        );
+      let wake = await wakeUp("wake-up");
       if (wake.state === "error" || wake.state === "deleted") gone(wake.state);
+      // Far slower than any normal resume: the user hears so (the stage
+      // `slow`), and the stuck resume is stopped and asked again, which is what
+      // got the provider's stuck placements moving. The slow poll after still
+      // covers one that's merely slow.
+      const slow: Pick<WakeStages, "slow" | "slowReason" | "kickedAt" | "kicks"> = {};
+      for (let kick = 1; !wake.refused && wake.state !== "ready" && kick <= MAX_WAKE_KICKS; kick++) {
+        if (slow.slow === undefined) {
+          const reason = `resume still ${wake.state} after ${Math.round(slowMs / 1000)} s`;
+          slow.slow = await step.do("say-slow", DO_STEP, () => account.wfSlowWake(p.chatId, p.generation, reason));
+          slow.slowReason = reason;
+        }
+        const stopped = await step.do(`kick-stop-${kick}`, PROVIDER_STEP, async () => {
+          try {
+            await provider.stop(p.sandboxId);
+            return true;
+          } catch (e) {
+            console.warn("cloud wake: stopping a stuck resume failed", failureMessage(e));
+            return false;
+          }
+        });
+        if (!stopped) break;
+        const state = await pollSandbox(step, provider, p.sandboxId, `kick-stopped-${kick}`, (s) => s === "stopped", 30);
+        if (state !== "stopped") break;
+        wake = await wakeUp(`wake-up-kick-${kick}`);
+        slow.kickedAt = wake.stages.started;
+        slow.kicks = kick;
+        if (wake.state === "error" || wake.state === "deleted") gone(wake.state);
+      }
       // Refused for good, or: a stop in progress that refused the resume, or a
       // slow restore, which the slow path sees through.
       const refused =
@@ -374,7 +410,7 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
         await step.do("record-size", DO_STEP, () => account.wfResumedOn(p.chatId, p.generation, machine));
       }
       const online = () => account.wfOnline(p.chatId, p.generation);
-      const stages = { ...wake.stages };
+      const stages: WakeStages = { ...wake.stages, ...slow };
       // The start didn't get through, and the boot hasn't brought it up either.
       if (wake.stages.engineExit !== 0 && !(await step.do("check-online-first", DO_STEP, online))) {
         stages.engineRetried = await step.do(
@@ -391,7 +427,19 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
           }
         );
       }
-      let up = await awaitSignal(step, "online", "", online, "90 seconds");
+      // A minute and a half for its engine to be heard from, as before; past
+      // the slow mark (well past any normal start: the token comes within
+      // seconds of the engine running) the session says so meanwhile.
+      const onlineMs = 90_000;
+      let up = await awaitSignal(step, "online", "", online, Math.min(slowMs, onlineMs));
+      if (!up) {
+        const reason = `machine up, engine not heard from after ${Math.round(Math.min(slowMs, onlineMs) / 1000)} s`;
+        if (stages.slow === undefined) {
+          stages.slow = await step.do("say-slow-engine", DO_STEP, () => account.wfSlowWake(p.chatId, p.generation, reason));
+          stages.slowReason = reason;
+        }
+        up = await awaitSignal(step, "online", "-slow", online, Math.max(onlineMs - slowMs, 30_000));
+      }
       if (!up) {
         await step.do(
           "restart-engine",

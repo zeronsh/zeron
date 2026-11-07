@@ -2374,13 +2374,16 @@ impl AppState {
     /// The chat's Cloud machine is getting to a send: starting, waking, or
     /// installing a release before it answers. The send isn't late then.
     fn cloud_machine_holds_send(&self, chat_id: &str) -> bool {
-        self.cloud_machine_booting(chat_id).is_some() || self.cloud_machine_updating(chat_id)
+        self.cloud_machine_booting(chat_id).is_some()
+            || self.cloud_machine_updating(chat_id)
+            || self.cloud_machine_slow(chat_id)
     }
 
     /// A send to `chat_id` waits while its Cloud machine installs a release:
     /// what the line under it says, setup steps or not.
     pub fn send_waits_on_update(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.send_pending(chat_id, now) && self.cloud_machine_updating(chat_id)
+        self.send_pending(chat_id, now)
+            && (self.cloud_machine_updating(chat_id) || self.cloud_machine_slow(chat_id))
     }
 
     /// The send has sat unadopted past the grace window: surface the
@@ -2939,6 +2942,13 @@ impl AppState {
     pub fn cloud_machine_updating(&self, chat_id: &str) -> bool {
         self.chat_cloud_session(chat_id)
             .is_some_and(crate::cloud::session_updating)
+    }
+
+    /// The edge says the wake of the machine `chat_id` runs on is taking far
+    /// longer than normal (a stuck resume it is kicking, or no engine yet).
+    pub fn cloud_machine_slow(&self, chat_id: &str) -> bool {
+        self.chat_cloud_session(chat_id)
+            .is_some_and(crate::cloud::session_slow)
     }
 
     /// Whether a send is waiting on a Cloud machine: keeps the session poll
@@ -6673,6 +6683,22 @@ mod tests {
         assert!(!s.send_waits_on_update("c", later));
         assert!(s.send_waits_on_cloud(at(165 + 2 * watch)));
         assert!(!s.send_waits_on_cloud(at(161 + 3 * watch)));
+    }
+
+    #[test]
+    fn a_wake_taking_longer_than_usual_holds_the_send_and_says_so() {
+        use zeron_proto::{CLOUD_STAGE_SLOW, CloudState};
+        let sent = Utc::now();
+        let later = sent + TimeDelta::seconds(600);
+        let mut s = cloud_chat_on_a_machine(sent);
+        s.begin_pending_send("c", "m1", sent);
+        set_cloud_session(&mut s, CloudState::Starting, Some(CLOUD_STAGE_SLOW));
+        assert!(s.cloud_machine_slow("c"));
+        assert!(s.send_waits_on_update("c", later), "the line says so");
+        assert!(!s.send_undelivered("c", later), "not late, however long");
+        assert!(s.send_waits_on_cloud(later));
+        set_cloud_session(&mut s, CloudState::Ready, None);
+        assert!(!s.cloud_machine_slow("c"));
     }
 
     #[test]

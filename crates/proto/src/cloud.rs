@@ -39,6 +39,10 @@ pub const CLOUD_SETUP_KEY: &str = "cloudSetup";
 
 /// [`CloudSession::stage`] while its machine installs a release before answering.
 pub const CLOUD_STAGE_UPDATING: &str = "updating";
+/// `CloudSession::stage` while a wake takes far longer than normal (a resume
+/// stuck at the provider, or a machine up with no engine yet): the edge kicks
+/// it, and the apps say it's taking longer than usual.
+pub const CLOUD_STAGE_SLOW: &str = "slow";
 
 /// The setup step a tool call records, if it is one ([`CLOUD_SETUP_KEY`]).
 pub fn cloud_setup_step(call: &crate::ToolCall) -> Option<&str> {
@@ -240,6 +244,10 @@ pub struct CloudSession {
     /// How far a waking machine has got, where the edge says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Unix ms the machine last found its chat store damaged and rebuilt it
+    /// from the server copy of its chats. Older edges omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_recovered_at: Option<f64>,
 }
 
 /// `CloudSessions` reply.
