@@ -84,6 +84,7 @@ import {
 import {
   AWAKE_STATES,
   HEARTBEAT_STALE_MS,
+  heartbeatStaleMs,
   MACHINES,
   diskLevel,
   idleDecision,
@@ -292,6 +293,8 @@ export interface Heartbeat {
   readonly waitingRuns?: number;
   /** Its disk's used bytes, as the machine reads them. */
   readonly diskUsedBytes?: number;
+  /** How often it beats from here on, in seconds. Older engines don't say. */
+  readonly everySecs?: number;
 }
 
 /** The GitHub repository a new session runs on (its project's origin). */
@@ -384,6 +387,9 @@ interface SessionRecord {
   backgroundRuns?: number;
   /** Last heartbeat's runs waiting on an answer. */
   waitingRuns?: number;
+  /** How often its engine said, in its last heartbeat, it beats from then on
+   * (newer engines: every 15 s while a turn runs). */
+  beatEveryMs?: number;
   lastTtlExtendAt?: number;
   /** Throttles the "ready but silent — did the provider auto-stop it?" probe. */
   lastProbeAt?: number;
@@ -1846,6 +1852,7 @@ export class CloudAccount extends DurableObject<Env> {
     s.clients = beat.clients;
     s.backgroundRuns = backgroundRuns;
     s.waitingRuns = waitingRuns;
+    s.beatEveryMs = beat.everySecs === undefined ? undefined : beat.everySecs * 1000;
     s.lastHeartbeatAt = now;
     if (busy || changed) s.lastActiveAt = now;
     this.markAlive(s, now);
@@ -1857,7 +1864,7 @@ export class CloudAccount extends DurableObject<Env> {
       s.idleCheckAt = (s.lastActiveAt ?? now) + this.idleMs();
       // A turn in flight is looked at as soon as its heartbeats would be late,
       // not a whole idle window on: a chat is waiting on that machine.
-      if (working) s.idleCheckAt = Math.min(s.idleCheckAt, now + HEARTBEAT_STALE_MS);
+      if (working) s.idleCheckAt = Math.min(s.idleCheckAt, now + heartbeatStaleMs(s.beatEveryMs));
     }
     const ttlSeconds = provider ? effectiveTtl(provider.capabilities, parseTtlSeconds(this.env.CLOUD_TTL_SECONDS)) : null;
     // Out of credits, a busy machine is not kept alive past its TTL.
@@ -2035,7 +2042,7 @@ export class CloudAccount extends DurableObject<Env> {
       // hung): nobody may send again for days, and the turn is stuck until
       // something boots it. Sleep it and bring it straight back, so its
       // engine's boot recovery resumes the turn or says why it can't.
-      const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS;
+      const dark = s.lastHeartbeatAt !== undefined && now - s.lastHeartbeatAt >= heartbeatStaleMs(s.beatEveryMs);
       const working =
         s.activeRuns - (s.waitingRuns ?? 0) > 0 ||
         (s.backgroundRuns ?? 0) > 0 ||
@@ -2511,6 +2518,7 @@ export class CloudAccount extends DurableObject<Env> {
     s.awakeSince = undefined;
     s.activeRuns = 0;
     s.clients = 0;
+    s.beatEveryMs = undefined;
     s.idleCheckAt = undefined;
     // A machine that never came up (a sleep from `error`) didn't stop just now:
     // its clock stands, and the provider's reading settles it.
