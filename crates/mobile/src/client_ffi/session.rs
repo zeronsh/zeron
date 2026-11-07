@@ -368,6 +368,10 @@ pub struct TranscriptStatus {
     pub working_since_ms: Option<i64>,
     /// Id of the newest entry (host or echo).
     pub last_entry_id: Option<String>,
+    /// The chat's Cloud machine rebuilt its chat store from the server copy
+    /// at this Unix ms: show a quiet note ("This chat was restored from its
+    /// server copy") until [`SessionHandle::dismiss_restored_note`].
+    pub restored_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -490,7 +494,14 @@ impl SessionHandle {
             working: snap.working,
             working_since_ms: snap.working_since_ms,
             last_entry_id: snap.entries.last().map(|e| e.id.clone()),
+            restored_at_ms: snap.restored_at_ms,
         }
+    }
+
+    /// Dismiss the restored-from-server note (for every chat on the machine,
+    /// until it is rebuilt again).
+    pub fn dismiss_restored_note(&self) {
+        self.inner.dismiss_restored_note();
     }
 
     /// Plain text of one entry's text parts (copy / share).

@@ -1313,7 +1313,7 @@ impl DocHost {
     }
 
     /// A hosted chat has a command no drain has executed yet.
-    fn has_waiting_commands(&self) -> bool {
+    pub(crate) fn has_waiting_commands(&self) -> bool {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
         handles.iter().any(|handle| {
@@ -5449,6 +5449,7 @@ impl DocHost {
                         entry.payload,
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
                     ) {
+                        crate::wake_trace::mark_command(entry.issued_at);
                         self.await_earlier_controls(handle, &entry.id).await;
                     }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {

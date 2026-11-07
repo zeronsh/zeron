@@ -3808,7 +3808,10 @@ async fn drive_run(
                     .await
                 {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
-                    Ok(()) => harness.run(wire_request, controls).await,
+                    Ok(()) => {
+                        crate::wake_trace::mark(crate::wake_trace::Stage::AgentSpawn);
+                        harness.run(wire_request, controls).await
+                    }
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
                 }
             } else {
@@ -4256,7 +4259,13 @@ async fn drive_run(
                     continue;
                 }
                 next = stream.next() => match next {
-                    Some(Ok(event)) => event,
+                    Some(Ok(event)) => {
+                        crate::wake_trace::note_agent_event(matches!(
+                            event,
+                            AgentEvent::SessionStarted { .. }
+                        ));
+                        event
+                    }
                     // A stream error while PARKED is a post-turn child death —
                     // the turn was already finalized, so the run ends clean
                     // instead of stamping a completed session Errored.

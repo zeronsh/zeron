@@ -681,6 +681,11 @@ struct PendingSend {
     row_before: Option<Session>,
     /// The send creates the chat, so no earlier turn of it exists.
     new_chat: bool,
+    /// When the session poll last saw this send waiting on its Cloud machine
+    /// (starting, waking or updating); the send itself until then. A machine
+    /// reads ready before it decides to update, so the poll keeps going a
+    /// little past it ([`crate::cloud::STAGE_WATCH`]).
+    machine_waited: DateTime<Utc>,
 }
 
 impl PendingSend {
@@ -2277,6 +2282,7 @@ impl AppState {
                 started: now,
                 row_before,
                 new_chat,
+                machine_waited: now,
             },
         );
     }
@@ -2361,8 +2367,23 @@ impl AppState {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                 || self.chat_link_at(chat_id, now).delivery_unconfirmed()
-                || self.cloud_machine_booting(chat_id).is_some()
+                || self.cloud_machine_holds_send(chat_id)
         })
+    }
+
+    /// The chat's Cloud machine is getting to a send: starting, waking, or
+    /// installing a release before it answers. The send isn't late then.
+    fn cloud_machine_holds_send(&self, chat_id: &str) -> bool {
+        self.cloud_machine_booting(chat_id).is_some()
+            || self.cloud_machine_updating(chat_id)
+            || self.cloud_machine_slow(chat_id)
+    }
+
+    /// A send to `chat_id` waits while its Cloud machine installs a release:
+    /// what the line under it says, setup steps or not.
+    pub fn send_waits_on_update(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        self.send_pending(chat_id, now)
+            && (self.cloud_machine_updating(chat_id) || self.cloud_machine_slow(chat_id))
     }
 
     /// The send has sat unadopted past the grace window: surface the
@@ -2374,7 +2395,7 @@ impl AppState {
     pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
-        }) && self.cloud_machine_booting(chat_id).is_none()
+        }) && !self.cloud_machine_holds_send(chat_id)
             && !matches!(
                 self.chat_link_at(chat_id, now).sync,
                 LinkSync::Syncing { .. }
@@ -2400,7 +2421,7 @@ impl AppState {
             .filter(|p| {
                 now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                     || self.chat_link_at(chat_id, now).delivery_unconfirmed()
-                    || self.cloud_machine_booting(chat_id).is_some()
+                    || self.cloud_machine_holds_send(chat_id)
             })
             .map(|p| p.started)
     }
@@ -2916,12 +2937,51 @@ impl AppState {
             })
     }
 
-    /// Whether a send is waiting on a Cloud machine (keeps the session poll
-    /// running until the machine is up).
-    fn send_waits_on_cloud(&self) -> bool {
-        self.pending_sends
+    /// The machine `chat_id` runs on is installing a release before it answers.
+    /// It can read `ready` by then: its engine is up, and a send still waits.
+    pub fn cloud_machine_updating(&self, chat_id: &str) -> bool {
+        self.chat_cloud_session(chat_id)
+            .is_some_and(crate::cloud::session_updating)
+    }
+
+    /// The edge says the wake of the machine `chat_id` runs on is taking far
+    /// longer than normal (a stuck resume it is kicking, or no engine yet).
+    pub fn cloud_machine_slow(&self, chat_id: &str) -> bool {
+        self.chat_cloud_session(chat_id)
+            .is_some_and(crate::cloud::session_slow)
+    }
+
+    /// Whether a send is waiting on a Cloud machine: keeps the session poll
+    /// running while the machine comes up or updates, and for
+    /// [`crate::cloud::STAGE_WATCH`] after it last did. A waking machine
+    /// reads ready as soon as its old engine first talks, and only then
+    /// looks for a release, so stopping at ready missed the update. Notes
+    /// what it sees first ([`Self::note_cloud_waits`]); a send that was
+    /// taken (or failed) is no longer pending, which ends it.
+    fn send_waits_on_cloud(&mut self, now: DateTime<Utc>) -> bool {
+        self.note_cloud_waits(now);
+        self.pending_sends.iter().any(|(chat_id, send)| {
+            self.chat_cloud_session(chat_id).is_some()
+                && now
+                    .signed_duration_since(send.machine_waited)
+                    .num_milliseconds()
+                    <= crate::cloud::STAGE_WATCH.as_millis() as i64
+        })
+    }
+
+    /// Stamp each pending send whose Cloud machine is still getting to it.
+    fn note_cloud_waits(&mut self, now: DateTime<Utc>) {
+        let waiting: Vec<String> = self
+            .pending_sends
             .keys()
-            .any(|chat_id| self.cloud_machine_booting(chat_id).is_some())
+            .filter(|chat_id| self.cloud_machine_holds_send(chat_id))
+            .cloned()
+            .collect();
+        for chat_id in waiting {
+            if let Some(send) = self.pending_sends.get_mut(&chat_id) {
+                send.machine_waited = now;
+            }
+        }
     }
 
     /// When `chat_id`'s Cloud machine isn't running: the session to wake
@@ -3154,11 +3214,13 @@ impl AppState {
                         if let Ok(sessions) = result {
                             state.set_cloud_sessions(sessions, cx);
                         }
-                        state
-                            .cloud_sessions
-                            .as_ref()
-                            .is_some_and(crate::cloud::any_session_settling)
-                            || state.send_waits_on_cloud()
+                        // First: it notes which sends still wait, every read.
+                        let waits = state.send_waits_on_cloud(Utc::now());
+                        waits
+                            || state
+                                .cloud_sessions
+                                .as_ref()
+                                .is_some_and(crate::cloud::any_session_settling)
                     })
                     .unwrap_or(false);
                 if !settling {
@@ -6560,6 +6622,111 @@ mod tests {
         });
         assert_eq!(s.cloud_machine_booting("c"), None);
         assert!(s.send_undelivered("c", later));
+    }
+
+    /// A Cloud chat on a machine with a fresh heartbeat, and its session.
+    fn cloud_chat_on_a_machine(now: DateTime<Utc>) -> AppState {
+        let mut s = AppState::new();
+        let mut c = chat("c", 0, Some(10));
+        c.device_id = "cloud-s1".into();
+        s.chats = vec![c];
+        let mut machine = device("cloud-s1", "Cloud");
+        machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+        machine.last_seen_at = Some(now);
+        s.devices = vec![machine];
+        s
+    }
+
+    fn set_cloud_session(s: &mut AppState, state: zeron_proto::CloudState, stage: Option<&str>) {
+        s.cloud_sessions = Some(zeron_proto::CloudSessions {
+            sessions: vec![zeron_proto::CloudSession {
+                chat_id: "c".into(),
+                device_id: "cloud-s1".into(),
+                space_id: "sp".into(),
+                state,
+                stage: stage.map(String::from),
+                ..Default::default()
+            }],
+            available: true,
+        });
+    }
+
+    #[test]
+    fn a_send_keeps_following_its_woken_machine_until_it_says_whether_it_updates() {
+        use zeron_proto::{CLOUD_STAGE_UPDATING, CloudState};
+        let sent = Utc::now();
+        let at = |secs: i64| sent + TimeDelta::seconds(secs);
+        let watch = crate::cloud::STAGE_WATCH.as_secs() as i64;
+        let mut s = cloud_chat_on_a_machine(sent);
+        s.begin_pending_send("c", "m1", sent);
+        // Waking: followed, however long it takes.
+        set_cloud_session(&mut s, CloudState::Starting, None);
+        assert!(s.send_waits_on_cloud(at(5)));
+        assert!(s.send_waits_on_cloud(at(150)));
+        // Its old engine talked: ready, heartbeat fresh, nothing booting any
+        // more. The update check comes after this, so the poll goes on.
+        set_cloud_session(&mut s, CloudState::Ready, None);
+        s.devices[0].last_seen_at = Some(Utc::now());
+        assert_eq!(s.cloud_machine_booting("c"), None);
+        assert!(s.send_waits_on_cloud(at(155)), "the wake ended just now");
+        // It installs a release: followed for as long as that takes, and the
+        // send reads as waiting on it, not late.
+        set_cloud_session(&mut s, CloudState::Ready, Some(CLOUD_STAGE_UPDATING));
+        assert!(s.send_waits_on_cloud(at(160)));
+        assert!(s.send_waits_on_cloud(at(160 + 2 * watch)));
+        let later = at(160 + 2 * watch);
+        assert!(s.send_pending("c", later));
+        assert!(!s.send_undelivered("c", later));
+        assert!(s.send_waits_on_update("c", later));
+        // Done: a little longer, then nothing more to learn.
+        set_cloud_session(&mut s, CloudState::Ready, None);
+        assert!(!s.send_waits_on_update("c", later));
+        assert!(s.send_waits_on_cloud(at(165 + 2 * watch)));
+        assert!(!s.send_waits_on_cloud(at(161 + 3 * watch)));
+    }
+
+    #[test]
+    fn a_wake_taking_longer_than_usual_holds_the_send_and_says_so() {
+        use zeron_proto::{CLOUD_STAGE_SLOW, CloudState};
+        let sent = Utc::now();
+        let later = sent + TimeDelta::seconds(600);
+        let mut s = cloud_chat_on_a_machine(sent);
+        s.begin_pending_send("c", "m1", sent);
+        set_cloud_session(&mut s, CloudState::Starting, Some(CLOUD_STAGE_SLOW));
+        assert!(s.cloud_machine_slow("c"));
+        assert!(s.send_waits_on_update("c", later), "the line says so");
+        assert!(!s.send_undelivered("c", later), "not late, however long");
+        assert!(s.send_waits_on_cloud(later));
+        set_cloud_session(&mut s, CloudState::Ready, None);
+        assert!(!s.cloud_machine_slow("c"));
+    }
+
+    #[test]
+    fn a_send_to_a_machine_already_up_stops_the_poll_soon_and_when_taken() {
+        use zeron_proto::CloudState;
+        let sent = Utc::now();
+        let at = |secs: i64| sent + TimeDelta::seconds(secs);
+        let watch = crate::cloud::STAGE_WATCH.as_secs() as i64;
+        let mut s = cloud_chat_on_a_machine(sent);
+        set_cloud_session(&mut s, CloudState::Ready, None);
+        // Nothing waiting: no poll.
+        assert!(!s.send_waits_on_cloud(at(0)));
+        // A send that never gets taken stops it once the watch is over:
+        // not forever.
+        s.begin_pending_send("c", "m1", sent);
+        assert!(s.send_waits_on_cloud(at(1)));
+        assert!(!s.send_waits_on_cloud(at(watch + 1)));
+        // A send that was taken ends it at once.
+        s.begin_pending_send("c", "m2", at(100));
+        assert!(s.send_waits_on_cloud(at(101)));
+        s.end_pending_send("c", "m2");
+        assert!(!s.send_waits_on_cloud(at(102)));
+        // A chat that isn't on Cloud never polls.
+        let mut local = chat("l", 0, Some(10));
+        local.device_id = "mac".into();
+        s.chats.push(local);
+        s.begin_pending_send("l", "m3", at(200));
+        assert!(!s.send_waits_on_cloud(at(201)));
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub mod auth;
 pub mod catalog;
 mod client;
 pub mod cloud;
+mod cloud_stage;
 pub mod config;
 pub mod connectivity;
 mod demo;
