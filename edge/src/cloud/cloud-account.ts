@@ -881,6 +881,8 @@ export class CloudAccount extends DurableObject<Env> {
       if (s.wakeTrace) s.wakeTrace.online = now;
       this.sendEvent(s, "wake", "online");
     }
+    // Its engine is talking: whatever was slow about this wake is over.
+    if (s.wakeStage?.stage === "slow") s.wakeStage = undefined;
     // Sleeping/error but the engine is talking: the sandbox came back without
     // us (resumed from the provider's side, or a wake that timed out finished
     // late). Believe the engine.
@@ -2486,6 +2488,22 @@ export class CloudAccount extends DurableObject<Env> {
   wfOnline(chatId: string, generation: number): boolean {
     const s = this.current(chatId, generation);
     return Boolean(s) && !s!.awaitingOnline;
+  }
+
+  /**
+   * WakeWorkflow: this wake is taking far longer than normal (a resume stuck,
+   * or a machine up with no engine). The session says so (`stage: "slow"`)
+   * until its engine is heard from, and the ledger keeps why. Returns when.
+   */
+  async wfSlowWake(chatId: string, generation: number, reason: string): Promise<number> {
+    const now = Date.now();
+    const s = this.current(chatId, generation);
+    if (!s) return now;
+    s.wakeStage = { stage: "slow", at: now };
+    this.ledger("wake_slow", s, { detail: reason });
+    console.info(JSON.stringify({ event: "cloud.wake_slow", chatId, reason }));
+    await this.saveSession(s);
+    return now;
   }
 
   async wfReady(chatId: string, generation: number, stages?: WakeStages): Promise<boolean> {

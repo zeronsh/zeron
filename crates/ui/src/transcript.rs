@@ -7920,8 +7920,16 @@ impl Transcript {
                 self.compact_last_elapsed.insert(entry_id, elapsed_secs);
             }
         }
+        let slow = updating
+            && self
+                .chat_id
+                .as_deref()
+                .is_some_and(|chat| self.state.read(cx).cloud_machine_slow(chat));
         let word = if queued {
             "Queued — will send automatically"
+        } else if slow {
+            // Far slower than a normal wake: said plainly, never as a failure.
+            "Waking the Cloud machine is taking longer than usual"
         } else if updating {
             // A longer wake: the machine installs the latest release first.
             "Updating the Cloud machine"

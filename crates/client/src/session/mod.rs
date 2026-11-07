@@ -456,6 +456,8 @@ impl SessionCore {
             .map_or(MachineWait::Up, |row| {
                 if client.cloud_machine_updating(&row.device_id) {
                     MachineWait::Updating
+                } else if client.cloud_machine_slow(&row.device_id) {
+                    MachineWait::Slow
                 } else if !workspace.device(&row.device_id).is_some_and(|d| d.online) {
                     MachineWait::Booting
                 } else {
@@ -481,7 +483,7 @@ impl SessionCore {
                 st.context_usage = self.doc.context_usage();
             }
             // A send its machine is updating for isn't late: it gets there.
-            let held = machine == MachineWait::Updating;
+            let held = matches!(machine, MachineWait::Updating | MachineWait::Slow);
             let echoes_changed =
                 derive_pending(&mut st, &client.config.device_id, degraded, held, now);
             send_after = oldest_state(&st.pending);
@@ -883,6 +885,8 @@ enum MachineWait {
     Booting,
     /// Up, and installing a release before it answers.
     Updating,
+    /// Its wake is taking far longer than normal (the edge kicks it meanwhile).
+    Slow,
 }
 
 #[derive(Clone, Copy)]
@@ -922,6 +926,8 @@ fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
             let waking = transcript.iter().any(|e| e.role() == MessageRole::Assistant);
             let name = if machine == MachineWait::Updating {
                 "Updating the machine"
+            } else if machine == MachineWait::Slow {
+                "Waking the machine is taking longer than usual"
             } else if waking {
                 "Waking the machine"
             } else {
@@ -1709,6 +1715,18 @@ mod setup_placeholder_tests {
         assert_eq!(step_name(&st).as_deref(), Some("Updating the machine"));
         assert!(!refresh_setup_placeholder(&mut st, MachineWait::Updating));
         // Done: the machine's own steps take over.
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
+        assert!(st.setup_placeholder.is_none());
+    }
+
+    #[test]
+    fn a_wake_taking_longer_than_usual_says_so() {
+        let mut st = state_with_pending_send();
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Slow));
+        assert_eq!(
+            step_name(&st).as_deref(),
+            Some("Waking the machine is taking longer than usual")
+        );
         assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
         assert!(st.setup_placeholder.is_none());
     }

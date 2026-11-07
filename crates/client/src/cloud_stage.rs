@@ -34,6 +34,8 @@ pub(crate) struct MachineWait {
 pub(crate) struct CloudStages {
     /// Machines (session devices) that said they are updating, as last read.
     updating: HashSet<String>,
+    /// Machines whose wake the edge says is taking far longer than normal.
+    slow: HashSet<String>,
     /// Per waiting chat: when its machine last read as getting to the send.
     waited: HashMap<String, i64>,
     last_read_ms: Option<i64>,
@@ -45,6 +47,10 @@ impl CloudStages {
         self.updating.contains(device_id)
     }
 
+    pub(crate) fn slow(&self, device_id: &str) -> bool {
+        self.slow.contains(device_id)
+    }
+
     /// Note what the sends wait on now; whether to read the list again (and
     /// if so, it counts as being read until [`Self::read_done`]).
     pub(crate) fn wants_read(&mut self, waits: &[MachineWait], now: i64) -> bool {
@@ -53,10 +59,11 @@ impl CloudStages {
         if waits.is_empty() {
             // Nothing shows it, and it would be stale by the next send.
             self.updating.clear();
+            self.slow.clear();
         }
         let mut watching = false;
         for wait in waits {
-            let held = wait.booting || self.updating(&wait.device_id);
+            let held = wait.booting || self.updating(&wait.device_id) || self.slow(&wait.device_id);
             let waited = self
                 .waited
                 .entry(wait.chat_id.clone())
@@ -92,8 +99,15 @@ impl CloudStages {
             .filter(|s| s.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_UPDATING))
             .map(|s| s.device_id.clone())
             .collect();
-        let changed = updating != self.updating;
+        let slow: HashSet<String> = sessions
+            .sessions
+            .iter()
+            .filter(|s| s.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_SLOW))
+            .map(|s| s.device_id.clone())
+            .collect();
+        let changed = updating != self.updating || slow != self.slow;
         self.updating = updating;
+        self.slow = slow;
         changed
     }
 }
@@ -200,6 +214,18 @@ mod tests {
         assert!(stages.updating("cloud-s1"));
         assert!(!stages.wants_read(&[], 20_000));
         assert!(!stages.updating("cloud-s1"));
+    }
+
+    #[test]
+    fn a_wake_the_edge_says_is_slow_is_noted_and_followed() {
+        let mut stages = CloudStages::default();
+        assert!(poll(&mut stages, &[wait(true)], 1_000, Some(zeron_proto::CLOUD_STAGE_SLOW)));
+        assert!(stages.slow("cloud-s1"));
+        assert!(!stages.updating("cloud-s1"));
+        // Its heartbeat back but still slow (no engine yet): still followed.
+        assert!(poll(&mut stages, &[wait(false)], 90_000, Some(zeron_proto::CLOUD_STAGE_SLOW)));
+        assert!(poll(&mut stages, &[wait(false)], 95_000, None));
+        assert!(!stages.slow("cloud-s1"));
     }
 
     #[test]

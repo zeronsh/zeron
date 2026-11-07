@@ -555,6 +555,11 @@ impl ClientInner {
         lock(&self.cloud_stages).updating(device_id)
     }
 
+    /// The edge says this machine's wake is taking far longer than normal.
+    pub(crate) fn cloud_machine_slow(&self, device_id: &str) -> bool {
+        lock(&self.cloud_stages).slow(device_id)
+    }
+
     /// While a send waits on a Cloud machine, re-read the session list now
     /// and then: the machine says it is updating only there.
     fn follow_cloud_stages(self: &Arc<Self>) {

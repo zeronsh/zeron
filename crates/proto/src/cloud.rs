@@ -39,6 +39,10 @@ pub const CLOUD_SETUP_KEY: &str = "cloudSetup";
 
 /// [`CloudSession::stage`] while its machine installs a release before answering.
 pub const CLOUD_STAGE_UPDATING: &str = "updating";
+/// `CloudSession::stage` while a wake takes far longer than normal (a resume
+/// stuck at the provider, or a machine up with no engine yet): the edge kicks
+/// it, and the apps say it's taking longer than usual.
+pub const CLOUD_STAGE_SLOW: &str = "slow";
 
 /// The setup step a tool call records, if it is one ([`CLOUD_SETUP_KEY`]).
 pub fn cloud_setup_step(call: &crate::ToolCall) -> Option<&str> {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SandboxError, type ExecResult, type SandboxProvider, type SandboxState } from "./sandbox-provider";
-import { ENGINE_START_GRACE_MS, fastWake, parseEngineTiming, parseWakeStage, wakePollMs, wakeTiming } from "./wake";
+import { ENGINE_START_GRACE_MS, FAST_WAKE_DEADLINE_MS, fastWake, parseEngineTiming, parseWakeStage, slowWakeMs, wakePollMs, wakeTiming } from "./wake";
 
 /** A provider on a scripted clock: every state read and timer moves it. */
 const scripted = (script: {
@@ -282,6 +282,7 @@ describe("wake timing", () => {
 
   it("takes a known stage from a runner, or none", () => {
     expect(parseWakeStage({ stage: "updating" })).toEqual({ stage: "updating" });
+    expect(parseWakeStage({ stage: "slow" })).toEqual({ stage: "slow" });
     expect(parseWakeStage({ stage: null })).toEqual({ stage: null });
     expect(parseWakeStage({})).toEqual({ stage: null });
     expect(parseWakeStage({ stage: "hacking" })).toBeUndefined();
@@ -305,5 +306,15 @@ describe("wake timing", () => {
     expect(parseEngineTiming({ version: "0.2.140", updateResult: "wentBack" }, now)).toEqual({ version: "0.2.140", updateResult: "wentBack" });
     expect(parseEngineTiming({ version: "<script>" }, now)).toBeUndefined();
     expect(parseEngineTiming({ updateResult: 5 }, now)).toBeUndefined();
+  });
+});
+
+describe("slowWakeMs", () => {
+  it("is 45 s unless configured", () => {
+    expect(slowWakeMs(undefined)).toBe(FAST_WAKE_DEADLINE_MS);
+    expect(FAST_WAKE_DEADLINE_MS).toBe(45_000);
+    expect(slowWakeMs("3")).toBe(3_000);
+    expect(slowWakeMs("nope")).toBe(FAST_WAKE_DEADLINE_MS);
+    expect(slowWakeMs("0")).toBe(FAST_WAKE_DEADLINE_MS);
   });
 });
