@@ -109,6 +109,8 @@ fun SessionScreen(
     onOpenBilling: () -> Unit = {},
     /** Companions open beside the session (the large-screen inspector) instead of over it. */
     onShowCompanions: ((CompanionSection?) -> Unit)? = null,
+    /** Phones: the header's leading button opens chat history (back is the system gesture or a swipe left). */
+    onOpenHistory: (() -> Unit)? = null,
 ) {
     val client by model.client.collectAsState()
     val core = client ?: return
@@ -272,7 +274,11 @@ fun SessionScreen(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                if (onOpenHistory != null) {
+                    TonalCircleButton(ZIcons.History, "Chat history", onClick = onOpenHistory, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                } else {
+                    TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                }
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(headerTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
                     Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
