@@ -131,6 +131,15 @@ pub trait Hooks: Send + Sync + 'static {
     fn verify(&self, _plan: &Plan) -> Result<(), String> {
         Ok(())
     }
+    /// `zeron.usage`, `zeron.switch_account`, `zeron.set_model`, …: asked
+    /// of the engine for `plugin`, which checks what this device allowed it
+    /// (plugins/agents). `done` with the answer, or why not.
+    fn agents(&self, _plugin: &str, _args: Json, done: Done) {
+        done(Err("Usage, accounts and models aren't available here".into()));
+    }
+    /// The `zeron.on` listeners `plugin`'s service registered, as it loaded:
+    /// the engine tells each its events (`Kind::Event`).
+    fn listeners(&self, _plugin: &str, _listeners: &[(String, String, Json)]) {}
 }
 
 #[derive(Debug, Clone)]
@@ -474,6 +483,7 @@ impl Services {
             st.running.replace(running.clone())
         };
         slot.note(format!("started ({} {})", plan.name, plan.version));
+        hooks.listeners(&plan.plugin, &described.listeners);
         // The old version finishes its calls in flight, then stops.
         if let Some(old) = old {
             old.vm.stop();
@@ -512,7 +522,8 @@ impl Services {
             let safe = match kind {
                 Kind::Method => *running.described.methods.get(name).ok_or_else(unknown)?,
                 Kind::Tool if !running.described.tools.iter().any(|t| t == name) => return Err(unknown()),
-                Kind::Tool | Kind::Timer => false,
+                Kind::Event if !running.described.listeners.iter().any(|l| l.0 == name) => return Err(unknown()),
+                Kind::Tool | Kind::Timer | Kind::Event => false,
             };
             let reply = running.vm.call(kind, name, args.clone(), call.clone());
             match tokio::time::timeout(timeout, reply).await {
@@ -600,6 +611,15 @@ impl Services {
                     .map(|(key, seconds)| json!({ "key": key, "seconds": seconds }))
                     .collect::<Vec<_>>()
             );
+            if !described.listeners.is_empty() {
+                out["listeners"] = json!(
+                    described
+                        .listeners
+                        .iter()
+                        .map(|(key, event, opts)| json!({ "key": key, "event": event, "opts": opts }))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
         if let Some((_, why)) = &st.failed {
             out["error"] = json!(why);
@@ -741,6 +761,12 @@ impl Ops for PluginOps {
                     let session = args["session"].as_str().filter(|s| !s.is_empty());
                     done(Ok(json!(hooks.notify(&plugin, &title, body, session))))
                 });
+            }
+            "agents" => {
+                // (Each op's permission is the engine's to check: agents.rs.)
+                let (hooks, plugin) = (self.hooks.clone(), self.plan.plugin.clone());
+                let _runtime = self.runtime.enter();
+                hooks.agents(&plugin, args, done);
             }
             other => done(Err(format!("zeron.{other} isn't something a service can do"))),
         }

@@ -15,6 +15,7 @@ local cloud_page = require("@app/screens/settings/cloud")
 local search = require("@app/screens/settings/search")
 local toast = require("@ds/toast")
 local locale = require("@ds/locale")
+local material = require("@ds/material")
 
 local M = {}
 
@@ -340,7 +341,7 @@ function M.view(): Node
 			p = "$space.4",
 			gap = "$space.1",
 			rounded = "$radius.xl",
-			bg = "$zeron.settings.card",
+			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
 			border = 1,
 			border_color = function(): string
 				return if current() then "$zeron.selected.ring" else "$zeron.settings.edge"

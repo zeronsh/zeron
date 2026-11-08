@@ -261,6 +261,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 		end)
 	end
+	local notice = ui.use_state(nil :: any)
 	-- What its chat asks, and its queue, todos and tasks, from its own
 	-- session, as the window's composer shows them.
 	local asks = Asks.bind {
@@ -272,13 +273,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		chosen = chosen,
 		asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		-- (A steer glides in its own transcript, as its sends do.)
+		name = name,
+		say = function(tone: string, key: string)
+			notice:set({ tone = tone, text = locale.s(key), dismissable = true })
+		end,
 	}
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
-	local notice = ui.use_state(nil :: any)
 	-- A queued message edited in its composer. (A split's pane: a press
 	-- focuses it, the window's composer doing this.)
-	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string }?)
+	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string, aside_cargo: { any }? }?)
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return chat
@@ -290,6 +295,12 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		say = function(tone: string, key: string)
 			notice:set({ tone = tone, text = locale.s(key), dismissable = true })
+		end,
+		cargo = function(): { any }
+			return Shared.peek_cargo(chat)
+		end,
+		set_cargo = function(list: { any })
+			Shared.set_cargo_of(chat, list)
 		end,
 	}
 	-- A tab closed mid-edit lets go of the edit, and made again finds its row
@@ -307,6 +318,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 					ui.batch(function()
 						editing:set(nil)
 						draft:set(e.aside)
+						if e.aside_cargo then
+							Shared.set_cargo_of(chat, e.aside_cargo)
+						end
 					end)
 				end
 			end
@@ -477,7 +491,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		local s = session:get()
 		local function project_row(id: string?): any?
-			for _, p in sessions.now:get().projects do
+			for _, p in sessions.projects:get() do
 				if p.id == id then
 					return p
 				end
@@ -498,7 +512,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		local p = project_row(s.project)
 		local on: string? = nil
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if d.id == s.device then
 				on = d.name
 			end
@@ -978,7 +992,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		if not s then
 			return nil
 		end
-		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
 	end)
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.

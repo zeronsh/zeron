@@ -235,6 +235,8 @@ local model = {
 	places = { pinned = {}, sections = {} } :: any,
 }
 
+-- (`fixture.sessions_loading`: an engine that hasn't answered yet, nothing heard.)
+local unheard = false
 local function publish()
 	local chats = {}
 	for _, c in model.chats do
@@ -249,7 +251,7 @@ local function publish()
 		table.insert(sections, { id = s.id, name = s.name, sessions = table.clone(s.sessions), collapsed = s.collapsed == true })
 	end
 	sessions.now:set({
-		state = "ready",
+		state = if unheard then "loading" else "ready",
 		here = model.here,
 		devices = model.devices,
 		projects = model.projects,
@@ -391,6 +393,45 @@ stub.rename = function(id: string, title: string)
 	find(id).title = title
 	publish()
 end
+-- Sleep, as the engine keeps it: until a time (none, awake).
+stub.sleep = function(id: string, until_at: number?): any
+	note(`sleep:{id}:{tostring(until_at)}`)
+	local c = find(id)
+	if c then
+		c.sleep_until = until_at
+		c.woke = nil
+	end
+	publish()
+	return { after = function(_, ok: any)
+		if ok then
+			ok(nil)
+		end
+	end }
+end
+-- Stop waiting: the processes it waited on no longer hold it; with nothing
+-- else to wait on, its turn's end stands (finished, unseen).
+stub.stop_waiting = function(id: string): any
+	note(`stop_waiting:{id}`)
+	local c = find(id)
+	if c and c.waiting then
+		local kept = {}
+		for _, w in c.waiting do
+			if w.kind ~= "process" then
+				table.insert(kept, w)
+			end
+		end
+		c.waiting = if #kept > 0 then kept else nil
+		if not c.waiting then
+			c.status = "done"
+		end
+	end
+	publish()
+	return { after = function(_, ok: any)
+		if ok then
+			ok(nil)
+		end
+	end }
+end
 stub.seen = function(id: string)
 	note(`seen:{id}`)
 	local c = find(id)
@@ -417,6 +458,28 @@ local icons_refused: string? = nil
 -- Cloud's machines among the devices, as the engine lists them: two
 -- sessions' (their platform, id and capability say Cloud's), never a device
 -- to pick.
+ui.command {
+	id = "fixture.sessions_loading",
+	title = "Fixture: an engine that hasn't answered, no chats heard",
+	run = function()
+		unheard = true
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.no_sessions",
+	title = "Fixture: an engine that answered, with no chats",
+	run = function()
+		unheard = false
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
 ui.command {
 	id = "fixture.cloud_machines",
 	title = "Fixture: Cloud sessions' machines among the devices",
@@ -642,6 +705,37 @@ for _, source in { "pr", "file", "url", "terminal" } do
 end
 
 -- What changes on the engine's side.
+-- The engine's Waiting: Write the docs ends its turn waiting on its tests.
+ui.command {
+	id = "wait_on_tests",
+	title = "Write the docs waits on its tests",
+	run = function()
+		local c = find("a2")
+		c.status = "waiting"
+		c.waiting = { { id = "bn1", kind = "process", label = "cargo test" } }
+		publish()
+	end,
+}
+-- Put to sleep for two hours and a minute (its corner: "3h").
+ui.command {
+	id = "sleep_a3",
+	title = "Tidy the tests sleeps",
+	run = function()
+		stub.sleep("a3", os.time() + 2 * 3600 + 60)
+	end,
+}
+-- Woken from sleep (its time came), not looked at since.
+ui.command {
+	id = "woke",
+	title = "Tidy the tests woke from sleep",
+	run = function()
+		local c = find("a3")
+		c.sleep_until = nil
+		c.woke = os.time() - 30
+		c.updated = os.time() - 30
+		publish()
+	end,
+}
 ui.command {
 	id = "work",
 	title = "Write the docs starts working",
@@ -844,6 +938,30 @@ ui.command {
 	run = function()
 		table.insert(model.chats, { id = "reg1", title = "Moved to Factory Droid", project = "atlas", device = "mac", updated = NOW - 3 * HOUR, created = NOW - 6 * HOUR, agent = "acp.factory-droid", harness = "acp.factory-droid" })
 		publish()
+	end,
+}
+-- A message in a chat that's running: the third most recent comes to the
+-- top, as the engine's list says once a reply moves (src/slide_bench_tests.rs
+-- sends one every two seconds). Its time by a count, not the clock, so every
+-- run moves the same rows at the same frames.
+local messages = 0
+ui.command {
+	id = "message",
+	title = "A message lands in a running chat",
+	run = function()
+		local live = {}
+		for _, c in model.chats do
+			table.insert(live, c)
+		end
+		table.sort(live, function(a: any, b: any): boolean
+			return a.updated > b.updated
+		end)
+		local c = live[math.min(3, #live)]
+		if c then
+			messages += 1
+			c.updated = NOW + messages
+			publish()
+		end
 	end,
 }
 ui.command {
@@ -1227,6 +1345,13 @@ local function editor(): any
 end
 ui.command { id = "fixture.edit_project", title = "Fixture: edit project", menu = "Fixture", run = function()
 	editor().open("borealis")
+end }
+-- (Each copy of Atlas after `atlas_cloned_on_box`: tests/project_default.)
+ui.command { id = "fixture.edit_project_atlas", title = "Fixture: edit Atlas", menu = "Fixture", run = function()
+	editor().open("atlas")
+end }
+ui.command { id = "fixture.edit_project_atlas_clone", title = "Fixture: edit Atlas's clone", menu = "Fixture", run = function()
+	editor().open("atlas-clone")
 end }
 ui.command { id = "fixture.edit_project_emoji", title = "Fixture: edit project, emoji", menu = "Fixture", run = function()
 	editor().open("borealis", { kind = "emoji", emoji = "🚀", hue = "amber" })

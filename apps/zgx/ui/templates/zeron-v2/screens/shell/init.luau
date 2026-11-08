@@ -132,6 +132,14 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	-- Check for Updates…: Settings' About & updates, checking now.
+	runs["shell.check_updates"] = function()
+		route.settings("about")
+		local about: any = boundary.load("@app/screens/settings/about")
+		if about and about.check then
+			about.check()
+		end
+	end
 	runs["shell.toggle_sidebar"] = function()
 		fit.toggle_sidebar()
 	end
@@ -307,6 +315,9 @@ return function(): Node
 					run()
 				end,
 			}
+			if k.rule then
+				ui.command { separator = true, menu = k.menu }
+			end
 		end
 	end
 
@@ -532,10 +543,9 @@ return function(): Node
 				end
 				local function device(): (string?, boolean)
 					local c = chat()
-					local now = sessions.now:get()
-					for _, d in now.devices do
+					for _, d in sessions.devices:get() do
 						if c and d.id == c.device then
-							return d.name, d.here or d.id == now.here
+							return d.name, d.here or d.id == sessions.here:get()
 						end
 					end
 					return nil, false
@@ -582,7 +592,7 @@ return function(): Node
 								if not c or not c.project then
 									return nil
 								end
-								for _, p in sessions.now:get().projects do
+								for _, p in sessions.projects:get() do
 									if p.id == c.project then
 										return p.name
 									end

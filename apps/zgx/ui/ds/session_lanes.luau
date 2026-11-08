@@ -20,6 +20,7 @@
 --   }
 
 local Icon = require("@self/icon")
+local material = require("@self/material")
 local IconButton = require("@self/icon_button").IconButton
 local Mark = require("@self/mark")
 local control = require("@self/control")
@@ -294,7 +295,7 @@ return ui.component(function(props: Props): Node
 		rounded = CARD_RADIUS,
 		border = 1,
 		border_color = "$zeron.settings.edge",
-		bg = "$zeron.settings.card",
+		bg = material.pick("$zeron.menu.tint", "$zeron.settings.card"),
 		heading(
 			locale.t("ds.session_lanes.side_chats"),
 			ui.show(function(): boolean

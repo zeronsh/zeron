@@ -388,9 +388,11 @@ fn a_window_resize_moves_everything_one_way() {
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
-/// A panel dragged narrow in a wide window keeps its tree beside the file: there's
-/// no floating it. While the edge is dragged the panel is as wide as the pointer
-/// says (no jump), and let go it stays there.
+/// A panel dragged narrower in a wide window keeps its tree beside the file while
+/// there's room for a file beside it (288 + 240); under that the file has the
+/// panel's whole width and the tree closes (ds/files_pane's narrow pane): there's
+/// no floating it either way. While the edge is dragged the panel is as wide as
+/// the pointer says (no jump), and let go it stays there.
 #[test]
 fn a_narrow_panel_keeps_its_tree_beside_the_file() {
     use zgx::input::{InputEvent, Modifiers, PointerButton};
@@ -427,7 +429,7 @@ fn a_narrow_panel_keeps_its_tree_beside_the_file() {
         app.frames(30);
         let now = app.bounds("#shell-files").width;
         assert!((now - w).abs() < 0.5, "dragged to {w}, the panel is {now}");
-        assert!(docked(app), "dragged to {w}: the tree stays beside the file");
+        assert_eq!(docked(app), w >= 528., "dragged to {w}: the tree beside the file only with room for both");
         app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x: to, y, button }, m);
         app.ui.input.forget_clicks();
         app.frames(30);
@@ -435,9 +437,14 @@ fn a_narrow_panel_keeps_its_tree_beside_the_file() {
         assert!((now - w).abs() < 0.5, "let go at {w}, the panel is {now}");
         docked(app)
     };
-    for w in [668., 638., 658., 678., 420.] {
+    for w in [668., 638., 658., 678.] {
         assert!(drag_to(&mut app, w), "at {w}: the tree stays beside the file");
     }
+    // Narrow: the file has the whole panel, the tree closed, not floating over it.
+    assert!(!drag_to(&mut app, 420.), "at 420: the file has the panel's whole width");
+    let panel = x_of(&mut app, "#shell-files").unwrap().0;
+    let file = x_of(&mut app, "#file-viewer-head").unwrap().0;
+    assert!((file - panel).abs() <= 1.5, "at 420 the file starts at the panel's start (its card's hairline in) ({file} against {panel})");
     assert!((app.bounds("#shell-files").width - 420.).abs() < 0.5, "it stays where it was let go");
 }
 

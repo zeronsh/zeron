@@ -67,6 +67,53 @@ local function chip_id(kind: string): string
 	return `{kind}{n}`
 end
 
+-- The new-chat page's draft (its words, what it carries, the passages
+-- quoted into it), kept across launches as its settings are
+-- (screens/chat/composer's `chat_new_defaults`); a chat's isn't.
+local saved_new = ui.persist("chat_new_draft", nil :: any)
+do
+	-- A launch (nothing out yet, nothing put away for a new chat): the new
+	-- page's draft as it was left, out as the new chat's (put away under
+	-- "" if a chat shows first, as any move does).
+	local all = kept:peek()
+	local was = saved_new:peek()
+	if type(was) == "table" and all[""] == nil and here:peek() == "" and M.text:peek() == "" and #M.cargo:peek() == 0 then
+		ui.batch(function()
+			M.text:set(if type(was.text) == "string" then was.text else "")
+			M.cargo:set(if type(was.cargo) == "table" then was.cargo else {})
+			M.quotes:set(if type(was.quotes) == "table" then was.quotes else {})
+			-- (Its chips' ids taken: one made from here never repeats one.)
+			local top = made:peek()
+			for _, c in M.cargo:peek() do
+				local n = tonumber(string.match(tostring(c.id or ""), "(%d+)$"))
+				if n and n > top then
+					top = n
+				end
+			end
+			if top ~= made:peek() then
+				made:set(top)
+			end
+		end)
+	end
+end
+ui.effect(function()
+	local now: any = nil
+	if here:get() == "" then
+		local text, cargo, quotes = M.text:get(), M.cargo:get(), M.quotes:get()
+		if text ~= "" or #cargo > 0 then
+			now = { text = text, cargo = cargo, quotes = quotes }
+		end
+	else
+		local put = kept:get()[""]
+		if put then
+			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
+		end
+	end
+	if now ~= nil or saved_new:peek() ~= nil then
+		saved_new:set(now)
+	end
+end)
+
 -- Whether a file's name is a picture the window can draw. (zgx decodes
 -- no GIF or HEIC yet: those are file chips, so a thumbnail never fails.)
 -- A project's file or folder as Zeron mentions it in a prompt, and back
@@ -220,6 +267,11 @@ local function set_cargo(key: string, list: { any })
 	d.cargo = list
 	all[key] = d
 	kept:set(all)
+end
+
+-- Chat `key`'s chips replaced (a queued message's, shown as it's edited).
+function M.set_cargo_of(key: string, list: { any })
+	set_cargo(key, list)
 end
 
 function M.push_cargo(key: string?, item: any)
@@ -781,7 +833,7 @@ end
 
 -- Which of `sessions`' devices is this one.
 local here_device = ui.computed(function(): string?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.here then
 			return d.id
 		end

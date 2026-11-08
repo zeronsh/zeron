@@ -114,7 +114,7 @@ export function* rowsAfter(
 
 export type CheckpointOutcome =
   | { ok: true; seqFloor: number; pruned: number }
-  | { ok: false; error: "floor_regression" | "ahead_of_head" | "empty" };
+  | { ok: false; error: "floor_regression" | "ahead_of_head" | "empty" | "incomplete" };
 
 /** Commit a client-built checkpoint covering rows `seq <= seqCovered`.
  *
@@ -137,13 +137,48 @@ export const commitCheckpoint = (
   if (seqCovered < seqFloor(sql)) return { ok: false, error: "floor_regression" };
   if (seqCovered > headSeq(sql)) return { ok: false, error: "ahead_of_head" };
   blobs.put(CHECKPOINT_BLOB, bytes);
+  return landCheckpoint(sql, blobs, seqCovered, frontier, bytes.byteLength, committedAt);
+};
+
+/** Where a checkpoint sent in parts is gathered (`/checkpoint/part`) until
+ * its commit takes it whole: one at a time per room. */
+export const STAGED_CHECKPOINT_BLOB = "checkpoint-upload";
+
+/** `commitCheckpoint` for one sent in parts: the staged blob becomes the
+ * checkpoint as it is, renamed (its bytes never held in memory at once),
+ * once it is the `size` it was said to be. Same guards, same outcome. */
+export const commitStagedCheckpoint = (
+  sql: SqlStorage,
+  blobs: BlobStore,
+  seqCovered: number,
+  frontier: Uint8Array,
+  size: number,
+  committedAt: number
+): CheckpointOutcome => {
+  const staged = blobs.size(STAGED_CHECKPOINT_BLOB) ?? 0;
+  if (size <= 0 || staged === 0) return { ok: false, error: "empty" };
+  if (staged !== size) return { ok: false, error: "incomplete" };
+  if (seqCovered < seqFloor(sql)) return { ok: false, error: "floor_regression" };
+  if (seqCovered > headSeq(sql)) return { ok: false, error: "ahead_of_head" };
+  blobs.rename(STAGED_CHECKPOINT_BLOB, CHECKPOINT_BLOB);
+  return landCheckpoint(sql, blobs, seqCovered, frontier, size, committedAt);
+};
+
+const landCheckpoint = (
+  sql: SqlStorage,
+  blobs: BlobStore,
+  seqCovered: number,
+  frontier: Uint8Array,
+  size: number,
+  committedAt: number
+): CheckpointOutcome => {
   blobs.put(FRONTIER_BLOB, frontier);
   const before = rowCount(sql);
   sql.exec("DELETE FROM rows WHERE seq <= ?", seqCovered);
   const pruned = before - rowCount(sql);
   setMeta(sql, "seqFloor", String(seqCovered));
   setMeta(sql, "checkpointSeq", String(seqCovered));
-  setMeta(sql, "checkpointSize", String(bytes.byteLength));
+  setMeta(sql, "checkpointSize", String(size));
   setMeta(sql, "checkpointAt", String(committedAt));
   return { ok: true, seqFloor: seqCovered, pruned };
 };

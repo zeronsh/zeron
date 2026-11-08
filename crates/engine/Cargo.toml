@@ -47,6 +47,8 @@ gethostname.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 sha2.workspace = true
 reqwest.workspace = true
+# A large chat2 checkpoint sent in parts, sliced from one buffer.
+bytes = "1"
 # The rules plugins are held to (paths, programs, network), shared with apps/zgx.
 zeron-plugin-guard.workspace = true
 ignore.workspace = true
@@ -60,7 +62,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 
 [target.'cfg(windows)'.dependencies]
 dunce = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

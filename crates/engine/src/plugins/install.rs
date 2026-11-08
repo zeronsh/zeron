@@ -490,6 +490,11 @@ async fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.as_std_mut().creation_flags(0x08000000);
+    }
     let output = tokio::time::timeout(GIT_TIMEOUT, cmd.output())
         .await
         .map_err(|_| "The repository took too long to answer".to_string())?

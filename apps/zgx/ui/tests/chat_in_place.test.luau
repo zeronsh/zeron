@@ -400,6 +400,91 @@ test("a sent prompt glides into its runway, and stays as its reply comes", funct
 	expect(at()).to_be(to)
 end)
 
+-- A node's y in the tree, by its id (its first line), or nil.
+local function y_of_id(app: any, id: string): number?
+	return tonumber((app:tree("#" .. id):match("[^\n]+") or ""):match(" %-?%d+,(%-?%d+) "))
+end
+
+-- A steer, as a person makes it mid-turn: the queued row's Steer, then the
+-- engine's copy of it landing a few frames on. Sampled a frame at a time:
+-- the steered prompt's y (`q1`) from the frame it joins in, and the lowest
+-- `watch` (an earlier prompt, by its id) stood meanwhile.
+local function steer(app: any, watch: string?): ({ number }, number?)
+	app:click('role:button "Open Queued"')
+	settle(app)
+	app:hover('role:listitem "1. Queued words"')
+	settle(app)
+	local lowest: number? = if watch then y_of_id(app, watch) else nil
+	local function look()
+		local y = if watch then y_of_id(app, watch) else nil
+		if y and (lowest == nil or y > (lowest :: number)) then
+			lowest = y
+		end
+	end
+	app:click('role:button "Steer"')
+	for _ = 1, 4 do
+		app:frames(1)
+		look()
+	end
+	expect(app:state("calls")).to_contain("queue:s1:send:q1")
+	app:command("steer_lands")
+	local ys: { number } = {}
+	for _ = 1, 60 do
+		app:frames(1)
+		local y = y_of_id(app, "q1")
+		if y then
+			table.insert(ys, y)
+		end
+		look()
+	end
+	return ys, lowest
+end
+
+test("a steered prompt glides into its runway, as a sent one does", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	-- The turn runs (the conversation opened as it stands: no runway yet),
+	-- and a message waits in the queue.
+	app:command("start_reply")
+	app:command("stream_words")
+	app:command("queue_one")
+	settle(app)
+	local ys = steer(app)
+	expect(eased(ys)).to_be_nil()
+	-- It stands where a sent prompt does: at the view's top, its reply's room
+	-- under it, and stays there.
+	local top = tonumber((app:tree("#transcript"):match("[^\n]+") or ""):match(" %-?%d+,(%-?%d+) ")) :: number
+	local to = ys[#ys]
+	expect(to - top < 60).to_be(true)
+	settle(app)
+	expect(y_of_id(app, "q1")).to_be(to)
+end)
+
+test("a steer keeps the runway a send made, and the steered prompt takes it on", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	local _, _, id = glide(app, "Rise into place")
+	app:command("engine_copy")
+	app:command("start_reply")
+	app:command("stream_words")
+	app:command("queue_one")
+	settle(app)
+	local sent = y_of_id(app, id :: string) :: number
+	-- The prompt sent stands at the top with its reply under it.
+	local ys, lowest = steer(app, id)
+	-- The view never falls back as the steer lands (the runway dropped, the
+	-- end coming down to the content's): the prompt sent only ever rises,
+	-- but for the glide's one-point step clear of the end, as a send's.
+	expect((lowest :: number) - sent <= 1).to_be(true)
+	expect(eased(ys)).to_be_nil()
+	-- The steered prompt lands where the sent one stood.
+	expect(math.abs(ys[#ys] - sent) <= 2).to_be(true)
+	settle(app)
+	expect(math.abs((y_of_id(app, "q1") :: number) - sent) <= 2).to_be(true)
+end)
+
 -- Each "You" article's height, top to bottom.
 local function bubbles(app: any): { number }
 	local out = {}

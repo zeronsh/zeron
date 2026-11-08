@@ -31,6 +31,7 @@ local boundary = require("@app/screens/shell/boundary")
 local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
+local activity = require("@app/screens/shell/activity")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -158,7 +159,7 @@ local sent: sessions.Places? = nil
 local sent_at = 0
 local ANSWER_MS = 5000
 ui.effect(function()
-	local theirs = plain(sessions.now:get().places)
+	local theirs = plain(sessions.places:get())
 	-- (Their places as they were: nothing to take.)
 	if heard and same(theirs, heard) then
 		return
@@ -197,7 +198,7 @@ end)
 -- Your sections' folds are the engine's, on every device: what it says
 -- folds them here, and folding one here tells it.
 ui.effect(function()
-	local sections = sessions.now:get().places.sections
+	local sections = sessions.places:get().sections
 	local mine = shared.folded:peek()
 	local next: { [string]: boolean }? = nil
 	for _, s in sections do
@@ -246,12 +247,12 @@ end)
 
 -- Device names, by id; this Mac's.
 local function devices(): ({ [string]: string }, string?)
-	local now = sessions.now:get()
 	local names: { [string]: string } = {}
 	local here: string? = nil
-	for _, d in now.devices do
+	local here_id = sessions.here:get()
+	for _, d in sessions.devices:get() do
 		names[d.id] = d.name
-		if d.here or d.id == now.here then
+		if d.here or d.id == here_id then
 			here = d.name
 		end
 	end
@@ -311,7 +312,7 @@ local ASKED: { [string]: string } = { approval = "approval", question = "input" 
 -- or `{ statuses = { "working", … }, by = "Focus" }`, those in these
 -- states ("idle", in none). Written by a plugin, so read with care: what
 -- isn't that shape is nil, and a word it doesn't know counts for nothing.
-local KNOWN = { working = true, input = true, approval = true, failed = true, done = true, idle = true }
+local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, done = true, woke = true, idle = true }
 local filter = ui.shared("sidebar.filter", nil :: any)
 type Narrow = { statuses: { [string]: boolean }, words: { string }, by: string }
 local narrow = ui.computed(function(): Narrow?
@@ -341,10 +342,9 @@ end
 -- The Archived shelf's sessions (the most recently moved first), as the
 -- list's rows read them.
 local shelf = ui.computed(function(): { any }
-	local now = sessions.now:get()
 	local names = devices()
 	local out = {}
-	for _, c in now.archived or {} do
+	for _, c in sessions.archived:get() do
 		table.insert(out, {
 			id = c.id,
 			title = c.title,
@@ -370,7 +370,7 @@ local function only_project(): string?
 	if not id then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return id
 		end
@@ -510,14 +510,26 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		local group = (c.project and by[c.project]) or loose
 		-- (Waiting on you beats working: an approval, then a question.)
 		local status = ASKED[asked[c.id] or ""] or c.status
+		-- (The Activity view's: woken from sleep and not looked at since, the
+		-- alarm, unless it's asking for you or under way. Which shelf it's
+		-- on, and its place; asleep, its corner says when it wakes. Off, none
+		-- of it.)
+		local act = activity.on:get()
+		if act and c.woke and (status == nil or status == "done") then
+			status = "woke"
+		end
 		if only and not only.statuses[status or "idle"] then
 			continue
 		end
+		local on_shelf = activity.shelf(c, status)
+		local rank = if act then activity.rank(c, on_shelf) else nil
 		table.insert(group.sessions, kept({
 			id = c.id,
 			title = c.title,
 			status = status :: any,
-			time = c.updated,
+			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
+			shelf = on_shelf,
+			rank = rank,
 			created = c.created,
 			agent = c.agent :: any,
 			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
@@ -591,7 +603,7 @@ local function project_filter(): Node
 				items = function(): { any }
 					local out: { any } = { { value = ALL, label = locale.s("shell.sidebar.project_filter.all_projects"), icon = "folder-with-files" } }
 					-- (A repository once, as the list has it.)
-					local all = sessions.now:get().projects
+					local all = sessions.projects:get()
 					local seen: { [string]: boolean } = {}
 					for _, p in all do
 						local first = oldest_checkout(p, all)
@@ -655,7 +667,8 @@ local function filter_notice(): Node
 end
 
 -- You, at the foot: your name, else your email; signed out, the
--- workspace's ("Local", as Zeron's: kept on this device).
+-- workspace's ("Local", as Zeron's: kept on this device); nothing until the
+-- engine has said which.
 type User = { id: string?, name: string }
 local function user(): User
 	local u = auth.user:get()
@@ -667,6 +680,9 @@ local function user(): User
 		local settings_store: any = boundary.load("@app/screens/settings/store")
 		local avatar = if settings_store then settings_store.photo_file(settings_store.photo()) else ""
 		return { id = u.id, name = if name and name ~= "" then name else fallback, avatar = if avatar ~= "" then avatar else nil }
+	end
+	if auth.state:get() == "restoring" then
+		return { name = "" }
 	end
 	return { name = locale.s("shell.sidebar.local") }
 end
@@ -687,7 +703,7 @@ local CONNECTION: { [string]: string } = {
 	reconnecting = "shell.sidebar.connection.reconnecting",
 }
 local function connection(): string?
-	local c = (sessions.now:get() :: any).connection
+	local c: any = sessions.connection:get()
 	return if type(c) == "string" and CONNECTION[c] then c else nil
 end
 local function connection_line(): Node
@@ -815,6 +831,10 @@ local renaming_row = ui.state("shell_renaming_row", nil :: string?)
 -- The session asked about deleting, and its dialog.
 local deleting = ui.state("shell_deleting", nil :: string?)
 local delete_open = ui.state("shell_delete_open", false)
+-- Sleep → Custom…: the chat, the moment chosen, and whether it's asking.
+local sleep_custom = ui.state("shell_sleep_custom", nil :: string?)
+local sleep_custom_at = ui.state("shell_sleep_custom_at", nil :: number?)
+local sleep_custom_open = ui.state("shell_sleep_custom_open", false)
 local new_title = ui.state("shell_rename_title", "")
 
 local function chat(id: string): sessions.Chat?
@@ -1104,6 +1124,63 @@ local function menu(id: string): { any }?
 		end,
 	})
 	local side = is_side(id)
+	-- The Activity view's Sleep (its times, each saying when, and one of
+	-- your own), or, asleep, Wake.
+	local sleep: any = false
+	if activity.on:peek() and not side then
+		if c.sleep_until then
+			sleep = {
+				label = locale.s("shell.activity.wake"),
+				icon = "sun",
+				on_select = function()
+					activity.wake(id)
+				end,
+			}
+		else
+			local times: { any } = {}
+			for _, p in activity.presets() do
+				table.insert(times, {
+					label = locale.s("shell.activity.sleep.choice", { name = p.label, when = p.detail }),
+					on_select = function()
+						activity.sleep(id, p.until_at)
+					end,
+				})
+			end
+			table.insert(times, { separator = true })
+			table.insert(times, {
+				label = locale.s("shell.activity.sleep.custom"),
+				on_select = function()
+					-- (It opens on tomorrow at 9: a time already chosen,
+					-- moved from there.)
+					local d = os.date("*t") :: any
+					sleep_custom:set(id)
+					sleep_custom_at:set(activity.local_time({ year = d.year, month = d.month, day = d.day + 1, hour = 9, min = 0, sec = 0 }))
+					sleep_custom_open:set(true)
+				end,
+			})
+			sleep = { label = locale.s("shell.activity.sleep.title"), icon = "moon", submenu = times }
+		end
+	end
+	-- Waiting on background work it said it waits on: the person can say
+	-- otherwise (a dev server marked by mistake). Its background agents
+	-- aren't its say, so there's nothing to take back there.
+	local stop_waiting: any = false
+	if c.status == "waiting" then
+		for _, w in c.waiting or {} do
+			if w.kind == "process" then
+				stop_waiting = {
+					label = locale.s("shell.activity.stop_waiting"),
+					icon = "close-circle",
+					on_select = function()
+						sessions.stop_waiting(id):after(function() end, function()
+							ds.toast.show { title = locale.s("shell.activity.stop_waiting_failed"), tone = "danger" }
+						end)
+					end,
+				}
+				break
+			end
+		end
+	end
 	local entries = {
 		{
 			label = locale.s("common.rename"),
@@ -1127,13 +1204,16 @@ local function menu(id: string): { any }?
 			icon = "copy",
 			submenu = copies,
 		},
-		if side then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
+		-- (Activity lists no sections: nothing to move into.)
+		if side or activity.on:peek() then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
+		sleep,
+		stop_waiting,
 		{ separator = true },
 		{
 			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
 			label = locale.s("common.archive"),
 			icon = "archive-minimalistic",
-			disabled = if c.status == "working" then locale.s("shell.sidebar.menu.archive_working") else nil,
+			disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
 			on_select = function()
 				M.archive(id)
 			end,
@@ -1180,7 +1260,7 @@ local project_remove_open = ui.state("shell_project_remove_open", false)
 -- Of a repository on several devices, the checkouts to remove, by id.
 local project_remove_chosen = ui.state("shell_project_remove_chosen", {} :: { [string]: boolean })
 local function project_of(id: string?): sessions.Project?
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -1225,7 +1305,7 @@ local function project_dialogs(): Node
 	-- The checkouts of the project being removed (one, for most).
 	local function acting_checkouts(): { any }
 		local p = project_of(project_acting:get())
-		return if p then checkouts_of(p, sessions.now:get().projects) else {}
+		return if p then checkouts_of(p, sessions.projects:get()) else {}
 	end
 	local function device_of(q: any): string
 		for _, d in sessions.now:peek().devices do
@@ -1256,7 +1336,7 @@ local function project_dialogs(): Node
 			end
 		end
 		local device = locale.s("shell.sidebar.project.its_device")
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if p and d.id == p.device then
 				device = d.name
 			end
@@ -1383,6 +1463,50 @@ local function delete_dialog(): Node
 	}
 end
 
+-- Sleep until a time of your own: a day and a time from a minute ahead.
+local function sleep_dialog(): Node
+	return ds.Dialog {
+		open = sleep_custom_open,
+		title = ui.t("shell.activity.sleep.custom_title") :: any,
+		-- Under it, the moment chosen, in words: what Sleep will do.
+		body = function(): string
+			local at = sleep_custom_at:get()
+			if not at then
+				return ""
+			end
+			return locale.s("shell.activity.sleep.until_when", {
+				day = locale.weekday(at),
+				date = locale.month_day(at),
+				time = locale.clock(at),
+			})
+		end,
+		size = "sm",
+		confirm = {
+			label = ui.t("shell.activity.sleep.title") :: any,
+			-- (A time that has passed, or none chosen, puts nothing to sleep.)
+			on_click = function()
+				local id, at = sleep_custom:peek(), sleep_custom_at:peek()
+				sleep_custom:set(nil)
+				sleep_custom_open:set(false)
+				if id and at and at > os.time() then
+					activity.sleep(id, at)
+				end
+			end,
+		},
+		-- (Built as it opens: its month of days is nothing to keep.)
+		build = function(): Node
+			return ds.DatePicker {
+				id = "sleep-custom",
+				value = sleep_custom_at,
+				min = function(): number
+					return os.time() + 60
+				end,
+				label = ui.t("shell.activity.sleep.custom_title") :: any,
+			}
+		end,
+	}
+end
+
 local function rename_dialog(): Node
 	local function done()
 		local id = renaming:peek()
@@ -1422,6 +1546,9 @@ M.Sidebar = ui.component(function(props: Props): Node
 		collapsed = props.collapsed,
 		limit = props.limit,
 		direct = props.direct,
+		loading = function(): boolean
+			return sessions.state:get() ~= "ready"
+		end,
 		island = props.island,
 		selected = shared.selected,
 		projects = projects,
@@ -1438,6 +1565,10 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end,
 		on_archive = M.archive,
 		archived = shelf,
+		activity = activity.on,
+		on_activity_settings = function()
+			route.settings("activity")
+		end,
 		on_unarchive = function(id: string)
 			sessions.unarchive(id)
 		end,
@@ -1499,6 +1630,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		bar,
 		rename_dialog(),
 		delete_dialog(),
+		sleep_dialog(),
 		project_dialogs(),
 	}
 end)

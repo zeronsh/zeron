@@ -126,9 +126,12 @@ function M.parts(b: MarkdownBlock, out: { string }?): { string }
 			M.parts(child, list)
 		end
 	elseif b.t == "table" then
-		for c, head in b.head do
+		-- (Row by row, as ds/markdown builds them.)
+		for _, head in b.head do
 			table.insert(list, M.words(head))
-			for _, row in b.rows do
+		end
+		for _, row in b.rows do
+			for c in b.head do
 				table.insert(list, M.words(row[c] or {}))
 			end
 		end

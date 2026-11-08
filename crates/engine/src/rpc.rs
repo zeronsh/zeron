@@ -327,6 +327,21 @@ struct BackgroundTaskParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AwaitBackgroundParams {
+    chat_id: String,
+    task_ids: Vec<String>,
+    #[serde(default)]
+    waiting: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StopWaitingParams {
+    chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RunProjectActionParams {
     space_id: String,
     chat_id: String,
@@ -814,6 +829,14 @@ enum MutateParams {
         chat_id: String,
         #[serde(default)]
         at: Option<i64>,
+    },
+    /// The person puts a chat to sleep until `until` (epoch ms), or wakes it
+    /// (`until` absent). Synced; its host wakes it early when it asks.
+    #[serde(rename_all = "camelCase")]
+    SetChatSleep {
+        chat_id: String,
+        #[serde(default)]
+        until: Option<i64>,
     },
 }
 
@@ -1770,6 +1793,14 @@ impl EngineRpc {
                 }
                 Err(err)
             }
+            Err(_) if method == methods::APPLY_HARNESS_UPDATE => {
+                // Still going there (an update waits for that device's chats
+                // to finish before it starts): the link is fine, and the
+                // update's row follows how it ends.
+                Err(RpcError::Failed(
+                    "The update is still running on that device. Its row shows how it ends.".into(),
+                ))
+            }
             Err(_) => {
                 // No reply inside the deadline. The link may be a zombie — the
                 // relay's auto-pong keeps a dead host socket looking alive
@@ -2121,6 +2152,19 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::SetChatSleep { chat_id, until } => {
+                let until = match until {
+                    Some(ms) => Some(
+                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+                            .ok_or_else(|| RpcError::BadParams("until is no time".into()))?,
+                    ),
+                    None => None,
+                };
+                self.workspace
+                    .set_chat_sleep(&chat_id, until)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
@@ -2275,9 +2319,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
-        // Leave headroom beyond the provider's 15-minute mutation timeout for
-        // queueing, verification, and the relayed response itself.
-        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
+        // The updater's own limit, plus headroom for queueing behind another
+        // update, verification, and the relayed response itself.
+        methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
@@ -2378,6 +2422,7 @@ fn forwardable(method: &str) -> bool {
             // Background processes run in the chat host's runtime.
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
+            | methods::STOP_WAITING
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -2481,6 +2526,85 @@ where
         Some((value, (rx, true)))
     })
     .boxed()
+}
+
+/// Whether a watch asked for changes only (`{"changes": true}`): opt-in,
+/// so older viewports keep the whole list on every change.
+fn wants_changes(params: &serde_json::Value) -> bool {
+    params.get("changes").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// What a keyed list stream last sent: its keys in order, and each row.
+type SentRows = (Vec<String>, std::collections::HashMap<String, serde_json::Value>);
+
+/// A list of rows keyed by `key` (`id`, or a session's `chatId`) as change
+/// frames: the whole list first, as [`watch_stream`] sends it; then, per
+/// change, only what moved: `{"changed": [row…], "removed": [key…]}`, plus
+/// `"order": [key…]` when the keys' order isn't what it was. A change that
+/// leaves every row as it was sends nothing. Applying a frame (replace or
+/// add each changed row, drop the removed, then order by `order` if sent)
+/// gives exactly the list the whole-list stream would have sent.
+///
+/// The whole chat list is ~0.4 MB with a few hundred chats, and one field
+/// of one row (a seen mark, a heartbeat) changing sent and parsed it all,
+/// in every window on every device.
+fn keyed_changes_stream<T>(rx: watch::Receiver<Vec<T>>, key: &'static str) -> BoxStream<'static, serde_json::Value>
+where
+    T: serde::Serialize + Send + Sync + 'static,
+{
+    futures::stream::unfold((rx, None::<SentRows>), move |(mut rx, mut last)| async move {
+        loop {
+            if last.is_some() {
+                rx.changed().await.ok()?;
+            }
+            let rows: Vec<serde_json::Value> = {
+                let borrowed = rx.borrow_and_update();
+                borrowed.iter().filter_map(|row| serde_json::to_value(row).ok()).collect()
+            };
+            let (frame, sent) = keyed_frame(rows, key, last.take());
+            last = Some(sent);
+            if let Some(frame) = frame {
+                return Some((frame, (rx, last)));
+            }
+        }
+    })
+    .boxed()
+}
+
+/// `rows` as the frame that follows `last` (`None`: nothing changed), and
+/// what's been sent once it is. No `last`: the whole list.
+fn keyed_frame(rows: Vec<serde_json::Value>, key: &str, last: Option<SentRows>) -> (Option<serde_json::Value>, SentRows) {
+    let keys: Vec<String> = rows
+        .iter()
+        .map(|row| row.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned())
+        .collect();
+    let Some((last_keys, mut last_rows)) = last else {
+        let by_key = keys.iter().cloned().zip(rows.iter().cloned()).collect();
+        return (Some(serde_json::Value::Array(rows)), (keys, by_key));
+    };
+    let mut changed = Vec::new();
+    let mut now_rows = std::collections::HashMap::with_capacity(rows.len());
+    for (k, row) in keys.iter().zip(rows) {
+        if last_rows.remove(k).as_ref() != Some(&row) {
+            changed.push(row.clone());
+        }
+        now_rows.insert(k.clone(), row);
+    }
+    let removed: Vec<&String> = last_keys.iter().filter(|k| !now_rows.contains_key(*k)).collect();
+    // (The order applying the rest gives: the rows kept where they were,
+    // new ones after. Sent only when the list's isn't that.)
+    let kept = last_keys.iter().filter(|k| now_rows.contains_key(*k));
+    let was: std::collections::HashSet<&String> = last_keys.iter().collect();
+    let added = keys.iter().filter(|k| !was.contains(k));
+    let reordered = !kept.chain(added).eq(keys.iter());
+    if changed.is_empty() && removed.is_empty() && !reordered {
+        return (None, (keys, now_rows));
+    }
+    let mut frame = serde_json::json!({ "changed": changed, "removed": removed });
+    if reordered {
+        frame["order"] = serde_json::json!(keys);
+    }
+    (Some(frame), (keys, now_rows))
 }
 
 /// The transcript watch as delta frames (`zeron_doc::transcript_delta`): a
@@ -2996,6 +3120,10 @@ impl RpcService for EngineRpc {
                 )
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // A catalog that changed is told to plugins (models.updated).
+                if let Some(plugins) = &self.plugins {
+                    plugins.agents().observe_models(p.harness, &models);
+                }
                 RpcReply::value(&models)
             }
             methods::LIST_SKILLS => {
@@ -3427,6 +3555,35 @@ impl RpcService for EngineRpc {
                 let stopping = self.sessions.stop_background_task(&p.chat_id, &p.task_id);
                 RpcReply::value(&serde_json::json!({ "stopping": stopping }))
             }
+            methods::AWAIT_BACKGROUND => {
+                let p: AwaitBackgroundParams = parse_params(params)?;
+                if p.task_ids.is_empty() || p.task_ids.len() > 20 {
+                    return Err(RpcError::BadParams("name 1 to 20 task ids".into()));
+                }
+                match self
+                    .sessions
+                    .await_background(&p.chat_id, &p.task_ids, p.waiting.unwrap_or(true))
+                {
+                    Ok(outcome) => RpcReply::value(&serde_json::json!({
+                        "matched": outcome.matched,
+                        "unmatched": outcome.unmatched,
+                    })),
+                    Err(crate::sessions::AwaitRefused::NoRun) => Err(RpcError::Failed(
+                        "This chat has no running agent here".into(),
+                    )),
+                    Err(crate::sessions::AwaitRefused::NoWake) => Err(RpcError::Failed(
+                        "This agent's runtime doesn't wake it when background work ends, so it \
+                         can't wait on it after its turn. Wait for the work inside your turn \
+                         (poll or read its output) before you finish."
+                            .into(),
+                    )),
+                }
+            }
+            methods::STOP_WAITING => {
+                let p: StopWaitingParams = parse_params(params)?;
+                let stopped = self.sessions.stop_waiting(&p.chat_id);
+                RpcReply::value(&serde_json::json!({ "stopped": stopped }))
+            }
             methods::READ_BACKGROUND_TASK_OUTPUT => {
                 let p: BackgroundTaskParams = parse_params(params)?;
                 let output = self
@@ -3592,12 +3749,18 @@ impl RpcService for EngineRpc {
                 );
                 Ok(RpcReply::Stream(Box::pin(stream)))
             }
+            methods::WATCH_CHATS if wants_changes(&params) => Ok(RpcReply::Stream(
+                keyed_changes_stream(self.workspace.watch_chats(), "id"),
+            )),
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
             methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_sidebar_preferences(),
             ))),
+            methods::WATCH_DEVICES if wants_changes(&params) => Ok(RpcReply::Stream(
+                keyed_changes_stream(self.workspace.watch_devices(), "id"),
+            )),
             methods::WATCH_DEVICES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_devices(),
             ))),
@@ -3609,6 +3772,9 @@ impl RpcService for EngineRpc {
                 let merged = self
                     .workspace
                     .merged_sessions_watch(self.sessions.watch_sessions());
+                if wants_changes(&params) {
+                    return Ok(RpcReply::Stream(keyed_changes_stream(merged, "chatId")));
+                }
                 Ok(RpcReply::Stream(watch_stream(merged)))
             }
             methods::LOCAL_DEVICE => {
@@ -3784,11 +3950,31 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::WATCH_CHECKOUT_DIFFS => {
-                Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
+                // A chat seen from another device: its transcript stream runs on
+                // the viewer's engine, so naming it here is what keeps its
+                // checkout scanned on this host.
+                let interest = params
+                    .get("chatId")
+                    .and_then(|chat_id| chat_id.as_str())
+                    .map(|chat_id| self.diff_sync.retain_chat(chat_id));
+                Ok(RpcReply::Stream(
+                    watch_stream(self.diff_sync.watch_diffs())
+                        .map(move |frame| {
+                            let _held = &interest;
+                            frame
+                        })
+                        .boxed(),
+                ))
             }
             methods::WATCH_WORKSPACE_GIT_STATUS => {
                 let request: zeron_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let workspace = self.workspace_files.resolve_target(&request.target).await?;
+                // A file browser can outlive its chat's transcript stream, or
+                // have none (a project's).
+                let interest = match request.target.chat_id.as_deref() {
+                    Some(chat_id) => vec![self.diff_sync.retain_chat(chat_id)],
+                    None => self.diff_sync.retain_checkout(&workspace.root),
+                };
                 let rx = self.diff_sync.watch_git_statuses();
                 // Only this authorized checkout crosses the connection. None means
                 // unavailable, including plain folders and initial/restarting engines.
@@ -3817,7 +4003,14 @@ impl RpcService for EngineRpc {
                         }
                     },
                 );
-                Ok(RpcReply::Stream(stream.boxed()))
+                Ok(RpcReply::Stream(
+                    stream
+                        .map(move |frame| {
+                            let _held = &interest;
+                            frame
+                        })
+                        .boxed(),
+                ))
             }
             methods::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let p: CheckoutChangeRequestParams = parse_params(params)?;
@@ -5276,6 +5469,71 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
 
+    /// What a viewport does with a keyed list frame: the list it shows after.
+    fn apply_frame(list: &[serde_json::Value], frame: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+        if let Some(whole) = frame.as_array() {
+            return whole.clone();
+        }
+        let id = |row: &serde_json::Value| row[key].as_str().unwrap_or_default().to_owned();
+        let removed: Vec<&str> = frame["removed"].as_array().unwrap().iter().filter_map(|k| k.as_str()).collect();
+        let mut rows: Vec<serde_json::Value> = list.iter().filter(|row| !removed.contains(&id(row).as_str())).cloned().collect();
+        for row in frame["changed"].as_array().unwrap() {
+            match rows.iter_mut().find(|r| id(r) == id(row)) {
+                Some(slot) => *slot = row.clone(),
+                None => rows.push(row.clone()),
+            }
+        }
+        if let Some(order) = frame["order"].as_array() {
+            rows = order.iter().filter_map(|k| rows.iter().find(|r| id(r) == k.as_str().unwrap()).cloned()).collect();
+        }
+        rows
+    }
+
+    /// `{"changes": true}`: the whole list once, then only the rows that
+    /// changed (a seen mark on one chat sends that chat, not all of them),
+    /// nothing for a change that changed no row, and, applied in order,
+    /// always the very list the whole-list stream sends.
+    #[test]
+    fn a_keyed_watch_sends_only_the_rows_that_changed() {
+        use serde_json::json;
+        let lists = [
+            json!([{ "id": "a", "seen": 1 }, { "id": "b", "seen": 1 }, { "id": "c", "seen": 1 }]),
+            json!([{ "id": "a", "seen": 1 }, { "id": "b", "seen": 2 }, { "id": "c", "seen": 1 }]),
+            json!([{ "id": "a", "seen": 1 }, { "id": "b", "seen": 2 }, { "id": "c", "seen": 1 }]),
+            json!([{ "id": "c", "seen": 1 }, { "id": "a", "seen": 1 }, { "id": "d", "seen": 0 }]),
+            json!([]),
+        ];
+        let mut sent = None;
+        let mut shown: Vec<serde_json::Value> = Vec::new();
+        let mut frames = Vec::new();
+        for list in &lists {
+            let rows = list.as_array().unwrap().clone();
+            let (frame, now) = keyed_frame(rows, "id", sent.take());
+            sent = Some(now);
+            if let Some(frame) = &frame {
+                shown = apply_frame(&shown, frame, "id");
+            }
+            assert_eq!(&serde_json::Value::Array(shown.clone()), list);
+            frames.push(frame);
+        }
+        assert!(frames[0].as_ref().unwrap().is_array(), "the whole list first");
+        assert_eq!(frames[1], Some(json!({ "changed": [{ "id": "b", "seen": 2 }], "removed": [] })));
+        assert_eq!(frames[2], None, "nothing changed: nothing sent");
+        assert_eq!(
+            frames[3],
+            Some(json!({ "changed": [{ "id": "d", "seen": 0 }], "removed": ["b"], "order": ["c", "a", "d"] }))
+        );
+        assert_eq!(frames[4], Some(json!({ "changed": [], "removed": ["c", "a", "d"] })));
+    }
+
+    /// Without asking, a watch is the whole list, as older viewports read it.
+    #[test]
+    fn changes_are_opt_in() {
+        assert!(!wants_changes(&serde_json::json!({})));
+        assert!(!wants_changes(&serde_json::Value::Null));
+        assert!(wants_changes(&serde_json::json!({ "changes": true })));
+    }
+
     #[tokio::test]
     async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -5893,9 +6151,10 @@ mod tests {
             forward_deadline(methods::CLONE_REPO),
             Duration::from_secs(15 * 60)
         );
-        assert_eq!(
-            forward_deadline(methods::APPLY_HARNESS_UPDATE),
-            Duration::from_secs(20 * 60)
+        // Never shorter than the updater it waits on.
+        assert!(
+            forward_deadline(methods::APPLY_HARNESS_UPDATE)
+                > crate::harness_updates::UPDATE_TIMEOUT
         );
         assert_eq!(
             forward_deadline(methods::CHECK_HARNESS_UPDATES),

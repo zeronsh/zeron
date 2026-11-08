@@ -258,6 +258,17 @@ pub mod methods {
     // its host's runtime: `{chatId, taskId}`, relay-forwardable.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
     pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
+    /// `{chatId, taskIds, waiting?}` → `{matched, unmatched}`: the agent says
+    /// it waits on these of its background processes (or, `waiting` false,
+    /// no longer), so its turn's end reads as a wait (Zeron's MCP
+    /// `wait_on_background`). An agent's always names its own chat. Refused
+    /// where the runtime doesn't wake its agent when the work ends. Local:
+    /// an agent's MCP server dials its chat's host.
+    pub const AWAIT_BACKGROUND: &str = "AwaitBackground";
+    /// `{chatId}` → `{stopped}`: the person's Stop waiting: the processes the
+    /// agent said it waits on no longer hold the chat (its background agents
+    /// still do). Relay-forwardable, to the chat's host.
+    pub const STOP_WAITING: &str = "StopWaiting";
     /// `{chatId, toolId, offset}` → `ToolOutputChunk`: one command's whole
     /// output, from the run journal of the device that ran it, redacted;
     /// relay-forwardable (target the chat's host).
@@ -486,6 +497,19 @@ pub mod methods {
     /// with a reason unless the plugin is installed, on and allowed here,
     /// in the same version, by the same author. A peer may call it.
     pub const SERVE_PLUGIN_CALL: &str = "ServePluginCall";
+    /// The app (a plugin's window): `{plugin, op, args?, device?}` →
+    /// `{ok: true, value}` | `{ok: false, reason, message}`. The agents'
+    /// usage, accounts and models as that plugin was allowed them on this
+    /// device, or on `device` (sent there as [`SERVE_PLUGIN_AGENTS`]).
+    /// `op: "listen"` with `listeners: [{key, event, opts}]` says what its
+    /// windows here listen for (`zeron.on`).
+    pub const PLUGIN_AGENTS: &str = "PluginAgents";
+    /// Peer to peer over the device link: `{plugin, version, authorKey?,
+    /// op, args?}` → as `PluginAgents`. Refused unless the caller is a
+    /// device the link verified and the plugin is installed and on here,
+    /// in the same version, by the same author; then what this device
+    /// allowed it decides. A peer may call it.
+    pub const SERVE_PLUGIN_AGENTS: &str = "ServePluginAgents";
     /// `{}` → stream (the app) of `{plugin, from: {id, name}, data, at}`.
     pub const WATCH_PLUGIN_CHANNEL: &str = "WatchPluginChannel";
     /// `{}` → `{key, registered}`.
@@ -629,6 +653,7 @@ pub fn local_only(method: &str) -> bool {
             | methods::PLUGIN_TOOL_RESULT
             | methods::PLUGIN_SEND
             | methods::CALL_PLUGIN_SERVICE
+            | methods::PLUGIN_AGENTS
             | methods::WATCH_PLUGIN_CHANNEL
             | methods::PLUGIN_SIGNING_KEY
             | methods::LIST_TEMPLATES
@@ -704,6 +729,8 @@ pub fn agent_allowed(method: &str) -> bool {
             // Showing the person something in the calling chat.
             | methods::PUBLISH_VISUAL
             | methods::PUBLISH_IMAGE
+            // Saying what the calling chat's agent waits on.
+            | methods::AWAIT_BACKGROUND
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, and their tools.
             | methods::LIST_PLUGINS
@@ -966,6 +993,10 @@ mod tests {
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));
         assert!(!local_only(methods::SERVE_PLUGIN_CALL));
+        assert!(local_only(methods::PLUGIN_AGENTS));
+        assert!(!local_only(methods::SERVE_PLUGIN_AGENTS));
+        // Never an agent's: a plugin's grants are its own.
+        assert!(!agent_allowed(methods::PLUGIN_AGENTS) && !agent_allowed(methods::SERVE_PLUGIN_AGENTS));
         // Your other devices manage this one's plugins (Settings → Plugins).
         for method in [
             methods::LIST_PLUGINS,

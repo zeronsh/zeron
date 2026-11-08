@@ -26,6 +26,20 @@ fn main() {
         .unwrap_or_else(|| version.clone());
     println!("cargo:rustc-env=ZERON_VERSION={version}");
     println!("cargo:rustc-env=ZERON_APP_VERSION={app}");
+
+    // On Windows, Zeron's icon in the exe: without one the taskbar shows
+    // the system's blank one, and zgx has none to give the window.
+    println!("cargo:rerun-if-changed=../../dist/windows/zeron.rc");
+    println!("cargo:rerun-if-changed=../../dist/windows/zeron.ico");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_resource::compile_for(
+            "../../dist/windows/zeron.rc",
+            &["zeron-zgx"],
+            embed_resource::NONE,
+        )
+        .manifest_required()
+        .expect("Windows app icon resource compilation failed");
+    }
 }
 
 /// `version = "…"` under `[workspace.package]`.
