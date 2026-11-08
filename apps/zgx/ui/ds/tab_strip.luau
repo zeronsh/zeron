@@ -39,6 +39,9 @@
 --   strip.preview(id)         a tab's `drag_preview`: shown off the strip
 --   strip.opacity(id)         a tab's: gone while it's carried (its gap)
 --   strip.busy()              (untracked) a tab carried or settling
+--
+--   TabStrip.Wash(lit)          a tab's hover wash, fading
+--   TabStrip.keys(id, list, go, ref_of)   a tab's `on_key`: arrows, Home, End
 
 local motion = require("@self/motion")
 
@@ -76,6 +79,41 @@ function M.Wash(lit: () -> boolean): Node
 		pointer_events = "none",
 		opacity = motion.tween(on, motion.hover()),
 	}
+end
+
+-- A tab's `on_key`: the arrows, Home and End go to the tab beside it, or
+-- at an end, and choose it (`go`), the keyboard going with them, as ds/tabs'
+-- do. `list` the tabs in order, `ref_of` a tab's ref.
+function M.keys(id: string, list: () -> { string }, go: (id: string) -> (), ref_of: (id: string) -> any): (e: any) -> boolean
+	return function(e: any): boolean
+		if e.shift or e.ctrl or e.alt or e.meta then
+			return false
+		end
+		local tabs = list()
+		local at = table.find(tabs, id)
+		if not at or #tabs == 0 then
+			return false
+		end
+		local to = if e.key == "ArrowLeft"
+			then math.max(1, at - 1)
+			elseif e.key == "ArrowRight" then math.min(#tabs, at + 1)
+			elseif e.key == "Home" then 1
+			elseif e.key == "End" then #tabs
+			else nil
+		if not to then
+			return false
+		end
+		local next_id = tabs[to]
+		if next_id ~= id then
+			go(next_id)
+			local r = ref_of(next_id)
+			local el = if r then r:peek() else nil
+			if el then
+				el:focus()
+			end
+		end
+		return true
+	end
 end
 
 export type HighlightProps = {

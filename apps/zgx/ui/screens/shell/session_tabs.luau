@@ -9,6 +9,7 @@
 
 local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
+local control = require("@ds/control")
 local SessionRow = require("@ds/session_row")
 local motion = require("@ds/motion")
 local TabStrip = require("@ds/tab_strip")
@@ -391,6 +392,14 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 					close(id)
 				end
 			end,
+			focus = control.ring,
+			on_key = TabStrip.keys(id, function(): { string }
+				return shown:peek()
+			end, function(other: string)
+				route.open_session(face(other))
+			end, function(other: string): any
+				return tab_refs[other]
+			end),
 			-- Dragged, it lifts and follows the pointer along the strip, the others
 			-- making room (`ds/tab_strip`); let go, it stays where it lands.
 			-- (`session`, as a sidebar row's: carried off the strip onto a pane, it

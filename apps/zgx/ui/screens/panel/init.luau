@@ -942,6 +942,17 @@ M.Panel = ui.component(function(props: Props): Node
 						close(id)
 					end
 				end,
+				focus = control.ring,
+				on_key = TabStrip.keys(id, function(): { string }
+					return strip.order:peek()
+				end, function(other: string)
+					local k = key:peek()
+					if k then
+						state.activate(k, other)
+					end
+				end, function(other: string): any
+					return chip_refs[other]
+				end),
 				-- Dragged, it lifts and follows the pointer along the strip, the
 				-- others making room (`ds/tab_strip`); let go, it stays where it
 				-- lands.
