@@ -159,7 +159,7 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "1ee856c75f3e3610a
 # the registry, until zgx reports them (zgx-asks/windows-transparency); a
 # visual's thread CPU time (src/visuals.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_System_Registry", "Win32_System_Threading"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
