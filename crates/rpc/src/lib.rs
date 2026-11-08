@@ -449,9 +449,16 @@ pub mod methods {
     pub const GITHUB_CONNECT_START: &str = "GithubConnectStart";
     /// `{flowId}` → `GithubConnectProgress`.
     pub const GITHUB_CONNECT_POLL: &str = "GithubConnectPoll";
-    /// Repositories the account's vault-held GitHub connection can see,
+    /// The GitHub logins connected for Cloud: `{}` → `{accounts: VaultAccount[]}`.
+    pub const GITHUB_ACCOUNTS: &str = "GithubAccounts";
+    /// Disconnect one login, leaving the others: `{slot}` → `{accounts}`. Its
+    /// sessions stay on it, and say so, until it's connected again.
+    pub const GITHUB_ACCOUNT_FORGET: &str = "GithubAccountForget";
+    /// The login new sessions try first: `{slot}` → `{accounts}`.
+    pub const GITHUB_ACCOUNT_ACTIVATE: &str = "GithubAccountActivate";
+    /// Repositories the account's vault-held GitHub logins can see, merged,
     /// newest push first: `{query?}` → `{repos: GithubRepo[]}`. Answered via
-    /// the edge (the vault calls GitHub; the token never leaves it), so any
+    /// the edge (the vault calls GitHub; the tokens never leave it), so any
     /// signed-in device can list them; a Cloud session device answers with
     /// its own grant. Fails with a `github_not_connected:`-prefixed message
     /// when GitHub isn't connected.

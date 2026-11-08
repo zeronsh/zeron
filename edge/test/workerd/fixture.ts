@@ -90,6 +90,14 @@ export class VaultStub extends WorkerEntrypoint {
       { fullName: "acme/app", cloneUrl: "https://github.com/acme/app.git", defaultBranch: "main", private: true, pushedAt: 2 }
     ]);
   }
+  githubListing(caller: Caller, query?: string) {
+    return this.answer("githubListing", [caller, query], {
+      repos: [
+        { fullName: "acme/app", cloneUrl: "https://github.com/acme/app.git", defaultBranch: "main", private: true, pushedAt: 2, installationId: 7, account: "ada", accounts: ["ada"] }
+      ],
+      installations: [{ id: 7, target: "acme", targetType: "Organization", reachedBy: ["ada"] }]
+    });
+  }
   githubBranches(caller: Caller, repo: string) {
     return this.answer("githubBranches", [caller, repo], ["main", "dev"]);
   }

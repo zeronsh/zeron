@@ -37,6 +37,31 @@ describe("/vault routes → VAULT service binding", () => {
     expect((await call("POST", "/vault/org1/github/device/f1", bearer)).status).toBe(200);
     expect((await lastCall("githubDevicePoll")).args).toEqual([caller, "f1"]);
 
+    // The repositories across logins, as an old client still parses them, with
+    // the App installations they come through alongside.
+    const listing = (await (await call("GET", "/vault/org1/github/repos?q=app", bearer)).json()) as {
+      repos: Record<string, unknown>[];
+      installations: Record<string, unknown>[];
+    };
+    expect(listing.repos[0]).toMatchObject({
+      fullName: "acme/app",
+      cloneUrl: "https://github.com/acme/app.git",
+      defaultBranch: "main",
+      private: true,
+      pushedAt: 2,
+      installationId: 7,
+      account: "ada"
+    });
+    expect(listing.installations).toEqual([{ id: 7, target: "acme", targetType: "Organization", reachedBy: ["ada"] }]);
+    expect((await lastCall("githubListing")).args).toEqual([caller, "app"]);
+
+    // A login is forgotten by its own route, and a user's grant names no parent
+    // whatever its body says.
+    expect(await (await call("DELETE", "/vault/org1/accounts/github/a1", bearer)).json()).toEqual({ accounts: [] });
+    expect((await lastCall("forgetAccount")).args).toEqual([caller, "github", "a1"]);
+    expect((await call("POST", "/vault/org1/grant", bearer, { ...grant, inheritFrom: "cloud-other" })).status).toBe(200);
+    expect((await lastCall("grant")).args).toEqual([caller, grant]);
+
     expect(await (await call("GET", "/vault/org1/github/branches?repo=acme/app", bearer)).json()).toEqual({
       branches: ["main", "dev"]
     });

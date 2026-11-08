@@ -3,6 +3,7 @@
  * sessions for child chats (each on a machine of its own), sees and manages
  * those children, and nothing else — no other main chat, no grandchildren.
  */
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { encodeHlc, type Op } from "../../src/registry-core";
 import {
@@ -232,5 +233,30 @@ describe("Cloud delegates", () => {
     // Waiting on an answer counts as stopped: the parent has to hear of it.
     expect((await beat({ activeRuns: 1, waitingRuns: 1 })).status).toBe(200);
     await waitForSession(u, main.chatId, "starting");
+  });
+
+  it("a delegate's GitHub grant names its parent's machine; a main chat's names none, and no body can", async () => {
+    const { u, main, runner } = await world();
+    const github = { provider: "github", ts: Date.now(), sig: "c2ln", repo: "acme/app" };
+    const lastGrant = async () => (await env.VAULT.calls()).filter((c) => c.method === "grant").at(-1)!.args[1];
+
+    const asMain = { ...github, deviceId: main.deviceId };
+    expect((await call("POST", "/vault/org1/grant", runner, { ...asMain, inheritFrom: "cloud-other" })).status).toBe(200);
+    expect(await lastGrant()).toEqual(asMain);
+
+    const { deviceId } = (await (await startChild(u, runner, `child-${rand()}`, main.chatId)).json()) as { deviceId: string };
+    const key = await runnerKey();
+    expect((await enroll(u, deviceId, await enrollCodeFor(deviceId), key.publicKey)).status).toBe(200);
+    const childRunner = `Bearer ${await runnerToken(u, deviceId, key)}`;
+    const asChild = { ...github, deviceId };
+    expect((await call("POST", "/vault/org1/grant", childRunner, { ...asChild, inheritFrom: "cloud-other" })).status).toBe(200);
+    expect(await lastGrant()).toEqual({ ...asChild, inheritFrom: main.deviceId });
+    // Still its own repository only.
+    expect((await call("POST", "/vault/org1/grant", childRunner, { ...asChild, repo: "acme/other" })).status).toBe(403);
+
+    // Another provider's grant asks nothing of the session.
+    const codex = { provider: "codex", deviceId, ts: Date.now(), sig: "c2ln" };
+    expect((await call("POST", "/vault/org1/grant", childRunner, codex)).status).toBe(200);
+    expect(await lastGrant()).toEqual(codex);
   });
 });

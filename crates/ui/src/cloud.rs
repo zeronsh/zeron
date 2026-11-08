@@ -561,6 +561,7 @@ mod tests {
             private: false,
             description: description.map(str::to_string),
             pushed_at,
+            ..Default::default()
         }
     }
 

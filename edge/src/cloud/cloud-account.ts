@@ -1895,6 +1895,14 @@ export class CloudAccount extends DurableObject<Env> {
     console.info(JSON.stringify({ event: "cloud.wake_timing", chatId: s.chatId, complete: engine !== undefined, ...timing }));
   }
 
+  /** The machine of the session that started this one, for a delegate: it
+   * works as the same GitHub login. */
+  async parentDeviceOf(caller: CloudCaller, deviceId: string): Promise<string | undefined> {
+    if (!this.matches(caller)) return undefined;
+    const parent = this.sessionByDevice(deviceId)?.parentChatId;
+    return parent === undefined ? undefined : this.sessions.get(parent)?.deviceId;
+  }
+
   /** `POST /runner/heartbeat` (runner bearer, already verified). */
   async heartbeat(
     runner: CloudCaller & { deviceId: string },
