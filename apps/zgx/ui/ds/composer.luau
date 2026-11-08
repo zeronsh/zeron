@@ -89,7 +89,7 @@ export type Notice = {
 export type Answer = { values: { string }, text: string }
 -- Where an existing chat works (`branch_fixed`).
 export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string? }
-export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean }
+export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
 	on_sizes: ((sizes: Sizes) -> ())?,
 	value: State<string>,
@@ -1096,7 +1096,14 @@ return ui.component(function(props: Props): Node
 			target_geometry:set(next)
 		end)
 	end)
-	local transition = ComposerMotion.use(target_geometry, props.snap)
+	local settlement = ui.computed(function()
+		local metrics_now = metrics.result:get()
+		local actual = pill.height
+		return { revision = metrics_now.revision,
+			status = if metrics_now.status == "ready" and actual ~= nil
+				and math.abs(actual - target_geometry:get().height) < 0.5 then "ready" else "pending" }
+	end)
+	local transition = ComposerMotion.use(target_geometry, props.snap, settlement)
 	local frame_geometry = transition.frame
 	-- Every binding reads the same frame snapshot; none starts an animation.
 	local function presented(select: (Layout.Geometry) -> number): () -> number
@@ -2301,10 +2308,12 @@ return ui.component(function(props: Props): Node
 			local footer_h, deck_h, actual = footer_size.height, deck_size.height, outer_size.height
 			local target = target_geometry:get()
 			local active = transition.active:get()
-			local ready = metrics.result:get().status == "ready"
+			local ready = settlement:get().status == "ready"
+			local settling = transition.settling:get()
+			local context = if props.snap then props.snap:get() else 0
 			if footer_h ~= nil and deck_h ~= nil and actual and actual > 0 then
 				on_sizes({ rest = rest + footer_h + deck_h, target = target.height + footer_h + deck_h,
-					presented = actual, active = active, ready = ready })
+					presented = actual, active = active, ready = ready, settling = settling, context = context })
 			end
 		end)
 	end

@@ -99,3 +99,10 @@ not establish that the original visual glitch is fixed.
 The C3 before/after trace comparison against C2 covered 786 samples. After
 normalizing editor node IDs, all observed values matched, including target
 rectangles and intermediate presented geometry, focus, selection and draft.
+
+Context changes snap until the current metric revision is ready and the pill
+has been laid out at its destination. A deferred acknowledgement verifies both
+revision and context; replacement or unmount cancels it. This is independent of
+elapsed time. Page placement consumes the same acknowledgement. The 220 ms
+geometry animation and 260 ms intentional send/picker movement remain animation
+durations, not measurement deadlines. Sidebar movement follows page layout.

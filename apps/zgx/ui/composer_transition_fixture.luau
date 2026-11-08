@@ -2,13 +2,15 @@
 local ds = require("@ds")
 local Layout = require("@ds/composer_layout")
 local Motion = require("@ds/composer_motion")
-local clock = require("@ds/composer_clock")
 ds.setup()
-local now = ui.state("fixture_transition_now", 0)
-clock.now = function() return now:peek() end
 local height = ui.state("fixture_transition_height", 22)
 local shown = ui.state("fixture_transition_shown", true)
 local snap = ui.state("fixture_transition_snap", 0)
+local ready = ui.state("fixture_transition_ready", true)
+local revision = ui.state("fixture_transition_revision", 0)
+local settlement = ui.computed(function()
+	return { revision = revision:get(), status = if ready:get() then "ready" else "pending" }
+end)
 local report = ui.state("fixture_transition_report", {} :: any)
 local target = ui.computed(function()
 	return Layout.calculate({
@@ -27,12 +29,12 @@ ui.command {
 	run = function()
 		if last then
 			report:set({ frame = last.frame:peek(), origin = last.origin:peek(),
-				destination = last.destination:peek(), progress = last.progress:peek(), active = last.active:peek() })
+				destination = last.destination:peek(), progress = last.progress:peek(), active = last.active:peek(), settling = last.settling:peek() })
 		end
 	end,
 }
 local Controller = ui.component(function(): Node
-	last = Motion.use(target, snap)
+	last = Motion.use(target, snap, settlement)
 	local own = last
 	return ui.div { w = 660, h = function() return own.frame:get().height end }
 end)

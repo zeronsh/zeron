@@ -2,7 +2,6 @@ use zgx_script::{ScriptHost, Value, testing::TestApp};
 
 struct Controller {
     app: TestApp,
-    frame: u32,
 }
 
 impl Controller {
@@ -11,7 +10,7 @@ impl Controller {
             .join("ui/composer_transition_fixture.luau");
         let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
         app.ui.scene.borrow_mut().resize(800., 600.);
-        let mut c = Self { app, frame: 0 };
+        let mut c = Self { app };
         c.frames(30);
         c
     }
@@ -26,11 +25,6 @@ impl Controller {
 
     fn frames(&mut self, n: usize) {
         for _ in 0..n {
-            self.frame += 1;
-            self.set(
-                "fixture_transition_now",
-                Value::Num(f64::from(self.frame) * 1000. / 60.),
-            );
             self.app.frame();
             assert_eq!(self.app.error(), None);
         }
@@ -121,13 +115,19 @@ fn composer_transition_context_and_reduce_motion_snap_and_cancel_the_running_cli
     let mut c = Controller::new();
     c.height(132.);
     c.frames(3);
+    c.set("fixture_transition_ready", Value::Bool(false));
     c.set("fixture_transition_snap", Value::Num(1.));
     let snapped = c.report();
     assert_eq!(snapped.field("frame"), snapped.field("destination"));
     assert_eq!(snapped.field("active"), Some(&Value::Bool(false)));
-    c.height(500.); // A measurement settling during the context's snap window.
+    c.frames(100); // Readiness is independent of how long the machine takes.
+    assert_eq!(c.report().field("settling"), Some(&Value::Bool(true)));
+    c.height(500.); // A late measurement still belongs to the same context.
     assert_eq!(c.report().field("frame"), c.report().field("destination"));
-    c.frames(30);
+    c.set("fixture_transition_revision", Value::Num(2.));
+    c.set("fixture_transition_ready", Value::Bool(true));
+    c.frames(2);
+    assert_eq!(c.report().field("settling"), Some(&Value::Bool(false)));
     c.height(100.);
     c.frames(3);
     assert_eq!(c.report().field("active"), Some(&Value::Bool(true)));
@@ -171,4 +171,22 @@ fn composer_transition_unmount_freezes_progress_and_remount_owns_a_new_controlle
     assert_eq!(c.report().field("active"), Some(&Value::Bool(true)));
     c.frames(30);
     assert_eq!(c.report().field("frame"), c.report().field("destination"));
+}
+
+#[test]
+fn composer_transition_replaced_context_cannot_acknowledge_a_pending_revision() {
+    let mut c = Controller::new();
+    c.set("fixture_transition_snap", Value::Num(1.));
+    // Replace the context before its deferred acknowledgement can run.
+    c.set("fixture_transition_ready", Value::Bool(false));
+    c.set("fixture_transition_revision", Value::Num(2.));
+    c.set("fixture_transition_snap", Value::Num(2.));
+    c.height(500.);
+    c.frames(40);
+    assert_eq!(c.report().field("settling"), Some(&Value::Bool(true)));
+    assert_eq!(c.report().field("frame"), c.report().field("destination"));
+    c.set("fixture_transition_ready", Value::Bool(true));
+    c.frames(2);
+    assert_eq!(c.report().field("settling"), Some(&Value::Bool(false)));
+    assert!(!c.app.clock.wants_frame());
 }

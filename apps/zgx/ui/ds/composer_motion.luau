@@ -85,9 +85,8 @@ function M.same_destination(a: Layout.Geometry, b: Layout.Geometry): boolean
 	return true
 end
 
-function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?)
+function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, settlement: ReadOnlyState<{ revision: number, status: string }>?)
 	local motion = require("@self/motion")
-	local clock = require("@self/composer_clock")
 	local initial = target:peek()
 	local origin = ui.use_state(initial)
 	local destination = ui.use_state(initial)
@@ -99,7 +98,8 @@ function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?)
 	local run: any = nil
 	local alive, generation = true, 0
 	local snap_seen = if snap then snap:peek() else nil
-	local snap_until = 0
+	local settling = ui.use_state(false)
+	local cancel_ack: (() -> ())? = nil
 	local function cancel()
 		generation += 1
 		if run then
@@ -119,16 +119,32 @@ function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?)
 	ui.effect(function()
 		local next = target:get()
 		local reduced = motion.reduced()
+		local measured = if settlement then settlement:get() else { revision = 0, status = "ready" }
+		if cancel_ack then cancel_ack(); cancel_ack = nil end
 		if snap then
 			local n = snap:get()
 			if n ~= snap_seen then
 				snap_seen = n
-				-- Keep C3's context-settle window; replacing deadlines is C6.
-				snap_until = clock.now() + 400
+				settling:set(true)
 			end
 		end
-		if reduced or clock.now() < snap_until then
+		if reduced then
 			settle(next)
+			settling:set(false)
+			return
+		end
+		if settling:peek() then
+			settle(next)
+			if measured.status == "ready" then
+				local context, revision = snap_seen, measured.revision
+				cancel_ack = ui.after(0, function()
+					local current = if settlement then settlement:peek() else measured
+					if alive and context == snap_seen and current.status == "ready"
+						and current.revision == revision and M.same_destination(target:peek(), next) then
+						settling:set(false)
+					end
+				end)
+			end
 			return
 		end
 		if M.same_destination(destination:peek(), next) then
@@ -160,9 +176,10 @@ function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?)
 	end)
 	ui.on_cleanup(function()
 		alive = false
+		if cancel_ack then cancel_ack() end
 		cancel()
 	end)
-	return { frame = frame, origin = origin, destination = destination, progress = progress, active = active }
+	return { frame = frame, origin = origin, destination = destination, progress = progress, active = active, settling = settling }
 end
 
 return M
