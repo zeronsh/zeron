@@ -453,6 +453,20 @@ local function checkout_here(id: string?): string?
 	return id
 end
 
+-- peeked, not tracked: read from a shortcut or a click, never a computed
+route.narrowed_project(function(): string?
+	if not shared.details.project_filter:peek() then
+		return nil
+	end
+	local id = shared.project:peek()
+	for _, p in sessions.now:peek().projects do
+		if p.id == id then
+			return checkout_here(id)
+		end
+	end
+	return nil
+end)
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
