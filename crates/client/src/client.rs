@@ -1529,6 +1529,11 @@ impl Client {
     /// the last cached list, else the static fallback. Cached in memory for
     /// capability gating (mid-turn steering).
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
+        // A Cloud machine runs Claude Code and Codex, every one of them: said
+        // here, so a chat on one that's asleep never waits on dialling it.
+        if let Some(list) = catalog::harnesses_without_asking(device_id) {
+            return list;
+        }
         let list = match self.inner.backend() {
             Backend::Demo(demo) => {
                 crate::providers::with_demo_toggles(true, demo.list_harnesses(device_id).await)

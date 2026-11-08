@@ -1149,6 +1149,14 @@ impl EngineRpc {
                         "Cloud runs Codex and Claude Code only".into(),
                     )));
                 }
+                // What Cloud's machines run: the edge's list (the last one read,
+                // when it's out of reach), as a phone reads it. This computer's
+                // own catalog only before either: it fails where an agent isn't
+                // installed or signed in here, and Cloud's are signed in on the
+                // machine.
+                if let Some(models) = self.cloud_models(p.harness).await {
+                    return Some(RpcReply::value(&models));
+                }
                 Some(self.handle(method, local(&[])).await)
             }
             methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
@@ -1160,6 +1168,31 @@ impl EngineRpc {
             ))),
             _ => None,
         }
+    }
+
+    /// Cloud's models for `harness`: the edge's list, kept on disk as it's
+    /// read, else the last one kept. `None` before the edge was ever read, or
+    /// with nothing listed for it.
+    async fn cloud_models(&self, harness: HarnessId) -> Option<Vec<zeron_proto::Model>> {
+        let key = serde_json::to_value(harness).ok()?.as_str()?.to_owned();
+        let path = self.repos.data_dir().join("cloud-models.json");
+        let listed = match self.cloud().models().await {
+            Ok(listed) => {
+                if let Ok(bytes) = serde_json::to_vec(&listed) {
+                    if let Err(error) = std::fs::write(&path, bytes) {
+                        tracing::warn!(%error, "Could not keep Cloud's models");
+                    }
+                }
+                listed
+            }
+            Err(error) => {
+                tracing::debug!(%error, "Cloud's models: the last list kept");
+                let bytes = std::fs::read(&path).ok()?;
+                serde_json::from_slice(&bytes).ok()?
+            }
+        };
+        let models = crate::cloud_client::cloud_models(listed.get(&key)?);
+        (!models.is_empty()).then_some(models)
     }
 
     /// `ListCloudBranches {repo, defaultBranch?}`: the branches a Cloud
@@ -2952,6 +2985,17 @@ impl RpcService for EngineRpc {
             .await;
         }
         if crate::cloud_client::handles(method) {
+            // The person wakes a chat's machine (a size picked, a fresh one):
+            // what waited for it goes with its clock started now, however
+            // long it waited. First, so the machine finds it as it boots.
+            if matches!(
+                method,
+                methods::CLOUD_SESSION_WAKE | methods::CLOUD_SESSION_RETRY
+            ) && let Ok(p) = serde_json::from_value::<ChatParams>(params.clone())
+                && let Err(err) = self.doc_host.restart_waiting_clocks(&p.chat_id)
+            {
+                tracing::warn!(chat = %p.chat_id, %err, "waiting messages not restarted for a wake");
+            }
             return Box::pin(crate::cloud_client::dispatch(
                 self.cloud(),
                 &self.agent_accounts,

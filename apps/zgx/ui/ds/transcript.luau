@@ -124,6 +124,11 @@ export type Props = {
 	on_attach: ((q: Quote.Quote) -> ())?,
 	-- A prompt that wasn't delivered, sent again (by its id).
 	on_retry: ((id: string) -> ())?,
+	-- What an unfinished turn's foot says in its working word's place, when
+	-- there's no turn to speak of (its host gone, its machine asleep): the
+	-- caller's, for a message (nil: the working word). `sending`: a prompt
+	-- whose reply hasn't begun.
+	turn_state: ((m: Message, sending: boolean) -> TurnLine?)?,
 	-- "Jump to latest" pressed. (It has the keys, and leaves as the view
 	-- arrives: this says where they go instead of the next control's, which
 	-- may be another chat's.)
@@ -466,11 +471,18 @@ end
 -- word and clock, as Zeron's working trailer (transcript.rs); not
 -- delivered, a line to send it again. The reply's own row takes over once
 -- it comes.
-local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?): Node
+local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
+	local function said(): TurnLine?
+		local m = row:get()
+		return if turn_state and m.waiting and m.waiting ~= "failed" then turn_state(m, m.waiting == "sending") else nil
+	end
 	return ui.presence(function(): string?
 		local w = row:get().waiting
-		return if w == "failed" then "failed" elseif w then "waiting" else nil
+		return if w == "failed" then "failed" elseif w and said() then "said" elseif w then "waiting" else nil
 	end, function(kind: string): Node
+		if kind == "said" then
+			return ui.row { w_full = true, mt = "$space.4", turn_line(said) }
+		end
 		if kind == "failed" then
 			return ui.button {
 				label = locale.t("ds.transcript.not_delivered"),
@@ -542,7 +554,33 @@ end
 -- (Markdown's `window`), so a long reply builds only what's near the view.
 -- (And the pictures its replies show: Props' `pictures`.)
 -- (`at_end`: whether the list rests at its end, the end then what it holds.)
+export type TurnLine = { text: string, spinner: boolean? }
+
+-- The line said in a working word's place: a ring while it's still on its
+-- way, then its words, in the working word's quiet ink.
+local function turn_line(line: () -> TurnLine?): Node
+	return ui.row {
+		gap = "$space.2",
+		items = "center",
+		role = "status",
+		ui.show(function(): boolean
+			local l = line()
+			return l ~= nil and l.spinner == true
+		end, status.StatusIcon { kind = "working", size = 14 }),
+		ui.text {
+			function(): string
+				local l = line()
+				return if l then l.text else ""
+			end,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = "$text.tertiary",
+		},
+	}
+end
+
 type View = {
+	turn_state: ((m: Message, sending: boolean) -> TurnLine?)?,
 	view: Ref,
 	offset: State<number>,
 	at_end: State<boolean>?,
@@ -772,8 +810,21 @@ local function reply(
 			h = LANE,
 			mt = ui.raw(-12, "the lane sits under the text, not a block gap below it"),
 			ui.presence(function()
-				return if now().streaming then "working" else nil
-			end, function()
+				if not now().streaming then
+					return nil
+				end
+				-- (No turn to speak of: why, in the working word's place.)
+				local said = view and view.turn_state and view.turn_state(now(), false)
+				return if said then "said" else "working"
+			end, function(kind: string)
+				if kind == "said" then
+					return ui.column {
+						mt = ui.raw(8, "the block gap less the indicator's own line spacing"),
+						turn_line(function(): TurnLine?
+							return view and view.turn_state and view.turn_state(now(), false)
+						end),
+					}
+				end
 				return ui.column {
 					-- (Where it stood as a slot of its own: the block gap less
 					-- the 4 its own line height already gives.)
@@ -1672,9 +1723,9 @@ local function Transcript(props: Props): Node
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 						},
 						strip(m, state, hovered),
-						waiting_line(state, props.on_retry),
+						waiting_line(state, props.on_retry, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
 			},
 		}
 	end

@@ -22,6 +22,19 @@
 --   cloud_stub.old_host        an engine from before several logins: no list
 --   cloud_stub.purchase_lands  a Stripe page's purchase lands: 12,000 extra
 --   cloud_stub.fail_next       the next Cloud or Billing call fails ("failed")
+--   cloud_stub.old_edge        an edge from before machines: no sizes, plain
+--                              sessions
+--   cloud_stub.session.<case>  the chat's Cloud session, as `cloud_stub_sessions`
+--                              says: sleeping, waking, staged, provisioning,
+--                              ready, updating, slow, restored, failed, blocked,
+--                              blocked_none, disk_ok,
+--                              disk_warn, disk_critical, expiring, expires_today,
+--                              expired, gone
+--   cloud_stub.refuse_wake     the next wake is refused as too small
+--   cloud_stub.age_held        what's held back was written two days ago
+--   cloud_stub.age_held_ten_days  ... ten days ago (past any message's week)
+--   cloud_stub.clear_held      nothing's held back
+--   cloud_stub.refuse_machine  the default size can't be changed
 
 local auth = require("@account/auth")
 local cloud = require("@account/cloud")
@@ -29,6 +42,9 @@ local billing = require("@account/billing")
 local github = require("@account/github")
 
 local calls = ui.state("cloud_stub_calls", {} :: { string })
+-- (Kept across launches in the app: here, each fixture starts with none.)
+local Held = require("@app/screens/chat/held")
+Held.all:set({})
 local function log(entry: string)
 	calls:push(entry)
 end
@@ -65,6 +81,20 @@ local function answer(value: any): any
 	return settled(value)
 end
 
+-- The sizes the edge offers (absent on an old edge), and the default chosen.
+local MACHINES: { cloud.Machine } = {
+	{ id = "small", name = "Small", vcpu = 1, memory_gb = 2, disk_gb = 20, rate = 0.5 },
+	{ id = "default", name = "Standard", vcpu = 2, memory_gb = 4, disk_gb = 50, rate = 1 },
+	{ id = "large", name = "Large", vcpu = 4, memory_gb = 16, disk_gb = 111, rate = 2 },
+	{ id = "xlarge", name = "Extra large", vcpu = 8, memory_gb = 32, disk_gb = 400, rate = 5.56 },
+}
+local old_edge = ui.state("cloud_stub_old_edge", false)
+local chosen_machine = ui.state("cloud_stub_machine", "default")
+local refuse_wake = ui.state("cloud_stub_refuse_wake", false)
+local refuse_machine = ui.state("cloud_stub_refuse_machine", false)
+-- The chat's session, as the edge says it now.
+local session_now = ui.state("cloud_stub_session", nil :: any)
+
 local DEVICE = "cloud-account-1"
 local state = "ready"
 local function status(): cloud.Status
@@ -78,6 +108,8 @@ local function status(): cloud.Status
 		credits = 44095,
 		awake = 0,
 		max_awake = 5,
+		machines = if old_edge:peek() then nil else MACHINES,
+		machine = if old_edge:peek() then nil else chosen_machine:peek(),
 	}
 end
 
@@ -153,6 +185,60 @@ c.usage = function(from: string, to: string): any
 		table.insert(days, { day = string.format("2026-10-%02d", i), credits = credits })
 	end
 	return answer { days = days, credits = 1505, balance = 44095, available = true }
+end
+-- (The host's calls alone: account/cloud's own handling of them runs.)
+c.ask_sessions = function(): any
+	log("cloud.sessions")
+	return answer(if session_now:peek() then { session_now:peek() } else {})
+end
+c.ask_wake = function(args: any): any
+	log(`cloud.wake:{args.chat}:{args.machine or "-"}`)
+	if refuse_wake:peek() then
+		refuse_wake:set(false)
+		return settled(nil, "disk_too_small")
+	end
+	if fail:peek() then
+		return answer(nil)
+	end
+	local s = table.clone(session_now:peek() or {})
+	-- (As the edge: an expired machine only comes back fresh; one that's up
+	-- won't change size.)
+	if s.state == "data_expired" then
+		return settled(nil, "This machine's files were deleted after it slept for too long.")
+	elseif s.state == "ready" and args.machine and args.machine ~= s.machine then
+		return settled(nil, "A machine changes size while it sleeps. Put it to sleep first.")
+	end
+	s.state, s.wake_blocked, s.machine = "starting", nil, args.machine or s.machine
+	session_now:set(s)
+	return answer(s)
+end
+c.ask_sleep = function(args: any): any
+	log(`cloud.sleep:{args.chat}`)
+	if fail:peek() then
+		return answer(nil)
+	end
+	local s = table.clone(session_now:peek() or {})
+	s.state = "stopping"
+	session_now:set(s)
+	return answer(s)
+end
+c.ask_retry = function(args: any): any
+	log(`cloud.retry:{args.chat}:{args.machine or "-"}`)
+	if fail:peek() then
+		return answer(nil)
+	end
+	local s = table.clone(session_now:peek() or {})
+	s.state, s.machine = "provisioning", args.machine or s.machine
+	session_now:set(s)
+	return answer(s)
+end
+c.ask_set_machine = function(machine: string): any
+	log(`cloud.set_machine:{machine}`)
+	if refuse_machine:peek() then
+		return settled(nil, "failed")
+	end
+	chosen_machine:set(machine)
+	return answer(status())
 end
 c.branches = function(repo: string, default: string?): any
 	log(`cloud.branches:{repo}`)
@@ -384,6 +470,108 @@ ui.command {
 		extra += 12000
 	end,
 }
+ui.command {
+	id = "cloud_stub.old_edge",
+	title = "An edge from before machines",
+	run = function()
+		old_edge:set(true)
+		cloud.load()
+	end,
+}
+ui.command {
+	id = "cloud_stub.refuse_machine",
+	title = "The default size can't be changed",
+	run = function()
+		refuse_machine:set(true)
+	end,
+}
+ui.command {
+	id = "cloud_stub.clear_held",
+	title = "Nothing's held back",
+	run = function()
+		Held.all:set({})
+	end,
+}
+local function age_held(days: number)
+	local all = {}
+	for chat, list in Held.all:peek() do
+		local aged = {}
+		for _, e in list do
+			local x = table.clone(e)
+			x.at -= days * 86400
+			table.insert(aged, x)
+		end
+		all[chat] = aged
+	end
+	Held.all:set(all)
+end
+ui.command {
+	id = "cloud_stub.age_held",
+	title = "What's held was written two days ago",
+	run = function()
+		age_held(2)
+	end,
+}
+ui.command {
+	id = "cloud_stub.age_held_ten_days",
+	title = "What's held was written ten days ago",
+	run = function()
+		age_held(10)
+	end,
+}
+ui.command {
+	id = "cloud_stub.refuse_wake",
+	title = "The next wake is refused as too small",
+	run = function()
+		refuse_wake:set(true)
+	end,
+}
+-- The session the fixture's chat has, by what the edge would say. (Its chat
+-- and machine ids the fixture's: `cloud_stub.session_ids` sets them.)
+local chat_id, device_id = "s2", "cloud-s2"
+-- When the `restored` case's machine rebuilt its store: one rebuild, however
+-- often it's read.
+local RESTORED_AT = os.time() - 3600
+local function session_of(fields: { [string]: any }): any
+	local s: { [string]: any } = { chat = chat_id, device = device_id, state = "sleeping", space = "atlas", repo = "acme/atlas", machine = "default" }
+	for k, v in fields do
+		s[k] = v
+	end
+	return s
+end
+local CASES: { [string]: () -> any } = {
+	sleeping = function() return session_of {} end,
+	waking = function() return session_of { state = "starting" } end,
+	staged = function() return session_of { state = "starting", stage = "clone" } end,
+	provisioning = function() return session_of { state = "provisioning" } end,
+	ready = function() return session_of { state = "ready", disk = { used = 10, capacity = 50, level = "ok" } } end,
+	updating = function() return session_of { state = "ready", stage = "updating", disk = { used = 10, capacity = 50, level = "ok" } } end,
+	slow = function() return session_of { state = "starting", stage = "slow" } end,
+	restored = function() return session_of { state = "ready", restored = RESTORED_AT, disk = { used = 10, capacity = 50, level = "ok" } } end,
+	failed = function() return session_of { state = "error", error = "The provider ran out of machines in this region.", failed_action = "wake" } end,
+	blocked = function() return session_of { wake_blocked = { reason = "disk_too_small", needed = 150 } } end,
+	blocked_none = function() return session_of { wake_blocked = { reason = "disk_too_small", needed = 900 } } end,
+	disk_ok = function() return session_of { state = "ready", disk = { used = 30, capacity = 50, level = "ok" } } end,
+	disk_warn = function() return session_of { state = "ready", disk = { used = 41.5, capacity = 50, level = "warn" } } end,
+	disk_critical = function() return session_of { state = "ready", disk = { used = 48, capacity = 50, level = "critical" } } end,
+	disk_critical_asleep = function() return session_of { disk = { used = 48, capacity = 50, level = "critical" } } end,
+	disk_warn_xlarge = function() return session_of { state = "ready", machine = "xlarge", disk = { used = 340, capacity = 400, level = "warn" } } end,
+	expiring = function() return session_of { expires = os.time() + 3 * 86400 } end,
+	expires_later = function() return session_of { expires = os.time() + 30 * 86400 } end,
+	expires_today = function() return session_of { expires = os.time() + 3600 } end,
+	expired = function() return session_of { state = "data_expired" } end,
+	gone = function() return nil end,
+}
+for name, make in CASES do
+	ui.command {
+		id = `cloud_stub.session.{name}`,
+		title = `The chat's Cloud session: {name}`,
+		run = function()
+			session_now:set(make())
+			cloud.load_sessions(true)
+		end,
+	}
+end
 ui.command {
 	id = "cloud_stub.fail_next",
 	title = "The next Cloud or Billing call fails",

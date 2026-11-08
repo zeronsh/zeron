@@ -419,6 +419,32 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent
+    /// (`claude-code`, `codex`), kept on the edge by hand so a new one needs no
+    /// app release. Each model is as the edge wrote it; [`cloud_models`] reads
+    /// them leniently.
+    pub async fn models(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<serde_json::Value>>, EngineError> {
+        #[derive(Deserialize)]
+        struct Models {
+            #[serde(default)]
+            models: std::collections::HashMap<String, Vec<serde_json::Value>>,
+        }
+        let reply = self
+            .target()?
+            .call::<Models>(
+                reqwest::Method::GET,
+                &["cloud", "models"],
+                &[],
+                None,
+                "Read Cloud's models",
+            )
+            .await
+            .map_err(Failure::into_error)?;
+        Ok(reply.models)
+    }
+
     /// `GET /vault/{orgId}/github/repos[?q=]` — the vault calls GitHub with
     /// the account's connection; the token never leaves it.
     pub async fn github_repos(&self, query: Option<&str>) -> Result<Vec<GithubRepo>, EngineError> {
@@ -1307,6 +1333,24 @@ impl Target {
 }
 
 
+/// The edge's models, as this engine's catalog takes them: each read alone, so
+/// one this build can't read (a reasoning level it doesn't know, say) drops
+/// that level or that model, never the list.
+pub fn cloud_models(listed: &[serde_json::Value]) -> Vec<zeron_proto::Model> {
+    listed
+        .iter()
+        .filter_map(|m| {
+            let mut m = m.clone();
+            if let Some(levels) = m.get_mut("reasoningLevels").and_then(|l| l.as_array_mut()) {
+                levels.retain(|l| {
+                    serde_json::from_value::<zeron_proto::ReasoningLevel>(l.clone()).is_ok()
+                });
+            }
+            serde_json::from_value::<zeron_proto::Model>(m).ok()
+        })
+        .collect()
+}
+
 fn available_vault(status: VaultStatus) -> VaultStatus {
     VaultStatus {
         available: true,
@@ -1626,6 +1670,20 @@ mod tests {
                 serde_json::json!({"error": "not_found", "message": "no route"}),
             ),
         }
+    }
+
+    #[test]
+    fn cloud_models_are_read_one_at_a_time() {
+        let listed = vec![
+            serde_json::json!({ "id": "opus", "label": "Opus", "reasoningLevels": ["low", "ultrathink", "someday"], "options": [] }),
+            serde_json::json!({ "label": "No id" }),
+            serde_json::json!({ "id": "sonnet", "label": "Sonnet" }),
+        ];
+        let models = cloud_models(&listed);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opus", "sonnet"]);
+        // A level this build doesn't know goes; the model stays.
+        assert_eq!(models[0].reasoning_levels.len(), 2);
     }
 
     #[tokio::test]

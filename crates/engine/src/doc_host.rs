@@ -59,6 +59,11 @@ fn checkpoint_fits(bytes: usize) -> bool {
 /// lock. Expiry fails closed into ReviewRequired rather than releasing.
 pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;
 
+/// A Cloud machine woken on the person's say-so takes a while to boot and read
+/// its chat: a waiting message whose clock runs out within this long goes
+/// again with a fresh one rather than expire on the way.
+const WAKE_BOOT_MARGIN_MS: i64 = 60 * 60 * 1000;
+
 /// Warm-doc LRU: how many unwatched, run-less docs stay fully open. Everything
 /// beyond this (and beyond [`zeron_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
 /// oldest-access-first — reopening from the SQLite snapshot measured within
@@ -5111,6 +5116,32 @@ impl DocHost {
     /// `pending://` refs (idempotent: re-pushing landed bytes re-commits the
     /// same file; the processed ledger keeps execution exactly-once).
     pub fn retry_delivery(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.retry_delivery_within(chat_id, 0)
+    }
+
+    /// The person woke a chat's Cloud machine (a size picked, a fresh
+    /// machine): what waited for it while it couldn't be woken goes now,
+    /// however long that was. A message's clock only runs once its machine can
+    /// take it, so one whose clock ran out while it waited — or would while
+    /// the machine boots — goes again with a fresh one, as a retry would send
+    /// it, and every other road is re-kicked as a retry does.
+    /// (A chat this device has no row for has nothing of ours waiting: its
+    /// doc isn't opened, which could mint it in the wrong room.)
+    pub fn restart_waiting_clocks(&self, chat_id: &str) -> Result<(), EngineError> {
+        let known = self
+            .workspace()
+            .and_then(|w| w.chat(chat_id).ok().flatten())
+            .is_some();
+        if !known {
+            return Ok(());
+        }
+        self.retry_delivery_within(chat_id, WAKE_BOOT_MARGIN_MS)
+    }
+
+    /// [`Self::retry_delivery`], also re-issuing a pending attempt whose clock
+    /// runs out within `ending_within` ms: it can't execute (or won't, by the
+    /// time its host reads it), and re-sending it is what the caller asked.
+    fn retry_delivery_within(&self, chat_id: &str, ending_within: i64) -> Result<(), EngineError> {
         let handle = self.open(chat_id)?;
         if let Some(chat2) = lock(&handle.chat2).as_ref() {
             chat2.redial();
@@ -5124,10 +5155,15 @@ impl DocHost {
         self.retry_held_sends(chat_id)?;
         let peer_transfers = self.peer_transfers_needed(chat_id);
         let commands = handle.doc.read_commands()?;
+        let ends_by = now_ms() + ending_within;
+        let ending = |c: &SessionCommandEntry| {
+            c.status == SessionCommandStatus::Pending && c.effective_expiry() <= ends_by
+        };
         let pending: Vec<SessionCommandEntry> = commands
             .iter()
             .filter(|c| {
                 c.status == SessionCommandStatus::Pending
+                    && !ending(c)
                     && !self.inner.store.is_processed(&c.id).unwrap_or(false)
             })
             .cloned()
@@ -5167,6 +5203,11 @@ impl DocHost {
                 // window. Expired: the entry outlived its TTL undelivered —
                 // an explicit user retry is exactly the consent to re-send.
                 SessionCommandStatus::Rejected | SessionCommandStatus::Expired => true,
+                // Its clock ran out unexecuted (its host would mark it
+                // Expired), or is about to: the same consent applies.
+                SessionCommandStatus::Pending if ending(c) => {
+                    !lock(&self.inner.executing).contains(&c.id)
+                }
                 SessionCommandStatus::Pending => {
                     self.inner.store.is_processed(&c.id).unwrap_or(false)
                         && !lock(&self.inner.executing).contains(&c.id)
@@ -5181,6 +5222,7 @@ impl DocHost {
             let live_attempt = commands.iter().any(|o| {
                 o.id != c.id
                     && o.status == SessionCommandStatus::Pending
+                    && !ending(o)
                     && !self.inner.store.is_processed(&o.id).unwrap_or(false)
                     && match (&o.payload, &c.payload) {
                         (
@@ -5212,12 +5254,12 @@ impl DocHost {
             if old.status == SessionCommandStatus::Pending {
                 // Terminalize the consumed-but-dead original so the doc tells
                 // the truth and the next retry pass doesn't see it again.
-                self.resolve_command(
-                    &handle,
-                    &old.id,
-                    SessionCommandStatus::Rejected,
-                    Some("interrupted before completion — superseded by retry"),
-                );
+                let why = if ending(old) {
+                    "its time ran out while it waited — superseded by retry"
+                } else {
+                    "interrupted before completion — superseded by retry"
+                };
+                self.resolve_command(&handle, &old.id, SessionCommandStatus::Rejected, Some(why));
             }
             let now = now_ms();
             let reissue = SessionCommandEntry {

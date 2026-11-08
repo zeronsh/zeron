@@ -4,8 +4,8 @@
 -- it (set up as it's first read), so there's no switch: the credits Cloud used,
 -- day by day, over a range; GitHub, the way Cloud clones and pushes (its logins,
 -- and the block setup's Connect GitHub shows, ds.GitHubBlock, for connecting
--- one); and the repositories Cloud can open, chosen on GitHub. Billing has its
--- own page.
+-- one); the repositories Cloud can open, chosen on GitHub; and the size of
+-- machine new chats start on. Billing has its own page.
 --
 -- Listed only while the account has Cloud (screens/settings/init.luau).
 -- Cloud's status and repositories are the account's (account/cloud), read
@@ -15,6 +15,7 @@ local ds = require("@ds")
 local cloud = require("@account/cloud")
 local github = require("@account/github")
 local search = require("@app/screens/settings/search")
+local machine_logic = require("@app/screens/chat/cloud_machine")
 
 local M = {}
 
@@ -23,6 +24,7 @@ M.TITLE = "Cloud"
 
 M.ROWS = {
 	{ key = "usage", title = ui.t("settings.cloud.usage.title"), terms = ui.t("settings.cloud.usage.terms") },
+	{ key = "machine", title = ui.t("settings.cloud.machine.title"), terms = ui.t("settings.cloud.machine.terms") },
 	{ key = "github", title = "GitHub", terms = ui.t("settings.cloud.github.terms") },
 	{ key = "repos", title = ui.t("settings.cloud.repos.title"), terms = ui.t("settings.cloud.repos.terms") },
 }
@@ -284,6 +286,116 @@ local function usage(): Node
 			}
 		),
 	}
+end
+
+-- The sizes, on the same grid as a chat's size list (ds/grid, the columns
+-- screens/chat/cloud_machine's GRID): a radio group, a row a size; the one new
+-- chats start on says "Current" in the trailing slot. Picked: the edge is asked,
+-- shown at once, put back if it refuses (account/cloud).
+local Grid = require("@ds/grid")
+
+local SizeRow = ui.component(function(props: { row: State<machine_logic.DefaultRow>, width: State<number> }): Node
+	local row, width = props.row, props.width
+	local grid = machine_logic.GRID :: Grid.Grid
+	local function chosen(): boolean
+		return row:get().current
+	end
+	local parts: { [any]: any } = {
+		role = "radio",
+		label = function(): string
+			return row:get().name
+		end,
+		checked = chosen,
+		focusable = true,
+		w_full = true,
+		min_h = 36,
+		px = "$space.2",
+		gap = "$space.2",
+		items = "center",
+		rounded = "$radius.md",
+		cursor = "pointer",
+		hover = { bg = "$hover" },
+		focus = require("@ds/control").ring,
+		on_click = function()
+			if not chosen() then
+				cloud.set_machine(row:peek().id)
+			end
+		end,
+		Grid.name(grid, function(): string
+			return row:get().name
+		end),
+	}
+	for _, cell in Grid.cells(grid, width, function(): { string }?
+		return row:get().cells
+	end) do
+		table.insert(parts, cell)
+	end
+	table.insert(parts, Grid.gap())
+	table.insert(parts, Grid.trail(function(): string?
+		return row:get().trail
+	end, chosen))
+	return ui.row(parts)
+end)
+
+local MachineChoice = ui.component(function(): Node
+	local width = ui.use_state(0)
+	local rows = ui.computed(function(): { machine_logic.DefaultRow }
+		return machine_logic.default_rows(cloud.machines(), cloud.machine())
+	end)
+	return ui.column {
+		role = "radiogroup",
+		label = ui.t("settings.cloud.machine.title"),
+		focus_group = "vertical",
+		w_full = true,
+		on_resize = Grid.measure(width),
+		ui.each(rows, function(_r: machine_logic.DefaultRow, _i: number, row: State<machine_logic.DefaultRow>): Node
+			return SizeRow { row = row, width = width }
+		end, {
+			key = function(r: machine_logic.DefaultRow): string
+				return r.id
+			end,
+			w_full = true,
+		}),
+	}
+end)
+
+-- The size new chats start on: every size the account's offered, each with
+-- its specs and rate. (An edge that offers no choice: no section.)
+local function default_machine(): Node
+	local function ids(): string
+		local out = {}
+		for _, m in cloud.machines() do
+			table.insert(out, m.id)
+		end
+		return table.concat(out, ",")
+	end
+	return ui.show(function(): boolean
+		return ids() ~= ""
+	end, ds.Settings.Section {
+		title = ui.t("settings.cloud.machine.title"),
+		description = ui.t("settings.cloud.machine.description"),
+		row(
+			"machine",
+			ds.Settings.Group {
+				ui.column {
+					w_full = true,
+					px = "$space.2",
+					py = "$space.2",
+					gap = "$space.2",
+					MachineChoice {},
+					ui.show(function(): boolean
+						return cloud.now:get().machine_failure ~= nil
+					end, ui.text {
+						ui.t("settings.cloud.machine.failed"),
+						wrap = true,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$zeron.tone.danger.ink",
+					}),
+				},
+			}
+		),
+	})
 end
 
 local function github_now(): github.Now
@@ -677,6 +789,7 @@ function M.view(): Node
 			w_full = true,
 			gap = "$space.6",
 			usage(),
+			default_machine(),
 			github_section(),
 			repositories(),
 		}),
