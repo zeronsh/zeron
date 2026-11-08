@@ -214,11 +214,12 @@
 			// dialogs the composer's dark tint / the overlay glass (popover.rs
 			// `surface_bg`), the island its overlay glass (shell.rs, theme.rs
 			// `glass_overlay`), the composer and its trays `composer_surface_bg`,
-			// the panel `panel_bg` (its background at 0.4), settings' cards
-			// `block_fill` (wash 0.045), fields `input_glass_bg`.
+			// settings' cards `block_fill` (wash 0.045), fields `input_glass_bg`.
+			// The panel keeps ds/tokens' own (the page's card's wash), level
+			// with the page and sidebar, as dark's: Zeron's `panel_bg` (its
+			// background at 0.4) lifted it above them, a milky slab.
 			"island": { "tint": "#ffffff73" },
 			"palette": { "tint": "{zeron.menu.tint}" },
-			"panel": { "tint": "#ffffff66" },
 			"settings": { "tint": "#1a1a1a0b", "note": "#00000009", "comment": "#0000000d" },
 			// A field: whiter than the window (as the composer is), its edge a
 			// cool hairline that firms under the pointer. Not a grey well:
