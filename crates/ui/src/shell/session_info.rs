@@ -40,9 +40,9 @@ pub(super) fn session_card_reserve(main: f32, transcript: f32) -> Option<f32> {
 #[derive(Default)]
 pub(super) struct SessionDiffs {
     diffs: Vec<zeron_proto::CheckoutDiff>,
-    /// Device the running watch targets: `None` the connected engine, else
-    /// a remote chat's host (diffs are produced where the checkout lives).
-    target: Option<Option<String>>,
+    /// What the running watch targets: `None` the connected engine, else a
+    /// remote chat on its host (diffs are produced where the checkout lives).
+    target: Option<Option<crate::changes::RemoteDiffWatch>>,
     _watch: Option<Task<()>>,
     /// The comparison base per `device:cwd`, from `ListBranches`.
     base: Option<(String, String)>,
@@ -121,9 +121,8 @@ impl Shell {
             let Some(chat) = state.selected_chat_row() else {
                 return;
             };
-            let device = chat.device_id.clone();
             let target =
-                (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device);
+                crate::changes::RemoteDiffWatch::of(chat, state.local_device_id.as_deref());
             (target, state.engine().cloned())
         };
         if self.session_diffs.target.as_ref() == Some(&target) {
@@ -137,18 +136,11 @@ impl Shell {
         self.session_diffs.target = Some(target.clone());
         self.session_diffs._watch = Some(cx.spawn(async move |this, cx| {
             loop {
-                let mut params = serde_json::Map::new();
-                if let Some(target) = &target {
-                    params.insert(
-                        "targetDeviceId".into(),
-                        serde_json::Value::String(target.clone()),
-                    );
-                }
                 if let Ok(mut rx) = engine
                     .client()
                     .subscribe(
                         methods::WATCH_CHECKOUT_DIFFS,
-                        serde_json::Value::Object(params),
+                        crate::changes::RemoteDiffWatch::params(target.as_ref()),
                     )
                     .await
                 {
@@ -256,7 +248,12 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let target = self.session_diffs.target.clone().flatten();
+        let target = self
+            .session_diffs
+            .target
+            .clone()
+            .flatten()
+            .map(|watch| watch.device);
         let repo = format!("{}:{cwd}", target.as_deref().unwrap_or("local"));
         let known_base = self
             .session_diffs

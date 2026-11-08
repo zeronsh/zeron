@@ -111,6 +111,26 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"wrapped up","errors":[],"usage":{"input_tokens":3,"output_tokens":3},"session_id":"sess-wake"}'
   ;;
 
+*scenario:shellwake*)
+  # A background shell and a background agent, then the CLI's own wake turn
+  # (the frame order live-captured from 2.1.319: the turn ends with the shell
+  # still running; task_notification, the roster drained, a fresh init, the
+  # wake turn's result).
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-shellwake"}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"cargo test","run_in_background":true}}]}}'
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bn1","task_type":"local_bash","description":"Run the tests"},{"task_id":"ag1","task_type":"local_agent","description":"Review the diff"}]}'
+  emit '{"type":"system","subtype":"task_started","task_id":"bn1","tool_use_id":"toolu_bg"}'
+  emit '{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","is_error":false,"content":"Command running in background with ID: bn1."}]}}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"waiting on the tests"}}}'
+  emit '{"type":"result","subtype":"success","result":"waiting on the tests","errors":[],"usage":{"input_tokens":5,"output_tokens":5},"session_id":"sess-shellwake"}'
+  sleep 0.3
+  emit '{"type":"system","subtype":"task_notification","task_id":"bn1","status":"completed"}'
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-shellwake"}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tests passed"}}}'
+  emit '{"type":"result","subtype":"success","result":"tests passed","errors":[],"usage":{"input_tokens":3,"output_tokens":3},"session_id":"sess-shellwake"}'
+  ;;
+
 *scenario:askuser*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-ask"}'
   # A plain tool permission request: must be auto-allowed.

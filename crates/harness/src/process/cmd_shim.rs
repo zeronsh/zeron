@@ -245,4 +245,27 @@ mod tests {
             })
         );
     }
+
+    /// Who installed an npm CLI on Windows shows only in its shim's target.
+    #[test]
+    fn a_shim_on_disk_names_the_file_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("claude.cmd");
+        std::fs::write(&shim, NODE_SCRIPT).unwrap();
+        assert_eq!(
+            super::super::npm_shim_target(&shim),
+            Some(dir.path().join("node_modules").join("@anthropic-ai").join("claude-code").join("cli.js"))
+        );
+        let native = dir.path().join("native.cmd");
+        std::fs::write(&native, NATIVE_EXE).unwrap();
+        assert_eq!(
+            super::super::npm_shim_target(&native),
+            Some(dir.path().join("node_modules").join("@scope").join("cli").join("bin").join("native.exe"))
+        );
+        // Not a shim: a hand-written batch file, or not a batch file at all.
+        let other = dir.path().join("other.cmd");
+        std::fs::write(&other, "@echo off\r\nnode C:\\x.js %*\r\n").unwrap();
+        assert_eq!(super::super::npm_shim_target(&other), None);
+        assert_eq!(super::super::npm_shim_target(&dir.path().join("claude.exe")), None);
+    }
 }
