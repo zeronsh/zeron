@@ -22,7 +22,8 @@
 -- one open the file has the whole pane: opening a file closes the tree, the
 -- toggle brings the tree over the whole pane, and a file chosen there goes
 -- back to the file. Whether the tree stands beside the file (`shown`) is
--- left as it was, so widening brings it back if it was out.
+-- left as it was, so widening brings it back if it was out. With no file
+-- at all, the tree shows whatever `shown` says: never an empty file.
 --
 -- `FilesPane { shown = state, tree = { FileTree's props }, viewer = { FileViewer's props }, head = "line" }`.
 
@@ -99,7 +100,13 @@ local made = ui.component(function(props: Props): Node
 	local function overlaying(): boolean
 		return narrow() and open_doc() ~= nil
 	end
+	-- With no file to show, the tree is out however it was left: never a
+	-- file's side with nothing in it. (`shown` stays as it was: a file
+	-- chosen shows as it asked.)
 	local function out(): boolean
+		if open_doc() == nil then
+			return true
+		end
 		return if overlaying() then over:get() else shown:get()
 	end
 	-- Narrow, the tree out has it all.

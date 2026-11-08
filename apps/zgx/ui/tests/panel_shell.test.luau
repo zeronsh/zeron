@@ -241,3 +241,37 @@ test("the panel's home stands level with a new chat's composer, its rows no wide
 		end
 	end
 end)
+
+-- The Files tab's tree as it shows (its width; 0 put away).
+local function tree_w(app: any): number
+	local b = box(app, "files-tree-beside")
+	local pane = box(app, "files-pane")
+	if not b or not pane or b.w == 0 then
+		return 0
+	end
+	-- (Slid under the pane's edge when put away.)
+	return math.max(0, math.min(b.x + b.w, pane.x + pane.w) - math.max(b.x, pane.x))
+end
+
+test("Files with no file and its tree put away shows the tree, never an empty file; a file chosen shows alone", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1440, 900)
+	app:frames(30)
+	show_chat(app, "Fix the build")
+	open_files_tab(app)
+	expect(tree_w(app) > 200).to_be(true)
+	-- Its toggle puts the tree away: with no file to show, the tree stays,
+	-- every frame.
+	app:click('#files-pane >> role:button "Toggle File Tree"')
+	for _ = 1, 30 do
+		app:frames(1)
+		expect(tree_w(app) > 200).to_be(true)
+	end
+	-- A file chosen: the file, the tree away as asked.
+	app:click('#files-pane >> role:treeitem "README.md"')
+	expect(app:wait('#file-viewer-head >> "README.md"', { timeout_ms = 15000 })).to_be(true)
+	expect(eventually(app, function(): boolean
+		app:frames(5)
+		return tree_w(app) == 0
+	end)).to_be(true)
+end)
