@@ -53,10 +53,9 @@ local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
-local motion = require("@self/motion")
-local clock = require("@ds/composer_clock")
 local TextMetrics = require("@self/composer_metrics")
 local Layout = require("@self/composer_layout")
+local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
 
 -- What the model's context holds, as its agent reports it: the tokens in
@@ -1095,48 +1094,13 @@ return ui.component(function(props: Props): Node
 			target_geometry:set(next)
 		end)
 	end)
-	local EASE: TweenOptions = { duration = 220, ease = "out(3)" }
-	-- Each of the pill's measures as it shows: eased (EASE) as it grows or
-	-- shrinks in place; at once for a moment after `snap` moves (what
-	-- settles its size, measured, lands over a frame or two), and with
-	-- motion reduced.
-	local SNAP_MS = 400
-	local snap_seen = if props.snap then props.snap:peek() else nil
-	local snap_until = 0
-	local function at_once(): boolean
-		if props.snap then
-			local n = props.snap:get()
-			if n ~= snap_seen then
-				snap_seen = n
-				snap_until = clock.now() + SNAP_MS
-			end
+	local transition = ComposerMotion.use(target_geometry, props.snap)
+	local frame_geometry = transition.frame
+	-- Every binding reads the same frame snapshot; none starts an animation.
+	local function presented(select: (Layout.Geometry) -> number): () -> number
+		return function(): number
+			return select(frame_geometry:get())
 		end
-		return motion.reduced_now() or clock.now() < snap_until
-	end
-	local function eased(src: ReadOnlyState<number>): State<number>
-		local value = ui.use_state(src:peek())
-		local run: any = nil
-		ui.effect(function()
-			local v = src:get()
-			local now = at_once()
-			if run then
-				run:cancel()
-				run = nil
-			end
-			if now or math.abs(value:peek() - v) < 0.01 then
-				value:set(v)
-				return
-			end
-			run = anime.animate(value, { value = v, duration = EASE.duration, ease = EASE.ease })
-		end)
-		return value
-	end
-	-- C3 centralizes destinations only. Each scalar still has the existing
-	-- independent animation; coordinating those is the next change (C4).
-	local function presented(select: (Layout.Geometry) -> number): State<number>
-		return eased(ui.computed(function(): number
-			return select(target_geometry:get())
-		end))
 	end
 
 	-- +, as a secondary button: a fill of its own, so it reads as a control
@@ -1707,7 +1671,14 @@ return ui.component(function(props: Props): Node
 		},
 		metrics.nodes[1],
 		metrics.nodes[2],
-		head,
+		-- Measure the natural header inside a separate presented clip. The
+		-- clip's animated height must never feed the header measurement.
+		ui.div {
+			absolute = true, left = 0, right = 0, top = 0,
+			h = presented(function(g) return g.header_height end),
+			overflow = "hidden",
+			head,
+		},
 		-- The draft.
 		ui.div {
 			absolute = true,
@@ -1876,7 +1847,7 @@ return ui.component(function(props: Props): Node
 			right = presented(function(g) return g.controls.trailing.right end),
 			-- (Its row is 32: the control centred in it.)
 			bottom = presented(function(g) return g.controls.trailing.bottom end),
-			h = function() return target_geometry:get().controls.trailing.height end,
+			h = presented(function(g) return g.controls.trailing.height end),
 			items = "center",
 			gap = "$space.2",
 			ui.show(asking, ask_controls()),
@@ -2106,7 +2077,7 @@ return ui.component(function(props: Props): Node
 				return if on_tray() then `${TRAY_GAP}` else 0
 			end :: any,
 			px = function(): any
-				return if on_tray() then ui.raw(target_geometry:get().tray_inset, "the pill's controls' inset") else "$zeron.space.snug"
+				return if on_tray() then ui.raw(frame_geometry:get().tray_inset, "the pill's controls' inset") else "$zeron.space.snug"
 			end :: any,
 			items = "center",
 			gap = "$space.1",

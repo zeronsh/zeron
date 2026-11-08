@@ -241,6 +241,74 @@ fn type_at_caret(app: &mut TestApp, text: &str) {
 }
 
 #[test]
+fn composer_transition_near_the_height_cap_preserves_scroll_editing_and_the_caret() {
+    for session in [false, true] {
+        let mut c = Composer::new(session);
+        c.act(|app| app.click(FIELD));
+        let first = (0..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        c.act(|app| type_at_caret(app, &first));
+        c.watch(3);
+        let more = (10..80).map(|i| format!("\nline {i}")).collect::<String>();
+        c.act(|app| type_at_caret(app, &more));
+        c.trace.clear();
+        c.watch(40);
+        let text = format!("{first}{more}");
+        c.draft(&text, (text.len(), text.len()));
+        c.at_target();
+        let cap = c.last().presented;
+        let field = c.shown.app.find(FIELD).unwrap();
+        let editor = c.shown.app.ui.editor_within(field).unwrap();
+        let caret_before = c
+            .shown
+            .app
+            .ui
+            .scene
+            .borrow()
+            .transformed_bounds(editor.caret);
+        c.act(|app| app.scroll(FIELD, -120.));
+        c.watch(3);
+        let caret_scrolled = c
+            .shown
+            .app
+            .ui
+            .scene
+            .borrow()
+            .transformed_bounds(editor.caret);
+        assert!(
+            (caret_before.y - caret_scrolled.y).abs() > 20.,
+            "the test must actually scroll the editor"
+        );
+        c.act(|app| type_at_caret(app, " typed after scrolling"));
+        c.trace.clear();
+        c.watch(20);
+        let text = format!("{text} typed after scrolling");
+        c.draft(&text, (text.len(), text.len()));
+        for s in &c.trace {
+            assert_eq!(
+                s.presented.composer.height, cap.composer.height,
+                "typing above the cap must not resize the composer"
+            );
+            assert_eq!(s.presented.field, cap.field);
+        }
+        let caret = c
+            .shown
+            .app
+            .ui
+            .scene
+            .borrow()
+            .transformed_bounds(editor.caret);
+        assert!(
+            caret.y >= cap.field.y - 1.
+                && caret.y + caret.height <= cap.field.y + cap.field.height + 1.,
+            "typing must reveal the caret inside the viewport: {caret:?}, {cap:?}"
+        );
+    }
+}
+
+#[test]
 fn composer_click_and_focus_preserve_geometry_and_the_selected_draft() {
     for session in [false, true] {
         let mut c = Composer::new(session);
@@ -300,6 +368,7 @@ fn composer_character_typing_crosses_the_wrap_boundary_and_folds_back() {
     c.act(|app| app.click(FIELD));
     c.watch(1);
     let compact = c.last().target.composer.height;
+    let compact_width = c.last().presented.field.width;
     let mut text = String::new();
     // Find the boundary with the actual font, without copying width rules.
     while c.last().target.composer.height <= compact + 1. {
@@ -312,6 +381,24 @@ fn composer_character_typing_crosses_the_wrap_boundary_and_folds_back() {
     }
     c.watch(30);
     c.at_target();
+    let expanded_width = c.last().target.field.width;
+    let mut width = compact_width;
+    let mut changes = 0;
+    for s in &c.trace {
+        let next = s.presented.field.width;
+        assert!(
+            (next - compact_width).abs() < 1. || (next - expanded_width).abs() < 1.,
+            "mode change must not rewrap through intermediate widths: {s:?}"
+        );
+        if (next - width).abs() >= 1. {
+            changes += 1;
+        }
+        width = next;
+    }
+    assert_eq!(
+        changes, 1,
+        "the real editor changes width once at expansion"
+    );
     assert!(c.last().presented.composer.height > compact + 20.);
     while !text.is_empty() {
         c.act(|app| app.key(Key::Backspace));

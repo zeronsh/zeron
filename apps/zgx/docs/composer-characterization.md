@@ -58,10 +58,12 @@ prove that the GPU painted the text or that a presented frame was correct.
 
 ## Visual reproduction procedure
 
-Status at implementation: the original visual glitch has not been
-reproduced by these headless tests. A valid standalone visual comparison
-and the macOS comparison have not been executed in this change. The following is a repeatable diagnostic
-procedure, not a claim that these steps reproduce it on every machine.
+Status at C1: the original visual glitch was not reproduced by these
+headless tests, and visual comparisons were not executed in that change.
+C4 adds a host-isolated composer preview and a Linux recording described
+in [composer-motion.md](composer-motion.md); macOS comparison remains pending.
+The following is a repeatable diagnostic procedure, not a claim that these
+steps reproduce the glitch on every machine.
 macOS native-caret/Metal comparison requires a separate run on macOS.
 
 Use the standalone **ZGX runner built from the revision pinned in

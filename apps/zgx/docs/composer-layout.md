@@ -47,15 +47,16 @@ width is known. This distinction preserves behavior after forced modes end.
 
 `composer.luau` gathers the inputs in one place, invokes the calculation
 in an effect, and commits the next history plus `target_geometry` in one
-batch. A scalar selector takes each destination from this single result.
-Unchanged destinations retain their values.
+batch. The motion controller consumes this single destination. View bindings
+read a single presented-frame snapshot rather than animating each scalar.
 
 ## Target, presented and published sizes
 
 `target_geometry` describes the destination, not an intermediate frame.
-The `presented` helper still applies the existing independent scalar
-animations, easing, duration and snap policy. Coordinating the animations
-belongs to C4; this change does not implement that policy.
+`composer_motion.luau` (C4) owns origin, destination and a single progress
+animation. The `presented` helper only selects values from that controller's
+frame; it starts no animation. See [composer-motion.md](composer-motion.md)
+for viewport constraints, discrete mode changes and interruption behavior.
 
 `natural_height` is not the box's displayed height and is not published to
 the transcript. `screens/chat/composer.luau` continues to publish the actual
@@ -83,6 +84,6 @@ and return to compact geometry. C1/C2 characterization and metric tests
 remain part of the same targeted suite. These are headless checks; they do
 not establish that the original visual glitch is fixed.
 
-The C1 before/after trace comparison against C2 covered 786 samples. After
+The C3 before/after trace comparison against C2 covered 786 samples. After
 normalizing editor node IDs, all observed values matched, including target
 rectangles and intermediate presented geometry, focus, selection and draft.

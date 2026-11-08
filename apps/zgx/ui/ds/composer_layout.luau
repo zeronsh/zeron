@@ -27,6 +27,7 @@ export type Input = {
 	multiline: boolean,
 }
 export type Geometry = {
+	width: number,
 	mode: "compact" | "expanded",
 	expanded: boolean,
 	next_text_expanded: boolean,
@@ -34,9 +35,13 @@ export type Geometry = {
 	height: number,
 	header_height: number,
 	tray_inset: number,
+	-- Constraints for deriving a safe viewport from a presented frame.
+	line_height: number,
+	compact_inset: number,
+	compact_text: { left: number, right: number },
 	text: { left: number, right: number, width: number, top: number, height: number },
 	controls: {
-		leading: { left: number, bottom: number },
+		leading: { left: number, bottom: number, height: number },
 		trailing: { right: number, bottom: number, height: number },
 		voice: { left: number, right: number, bottom: number },
 	},
@@ -91,6 +96,7 @@ function M.calculate(p: Input, previous_text_expanded: boolean): Geometry
 	local right = if expanded then TEXT_OPEN_SIDE else line_right
 	local inset = if expanded then chrome.inset else INSET_LINE
 	return {
+		width = math.max(0, p.width),
 		mode = if expanded then "expanded" else "compact",
 		expanded = expanded,
 		next_text_expanded = next_text_expanded,
@@ -100,6 +106,9 @@ function M.calculate(p: Input, previous_text_expanded: boolean): Geometry
 		height = height,
 		header_height = head,
 		tray_inset = chrome.tray_inset,
+		line_height = if p.sample then p.sample.line_height else LINE,
+		compact_inset = INSET_LINE,
+		compact_text = { left = line_left, right = line_right },
 		text = {
 			left = left,
 			right = right,
@@ -108,7 +117,7 @@ function M.calculate(p: Input, previous_text_expanded: boolean): Geometry
 			height = if expanded then box - TEXT_TOP - TEXT_BOTTOM else LINE,
 		},
 		controls = {
-			leading = { left = inset, bottom = inset },
+			leading = { left = inset, bottom = inset, height = CONTROL },
 			trailing = { right = inset, bottom = inset - 2, height = 32 },
 			voice = {
 				left = inset + CONTROL + TEXT_SIDE,
