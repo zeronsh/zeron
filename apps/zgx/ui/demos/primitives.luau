@@ -41,6 +41,9 @@ return {
 			page("choices", "Select, slider, stepper", function()
 				return require("@demos/choices")
 			end),
+			page("date_picker", "Date picker", function()
+				return require("@demos/date_picker")
+			end),
 			page("tabs", "Tabs", function()
 				return require("@demos/tabs")
 			end),

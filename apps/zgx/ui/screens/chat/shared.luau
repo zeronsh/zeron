@@ -41,6 +41,12 @@ M.shown = ui.shared("chat.transcript.session", nil :: string?)
 -- Where in it the reader was (ds/transcript's `keep`), for a page made
 -- again; nil at the end.
 M.anchor = ui.shared("chat.transcript.anchor", nil :: any)
+-- The transcript's "Scroll to end" pill: its width while it shows (the
+-- composer's folded trays' pill moves aside for it).
+M.jump_width = ui.shared("chat.transcript.jump_width", nil :: number?)
+-- The composer's folded trays' pill: its width while it shows (the two
+-- pills, both showing, centre together).
+M.pill_width = ui.shared("chat.composer.pill_width", nil :: number?)
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
@@ -214,6 +220,11 @@ local function set_cargo(key: string, list: { any })
 	d.cargo = list
 	all[key] = d
 	kept:set(all)
+end
+
+-- Chat `key`'s chips replaced (a queued message's, shown as it's edited).
+function M.set_cargo_of(key: string, list: { any })
+	set_cargo(key, list)
 end
 
 function M.push_cargo(key: string?, item: any)
