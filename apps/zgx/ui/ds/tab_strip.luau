@@ -27,6 +27,7 @@
 --     selected = () -> string?,   -- the chosen tab
 --     face = (id) -> Node,        -- what a tab shows, still (made afresh)
 --     commit = (id, index) -> (), -- dropped on the strip: its new place
+--     on_away = (away) -> (),     -- (optional) carried off the strip, or back
 --     h = 28, rounded = "$radius.lg",
 --   }
 --   strip.order               the ids as the strip shows them: `ui.each` it
@@ -186,6 +187,7 @@ export type Props = {
 	selected: () -> string?,
 	face: (id: string) -> Node,
 	commit: (id: string, index: number) -> (),
+	on_away: ((away: boolean) -> ())?,
 	h: number,
 	rounded: string,
 }
@@ -324,11 +326,23 @@ function M.new(props: Props)
 		edge_scroll()
 	end
 
+	-- Its phase; carried off the strip or back onto it, the strip says so.
+	local function set_phase(to: Phase)
+		local was = phase:peek()
+		if was == to then
+			return
+		end
+		phase:set(to)
+		if props.on_away and (was == "away") ~= (to == "away") then
+			props.on_away(to == "away")
+		end
+	end
+
 	local function finish()
 		stop_edge()
 		settle = nil
 		held:set(nil)
-		phase:set("idle")
+		set_phase("idle")
 	end
 
 	-- To its place, on the tabs' spring (at once, with motion reduced).
@@ -338,7 +352,7 @@ function M.new(props: Props)
 			return finish()
 		end
 		stop_edge()
-		phase:set("settling")
+		set_phase("settling")
 		local x = left_in(order:peek(), width, id) - props.offset:peek()
 		if motion.reduced_now() then
 			anime.utils.set(ghost, { x = x })
@@ -379,7 +393,7 @@ function M.new(props: Props)
 		anime.utils.set(ghost, { x = x })
 		at:set(from_at)
 		held:set(id)
-		phase:set("lifted")
+		set_phase("lifted")
 	end
 
 	function self.ended(_payload: any?, accepted: boolean?)
@@ -393,7 +407,7 @@ function M.new(props: Props)
 		-- Let go over nothing, or cancelled (Escape): it flies back into its
 		-- gap, opening again where it was, from where it left the strip.
 		at:set(from_at)
-		phase:set("lifted")
+		set_phase("lifted")
 		settle_in()
 	end
 
@@ -447,14 +461,14 @@ function M.new(props: Props)
 		p.on_drag_over = function(_payload: any, e: any)
 			track(e)
 			if phase:peek() == "away" then
-				phase:set("lifted")
+				set_phase("lifted")
 			end
 			place()
 		end
 		p.on_drag_leave = function()
 			if phase:peek() == "lifted" then
 				stop_edge()
-				phase:set("away")
+				set_phase("away")
 			end
 		end
 		p.on_drop = function(payload: any, e: any)
@@ -464,7 +478,7 @@ function M.new(props: Props)
 			end
 			track(e)
 			if phase:peek() ~= "lifted" then
-				phase:set("lifted")
+				set_phase("lifted")
 			end
 			place()
 			dropped = true

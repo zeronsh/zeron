@@ -409,7 +409,6 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			end,
 			on_drag = function(): any
 				strip.begin(id)
-				splits.dragging:set(true)
 				return { session_tab = id, session = face(id) }
 			end,
 			on_drag_end = function(payload: any, accepted: boolean)
@@ -537,6 +536,11 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			if onto and onto ~= id then
 				splits.move_tab(id, onto)
 			end
+		end,
+		-- (Off the strip, the split's panes show where it can land; over
+		-- it, they stay as they are.)
+		on_away = function(away: boolean)
+			splits.dragging:set(away)
 		end,
 		h = TAB_H,
 		rounded = "$radius.lg",

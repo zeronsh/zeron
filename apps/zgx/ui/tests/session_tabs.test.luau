@@ -333,6 +333,19 @@ test("a tab still opens its chat on a click, and reorders by a drag, with its me
 	expect(app:error()).to_be_nil()
 end)
 
+-- Carried off the strip onto a pane's edge, a chat's tab lands in that split,
+-- as a sidebar row does: the split's panes show where only once it's off.
+test("a session tab carried onto a split pane's edge joins that split", function()
+	local app = all_open()
+	expect(app:has("#split-pane-a1")).to_be(false)
+	-- (Onto the pane's right edge: its transcript's rail stands there.)
+	app:drag("#session-tab-a1", "#split-pane-p5 >> #transcript-rail")
+	app:frames(40)
+	expect(app:has("#split-pane-a1")).to_be(true)
+	expect(app:has("#split-pane-p5")).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
 -- A tab carried off the strip and let go over nothing flies back into its
 -- place: one tab throughout, none left behind in the strip while it's away.
 test("a tab let go off the strip goes back to its place", function()
