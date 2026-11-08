@@ -1,4 +1,4 @@
-//! The measurement contract, exercised with the real invisible text nodes.
+//! The measurement contract, exercised with the real editor provider.
 use zgx_script::{ScriptHost, Value, testing::TestApp};
 
 fn mount() -> TestApp {
@@ -39,21 +39,17 @@ fn ready(app: &TestApp) -> Value {
     s
 }
 
-fn two_nodes(app: &mut TestApp) -> Vec<zgx::scene::NodeId> {
-    let nodes = [".composer-metric-line", ".composer-metric-wrapped"]
-        .iter()
-        .map(|selector| app.find(selector).expect("measurement node"))
-        .collect::<Vec<_>>();
-    assert_ne!(nodes[0], nodes[1]);
-    assert!(app.find(".composer-metric-line[2]").is_none());
-    assert!(app.find(".composer-metric-wrapped[2]").is_none());
-    nodes
+fn editor_only(app: &mut TestApp) -> zgx::scene::NodeId {
+    assert!(app.find(".composer-metric-line").is_none());
+    assert!(app.find(".composer-metric-wrapped").is_none());
+    app.find("metrics-editor")
+        .expect("the editor is the only text provider")
 }
 
 #[test]
 fn composer_metrics_publish_empty_text_as_a_real_sample_then_refresh_equal_size_edits() {
     let mut app = mount();
-    let nodes = two_nodes(&mut app);
+    let nodes = editor_only(&mut app);
     let history = app
         .host
         .states()
@@ -90,9 +86,9 @@ fn composer_metrics_publish_empty_text_as_a_real_sample_then_refresh_equal_size_
             );
         }
         assert_eq!(
-            two_nodes(&mut app),
+            editor_only(&mut app),
             nodes,
-            "edits must retain the same two measuring nodes"
+            "edits must retain the same editor"
         );
         previous = sample;
     }
@@ -178,7 +174,7 @@ fn composer_metrics_revalidate_restored_samples_and_typography_changes() {
     app.frames(3);
     let restored = ready(&app);
     assert!(number(&restored, "revision") > number(&before, "revision"));
-    two_nodes(&mut app);
+    editor_only(&mut app);
     assert!(app.host.run_command("fixture.metrics.type"));
     app.frames(3);
     let changed = ready(&app);
@@ -218,4 +214,37 @@ fn composer_metrics_wrap_at_requested_width_and_preserve_a_final_empty_line() {
         number(&narrow, "unwrapped_width"),
         number(&wide, "unwrapped_width")
     );
+}
+
+#[test]
+fn composer_metrics_follow_styled_editor_and_uncommitted_ime_without_extra_nodes() {
+    let mut app = mount();
+    let node = editor_only(&mut app);
+    app.host
+        .set_state("fixture_metrics_text", Value::from("@mention hello\n"))
+        .unwrap();
+    app.frames(3);
+    let editor = app.ui.editor(node).unwrap();
+    let shown = editor.text_metrics(320.).unwrap();
+    let sample = ready(&app);
+    assert_eq!(
+        number(&sample, "unwrapped_width"),
+        f64::from(shown.unwrapped_width)
+    );
+    assert_eq!(
+        number(&sample, "wrapped_height"),
+        f64::from(shown.wrapped_height)
+    );
+    app.ui.input.focus(&app.ui.scene, Some(node));
+    editor.set_selection(0, 0);
+    app.ui.dispatch(zgx::input::InputEvent::ImePreedit {
+        text: "你好世界".repeat(30),
+        cursor: Some((0, 0)),
+    });
+    app.frames(3);
+    let composition = ready(&app);
+    assert!(number(&composition, "wrapped_height") > number(&sample, "wrapped_height"));
+    assert!(number(&composition, "revision") > number(&sample, "revision"));
+    assert_eq!(editor.value().get(), "@mention hello\n");
+    assert_eq!(editor_only(&mut app), node);
 }

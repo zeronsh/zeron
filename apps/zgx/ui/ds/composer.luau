@@ -918,7 +918,7 @@ return ui.component(function(props: Props): Node
 	local metrics = TextMetrics.use {
 		value = value,
 		keep = props.keep,
-		left = Layout.measurement(0).left,
+		editor = field,
 		width = function(): number
 			-- The surface's content box excludes its two hairlines. Both
 			-- expanded text insets come out of that, never the eased field.
@@ -1678,8 +1678,6 @@ return ui.component(function(props: Props): Node
 				end
 			end,
 		},
-		metrics.nodes[1],
-		metrics.nodes[2],
 		-- Measure the natural header inside a separate presented clip. The
 		-- clip's animated height must never feed the header measurement.
 		ui.div {

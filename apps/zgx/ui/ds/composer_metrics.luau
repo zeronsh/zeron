@@ -1,7 +1,6 @@
--- The composer's measurement provider. For now the same two invisible
--- plain-text nodes measure its unwrapped width and its expanded height.
--- Keep this contract independent of those nodes so an editor-backed
--- provider can replace them without changing layout rules.
+-- The editor owns shaping, spans and IME. This adapter keeps a complete
+-- last sample during initialization and tags every publication with the
+-- request revision, independent of the editor's animated viewport.
 local M = {}
 
 export type Sample = {
@@ -22,78 +21,55 @@ export type Props = {
 	value: State<string>,
 	-- Content width at the expanded destination, not the animated viewport.
 	width: () -> number,
-	left: number,
+	editor: Ref,
 	keep: string?,
 }
 
 function M.use(props: Props)
+	-- New namespace: a restored plain-text measurement is not editor geometry.
 	local measured: State<Sample?> = if props.keep
-		then ui.state(`composer:{props.keep}:text_metrics`, nil :: Sample?)
+		then ui.state(`composer:{props.keep}:editor_text_metrics`, nil :: Sample?)
 		else ui.use_state(nil :: Sample?)
 	local revision = if measured:peek() then (measured:peek() :: Sample).revision else 0
 	local request = ui.computed(function()
 		local text = props.value:get()
 		local width = math.max(0, props.width())
 		local theme = ui.theme.current:get()
-		local size = (ui.theme.get("zeron.composer.text") :: number?) or 14
-		local line = (ui.theme.get("zeron.composer.line") :: number?) or 22
-		local font = ui.theme.get("font.sans")
+		local el = props.editor:get()
+		-- Reading follows the editor's settled content/IME/style revision.
+		local source = if el and width > 0 then el:text_metrics(width) else nil
 		revision += 1
-		return {
-			text = text,
-			width = width,
-			size = size,
-			line = line,
-			font = font,
-			theme = theme,
-			revision = revision,
-		}
+		return { text = text, width = width, theme = theme, editor = el, source = source, revision = revision }
 	end)
-	local line, wrapped = ui.ref(), ui.ref()
 	local alive = true
 	local cancel: (() -> ())? = nil
-	local queue: () -> ()
-	queue = function()
-		if not alive then
-			return
-		end
-		-- Timers created in an effect are cancelled when it re-runs. Always
-		-- replace the handle: a retained "queued" flag could otherwise leave
-		-- the provider waiting forever for a callback that was cancelled.
+	ui.effect(function()
+		local wanted = request:get()
 		if cancel then
 			cancel()
+			cancel = nil
 		end
-		local wanted = request:peek()
-		-- Coalesce both resize notifications into one read of both nodes.
-		-- Also sample on a request change: equal-size edits have no resize.
+		if wanted.source == nil then
+			return
+		end
+		-- Defer publication until bindings and editor layout have consumed
+		-- the request. A replacement effect cancels this acknowledgement.
 		cancel = ui.after(0, function()
-			if not alive then
+			if not alive or request:peek().revision ~= wanted.revision then
 				return
 			end
-			if request:peek().revision ~= wanted.revision then
-				queue()
+			local source = wanted.editor:text_metrics(wanted.width)
+			if source == nil or source.revision ~= wanted.source.revision then
 				return
 			end
-			local a, b = line:peek(), wrapped:peek()
-			if not a or not b or wanted.width <= 0 then
-				return
-			end
-			local w, h, at = a.width, b.height, b.width
-			if w == nil or h == nil or at == nil or h <= 0 or math.abs(at - wanted.width) >= 0.5 then
-				return
-			end
-			measured:set({
-				unwrapped_width = w,
-				wrapped_height = h,
-				line_height = wanted.line,
-				width = at,
+			measured:set {
+				unwrapped_width = source.unwrapped_width,
+				wrapped_height = source.wrapped_height,
+				line_height = source.line_height,
+				width = source.width,
 				revision = wanted.revision,
-			})
+			}
 		end)
-	end
-	ui.effect(function()
-		request:get()
-		queue()
 	end)
 	ui.on_cleanup(function()
 		alive = false
@@ -101,7 +77,6 @@ function M.use(props: Props)
 			cancel()
 		end
 	end)
-
 	local result = ui.computed(function(): Result
 		local want, sample = request:get(), measured:get()
 		return {
@@ -111,44 +86,7 @@ function M.use(props: Props)
 			width = want.width,
 		}
 	end)
-	local nodes = {
-		ui.text {
-			class = "composer-metric-line",
-			ref = line,
-			on_resize = queue,
-			absolute = true,
-			left = 0,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			function()
-				return request:get().text
-			end,
-		},
-		ui.text {
-			class = "composer-metric-wrapped",
-			ref = wrapped,
-			on_resize = queue,
-			absolute = true,
-			left = props.left,
-			w = function()
-				return request:get().width
-			end,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			wrap = true,
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			-- A final empty line still contributes to the measured height.
-			function()
-				return request:get().text .. "\u{200B}"
-			end,
-		},
-	}
-	return { result = result, nodes = nodes }
+	return { result = result }
 end
 
 return M
