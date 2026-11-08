@@ -558,7 +558,14 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local list = shown:get()
 		local total = content.width or 0
 		local room = view.width or 0
+		-- (Read so it runs again once a carried tab has landed.)
+		strip.order:get()
 		if not s or room <= 0 then
+			return
+		end
+		-- (Not while a tab's carried or settling: it lands on its slot as the
+		-- strip stands, and the strip scrolls under it near an end.)
+		if strip.busy() then
 			return
 		end
 		for _, id in list do
