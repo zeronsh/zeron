@@ -17,11 +17,10 @@
 --    out (no more than `PUSH`), and the gaps between make up the rest, so
 --    the cell's mean is the colour's exactly (`fx_split`).
 --
--- Dither quantizes each cell to two shades of its own colour, and ASCII
--- lays glyphs over the picture. The paper follows the scheme (near black in the dark, warm white in the
--- light), the same for every effect. Every edge is worked out over the
--- window's own pixel (crisp at 2x, no shimmer), and every effect, None
--- too, fades the art from its top, full, to nothing at its foot.
+-- Dither quantizes each cell to two shades of its own colour; ASCII lays
+-- glyphs over the picture. The paper follows the scheme (near black in the
+-- dark, warm white in the light). Edges are worked out over the window's
+-- pixel, and every effect fades the art from its top to nothing at its foot.
 
 local M = {}
 
@@ -180,7 +179,7 @@ fn fx_effect(input:LayerInput,g:vec3<f32>,q:vec2<f32>,fp:f32)->vec3<f32> {
 ]]
 
 -- ASCII: glyphs of the 5 by 7 font in cells of 6 by 8 font pixels, each
--- `FX_PX` points, anchored to the art's box (still as a sidebar or panel
+-- `FX_PX` points (snapped to the device's pixels), anchored to the art's box (still as a sidebar or panel
 -- moves). A cell's glyph, of ` .:-=+*#@` (Zeron's ramp less `%`, whose
 -- diagonal hatches), rises with the brightness at its centre (in the
 -- light, its darkness); cells under the density's threshold hold none.
@@ -216,11 +215,13 @@ const FX_K:f32=.34;
 const FX_GROUND:f32=.3;
 const FX_DIM:f32=.75;
 fn fx_a_at(input:LayerInput,p:vec2<f32>)->vec3<f32> {return zgx_sample(clamp(p,vec2(0.),input.size-vec2(.01))).rgb;}
+// A font pixel, `FX_PX` points snapped to the device's pixels.
+fn fx_px(input:LayerInput)->f32 {let s=max(input.scale,1.); return max(round(FX_PX*s),1.)/s;}
 // Font pixel `k`'s colour: its cell's glyph stroke, or the ground.
 fn fx_a_pix(input:LayerInput,k:vec2<i32>)->vec3<f32> {
  let light=input.params[0].z>.5;
  let cell=vec2<i32>(floor(vec2<f32>(k)/vec2(6.,8.)));
- let c=fx_a_at(input,(vec2<f32>(cell)+.5)*vec2(6.,8.)*FX_PX);
+ let c=fx_a_at(input,(vec2<f32>(cell)+.5)*vec2(6.,8.)*fx_px(input));
  let lum=dot(c,vec3(.2126,.7152,.0722));
  let t=clamp(FX_T+input.params[0].y,0.,.9);
  let level=pow(clamp((select(lum,1.-lum,light)-t)/(1.-t),0.,1.),FX_GAMMA);
@@ -232,11 +233,11 @@ fn fx_a_pix(input:LayerInput,k:vec2<i32>)->vec3<f32> {
   let peak=max(max(c.r,c.g),max(c.b,.004));
   return mix(mix(c,c/peak,FX_VIVID),select(vec3(1.),vec3(0.),light),FX_LIFT);
  }
- let here=fx_a_at(input,(vec2<f32>(k)+.5)*FX_PX);
+ let here=fx_a_at(input,(vec2<f32>(k)+.5)*fx_px(input));
  return mix(fx_paper_srgb(input),here*FX_DIM,FX_GROUND);
 }
 fn fx_effect(input:LayerInput,g:vec3<f32>,q:vec2<f32>,fp:f32)->vec3<f32> {
- let x=input.p/FX_PX; let w=1./(max(input.scale,1.)*FX_PX);
+ let px=fx_px(input); let x=input.p/px; let w=1./(max(input.scale,1.)*px);
  let k=vec2<i32>(floor(x-.5*w));
  let o=fx_over(x,w);
  var s=fx_a_pix(input,k)*(1.-o.x)*(1.-o.y);
@@ -344,7 +345,7 @@ function M.params(o: Params): { any }
 	return {
 		{ o.strength or 1, o.threshold or 0, if o.light then 1 else 0, if o.faded == false then 0 else 1 },
 		{ gw, gh, if p then math.clamp(p.x or 0.5, 0, 1) else 0.5, if p then math.clamp(p.y or 0.5, 0, 1) else 0.5 },
-		{ if p then p.zoom or 1 else 1, M.FLOOR, M.MOST, M.RECEDE[scheme] },
+		{ if p then math.clamp(p.zoom or 1, 1, 4) else 1, M.FLOOR, M.MOST, M.RECEDE[scheme] },
 		{ M.PUSH[scheme], 0, 0, 0 },
 	}
 end
