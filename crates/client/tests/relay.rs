@@ -581,6 +581,112 @@ async fn a_dropped_socket_loses_nothing_of_what_went_by_meanwhile() {
     leave(client);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_network_path_checks_the_room_and_rejoins_a_room_it_lost() {
+    let _serial = SERIAL.lock().await;
+    let chat = "new-path";
+    let edge = MockEdge::start_relay().await;
+    let _registry = Registry::start(&edge, &[chat_row(chat, 3, false)], true).await;
+    let host = Host::join(&edge, chat, LoroDoc::new()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    registered(&client, chat).await;
+    let session = client.open_session(chat).unwrap();
+    eventually("the room", 10, || session.composer().room.connected).await;
+
+    // A socket on the old path may be dead without saying so. It's asked, not trusted.
+    let before = edge.probes(chat);
+    client.network_path_changed();
+    eventually("a probe on the new path", 5, || edge.probes(chat) > before).await;
+
+    // One already gone doesn't wait out its backoff.
+    edge.refuse_chat_joins(true);
+    edge.kick(chat);
+    eventually("the drop", 10, || !session.composer().room.connected).await;
+    host.say("r1", "said while it was gone");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    edge.refuse_chat_joins(false);
+    client.network_path_changed();
+    eventually("the rejoin and catch-up", 10, || shows(&session, "said while it was gone")).await;
+    host.leave().await;
+    leave(client);
+}
+
+/// Android can leave a backgrounded process running for hours, so nothing suspends its
+/// sockets for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phone_at_rest_holds_no_socket_dials_nothing_and_catches_up_on_return() {
+    let _serial = SERIAL.lock().await;
+    let chat = "at-rest";
+    let edge = MockEdge::start_relay().await;
+    let _registry = Registry::start(&edge, &[chat_row(chat, 3, false)], true).await;
+    let host = Host::join(&edge, chat, LoroDoc::new()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    registered(&client, chat).await;
+    let session = client.open_session(chat).unwrap();
+    session.set_view_attached(true);
+    eventually("the room", 10, || session.composer().room.connected).await;
+    host.say("r1", "before resting");
+    eventually("the first", 10, || shows(&session, "before resting")).await;
+
+    client.on_background();
+    client.on_background_idle();
+    eventually("the room's socket to close", 5, || !session.composer().room.connected).await;
+
+    // Long enough for several rounds of the backoff a dropped socket would go through.
+    let hellos = edge.hellos(chat).len();
+    let pulls = edge.pulls(chat).len();
+    host.say("r2", "said while it rested");
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(edge.hellos(chat).len(), hellos, "nothing dials at rest");
+    assert_eq!(edge.pulls(chat).len(), pulls, "nothing polls at rest");
+    assert!(!shows(&session, "said while it rested"));
+
+    client.on_foreground();
+    eventually("the catch-up", 15, || shows(&session, "said while it rested")).await;
+    assert!(
+        edge.pulls(chat).iter().all(|query| !query.contains("fallback=1")),
+        "resting isn't a network with no sockets",
+    );
+    session.send(SendRequest::text("back again")).unwrap();
+    eventually("the send to arrive", 15, || host.received("back again")).await;
+    host.leave().await;
+    leave(client);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_left_behind_at_rest_waits_in_the_outbox_and_goes_on_return() {
+    let _serial = SERIAL.lock().await;
+    let chat = "rest-send";
+    let edge = MockEdge::start_relay().await;
+    let _registry = Registry::start(&edge, &[chat_row(chat, 3, false)], true).await;
+    let host = Host::join(&edge, chat, LoroDoc::new()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    registered(&client, chat).await;
+    eventually("the host's capability", 10, || {
+        client.workspace().device(HOST).is_some_and(|d| !d.capabilities.is_empty())
+    })
+    .await;
+    let session = client.open_session(chat).unwrap();
+    eventually("the room", 10, || session.composer().room.connected).await;
+
+    client.on_background();
+    client.on_background_idle();
+    eventually("the room's socket to close", 5, || !session.composer().room.connected).await;
+    session.send(SendRequest::text("written just before it slept")).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(outbox(dir.path(), chat), 1, "held on disk");
+    assert_eq!(edge.queue_len(chat), 0, "and not sent");
+
+    client.on_foreground();
+    eventually("the send to arrive", 15, || host.received("written just before it slept")).await;
+    eventually("the outbox to let go", 10, || outbox(dir.path(), chat) == 0).await;
+    host.leave().await;
+    leave(client);
+}
+
 // ── sends ────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

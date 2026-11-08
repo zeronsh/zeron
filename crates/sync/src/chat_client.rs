@@ -1125,6 +1125,13 @@ impl Actor {
             if *self.shutdown.borrow() {
                 return;
             }
+            if crate::wake::is_resting() {
+                tokio::select! {
+                    _ = crate::wake::until_awake() => {}
+                    _ = self.shutdown.changed() => {}
+                }
+                continue;
+            }
             let attempt = self
                 .flags
                 .dial_seq
@@ -1184,6 +1191,7 @@ impl Actor {
             let end = tokio::select! {
                 biased;
                 _ = shutdown.wait_for(|stop| *stop) => SessionEnd::Stop,
+                _ = crate::wake::until_resting() => SessionEnd::Reconnect,
                 end = self.run_session(pipe, &mut ready) => end,
             };
             match end {
@@ -1872,6 +1880,9 @@ impl Actor {
     /// retry on the next backoff cycle.
     fn spawn_offline_sync(&self) {
         use std::sync::atomic::Ordering::Relaxed;
+        if crate::wake::is_resting() {
+            return;
+        }
         let Some(transport) = self.transport.clone() else {
             return;
         };

@@ -63,10 +63,14 @@ pub(crate) async fn wait_backoff(cancel: &CancellationToken, wait: Duration) -> 
         wait + jitter
     };
     tokio::select! {
+        _ = cancel.cancelled() => return false,
+        _ = tokio::time::sleep(wait) => {}
+        _ = wake.recv() => {}
+        _ = online.recv() => {}
+    }
+    tokio::select! {
         _ = cancel.cancelled() => false,
-        _ = tokio::time::sleep(wait) => true,
-        _ = wake.recv() => true,
-        _ = online.recv() => true,
+        _ = zeron_sync::wake::until_awake() => true,
     }
 }
 
@@ -531,7 +535,10 @@ impl LiveBackend {
                     _ = cancel.cancelled() => return,
                     _ = beat.tick() => {
                         let Some(inner) = weak.upgrade() else { return };
-                        if let Some(live) = inner.live()
+                        // Not suspended isn't the same as in use: Android can leave a
+                        // backgrounded process running for hours, and each beat wakes the radio.
+                        if inner.is_foreground()
+                            && let Some(live) = inner.live()
                             && let Some(client) = lock(&live.registry).as_ref()
                         {
                             client.set_presence(now_ms());
