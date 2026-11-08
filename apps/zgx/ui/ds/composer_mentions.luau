@@ -324,9 +324,21 @@ function M.use(opts: Use)
 				)
 			return locale.s(if t.query == "" then "ds.composer_mentions.none_available" else "ds.composer_mentions.none_matching", { what = what })
 		end
-		local rows = ui.each(shown, row, {
-			key = function(item: Item): string
-				return item.value
+		-- keyed by position, not by item: a keyed row outlives a re-filter with the
+		-- index it was built at, so the lit row never matched, and two skills
+		-- installed in two places share a name
+		local placed = ui.computed(function(): { { item: Item, i: number } }
+			local out = {}
+			for i, item in shown:get() do
+				table.insert(out, { item = item, i = i })
+			end
+			return out
+		end)
+		local rows = ui.each(placed, function(entry: { item: Item, i: number }): Node
+			return row(entry.item, entry.i)
+		end, {
+			key = function(entry: { item: Item, i: number }): string
+				return tostring(entry.i)
 			end,
 			gap = "$zeron.list.gap",
 		})
