@@ -304,15 +304,16 @@ fn fx_effect(input:LayerInput,g:vec3<f32>,q:vec2<f32>,fp:f32)->vec3<f32> {return
 
 local SOURCES = { dither = DITHER, ascii = ascii(), halftone = HALFTONE, scanlines = SCANLINES } :: { [string]: string }
 
-local made: { [string]: any } = {}
--- The layer shader for an effect ("dither"; anything else draws none),
--- made once.
+-- Every effect's layer shader, made as this loads: zgx compiles a shader
+-- in the background (70 to 360 ms each), so one made as it's first used
+-- left the plain picture up, the effect popping in over it a moment later.
+local made: { [string]: any } = { none = ui.layer_shader(COMMON .. NONE) }
+for name, source in SOURCES do
+	made[name] = ui.layer_shader(COMMON .. source)
+end
+-- The layer shader for an effect ("dither"; anything else draws none).
 function M.shader(name: string): any
-	local key = if SOURCES[name] then name else "none"
-	if not made[key] then
-		made[key] = ui.layer_shader(COMMON .. (SOURCES[key] or NONE))
-	end
-	return made[key]
+	return made[name] or made.none
 end
 
 export type Grid = { w: number, h: number, x: number?, y: number?, zoom: number? }
