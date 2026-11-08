@@ -127,6 +127,24 @@ function M.column(from: number, to: number): TableParams
 	return { value = to, duration = M.ms(M.duration(to - from)), ease = M.EASE }
 end
 
+-- The columns on their way (the sidebar folding, the panel opening): each
+-- its step left, the points its width still has to move by, easing to
+-- nothing (`glide(name, step)`, a column a name). `landing()`: how far the
+-- page beside them still has to widen (narrowing, below zero) as they land,
+-- for what lays out once for where it lands rather than at each width on
+-- the way (the composer's footer).
+local glides: { [string]: State<number> } = {}
+function M.glide(name: string, step: State<number>)
+	glides[name] = step
+end
+function M.landing(): number
+	local left = 0
+	for _, step in glides do
+		left += step:get()
+	end
+	return left
+end
+
 -- What moves with the sidebar (its own width is the sidebar's default or
 -- near it): for `ui.tween`.
 M.sidebar = { duration = M.BASE, ease = M.EASE } :: TweenOptions
