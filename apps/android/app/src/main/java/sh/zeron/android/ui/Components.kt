@@ -139,7 +139,8 @@ fun StatusLabel(row: SessionRow) {
     // run reads Done only until it's been seen.
     if (row.sendState == uniffi.zeron_core.SendState.FAILED) return label("Failed", MaterialTheme.colorScheme.error, dot = true)
     when (row.indicator) {
-        ChatIndicator.WORKING -> LoadingIndicator(Modifier.size(26.dp))
+        // (Waiting on background work is drawn as Working, as on desktop and iOS.)
+        ChatIndicator.WORKING, ChatIndicator.WAITING -> LoadingIndicator(Modifier.size(26.dp))
         ChatIndicator.AWAITING_INPUT -> label("Input", MaterialTheme.colorScheme.primary, dot = true)
         ChatIndicator.ERRORED -> label("Failed", MaterialTheme.colorScheme.error, dot = true)
         ChatIndicator.COMPLETED, ChatIndicator.IDLE -> if (row.indicator == ChatIndicator.COMPLETED && row.unseen) label("Done", successColor(), dot = false) else Row(verticalAlignment = Alignment.CenterVertically) {
