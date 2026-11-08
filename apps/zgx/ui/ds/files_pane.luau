@@ -143,12 +143,21 @@ local made = ui.component(function(props: Props): Node
 	local dock_w = ui.use_state(dock_target())
 	local dock_easing: any = nil
 	local was_whole = whole()
+	local was_narrow = narrow()
 	ui.effect(function()
 		local to = dock_target()
 		local now_whole = whole()
 		-- (All of it already, the pane resizing: with the pane, not after it.)
 		local follows = now_whole and was_whole
 		was_whole = now_whole
+		-- (The pane's own width crossing the narrow line, as the window or a
+		-- column beside it moves: the tree goes or comes at once, the file
+		-- not sliding under a drag; it slides only for its toggle.)
+		local now_narrow = narrow()
+		if now_narrow ~= was_narrow then
+			follows = true
+		end
+		was_narrow = now_narrow
 		if dock_easing then
 			dock_easing:cancel()
 			dock_easing = nil

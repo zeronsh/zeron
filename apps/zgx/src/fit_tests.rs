@@ -358,9 +358,17 @@ fn a_window_resize_keeps_the_chat_and_the_panel_at_half_each() {
             app.frames(30);
             let mut last: Option<(f32, Vec<Option<f32>>, f32, Option<f32>)> = None;
             let mut changed_at: Option<usize> = None;
+            let mut was_narrow: Option<bool> = None;
             for (frame, &w) in sweep.iter().enumerate() {
                 app.ui.scene.borrow_mut().resize(w, 800.);
                 app.frame();
+                // (The Files pane crossing its narrow line, 288 + 240, as the
+                // panel narrows or widens with the window: the tree goes or
+                // comes beside the file then, at once, Wing's narrow rule;
+                // the file moves by the tree's width that once.)
+                let narrow = app.bounds("files-pane").width < 288. + 240.;
+                let crossed = was_narrow.is_some_and(|n| n != narrow);
+                was_narrow = Some(narrow);
                 let xs: Vec<Option<f32>> = parts.iter().map(|p| x_of(&mut app, p).map(|(x, _)| x)).collect();
                 let side = app.bounds("#shell-sidebar").width;
                 let more = x_of(&mut app, parts[2]).map(|(x, wd)| w - x - wd);
@@ -380,6 +388,9 @@ fn a_window_resize_keeps_the_chat_and_the_panel_at_half_each() {
                             // (No more than the window's own step, the file. A
                             // sidebar coming back moves it, within the ease above.)
                             let file = i == 3 || i == 4;
+                            if file && crossed {
+                                continue;
+                            }
                             if file && !easing && (b - a).abs() > dw.abs() + 1. {
                                 faults.push(format!("step {step}, {lw} → {w}: the file ({}) moved {a} → {b}", parts[i]));
                             }
