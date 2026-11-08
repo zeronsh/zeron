@@ -166,10 +166,10 @@ function M.Highlight(props: HighlightProps): Node
 			pointer_events = "none",
 			x = motion.spring(ui.computed(function(): number
 				return left_in(props.order(), props.width, chosen())
-			end), motion.TAB_SPRING),
+			end), motion.TAB_SLIDE_SPRING),
 			w = motion.spring(ui.computed(function(): number
 				return props.width(chosen())
-			end), motion.TAB_SPRING),
+			end), motion.TAB_SLIDE_SPRING),
 			opacity = function(): number
 				return if props.hidden and props.hidden() then 0 else 1
 			end,

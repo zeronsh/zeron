@@ -148,7 +148,7 @@ function M.hover(): TweenOptions
 end
 
 
--- Tabs (ds/tabs, ds/tab_strip): the chosen one's wash gliding to the tab
+-- Tabs (ds/tabs, ds/tab_strip): ds/tabs' chosen wash gliding to the tab
 -- that takes it, and a tab let go settling into its place, on one spring.
 -- A little under critical damping: it lands in about a quarter of a second
 -- with no overshoot to see, and a `ui.spring` sent somewhere new on the way
@@ -165,8 +165,9 @@ M.TAB_LIFT_TWEEN = { duration = 120, ease = "out(3)" } :: TweenOptions
 -- The tabs beside one moving, opening or closing slide over on a stiffer
 -- spring, critically damped: quick, and still, with nothing to wobble. (The
 -- tab itself comes and goes at once: a chat alone's tab is replaced on each
--- navigation, too often for an entrance.)
-M.TAB_SLIDE_SPRING = { stiffness = 600, damping = 49 }
+-- navigation, too often for an entrance.) A strip's chosen wash follows its
+-- tab on this one too, so the two never drift apart.
+M.TAB_SLIDE_SPRING = { stiffness = 600, damping = 49 } :: SpringOptions
 function M.tab_slide(): { [string]: any }?
 	return M.layout { spring = anime.createSpring(M.TAB_SLIDE_SPRING) }
 end
