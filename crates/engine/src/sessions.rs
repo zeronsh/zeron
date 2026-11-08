@@ -279,7 +279,7 @@ struct Inner {
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
     /// Rung as the port is recorded: what a run revived on boot, while the
-    /// engine is still being assembled, waits on ([`Sessions::ipc_port_ready`]).
+    /// engine is still being assembled, waits on ([`SessionsEngine::ipc_port_ready`]).
     ipc_ready: tokio::sync::Notify,
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
@@ -393,7 +393,7 @@ impl SessionsEngine {
     pub fn set_ipc_port(&self, port: u16) {
         self.inner
             .ipc_port
-            .store(port, std::sync::atomic::Ordering::Relaxed);
+            .store(port, std::sync::atomic::Ordering::Release);
         self.inner.ipc_ready.notify_waiters();
     }
 
@@ -408,7 +408,12 @@ impl SessionsEngine {
             // (Made before the check: `notify_waiters` reaches a `Notified`
             // from its making, polled or not.)
             let rung = self.inner.ipc_ready.notified();
-            if self.inner.ipc_port.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            // (Acquire: the bearer, recorded before the port, is seen too.)
+            let port = self
+                .inner
+                .ipc_port
+                .load(std::sync::atomic::Ordering::Acquire);
+            if port != 0 {
                 return;
             }
             if tokio::time::timeout_at(deadline, rung).await.is_err() {
@@ -6927,5 +6932,42 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Idle);
         assert!(s.last_completed_turn.is_some(), "a wait never swallows the finish");
         rig.core.sessions.shutdown().await;
+    }
+
+    /// What a turn revived on boot waits on before it dispatches: the port its
+    /// Zeron tools dial. An engine serving none goes on at the limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_the_port_gives_up_at_its_limit_wakes_as_it_is_recorded_and_is_over_after() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let limit = Duration::from_secs(10);
+
+        // No port, none coming: the whole limit, then on without one.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), limit);
+
+        // The port recorded midway: the wait ends then, not at the limit.
+        let start = Instant::now();
+        let waiting = tokio::spawn({
+            let sessions = sessions.clone();
+            async move { sessions.ipc_port_ready(limit).await }
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!waiting.is_finished(), "no port yet: still waiting");
+        sessions.set_ipc_port(27699);
+        waiting.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+
+        // Recorded already: no wait at all.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
