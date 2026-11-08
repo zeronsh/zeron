@@ -465,6 +465,7 @@ pub(crate) fn seed(
             room_gen: Some(2),
             parent_chat_id: demo.parent.map(str::to_owned),
             child_kind: None,
+            sleep: None,
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {
@@ -479,6 +480,7 @@ pub(crate) fn seed(
                 status,
                 started_at: Some(ms(now - 95_000)),
                 updated_at: Utc::now(),
+                waiting: None,
             })?;
         }
         if let (Some((number, state, title)), Some(source)) = (demo.pr, &source_context) {

@@ -45,6 +45,7 @@ export type Name =
 	| "status-approval"
 	| "status-failed"
 	| "status-done"
+	| "status-woke"
 	| "archive-minimalistic"
 	| "archive-up-minimalistic"
 	| "pin"

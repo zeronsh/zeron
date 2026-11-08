@@ -20,6 +20,7 @@ local motion = require("@ds/motion")
 local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
+local lanes = require("@app/screens/chat/lanes")
 local route = require("@app/screens/shell/route")
 local art = require("@app/screens/shell/art")
 local shared = require("@app/screens/chat/shared")
@@ -373,6 +374,9 @@ local function Composer(): Node
 	-- What the agent asks, and which of a question's options are chosen
 	-- (fresh for each question); its queue, todos and tasks. (The same as
 	-- a split pane's composer shows them: screens/chat/asks.)
+	-- A line above it: one of its own (a send that failed), else the
+	-- session's.
+	local own_notice = ui.state("chat_own_notice", nil :: any)
 	local asks = Asks.bind {
 		id = function(): string?
 			return session_id:peek()
@@ -382,11 +386,34 @@ local function Composer(): Node
 		-- (The request the options were picked for: kept, so a reload keeps
 		-- them.)
 		asked = ui.state("chat_asked_by", nil :: any),
+		say = function(tone: string, key: string)
+			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
 	}
 	local ask, queue = asks.ask, asks.queue
-	-- A line above it: one of its own (a send that failed), else the
-	-- session's.
-	local own_notice = ui.state("chat_own_notice", nil :: any)
+	-- What runs behind it: this chat's subagents (the open chat's: its
+	-- transcript is the session shown) and the processes it left running.
+	local tasks = ui.computed(function(): { any }
+		local out: { any } = {}
+		local shown = store.session:get()
+		local id = session_id:get()
+		if shown and id and shown.id == id then
+			out = lanes.tasks()
+		end
+		local first_ended = #out + 1
+		for i, t in out do
+			if t.ended then
+				first_ended = i
+				break
+			end
+		end
+		-- (Processes after the subagents that run, before those that ended.)
+		for _, t in asks.tasks:get() do
+			table.insert(out, first_ended, t)
+			first_ended += 1
+		end
+		return out
+	end)
 	-- Its own goes as the chat changes (kept: a reload isn't a change).
 	local notice_for = ui.state("chat_notice_for", "?")
 	ui.effect(function()
@@ -502,7 +529,7 @@ local function Composer(): Node
 
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
-	local editing = ui.state("chat_editing", nil :: { item: string, aside: string }?)
+	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }? }?)
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return session_id:peek()
@@ -514,6 +541,12 @@ local function Composer(): Node
 		end,
 		say = function(tone: string, key: string)
 			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
+		cargo = function(): { any }
+			return shared.cargo:peek()
+		end,
+		set_cargo = function(list: { any })
+			shared.cargo:set(list)
 		end,
 	}
 	local end_edit = edits.finish
@@ -786,6 +819,15 @@ local function Composer(): Node
 			open_model = shared.open_model,
 			model_open = model_open,
 			tray = TRAY,
+			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			aside = function(): number?
+				return shared.jump_width:get()
+			end,
+			on_pill_width = function(w: number?)
+				if shared.pill_width:peek() ~= w then
+					shared.pill_width:set(w)
+				end
+			end,
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
@@ -891,7 +933,14 @@ local function Composer(): Node
 			on_queue_remove = asks.on_queue_remove,
 			on_queue_reorder = asks.on_queue_reorder,
 			todos = asks.todos,
-			tasks = asks.tasks,
+			tasks = tasks,
+			-- A subagent's row opens it, a tab of the session's panel.
+			on_open_task = function(ref: string)
+				local id = session_id:peek()
+				if id then
+					lanes.open_task(id, ref)
+				end
+			end,
 			-- Stop on a background process: its host stops it, and its row
 			-- goes as the session stops listing it (production's tray).
 			on_stop_task = function(task: string)
