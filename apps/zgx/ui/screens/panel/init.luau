@@ -466,6 +466,8 @@ local CHIP_INSET = (CHIP_H - SLOT) / 2
 local BAND_H = Dock.head()
 local STRIP_EDGE = (BAND_H - CHIP_H) / 2
 local STRIP_START = ui.raw(STRIP_EDGE, "a strip's tabs as far in from the card's side as from its top")
+-- The card's edge, inside the panel's box.
+local CARD_EDGE = 1
 local STRIP_FADE = 36
 
 -- A prop's value now (`control.value`: a function's answer, a state's,
@@ -1328,6 +1330,8 @@ M.Panel = ui.component(function(props: Props): Node
 			key = k,
 			session = sid,
 			showing = visible,
+			-- (Under the card's edge and its strip.)
+			above = BAND_H + CARD_EDGE,
 			open_kind = function(kind: string)
 				open_kind(kind :: state.Kind)
 			end,
@@ -1660,8 +1664,6 @@ M.Panel = ui.component(function(props: Props): Node
 		ui.column { w_full = true, shrink = 0, hidden = closed, strip_row },
 		panes,
 	}
-	-- (The card's edge, inside its box.)
-	local CARD_EDGE = 1
 	for k, v in props.content or {} do
 		inner[k] = v
 	end

@@ -1,7 +1,8 @@
 -- The right panel in the main window (A's ui/shell_fixture.luau, read as it
 -- is): closing a chat's last tab closes that chat's panel, easing shut as
 -- the title bar's toggle closes it, and leaves the other chats' alone;
--- opened again, it shows its empty page, its block in the panel's middle.
+-- opened again, it shows its empty page, its block a little over the
+-- panel's middle, level with where a new chat's composer stands.
 
 local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
 	local tries = math.ceil((ms or 15000) / 50)
@@ -65,7 +66,7 @@ local function open_files_tab(app: any)
 	app:frames(30)
 end
 
-test("closing a chat's last tab closes its panel, easing shut; other chats keep theirs; reopened, its empty page, centred", function()
+test("closing a chat's last tab closes its panel, easing shut; other chats keep theirs; reopened, its empty page, a little over the middle", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 800)
 	app:frames(30)
@@ -106,7 +107,8 @@ test("closing a chat's last tab closes its panel, easing shut; other chats keep 
 	app:click('#titlebar >> role:button "Panel"')
 	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
 	expect(app:has("#panel-strip >> role:tab")).to_be(false)
-	-- Its block in the middle of the page, as much room over it as under it.
+	-- Its block a little over the page's middle (the composer's lift: as
+	-- a new chat's composer stands, below).
 	expect(eventually(app, function(): boolean
 		app:frames(5)
 		local page, block = box(app, "panel-empty"), box(app, "panel-home-block")
@@ -114,7 +116,7 @@ test("closing a chat's last tab closes its panel, easing shut; other chats keep 
 			return false
 		end
 		local over, under = block.y - page.y, (page.y + page.h) - (block.y + block.h)
-		return over > 24 and math.abs(over - under) <= 1
+		return over > 24 and under - over > 48
 	end)).to_be(true)
 	-- A window too short for it: it starts at the page's top and scrolls.
 	app:resize(1200, 360)
@@ -204,4 +206,38 @@ test("closing a chat's last tab, the panel shuts on what it showed: no frame of 
 	app:click('#titlebar >> role:button "Panel"')
 	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
 	expect(app:has("#panel-strip >> role:tab")).to_be(false)
+end)
+-- Where node `#id`'s middle stands, down the window.
+local function middle(app: any, id: string): number?
+	local b = box(app, id)
+	return if b and b.h > 0 then b.y + b.h / 2 else nil
+end
+
+test("the panel's home stands level with a new chat's composer, its rows no wider than the reading column", function()
+	local app = mount("shell_fixture.luau")
+	for _, size in { { 1100, 760 }, { 1440, 900 }, { 2560, 1440 } } do
+		app:resize(size[1], size[2])
+		app:frames(30)
+		app:command("shell.new_chat")
+		app:frames(30)
+		if not app:has("#panel-home-block") or (box(app, "panel-home-block") :: any).w == 0 then
+			app:click('#titlebar >> role:button "Panel"')
+		end
+		expect(eventually(app, function(): boolean
+			app:frames(5)
+			local home, composer = middle(app, "panel-home-block"), middle(app, "chat-composer-dock")
+			return home ~= nil and composer ~= nil and math.abs(home - composer) <= 1
+		end)).to_be(true)
+		-- (No wider than the reading column, in the panel's middle; each row
+		-- as wide as the block's inside, its whole width a target.)
+		local panel, block = box(app, "panel-empty") :: any, box(app, "panel-home-block") :: any
+		local row = box(app, "panel-open-browser") :: any
+		expect(block.w <= 660).to_be(true)
+		expect(math.abs((block.x - panel.x) - ((panel.x + panel.w) - (block.x + block.w))) <= 1).to_be(true)
+		expect(row.w).to_be(block.w - 32)
+		if size[1] == 2560 then
+			expect(block.w).to_be(660)
+			expect(panel.w > 700).to_be(true)
+		end
+	end
 end)

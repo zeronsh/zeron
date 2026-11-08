@@ -35,6 +35,7 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local store = require("@app/screens/chat/store")
+local Dock = require("@app/screens/chat/dock")
 local api = require("@app/screens/panel/home_api")
 local Previews = require("@app/screens/panel/previews")
 -- Which finished lanes you've seen (their tabs in front).
@@ -172,6 +173,10 @@ export type Props = {
 	-- A web address in a browser tab of the session's panel (a port's).
 	open_url: ((session: string, url: string) -> ())?,
 	showing: () -> boolean,
+	-- How far its top stands under the panel's (its tab strip): its block
+	-- lines up with a new chat's composer beside it, which stands by the
+	-- panel's whole height.
+	above: number?,
 }
 
 -- ---------------------------------------------------------------------------
@@ -1280,13 +1285,25 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: across the card from its left (its rows from the
-	-- card's left, their letters at its right, as the shipping app's), and
-	-- in the middle of the panel's height. What it's in is at least as tall
-	-- as the scroll's window (measured) and centres it, so taller than the
-	-- panel it starts at the top and scrolls, nothing pushed out of reach.
+	-- Where it stands: in the panel's middle, its rows no wider than the
+	-- reading column (`zeron.prose.measure`, the conversation's own
+	-- default), each row's whole width still its target; and level with a
+	-- new chat's composer, by the composer's own rule (screens/chat/dock:
+	-- a little over the middle of the room under the title bar, read over
+	-- the panel's whole height). What it's in is at least as tall as the
+	-- scroll's window (measured) and centres it, the lift as room under it,
+	-- never more than the room left: taller than the panel, it starts at the
+	-- top and scrolls, nothing pushed out of reach.
 	local view = ui.ref()
+	local block = ui.ref()
 	local room = ui.use_state(0)
+	-- (Its middle that far over the scroll's: the composer's offset from the
+	-- page's middle, less half the strip over it.)
+	local lift = (props.above or 0) / 2 - Dock.hero_offset()
+	local function under(): number
+		local spare = room:get() - (block.height or 0)
+		return ui.raw(math.clamp(2 * lift, 0, math.max(spare, 0)), "the composer's lift, as room under the block")
+	end
 	return ui.scroll {
 		ref = view,
 		id = "panel-empty",
@@ -1314,9 +1331,13 @@ M.Page = ui.component(function(props: Props): Node
 				return room:get()
 			end,
 			justify = "center",
+			items = "center",
+			pb = under,
 			ui.column {
 				id = "panel-home-block",
+				ref = block,
 				w_full = true,
+				max_w = ui.theme.get("zeron.prose.measure") :: number?,
 				px = "$space.4",
 				py = "$space.6",
 				gap = "$space.5",

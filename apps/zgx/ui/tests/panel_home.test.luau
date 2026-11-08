@@ -566,27 +566,34 @@ local function span_of(app: any, target: string): (number, number)
 	return tonumber(y) or 0, tonumber(h) or 0
 end
 
--- Whether the home's block stands in the page's middle, or, taller than
--- the page, at its top.
-local function centred(app: any): boolean
+-- Whether the home's block stands a little over the page's middle, by
+-- the new chat's composer's lift (`lift`: the room under it less the room
+-- over it), never more than the room left; or, taller than the page, at
+-- its top.
+local function centred(app: any, lift: number): boolean
 	local py, ph = span_of(app, "#panel-empty")
 	local by, bh = span_of(app, "#panel-home-block")
 	if bh >= ph then
 		return by == py
 	end
-	return math.abs((by - py) - (py + ph - by - bh)) <= 1
+	local over, under = by - py, py + ph - by - bh
+	return math.abs((under - over) - math.min(lift, ph - bh)) <= 1
 end
 
-test("the home stands in the panel's middle as its parts open, close and grow", function()
+test("the home stands a little over the panel's middle as its parts open, close and grow", function()
 	local app = home()
-	expect(centred(app)).to_be(true)
+	-- (The lift: the composer's, here with no strip over the page.)
+	local py, ph = span_of(app, "#panel-empty")
+	local by, bh = span_of(app, "#panel-home-block")
+	local lift = (py + ph - by - bh) - (by - py)
+	expect(lift > 40).to_be(true)
 	app:click("#panel-home-subagents-head")
 	app:frames(30)
-	expect(centred(app)).to_be(true)
+	expect(centred(app, lift)).to_be(true)
 	app:click("#panel-home-subagents-head")
 	app:command("many")
 	app:frames(30)
-	expect(centred(app)).to_be(true)
+	expect(centred(app, lift)).to_be(true)
 end)
 
 -- Where a node's left edge is in the window.
