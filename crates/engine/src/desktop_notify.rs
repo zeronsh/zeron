@@ -31,6 +31,14 @@ use zeron_proto::{Chat, ConnectivityState, HarnessUpdatePhase, HarnessUpdateStat
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// How long a finish waits to stand before it rings. The person's own
+/// message often comes with one: a steer or a queued row taken as a turn
+/// ends publishes that end with Working (their message carries the turn on),
+/// and a send that replaces the runtime marks the old turn's end a moment
+/// before the new one starts. Neither is "finished"; a turn that follows
+/// within this window takes the finish with it.
+const DONE_SETTLE: chrono::Duration = chrono::Duration::seconds(2);
+
 /// This process shows desktop banners: engines assembled from now on post
 /// them (and advertise [`zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1`]).
 pub fn enable() {
@@ -222,7 +230,12 @@ impl Prefs {
 
 /// What a banner asked for by something other than a session (a plugin's,
 /// through `PostNotification`) came to: shown, or why not.
-pub(crate) fn asked_outcome(prefs_enabled: bool, background_only: bool, focused: bool, desktop: bool) -> &'static str {
+pub(crate) fn asked_outcome(
+    prefs_enabled: bool,
+    background_only: bool,
+    focused: bool,
+    desktop: bool,
+) -> &'static str {
     if !desktop {
         "unavailable"
     } else if !prefs_enabled {
@@ -237,7 +250,13 @@ pub(crate) fn asked_outcome(prefs_enabled: bool, background_only: bool, focused:
 /// A banner asked for (a plugin's): shown as the engine's own are, under
 /// the same Settings (`notificationsEnabled`, "only when in the
 /// background"), clicking it opening `target` (a session). What it came to.
-pub(crate) fn post_asked(data_dir: &Path, focus: &ViewportFocus, title: &str, body: &str, target: Option<&str>) -> &'static str {
+pub(crate) fn post_asked(
+    data_dir: &Path,
+    focus: &ViewportFocus,
+    title: &str,
+    body: &str,
+    target: Option<&str>,
+) -> &'static str {
     let prefs = Prefs::read(data_dir);
     let outcome = asked_outcome(prefs.enabled, prefs.background_only, focus.any(), enabled());
     if outcome == "posted" {
@@ -261,7 +280,9 @@ pub(crate) fn post_for(
         std::sync::LazyLock::new(Default::default);
     let body: String = body.chars().take(500).collect();
     let paced = {
-        let mut pace = PACE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pace = PACE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         !asked_in_time(pace.entry(source.to_owned()).or_default(), Instant::now())
     };
     if paced {
@@ -273,11 +294,19 @@ pub(crate) fn post_for(
 
 /// Whether one more banner from a source may show, given when its last
 /// ones did: at most [`ASKED_PER_MINUTE`] a minute, [`ASKED_APART`] apart.
-pub(crate) fn asked_in_time(history: &mut std::collections::VecDeque<Instant>, now: Instant) -> bool {
-    while history.front().is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60)) {
+pub(crate) fn asked_in_time(
+    history: &mut std::collections::VecDeque<Instant>,
+    now: Instant,
+) -> bool {
+    while history
+        .front()
+        .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+    {
         history.pop_front();
     }
-    let apart = history.back().is_none_or(|at| now.duration_since(*at) >= ASKED_APART);
+    let apart = history
+        .back()
+        .is_none_or(|at| now.duration_since(*at) >= ASKED_APART);
     if apart && history.len() < ASKED_PER_MINUTE {
         history.push_back(now);
         return true;
@@ -316,6 +345,9 @@ struct Notifier {
     focus: ViewportFocus,
     post: Post,
     baselines: HashMap<String, SessionNotificationState>,
+    /// Finishes waiting to stand ([`DONE_SETTLE`]): chat → its title and
+    /// when it rings.
+    settling: HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
     connectivity: ConnectivityNotificationState,
     updates_seen: HashSet<String>,
 }
@@ -328,6 +360,7 @@ impl Notifier {
             focus,
             post,
             baselines: HashMap::new(),
+            settling: HashMap::new(),
             connectivity: ConnectivityNotificationState::default(),
             updates_seen: HashSet::new(),
         }
@@ -356,15 +389,56 @@ impl Notifier {
             if !chat.is_some_and(Chat::is_top_level) {
                 continue;
             }
+            // A turn going on (or asking, or failing) takes a waiting
+            // finish with it.
+            if status.indicator != Indicator::None {
+                self.settling.remove(&session.chat_id);
+            }
             if let Some(prev) = prev
                 && let Some(ping) = status.ping_since(&prev, false)
             {
                 let title = chat
                     .and_then(|chat| chat.title.clone())
                     .unwrap_or_else(|| "New session".into());
-                due.push((title, ping, session.chat_id.clone()));
+                match ping {
+                    // Published with the next turn already running: the
+                    // person's message carried it on, nothing finished.
+                    Ping::Done if status.indicator == Indicator::Working => {}
+                    Ping::Done => {
+                        self.settling
+                            .insert(session.chat_id.clone(), (title, now + DONE_SETTLE));
+                    }
+                    _ => due.push((title, ping, session.chat_id.clone())),
+                }
             }
         }
+        self.post_due(due);
+    }
+
+    /// When the next waiting finish rings.
+    fn next_settled(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.settling.values().map(|(_, at)| *at).min()
+    }
+
+    /// Ring the finishes that have stood for [`DONE_SETTLE`].
+    fn flush(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        let stood: Vec<String> = self
+            .settling
+            .iter()
+            .filter(|(_, (_, at))| *at <= now)
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        let due = stood
+            .into_iter()
+            .filter_map(|chat| {
+                let (title, _) = self.settling.remove(&chat)?;
+                Some((title, Ping::Done, chat))
+            })
+            .collect();
+        self.post_due(due);
+    }
+
+    fn post_due(&mut self, due: Vec<(String, Ping, String)>) {
         if due.is_empty() || self.allowed().is_none() {
             return;
         }
@@ -464,6 +538,7 @@ pub(crate) fn spawn(core: &crate::EngineCore, data_dir: PathBuf) -> tokio::task:
         let mut updates_due: Option<tokio::time::Instant> =
             Some(tokio::time::Instant::now() + UPDATE_DEBOUNCE);
         loop {
+            let settles_at = notifier.next_settled();
             tokio::select! {
                 changed = sessions.changed() => {
                     if changed.is_err() { break; }
@@ -486,6 +561,17 @@ pub(crate) fn spawn(core: &crate::EngineCore, data_dir: PathBuf) -> tokio::task:
                     updates_due.get_or_insert(tokio::time::Instant::now() + UPDATE_DEBOUNCE);
                 }
                 _ = async {
+                    match settles_at {
+                        Some(at) => {
+                            let wait = (at - chrono::Utc::now()).to_std().unwrap_or_default();
+                            tokio::time::sleep(wait).await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    notifier.flush(chrono::Utc::now());
+                }
+                _ = async {
                     match updates_due {
                         Some(at) => tokio::time::sleep_until(at).await,
                         None => std::future::pending().await,
@@ -505,21 +591,38 @@ mod tests {
     #[test]
     fn a_plugin_s_banner_keeps_to_the_settings_and_its_pace() {
         assert_eq!(asked_outcome(true, false, true, true), "posted");
-        assert_eq!(asked_outcome(true, true, true, true), "held", "only when in the background, and a window is in front");
+        assert_eq!(
+            asked_outcome(true, true, true, true),
+            "held",
+            "only when in the background, and a window is in front"
+        );
         assert_eq!(asked_outcome(true, true, false, true), "posted");
         assert_eq!(asked_outcome(false, false, false, true), "off");
-        assert_eq!(asked_outcome(true, false, false, false), "unavailable", "a server never shows banners");
+        assert_eq!(
+            asked_outcome(true, false, false, false),
+            "unavailable",
+            "a server never shows banners"
+        );
         let mut history = std::collections::VecDeque::new();
         let t0 = Instant::now();
         assert!(asked_in_time(&mut history, t0));
-        assert!(!asked_in_time(&mut history, t0 + Duration::from_secs(1)), "too soon after the last");
+        assert!(
+            !asked_in_time(&mut history, t0 + Duration::from_secs(1)),
+            "too soon after the last"
+        );
         let mut at = t0;
         for _ in 1..ASKED_PER_MINUTE {
             at += ASKED_APART;
             assert!(asked_in_time(&mut history, at));
         }
-        assert!(!asked_in_time(&mut history, at + ASKED_APART), "a minute's worth");
-        assert!(asked_in_time(&mut history, t0 + Duration::from_secs(61)), "a minute on, one more");
+        assert!(
+            !asked_in_time(&mut history, at + ASKED_APART),
+            "a minute's worth"
+        );
+        assert!(
+            asked_in_time(&mut history, t0 + Duration::from_secs(61)),
+            "a minute on, one more"
+        );
     }
 
     use super::*;
@@ -782,6 +885,8 @@ mod tests {
             &chats,
             now,
         );
+        // (Once it has settled: a finish waits a moment for a turn to follow.)
+        notifier.flush(now + DONE_SETTLE);
         assert_eq!(
             *posted.lock().unwrap(),
             vec![(
@@ -793,6 +898,7 @@ mod tests {
         // A focused window holds it back (background-only is the default).
         focus.set("window", true);
         notifier.sessions(&[session("a", Some("t3"), now)], &chats, now);
+        notifier.flush(now + DONE_SETTLE);
         assert_eq!(posted.lock().unwrap().len(), 1);
         // Banners off: nothing, focused or not.
         focus.set("window", false);
@@ -802,7 +908,66 @@ mod tests {
         )
         .unwrap();
         notifier.sessions(&[session("a", Some("t4"), now)], &chats, now);
+        notifier.flush(now + DONE_SETTLE);
         assert_eq!(posted.lock().unwrap().len(), 1);
+    }
+
+    fn working(chat_id: &str, turn: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut row = session(chat_id, turn, now);
+        row.status = zeron_proto::SessionStatus::Working;
+        row.started_at = Some(now);
+        row
+    }
+
+    /// Your own message never rings "finished". These are the rows
+    /// crates/engine/src/sessions.rs publishes at such a send.
+    #[test]
+    fn a_send_steer_or_queued_send_never_rings_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, _) = notifier(dir.path());
+        let chats = [chat("a", "Fix the build", None)];
+        let t0 = chrono::Utc::now();
+        let at = |ms: i64| t0 + chrono::Duration::milliseconds(ms);
+        notifier.sessions(&[session("a", Some("t1"), at(0))], &chats, at(0));
+
+        // A plain send to an idle chat: Working, the marker as it was.
+        notifier.sessions(&[working("a", Some("t1"), at(10))], &chats, at(10));
+        notifier.flush(at(10_000));
+        // A steer (or a queued row taken) as the turn ends: the end is
+        // published with Working, the person's message carrying it on.
+        notifier.sessions(&[working("a", Some("t2"), at(20))], &chats, at(20));
+        notifier.flush(at(10_000));
+        // A send that replaces the runtime: the held end lands Idle, then
+        // the new turn starts a moment later.
+        notifier.sessions(&[session("a", Some("t3"), at(30))], &chats, at(30));
+        notifier.sessions(&[working("a", Some("t3"), at(200))], &chats, at(200));
+        notifier.flush(at(10_000));
+        assert!(
+            posted.lock().unwrap().is_empty(),
+            "rang on a send: {:?}",
+            posted.lock().unwrap()
+        );
+
+        // The turn your message started finishing: that rings, once.
+        notifier.sessions(&[session("a", Some("t4"), at(20_000))], &chats, at(20_000));
+        notifier.flush(at(30_000));
+        notifier.flush(at(40_000));
+        assert_eq!(posted.lock().unwrap().len(), 1);
+    }
+
+    /// A question or a failure doesn't wait: it rings at once.
+    #[test]
+    fn a_question_or_failure_rings_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, _) = notifier(dir.path());
+        let chats = [chat("a", "Fix the build", None)];
+        let now = chrono::Utc::now();
+        notifier.sessions(&[working("a", Some("t1"), now)], &chats, now);
+        let mut asking = working("a", Some("t1"), now);
+        asking.status = zeron_proto::SessionStatus::AwaitingInput;
+        notifier.sessions(&[asking], &chats, now);
+        assert_eq!(posted.lock().unwrap().len(), 1);
+        assert_eq!(posted.lock().unwrap()[0].1, "Waiting on your input");
     }
 
     #[test]
