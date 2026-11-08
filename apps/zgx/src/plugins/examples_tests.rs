@@ -4066,6 +4066,19 @@ end)
 }
 
 #[test]
+fn account_pin_says_what_its_service_did() {
+    let (mut app, heard) = shell_with_agents(vec![example("account-pin")], json!({}));
+    assert_eq!(app.error(), None, "the shell with the example failed");
+    tell(&mut app, "account-pin", "pinned", json!({ "chat": "s-unknown", "to": "b@example.com" }));
+    tell(&mut app, "account-pin", "lost", json!({ "account": "acct-b", "chat": "s-unknown" }));
+    let toasts = said(&heard, "plugin.account-pin.toast");
+    assert_eq!(toasts.len(), 2, "{toasts:?}");
+    assert!(toasts[0].contains("running on b@example.com"), "{toasts:?}");
+    assert!(toasts[1].contains("saved account was removed"), "{toasts:?}");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
 fn keep_going_says_what_its_service_sent() {
     let (mut app, heard) = shell_with_agents(vec![example("keep-going")], json!({}));
     assert_eq!(app.error(), None, "the shell with the example failed");
