@@ -232,6 +232,19 @@ impl CoreClient {
         Ok(self.client.unarchive_session(&chat_id)?)
     }
 
+    /// Put a chat to sleep until `until_ms` (the Activity view's Asleep),
+    /// or wake it now (`None`). Synced: every device shows it asleep.
+    pub fn sleep_session(&self, chat_id: String, until_ms: Option<i64>) -> CoreResult<()> {
+        Ok(self.client.sleep_session(&chat_id, until_ms)?)
+    }
+
+    /// Stop waiting on the background processes a chat's agent said it
+    /// waits on (asked of its host). `false` when it no longer was.
+    pub async fn stop_waiting(&self, chat_id: String) -> CoreResult<bool> {
+        let client = self.client.clone();
+        on_runtime(async move { client.stop_waiting(&chat_id).await }).await
+    }
+
     pub fn rename_session(&self, chat_id: String, title: String) -> CoreResult<()> {
         Ok(self.client.rename_session(&chat_id, &title)?)
     }

@@ -26,11 +26,14 @@ final class StatusGlyph: UIView {
         case trailer
         case dot(UIColor)
         case check(UIColor)
+        /// An SF Symbol at the glyph's size (Activity's woke: `alarm`).
+        case symbol(String, UIColor)
     }
 
     var kind: Kind { didSet { if kind != oldValue { rebuild() } } }
     private var cells: [CALayer] = []
     private let checkLayer = CAShapeLayer()
+    private let symbolView = UIImageView()
 
     init(_ kind: Kind = .none) {
         self.kind = kind
@@ -41,6 +44,9 @@ final class StatusGlyph: UIView {
         checkLayer.lineCap = .round
         checkLayer.lineJoin = .round
         layer.addSublayer(checkLayer)
+        symbolView.contentMode = .center
+        symbolView.isHidden = true
+        addSubview(symbolView)
         rebuild()
     }
 
@@ -70,9 +76,13 @@ final class StatusGlyph: UIView {
         cells.forEach { $0.removeFromSuperlayer() }
         cells.removeAll()
         checkLayer.isHidden = true
+        symbolView.isHidden = true
         switch kind {
         case .none:
             break
+        case let .symbol(name, _):
+            symbolView.image = UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+            symbolView.isHidden = false
         case .spinner:
             for _ in 0..<6 { cells.append(CALayer()) }
         case .trailer:
@@ -118,6 +128,8 @@ final class StatusGlyph: UIView {
             p.addLine(to: CGPoint(x: o.x + 12.5 * s, y: o.y + 4.5 * s))
             checkLayer.frame = bounds
             checkLayer.path = p.cgPath
+        case .symbol:
+            symbolView.frame = bounds.insetBy(dx: -2, dy: -2)
         case .none:
             break
         }
@@ -142,6 +154,8 @@ final class StatusGlyph: UIView {
             cells.first?.backgroundColor = color.resolvedColor(with: traitCollection).cgColor
         case let .check(color):
             checkLayer.strokeColor = color.resolvedColor(with: traitCollection).cgColor
+        case let .symbol(_, color):
+            symbolView.tintColor = color
         case .spinner, .trailer:
             let spinner = kind == .spinner
             for (i, cell) in cells.enumerated() {
