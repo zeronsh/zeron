@@ -47,7 +47,9 @@
       "done": "Done",
       "done_long": "Completed",
       "failed": "Failed",
-      "limited": "Limited"
+      "limited": "Limited",
+      "woke": "Woke",
+      "woke_long": "Woke from sleep"
     },
     "file_tree": {
       "status": {
@@ -490,13 +492,18 @@
         "keep_active": "Active when collapsed",
         "devices_first": "Devices first",
         "projects_first": "Projects first",
-        "empty_projects": "Empty projects"
+        "empty_projects": "Empty projects",
+        "activity": "Activity",
+        "activity_settings": "Activity settings…"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
       "show_less": "Show less",
       "empty_projects_word": "Empty",
-      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}",
+      "activity": "Activity",
+      "working": "Working",
+      "asleep": "Asleep"
     },
     "git": {
       "pull_request": "Pull request",
@@ -1054,6 +1061,14 @@
       "cut": "Cut",
       "paste": "Paste",
       "label": "Text"
+    },
+    "date_picker": {
+      "label": "Days",
+      "month_year": "{m, select, 1 {January} 2 {February} 3 {March} 4 {April} 5 {May} 6 {June} 7 {July} 8 {August} 9 {September} 10 {October} 11 {November} 12 {December} other {}} {year}",
+      "previous_month": "Previous month",
+      "next_month": "Next month",
+      "time": "Time",
+      "first_weekday": "1"
     }
   },
   "settings": {
@@ -2152,6 +2167,35 @@
       "yesterday": "Yesterday",
       "empty_title": "No history yet",
       "off": "Keep history is off, so pages you visit aren’t kept."
+    },
+    "activity": {
+      "title": "Activity",
+      "terms": "activity inbox sidebar working sleep asleep snooze archive auto-archive idle",
+      "description": "One list of the chats that need you, the latest at the top. Working, asleep and archived chats fold away at its end.",
+      "view": {
+        "label": "Activity sidebar",
+        "description": "Show the sidebar as Activity instead of grouped by project or device. Also in the sidebar's … menu.",
+        "terms": "inbox view sidebar mode"
+      },
+      "list_section": "Activity",
+      "working": {
+        "label": "Fold working chats into Working",
+        "description": "A chat moves into Working while its agent runs, or waits on work that will wake it, and comes back to the top when it's done or needs you.",
+        "terms": "running agent shelf"
+      },
+      "sleep": {
+        "label": "Sleep",
+        "description": "Right-click a chat and choose Sleep to put it in Asleep until a time you pick, on every device. It wakes early if it asks you something, needs an approval or fails, and comes back to the top.",
+        "terms": "snooze later remind wake"
+      },
+      "archive_section": "Archiving",
+      "archive_after": {
+        "label": "Archive idle chats",
+        "description": "Chats with nothing new for this long move to Archived. Pinned, working and asleep chats stay, as do chats waiting on you.",
+        "terms": "auto archive idle old clean up",
+        "never": "Never",
+        "days": "{n, plural, one {After # day} other {After # days}}"
+      }
     }
   },
   "common": {
@@ -2352,6 +2396,7 @@
         "shell_previous_session": "Previous session",
         "session_n": "Session {i}",
         "shell_palette": "Search",
+        "shell_check_updates": "Check for Updates…",
         "shell_settings": "Settings",
         "shell_find": "Find",
         "shell_close": "Close",
@@ -2505,6 +2550,26 @@
       "skipped_body": "You'll see it again when there's a newer version",
       "undo": "Undo",
       "skip_hint": "Hide until there's a newer version"
+    },
+    "activity": {
+      "wake": "Wake",
+      "sleep": {
+        "title": "Sleep",
+        "choice": "{name} · {when}",
+        "in_hour": "In 1 hour",
+        "in_hours": "In 3 hours",
+        "evening": "This evening",
+        "tomorrow": "Tomorrow",
+        "next_week": "Next week",
+        "custom": "Custom…",
+        "custom_title": "Sleep until",
+        "failed": "Couldn't put this chat to sleep",
+        "needs_update": "Zeron on this chat's device needs an update for Sleep.",
+        "until_when": "{day}, {date} at {time}"
+      },
+      "stop_waiting": "Stop waiting",
+      "stop_waiting_failed": "Couldn't stop waiting",
+      "wake_failed": "Couldn't wake this chat"
     }
   },
   "onboarding": {

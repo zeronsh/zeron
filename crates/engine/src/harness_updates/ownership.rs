@@ -77,6 +77,9 @@ pub(super) struct PackageUpdate {
     pub args: Vec<String>,
     /// The installation owner's lock key: one updater per owner at a time.
     pub owner: String,
+    /// What the owner's tool needs to find that install, which a Finder- or
+    /// service-launched engine's environment lacks, and what stops it asking.
+    pub env: Vec<(String, String)>,
 }
 
 /// `/`-separated and ASCII-lowercased: byte offsets stay valid against the
@@ -86,7 +89,27 @@ fn slash(path: &Path) -> String {
 }
 
 fn real(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    plain(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Where the CLI behind `resolved` really lives. On Windows a PATH lookup
+/// finds npm's `.cmd` shim (`%APPDATA%\npm\claude.cmd`), which isn't inside
+/// any package: the file the shim runs is.
+pub(super) fn real_target(resolved: &Path) -> PathBuf {
+    match zeron_harness::process::npm_shim_target(resolved) {
+        Some(target) if target.exists() => real(&target),
+        _ => real(resolved),
+    }
+}
+
+/// Windows' canonical paths are verbatim (`\\?\C:\…`), which npm and
+/// friends don't take as a `--prefix`: the same path, spelled plainly.
+fn plain(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 /// Whether mise owns this launcher: a mise shim or install path, mise's own
@@ -136,7 +159,7 @@ fn is_mise_wrapper(path: &Path) -> bool {
 /// `None` when it isn't package-managed at all (a vendor's native install,
 /// a system package) and the caller's other rules apply.
 pub(super) fn package_owner(resolved: &Path, package: &str) -> Option<PackageOwner> {
-    let real = real(resolved);
+    let real = real_target(resolved);
     let paths = [slash(resolved), slash(&real)];
     let lower: Vec<String> = paths.iter().map(|p| p.to_ascii_lowercase()).collect();
     let any = |needle: &str| lower.iter().any(|p| p.contains(needle));
@@ -257,6 +280,10 @@ pub(super) fn package_update(
                     spec,
                 ],
                 owner: format!("npm:{}", slash(prefix).to_ascii_lowercase()),
+                env: vec![
+                    ("npm_config_yes".into(), "true".into()),
+                    ("npm_config_update_notifier".into(), "false".into()),
+                ],
             }
         }
         PackageOwner::Pnpm => {
@@ -265,26 +292,63 @@ pub(super) fn package_update(
                 args.push(format!("--allow-build={package}"));
             }
             args.push(spec);
+            // pnpm finds its global install through `PNPM_HOME`, set by the
+            // user's shell and missing from a Finder launch: without it `add
+            // -g` fails ("no global bin directory") or installs somewhere the
+            // launcher isn't. Its global bin directory is where the launcher is.
+            let home = real(resolved)
+                .parent()
+                .map(Path::to_path_buf)
+                .or_else(|| launcher_dir.first().cloned());
+            let mut env = vec![
+                // Asked when the global store moved; with nobody to answer
+                // pnpm fails, so say yes up front.
+                ("npm_config_confirm_modules_purge".into(), "false".into()),
+            ];
+            if let Some(home) = &home {
+                env.push(("PNPM_HOME".into(), home.to_string_lossy().into_owned()));
+                // …and refuses to install unless that directory is on PATH
+                // (put ahead of the child's PATH, see `run_command_output_watched`).
+                env.push(("PATH".into(), home.to_string_lossy().into_owned()));
+            }
+            let mut near = launcher_dir.clone();
+            near.extend(home);
             PackageUpdate {
-                program: found("pnpm", &launcher_dir)?,
+                program: found("pnpm", &near)?,
                 args,
                 owner: "pnpm-global".into(),
+                env,
             }
         }
-        PackageOwner::Bun => PackageUpdate {
-            program: found("bun", &launcher_dir)?,
-            args: vec!["add".into(), "-g".into(), spec],
-            owner: "bun-global".into(),
-        },
+        PackageOwner::Bun => {
+            // `<BUN_INSTALL>/bin/<cli>`: bun's global install is that
+            // `BUN_INSTALL`'s, which a Finder launch doesn't have set.
+            let bun_install = launcher_dir
+                .first()
+                .filter(|dir| dir.file_name().is_some_and(|name| name == "bin"))
+                .and_then(|dir| dir.parent())
+                .map(Path::to_path_buf);
+            PackageUpdate {
+                program: found("bun", &launcher_dir)?,
+                args: vec!["add".into(), "-g".into(), spec],
+                owner: "bun-global".into(),
+                env: bun_install
+                    .map(|dir| ("BUN_INSTALL".to_string(), dir.to_string_lossy().into_owned()))
+                    .into_iter()
+                    .collect(),
+            }
+        }
         PackageOwner::Yarn => PackageUpdate {
             program: found("yarn", &[])?,
-            args: vec!["global".into(), "add".into(), spec],
+            args: vec!["global".into(), "add".into(), "--non-interactive".into(), spec],
             owner: "yarn-global".into(),
+            env: Vec::new(),
         },
         PackageOwner::Volta { volta_home } => PackageUpdate {
             program: found("volta", &[volta_home.join("bin")])?,
             args: vec!["install".into(), spec],
             owner: format!("volta:{}", slash(volta_home).to_ascii_lowercase()),
+            env: vec![("VOLTA_HOME".into(), volta_home.to_string_lossy().into_owned())],
         },
         PackageOwner::Project => return Err(Manual::Project.instruction().into()),
     })
@@ -387,7 +451,9 @@ mod tests {
         );
         // A vendor's native install isn't package-managed.
         assert_eq!(owner("/home/u/.local/bin/claude"), None);
-        assert_eq!(owner("/usr/local/bin/codex"), None);
+        // Nothing real can answer here: this box's own /usr/local/bin/codex
+        // may well be an npm install.
+        assert_eq!(owner("/usr/local/bin/zeron-test-no-such-cli"), None);
     }
 
     #[cfg(unix)]

@@ -410,6 +410,7 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         settings.accessibilityLabel = "Settings"
         settings.accessibilityIdentifier = "sidebar-settings"
         let options = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: list.optionsMenu())
+        options.accessibilityIdentifier = "sessions-options"
         options.accessibilityLabel = "Options"
         let compose = UIBarButtonItem(image: UIImage(systemName: "plus"), primaryAction: UIAction { [weak self] _ in
             self?.router?.presentNewSession(prompt: nil)
