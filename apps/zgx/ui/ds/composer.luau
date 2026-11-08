@@ -531,6 +531,9 @@ local function submenu(
 				end,
 				on_click = menu.toggle,
 				on_hover = function(inside: boolean)
+					if menu.on_hover then
+						menu.on_hover(inside)
+					end
 					if inside then
 						close_siblings()
 						if not menu.open:peek() then
