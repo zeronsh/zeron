@@ -1854,7 +1854,7 @@
       "usage": {
         "title": "Usage",
         "terms": "credits used spent minutes chart days range",
-        "description": "Credits Cloud chats used. A credit is a minute of a standard machine.",
+        "description": "Credits Cloud chats used. A credit is a minute of a small machine.",
         "used": "{credits} used",
         "reading": "Reading usage…",
         "failed": "Couldn't read usage. It shows once Zeron can reach Cloud.",
@@ -1892,7 +1892,7 @@
       "title": "Billing",
       "terms": "billing payment stripe credits plan subscription purchase invoice",
       "description": "Credits run your Cloud chats.",
-      "hours": "about {n} hours",
+      "hours": "about {n} small-machine hours",
       "try_later": "Try again in a moment.",
       "changed": {
         "plan": "You're on {plan}: {credits} a month",
@@ -1910,7 +1910,7 @@
       "credits": {
         "title": "Credits",
         "terms": "balance left remaining monthly extra hours",
-        "description": "What Cloud chats can spend. A credit is a minute of a standard machine.",
+        "description": "What Cloud chats can spend. A credit is a minute of a small machine.",
         "none": "Choose a plan or buy credits to run Cloud chats.",
         "unit": "{n, plural, one {credit} other {credits}}",
         "split": "{plan} plan credits, {extra} extra",

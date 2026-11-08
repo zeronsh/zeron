@@ -82,10 +82,14 @@ export interface Env {
   CLOUD_IDLE_MINUTES?: string;
   /** Credits a user gets the first time they turn Cloud on (default 0). */
   CLOUD_STARTING_CREDITS?: string;
-  /** Provider billable seconds per credit (default 60): set to what the
-   * provider bills for a minute of the default machine, so a credit is a
+  /** Provider billable seconds per credit from `CLOUD_CREDIT_RATE_FROM` on:
+   * what the provider bills for a minute of a small machine, so a credit is a
    * minute of it. Larger machines scale by the provider's multiplier. */
   CLOUD_CREDIT_SECONDS?: string;
+  /** The first UTC day (`YYYY-MM-DD`) charged at `CLOUD_CREDIT_SECONDS`; every
+   * day before it stays at 60. Anything else means no cutover: every day at
+   * 60, whatever `CLOUD_CREDIT_SECONDS` says. */
+  CLOUD_CREDIT_RATE_FROM?: string;
   /** Stripe (cloud/stripe.ts): API key, webhook signing secret and the
    * Price ids of the monthly plans and the credit pack. Billing reads as
    * unavailable until all are set. */

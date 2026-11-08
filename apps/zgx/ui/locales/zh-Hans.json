@@ -1854,7 +1854,7 @@
       "usage": {
         "title": "用量",
         "terms": "额度 已使用 消耗 分钟 图表 天 范围 credits used spent minutes chart days range",
-        "description": "Cloud 对话使用的额度。1 额度相当于标准机器运行 1 分钟。",
+        "description": "Cloud 对话使用的额度。1 额度相当于小型机器运行 1 分钟。",
         "used": "已使用 {credits}",
         "reading": "正在读取用量…",
         "failed": "无法读取用量。Zeron 连接到 Cloud 后将显示。",
@@ -1892,7 +1892,7 @@
       "title": "账单",
       "terms": "账单 付款 额度 套餐 订阅 购买 发票 billing payment stripe credits plan subscription purchase invoice",
       "description": "额度用于运行你的 Cloud 对话。",
-      "hours": "约 {n} 小时",
+      "hours": "小型机器约 {n} 小时",
       "try_later": "请稍后重试。",
       "changed": {
         "plan": "你使用的是 {plan}：每月 {credits}",
@@ -1910,7 +1910,7 @@
       "credits": {
         "title": "额度",
         "terms": "余额 剩余 每月 额外 小时 balance left remaining monthly extra hours",
-        "description": "Cloud 对话可使用的额度。1 额度相当于标准机器运行 1 分钟。",
+        "description": "Cloud 对话可使用的额度。1 额度相当于小型机器运行 1 分钟。",
         "none": "选择套餐或购买额度以运行 Cloud 对话。",
         "unit": "{n, plural, other {额度}}",
         "split": "套餐额度 {plan}，额外额度 {extra}",

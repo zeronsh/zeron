@@ -77,7 +77,7 @@ function M.group(n: number): string
 	return if n < 0 and out ~= "0" then `-{out}` else out
 end
 
--- "1,240 credits": whole credits (a minute each), a decimal only under ten
+-- "1,240 credits": whole credits, a decimal only under ten
 -- so a short session still reads as something.
 function M.credits(n: number): string
 	local v = math.abs(n)
