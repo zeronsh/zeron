@@ -251,6 +251,9 @@ function M.Wallpaper(props: Props): Node
 				x = props.beside,
 				overflow = "hidden",
 				provide = props.provide,
+				-- (Away, its layer goes: zgx frees the window-sized texture it's
+				-- composited from, and draws it again in one frame on return.)
+				layer_on = shown,
 				layer_shader = effects.shader(how),
 				layer_params = effects.params {
 					strength = strength(),
