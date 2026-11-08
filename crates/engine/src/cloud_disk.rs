@@ -3,8 +3,10 @@
 //! sleep, so that a machine can still fit its size when it comes back.
 //!
 //! The cleanup deletes from an allow-list and nothing else: Cargo's own
-//! `incremental` and `deps` under a directory Cargo marked as its target, and
-//! named package-manager download caches in the home directory. It never reads
+//! `incremental` and `deps` under a directory Cargo marked as its target,
+//! named package-manager download caches in the home directory, and Codex's
+//! own downloads in the managed `CODEX_HOME` (every sleep: they cost every
+//! wake, and Codex fetches them again itself). It never reads
 //! a tracked file, untracked source, a login (`~/.claude`, whose
 //! `.oauth_refresh.lock` a parked Claude child may hold) or any process. It is
 //! bounded by a deadline, and whatever goes wrong the sleep carries on.
@@ -41,6 +43,15 @@ const PACKAGE_CACHES: &[&str] = &[
     ".cache/go-build",
     ".bun/install/cache",
 ];
+
+/// Codex's own downloads, relative to the managed `CODEX_HOME`
+/// (`credentials::managed_codex_home`): the plugin catalog (about 60 MB), the
+/// account's plugin bundles (about 30 MB) and the apps tool list. Every byte
+/// on the disk is copied back in on every wake, beside the engine that's
+/// starting; Codex fetches these again itself, in the background, once it
+/// runs. None holds a login (`auth.json` sits beside them), a session, a
+/// database or a setting.
+const CODEX_CACHES: &[&str] = &["cache", "plugins/cache"];
 
 /// Disk space, as `df` reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,20 +137,30 @@ pub struct CleanupReport {
 
 /// Before a sleep: clear caches in this machine's checkout and home. Never
 /// fails, and returns by the deadline even if the filesystem doesn't.
-pub async fn pre_sleep_cleanup() {
+pub async fn pre_sleep_cleanup(data_dir: &Path) {
     let Some(session) = crate::runner::session() else {
         return; // only ever on a Cloud machine
     };
     let checkout = session.path.as_ref().map(PathBuf::from);
     let home = home_dir();
+    let codex_home = crate::credentials::managed_codex_home(data_dir);
+    let app_root = data_dir.join("app");
     let probe = machine_usage;
     let cleaning = tokio::task::spawn_blocking(move || {
-        clean(
+        let started = Instant::now();
+        // What's copied back in on every wake and never needed for one: a
+        // machine installed before Cloud stopped unpacking these still has them.
+        zeron_update::strip_cloud_unused_installed(&app_root);
+        let mut report = clean_codex_caches(&codex_home, CLEANUP_BUDGET);
+        let rest = clean(
             checkout.as_deref(),
             home.as_deref(),
             || probe().is_some_and(|usage| over_warn(usage, capacity_bytes())),
-            CLEANUP_BUDGET,
-        )
+            CLEANUP_BUDGET.saturating_sub(started.elapsed()),
+        );
+        report.removed.extend(rest.removed);
+        report.timed_out |= rest.timed_out;
+        report
     });
     // A little past the budget: one stuck syscall can't hold up the sleep.
     match tokio::time::timeout(CLEANUP_BUDGET + Duration::from_secs(5), cleaning).await {
@@ -153,6 +174,24 @@ pub async fn pre_sleep_cleanup() {
         Ok(Err(err)) => tracing::warn!(error = %err, "cloud: the pre-sleep cleanup failed"),
         Err(_) => tracing::warn!("cloud: the pre-sleep cleanup ran out of time"),
     }
+}
+
+/// Codex's downloads under `codex_home` ([`CODEX_CACHES`]), every sleep, full
+/// or not: they cost every wake. Renamed before they're deleted, like the rest.
+pub fn clean_codex_caches(codex_home: &Path, budget: Duration) -> CleanupReport {
+    let deadline = Instant::now() + budget;
+    let mut report = CleanupReport::default();
+    for cache in CODEX_CACHES {
+        let renamed = codex_home.join(format!("{cache}{REMOVING_SUFFIX}"));
+        if renamed.exists() {
+            remove(&renamed, deadline, &mut report);
+        }
+        if report.timed_out {
+            break;
+        }
+        remove(&codex_home.join(cache), deadline, &mut report);
+    }
+    report
 }
 
 /// The cleanup itself. `still_full`: whether the disk is still past the warning
@@ -429,6 +468,58 @@ mod tests {
         ] {
             assert!(kept.exists(), "{} must survive", kept.display());
         }
+    }
+
+    /// Codex's downloads go every sleep; its login, sessions, databases and
+    /// settings never do.
+    #[test]
+    fn codex_s_downloads_go_and_its_login_and_state_stay() {
+        let root = tempfile::tempdir().unwrap();
+        let codex = root.path().join(".zeron/cloud/codex-home");
+        write(&codex.join("cache/remote_plugin_catalog/c981.json"), "60 MB");
+        write(&codex.join("cache/codex_apps_tools/6b7d.json"), "tools");
+        write(&codex.join("plugins/cache/openai-curated-remote/t/0.1.1/skills/x/a.pptx"), "bundle");
+        // A cleanup a deadline cut off.
+        write(&codex.join("cache.zeron-removing/old.json"), "half gone");
+        let kept = [
+            "auth.json",
+            "config.toml",
+            "installation_id",
+            "models_cache.json",
+            "state_5.sqlite",
+            "state_5.sqlite-wal",
+            "sessions/2026/11/07/rollout.jsonl",
+            "skills/mine/SKILL.md",
+            "plugins/installed.json",
+        ];
+        for file in kept {
+            write(&codex.join(file), "keep");
+        }
+
+        let report = clean_codex_caches(&codex, CLEANUP_BUDGET);
+
+        assert!(!report.timed_out);
+        for gone in ["cache", "plugins/cache", "cache.zeron-removing"] {
+            assert!(!codex.join(gone).exists(), "{gone} must go");
+        }
+        for file in kept {
+            assert!(codex.join(file).exists(), "{file} must survive");
+        }
+        // Nothing there: nothing to do, and no harm.
+        assert!(clean_codex_caches(&root.path().join("nowhere"), CLEANUP_BUDGET).removed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_cache_that_is_a_symlink_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        write(&elsewhere.join("precious"), "keep");
+        let codex = root.path().join("codex-home");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, codex.join("cache")).unwrap();
+        clean_codex_caches(&codex, CLEANUP_BUDGET);
+        assert!(elsewhere.join("precious").exists());
     }
 
     #[test]
