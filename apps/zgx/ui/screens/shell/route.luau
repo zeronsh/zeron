@@ -552,7 +552,14 @@ local function placed(project: string?, device: string): (string?, string)
 	return if named then named.id else nil, device
 end
 
+-- The project a new chat asked for in none starts in (the sidebar's, while
+-- its list is narrowed to one), else nil: the one chosen stays.
+M.narrowed = nil :: (() -> string?)?
+
 function M.new_chat(project: string?, device: string?)
+	if project == nil and device == nil and M.narrowed then
+		project = M.narrowed()
+	end
 	local on: string? = nil
 	-- (None of the project's there: none chosen, so the composer picks.)
 	local unchosen = false

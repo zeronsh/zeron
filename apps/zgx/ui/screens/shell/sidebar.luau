@@ -1010,6 +1010,20 @@ fit.sidebar_width(function(): number
 	return shared.width:get()
 end)
 
+-- A new chat asked for in no project (New chat, cmd+n, the palette's) starts
+-- in the project the list is narrowed to, as Zeron's does.
+route.narrowed = function(): string?
+	local only = if shared.details.project_filter:peek() then shared.project:peek() else nil
+	if only then
+		for _, p in sessions.now:peek().projects do
+			if p.id == only then
+				return checkout_here(only)
+			end
+		end
+	end
+	return nil
+end
+
 function M.archive(id: string)
 	if route.current:peek().session == id then
 		route.new_chat()
