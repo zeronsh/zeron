@@ -1234,12 +1234,13 @@ impl Engine {
         });
         let server = serve_ipc(config.ipc_port, &config.data_dir, service).await?;
         // Only a port this process actually serves goes to agents: the
-        // injected MCP server must dial back into THIS engine.
-        runtime.core().sessions.set_ipc_port(config.ipc_port);
+        // injected MCP server must dial back into THIS engine. (Its bearer
+        // first: a run revived on boot waits on the port, then reads both.)
         runtime
             .core()
             .sessions
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
+        runtime.core().sessions.set_ipc_port(config.ipc_port);
         update_trial::prove_and_commit(runtime.core(), &config);
 
         tokio::select! {
