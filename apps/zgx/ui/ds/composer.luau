@@ -476,6 +476,7 @@ local function list_of(given: any): any
 end
 
 local function submenu(
+	siblings: { State<boolean> },
 	label: Message,
 	value: State<string?>,
 	choices: { Choice } | () -> { Choice },
@@ -499,7 +500,16 @@ local function submenu(
 		-- (None yet, as a list still coming: a blank row.)
 		return listed[fallback] or listed[1] or { value = "", label = "" }
 	end
+	local own: State<boolean>? = nil
+	local function close_siblings()
+		for _, open in siblings do
+			if open ~= own then
+				open:set(false)
+			end
+		end
+	end
 	return Dropdown {
+		on_open = close_siblings,
 		value = value,
 		items = choices,
 		actions = actions,
@@ -507,16 +517,27 @@ local function submenu(
 		label = label :: any,
 		search = search or false,
 		width = 260,
+		submenu = true,
 		-- Close beside the panel, as a submenu sits: 2 from its edge (the
 		-- row it opens from sits 5 inside it, its inset and border).
 		placement = { side = "right", align = "start", offset = 7 },
 		trigger = function(menu: Dropdown.Menu): Node
-			return menu_row {
+			own = menu.open
+			table.insert(siblings, menu.open)
+			return ui.menu_item(Menu.look {
 				label = label,
 				bg = function()
 					return if menu.open:get() then "$hover" else "#00000000"
 				end,
 				on_click = menu.toggle,
+				on_hover = function(inside: boolean)
+					if inside then
+						close_siblings()
+						if not menu.open:peek() then
+							menu.toggle()
+						end
+					end
+				end,
 				-- The choice's own tile (a project's hue or artwork), else its
 				-- icon: one or the other, following the choice.
 				ui.presence(function(): string
@@ -565,7 +586,7 @@ local function submenu(
 					Icon { name = "wifi-off", size = 12 },
 				}),
 				Menu.chevron(),
-			}
+			})
 		end,
 	}
 end
@@ -614,6 +635,7 @@ local function work_in(
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?
 ): Node
+	local siblings: { State<boolean> } = {}
 	local rows: { Node } = {
 		Menu.Heading { locale.t("ds.composer.work_in") },
 	}
@@ -639,7 +661,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return #choices() > 0
-			end, submenu(locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
+			end, submenu(siblings, locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
 		)
 	end
 	if project and projects then
@@ -666,7 +688,7 @@ local function work_in(
 		local p = project
 		table.insert(
 			rows,
-			submenu(locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
+			submenu(siblings, locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
 				worded({
 					icon = "close",
 					on_click = function()
@@ -700,7 +722,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
-			end, submenu(locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
+			end, submenu(siblings, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
 		)
 	end
 	return ui.column { w_full = true, table.unpack(rows) }

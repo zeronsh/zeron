@@ -146,6 +146,8 @@ export type Props = {
 	-- The caller's own trigger in place of the chip (a row of another
 	-- panel opening this one beside it, as a submenu).
 	trigger: ((menu: Menu) -> Node)?,
+	-- A side-opening menu whose parent stays reachable by the pointer.
+	submenu: boolean?,
 	-- How far the trigger folds (a footer short of room): 0, all of it; 1,
 	-- without its detail; 2, its leading icon alone. And while `accent` is
 	-- true, that icon is in the accent (a mode on).
@@ -878,7 +880,7 @@ return ui.component(function(props: Props): Node
 	-- The menus' glass (frosted: a light tint over the platform's own
 	-- popover material; opaque: a solid panel). No padding of its own: its
 	-- rules run edge to edge; each section insets itself.
-	return ui.popover(Menu.panel {
+	local panel = Menu.panel {
 		-- (Named for tests.)
 		class = "dropdown-panel",
 		open = open,
@@ -1447,5 +1449,19 @@ return ui.component(function(props: Props): Node
 				table.unpack(rows),
 			}
 		end,
-	})
+	}
+	if props.submenu then
+		local build = panel.build
+		panel.build = nil
+		panel.anchor = nil
+		panel.trigger = trigger
+		panel.label = props.label
+		panel[1] = ui.presence(function(): boolean
+			return open:get()
+		end, function(visible: boolean): Node
+			return if visible then build() else ui.div {}
+		end)
+		return ui.submenu(panel)
+	end
+	return ui.popover(panel)
 end)
