@@ -19,8 +19,9 @@
 --                           ds.Composer takes them ({ value, label, hue? })
 --   route.open_session(id)  to that session
 --   route.new_chat(project?, device?) to a new chat (in that project, a
---                           space id; "none" for none; nil, the one chosen
---                           last), on that device if given (a device id):
+--                           space id; "none" for none; nil, the one the
+--                           sidebar's project filter narrows to, else the
+--                           one chosen last), on that device if given (a device id):
 --                           the composer's device picked for it (a project
 --                           not there: its namesake there, else the
 --                           composer's pick there; `placed`)
@@ -552,7 +553,19 @@ local function placed(project: string?, device: string): (string?, string)
 	return if named then named.id else nil, device
 end
 
+-- registered by screens/shell/sidebar: it requires this module, so this one
+-- can't require it back to read the project its filter narrows to
+local narrowed_to: () -> string? = function(): string?
+	return nil
+end
+function M.narrowed_project(get: () -> string?)
+	narrowed_to = get
+end
+
 function M.new_chat(project: string?, device: string?)
+	if project == nil and device == nil then
+		project = narrowed_to()
+	end
 	local on: string? = nil
 	-- (None of the project's there: none chosen, so the composer picks.)
 	local unchosen = false
