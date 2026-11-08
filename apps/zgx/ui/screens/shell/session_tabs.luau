@@ -373,13 +373,10 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			items = "center",
 			rounded = "$radius.lg",
 			cursor = "pointer",
-			-- (Chosen, it stands on the strip's wash, which glides to it.)
-			bg = function(): string
-				if active() then
-					return "#00000000"
-				end
-				return if hovered:get() or held:get() then "$hover" else "#00000000"
-			end,
+			relative = true,
+			-- (Chosen, it stands on the strip's wash, which glides to it; the
+			-- others take the hover wash, `TabStrip.Wash`. Pressed, any darkens.)
+			active = { bg = "$pressed" },
 			color = function(): string
 				return if active() or hovered:get() then "$text.primary" else "$text.secondary"
 			end,
@@ -453,6 +450,9 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 				route.open_session(face(id))
 				return true
 			end,
+			TabStrip.Wash(function(): boolean
+				return (hovered:get() or held:get()) and not active()
+			end),
 			tile(id),
 			ds.FadeText {
 				function(): string
@@ -633,7 +633,9 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 						end,
 						direction = "row",
 						gap = "$zeron.space.hair",
-						animate = motion.layout(SLIDE),
+						animate = motion.tab_slide(),
+						enter = motion.transition(motion.TAB_ENTER),
+						exit = motion.transition(motion.TAB_EXIT),
 					}),
 				},
 			}),

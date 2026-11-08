@@ -60,6 +60,24 @@ local function left_in(list: { string }, width: (string) -> number, id: string):
 	return x
 end
 
+-- A tab's hover wash, under its content, fading in and out (`motion.hover`). (The tab is `relative`; this comes first in it.)
+function M.Wash(lit: () -> boolean): Node
+	local on = ui.computed(function(): number
+		return if lit() then 1 else 0
+	end)
+	return ui.div {
+		absolute = true,
+		left = 0,
+		top = 0,
+		right = 0,
+		bottom = 0,
+		rounded = "$radius.lg",
+		bg = "$hover",
+		pointer_events = "none",
+		opacity = motion.tween(on, motion.hover()),
+	}
+end
+
 export type HighlightProps = {
 	key: string,
 	order: () -> { string },

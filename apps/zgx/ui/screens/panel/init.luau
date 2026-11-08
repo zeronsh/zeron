@@ -466,7 +466,6 @@ local BAND_H = Dock.head()
 local STRIP_EDGE = (BAND_H - CHIP_H) / 2
 local STRIP_START = ui.raw(STRIP_EDGE, "a strip's tabs as far in from the card's side as from its top")
 local STRIP_FADE = 36
-local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 
 -- A prop's value now (`control.value`: a function's answer, a state's,
 -- tracked, or the value itself); a path's file name.
@@ -920,15 +919,12 @@ M.Panel = ui.component(function(props: Props): Node
 				items = "center",
 				rounded = "$radius.lg",
 				cursor = "pointer",
+				relative = true,
 				-- (As ds/tabs' pill: the chosen one on the flat wash, which
 				-- glides to it, `strip.Highlight`; the others take the hover
-				-- wash under the pointer, their ink brightening with it.)
-				bg = function(): string
-					if is_active() then
-						return "#00000000"
-					end
-					return if hovered:get() then "$hover" else "#00000000"
-				end,
+				-- wash under the pointer, `TabStrip.Wash`, their ink
+				-- brightening with it. Pressed, any darkens.)
+				active = { bg = "$pressed" },
 				color = function(): string
 					return if is_active() or hovered:get() then "$text.primary" else "$text.secondary"
 				end,
@@ -966,6 +962,9 @@ M.Panel = ui.component(function(props: Props): Node
 				opacity = function(): number
 					return strip.opacity(id)
 				end,
+				TabStrip.Wash(function(): boolean
+					return hovered:get() and not is_active()
+				end),
 				make_tile(),
 				FadeText {
 					title,
@@ -1230,7 +1229,7 @@ M.Panel = ui.component(function(props: Props): Node
 					end,
 					direction = "row",
 					gap = "$zeron.space.hair",
-					animate = motion.layout(SLIDE),
+					animate = motion.tab_slide(),
 				}),
 				-- (Only with a tab open, as Zeron's: the empty page is what it
 				-- opens. Here, after the last tab, while they all fit; pinned at
