@@ -37,7 +37,8 @@ export type Props = {
 
 local SPRING: SpringOptions = motion.TAB_SPRING
 
-return function(props: Props): Node
+-- (A component: each tab keeps its own hover.)
+return ui.component(function(props: Props): Node
 	local value = props.value
 	local look: Look = props.look or "underline"
 	local size = props.size or "md"
@@ -211,4 +212,4 @@ return function(props: Props): Node
 		ui.div { absolute = true, left = 0, right = 0, bottom = 0, h = 1, bg = "$border.subtle", pointer_events = "none" },
 		line,
 	}
-end
+end)
