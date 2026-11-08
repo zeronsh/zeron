@@ -21,7 +21,7 @@ export function chatRoute(request: Request, env: Pick<Env, "CHAT_ROOMS">, userId
     if (host !== null) url.searchParams.set("hostDevice", host);
   } else {
     const routes: Record<string, string[]> = {
-      checkpoint: ["GET", "POST"], rows: ["GET", "POST"],
+      checkpoint: ["GET", "POST"], "checkpoint-part": ["POST"], rows: ["GET", "POST"],
       tail: ["GET", "PUT"], diff: ["GET", "PUT"], stats: ["GET"], reset: ["POST"]
     };
     if (!routes[route]?.includes(request.method)) return new Response("not found", { status: 404 });

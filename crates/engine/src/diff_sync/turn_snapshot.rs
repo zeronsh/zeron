@@ -384,6 +384,8 @@ async fn snapshot_git(
     cmd.stderr(std::process::Stdio::piped());
     cmd.kill_on_drop(true);
     let mut child = cmd.spawn()?;
+    // A timed-out snapshot drops this future; take the real git down with it.
+    let _tree = crate::git_tree::GitTree::adopt(&child);
     if let Some(input) = stdin
         && let Some(mut pipe) = child.stdin.take()
     {
