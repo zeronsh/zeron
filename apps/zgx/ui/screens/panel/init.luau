@@ -682,8 +682,19 @@ M.Panel = ui.component(function(props: Props): Node
 	local key = ui.computed(function(): string?
 		return state.key(read(session), read(project), read(page)) or (if props.no_project then state.NO_PROJECT else nil)
 	end)
+	-- The last tab closed, closing the panel with it: still shown, its
+	-- chip and its view, until the panel has eased shut (or opens again,
+	-- or another session's shows), so the panel shuts on what it showed,
+	-- never on its home. Its view is let go only then.
+	local leaving = ui.use_state(nil :: { key: string, tab: Tab }?)
+	local function held(k: string?): Tab?
+		local l = leaving:get()
+		return if l and l.key == k then l.tab else nil
+	end
 	local function tabs(): { Tab }
-		return state.of(key:get()).tabs
+		local k = key:get()
+		local h = held(k)
+		return if h then { h } else state.of(k).tabs
 	end
 	-- (The strip's rows, keyed by tab: each keeps its node as others come,
 	-- go and move.)
@@ -691,7 +702,9 @@ M.Panel = ui.component(function(props: Props): Node
 		return tabs()
 	end)
 	local function active(): string?
-		return state.of(key:get()).active
+		local k = key:get()
+		local h = held(k)
+		return if h then h.id else state.of(k).active
 	end
 
 	-- Closing: a file tab with unsaved changes asks first; a terminal with
@@ -703,19 +716,22 @@ M.Panel = ui.component(function(props: Props): Node
 			asked:set(nil)
 		end
 	end)
+	-- A closed tab's view let go: its terminal, its page, its chat, its file.
+	local function let_go(tab: Tab)
+		if tab.kind == "terminal" and Terminal and Terminal.close then
+			Terminal.close(tab)
+		elseif tab.kind == "browser" and Browser then
+			Browser.close(tab)
+		elseif (tab.kind == "side_chat" or tab.kind == "subagent") and lanes_card then
+			-- Its chat let go (a reload never does this).
+			lanes_card.watch(tab.id, nil)
+		elseif tab.kind == "files" then
+			Files.close_tab(tab.id)
+		end
+	end
 	local function close_now(k: string, id: string)
 		local tab = state.find(k, id)
 		state.close(k, id)
-		if tab and tab.kind == "terminal" and Terminal and Terminal.close then
-			Terminal.close(tab)
-		elseif tab and tab.kind == "browser" and Browser then
-			Browser.close(tab)
-		elseif tab and (tab.kind == "side_chat" or tab.kind == "subagent") and lanes_card then
-			-- Its chat let go (a reload never does this).
-			lanes_card.watch(tab.id, nil)
-		elseif tab and tab.kind == "files" then
-			Files.close_tab(id)
-		end
 		-- Its last tab gone, the panel closes for this session (as the
 		-- shipping app's `collapse_surfaces_if_empty`), leaving expanded with
 		-- it, easing shut as the title bar's toggle closes it; opened again,
@@ -723,7 +739,12 @@ M.Panel = ui.component(function(props: Props): Node
 		-- home instead (on by default). Only a person's close comes here:
 		-- switching sessions or tearing the panel down closes no tab.
 		local close_with_last = require("@app/screens/settings/prefs").close_panel_with_last_tab:peek() == true
-		if tab and close_with_last and #state.of(k).tabs == 0 then
+		if not tab then
+			return
+		end
+		if close_with_last and #state.of(k).tabs == 0 then
+			local shell_files = if shell_view then shell_view.files else nil
+			local was_open = shell_files ~= nil and shell_files:peek() == true
 			local on_last = props.on_last_closed
 			if on_last then
 				on_last()
@@ -733,7 +754,13 @@ M.Panel = ui.component(function(props: Props): Node
 					set_files(false)
 				end
 			end
+			-- (Shut by the shell: held until it has eased shut.)
+			if was_open and shell_files and shell_files:peek() == false then
+				leaving:set({ key = k, tab = tab })
+				return
+			end
 		end
+		let_go(tab)
 	end
 	local function close(id: string)
 		local k = key:peek()
@@ -1441,6 +1468,18 @@ M.Panel = ui.component(function(props: Props): Node
 	local function closed(): boolean
 		return not showing()
 	end
+	-- The tab held as the panel shuts, let go once it has (or once it opens
+	-- again, a tab opens, or another session's panel shows).
+	ui.effect(function()
+		local l = leaving:get()
+		if not l then
+			return
+		end
+		if key:get() ~= l.key or #state.of(l.key).tabs > 0 or (files and files:get() == true) or closed() then
+			leaving:set(nil)
+			let_go(l.tab)
+		end
+	end)
 
 	local content = ui.presence(function(): string
 		local k = key:get()
@@ -1462,6 +1501,10 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 		local a = state.of(k).active
 		local tab = if a then state.find(k, a) else nil
+		local h = leaving:peek()
+		if not tab and h and h.key == k then
+			tab = h.tab
+		end
 		if not tab then
 			return empty_page(k, showing)
 		end

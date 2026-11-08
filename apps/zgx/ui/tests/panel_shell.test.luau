@@ -176,3 +176,32 @@ test("a closed panel leaves nothing to Tab to: its tabs and choices come back as
 	end)).to_be(true)
 	expect(tab_reaches_panel(app, 60)).to_be(false)
 end)
+
+test("closing a chat's last tab, the panel shuts on what it showed: no frame of its home", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:frames(30)
+	show_chat(app, "Fix the build")
+	open_files_tab(app)
+	expect(app:has("#files-pane")).to_be(true)
+	app:click("#panel-strip >> role:tab")
+	app:key("cmd+w")
+	-- Frame by frame as it eases shut: the file tab's view, never the home.
+	local seen = 0
+	for _ = 1, 120 do
+		app:frames(1)
+		-- (Shut: the panel itself has no width left, hidden.)
+		local p = box(app, "panel")
+		if not p or p.w == 0 then
+			break
+		end
+		seen += 1
+		expect(app:has("#panel-empty")).to_be(false)
+		expect(app:has("#files-pane")).to_be(true)
+	end
+	expect(seen > 3).to_be(true)
+	-- Opened again: its home, at once.
+	app:click('#titlebar >> role:button "Panel"')
+	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
+	expect(app:has("#panel-strip >> role:tab")).to_be(false)
+end)
