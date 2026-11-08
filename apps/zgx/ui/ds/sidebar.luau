@@ -80,6 +80,10 @@ export type Session = {
 	-- Subagents and side chats working under it (Zeron's "● N" pill beside
 	-- its corner).
 	subagents: number?,
+	-- Its side chats, newest first (nested under it, a step in, while
+	-- `details.side_chats` is on). They aren't listed in their own right, so
+	-- a group's count, its "Show N more" and its badge know nothing of them.
+	side_chats: { Session }?,
 	-- Its pull request: a badge beside its corner.
 	pr: PullRequest?,
 	-- When it was made (as `time`), for sorting by it.
@@ -133,6 +137,10 @@ export type Details = {
 	-- sessions in a state (working, asking, done unseen: those whose corner
 	-- shows a glyph), each leaving as it settles. On unless the caller says.
 	keep_active: State<boolean>?,
+	-- Each session's side chats nested under it (a fold on the session
+	-- folds them away), where the caller lists them (a session's
+	-- `side_chats`). Off unless the caller says.
+	side_chats: State<boolean>?,
 }
 -- How grouped sessions are ordered (Zeron's Sort): the most recently
 -- updated first, or the most recently made. (Pinned and sections keep the
@@ -521,6 +529,10 @@ return ui.component(function(props: Props): Node
 				out.project_of[s.id] = p
 				out.by_id[s.id] = s
 				table.insert(out.everything, s)
+				-- (Its side chats follow their rows as it does, not listed.)
+				for _, c in s.side_chats or {} do
+					out.by_id[c.id] = c
+				end
 			end
 		end
 		for _, s in follow(props.pinned, {} :: { Session }) do
@@ -666,6 +678,17 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- A session's drag starting and ending (the list's, below).
 	local start_drag: (Drag) -> ()
 	local end_drag: () -> ()
+	-- A session's side chats nested under it (Show → Side chats, outside the
+	-- Activity view's one flat list), and whether they're unfolded (folded
+	-- until opened, kept per session); the fold
+	-- itself is played where the list's folds are (`toggle_side`, below).
+	local function nesting(): boolean
+		return details.side_chats ~= nil and details.side_chats:get() and not act_now()
+	end
+	local function side_open(id: string): boolean
+		return folded:get()[`side_open:{id}`] == true
+	end
+	local toggle_side: (id: string) -> ()
 	-- The list's scroll position, and its element.
 	local list_offset = props.offset or ui.use_state(0)
 	local list_view = ui.ref()
@@ -1174,6 +1197,31 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		card_hide(true)
 	end)
 
+	-- The fold on a session with side chats nested under it: its chevron in
+	-- the row's line, down while they show, right once they're folded away
+	-- (they in a state still stay, as a group's do: `keep_active`).
+	local function side_fold_toggle(s: Session, cur: () -> Session, off: boolean): Node?
+		if off or not details.side_chats then
+			return nil
+		end
+		return ui.show(
+			function(): boolean
+				return nesting() and #(cur().side_chats or {}) > 0
+			end,
+			ui.presence(function(): string
+				return if side_open(s.id) then "open" else "closed"
+			end, function(kind: string): Node
+				local open = kind == "open"
+				return corner(
+					if open then "ds.sidebar.side_chats_fold" else "ds.sidebar.side_chats_unfold",
+					if open then "alt-arrow-down" else "alt-arrow-right",
+					function()
+						toggle_side(s.id)
+					end
+				)
+			end)
+		)
+	end
 	local function session_row(s: Session, by: Organize, place: Place?): Node
 		local in_flyout = place ~= nil and place.wide == true
 		-- (On the Archived shelf: Unarchive under the pointer, no drag.)
@@ -1367,6 +1415,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				line(
 					title,
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
+					side_fold_toggle(s, cur, in_flyout or shelved),
 					subagents_pill(function(): number
 						return cur().subagents or 0
 					end),
@@ -2353,6 +2402,21 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			folded:set(f)
 		end)
 	end
+	-- A session's side chats nested under it: folded until opened (kept with
+	-- the sections' folds, as `side_open:<id>`).
+	local function side_fold(id: string): Fold
+		return fold_of(`side:{id}`, function(): boolean
+			return folded:peek()[`side_open:{id}`] == true
+		end, function(on: boolean)
+			local f = table.clone(folded:peek())
+			f[`side_open:{id}`] = if on then true else nil
+			folded:set(f)
+		end)
+	end
+	toggle_side = function(id: string)
+		local f = side_fold(id)
+		fold_set(f, not f.is_open())
+	end
 	-- A group's sessions past its first few: shown ("Show N more") or not.
 	local function more_fold(key: string): Fold
 		return fold_of(`more:{key}`, function(): boolean
@@ -2514,6 +2578,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		index: number?,
 		last: boolean?,
 		trunk: (() -> number)?,
+		-- A side chat nested under a session: that session's id.
+		under: string?,
 		g: Group?,
 		sec: Section?,
 		n: number?,
@@ -2560,6 +2626,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- state (its corner a glyph), and folded places keep
 		-- those (`keep_active`).
 		local keep = keep_active:get()
+		-- (Side chats nest under their sessions, the Activity view's list aside.)
+		local nest = details.side_chats ~= nil and details.side_chats:get() and not act
 		-- (The session open shows in its group however far down it is.)
 		local open_id = selected:get()
 		local function peeks(s: Session): boolean
@@ -2627,6 +2695,80 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						return session_h(s, row_by) + gap_after
 					end,
 				})
+				-- Its side chats, a step in under it: all while it's unfolded (the
+				-- first few, then "Show N more"), else those in a state; the one
+				-- open always; not while it's being dragged.
+				local kids = if nest and not dragged then s.side_chats else nil
+				if kids and #kids > 0 then
+					local f = side_fold(s.id)
+					local key = `side:{s.id}`
+					local within: { [string]: boolean } = {}
+					local past = 0
+					for i, kid in kids do
+						if i <= GROUP_FIRST or kid.id == open_id or peeks(kid) then
+							within[kid.id] = true
+						else
+							past += 1
+						end
+					end
+					local xf = if past > 0 then more_fold(key) else nil
+					local paged = past > 0 and f.present
+					local inside = table.clone(chains[s.id])
+					table.insert(inside, f)
+					local past_first = table.clone(inside)
+					if xf then
+						table.insert(past_first, xf)
+					end
+					local up: { Session } = {}
+					local kid_chains: { [string]: { Fold } } = {}
+					for _, kid in kids do
+						local kc: { Fold }? = nil
+						if kid.id == open_id or peeks(kid) then
+							-- (Open, or in a state: it stays however it's folded.)
+							kc = chains[s.id]
+						elseif f.present then
+							if within[kid.id] then
+								kc = inside
+							elseif xf and xf.present then
+								kc = past_first
+							end
+						end
+						if kc then
+							table.insert(up, kid)
+							kid_chains[kid.id] = kc
+						end
+					end
+					for k, kid in up do
+						add({
+							kind = "session",
+							key = `s:{kid.id}`,
+							place = place,
+							chain = kid_chains[kid.id],
+							s = kid,
+							by = row_by,
+							under = s.id,
+							last = k == #up and not paged,
+							base = function(): number
+								return session_h(kid, row_by) + gap_after
+							end,
+						})
+					end
+					if paged then
+						add({
+							kind = "pager",
+							key = `more:{key}`,
+							pkey = key,
+							place = place,
+							chain = inside,
+							n = past,
+							under = s.id,
+							last = true,
+							base = function(): number
+								return SLOT + gap_after
+							end,
+						})
+					end
+				end
 			end
 			gap_rows(list, j + 1, chain, place)
 			counts[list] = j
@@ -4004,6 +4146,46 @@ fn layer(input:LayerInput)->vec4<f32> {
 					}
 				end
 			end
+			-- A side chat's tree: a trunk of its own down from under its
+			-- session's mark, its elbow off that; the session's group's trunk
+			-- (and any outer one) running on past it unless the session ends
+			-- that one.
+			local function child_tree(parent: string): () -> Tree?
+				local pkey = `s:{parent}`
+				return function(): Tree?
+					local p = item_of(pkey)
+					if not p then
+						return nil
+					end
+					return {
+						trunk = function(): number
+							local q = item_of(pkey)
+							local at = if q and q.trunk then q.trunk() + SessionRow.BEND + SessionRow.REACH else 0
+							return at + SLOT / 2
+						end,
+						last = function(): boolean
+							local c = item_of(key)
+							return c ~= nil and c.last == true
+						end,
+						through = function(): { number }
+							local q = item_of(pkey)
+							local out: { number } = {}
+							if not q then
+								return out
+							end
+							if q.through then
+								for _, x in q.through() do
+									table.insert(out, x)
+								end
+							end
+							if q.trunk and q.last ~= true then
+								table.insert(out, q.trunk())
+							end
+							return out
+						end,
+					}
+				end
+			end
 			if it.kind == "title" then
 				-- (Its title its message's key: the items are data.)
 				node = section(locale.t(it.title :: string), fold_switch(it.fold :: () -> Fold, it.open :: State<boolean>), function(): number
@@ -4036,8 +4218,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 						return if now and now.by then now.by :: Organize else it.by :: Organize
 					end,
 					at = at,
-					-- Its trunk while it sits in a group that draws one.
-					tree_of = tree_at(),
+					-- Its trunk while it sits in a group that draws one; a side
+					-- chat's, a step in off its session's mark.
+					tree_of = if it.under then child_tree(it.under :: string) else tree_at(),
 				})
 			elseif it.kind == "drop" then
 				node = drop_here(it.text :: string)
@@ -4053,7 +4236,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				local says = SessionRow.pager_says(all_shown, function(): number
 					return now().n or 0
 				end)
-				local tree_now = tree_at(true)
+				local tree_now = if it.under then child_tree(it.under :: string) else tree_at(true)
 				node = on_tree(
 					row {
 						class = "group-pager",
@@ -4596,6 +4779,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 	if (details :: any).keep_active then
 		table.insert(SHOW, { key = "keep_active", label = "ds.sidebar.view.keep_active", icon = "bell" })
 	end
+	if (details :: any).side_chats then
+		table.insert(SHOW, { key = "side_chats", label = "ds.sidebar.view.side_chats", icon = "side-chat" })
+	end
 	if (details :: any).project_filter then
 		table.insert(SHOW, { key = "project_filter", label = "ds.sidebar.view.project_filter", icon = "folder" })
 	end
@@ -4854,8 +5040,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 			end
 			local show_rows: { Node } = { heading = locale.s("ds.sidebar.view.show") } :: any
 			-- (Activity keeps its own: the Archived shelf always, folded; no
-			-- groups to fold or empty projects to list.)
-			local ACTIVITY_OWNS: { [string]: boolean } = { keep_active = true, empty_projects = true, archived = true }
+			-- groups to fold or empty projects to list, one flat list with
+			-- nothing nested.)
+			local ACTIVITY_OWNS: { [string]: boolean } = { keep_active = true, empty_projects = true, archived = true, side_chats = true }
 			for _, d in SHOW do
 				local st = (details :: any)[d.key] :: State<boolean>
 				local owned = act and ACTIVITY_OWNS[d.key] == true

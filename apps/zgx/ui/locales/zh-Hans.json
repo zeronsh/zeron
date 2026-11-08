@@ -494,7 +494,8 @@
         "projects_first": "项目优先",
         "empty_projects": "空项目",
         "activity": "动态",
-        "activity_settings": "动态设置…"
+        "activity_settings": "动态设置…",
+        "side_chats": "嵌套侧边对话"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
@@ -503,7 +504,9 @@
       "empty_projects": "{n, plural, other {# 个空项目}}",
       "activity": "动态",
       "working": "进行中",
-      "asleep": "已休眠"
+      "asleep": "已休眠",
+      "side_chats_fold": "折叠侧边对话",
+      "side_chats_unfold": "显示侧边对话"
     },
     "git": {
       "pull_request": "拉取请求",

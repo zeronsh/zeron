@@ -77,6 +77,10 @@ local shared = {
 		-- A collapsed group still lists its sessions working, asking or done
 		-- unseen: on, so folding a group away never hides what needs you.
 		keep_active = ui.persist("shell_sidebar_keep_active", true),
+		-- Each chat's side chats nested under it, a step in, as one group;
+		-- a side chat whose chat isn't listed (archived, or gone) stands
+		-- as a row of its own. Off until asked for.
+		side_chats = ui.persist("shell_sidebar_side_chats", false),
 	},
 	-- The groups showing all their sessions ("Show N more"): until the app
 	-- quits (a reload keeps them).
@@ -452,9 +456,37 @@ local function checkout_here(id: string?): string?
 	return id
 end
 
+-- A chat's side chats as the rows nest them (newest first, as `children`
+-- has them; a subagent's chat, where the engine says so, is not one), and
+-- the side chats left without a chat in the list, to stand alone: those
+-- the engine says nothing of kind for are side chats, as they were all
+-- before it did. Each kept as made, so a chat's row sleeps while they do.
+local function is_side(c: any): boolean
+	return c.kind == nil or c.kind == "side"
+end
+local made_kids: { [string]: { any } } = {}
+local function kept_kids(parent: string, list: { any }): { any }
+	local was = made_kids[parent]
+	if was and #was == #list then
+		local same = true
+		for i, row in list do
+			if was[i] ~= row then
+				same = false
+				break
+			end
+		end
+		if same then
+			return was
+		end
+	end
+	made_kids[parent] = list
+	return list
+end
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
+	local nest = shared.details.side_chats:get()
 	local only = narrow:get()
 	local just = only_project()
 	local names = devices()
@@ -477,11 +509,30 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		by[p.id] = group :: any
 	end
 	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} }
+	-- The chats listed, and (nesting) the side chats with no listed chat to
+	-- stand under, as chats of their own.
+	local entries: { any } = now.chats
+	local listed_ids: { [string]: boolean } = {}
+	if nest then
+		entries = table.clone(now.chats)
+		for _, c in now.chats do
+			listed_ids[c.id] = true
+		end
+		for parent, list in now.children or {} do
+			if not listed_ids[parent] then
+				for _, c in list do
+					if is_side(c) then
+						table.insert(entries, c)
+					end
+				end
+			end
+		end
+	end
 	-- (Which have sessions listed, and which archived ones.)
 	-- (By group: a repository isn't empty while any clone of it has a session.)
 	local just_group = if just then by[just] else nil
 	local listed: { [any]: boolean } = {}
-	for _, c in now.chats do
+	for _, c in entries do
 		local group = if c.project then by[c.project] else nil
 		if group then
 			listed[group] = true
@@ -503,7 +554,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			group.unused = true
 		end
 	end
-	for _, c in now.chats do
+	for _, c in entries do
 		if just and not (just_group and c.project and by[c.project] == just_group) then
 			continue
 		end
@@ -523,6 +574,34 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		end
 		local on_shelf = activity.shelf(c, status)
 		local rank = if act then activity.rank(c, on_shelf) else nil
+		-- Its side chats, nested under it (the narrowed list's own: those in
+		-- a state it shows).
+		local kids: { any }? = nil
+		if nest and not act then
+			local rows: { any } = {}
+			for _, k in (now.children or {})[c.id] or {} do
+				if not is_side(k) then
+					continue
+				end
+				local k_status = ASKED[asked[k.id] or ""] or k.status
+				if only and not only.statuses[k_status or "idle"] then
+					continue
+				end
+				table.insert(rows, kept({
+					id = k.id,
+					title = k.title,
+					status = k_status :: any,
+					time = k.updated,
+					created = k.created,
+					agent = k.agent :: any,
+					device = names[k.device] or locale.s("shell.sidebar.unknown_device"),
+					branch = k.branch,
+				}))
+			end
+			if #rows > 0 then
+				kids = kept_kids(c.id, rows)
+			end
+		end
 		table.insert(group.sessions, kept({
 			id = c.id,
 			title = c.title,
@@ -537,6 +616,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			-- (Its side chats working count as its subagents do, as its
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
+			side_chats = kids,
 		}) :: any)
 	end
 	if #loose.sessions > 0 then
