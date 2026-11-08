@@ -278,6 +278,9 @@ struct Inner {
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
+    /// Rung as the port is recorded: what a run revived on boot, while the
+    /// engine is still being assembled, waits on ([`Sessions::ipc_port_ready`]).
+    ipc_ready: tokio::sync::Notify,
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
@@ -356,6 +359,7 @@ impl SessionsEngine {
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_ready: tokio::sync::Notify::new(),
                 ipc_token_file: Mutex::new(None),
                 journal,
                 registry,
@@ -390,6 +394,27 @@ impl SessionsEngine {
         self.inner
             .ipc_port
             .store(port, std::sync::atomic::Ordering::Relaxed);
+        self.inner.ipc_ready.notify_waiters();
+    }
+
+    /// Until the IPC port is recorded, or `limit` passes. Boot recovery
+    /// revives cut-off turns while the engine is still being assembled, before
+    /// it serves its port: dispatched then, a revived run went out with no
+    /// Zeron tools (its agent read them as gone, and a parent woken by its
+    /// children's reports couldn't answer them).
+    async fn ipc_port_ready(&self, limit: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            // (Made before the check: `notify_waiters` reaches a `Notified`
+            // from its making, polled or not.)
+            let rung = self.inner.ipc_ready.notified();
+            if self.inner.ipc_port.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, rung).await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
@@ -1969,6 +1994,12 @@ impl SessionsEngine {
                 let Some(host) = sessions.inner.doc_host() else {
                     return;
                 };
+                // Its Zeron tools need the port the engine is about to serve.
+                // (One serving none, its in-process transport alone, goes on
+                // without them after a moment, as any run of its does.)
+                sessions
+                    .ipc_port_ready(std::time::Duration::from_secs(10))
+                    .await;
                 // A message sent since boot owns the chat now: reviving the
                 // old turn into it would deliver the old request a second
                 // time (dispatch checks again as the run starts).
