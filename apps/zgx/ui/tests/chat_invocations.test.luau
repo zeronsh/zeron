@@ -86,6 +86,33 @@ test("a command picked lands as its token and is sent as its reference; one type
 	expect(calls).to_contain("send:s2:[/review](zeron-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22726576696577227d) the branch, then /compact by hand")
 end)
 
+test("narrowing the list lights the row now at its top, and the arrows move the light", function()
+	local app = chat()
+	local function lit(): string?
+		for line in app:tree("#mention-popover"):gmatch("[^\n]+") do
+			if line:find(" selected", 1, true) then
+				return line:match('option "([^"]+)"')
+			end
+		end
+		return nil
+	end
+	app:type("role:textbox", "/")
+	settle(app)
+	expect(lit()).never.to_be_nil()
+	app:type("role:textbox", "comp")
+	settle(app)
+	expect(lit()).to_be("/compact")
+	app:fill("role:textbox", "/")
+	settle(app)
+	local first = lit()
+	app:key("ArrowDown")
+	settle(app)
+	expect(lit()).never.to_be(first)
+	app:type("role:textbox", "rev")
+	settle(app)
+	expect(lit()).to_be("/review")
+end)
+
 test("skills sent in a prompt show in its bubble as their names, not as their references", function()
 	local app = chat()
 	app:type("role:textbox", "$code")
