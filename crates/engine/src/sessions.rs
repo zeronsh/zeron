@@ -2220,20 +2220,19 @@ impl Inner {
     /// Bump the session's freshness on stream activity WITHOUT a status
     /// transition. Long silent-LOOKING stretches (thinking heartbeats, a big
     /// tool input being generated) still carry events — the UI's 45s
-    /// staleness gate must not flip "Working" off mid-run. Throttled: a
-    /// workspace-doc mirror per delta would be far too chatty.
+    /// staleness gate must not flip "Working" off mid-run. Each touch is a
+    /// stored registry write, so it comes only as often as that gate needs
+    /// ([`zeron_proto::view::SESSION_HEARTBEAT_MS`]), and never for a row
+    /// with nothing to expire: a session parked idle after its turn read the
+    /// same with or without one, and touched every 15 s for its 30 minutes.
     fn touch_session(&self, chat_id: &str) {
-        const TOUCH_THROTTLE_MS: i64 = 10_000;
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
                 return;
             };
-            let age = now
-                .signed_duration_since(entry.updated_at)
-                .num_milliseconds();
-            if age < TOUCH_THROTTLE_MS {
+            if !touch_due(entry, now) {
                 return;
             }
             entry.updated_at = now;
@@ -3385,6 +3384,21 @@ fn is_active(session: &Session) -> bool {
     )
 }
 
+/// How often a live run (and the activity projection) checks whether a
+/// session row is due its heartbeat. A check costs a lock and a compare;
+/// only a due one writes. Bounds a quiet row's restamps to
+/// `SESSION_HEARTBEAT_MS` plus this.
+const HEARTBEAT_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether a liveness touch should restamp (and so store) `session` at
+/// `now`: only a row readers would expire, once its last stamp is a
+/// heartbeat old.
+fn touch_due(session: &Session, now: chrono::DateTime<Utc>) -> bool {
+    zeron_proto::view::session_expires(session)
+        && now.signed_duration_since(session.updated_at).num_milliseconds()
+            >= zeron_proto::view::SESSION_HEARTBEAT_MS
+}
+
 // ── subagent docs ───────────────────────────────────────────────────────────
 
 /// The per-subagent doc id: `{chatId}--sub--{suffix}`. Constrained by the
@@ -4240,8 +4254,12 @@ async fn drive_run(
     // timeout here by design (a first port was rejected — agents may
     // legitimately be quiet for >10min): a live child means Working, dying
     // paths each carry their own error, and engine death stops these ticks
-    // so the gate still catches real crashes. touch_session throttles at 10s.
-    let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    // so the gate still catches real crashes. touch_session stores a touch
+    // only for a row that can expire, once its stamp is SESSION_HEARTBEAT_MS
+    // old; this tick only checks, so a quiet live row is restamped within
+    // one tick of that (≤ 30 s apart, inside the 45 s gate). A coarser tick
+    // let a stamp from the last streamed event age 40 s before the next.
+    let mut live_heartbeat = tokio::time::interval(HEARTBEAT_CHECK);
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The runtime's background processes, published on the session row.
     let mut background_processes = turn.watch_background_processes();
@@ -5563,6 +5581,53 @@ async fn drive_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_at(status: SessionStatus, updated_at: chrono::DateTime<Utc>) -> Session {
+        Session {
+            chat_id: "c".into(),
+            device_id: "d".into(),
+            status,
+            started_at: None,
+            updated_at,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
+            last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            waiting: None,
+        }
+    }
+
+    /// A live row is restamped often enough for shipped readers' 45 s gate,
+    /// no oftener; a row parked idle with nothing running is never touched.
+    #[test]
+    fn liveness_touches_only_rows_that_expire_once_a_heartbeat_old() {
+        let now = Utc::now();
+        let ms = chrono::Duration::milliseconds;
+        let beat = zeron_proto::view::SESSION_HEARTBEAT_MS;
+        for status in [SessionStatus::Working, SessionStatus::AwaitingInput] {
+            assert!(!touch_due(&session_at(status, now - ms(beat - 1)), now));
+            assert!(touch_due(&session_at(status, now - ms(beat)), now));
+        }
+        // A due row is stored by the next check: at most 30 s apart, which
+        // leaves shipped readers' 45 s gate 15 s for delivery and skew.
+        let check = HEARTBEAT_CHECK.as_millis() as i64;
+        assert!(beat + check <= 30_000);
+        assert!(beat + check + 15_000 <= zeron_proto::view::SESSION_STALE_MS);
+
+        let long_ago = now - chrono::Duration::minutes(20);
+        assert!(!touch_due(&session_at(SessionStatus::Idle, long_ago), now));
+        assert!(!touch_due(&session_at(SessionStatus::Errored, long_ago), now));
+        let mut subagents = session_at(SessionStatus::Idle, long_ago);
+        subagents.running_subagents = 1;
+        assert!(touch_due(&subagents, now));
+        let mut waiting = session_at(SessionStatus::Idle, long_ago);
+        waiting.waiting = Some(zeron_proto::SessionWaiting {
+            on: Vec::new(),
+            since: long_ago,
+        });
+        assert!(touch_due(&waiting, now));
+    }
 
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {

@@ -24,6 +24,11 @@ export interface Env {
    * derives the head from the rows: older code reads the stored copy, and a
    * stale one collides on `rows.seq`. */
   CHAT_ROOM_WRITE_THROUGH?: string;
+  /** "1": RegistryRoom also stores its seq on every push. Set this and wait
+   * out one bookkeeping flush (5 min) before rolling back past the release
+   * that derives the seq from the rows: older code reads the stored copy,
+   * and a stale one would stamp new rows below cursors clients already hold. */
+  REGISTRY_ROOM_WRITE_THROUGH?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;
