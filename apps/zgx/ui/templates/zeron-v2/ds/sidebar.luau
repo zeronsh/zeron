@@ -358,6 +358,7 @@ return ui.component(function(props: Props): Node
 	local edge_over = ui.use_state(false)
 	local from_x, from_w = 0, 0
 	local easing: any = nil
+	local steps = 0
 	local was_folded = collapsed:peek()
 	-- Its width is where it's going (`base`, which its edge dragged or the
 	-- window resized moves at once) and, after a step (folding, coming
@@ -393,14 +394,15 @@ return ui.component(function(props: Props): Node
 			end
 			step:set(showing - to)
 			local params = motion.column(step:peek(), 0)
-			local this: any = nil
+			-- (By number: a callback holding its own clip would keep both for good.)
+			steps += 1
+			local this = steps
 			params.onComplete = function()
-				if easing == this then
+				if steps == this then
 					easing = nil
 				end
 			end
-			this = anime.animate(step, params)
-			easing = this
+			easing = anime.animate(step, params)
 		else
 			base = to
 		end

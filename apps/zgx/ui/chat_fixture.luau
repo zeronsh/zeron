@@ -1477,6 +1477,23 @@ ui.command {
 		store.catalog:set(c)
 	end,
 }
+-- The box's catalog as the host has it while the box doesn't answer
+-- (offline): looking, nothing listed; then settled with that, as the host
+-- settles a look that goes unanswered (src/chat.rs `settle_remote`).
+ui.command {
+	id = "catalog_box_looking",
+	title = "The box doesn't answer",
+	run = function()
+		store.catalog:set { state = "looking", complete = false, device = "box", harnesses = {}, models = {} }
+	end,
+}
+ui.command {
+	id = "catalog_box_settled",
+	title = "The box's look settles unanswered",
+	run = function()
+		store.catalog:set { state = "ready", complete = true, device = "box", harnesses = {}, models = {} }
+	end,
+}
 -- The open session names no model (made without one: its agent runs its
 -- own), the host naming that one.
 ui.command {

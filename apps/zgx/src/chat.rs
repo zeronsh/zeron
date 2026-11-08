@@ -109,6 +109,10 @@ struct Chats {
     /// Which look at `remote` is the latest (`reload_remote`): an older one's
     /// answers, for this device or another, change nothing.
     remote_turn: Cell<u64>,
+    /// The look at `remote` settled before all its answers came
+    /// (`settle_remote`): its catalog stands complete with what it has, and
+    /// answers still to come fill it in without its going back to looking.
+    remote_settled: Cell<u64>,
     /// The chat a view has just let go of, kept a moment: a chat on its own
     /// that becomes a split is opened again at once, in its pane, and has
     /// what it had rather than reading and building it all again.
@@ -194,45 +198,19 @@ struct RowContext {
 
 impl zgx_script::Unfold for FoldedEntry {
     fn unfold(&self) -> Value {
-        let json = miniz_oxide::inflate::decompress_to_vec(&self.bytes).ok();
+        let json = lz4_flex::block::decompress_size_prepended(&self.bytes).ok();
         let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
         let RowContext { doc, device, model } = &*self.context;
         built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil)
     }
 }
 
-/// How hard a settled entry is compressed: fast, as a long chat's are made in
-/// slices between frames, and most of what it saves is had by the first level.
-const FOLD_LEVEL: i32 = 1;
-
-/// `bytes` compressed, the compressor's tables kept for the next (a compressor is
-/// about 300 KB, against the kilobytes of an entry: one a call was gigabytes
-/// allocated to open a few long chats).
-fn compressed(mut bytes: &[u8]) -> Box<[u8]> {
-    use miniz_oxide::deflate::core::{
-        CompressorOxide, TDEFLFlush, TDEFLStatus, compress, create_comp_flags_from_zip_params,
-    };
-    thread_local! {
-        static COMPRESSOR: RefCell<CompressorOxide> =
-            RefCell::new(CompressorOxide::new(create_comp_flags_from_zip_params(FOLD_LEVEL, 0, 0)));
-    }
-    COMPRESSOR.with_borrow_mut(|compressor| {
-        compressor.reset();
-        let mut out = vec![0; (bytes.len() / 2).max(64)];
-        let mut at = 0;
-        loop {
-            let (status, read, written) = compress(compressor, bytes, &mut out[at..], TDEFLFlush::Finish);
-            at += written;
-            bytes = &bytes[read..];
-            if matches!(status, TDEFLStatus::Done) {
-                break;
-            }
-            let room = out.len() * 2;
-            out.resize(room, 0);
-        }
-        out.truncate(at);
-        out.into_boxed_slice()
-    })
+/// `bytes` compressed: fast to make, as a long chat's are made each time it opens,
+/// and to open, as a scroll does. (LZ4 makes them in a quarter of the time deflate's
+/// fastest level does and opens them in a twelfth, for rows a quarter larger, measured
+/// on 16,271 rows of real chats; deflate spends most of its time on a table per row.)
+fn compressed(bytes: &[u8]) -> Box<[u8]> {
+    lz4_flex::block::compress_prepend_size(bytes).into_boxed_slice()
 }
 
 /// An entry's row, as a view keeps it: its subagents apart, as the transcript
@@ -319,11 +297,37 @@ impl SubagentOff {
     }
 }
 
+/// Whether `entry` plainly has a row, from its parts alone: building it would
+/// say so too, at the cost of all a long chat's rows each time it opens. `false`
+/// only means that takes building it.
+fn plainly_has_row(entry: &Json) -> bool {
+    if entry["id"].as_str().is_none() {
+        return false;
+    }
+    match entry["role"].as_str() {
+        Some("user") => true,
+        // As `blocks_of`: a tool that isn't its output alone, or a thought with words.
+        Some("assistant") => entry["parts"].as_array().into_iter().flatten().any(|part| match part["kind"].as_str() {
+            Some("tool") => !display_tool(part),
+            Some("reasoning") => !part["text"].as_str().unwrap_or_default().trim().is_empty(),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a part of `entry` names a subagent (`tool_row`), all `subagents_in` finds.
+fn names_subagent(entry: &Json) -> bool {
+    entry["parts"].as_array().into_iter().flatten().any(|part| part["subagentRef"].as_str().is_some_and(|name| !name.is_empty()))
+}
+
 /// `entry`, as the worker folds it.
 fn fold_off(at: usize, id: String, entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> FoldedOff {
-    let row = built_entry(entry, doc, device, model);
+    // (Its row is built here only if what's wanted of it isn't plain from its parts.)
+    let plain = plainly_has_row(entry) && !names_subagent(entry);
+    let row = (!plain).then(|| built_entry(entry, doc, device, model)).flatten();
     let subagents = row.as_ref().and_then(subagents_in).map_or(Vec::new(), |found| found.iter().filter_map(SubagentOff::of).collect());
-    let bytes = row.and_then(|_| serde_json::to_vec(entry).ok()).map(|bytes| compressed(&bytes));
+    let bytes = (plain || row.is_some()).then(|| serde_json::to_vec(entry).ok()).flatten().map(|bytes| compressed(&bytes));
     FoldedOff { at, id, bytes, subagents, sum: sum_of(entry), todo: latest_todo(std::iter::once(entry)).cloned() }
 }
 
@@ -379,6 +383,11 @@ const RETRY_AFTER: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(8),
     std::time::Duration::from_secs(15),
 ];
+/// How long a look at another device's catalog may go unanswered before it
+/// settles with what it has (`settle_remote`): an offline device's list
+/// never comes, and the model picker shouldn't wait on it forever.
+const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// How many times an agent's models are asked again on another device
 /// before it's left out (one signed out fails every time).
 const MODEL_RETRIES: usize = 2;
@@ -1060,7 +1069,40 @@ impl Chats {
         let turn = self.remote_turn.get() + 1;
         self.remote_turn.set(turn);
         let me = self.clone();
-        engine::get().spawn(async move { me.load_remote(device, turn).await });
+        let look = device.clone();
+        engine::get().spawn(async move { me.load_remote(look, turn).await });
+        // Unanswered by then (the device offline, or slow), it settles.
+        let me = self.clone();
+        engine::get().spawn(async move {
+            zgx::timer::sleep(SETTLE_AFTER).await;
+            me.settle_remote(&device, turn);
+        });
+    }
+
+    /// The look `turn` at `device`'s catalog settles with what it has: the
+    /// catalog kept from its last whole look, or nothing listed, never this
+    /// device's in its place. It stands complete (the picker names what it
+    /// knows, and stops waiting), and its answers still to come fill it in.
+    fn settle_remote(&self, device: &str, turn: u64) {
+        if !self.on_remote(device, turn) {
+            return;
+        }
+        self.remote_settled.set(turn);
+        let changed = match self.remote.borrow_mut().as_mut() {
+            Some(r) if !r.ready => {
+                r.ready = true;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.publish_catalog();
+        }
+    }
+
+    /// Whether the look `turn` has settled (`settle_remote`).
+    fn settled(&self, turn: u64) -> bool {
+        self.remote_settled.get() == turn
     }
 
     /// Whether the look `turn` is still the composer's, on `device`.
@@ -1082,9 +1124,11 @@ impl Chats {
             match list {
                 Ok(list) => break list,
                 Err(error) => {
-                    // (Unreachable for now: its catalog stays looking, never
-                    // this device's in its place, and it's asked again.)
+                    // (Unreachable for now: its catalog settles with what it
+                    // has, never this device's in its place, and it's asked
+                    // again.)
                     eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
+                    self.settle_remote(&device, turn);
                     zgx::timer::sleep(RETRY_AFTER[tries.min(RETRY_AFTER.len() - 1)]).await;
                     tries += 1;
                     if !self.on_remote(&device, turn) {
@@ -1108,7 +1152,7 @@ impl Chats {
         if let Some(r) = self.remote.borrow_mut().as_mut() {
             crate::agents::remember_icons(&harnesses);
             r.harnesses = harnesses;
-            r.ready = ids.is_empty();
+            r.ready = ids.is_empty() || self.settled(turn);
         }
         self.publish_catalog();
         let left = Rc::new(Cell::new(ids.len()));
@@ -1151,8 +1195,9 @@ impl Chats {
                         // (What it had before, if anything, stays.)
                         None => whole.set(false),
                     }
-                    r.ready = left.get() == 0;
-                    if r.ready {
+                    let all = left.get() == 0;
+                    r.ready = all || me.settled(turn);
+                    if all {
                         // Kept short, it isn't ready: moving to it shows it
                         // while it's looked at again.
                         let mut kept = r.clone();
@@ -4888,7 +4933,7 @@ mod tests {
         let long = "words that repeat ".repeat(4000);
         for input in [long.as_bytes(), b"short", b""] {
             let out = super::compressed(input);
-            assert_eq!(miniz_oxide::inflate::decompress_to_vec(&out).unwrap(), input);
+            assert_eq!(lz4_flex::block::decompress_size_prepended(&out).unwrap(), input);
         }
         assert!(super::compressed(long.as_bytes()).len() < long.len() / 10);
     }
@@ -5124,6 +5169,36 @@ mod tests {
         assert!(!chats.on_remote("linux", 2), "another device's");
         chats.remote.borrow_mut().take();
         assert!(!chats.on_remote("laptop", 2), "back here");
+    }
+
+    /// A look at another device's catalog that goes unanswered (the device
+    /// offline) settles: complete with what it has, nothing listed here, never
+    /// this device's in its place, so the picker stops waiting on it. Only
+    /// the latest look settles, and once settled it stays complete.
+    #[test]
+    fn an_unanswered_look_at_a_devices_catalog_settles_with_what_it_has() {
+        let chats = Chats::default();
+        *chats.here.borrow_mut() = Some("mac".into());
+        *chats.harnesses.borrow_mut() = vec![json!({ "id": "codex", "name": "Codex" })];
+        chats.models.borrow_mut().insert("codex".into(), vec![json!({ "id": "gpt", "label": "GPT" })]);
+        *chats.remote.borrow_mut() = Some(Remote {
+            device: "box".into(),
+            harnesses: Vec::new(),
+            models: HashMap::new(),
+            ready: false,
+        });
+        chats.remote_turn.set(2);
+        let complete = |chats: &Chats| matches!(chats.catalog_value().field("complete"), Some(Value::Bool(true)));
+        assert!(!complete(&chats), "looking");
+        chats.settle_remote("box", 1);
+        assert!(!complete(&chats), "an earlier look settles nothing");
+        chats.settle_remote("box", 2);
+        assert!(complete(&chats), "settled");
+        let settled = chats.catalog_value();
+        assert!(matches!(settled.field("device"), Some(Value::Str(s)) if s.as_ref() == "box"));
+        let Some(Value::List(harnesses)) = settled.field("harnesses") else { panic!("harnesses") };
+        assert!(harnesses.is_empty(), "nothing listed: never this device's in its place");
+        assert!(chats.settled(2) && !chats.settled(3));
     }
 
     /// One looked at ahead of time without all its agents' models is kept as
@@ -5841,6 +5916,49 @@ mod tests {
         let whole = tool(&stamped["parts"][1]).unwrap();
         assert!(whole.field("chat").is_none() && whole.field("output_truncated").is_none());
         assert!(with_host(&json!({ "parts": [exec("t2", false)] }), "c1", None).is_none());
+    }
+
+    #[test]
+    fn a_row_plainly_there_is_one_building_it_makes() {
+        let tool = |id: &str| json!({ "kind": "tool", "id": id, "resolved": true, "call": { "kind": "exec", "command": "ls" } });
+        let show = json!({ "kind": "tool", "id": "s", "resolved": true, "call": { "kind": "mcp", "server": "zeron", "tool": "show_visual", "input": {} } });
+        let thought = |text: &str| json!({ "kind": "reasoning", "id": "r", "text": text });
+        let reply = |parts: Vec<Json>| json!({ "id": "a", "role": "assistant", "status": "done", "parts": parts });
+        let cases = [
+            (json!({ "id": "u", "role": "user", "parts": [] }), true),
+            (reply(vec![tool("t")]), true),
+            (reply(vec![thought("words")]), true),
+            (reply(vec![show.clone(), tool("t")]), true),
+            // Not plain: nothing said, though building may find a row.
+            (reply(vec![thought("  ")]), false),
+            (reply(vec![show]), false),
+            (reply(vec![]), false),
+            (json!({ "role": "user", "parts": [] }), false),
+            (json!({ "id": "x", "role": "switch", "parts": [] }), false),
+        ];
+        for (entry, plain) in cases {
+            assert_eq!(super::plainly_has_row(&entry), plain, "{entry}");
+            if plain {
+                assert!(super::message(&entry, None).is_some(), "plainly a row, but none built: {entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_subagent_is_named_in_its_part_or_is_in_no_row() {
+        let part = |extra: Json| {
+            let mut part = json!({ "kind": "tool", "id": "t", "resolved": true, "call": { "kind": "unknown", "name": "Agent: look", "input": { "prompt": "Look" } } });
+            part.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            part
+        };
+        let reply = |part: Json| json!({ "id": "a", "role": "assistant", "status": "done", "parts": [part] });
+        let named = reply(part(json!({ "subagentRef": "doc--sub--1", "subagentStatus": "done" })));
+        assert!(super::names_subagent(&named));
+        assert!(super::subagents_in(&super::message(&named, None).unwrap()).is_some());
+        for unnamed in [reply(part(json!({}))), reply(part(json!({ "subagentRef": "" })))] {
+            assert!(!super::names_subagent(&unnamed));
+            assert!(super::subagents_in(&super::message(&unnamed, None).unwrap()).is_none());
+        }
     }
 
     #[test]

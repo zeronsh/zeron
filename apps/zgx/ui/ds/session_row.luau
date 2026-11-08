@@ -1049,6 +1049,7 @@ function M.Fold(props: FoldProps): Node
 	local mounted = ui.use_state(was)
 	local amount = ui.use_state(if was then 1 else 0)
 	local going: any = nil
+	local folds = 0
 	ui.effect(function()
 		local on = props.open()
 		if on == was then
@@ -1062,13 +1063,15 @@ function M.Fold(props: FoldProps): Node
 		if on then
 			mounted:set(true)
 		end
-		local this: any = nil
-		this = anime.animate(amount, motion.params({
+		-- (By number: a callback holding its own clip would keep both for good.)
+		folds += 1
+		local this = folds
+		going = anime.animate(amount, motion.params({
 			value = if on then 1 else 0,
 			duration = if on then M.FOLD.open else M.FOLD.close,
 			ease = M.FOLD.ease,
 			onComplete = function()
-				if going == this then
+				if folds == this then
 					going = nil
 				end
 				if not props.open() then
@@ -1076,7 +1079,6 @@ function M.Fold(props: FoldProps): Node
 				end
 			end,
 		}))
-		going = this
 	end)
 	return ui.show(
 		function(): boolean
