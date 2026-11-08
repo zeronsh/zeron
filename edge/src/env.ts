@@ -36,6 +36,10 @@ export interface Env {
   /** "1": ChatRoom offers the relay layer to clients that ask for it
    * (docs/design/relay-layer.md). Off, its behaviour doesn't change at all. */
   CHAT_RELAY_LAYER?: string;
+  /** "1": Cloud machines provisioned from now on run the relay layer in their
+   * engine (`ZERON_RELAY_LAYER`). Turn on `CHAT_RELAY_LAYER` first; see the
+   * rollout in docs/design/relay-layer.md. */
+  CLOUD_RELAY_LAYER?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;
