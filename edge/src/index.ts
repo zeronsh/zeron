@@ -392,7 +392,7 @@ export default {
       if (parts[2] === "nudge" && request.method === "POST") {
         // A send to a sleeping Cloud session wakes its machine; the nudge
         // queues in the DeviceRoom and replays once its engine reconnects.
-        autoWakeCloudDevice(env, ctx, auth, deviceId);
+        autoWakeCloudDevice(env, ctx, auth, deviceId, env.CLOUD_EDGE_URL ?? url.origin);
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, "/nudge", "");
       }
     }

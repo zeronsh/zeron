@@ -34,6 +34,8 @@
  * helpers take the DO's `SqlStorage`.
  */
 
+import { machineSpec } from "./policy";
+
 export const CLOSE_GRACE_MS = 60 * 60_000;
 /** Reconcile at least this often while anything is open. */
 export const RECONCILE_EVERY_MS = 60 * 60_000;
@@ -110,17 +112,10 @@ export const monthClosable = (month: string, now: number, graceMs = CLOSE_GRACE_
   now >= monthEnd(month) + graceMs;
 
 /** Provider billing multiplier per sandbox size, relative to `default`
- * (Boat's published figures, docs.boat.dev/pricing). Only for the live
- * estimate between meter reads: the reconciled figure is the provider's own
- * billable seconds, which carry the multiplier already. */
-export const SIZE_MULTIPLIER: Readonly<Record<string, number>> = {
-  small: 0.5,
-  default: 1,
-  large: 2,
-  xlarge: 5.56
-};
-
-export const sizeMultiplier = (type: string | undefined): number => SIZE_MULTIPLIER[type ?? "default"] ?? 1;
+ * (policy.ts's catalog). Only for the live estimate between meter reads: the
+ * reconciled figure is the provider's own billable seconds, which carry the
+ * multiplier already, also across a resize mid-life. */
+export const sizeMultiplier = (type: string | undefined): number => machineSpec(type ?? "default")?.creditMultiplier ?? 1;
 
 export interface SandboxRecord {
   readonly provider: string;
@@ -334,7 +329,13 @@ export type LedgerEvent =
   | "stop"
   | "delete"
   | "ttl_extend"
-  | "error";
+  | "error"
+  /** A wake moved the sandbox onto another size. */
+  | "resize"
+  /** A sleeping machine was resumed only to keep its disk from expiring. */
+  | "refresh"
+  /** Its engine found its chat store damaged on a start and rebuilt it. */
+  | "store_recovered";
 
 export interface LedgerEntry {
   readonly at: number;
@@ -507,6 +508,18 @@ export const recordSandbox = (sql: SqlStorage, sandbox: SandboxRecord): void => 
     sandbox.createdAt
   );
 };
+
+/** A resume moved the sandbox onto another size. Its usage rows keep the
+ * provider's own figures; this is the size it is on from now. */
+export const setSandboxType = (sql: SqlStorage, ref: SandboxRef, type: string): void => {
+  sql.exec("UPDATE sandboxes SET type = ? WHERE provider = ? AND sandbox_id = ?", type, ref.provider, ref.sandboxId);
+};
+
+/** The size a sandbox was last recorded on. */
+export const sandboxType = (sql: SqlStorage, ref: SandboxRef): string | undefined =>
+  [...sql.exec("SELECT type FROM sandboxes WHERE provider = ? AND sandbox_id = ?", ref.provider, ref.sandboxId)][0]?.type as
+    | string
+    | undefined;
 
 export const markSandboxFinal = (sql: SqlStorage, ref: SandboxRef, finalAt: number): void => {
   sql.exec("UPDATE sandboxes SET final_at = ? WHERE provider = ? AND sandbox_id = ?", finalAt, ref.provider, ref.sandboxId);

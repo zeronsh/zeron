@@ -6558,6 +6558,7 @@ mod tests {
             failed_action: None,
             last_active_at: None,
             created_at: 0,
+            ..Default::default()
         };
         s.begin_pending_send("c", "m1", now);
         for state in [
@@ -6678,6 +6679,7 @@ mod tests {
                 failed_action: None,
                 last_active_at: None,
                 created_at: 0,
+                ..Default::default()
             }],
             available: true,
         };

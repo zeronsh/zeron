@@ -1021,6 +1021,30 @@ impl ChatDocHandle {
         Ok(stamped)
     }
 
+    /// A turn ended with nothing in the transcript to say so (its reply never
+    /// reached this disk, or it never got to run): write that it failed, so
+    /// the chat doesn't just stop at the user's message. Idempotent per `key`.
+    pub fn note_turn_failure(&self, key: &str, note: &str) -> Result<(), DocError> {
+        let id = format!("{key}-interrupted");
+        if self.doc.read_entries()?.iter().any(|entry| entry.id == id) {
+            return Ok(());
+        }
+        self.doc.push_message(&SessionMessageEntry {
+            id: id.clone(),
+            role: MessageRole::Assistant,
+            parts: Vec::new(),
+            created_at: now_ms(),
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Aborted),
+            continuation_of: None,
+            duration_ms: None,
+        })?;
+        self.doc
+            .append_error_part(&id, &format!("{id}-note"), note)?;
+        self.publish_messages();
+        Ok(())
+    }
+
     fn publish_messages(&self) {
         let _import = lock(&self.transcript_import);
         self.publish_messages_locked();
@@ -1194,8 +1218,14 @@ impl DocHost {
         let running = self
             .sessions()
             .map_or(0, |sessions| sessions.active_count());
+        // Sleeping stops the engine, and a parked chat's subagents with it.
+        let background = self
+            .sessions()
+            .map_or(0, |sessions| sessions.background_count());
         let busy = if running > 0 {
             Some(format!("{running} chat(s) have a turn in flight"))
+        } else if background > 0 {
+            Some(format!("{background} chat(s) have background work running"))
         } else if self.has_waiting_commands() {
             Some("a message is waiting to run".to_string())
         } else {
@@ -1241,6 +1271,79 @@ impl DocHost {
                 host.drain_commands(&handle).await;
                 host.drain_queue(&handle).await;
             });
+        }
+    }
+
+    /// Boot recovery reads this disk, and a machine that died can come back
+    /// with a disk older than its chat's room: a turn that was running then
+    /// has no open journal here, so recovery never saw it. Once the room has
+    /// caught up, a reply still streaming from this device with no run behind
+    /// it, or a message marked delivered that this disk's ledger has never
+    /// heard of, is such a turn. It says so; a message still pending just runs.
+    async fn settle_rolled_back_turn(&self, weak: Weak<ChatDocHandle>) {
+        const CATCH_UP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + CATCH_UP_WAIT;
+        let handle = loop {
+            let Some(handle) = weak.upgrade() else {
+                return;
+            };
+            let caught_up = self.inner.config.edge.is_none()
+                || lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
+            if caught_up {
+                break handle;
+            }
+            drop(handle);
+            if tokio::time::Instant::now() >= deadline {
+                return; // the next boot looks again
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        };
+        let Some(sessions) = self.sessions() else {
+            return;
+        };
+        if !self.is_host(&handle.chat_id)
+            || sessions.has_run(&handle.chat_id)
+            || sessions.reviving(&handle.chat_id)
+        {
+            return;
+        }
+        let Ok(commands) = handle.doc.read_commands() else {
+            return;
+        };
+        let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(true);
+        // Running or about to: this isn't a lost turn.
+        if commands.iter().any(|c| {
+            c.status == SessionCommandStatus::Pending || lock(&self.inner.executing).contains(&c.id)
+        }) {
+            return;
+        }
+        let stamped = match handle.mark_abandoned_streams(ROLLED_BACK_NOTE) {
+            Ok(stamped) => stamped,
+            Err(err) => {
+                tracing::warn!(chat = %handle.chat_id, error = %err, "settling a lost turn failed");
+                return;
+            }
+        };
+        if !stamped.is_empty() {
+            tracing::warn!(chat = %handle.chat_id, "a turn was lost with this machine's disk");
+            return;
+        }
+        let Ok(entries) = handle.doc.read_entries() else {
+            return;
+        };
+        let Some(last) = entries.last().filter(|entry| entry.role == MessageRole::User) else {
+            return;
+        };
+        let lost = commands.iter().any(|c| {
+            matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if *message_id == last.id)
+                && c.status == SessionCommandStatus::Applied
+                && !is_processed(&c.id)
+        });
+        if lost {
+            tracing::warn!(chat = %handle.chat_id, "a turn was lost with this machine's disk");
+            if let Err(err) = handle.note_turn_failure(&last.id, ROLLED_BACK_NOTE) {
+                tracing::warn!(chat = %handle.chat_id, error = %err, "noting a lost turn failed");
+            }
         }
     }
 
@@ -5809,7 +5912,20 @@ impl DocHost {
                 // client, another device's switch) waits for the turn: the
                 // provider never changes by killing a turn mid-flight.
                 let other_provider = sessions.live_harness(chat_id).is_some_and(|live| live != harness);
-                if other_provider || sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                // Sent before the turn now running had started: the sender never
+                // saw that turn, so it can't be a steer into it. Two messages sent
+                // to a sleeping Cloud machine (or an offline host) start one turn
+                // each; steering the second into the first cut the first off with
+                // an empty reply.
+                // Only when an earlier send started that turn: nothing else changes.
+                let sent_before_turn = sessions
+                    .turn_started_ms(chat_id)
+                    .is_some_and(|started| entry.issued_at < started)
+                    && self.live_turn_sent_earlier(handle, entry, message_id);
+                if other_provider
+                    || sent_before_turn
+                    || sessions.defers_to_turn_end(chat_id, Some((harness, &request)))
+                {
                     self.hold_until_turn_end(
                         handle,
                         message_id,
@@ -5970,6 +6086,36 @@ impl DocHost {
     /// Park a prompt for a turn-boundary agent in the visible queue instead
     /// of its mailbox, keeping the message id so the transcript entry written
     /// at delivery is the same message. Steers lead ordinary rows.
+    /// The running turn is the latest message in the transcript, sent as a run no
+    /// later than `entry` and not `entry`'s own: a second send that went out while
+    /// the host was away, now arriving behind the first.
+    fn live_turn_sent_earlier(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        entry: &SessionCommandEntry,
+        message_id: &str,
+    ) -> bool {
+        let Some(live) = handle.doc.read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| e.role == MessageRole::User)
+                .map(|e| e.id.clone())
+        }) else {
+            return false;
+        };
+        if live == message_id {
+            return false;
+        }
+        handle.doc.read_commands().is_ok_and(|commands| {
+            commands.iter().any(|c| {
+                c.id != entry.id
+                    && c.issued_at <= entry.issued_at
+                    && matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if *message_id == live)
+            })
+        })
+    }
+
     fn hold_until_turn_end(
         &self,
         handle: &Arc<ChatDocHandle>,
@@ -6346,6 +6492,17 @@ impl DocHost {
     }
 
     /// Persist every open doc now (shutdown path; bypasses the debounce).
+    /// The store's WAL folded into its file ([`DocsStore::flush_for_sleep`]):
+    /// before a Cloud sleep's snapshot, and at shutdown.
+    pub fn checkpoint_store(&self) -> bool {
+        self.inner.store.flush_for_sleep()
+    }
+
+    /// The store this host writes (its path, and what its open recovered).
+    pub fn store(&self) -> &Arc<DocsStore> {
+        &self.inner.store
+    }
+
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
@@ -6755,6 +6912,10 @@ mod queued_message_prompt_tests {
 
 /// Per-chat background task: reacts to doc changes (local commits and remote imports)
 /// by re-publishing the transcript watch, draining commands, and debouncing snapshots.
+/// Why a Cloud chat's reply stopped when its machine lost its place.
+const ROLLED_BACK_NOTE: &str =
+    "The Cloud machine stopped during this turn and lost its place. Send a message to continue.";
+
 /// Holds only a weak handle so a dropped host tears the task down.
 async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
     // Prompt delivery may wait for mailbox capacity. Keep a separate watcher
@@ -6774,6 +6935,11 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
             }
         }
     });
+    if crate::runner::session().is_some() {
+        let settling = host.clone();
+        let settling_weak = weak.clone();
+        host.spawn_worker(async move { settling.settle_rolled_back_turn(settling_weak).await });
+    }
     // Initial pass: the snapshot may already carry pending commands. The
     // mirror stays lazy — it materializes on the first watch attach.
     {

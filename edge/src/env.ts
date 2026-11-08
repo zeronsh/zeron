@@ -120,7 +120,7 @@ export interface Env {
    * `/home/user`); a local stack whose machines are processes on one
    * computer points it at a scratch folder (scripts/cloud-dev.sh). */
   CLOUD_PROJECTS_ROOT?: string;
-  /** Machine size for session sandboxes: small · default · large. */
+  /** Machine size for new sessions without a default of their own: small · default · large · xlarge. */
   CLOUD_MACHINE?: string;
   /** ES256 JWK (JSON) pair for runner JWTs (secrets). */
   RUNNER_JWT_PRIVATE_KEY?: string;

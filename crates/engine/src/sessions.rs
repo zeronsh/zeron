@@ -490,6 +490,15 @@ impl SessionsEngine {
     /// question it is still owed an answer to (see [`is_active`]). A persistent
     /// session parked BETWEEN turns is not: it holds a warm child with nothing
     /// outstanding, and takes the next prompt straight through its mailbox.
+    /// When the turn now running started (epoch millis), while one is.
+    pub fn turn_started_ms(&self, chat_id: &str) -> Option<i64> {
+        lock(&self.inner.statuses)
+            .get(chat_id)
+            .filter(|session| is_active(session))
+            .and_then(|session| session.started_at)
+            .map(|started| started.timestamp_millis())
+    }
+
     pub fn turn_in_flight(&self, chat_id: &str) -> bool {
         lock(&self.inner.statuses)
             .get(chat_id)
@@ -574,6 +583,43 @@ impl SessionsEngine {
                 std::io::Error::other(e.to_string()),
             ))
         })?
+    }
+
+    /// What this engine's runs are doing, for the Cloud runner heartbeat:
+    /// turns in flight, those parked on a question, and runs whose turn ended
+    /// with background work still live. A runaway subagent can't hold the
+    /// machine forever: the idle reaper ends a parked run whose subagents
+    /// fall silent.
+    pub fn run_counts(&self) -> crate::runner::RunCounts {
+        let (active, waiting) = {
+            let statuses = lock(&self.inner.statuses);
+            (
+                statuses.values().filter(|s| is_active(s)).count(),
+                statuses
+                    .values()
+                    .filter(|s| s.status == SessionStatus::AwaitingInput)
+                    .count(),
+            )
+        };
+        crate::runner::RunCounts {
+            active,
+            waiting,
+            background: self.background_count(),
+        }
+    }
+
+    /// Chats whose turn has ended but whose runtime still runs background
+    /// work (subagents, background shells).
+    pub fn background_count(&self) -> usize {
+        let parked: Vec<String> = lock(&self.inner.runs)
+            .iter()
+            .filter(|(_, run)| run.turn.background_live())
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        parked
+            .iter()
+            .filter(|chat| !self.turn_in_flight(chat))
+            .count()
     }
 
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
@@ -1763,6 +1809,11 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Boot recovery has a revival of this chat on its way.
+    pub(crate) fn reviving(&self, chat_id: &str) -> bool {
+        lock(&self.inner.revivals).contains_key(chat_id)
+    }
+
     /// Boot recovery: pick back up every turn the engine itself cut off — a
     /// journal whose last event is not `Done` (the engine died mid-stream), or
     /// a chat its graceful shutdown marked (see [`Self::shutdown`]; that
@@ -1783,6 +1834,11 @@ impl SessionsEngine {
     /// carry on), a turn parked on an unanswered question, a turn that had
     /// already finished, and one the user had stopped (its run had not
     /// settled yet when the engine died).
+    ///
+    /// Whatever happens to it, a turn cut off never ends in silence: a reply
+    /// that reached disk carries the note, and one that didn't (the kill came
+    /// before the doc's debounced save, so the transcript ends at the user's
+    /// message) gets an entry of its own, as does a revival that fails to start.
     pub fn recover_stale(&self) -> Result<usize, EngineError> {
         const MAX_AUTO_RESUME: u32 = 3;
         const RESUME_FRESH_MS: i64 = 12 * 60 * 60 * 1000;
@@ -1921,6 +1977,13 @@ impl SessionsEngine {
             // A shutdown already finalized its entry (with its own note); a
             // streaming entry here means the snapshot outran that.
             let stamped = handle.mark_abandoned_streams(&note)?.len();
+            // Nothing to stamp, not going to run, and not the user's doing or
+            // a turn that had finished.
+            if stamped == 0 && pickup != Pickup::Resume && !stopped && !(crashed && tail.finished) {
+                if let Some(last) = entries.last().filter(|e| e.role == MessageRole::User) {
+                    handle.note_turn_failure(&last.id, &note)?;
+                }
+            }
             self.inner.set_status_with_completion(
                 &chat_id,
                 SessionStatus::Idle,
@@ -1994,7 +2057,14 @@ impl SessionsEngine {
                     }
                     Err(err) => {
                         sessions.inner.drop_revival(&chat_id, &user_id);
-                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
+                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed");
+                        let note = format!(
+                            "Run interrupted by engine restart, and couldn't be resumed ({err}). \
+                             Send a message to continue."
+                        );
+                        if let Err(err) = handle.note_turn_failure(&user_id, &note) {
+                            tracing::warn!(chat = %chat_id, error = %err, "noting a failed resume failed");
+                        }
                     }
                 }
             });
@@ -2502,7 +2572,7 @@ impl Inner {
         if port == 0 {
             return None;
         }
-        let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let command = crate::managed::mcp_executable()?.to_str()?.to_owned();
         let mut env: std::collections::BTreeMap<String, String> = [
             ("ZERON_IPC_PORT".to_owned(), port.to_string()),
             (zeron_proto::McpServer::CHAT_ID_ENV.to_owned(), chat_id.to_owned()),

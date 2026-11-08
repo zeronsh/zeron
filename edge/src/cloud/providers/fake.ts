@@ -15,6 +15,8 @@ import {
   type CreateSandbox,
   type ExecResult,
   type ListedSandbox,
+  type SandboxFailure,
+  type SandboxMachine,
   type SandboxProvider,
   type SandboxState,
   type SandboxUsage
@@ -32,13 +34,20 @@ interface FakeMachine {
   /** Running stretches `[start, end)`; an open stretch has no end. */
   stretches: { start: number; end?: number }[];
   execs: string[];
+  stoppedAt?: number;
+  /** Test hook: what its disk takes, refusing a smaller machine. */
+  neededGiB?: number;
+  dataExpired?: boolean;
 }
+
+/** What each size's disk holds, as a real provider would refuse a resume. */
+const HOLDS: Record<string, number> = { small: 51, default: 51, large: 111.8, xlarge: 251 };
 
 const SECONDS_PER_DOLLAR = 100_000;
 
 export class FakeProvider implements SandboxProvider {
   readonly name = "fake";
-  readonly capabilities = { ttlRequired: false, maxTtlSeconds: null };
+  readonly capabilities = { ttlRequired: false, maxTtlSeconds: null, stoppedRetentionMs: 14 * 24 * 60 * 60_000 };
   private readonly machines = new Map<string, FakeMachine>();
   private readonly keys = new Map<string, { id: string; request: string }>();
 
@@ -55,6 +64,16 @@ export class FakeProvider implements SandboxProvider {
   /** Test hook: what ran on a sandbox. */
   execsOf(id: string): readonly string[] {
     return this.machines.get(id)?.execs ?? [];
+  }
+
+  /** Test hook: its disk now takes this much. */
+  setNeededGiB(id: string, neededGiB: number): void {
+    this.find(id).neededGiB = neededGiB;
+  }
+
+  /** Test hook: its stopped disk was deleted. */
+  expireData(id: string): void {
+    this.find(id).dataExpired = true;
   }
 
   /** Dev hook (`GET /dev/cloud/fake-sandboxes`): every machine with the env
@@ -102,22 +121,39 @@ export class FakeProvider implements SandboxProvider {
     if (!machine || machine.state === "deleted") return { state: "deleted" as const };
     if (machine.state === "provisioning") machine.state = "ready";
     else if (machine.state === "stopping") machine.state = "stopped";
-    return { state: machine.state };
+    const failure: SandboxFailure | undefined = machine.dataExpired ? { kind: "data_expired" } : undefined;
+    return {
+      state: machine.state,
+      ...(failure ? { failure } : {}),
+      ...(machine.state === "stopped" && machine.stoppedAt !== undefined ? { stoppedAt: machine.stoppedAt } : {})
+    };
   }
 
   async stop(sandboxId: string): Promise<void> {
     const machine = this.find(sandboxId);
     if (machine.state === "stopped" || machine.state === "stopping") return;
     machine.state = "stopping";
+    machine.stoppedAt = this.now();
     const open = machine.stretches.at(-1);
     if (open && open.end === undefined) open.end = this.now();
   }
 
-  async resume(sandboxId: string, options: { ttlSeconds: number | null }): Promise<void> {
+  async resume(sandboxId: string, options: { ttlSeconds: number | null; machine?: SandboxMachine }): Promise<void> {
     const machine = this.find(sandboxId);
     if (machine.state !== "stopped") {
       throw new SandboxError("conflict", `cannot resume a ${machine.state} sandbox`, "not_stopped", this.name);
     }
+    if (machine.dataExpired) {
+      throw new SandboxError("conflict", "its data was deleted", "data_expired", this.name, undefined, { kind: "data_expired" });
+    }
+    const size = options.machine ?? machine.machine;
+    if (machine.neededGiB !== undefined && machine.neededGiB > (HOLDS[size] ?? 0)) {
+      throw new SandboxError("conflict", `needs ${machine.neededGiB} GiB`, "disk_too_small", this.name, undefined, {
+        kind: "disk_too_small",
+        neededGiB: machine.neededGiB
+      });
+    }
+    machine.machine = size;
     machine.state = "provisioning";
     machine.ttlSeconds = options.ttlSeconds;
     machine.stretches.push({ start: this.now() });

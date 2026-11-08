@@ -135,9 +135,10 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
 /// what can go back. Without one there's nothing running to protect, and the new
 /// version simply starts next time.
 fn service_running() -> bool {
+    let unit = zeron_update::service_unit();
     cfg!(target_os = "linux")
-        && std::process::Command::new("systemctl")
-            .args(["--user", "--quiet", "is-active", &zeron_update::service_unit()])
+        && zeron_update::systemctl_query(&unit)
+            .args(["--quiet", "is-active", &unit])
             .status()
             .is_ok_and(|status| status.success())
 }

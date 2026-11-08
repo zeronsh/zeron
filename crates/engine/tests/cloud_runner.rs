@@ -683,8 +683,19 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
     let task = runner::spawn_heartbeat(
         identity.edge_url(),
         Arc::new(auth),
-        Arc::new(|| 2),
+        Arc::new(|| runner::RunCounts {
+            active: 2,
+            waiting: 1,
+            background: 1,
+        }),
+        Arc::new(|| {
+            Some(zeron_engine::cloud_disk::DiskUsage {
+                used_bytes: 1024,
+                total_bytes: 4096,
+            })
+        }),
         activity.clone(),
+        Duration::from_secs(3600),
         Duration::from_millis(50),
     );
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -696,10 +707,68 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
     .expect("heartbeats");
     task.abort();
     let beats = rig.edge.requests("/runner/heartbeat");
-    assert_eq!(beats[0].body, json!({"activeRuns": 2, "clients": 3}));
+    assert_eq!(
+        beats[0].body,
+        json!({"activeRuns": 2, "clients": 3, "backgroundRuns": 1, "waitingRuns": 1, "diskUsedBytes": 1024, "diskTotalBytes": 4096, "everySecs": 1})
+    );
     // Drained by the delivered beat: an idle open link reports nothing.
-    assert_eq!(beats[1].body, json!({"activeRuns": 2, "clients": 0}));
+    assert_eq!(
+        beats[1].body,
+        json!({"activeRuns": 2, "clients": 0, "backgroundRuns": 1, "waitingRuns": 1, "diskUsedBytes": 1024, "diskTotalBytes": 4096, "everySecs": 1})
+    );
     assert!(beats[0].bearer.as_deref().is_some_and(|b| b.contains('.')));
+}
+
+/// A turn starting is reported at once, and beats come at the fast pace until it
+/// ends: a machine stopped mid-turn is noticed in under a minute.
+#[tokio::test]
+async fn heartbeat_speeds_up_while_a_turn_runs() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    let auth = rig.auth(identity.clone());
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counts = active.clone();
+    let task = runner::spawn_heartbeat(
+        identity.edge_url(),
+        Arc::new(auth),
+        Arc::new(move || runner::RunCounts {
+            active: counts.load(std::sync::atomic::Ordering::SeqCst),
+            waiting: 0,
+            background: 0,
+        }),
+        Arc::new(|| None),
+        runner::RelayActivity::default(),
+        Duration::from_secs(3600),
+        Duration::from_millis(200),
+    );
+    let beats = |n: usize| {
+        let edge = &rig.edge;
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while edge.requests("/runner/heartbeat").len() < n {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("heartbeats");
+        }
+    };
+    beats(1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let first = rig.edge.requests("/runner/heartbeat");
+    assert_eq!(first.len(), 1, "idle: one beat an hour");
+    assert_eq!(first[0].body["everySecs"], 3600);
+    active.store(1, std::sync::atomic::Ordering::SeqCst);
+    beats(4).await;
+    active.store(0, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let all = rig.edge.requests("/runner/heartbeat");
+    task.abort();
+    assert_eq!(all[1].body["activeRuns"], 1);
+    assert_eq!(all[1].body["everySecs"], 1);
+    let last = all.last().unwrap();
+    assert_eq!(last.body["activeRuns"], 0, "the turn's end is reported too");
+    assert_eq!(last.body["everySecs"], 3600);
 }
 
 // ---------------------------------------------------------------------------
