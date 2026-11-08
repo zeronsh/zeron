@@ -128,6 +128,14 @@ function M.column(from: number, to: number): TableParams
 	return { value = to, duration = M.ms(M.duration(to - from)), ease = M.EASE }
 end
 
+-- An agent's presence (ds/status, ds/sweep): one sweep where you look,
+-- still marks elsewhere. `beat`: the band's tick (ms; twelve a second);
+-- `start`: how long a quiet mark sweeps when its agent starts or resumes
+-- (ms) before it holds still; `flash`: the beats of a "needs you" flash;
+-- `primaries`: how many sub-agents sweep at once (the rest hold still);
+-- `rest`: a tile at rest, as a share of a lit one's ink.
+M.presence = { beat = 1000 / 12, start = 3000, flash = 4, primaries = 2, rest = 0.4 }
+
 -- What moves with the sidebar (its own width is the sidebar's default or
 -- near it): for `ui.tween`.
 M.sidebar = { duration = M.BASE, ease = M.EASE } :: TweenOptions

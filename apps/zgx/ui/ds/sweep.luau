@@ -14,20 +14,36 @@
 --
 -- Cheap: one quad on the GPU, the band's place the shader's time, set only
 -- as it moves (twelve times a second, by ds/status's one timer, so every
--- sweep on screen moves on the same frame; out of sight, it stops).
+-- sweep on screen moves on the same frame; out of sight, it stops). Which
+-- sweeps move at all is ds/status's: one where you look, the rest still.
 
 local M = {}
 
 -- The space between tiles, in tiles: 1/φ⁴, as the mark.
 local GAP = 1 / ((1 + math.sqrt(5)) / 2) ^ 4
 
--- Each glyph's tiles; its cycle in beats (`BEAT`), the last `rest` of them
--- dark; where its band stands still (motion reduced: mid-way, through the
--- gap).
+-- Each glyph's tiles (its id in the shader); its cycle in beats (ds/motion
+-- `presence.beat`), the last `rest` of them dark; where its band stands
+-- still (a quiet mark, motion reduced: mid-way, through the gap). The mark
+-- at 16 and 14 points, a smaller cut of it to 12 (its gap kept), the
+-- sub-agent's dot, and, under 10 points, a micro form of three tiles.
 local GLYPHS = {
-	agent = { rows = { "###.#", "##.##", "#.###" }, beats = 12, rest = 2, still = 4 },
-	subagent = { rows = { "##.", "#.#", ".##" }, beats = 10, rest = 2, still = 2 },
+	agent = { id = 0, rows = { "###.#", "##.##", "#.###" }, beats = 12, rest = 2, still = 4 },
+	subagent = { id = 1, rows = { "##.", "#.#", ".##" }, beats = 10, rest = 2, still = 2 },
+	small = { id = 2, rows = { "##.#", "#.##" }, beats = 10, rest = 2, still = 2 },
+	micro = { id = 3, rows = { "##", "#." }, beats = 8, rest = 2, still = 1 },
 }
+export type Glyph = "agent" | "subagent" | "small" | "micro"
+
+-- The glyph drawn for `who` at `size` points.
+function M.glyph(who: ("agent" | "subagent")?, size: number): Glyph
+	if size < 10 then
+		return "micro"
+	elseif size <= 12 and who ~= "subagent" then
+		return "small"
+	end
+	return who or "agent"
+end
 
 -- A tile's bit: row by row, left to right.
 local function shape(rows: { string }): number
@@ -53,7 +69,7 @@ M.GLYPHS = GLYPHS
 -- before the first diagonal to just past the last, evenly, then off the
 -- glyph for its rest.
 local OFF = -9
-function M.band(who: "agent" | "subagent", i: number): number
+function M.band(who: Glyph, i: number): number
 	local g = GLYPHS[who]
 	local moving = g.beats - g.rest
 	i %= g.beats
@@ -64,22 +80,21 @@ function M.band(who: "agent" | "subagent", i: number): number
 end
 
 -- params[0]: the lit face's ink (a token: zgx resolves one only there);
--- params[1]: the rest's share of its alpha, the glyph (0 the mark, 1 the
--- dot), where a still band stands and whether it does (else it stands at
+-- params[1]: the rest's share of its alpha, the glyph (its id), where a still band stands and whether it does (else it stands at
 -- the shader's time). A tile within a diagonal of the band's middle is lit,
 -- one a diagonal further half lit, past that at rest.
 local SOURCE = string.format(
 	[[
 fn fill(input:FillInput)->vec4<f32> {
- let dot=input.params[1].y>.5;
- let cols=select(5.,3.,dot);
- let shape=select(%du,%du,dot);
+ let id=u32(input.params[1].y+.5);
+ var cols=5.; var rows=3.; var shape=%du;
+ if id==1u { cols=3.; shape=%du; } else if id==2u { cols=4.; rows=2.; shape=%du; } else if id==3u { cols=2.; rows=2.; shape=%du; }
  let g=%.9f;
- let k=min(input.size.x/(cols+(cols-1.)*g),input.size.y/(3.+2.*g));
- let o=(input.size-vec2(cols+(cols-1.)*g,3.+2.*g)*k)*.5;
+ let k=min(input.size.x/(cols+(cols-1.)*g),input.size.y/(rows+(rows-1.)*g));
+ let o=(input.size-vec2(cols+(cols-1.)*g,rows+(rows-1.)*g)*k)*.5;
  let q=(input.p-o)/(k*(1.+g));
  let cell=floor(q);
- if cell.x<0.||cell.y<0.||cell.x>=cols||cell.y>=3. { return vec4(0.); }
+ if cell.x<0.||cell.y<0.||cell.x>=cols||cell.y>=rows { return vec4(0.); }
  let i=u32(cell.y*cols+cell.x);
  if ((shape>>i)&1u)==0u { return vec4(0.); }
  // A squircle, |x|⁴ + |y|⁴ = 1, the tile's half a side.
@@ -95,27 +110,22 @@ fn fill(input:FillInput)->vec4<f32> {
 ]],
 	GLYPHS.agent.shape,
 	GLYPHS.subagent.shape,
+	GLYPHS.small.shape,
+	GLYPHS.micro.shape,
 	GAP
 )
 -- (Compiled as the first sweep is drawn.)
 local shader: any = nil
 
--- The beat (ms): a twelfth of a second, five frames of a 60 Hz display,
--- so each place of the band is drawn once, on the display's beat; the
--- band's soft edge carries the light between places. Connecting goes at
--- half the pace, on every other beat.
-M.BEAT = 1000 / 12
 local PACES = { working = 1, connecting = 2 }
-
--- A tile at rest, as a share of a lit one's ink: lighter than the brand's
--- renders (0.15 there, on its ink), so the unlit part reads in both themes.
-M.REST = 0.4
 
 export type Props = {
 	who: ("agent" | "subagent")?,
 	size: number?,
 	pace: ("working" | "connecting" | "still")?,
 	ink: string?,
+	-- A tile at rest, as a share of a lit one's ink (ds/motion).
+	rest: number?,
 	-- The band held at a place (in diagonals): a still frame, for a sheet.
 	at: number?,
 	-- Motion reduced (ds/motion): it stands still mid-way.
@@ -126,7 +136,7 @@ export type Props = {
 -- of its places lasts (none: it stands still): every tile at rest
 -- (waiting) or, with motion reduced, mid-way across.
 function M.plan(props: Props): (number?, number?)
-	local g = GLYPHS[props.who or "agent"]
+	local g = GLYPHS[M.glyph(props.who, props.size or 14)]
 	local pace = props.pace or "working"
 	if props.at then
 		return props.at, nil
@@ -138,9 +148,11 @@ function M.plan(props: Props): (number?, number?)
 	return nil, PACES[pace]
 end
 
--- The sweep's node, and its places' length in beats (as `plan`).
-function M.node(props: Props): (ContainerProps, number?)
+-- The sweep's node, its places' length in beats (as `plan`), and the glyph
+-- it draws.
+function M.node(props: Props): (ContainerProps, number?, Glyph)
 	local size = props.size or 14
+	local glyph = M.glyph(props.who, size)
 	local still, every = M.plan(props)
 	shader = shader or ui.shader(SOURCE)
 	return {
@@ -150,10 +162,11 @@ function M.node(props: Props): (ContainerProps, number?)
 		bg_shader = shader,
 		shader_params = {
 			props.ink or "$zeron.status.working",
-			{ M.REST, if props.who == "subagent" then 1 else 0, still or 0, if still then 1 else 0 },
+			{ props.rest or 0.4, GLYPHS[glyph].id, still or 0, if still then 1 else 0 },
 		},
 	},
-		every
+		every,
+		glyph
 end
 
 return M

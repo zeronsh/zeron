@@ -604,7 +604,7 @@ local function turn_line(line: () -> TurnLine?): Node
 		ui.show(function(): boolean
 			local l = line()
 			return l ~= nil and l.spinner == true
-		end, status.StatusIcon { kind = "working", size = 14 }),
+		end, status.Spinner { size = 14 }),
 		ui.text {
 			function(): string
 				local l = line()

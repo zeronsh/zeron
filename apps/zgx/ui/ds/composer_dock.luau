@@ -1194,7 +1194,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 					local r = row:get()
 					return if not r.ended then "working" elseif r.failed then "failed" else "done"
 				end, {
-					working = status.StatusIcon { kind = "working", size = 14, who = "subagent" },
+					working = status.StatusIcon { kind = "working", size = 14, who = "subagent", role = "primary" },
 					done = status.StatusIcon { kind = "done", size = 14 },
 					failed = status.StatusIcon { kind = "failed", size = 14 },
 				})

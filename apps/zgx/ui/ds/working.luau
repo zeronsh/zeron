@@ -70,7 +70,7 @@ return ui.component(function(props: Props): Node
 		items = "center",
 		selectable = false,
 		label = locale.t("ds.working.label"),
-		status.StatusIcon { kind = "working", size = 16 },
+		status.StatusIcon { kind = "working", size = 16, role = "primary" },
 		RollText {
 			function(): string
 				if sending() then

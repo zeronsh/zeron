@@ -224,7 +224,7 @@ end
 -- (`now`) as it goes on: finished, failed, its lines counted. A tool whose
 -- line says less than its call opens to it (a press on the line), kept open
 -- by its id.
--- (`running`: it is the one in flight, its glyph the working loader.)
+-- (`running`: it is the one in flight; a sub-agent's, its glyph its sweep.)
 -- What the reader opened, kept apart from the rows (a reload, a row
 -- scrolled back): each tool's call by its id, each group by its key. One
 -- map each, holding only what's open (or, for a group, chosen), not a
@@ -541,7 +541,7 @@ local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, wr
 local COUNTS: { [string]: boolean } = { edit = true, write = true }
 
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
--- one; `running`: it is the one in flight, its glyph the working loader;
+-- one; `running`: it is the one in flight; a sub-agent's, its sweep;
 -- `resized`: told the row's size as it's laid out; `settled`: it is before
 -- the group's last, so never the one in flight.)
 -- A row is built often (each comes into view, a long group's thousands), so
@@ -672,15 +672,24 @@ local function row(
 					left = GLYPH_LEFT,
 					top = (ROW - GLYPH_SIZE) / 2,
 					color = tint,
-					-- (Running, its agent's sweep: a sub-agent's spawn its dot glyph.)
-					ui.show(running, status.StatusIcon {
-						kind = "working",
-						size = GLYPH_SIZE,
-						who = if (now() :: any).subagent or t.kind == "agent" then "subagent" else "agent",
-					}, Icon {
-						name = GLYPH[t.kind],
-						size = GLYPH_SIZE,
-					}),
+					-- (A sub-agent's spawn, running: its sweep. A Cloud machine's
+					-- step, running, is loading, not an agent: the ring. Any other
+					-- call keeps its tool's glyph: the turn's foot says it works.)
+					ui.show(
+						function(): boolean
+							return running() and ((now() :: any).subagent ~= nil or t.kind == "agent")
+						end,
+						status.StatusIcon { kind = "working", size = GLYPH_SIZE, who = "subagent", role = "primary" },
+						if t.kind == "cloud" or t.kind == "git"
+							then ui.show(running, status.Spinner { size = GLYPH_SIZE }, Icon {
+								name = GLYPH[t.kind],
+								size = GLYPH_SIZE,
+							})
+							else Icon {
+								name = GLYPH[t.kind],
+								size = GLYPH_SIZE,
+							}
+					),
 				},
 			ui.row {
 				pl = ui.raw(GUTTER, "past the tree's gutter"),
