@@ -71,6 +71,41 @@ pub fn open(url: &str) {
     });
 }
 
+/// Banner clicks, taken in this process. The engine posts Zeron's banners,
+/// but macOS hands a click to the app its bundle names (Zeron.app's
+/// interface, this process), never to the engine that posted it, so the
+/// engine's own route (`open -a … zeron://notification/…`) never runs. As
+/// Zeron.app's interface always has (crates/ui `notify::on_click`), the
+/// click is answered here: Zeron comes forward, on the banner's chat.
+pub fn take_banner_clicks() {
+    zeron_notify::on_click(|target| {
+        activate();
+        clicked(&target);
+    });
+}
+
+/// A clicked banner's target (a chat, or agent updates), opened as its
+/// `zeron://notification/` link is.
+fn clicked(target: &str) {
+    open(&zeron_notify::link(target));
+}
+
+/// This app to the front: a banner was clicked. (Main thread: the click
+/// comes through the AppKit delegate.)
+#[cfg(target_os = "macos")]
+fn activate() {
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let app: *mut objc::runtime::Object = msg_send![class!(NSApplication), sharedApplication];
+        if !app.is_null() {
+            let _: () = msg_send![app, activateIgnoringOtherApps: true];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate() {}
+
 fn tell(target: Target) {
     let seq = SEQ.with(|s| {
         s.set(s.get() + 1);
@@ -93,6 +128,28 @@ fn tell(target: Target) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn last() -> (Option<String>, Option<String>) {
+        LAST.with(|l| {
+            let l = l.borrow();
+            let text = |k: &str| match l.field(k) {
+                Some(Value::Str(s)) => Some(s.to_string()),
+                Some(Value::Text(s)) => Some(s.to_string()),
+                _ => None,
+            };
+            (text("chat"), text("settings"))
+        })
+    }
+
+    /// A banner clicked in this process (macOS hands the click to the app,
+    /// not the engine that posted it) opens its chat as its link would.
+    #[test]
+    fn a_clicked_banner_opens_its_chat() {
+        clicked("chat-42");
+        assert_eq!(last(), (Some("chat-42".into()), None));
+        clicked(zeron_notify::AGENT_UPDATES_TARGET);
+        assert_eq!(last(), (None, Some("providers".into())));
+    }
 
     #[test]
     fn banners_and_chat_links_open_where_zeron_s_do() {
