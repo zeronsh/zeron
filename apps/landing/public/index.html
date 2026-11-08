@@ -747,17 +747,6 @@
     white-space: nowrap;
   }
   .dl-list .btn { margin-left: auto; padding: 8px 14px; font-size: 13px; }
-  .dl-list .btn.ghost[aria-disabled="true"] {
-    opacity: .4;
-    cursor: default;
-    pointer-events: none;
-  }
-  .dl-soon {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.02em;
-    color: var(--faint);
-  }
   .download-foot {
     margin-top: 24px;
     display: flex;
@@ -1155,7 +1144,7 @@
     <div class="wrap" id="downloads">
       <div class="dl-lede">
         <h2 id="downloads-title">Download Zeron.</h2>
-        <p class="sub">Available for macOS, Windows, Linux and Android. iOS is on the way.</p>
+        <p class="sub">Available for macOS, Windows, Linux, Android and iOS.</p>
       </div>
       <div class="dl-rows">
         <div class="dl-row">
@@ -1177,8 +1166,8 @@
             <p>Android, iPhone and iPad.</p>
           </div>
           <ul class="dl-list">
+            <li><span class="dl-name">iOS</span><span class="dl-meta">iPhone · iPad</span><a class="btn ghost" id="ios-download" href="https://apps.apple.com/us/app/zeron-coding-agents/id6803187897">App Store ↗</a></li>
             <li><span class="dl-name">Android</span><span class="dl-meta">arm64 · apk</span><a class="btn ghost" id="android-download" href="https://zeron.sh/releases/zeron-android-arm64.apk">Download</a></li>
-            <li><span class="dl-name">iOS</span><span class="dl-soon">coming soon</span><span class="btn ghost" role="link" aria-disabled="true">App Store ↗</span></li>
           </ul>
         </div>
       </div>

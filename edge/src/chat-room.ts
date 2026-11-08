@@ -17,10 +17,12 @@
  * auto-response pair; alarms retry accepted rows' host wakes and back up to R2.
  */
 import { createBlobStore, type BlobStore } from "./blobs";
+import { readCapped } from "./read-capped";
 import {
   appendRow,
   CHECKPOINT_BLOB,
   commitCheckpoint,
+  commitStagedCheckpoint,
   ensureChatLog,
   FRONTIER_BLOB,
   getMeta,
@@ -28,7 +30,8 @@ import {
   logStats,
   MAX_ROW_BYTES,
   rowsAfter,
-  setMeta
+  setMeta,
+  STAGED_CHECKPOINT_BLOB
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
@@ -45,6 +48,16 @@ const MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
 /** Existing long-running sessions exceed 16 MiB. Keep uploads bounded,
  * but allow their checkpoints to advance instead of stranding the row log. */
 export const MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024;
+/** A checkpoint past that comes in parts (`/checkpoint-part`, then
+ * `/checkpoint?staged=<size>`), each at most this: a long chat's state alone
+ * outgrows one request (2026-11-07: 35 and 39 MB, 413 on every post), and a
+ * part is all the room holds in memory at once. */
+export const MAX_CHECKPOINT_PART_BYTES = 8 * 1024 * 1024;
+/** The most a checkpoint sent in parts may come to. */
+export const MAX_STAGED_CHECKPOINT_BYTES = 256 * 1024 * 1024;
+/** A checkpoint past this goes to the nightly backup as an object of its
+ * own, streamed, not inline in its JSON as base64. */
+const BACKUP_INLINE_CHECKPOINT_BYTES = 8 * 1024 * 1024;
 /** Presence beats older than this are swept before relay/stats. */
 const PRESENCE_TTL_MS = 30_000;
 /** Per-device push quota, rolling window (in-memory; resets on hibernation —
@@ -141,8 +154,20 @@ export class ChatRoom implements DurableObject {
       if (frontier.byteLength === 0 && seqCovered > 0) {
         return json({ error: "bad_frontier", message: "empty frontier on a content checkpoint" }, 400);
       }
-      const body = new Uint8Array(await request.arrayBuffer());
-      if (body.byteLength > MAX_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
+      // Sent in parts: the staged parts become it, as they are.
+      const staged = url.searchParams.get("staged");
+      if (staged !== null) {
+        const size = Number(staged);
+        if (!Number.isSafeInteger(size) || size <= 0) return json({ error: "bad_staged" }, 400);
+        const outcome = commitStagedCheckpoint(sql, this.blobs, seqCovered, frontier, size, Date.now());
+        if (!outcome.ok) return json({ error: outcome.error }, 409);
+        await this.markBackupDirty();
+        return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
+      }
+      // (Refused before it's read: an engine from before parts re-posted a
+      // long chat's whole snapshot, 35 MB and more, every few seconds.)
+      const body = await readCapped(request, MAX_CHECKPOINT_BYTES);
+      if (!body) return json({ error: "too_large" }, 413);
       const outcome = commitCheckpoint(sql, this.blobs, seqCovered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
       await this.markBackupDirty();
@@ -157,31 +182,47 @@ export class ChatRoom implements DurableObject {
     if (!owner) setMeta(sql, "owner", userId);
     else if (owner !== userId) return json({ error: "forbidden" }, 403);
 
+    if (url.pathname === "/checkpoint-part" && request.method === "POST") {
+      // One piece of a checkpoint too large for one request, at `offset` in
+      // it: appended to the room's staged checkpoint (offset 0 starts it
+      // again), which `/checkpoint?staged=<size>` then commits.
+      const offset = Number(url.searchParams.get("offset") ?? "");
+      if (!Number.isSafeInteger(offset) || offset < 0) return json({ error: "bad_offset" }, 400);
+      const body = await readCapped(request, MAX_CHECKPOINT_PART_BYTES);
+      if (!body) return json({ error: "too_large" }, 413);
+      if (body.byteLength === 0) return json({ error: "empty" }, 400);
+      if (offset === 0) this.blobs.delete(STAGED_CHECKPOINT_BLOB);
+      const staged = this.blobs.size(STAGED_CHECKPOINT_BLOB) ?? 0;
+      if (offset !== staged) return json({ error: "offset", staged }, 409);
+      if (staged + body.byteLength > MAX_STAGED_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
+      this.blobs.append(STAGED_CHECKPOINT_BLOB, body);
+      return json({ ok: true, staged: staged + body.byteLength });
+    }
+
     if (url.pathname === "/checkpoint" && request.method === "GET") {
-      const bytes = this.blobs.get(CHECKPOINT_BLOB);
-      if (!bytes) return json({ error: "not_found" }, 404);
+      // Read a chunk row at a time: a checkpoint sent in parts can be more
+      // than the room holds in memory.
+      const size = this.blobs.size(CHECKPOINT_BLOB);
+      if (size === undefined) return json({ error: "not_found" }, 404);
       // Range-resumable (bytes=N- only): a 1MB load over a 1.2Mbps link that
       // dies at byte 800k resumes, where s2's export-per-join restarted.
       const range = parseRangeStart(request.headers.get("range"));
-      if (range !== null && range >= bytes.byteLength) {
+      if (range !== null && range >= size) {
         return new Response(null, {
           status: 416,
-          headers: { "content-range": `bytes */${bytes.byteLength}` }
+          headers: { "content-range": `bytes */${size}` }
         });
       }
-      const body = range !== null ? bytes.subarray(range) : bytes;
       const headers = new Headers({
         "content-type": "application/octet-stream",
-        "content-length": String(body.byteLength),
+        "content-length": String(size - (range ?? 0)),
         "accept-ranges": "bytes",
         "x-chat2-checkpoint-seq": getMeta(sql, "checkpointSeq") ?? "0"
       });
       if (range !== null) {
-        headers.set(
-          "content-range",
-          `bytes ${range}-${bytes.byteLength - 1}/${bytes.byteLength}`
-        );
+        headers.set("content-range", `bytes ${range}-${size - 1}/${size}`);
       }
+      const body = this.blobs.stream(CHECKPOINT_BLOB, range ?? 0).pipeThrough(new FixedLengthStream(size - (range ?? 0)));
       return new Response(body, { status: range !== null ? 206 : 200, headers });
     }
 
@@ -664,14 +705,26 @@ export class ChatRoom implements DurableObject {
         batchId: row.batchId,
         bytes: encodeBase64(row.bytes)
       }));
-      const checkpoint = this.blobs.get(CHECKPOINT_BLOB);
+      // A large checkpoint goes beside the JSON, streamed: inline as
+      // base64 it was more than the room could hold in memory.
+      const size = this.blobs.size(CHECKPOINT_BLOB) ?? 0;
+      const inline = size <= BACKUP_INLINE_CHECKPOINT_BYTES;
+      const checkpoint = inline ? this.blobs.get(CHECKPOINT_BLOB) : undefined;
+      const prefix = `backup/chat2/${this.ctx.id.toString()}`;
+      if (!inline) {
+        await this.env.BLOBS.put(
+          `${prefix}/checkpoint.bin`,
+          this.blobs.stream(CHECKPOINT_BLOB).pipeThrough(new FixedLengthStream(size))
+        );
+      }
       const frontier = this.blobs.get(FRONTIER_BLOB);
       await this.env.BLOBS.put(
-        `backup/chat2/${this.ctx.id.toString()}/latest.json`,
+        `${prefix}/latest.json`,
         JSON.stringify({
           at: Date.now(),
           ...logStats(sql),
           checkpoint: checkpoint ? encodeBase64(checkpoint) : null,
+          ...(inline ? {} : { checkpointObject: `${prefix}/checkpoint.bin` }),
           frontier: frontier ? encodeBase64(frontier) : null,
           rows
         })

@@ -8,7 +8,7 @@
 //! What scripts see, `sessions`:
 //!   { state = "loading" | "ready" | "offline",
 //!     here = this Mac's device id?,
-//!     devices = { { id, name, platform, here, online, seen?, version? } },
+//!     devices = { { id, name, platform, here, online, seen? (while away), version? } },
 //!     projects = { { id, name, device, path, git, github?, repository?, created?,
 //!                    icon? = { emoji?, image?, hue? } } },
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
@@ -66,6 +66,7 @@ use std::{
 };
 
 use serde_json::{Value as Json, json};
+use zeron_proto::{ChatIndicator, SeenMarks, Session, SleepState};
 use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
 
@@ -130,6 +131,15 @@ struct Sessions {
     /// Each chat's row as last built, by id: the engine sends the whole list
     /// with any chat's change, and only that chat's row is built again.
     rows: RefCell<HashMap<String, Row>>,
+    /// What the scripts were last given of the live states and the devices,
+    /// as `value` judged them: the engine sends every row again with each
+    /// heartbeat (a row's `updatedAt`, a device's `lastSeenAt`), and a frame
+    /// that leaves both as they were changes nothing shown, so isn't published.
+    shown_live: RefCell<HashMap<String, Live>>,
+    shown_devices: RefCell<Option<Value>>,
+    /// Publishes so far (for tests).
+    #[cfg(test)]
+    published: Cell<u32>,
 }
 
 /// A chat's row for scripts, and what it was built from besides the chat's
@@ -139,7 +149,7 @@ struct Row {
     /// parent's list, and whether it said anything since it was last seen.
     moved: i64,
     updated: f64,
-    unseen: bool,
+    marks: SeenMarks,
     with: RowWith,
     value: Value,
 }
@@ -147,6 +157,10 @@ struct Row {
 #[derive(PartialEq)]
 struct RowWith {
     status: Option<&'static str>,
+    /// What its agent waits on, while that shows.
+    waiting: Option<Vec<zeron_proto::WaitingOn>>,
+    /// Its sleep: asleep until (`true`), or woke at (`false`), in Unix seconds.
+    sleep: Option<(bool, i64)>,
     running_subagents: u32,
     side_chats: usize,
     working_side_chats: u32,
@@ -180,18 +194,6 @@ fn forget_changed(rows: &mut HashMap<String, Row>, old: &Json, new: &Json) {
         (Some(&a), Some(&b)) => old[a] == new[b],
         _ => false,
     });
-}
-
-/// Whether `chat` said anything since it was last seen.
-fn unseen(chat: &Json) -> bool {
-    match (
-        chat["lastMessageAt"].as_str().and_then(unix_seconds),
-        chat["lastSeenAt"].as_str().and_then(unix_seconds),
-    ) {
-        (Some(message), Some(seen)) => message > seen,
-        (Some(_), None) => true,
-        _ => false,
-    }
 }
 
 /// When `chat` last moved, for Settings → Archived's order.
@@ -342,6 +344,25 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 .ok_or_else(|| "not ready".to_string())
         }
     });
+    // A chat put to sleep until `until` (Unix seconds), or woken (none):
+    // synced, and its host wakes it early when it asks for you.
+    host.async_action("sessions.sleep", move |args| {
+        let id = args.field("id").map(text).unwrap_or_default();
+        let until = args.field("until").and_then(|v| v.as_f64()).map(|secs| (secs * 1000.0) as i64);
+        let params = json!({ "op": "setChatSleep", "chatId": id, "until": until });
+        async move {
+            if id.is_empty() {
+                return Err("missing".to_string());
+            }
+            // An engine from before Sleep doesn't know the request at all:
+            // "outdated", so the app can say what would let it.
+            match engine::get().call("Mutate", params).await {
+                Ok(_) => Ok(Value::Nil),
+                Err(error) if error.contains("unknown variant") => Err("outdated".to_string()),
+                Err(error) => Err(fail(&error).to_string()),
+            }
+        }
+    });
     let a = s.clone();
     host.action("sessions.seen", move |id| {
         let a = a.clone();
@@ -409,13 +430,15 @@ impl Sessions {
                     return;
                 }
             }
-            Slot::Devices => {
-                if !replace_changed(&self.devices, item) {
+            Slot::Devices | Slot::Live => {
+                let slot = if matches!(slot, Slot::Devices) { &self.devices } else { &self.live };
+                if !replace_changed(slot, item) {
                     return;
                 }
-            }
-            Slot::Live => {
-                if !replace_changed(&self.live, item) {
+                // A heartbeat: nothing shown moved. (When a state goes stale
+                // or a device quiet is looked at again from what's now known.)
+                if self.shows_the_same() {
+                    self.look_again();
                     return;
                 }
             }
@@ -440,6 +463,8 @@ impl Sessions {
     }
 
     fn publish(&self) {
+        #[cfg(test)]
+        self.published.set(self.published.get() + 1);
         let value = self.value();
         for (_, shared) in self.shared.borrow().iter() {
             shared.set(value.clone());
@@ -454,7 +479,8 @@ impl Sessions {
         let now = now_seconds();
         let stale = next_stale(&self.live.borrow(), now);
         let offline = next_offline(&self.devices.borrow(), self.here.borrow().as_deref(), now);
-        let Some(at) = stale.into_iter().chain(offline).min() else { return };
+        let wake = next_wake(&self.chats.borrow(), now);
+        let Some(at) = stale.into_iter().chain(offline).chain(wake).min() else { return };
         // (One sooner is already set; it looks again for this one then.)
         if self.due.get().is_some_and(|due| due <= at) {
             return;
@@ -471,10 +497,16 @@ impl Sessions {
         });
     }
 
-    fn value(&self) -> Value {
+    /// Whether the live states and devices, judged now, are what the scripts
+    /// were last given.
+    fn shows_the_same(&self) -> bool {
         let now = now_seconds();
-        let state = if self.heard.get() { "ready" } else { "loading" };
-        let here = self.here.borrow().clone();
+        *self.shown_live.borrow() == live_states(&self.live.borrow(), now)
+            && self.shown_devices.borrow().as_ref() == Some(&self.devices_value(now))
+    }
+
+    fn devices_value(&self, now: i64) -> Value {
+        let here = self.here.borrow();
         let devices: Vec<Value> = self
             .devices
             .borrow()
@@ -501,7 +533,11 @@ impl Sessions {
                     ("here", Value::Bool(here.as_deref() == Some(id))),
                     ("online", Value::Bool(online)),
                 ];
-                if let Some(at) = seen {
+                // When it was last seen, while it's away (Settings → Devices
+                // and the place picker say so). Online, its beat moves every
+                // few seconds and shows nowhere; it going quiet is published
+                // as that happens (`look_again`).
+                if let Some(at) = seen.filter(|_| !online) {
                     fields.push(("seen", Value::Num(at as f64)));
                 }
                 // The Zeron it runs, as it last said (Settings → Devices).
@@ -511,6 +547,15 @@ impl Sessions {
                 Some(Value::record(fields))
             })
             .collect();
+        Value::List(devices.into())
+    }
+
+    fn value(&self) -> Value {
+        let now = now_seconds();
+        let state = if self.heard.get() { "ready" } else { "loading" };
+        let here = self.here.borrow().clone();
+        let devices = self.devices_value(now);
+        *self.shown_devices.borrow_mut() = Some(devices.clone());
         let spaces = self.spaces.borrow();
         let mut known_spaces: HashSet<&str> = HashSet::new();
         let projects: Vec<Value> = spaces
@@ -540,7 +585,8 @@ impl Sessions {
                 ]))
             })
             .collect();
-        let live = live_states(&self.live.borrow(), now);
+        let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
+        let live = live_sessions(&self.live.borrow(), at);
         let all = self.chats.borrow();
         let all = all.as_array().map(Vec::as_slice).unwrap_or_default();
         let archived = |c: &&Json| c["archived"].as_bool().unwrap_or(false);
@@ -552,13 +598,16 @@ impl Sessions {
         let mut working_children: HashMap<String, u32> = HashMap::new();
         for c in all.iter().filter(|c| !archived(c)) {
             let (Some(id), Some(parent)) = (c["id"].as_str(), c["parentChatId"].as_str()) else { continue };
-            let status = status_from(rows.get(id).map_or_else(|| unseen(c), |row| row.unseen), live.get(id));
-            if status == Some("working") {
+            let status = status_of(rows.get(id).map_or_else(|| seen_marks(c), |row| row.marks), live.get(id), at);
+            // (Under way: running, or waiting on work that will wake it.)
+            if matches!(status, Some("working" | "waiting")) {
                 *working_children.entry(parent.to_owned()).or_default() += 1;
             }
             let harness = c["config"]["harness"].as_str();
             let with = RowWith {
                 status,
+                waiting: None,
+                sleep: None,
                 running_subagents: 0,
                 side_chats: 0,
                 working_side_chats: 0,
@@ -596,7 +645,7 @@ impl Sessions {
                 ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
             ]);
             let row = (updated as f64, value.clone());
-            rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, unseen: unseen(c), with, value });
+            rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
             match children.iter_mut().find(|(p, _)| p == parent) {
                 Some((_, list)) => list.push(row),
                 None => children.push((parent.to_owned(), vec![row])),
@@ -618,9 +667,16 @@ impl Sessions {
                 // A project that isn't known (deleted, or not yet synced)
                 // leaves the chat among those with none.
                 let project = c["spaceId"].as_str().filter(|s| known_spaces.contains(s));
+                let marks = rows.get(id).map_or_else(|| seen_marks(c), |row| row.marks);
+                let session = live.get(id);
+                let status = status_of(marks, session, at);
                 let with = RowWith {
-                    status: status_from(rows.get(id).map_or_else(|| unseen(c), |row| row.unseen), live.get(id)),
-                    running_subagents: live.get(id).map_or(0, |l| l.subagents),
+                    status,
+                    waiting: (status == Some("waiting"))
+                        .then(|| zeron_proto::view::waiting(session, at).map(|w| w.on.clone()))
+                        .flatten(),
+                    sleep: sleep_of(c, marks, at),
+                    running_subagents: zeron_proto::view::running_subagents(session, at),
                     side_chats: side_chats(id),
                     working_side_chats: working_children.get(id).copied().unwrap_or(0),
                     known_project: project.is_some(),
@@ -658,9 +714,15 @@ impl Sessions {
                     ("running_subagents", Value::from(with.running_subagents as f64)),
                     ("side_chats", Value::from(with.side_chats as f64)),
                     ("working_side_chats", Value::from(with.working_side_chats as f64)),
+                    // What its agent waits on after its turn (status
+                    // "waiting"): `{ id, kind = "agent" | "process", label }`.
+                    ("waiting", with.waiting.as_deref().map_or(Value::Nil, waiting_value)),
+                    // Put to sleep: until when; or, woken and not looked at
+                    // since, when it woke (Unix seconds).
+                    ("sleep_until", with.sleep.filter(|s| s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
+                    ("woke", with.sleep.filter(|s| !s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
                 ]);
-                let unseen = unseen(c);
-                rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, unseen, with, value: value.clone() });
+                rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
                 Some(value)
         };
         let chats: Vec<Value> = all.iter().filter(|c| !archived(c)).filter_map(&mut row).collect();
@@ -682,10 +744,10 @@ impl Sessions {
                 ])
             })
             .collect();
-        Value::record([
+        let value = Value::record([
             ("state", Value::from(state)),
             ("here", here.as_deref().map_or(Value::Nil, Value::from)),
-            ("devices", Value::List(devices.into())),
+            ("devices", devices),
             ("projects", Value::List(projects.into())),
             ("chats", Value::List(chats.into())),
             (
@@ -701,7 +763,9 @@ impl Sessions {
             ),
             ("places_ready", Value::Bool(self.places_ready.get())),
             ("connection", connection(&self.connectivity.borrow()).map_or(Value::Nil, Value::from)),
-        ])
+        ]);
+        *self.shown_live.borrow_mut() = live_states(&self.live.borrow(), now);
+        value
     }
 
     async fn mutate(&self, params: Json) -> Result<Value, Outcome> {
@@ -994,24 +1058,50 @@ fn project_name<'a>(name: Option<&'a str>, path: &'a str) -> &'a str {
     trimmed.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(path)
 }
 
-/// What a chat's live state says, by chat: its status, whether its last turn
-/// was interrupted. Several hosts may report one chat: an active state wins.
+/// What a chat's live state says, by chat, as far as anything shown reads
+/// it (`status_of`'s `display_status_from`, the waits, the subagents): one
+/// of these changing is what's worth publishing. Several hosts may report
+/// one chat: `live_sessions` picks the one that says most.
+#[derive(PartialEq, Debug)]
 struct Live {
-    status: String,
-    interrupted: bool,
-    /// Its subagents streaming now (the session row's `runningSubagents`),
-    /// none once the row has gone quiet.
+    indicator: zeron_proto::view::Indicator,
+    /// What its agent waits on, while that shows.
+    waiting: Option<Vec<zeron_proto::WaitingOn>>,
+    /// Its subagents streaming now, none once the row has gone quiet.
     subagents: u32,
+    /// Its last turn's outcome and the turn it marks, as the status reads
+    /// them (whether a finish is new, or was interrupted).
+    outcome: Option<String>,
+    last_completed_turn: Option<String>,
 }
 
-/// When the next live state that shows (not idle, not yet stale) goes
-/// stale, in Unix seconds: the next moment a look changes anything.
+/// Each chat's `Live`, judged at `now` (Unix seconds).
+fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
+    let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
+    live_sessions(value, at)
+        .into_iter()
+        .map(|(chat, s)| {
+            let live = Live {
+                indicator: zeron_proto::view::effective_indicator(Some(&s), at),
+                waiting: zeron_proto::view::waiting(Some(&s), at).map(|w| w.on.clone()),
+                subagents: zeron_proto::view::running_subagents(Some(&s), at),
+                outcome: s.last_turn_outcome.as_ref().and_then(|o| serde_json::to_string(o).ok()),
+                last_completed_turn: s.last_completed_turn.clone(),
+            };
+            (chat, live)
+        })
+        .collect()
+}
+
+/// When the next live state that shows (a run, or a wait: not idle, not yet
+/// stale) goes stale, in Unix seconds: the next moment a look changes
+/// anything.
 fn next_stale(value: &Json, now: i64) -> Option<i64> {
     value
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|row| row["status"].as_str().is_some_and(|s| s != "idle"))
+        .filter(|row| row["status"].as_str().is_some_and(|s| s != "idle") || !row["waiting"].is_null())
         .filter_map(|row| row["updatedAt"].as_str().and_then(unix_seconds))
         .map(|updated| updated + STALE_SECS + 1)
         .filter(|&at| at > now)
@@ -1032,43 +1122,103 @@ fn next_offline(devices: &Json, here: Option<&str>, now: i64) -> Option<i64> {
         .min()
 }
 
-fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
-    let mut out: HashMap<String, Live> = HashMap::new();
-    for row in value.as_array().into_iter().flatten() {
-        let Some(chat) = row["chatId"].as_str() else { continue };
-        let updated = row["updatedAt"].as_str().and_then(unix_seconds).unwrap_or(now);
-        let mut status = row["status"].as_str().unwrap_or("idle").to_owned();
-        // Gone quiet: its engine went with it.
-        if now - updated > STALE_SECS {
-            status = "idle".into();
+/// When the next sleeping chat wakes on its own, in Unix seconds.
+fn next_wake(chats: &Json, now: i64) -> Option<i64> {
+    chats
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["sleep"]["wokeAt"].is_null())
+        .filter_map(|c| c["sleep"]["until"].as_str().and_then(unix_seconds))
+        .map(|until| until + 1)
+        .filter(|&at| at > now)
+        .min()
+}
+
+/// Each chat's session row, as its hosts report them. Several may report
+/// one chat (re-homed mid-flight): the one that says most wins, a run
+/// showing, then a wait showing, then the newest.
+fn live_sessions(value: &Json, now: chrono::DateTime<chrono::Utc>) -> HashMap<String, Session> {
+    use serde::Deserialize;
+    let says = |s: &Session| -> u8 {
+        if zeron_proto::view::effective_indicator(Some(s), now) != zeron_proto::view::Indicator::None {
+            2
+        } else if zeron_proto::view::waiting(Some(s), now).is_some() {
+            1
+        } else {
+            0
         }
-        let interrupted = row["lastTurnOutcome"]["status"].as_str() == Some("interrupted");
-        let subagents = if now - updated > STALE_SECS { 0 } else { row["runningSubagents"].as_u64().unwrap_or(0) as u32 };
-        let entry = out.entry(chat.to_owned()).or_insert(Live { status: "idle".into(), interrupted, subagents: 0 });
-        entry.subagents = entry.subagents.max(subagents);
-        if entry.status == "idle" {
-            *entry = Live { status, interrupted, subagents: entry.subagents };
+    };
+    let mut out: HashMap<String, Session> = HashMap::new();
+    for row in value.as_array().into_iter().flatten() {
+        let Ok(session) = Session::deserialize(row) else { continue };
+        match out.get(&session.chat_id) {
+            Some(held) if (says(held), held.updated_at) >= (says(&session), session.updated_at) => {}
+            _ => {
+                out.insert(session.chat_id.clone(), session);
+            }
         }
     }
     out
 }
 
-/// The sidebar's state for a chat (proto's `chat_indicator`): working,
-/// waiting on you, failed or finished since you last looked; else none.
-#[cfg(test)]
-fn status(chat: &Json, live: Option<&Live>) -> Option<&'static str> {
-    status_from(unseen(chat), live)
+/// What the sidebar's status reads from a chat's own row.
+fn seen_marks(chat: &Json) -> SeenMarks {
+    let at = |key: &str| {
+        chat[key].as_str().and_then(unix_seconds).and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+    };
+    SeenMarks { last_message_at: at("lastMessageAt"), last_seen_at: at("lastSeenAt") }
 }
 
-/// `status`, knowing whether the chat said anything since it was last seen.
-fn status_from(unseen: bool, live: Option<&Live>) -> Option<&'static str> {
-    match live.map(|l| l.status.as_str()) {
-        Some("working") => Some("working"),
-        Some("awaitingInput") => Some("input"),
-        Some("errored") if unseen => Some("failed"),
-        _ if unseen && !live.is_some_and(|l| l.interrupted) => Some("done"),
-        _ => None,
+/// The sidebar's state for a chat, as every viewport reads it
+/// (`zeron_proto::view::display_status`): working, waiting on work that will
+/// wake it, waiting on you, failed or finished since you last looked; else
+/// none.
+fn status_of(
+    marks: SeenMarks,
+    session: Option<&Session>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<&'static str> {
+    match zeron_proto::view::display_status_from(marks, session, now) {
+        ChatIndicator::Working => Some("working"),
+        ChatIndicator::Waiting => Some("waiting"),
+        ChatIndicator::AwaitingInput => Some("input"),
+        ChatIndicator::Errored => Some("failed"),
+        ChatIndicator::Completed => Some("done"),
+        ChatIndicator::Idle => None,
     }
+}
+
+/// A chat's sleep at `now`: asleep until (`true`, its time), or woke and not
+/// looked at since (`false`, when it woke).
+fn sleep_of(chat: &Json, marks: SeenMarks, now: chrono::DateTime<chrono::Utc>) -> Option<(bool, i64)> {
+    use serde::Deserialize;
+    if chat["sleep"].is_null() {
+        return None;
+    }
+    let sleep = zeron_proto::ChatSleep::deserialize(&chat["sleep"]).ok()?;
+    match sleep.state(marks.last_seen_at, now) {
+        SleepState::Awake => None,
+        SleepState::Asleep { until } => Some((true, until.timestamp())),
+        SleepState::Woke { at } => Some((false, at.timestamp())),
+    }
+}
+
+/// What a chat's agent waits on, as scripts read it.
+fn waiting_value(on: &[zeron_proto::WaitingOn]) -> Value {
+    Value::List(on.iter().map(|w| {
+        Value::record([
+            ("id", Value::from(w.id.as_str())),
+            (
+                "kind",
+                Value::from(match w.kind {
+                    zeron_proto::WaitingKind::Agent => "agent",
+                    _ => "process",
+                }),
+            ),
+            ("label", Value::from(w.label.as_str())),
+        ])
+    }).collect())
 }
 
 fn places_of_json(value: &Json) -> Places {
@@ -1293,6 +1443,24 @@ pub(crate) fn now_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
+#[cfg(test)]
+/// An RFC 3339 time for `secs` (Unix seconds), as the engine writes them.
+pub(crate) fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rest = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", rest / 3600, (rest % 3600) / 60, rest % 60)
+}
+
 /// An RFC 3339 time as Unix seconds ("2026-10-31T21:27:23.486Z", or with an
 /// offset).
 pub(crate) fn unix_seconds(stamp: &str) -> Option<i64> {
@@ -1413,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn states_follow_the_shipping_app() {
+    fn states_are_every_viewports() {
         let now = 1_000_000;
         let stamp = |secs: i64| {
             let days = secs.div_euclid(86_400);
@@ -1421,21 +1589,51 @@ mod tests {
             assert_eq!(days, 11);
             format!("1970-01-12T{:02}:{:02}:{:02}Z", (secs % 86_400) / 3600, (secs % 3600) / 60, secs % 60)
         };
-        let live = live_states(
+        let at = chrono::DateTime::from_timestamp(now, 0).unwrap();
+        let live = live_sessions(
             &json!([
-                { "chatId": "w", "status": "working", "updatedAt": stamp(now - 5) },
-                { "chatId": "old", "status": "working", "updatedAt": stamp(now - 120) },
-                { "chatId": "q", "status": "awaitingInput", "updatedAt": stamp(now - 5) },
+                { "chatId": "w", "deviceId": "d", "status": "working", "updatedAt": stamp(now - 5) },
+                { "chatId": "old", "deviceId": "d", "status": "working", "updatedAt": stamp(now - 120) },
+                { "chatId": "q", "deviceId": "d", "status": "awaitingInput", "updatedAt": stamp(now - 5) },
+                { "chatId": "z", "deviceId": "d", "status": "idle", "updatedAt": stamp(now - 5),
+                  "waiting": { "since": stamp(now - 5), "on": [{ "id": "bn1", "kind": "process", "label": "cargo test" }] } },
+                { "chatId": "gone", "deviceId": "d", "status": "idle", "updatedAt": stamp(now - 120),
+                  "waiting": { "since": stamp(now - 120), "on": [] } },
+                // One chat on two hosts: the one running wins.
+                { "chatId": "two", "deviceId": "a", "status": "idle", "updatedAt": stamp(now - 1) },
+                { "chatId": "two", "deviceId": "b", "status": "working", "updatedAt": stamp(now - 5) },
             ]),
-            now,
+            at,
         );
-        let chat = json!({ "lastMessageAt": stamp(now - 10), "lastSeenAt": stamp(now - 20) });
-        let seen = json!({ "lastMessageAt": stamp(now - 30), "lastSeenAt": stamp(now - 20) });
-        assert_eq!(status(&seen, live.get("w")), Some("working"));
-        assert_eq!(status(&seen, live.get("q")), Some("input"));
-        assert_eq!(status(&seen, live.get("old")), None);
-        assert_eq!(status(&chat, live.get("old")), Some("done"));
-        assert_eq!(status(&seen, None), None);
+        let unseen = seen_marks(&json!({ "lastMessageAt": stamp(now - 10), "lastSeenAt": stamp(now - 20) }));
+        let seen = seen_marks(&json!({ "lastMessageAt": stamp(now - 30), "lastSeenAt": stamp(now - 20) }));
+        assert_eq!(status_of(seen, live.get("w"), at), Some("working"));
+        assert_eq!(status_of(seen, live.get("q"), at), Some("input"));
+        assert_eq!(status_of(unseen, live.get("z"), at), Some("waiting"));
+        assert_eq!(status_of(seen, live.get("two"), at), Some("working"));
+        // A run gone quiet is no run, and no finish either.
+        assert_eq!(status_of(seen, live.get("old"), at), None);
+        assert_eq!(status_of(unseen, live.get("old"), at), None);
+        // A wait gone quiet: its turn did end, so it's finished, unseen.
+        assert_eq!(status_of(unseen, live.get("gone"), at), Some("done"));
+        assert_eq!(status_of(seen, None, at), None);
+        assert_eq!(status_of(unseen, None, at), Some("done"));
+    }
+
+    #[test]
+    fn a_sleep_reads_asleep_until_its_time_then_woke_until_looked_at() {
+        let at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let stamp = |secs: i64| chrono::DateTime::from_timestamp(secs, 0).unwrap().to_rfc3339();
+        let chat = |seen: i64, sleep: serde_json::Value| json!({ "lastSeenAt": stamp(seen), "sleep": sleep });
+        let asleep = chat(999_000, json!({ "until": stamp(1_003_600), "at": stamp(999_000) }));
+        assert_eq!(sleep_of(&asleep, seen_marks(&asleep), at), Some((true, 1_003_600)));
+        let woke = chat(999_000, json!({ "until": stamp(1_003_600), "at": stamp(999_000), "wokeAt": stamp(999_500) }));
+        assert_eq!(sleep_of(&woke, seen_marks(&woke), at), Some((false, 999_500)));
+        let looked = chat(999_600, json!({ "until": stamp(1_003_600), "at": stamp(999_000), "wokeAt": stamp(999_500) }));
+        assert_eq!(sleep_of(&looked, seen_marks(&looked), at), None);
+        assert_eq!(sleep_of(&json!({}), seen_marks(&json!({})), at), None);
+        // The next wake on its own: a minute's look scheduled exactly then.
+        assert_eq!(next_wake(&json!([asleep, woke]), 1_000_000), Some(1_003_601));
     }
 
     #[test]
@@ -1443,17 +1641,22 @@ mod tests {
         let now = 1_000_000;
         let stamp = |secs: i64| format!("1970-01-12T{:02}:{:02}:{:02}Z", (secs % 86_400) / 3600, (secs % 3600) / 60, secs % 60);
         let rows = json!([
-            { "chatId": "w", "status": "working", "updatedAt": stamp(now - 5) },
-            { "chatId": "q", "status": "awaitingInput", "updatedAt": stamp(now - 30) },
-            { "chatId": "old", "status": "working", "updatedAt": stamp(now - 120) },
-            { "chatId": "i", "status": "idle", "updatedAt": stamp(now - 1) },
+            { "chatId": "w", "deviceId": "d", "status": "working", "updatedAt": stamp(now - 5) },
+            { "chatId": "q", "deviceId": "d", "status": "awaitingInput", "updatedAt": stamp(now - 30) },
+            { "chatId": "old", "deviceId": "d", "status": "working", "updatedAt": stamp(now - 120) },
+            { "chatId": "i", "deviceId": "d", "status": "idle", "updatedAt": stamp(now - 1) },
         ]);
         // The soonest: q, stale once it's 45 s old.
         assert_eq!(next_stale(&rows, now), Some(now - 30 + STALE_SECS + 1));
+        // A wait shows too, while it's fresh.
+        let waits = json!([
+            { "chatId": "z", "deviceId": "d", "status": "idle", "updatedAt": stamp(now - 40), "waiting": { "since": stamp(now - 40) } },
+        ]);
+        assert_eq!(next_stale(&waits, now), Some(now - 40 + STALE_SECS + 1));
         // Nothing showing, or only stale and idle states: no look at all.
         let quiet = json!([
-            { "chatId": "old", "status": "working", "updatedAt": stamp(now - 120) },
-            { "chatId": "i", "status": "idle", "updatedAt": stamp(now - 1) },
+            { "chatId": "old", "deviceId": "d", "status": "working", "updatedAt": stamp(now - 120) },
+            { "chatId": "i", "deviceId": "d", "status": "idle", "updatedAt": stamp(now - 1) },
         ]);
         assert_eq!(next_stale(&quiet, now), None);
         assert_eq!(next_stale(&json!([]), now), None);
@@ -1496,8 +1699,8 @@ mod tests {
             { "id": "gone", "parentChatId": "p", "archived": true, "deviceId": "d", "createdAt": "2026-11-01T10:08:00Z" },
         ]);
         *s.live.borrow_mut() = serde_json::json!([
-            { "chatId": "p", "status": "working", "updatedAt": subagents_at, "runningSubagents": 2 },
-            { "chatId": "a", "status": "working", "updatedAt": "2099-01-01T00:00:00Z" },
+            { "chatId": "p", "deviceId": "d", "status": "working", "updatedAt": subagents_at, "runningSubagents": 2 },
+            { "chatId": "a", "deviceId": "d", "status": "working", "updatedAt": "2099-01-01T00:00:00Z" },
         ]);
         s
     }
@@ -1549,7 +1752,7 @@ mod tests {
         // Its live state's change shows, whatever its entry.
         s.heard(
             super::Slot::Live,
-            serde_json::json!([{ "chatId": "p", "status": "awaitingInput", "updatedAt": "2099-01-01T00:00:00Z" }]),
+            serde_json::json!([{ "chatId": "p", "deviceId": "d", "status": "awaitingInput", "updatedAt": "2099-01-01T00:00:00Z" }]),
         );
         let waiting = s.value();
         assert!(!same(chat(&first, "p"), chat(&waiting, "p")));
@@ -1572,6 +1775,85 @@ mod tests {
         // (`publish` would have asked to look again at the live state going stale.)
         assert_eq!(s.due.get(), None);
     }
+
+    /// The engine's heartbeats (every couple of seconds, the whole list
+    /// again): a row whose `updatedAt` alone moved, or a device's beat while
+    /// it's online, changes nothing shown and publishes nothing; a change that
+    /// shows is published at once.
+    #[test]
+    fn a_heartbeat_that_shows_nothing_new_publishes_nothing() {
+        let now = now_seconds();
+        let stamp = |secs: i64| iso(secs);
+        let s = with_children("2099-01-01T00:00:00Z");
+        s.heard.set(true);
+        *s.here.borrow_mut() = Some("here".into());
+        *s.devices.borrow_mut() = json!([
+            { "id": "here", "name": "This Mac", "lastSeenAt": stamp(now - 1) },
+            { "id": "laptop", "name": "Laptop", "lastSeenAt": stamp(now - 5) },
+            { "id": "gone", "name": "Old PC", "lastSeenAt": stamp(now - 5000) },
+        ]);
+        *s.live.borrow_mut() = json!([
+            { "chatId": "p", "deviceId": "here", "status": "working", "updatedAt": stamp(now - 2), "runningSubagents": 2 },
+            { "chatId": "a", "deviceId": "here", "status": "idle", "updatedAt": stamp(now - 600) },
+        ]);
+        s.publish();
+        let before = s.published.get();
+        // The laptop beats; this Mac beats; the working chat's row is fresher;
+        // an idle one's time moves.
+        s.heard(Slot::Devices, json!([
+            { "id": "here", "name": "This Mac", "lastSeenAt": stamp(now) },
+            { "id": "laptop", "name": "Laptop", "lastSeenAt": stamp(now) },
+            { "id": "gone", "name": "Old PC", "lastSeenAt": stamp(now - 5000) },
+        ]));
+        s.heard(Slot::Live, json!([
+            { "chatId": "p", "deviceId": "here", "status": "working", "updatedAt": stamp(now), "runningSubagents": 2 },
+            { "chatId": "a", "deviceId": "here", "status": "idle", "updatedAt": stamp(now) },
+        ]));
+        assert_eq!(s.published.get(), before, "nothing shown moved");
+        // A real change: shown at once.
+        s.heard(Slot::Live, json!([
+            { "chatId": "p", "deviceId": "here", "status": "awaitingInput", "updatedAt": stamp(now), "runningSubagents": 2 },
+            { "chatId": "a", "deviceId": "here", "status": "idle", "updatedAt": stamp(now) },
+        ]));
+        assert_eq!(s.published.get(), before + 1);
+        assert_eq!(chat(&s.value(), "p").field("status").map(crate::auth::text).as_deref(), Some("input"));
+        // The old PC comes back: shown at once, online.
+        s.heard(Slot::Devices, json!([
+            { "id": "here", "name": "This Mac", "lastSeenAt": stamp(now) },
+            { "id": "laptop", "name": "Laptop", "lastSeenAt": stamp(now) },
+            { "id": "gone", "name": "Old PC", "lastSeenAt": stamp(now) },
+        ]));
+        assert_eq!(s.published.get(), before + 2);
+        let online = |v: &zgx_script::Value, id: &str| {
+            v.field("devices").unwrap().list().iter().find(|d| d.field("id").map(crate::auth::text).as_deref() == Some(id)).unwrap().field("online").cloned()
+        };
+        assert_eq!(online(&s.value(), "gone"), Some(zgx_script::Value::Bool(true)));
+    }
+
+    /// A device's last beat is given while it's away (Settings → Devices and
+    /// the place picker say when it was last seen); while it's online the beat
+    /// shows nowhere, and isn't given.
+    #[test]
+    fn a_device_s_last_beat_is_given_while_it_s_away() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("here".into());
+        *s.devices.borrow_mut() = json!([
+            { "id": "here", "lastSeenAt": iso(now - 1) },
+            { "id": "laptop", "lastSeenAt": iso(now - 5) },
+            { "id": "gone", "lastSeenAt": iso(now - 5000) },
+            { "id": "never" },
+        ]);
+        let v = s.value();
+        let device = |id: &str| v.field("devices").unwrap().list().iter().find(|d| d.field("id").map(crate::auth::text).as_deref() == Some(id)).unwrap().clone();
+        for (id, online, seen) in [("here", true, None), ("laptop", true, None), ("gone", false, Some((now - 5000) as f64)), ("never", false, None)] {
+            let d = device(id);
+            assert_eq!(d.field("online"), Some(&zgx_script::Value::Bool(online)), "{id}");
+            assert_eq!(d.field("seen").and_then(|n| n.as_f64()), seen, "{id}");
+        }
+    }
+
+    use super::rfc3339 as iso;
 
     #[test]
     fn running_subagents_go_quiet_with_their_row() {

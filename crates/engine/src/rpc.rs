@@ -327,6 +327,21 @@ struct BackgroundTaskParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AwaitBackgroundParams {
+    chat_id: String,
+    task_ids: Vec<String>,
+    #[serde(default)]
+    waiting: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StopWaitingParams {
+    chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RunProjectActionParams {
     space_id: String,
     chat_id: String,
@@ -814,6 +829,14 @@ enum MutateParams {
         chat_id: String,
         #[serde(default)]
         at: Option<i64>,
+    },
+    /// The person puts a chat to sleep until `until` (epoch ms), or wakes it
+    /// (`until` absent). Synced; its host wakes it early when it asks.
+    #[serde(rename_all = "camelCase")]
+    SetChatSleep {
+        chat_id: String,
+        #[serde(default)]
+        until: Option<i64>,
     },
 }
 
@@ -1770,6 +1793,14 @@ impl EngineRpc {
                 }
                 Err(err)
             }
+            Err(_) if method == methods::APPLY_HARNESS_UPDATE => {
+                // Still going there (an update waits for that device's chats
+                // to finish before it starts): the link is fine, and the
+                // update's row follows how it ends.
+                Err(RpcError::Failed(
+                    "The update is still running on that device. Its row shows how it ends.".into(),
+                ))
+            }
             Err(_) => {
                 // No reply inside the deadline. The link may be a zombie — the
                 // relay's auto-pong keeps a dead host socket looking alive
@@ -2121,6 +2152,19 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::SetChatSleep { chat_id, until } => {
+                let until = match until {
+                    Some(ms) => Some(
+                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+                            .ok_or_else(|| RpcError::BadParams("until is no time".into()))?,
+                    ),
+                    None => None,
+                };
+                self.workspace
+                    .set_chat_sleep(&chat_id, until)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
@@ -2275,9 +2319,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
-        // Leave headroom beyond the provider's 15-minute mutation timeout for
-        // queueing, verification, and the relayed response itself.
-        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
+        // The updater's own limit, plus headroom for queueing behind another
+        // update, verification, and the relayed response itself.
+        methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
@@ -2378,6 +2422,7 @@ fn forwardable(method: &str) -> bool {
             // Background processes run in the chat host's runtime.
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
+            | methods::STOP_WAITING
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -3426,6 +3471,35 @@ impl RpcService for EngineRpc {
                 let p: BackgroundTaskParams = parse_params(params)?;
                 let stopping = self.sessions.stop_background_task(&p.chat_id, &p.task_id);
                 RpcReply::value(&serde_json::json!({ "stopping": stopping }))
+            }
+            methods::AWAIT_BACKGROUND => {
+                let p: AwaitBackgroundParams = parse_params(params)?;
+                if p.task_ids.is_empty() || p.task_ids.len() > 20 {
+                    return Err(RpcError::BadParams("name 1 to 20 task ids".into()));
+                }
+                match self
+                    .sessions
+                    .await_background(&p.chat_id, &p.task_ids, p.waiting.unwrap_or(true))
+                {
+                    Ok(outcome) => RpcReply::value(&serde_json::json!({
+                        "matched": outcome.matched,
+                        "unmatched": outcome.unmatched,
+                    })),
+                    Err(crate::sessions::AwaitRefused::NoRun) => Err(RpcError::Failed(
+                        "This chat has no running agent here".into(),
+                    )),
+                    Err(crate::sessions::AwaitRefused::NoWake) => Err(RpcError::Failed(
+                        "This agent's runtime doesn't wake it when background work ends, so it \
+                         can't wait on it after its turn. Wait for the work inside your turn \
+                         (poll or read its output) before you finish."
+                            .into(),
+                    )),
+                }
+            }
+            methods::STOP_WAITING => {
+                let p: StopWaitingParams = parse_params(params)?;
+                let stopped = self.sessions.stop_waiting(&p.chat_id);
+                RpcReply::value(&serde_json::json!({ "stopped": stopped }))
             }
             methods::READ_BACKGROUND_TASK_OUTPUT => {
                 let p: BackgroundTaskParams = parse_params(params)?;
@@ -5920,9 +5994,10 @@ mod tests {
             forward_deadline(methods::CLONE_REPO),
             Duration::from_secs(15 * 60)
         );
-        assert_eq!(
-            forward_deadline(methods::APPLY_HARNESS_UPDATE),
-            Duration::from_secs(20 * 60)
+        // Never shorter than the updater it waits on.
+        assert!(
+            forward_deadline(methods::APPLY_HARNESS_UPDATE)
+                > crate::harness_updates::UPDATE_TIMEOUT
         );
         assert_eq!(
             forward_deadline(methods::CHECK_HARNESS_UPDATES),

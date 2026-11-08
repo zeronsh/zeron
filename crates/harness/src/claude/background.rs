@@ -29,6 +29,31 @@ use super::wire::{Frame, MessageFrame, SystemFrame};
 /// session runs many foreground commands that never become tasks.
 const MAX_COMMANDS: usize = 256;
 
+/// The roster's background agents (`task_type: "local_agent"`), oldest
+/// first: each reports back when it ends, waking the agent. Other kinds the
+/// CLI may add aren't assumed to.
+pub(super) fn agents(tasks: Option<&[Value]>) -> Vec<zeron_proto::WaitingOn> {
+    tasks
+        .into_iter()
+        .flatten()
+        .filter(|task| task.get("task_type").and_then(Value::as_str) == Some("local_agent"))
+        .filter_map(|task| {
+            let id = task.get("task_id").and_then(Value::as_str)?;
+            let label = task
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .unwrap_or("Background agent");
+            Some(zeron_proto::WaitingOn {
+                id: id.to_owned(),
+                kind: zeron_proto::WaitingKind::Agent,
+                label: label.to_owned(),
+            })
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub(super) struct BackgroundShells {
     /// Shell-capable tool_use id → its command, oldest first.

@@ -177,6 +177,19 @@ impl Harness for MockHarness {
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::StepBoundary
     }
+    /// Only the long-tool runtime (`ZERON_MOCK_LONG_TOOL`) stops a turn in
+    /// place, as Claude's and Codex's do.
+    fn stops_turn_in_place(&self) -> bool {
+        long_tool_mode()
+    }
+    /// (`ZERON_MOCK_STEER_WAITS=1`: a steer waits for the command instead,
+    /// as every steer did before, for timing one against the other.)
+    fn steer_stops_tool(&self) -> bool {
+        long_tool_mode()
+            && !std::env::var("ZERON_MOCK_STEER_WAITS")
+                .ok()
+                .is_some_and(|v| !v.is_empty() && v != "0")
+    }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
     }
@@ -350,6 +363,16 @@ impl Harness for MockHarness {
             .is_some_and(|v| !v.is_empty() && v != "0")
         {
             return Ok(background_run(controls, delay));
+        }
+
+        // Dev/testing knob: `ZERON_MOCK_LONG_TOOL=1` is a runtime with real
+        // processes, for timing steers against a blocking command.
+        if long_tool_mode() {
+            return Ok(long_tool_run(
+                request.prompt.clone(),
+                request.attachments.clone(),
+                controls,
+            ));
         }
 
         // Dev/testing knob: a `/fanout N` prompt spawns N subagents at once,
@@ -1059,6 +1082,232 @@ fn background_run(
                 error: None,
                 session_id: None,
             });
+        }
+    });
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (Ok(event), rx))
+    })
+    .boxed()
+}
+
+/// What the long-tool runtime answers a prompt: its words, and the files it
+/// came with as attachments (the images among them by name), so a test can
+/// see what reached the agent as an attachment and not only as text.
+fn heard(words: &str, attached: &[String]) -> String {
+    if attached.is_empty() {
+        return format!("Heard: {words}\n\n");
+    }
+    let names: Vec<&str> = attached
+        .iter()
+        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p))
+        .collect();
+    let images = attached
+        .iter()
+        .filter(|p| {
+            let p = p.to_ascii_lowercase();
+            [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                .iter()
+                .any(|e| p.ends_with(e))
+        })
+        .count();
+    format!(
+        "Heard: {words}\n\n[attachments: {} ({images} image{}): {}]\n\n",
+        attached.len(),
+        if images == 1 { "" } else { "s" },
+        names.join(", ")
+    )
+}
+
+/// `ZERON_MOCK_LONG_TOOL=1` (Unix: it runs `sleep`).
+fn long_tool_mode() -> bool {
+    cfg!(unix)
+        && std::env::var("ZERON_MOCK_LONG_TOOL")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// `ZERON_MOCK_LONG_TOOL`: a runtime with real processes. Its first turn
+/// starts a background `sleep 600` that outlives every turn, then runs a
+/// foreground `sleep` (`ZERON_MOCK_TOOL_SECS`, 120 by default) as a
+/// blocking command; so does any later prompt naming "long". A steer that
+/// arrives while the command runs waits for it to finish (a step-boundary
+/// agent's), then is answered `Heard: <prompt>`. A host stop
+/// ([`crate::TurnControl::stop_turn`]) kills the foreground command alone
+/// and ends the turn in place; a teardown takes everything. With
+/// `ZERON_MOCK_PID_DIR`, the processes' ids go to `<first prompt>.bg.pid`
+/// and `<first prompt>.fg.pid` there.
+fn long_tool_run(
+    first: String,
+    first_attachments: Vec<String>,
+    controls: RunControls,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    let RunControls {
+        mut steering,
+        interrupt,
+        turn,
+        ..
+    } = controls;
+    let secs: u64 = std::env::var("ZERON_MOCK_TOOL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let pid_dir = std::env::var_os("ZERON_MOCK_PID_DIR").map(std::path::PathBuf::from);
+    // (Named for the runtime's first prompt, so runtimes don't share files.)
+    let slug: String = first
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .take(40)
+        .collect();
+    let note_pid = move |name: &str, pid: Option<u32>| {
+        if let (Some(dir), Some(pid)) = (&pid_dir, pid) {
+            let _ = std::fs::write(dir.join(format!("{slug}.{name}")), pid.to_string());
+        }
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    tokio::spawn(async move {
+        let done = |status: DoneStatus| AgentEvent::Done {
+            status,
+            result: None,
+            error: None,
+            session_id: None,
+        };
+        let say = |text: String| AgentEvent::TextDelta { text };
+        let mut background: Option<tokio::process::Child> = None;
+        let mut calls = 0usize;
+        let mut prompt = Some((first, first_attachments));
+        let mut first_turn = true;
+        'turns: loop {
+            // Parked between turns: the next prompt comes by the mailbox.
+            let (words, attached) = match prompt.take() {
+                Some(next) => next,
+                None => {
+                    tokio::select! {
+                        _ = interrupt.cancelled() => break 'turns,
+                        message = steering.recv() => {
+                            let Some(message) = message else { break 'turns };
+                            let _ = tx.send(AgentEvent::Steered {
+                                assistant_message_id: None,
+                                next_assistant_message_id: None,
+                            });
+                            (message.prompt, message.attachments)
+                        }
+                    }
+                }
+            };
+            let long = first_turn || words.contains("long");
+            if !first_turn {
+                let _ = tx.send(say(heard(&words, &attached)));
+            }
+            if first_turn {
+                first_turn = false;
+                calls += 1;
+                let id = format!("mock-long-bg-{calls}");
+                let _ = tx.send(AgentEvent::ToolCall {
+                    id: id.clone(),
+                    call: zeron_proto::ToolCall::Exec {
+                        command: "sleep 600 &".into(),
+                    },
+                });
+                background = tokio::process::Command::new("sleep")
+                    .arg("600")
+                    .spawn()
+                    .ok();
+                let pid = background.as_ref().and_then(|c| c.id());
+                note_pid("bg.pid", pid);
+                let _ = tx.send(AgentEvent::ToolResult {
+                    id,
+                    is_error: false,
+                    output: Some(format!(
+                        "Command running in background, pid {}",
+                        pid.unwrap_or(0)
+                    )),
+                    diff: None,
+                    exit_code: None,
+                });
+                turn.set_background_processes(vec![zeron_proto::BackgroundTask {
+                    id: "mock-long-bg".into(),
+                    command: "sleep 600".into(),
+                    description: Some("A background process that outlives the turn".into()),
+                    started_at: chrono::Utc::now(),
+                }]);
+                turn.set_background(1);
+            }
+            if !long {
+                let _ = tx.send(done(DoneStatus::Completed));
+                continue;
+            }
+            calls += 1;
+            let id = format!("mock-long-fg-{calls}");
+            let _ = tx.send(AgentEvent::ToolCall {
+                id: id.clone(),
+                call: zeron_proto::ToolCall::Exec {
+                    command: format!("sleep {secs}"),
+                },
+            });
+            let Ok(mut child) = tokio::process::Command::new("sleep")
+                .arg(secs.to_string())
+                .spawn()
+            else {
+                let _ = tx.send(done(DoneStatus::Errored));
+                continue;
+            };
+            note_pid("fg.pid", child.id());
+            // Steers that come while the command runs wait for it.
+            let mut held: Vec<(String, Vec<String>)> = Vec::new();
+            let stopped = loop {
+                tokio::select! {
+                    _ = interrupt.cancelled() => {
+                        let _ = child.kill().await;
+                        break 'turns;
+                    }
+                    _ = turn.stop_requested() => {
+                        let _ = child.kill().await;
+                        break true;
+                    }
+                    _ = child.wait() => break false,
+                    message = steering.recv() => match message {
+                        Some(message) => held.push((message.prompt, message.attachments)),
+                        None => {
+                            let _ = child.kill().await;
+                            break 'turns;
+                        }
+                    },
+                }
+            };
+            let _ = tx.send(AgentEvent::ToolResult {
+                id,
+                is_error: stopped,
+                output: Some(if stopped {
+                    "Interrupted".into()
+                } else {
+                    String::new()
+                }),
+                diff: None,
+                exit_code: (!stopped).then_some(0),
+            });
+            if stopped {
+                // Steers the stopped turn held are cancelled with it, as
+                // Claude's `cancel_queued` does.
+                let _ = tx.send(done(DoneStatus::Interrupted));
+                continue;
+            }
+            for (words, attached) in held {
+                let _ = tx.send(AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: None,
+                });
+                let _ = tx.send(say(heard(&words, &attached)));
+            }
+            let _ = tx.send(say("The command finished.".into()));
+            let _ = tx.send(done(DoneStatus::Completed));
+        }
+        if let Some(mut child) = background.take() {
+            let _ = child.kill().await;
+        }
+        turn.set_background_processes(Vec::new());
+        turn.set_background(0);
+        if interrupt.is_cancelled() {
+            let _ = tx.send(done(DoneStatus::Interrupted));
         }
     });
     futures::stream::unfold(rx, |mut rx| async move {
