@@ -170,5 +170,8 @@ M.TAB_SLIDE_SPRING = { stiffness = 600, damping = 49 }
 function M.tab_slide(): { [string]: any }?
 	return M.layout { spring = anime.createSpring(M.TAB_SLIDE_SPRING) }
 end
+-- A tab carried near an end of its strip scrolls the strip under it, this
+-- far from the edge, at this many points a second, till the end.
+M.TAB_EDGE, M.TAB_EDGE_SPEED = 32, 700
 
 return M

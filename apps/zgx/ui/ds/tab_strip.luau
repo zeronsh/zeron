@@ -243,10 +243,56 @@ function M.new(props: Props)
 		return frame.width or 0
 	end
 
+	-- Carried near an end of the strip, the strip scrolls under it (one
+	-- steady run to that end, the tab's place followed as it goes).
+	local edge_run: any = nil
+	local edge_dir = 0
+	local place: () -> ()
+	local function stop_edge()
+		if edge_run then
+			edge_run:cancel()
+			edge_run = nil
+		end
+		edge_dir = 0
+	end
+	local function edge_scroll()
+		local view = view_w()
+		local most = (props.content.width or 0) - view
+		local dir = 0
+		if phase:peek() == "lifted" and most > 0 then
+			if pointer < motion.TAB_EDGE then
+				dir = -1
+			elseif pointer > view - motion.TAB_EDGE then
+				dir = 1
+			end
+		end
+		if dir == edge_dir then
+			return
+		end
+		stop_edge()
+		edge_dir = dir
+		if dir == 0 then
+			return
+		end
+		local to = if dir < 0 then 0 else most
+		local far = math.abs(to - props.offset:peek())
+		if far < 1 then
+			return
+		end
+		edge_run = anime.animate(props.offset, {
+			value = to,
+			duration = far / motion.TAB_EDGE_SPEED * 1000,
+			ease = "linear",
+			onUpdate = function()
+				place()
+			end,
+		})
+	end
+
 	-- The lifted tab at the pointer, along the strip and inside it, and its
 	-- place among the others: past a neighbour's middle, it takes that
 	-- neighbour's place.
-	local function place()
+	function place()
 		local id = held:peek()
 		if not id or phase:peek() ~= "lifted" then
 			return
@@ -275,9 +321,11 @@ function M.new(props: Props)
 		if at:peek() ~= before + 1 then
 			at:set(before + 1)
 		end
+		edge_scroll()
 	end
 
 	local function finish()
+		stop_edge()
 		settle = nil
 		held:set(nil)
 		phase:set("idle")
@@ -289,6 +337,7 @@ function M.new(props: Props)
 		if not id then
 			return finish()
 		end
+		stop_edge()
 		phase:set("settling")
 		local x = left_in(order:peek(), width, id) - props.offset:peek()
 		if motion.reduced_now() then
@@ -404,6 +453,7 @@ function M.new(props: Props)
 		end
 		p.on_drag_leave = function()
 			if phase:peek() == "lifted" then
+				stop_edge()
 				phase:set("away")
 			end
 		end
