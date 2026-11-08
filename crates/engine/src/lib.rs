@@ -790,6 +790,13 @@ impl EngineRuntime {
 
     pub async fn shutdown(&self) {
         self.stop_notifier();
+        // While the edge is still reachable: a relaying chat's newest changes may
+        // be only here, and a device opening it while this one is off would get
+        // an older checkpoint.
+        self.core
+            .doc_host
+            .checkpoint_relayed_chats_before_stop(std::time::Duration::from_secs(5))
+            .await;
         self.disconnect_edge();
         self.core.shutdown().await;
     }

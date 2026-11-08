@@ -581,6 +581,43 @@ impl DocHost {
         Ok(())
     }
 
+    /// Stopping (a quit, an update's restart, a service stop): a relaying chat's
+    /// newest changes may be only on this machine and the devices that saw them,
+    /// and a device opening the chat before this one is back would get an older
+    /// checkpoint. Save what's owed, for at most `budget`: a stop never waits
+    /// longer, and a checkpoint that doesn't land is still owed on the next run.
+    pub async fn checkpoint_relayed_chats_before_stop(&self, budget: Duration) {
+        let owed = |handle: &Arc<ChatDocHandle>| {
+            lock(&handle.relay).clone().is_some_and(|state| {
+                state.relaying()
+                    && !state.too_large.load(Ordering::Acquire)
+                    && !state.checkpoint_covers(&handle.doc.doc().oplog_vv())
+            })
+        };
+        let mut waiting: Vec<_> = lock(&self.inner.handles)
+            .values()
+            .filter(|handle| owed(handle))
+            .cloned()
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let total = waiting.len();
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            waiting.retain(|handle| owed(handle));
+            if waiting.is_empty() {
+                tracing::info!(chats = total, "chat relay: checkpoints saved before stopping");
+                return;
+            }
+            for handle in &waiting {
+                self.spawn_chat2_checkpoint(handle, "relay-sleep");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tracing::warn!(chats = waiting.len(), "chat relay: stopping with checkpoints still owed");
+    }
+
     /// This build has the layer turned off and hosts a chat a build with it on left
     /// on generation 3. Rows it stores next would depend on what was only relayed,
     /// so it owes the same checkpoint any host that stops relaying does, then moves
@@ -837,6 +874,41 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(posts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_saves_what_a_relaying_chat_owes_and_never_waits_past_its_budget() {
+        let (url, posts) = edge_counting_checkpoints().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _store) = host_on(&url, dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let owed = state();
+        owed.caught_up.store(true, Ordering::Release);
+        owed.relaying.store(true, Ordering::Release);
+        *lock(&handle.relay) = Some(owed.clone());
+        let started = std::time::Instant::now();
+        host.checkpoint_relayed_chats_before_stop(Duration::from_secs(5)).await;
+        assert!(posts.load(Ordering::SeqCst) >= 1, "the owed checkpoint went");
+        assert!(owed.checkpoint_covers(&handle.doc.doc().oplog_vv()));
+        assert!(started.elapsed() < Duration::from_secs(5), "it returned once saved");
+        // Nothing owed: nothing sent.
+        let before = posts.load(Ordering::SeqCst);
+        host.checkpoint_relayed_chats_before_stop(Duration::from_secs(5)).await;
+        assert_eq!(posts.load(Ordering::SeqCst), before);
+
+        // An edge that never answers: the stop waits out its budget and no more.
+        let dir = tempfile::tempdir().unwrap();
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (host, _store) = host_on(&format!("http://{}", silent.local_addr().unwrap()), dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let silent_state = state();
+        silent_state.caught_up.store(true, Ordering::Release);
+        silent_state.relaying.store(true, Ordering::Release);
+        *lock(&handle.relay) = Some(silent_state.clone());
+        let started = std::time::Instant::now();
+        host.checkpoint_relayed_chats_before_stop(Duration::from_millis(600)).await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!silent_state.checkpoint_covers(&handle.doc.doc().oplog_vv()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

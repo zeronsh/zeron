@@ -53,7 +53,7 @@ if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
 fi
 # Another edge (staging, self-hosting) with its own sign-in client and
 # loopback callback: scripts/staging-app.sh.
-for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT; do
+for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT ZERON_RELAY_LAYER; do
   if [[ -n "${!var:-}" ]]; then
     plutil -insert "LSEnvironment.$var" -string "${!var}" "$CONTENTS/Info.plist"
   fi
@@ -101,7 +101,7 @@ OPEN_ENV=(
 if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
   OPEN_ENV+=(--env "CODEX_EXECUTABLE=$CODEX_EXECUTABLE")
 fi
-for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT; do
+for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT ZERON_RELAY_LAYER; do
   if [[ -n "${!var:-}" ]]; then
     OPEN_ENV+=(--env "$var=${!var}")
   fi

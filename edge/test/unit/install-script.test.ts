@@ -170,5 +170,23 @@ describe("cloud install script", { timeout: 60_000 }, () => {
       encoding: "utf8"
     });
     expect(readFileSync(join(home, ".zeron", "env"), "utf8")).toContain("ZERON_RUNNER_ENROLL=org.user.cloud-1.codeC\n");
+    expect(readFileSync(join(home, ".zeron", "env"), "utf8")).not.toContain("ZERON_RELAY_LAYER");
+  });
+
+  it("turns the relay layer on in the engine only when asked, and only with 1", () => {
+    expect(installCommand(session("org.user.dev.code"))).toContain("ZERON_RELAY_LAYER=''");
+    expect(() => installCommand(session("org.user.dev.code", "https://edge.test", { ZERON_RELAY_LAYER: "yes" }))).toThrow();
+    const { home, units } = setup();
+    const command = installCommand(session("org.user.cloud-1.codeD", "https://edge.test", { ZERON_RELAY_LAYER: "1" }));
+    expect(command).toContain("ZERON_RELAY_LAYER='1'");
+    execFileSync("sh", ["-c", command], {
+      env: {
+        PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+        ZERON_CLOUD_HOME: home,
+        ZERON_CLOUD_UNIT_DIR: units
+      },
+      encoding: "utf8"
+    });
+    expect(readFileSync(join(home, ".zeron", "env"), "utf8")).toContain("ZERON_RELAY_LAYER=1\n");
   });
 });

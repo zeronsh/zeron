@@ -211,7 +211,7 @@ const ttlFor = (env: Env, provider: SandboxProvider) =>
 
 /** Everything a session sandbox is provisioned with: its enrollment and its
  * project. Used as the create-time env and passed again to the install. */
-const sessionEnv = (p: ProvisionParams): SessionEnv => ({
+const sessionEnv = (p: ProvisionParams, env: Env): SessionEnv => ({
   ZERON_RUNNER_ENROLL: `${p.orgId}.${p.userId}.${p.deviceId}.${p.enrollCode}`,
   ZERON_EDGE_URL: p.edgeUrl,
   ZERON_DEVICE_NAME: "Cloud session",
@@ -220,7 +220,8 @@ const sessionEnv = (p: ProvisionParams): SessionEnv => ({
   ZERON_CLOUD_CHAT: p.chatId,
   ZERON_CLOUD_REPO: p.project.cloneUrl,
   ZERON_CLOUD_PATH: p.project.path,
-  ZERON_CLOUD_BRANCH: p.project.defaultBranch
+  ZERON_CLOUD_BRANCH: p.project.defaultBranch,
+  ZERON_RELAY_LAYER: env.CLOUD_RELAY_LAYER === "1" ? "1" : ""
 });
 
 /**
@@ -239,7 +240,7 @@ export class ProvisionWorkflow extends WorkflowEntrypoint<Env, ProvisionParams> 
       // The account's own size when an operator set one, else the server's.
       const machine = p.machine ?? parseMachine(this.env.CLOUD_MACHINE);
       const template = parseTemplate(this.env.CLOUD_TEMPLATE);
-      const env = sessionEnv(p);
+      const env = sessionEnv(p, this.env);
       let sandboxId = p.sandboxId;
       if (!sandboxId) {
         const created = await step.do("create-sandbox", { ...PROVIDER_STEP, sensitive: "output" }, async () => {
