@@ -1724,8 +1724,28 @@ local GROUPS: { Group } = {
 					for _, kind in GLYPH_KINDS do
 						table.insert(glyphs, ds.StatusIcon { kind = kind, size = 20 })
 					end
+					-- An agent at work: its light sweep, the mark and a
+					-- sub-agent's dot glyph, at each pace and each size it's
+					-- drawn at, and its eight steps held.
+					local function sweeps(who: ds.StatusWho): Node
+						local paces: { Node } = {}
+						for _, kind in { "working", "connecting", "waiting" } :: { ds.StatusKind } do
+							table.insert(paces, ds.Status { kind = kind, who = who })
+						end
+						local sizes: { Node } = {}
+						for _, size in { 8, 9, 10, 12, 14, 16, 20, 32 } do
+							table.insert(sizes, ds.StatusIcon { kind = "working", size = size, who = who })
+						end
+						local held: { Node } = {}
+						for at = 0, 7 do
+							table.insert(held, ui.div { color = "$zeron.status.working", ds.Sweep { who = who, size = 32, at = at } })
+						end
+						return ui.column { gap = "$space.3", row(table.unpack(paces)), row(table.unpack(sizes)), row(table.unpack(held)) }
+					end
 					return ui.column {
 						gap = "$space.6",
+						block("AN AGENT AT WORK", sweeps("agent")),
+						block("A SUB-AGENT AT WORK", sweeps("subagent")),
 						block("IN A CHAT'S HEADER", ui.column { gap = "$space.3", table.unpack(header) }),
 						block("IN A LIST", ui.column { gap = "$zeron.list.gap", table.unpack(rows) }),
 						block("WITH THEIR NAMES", row(table.unpack(tags))),
