@@ -393,6 +393,20 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
 end
 
+-- a command or skill picked in the composer has nothing to open, but reads
+-- as the same pill a mention does, as zeron's sent bubble and mobile draw it
+local function invocation_chip(span: { [any]: any }, name: string)
+	local glyph = if string.sub(name, 1, 1) == "/" then "command" else "magic-stick"
+	span.underline = false
+	span.underline_offset = nil
+	span.hover = nil
+	span.bg = "$zeron.composer.chip.bg"
+	span[1] = name
+	span.padding = { 2, 2 }
+	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+	span.icon = { src = `assets/icons/ui/{glyph}.svg`, size = 14, gap = 3, tint = "currentColor" }
+end
+
 -- A web address written bare in a run's words (not in code, not a link
 -- already): a link of its own, as GitHub's autolinks make one, keeping the
 -- run's bold, italic and strike. Punctuation that ends the sentence stays
@@ -574,7 +588,9 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.radius = ui.raw(4.5, "Zeron's inline code corner")
 			span.text_size = inline
 		end
-		if r.a then
+		if r.a and string.match(r.a, "^zeron%-invoke:") then
+			invocation_chip(span, r.x)
+		elseif r.a then
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
