@@ -89,7 +89,9 @@ export type Notice = {
 export type Answer = { values: { string }, text: string }
 -- Where an existing chat works (`branch_fixed`).
 export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string? }
+export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean }
 export type Props = {
+	on_sizes: ((sizes: Sizes) -> ())?,
 	value: State<string>,
 	placeholder: (string | Message)?,
 	-- What sends (the shipping app's setting): "enter", ↩ sends and ⇧↩
@@ -2189,6 +2191,7 @@ return ui.component(function(props: Props): Node
 
 	-- The pill (the mentions' popover anchored on it: its panel opens at
 	-- the caret inside), its trays behind, the footer under.
+	local footer_size, deck_size, outer_size = ui.ref(), ui.ref(), ui.ref()
 	local body = ui.column {
 		w_full = true,
 		relative = true,
@@ -2267,10 +2270,10 @@ return ui.component(function(props: Props): Node
 					return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
 				end,
 			},
-			trays,
+			ui.column { ref = deck_size, w_full = true, shrink = 0, trays },
 			ui.popover(m.popover(surface)),
 		},
-		footer,
+		ui.column { ref = footer_size, w_full = true, shrink = 0, footer },
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
 		-- it, as under "Scroll to end", which it moves aside for).
@@ -2288,7 +2291,26 @@ return ui.component(function(props: Props): Node
 			else nil,
 	}
 
+	if props.on_sizes then
+		local on_sizes = props.on_sizes
+		ui.effect(function()
+			local input = layout_input()
+			input.sample = nil
+			input.cargo, input.asking, input.dictating, input.multiline = false, false, false, false
+			local rest = Layout.calculate(input, false).height
+			local footer_h, deck_h, actual = footer_size.height, deck_size.height, outer_size.height
+			local target = target_geometry:get()
+			local active = transition.active:get()
+			local ready = metrics.result:get().status == "ready"
+			if footer_h ~= nil and deck_h ~= nil and actual and actual > 0 then
+				on_sizes({ rest = rest + footer_h + deck_h, target = target.height + footer_h + deck_h,
+					presented = actual, active = active, ready = ready })
+			end
+		end)
+	end
+
 	return ui.column {
+		ref = outer_size,
 		w_full = true,
 		gap = 0,
 		body,

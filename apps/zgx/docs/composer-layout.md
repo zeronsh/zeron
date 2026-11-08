@@ -52,6 +52,18 @@ read a single presented-frame snapshot rather than animating each scalar.
 
 ## Target, presented and published sizes
 
+C5 adds `Composer.on_sizes`: `rest` is calculated with an empty draft and
+no cargo/ask/dictation; `target` includes the destination pill, measured
+deck and footer; `presented` is the laid-out root. `active` and `ready`
+describe motion and metric validity. The footer/deck are measured separately,
+so animated pill height is never used to infer the empty height. Main and
+side composers publish the same contract to their transcript reservation.
+
+`screens/chat/composer_place.luau` handles page placement only. A new chat
+uses the rest height to retain its top and the presented height to avoid
+overflow. The page still owns dock/center placement, send glide and the
+model-picker hold. Clearing a draft no longer waits 500 ms to infer rest.
+
 `target_geometry` describes the destination, not an intermediate frame.
 `composer_motion.luau` (C4) owns origin, destination and a single progress
 animation. The `presented` helper only selects values from that controller's

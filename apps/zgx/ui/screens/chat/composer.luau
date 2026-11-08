@@ -17,6 +17,7 @@
 
 local ds = require("@ds")
 local motion = require("@ds/motion")
+local Placement = require("@app/screens/chat/composer_place")
 local clock = require("@ds/composer_clock")
 local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
@@ -811,8 +812,15 @@ local function Composer(): Node
 		}
 	end
 
+	local composer_sizes = ui.state("chat_composer_sizes", nil :: ds.ComposerSizes?)
 	local function composer(): Node
 		return ds.Composer {
+			on_sizes = function(sizes: ds.ComposerSizes)
+				composer_sizes:set(sizes)
+				if math.abs(shared.dock_h:peek() - sizes.presented) > 0.01 then
+					shared.dock_h:set(sizes.presented)
+				end
+			end,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
 			keep = "chat",
@@ -993,40 +1001,14 @@ local function Composer(): Node
 	ui.on_cleanup(function()
 		shared.composer_shown:set(false)
 	end)
-	local dock = ui.ref()
-	-- How tall a new chat's composer is with nothing in it (what it's placed
-	-- by, so what's written in it doesn't move its top).
-	local rest_tall = ui.state("chat_composer_rest_tall", nil :: number?)
-	-- (A draft just deleted, it's empty while still easing back, and that
-	-- height would move its top: taken once that's over.)
-	local REST_SETTLE_MS = 500
-	local had_draft = false
-	local rest_settles_at = 0
-	ui.effect(function()
-		local tall = dock.height or 0
-		if shared.text:get() ~= "" or #shared.cargo:get() > 0 or next(shared.quotes:get()) ~= nil then
-			had_draft = true
-			return
-		end
-		if had_draft then
-			had_draft = false
-			rest_settles_at = clock.now() + REST_SETTLE_MS
-		end
-		if tall <= 0 or not new_chat() then
-			return
-		end
-		local function take()
-			if math.abs((rest_tall:peek() or 0) - tall) >= 0.5 then
-				rest_tall:set(tall)
-			end
-		end
-		local left = rest_settles_at - clock.now()
-		if left > 0 and rest_tall:peek() ~= nil then
-			ui.after(left, take)
-		else
-			take()
-		end
+	local rest_tall = ui.computed(function(): number?
+		local sizes = composer_sizes:get()
+		return if sizes then sizes.rest else nil
 	end)
+	local function presented_height(): number
+		local sizes = composer_sizes:get()
+		return if sizes then sizes.presented else shared.dock_h:get()
+	end
 	-- Where it stands: mid-page on a new chat (centred under the title bar),
 	-- else docked at the foot (0), as laid out now.
 	local function target_y(): number
@@ -1039,7 +1021,7 @@ local function Composer(): Node
 		if h <= 0 then
 			h = page_h:get()
 		end
-		local tall = dock.height or 0
+		local tall = presented_height()
 		if tall <= 0 then
 			tall = shared.dock_h:get()
 		end
@@ -1047,9 +1029,7 @@ local function Composer(): Node
 		-- and grows down from there. Only a draft that would run off the
 		-- page's foot moves it, up by as much.)
 		local rest = rest_tall:get() or tall
-		local hero = TITLE_H + (h - TITLE_H - 96) / 2
-		local docked = h - FOOT - rest / 2
-		return math.min(hero - docked, rest - tall)
+		return Placement.dock_offset(h, rest, tall, FOOT)
 	end
 	-- Moving between a new chat and a session: its own send from a new chat
 	-- slides it down with the prompt (`slide_next`); any other move (another
@@ -1112,7 +1092,7 @@ local function Composer(): Node
 				gliding = nil
 			end
 			place:set(y)
-			local tall = dock.height or 0
+			local tall = presented_height()
 			if model_open:get() then
 				held_tall = held_tall or tall
 				hold:set(held_tall - tall)
@@ -1200,21 +1180,15 @@ local function Composer(): Node
 				if not new_chat() then
 					return place:get()
 				end
-				local tall = dock.height or 0
+				local tall = presented_height()
 				if tall <= 0 then
 					tall = shared.dock_h:get()
 				end
 				local rest = rest_tall:get() or tall
-				local at = TITLE_H / 2 - 48 - rest / 2
-				-- (Only a draft that would run off the page's foot moves it.)
-				local h = page.height or 0
-				if h > 0 then
-					at = math.min(at, h / 2 - FOOT - tall)
-				end
+				local at = Placement.new_offset(page.height or 0, rest, tall, FOOT)
 				return at + hold:get()
 			end,
 			ui.div {
-				ref = dock,
 				id = "chat-composer",
 				hook = "chat.composer",
 				-- (Over the page, not in it: the session it sends to, as the
@@ -1228,11 +1202,7 @@ local function Composer(): Node
 					end),
 					DOCK
 				),
-				on_resize = function(size: { w: number, h: number })
-					if size.h >= 1 and math.abs(shared.dock_h:peek() - size.h) > 0.01 then
-						shared.dock_h:set(size.h)
-					end
-				end,
+
 				-- Files carried over the composer itself: the chat's drop,
 				-- as over the page under it.
 				on_file_hover = composer_zone.on_file_hover,

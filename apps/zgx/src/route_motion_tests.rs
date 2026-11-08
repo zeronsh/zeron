@@ -241,6 +241,60 @@ fn type_at_caret(app: &mut TestApp, text: &str) {
 }
 
 #[test]
+fn composer_rest_size_is_independent_of_animated_draft_size_and_picker_placement() {
+    let mut c = Composer::new(false);
+    let sizes = |app: &TestApp| {
+        app.host
+            .states()
+            .into_iter()
+            .find(|(n, _)| n.ends_with("::chat_composer_sizes"))
+            .unwrap()
+            .1
+    };
+    let rest = sizes(&c.shown.app).field("rest").unwrap().as_f64().unwrap();
+    c.act(|app| app.fill(FIELD, "one\ntwo\nthree\nfour\nfive\nsix"));
+    c.watch(3);
+    let moving = sizes(&c.shown.app);
+    assert_eq!(moving.field("rest").unwrap().as_f64(), Some(rest));
+    assert!(moving.field("target").unwrap().as_f64().unwrap() > rest);
+    assert!(
+        moving.field("presented").unwrap().as_f64().unwrap()
+            < moving.field("target").unwrap().as_f64().unwrap()
+    );
+    c.watch(40);
+    c.act(|app| app.fill(FIELD, ""));
+    c.watch(1);
+    assert_eq!(
+        sizes(&c.shown.app).field("rest").unwrap().as_f64(),
+        Some(rest),
+        "clearing needs no settle timer"
+    );
+    c.watch(40);
+    c.act(|app| app.click("#chat-composer >> role:button \"Model\""));
+    c.watch(2);
+    let button = c
+        .shown
+        .app
+        .find("#chat-composer >> role:button \"Model\"")
+        .unwrap();
+    let y = c.shown.app.ui.scene.borrow().transformed_bounds(button).y;
+    c.act(|app| {
+        app.host
+            .set_state(
+                "chat.composer.text",
+                Value::from("one\ntwo\nthree\nfour\nfive\nsix"),
+            )
+            .unwrap()
+    });
+    c.watch(40);
+    let held = c.shown.app.ui.scene.borrow().transformed_bounds(button).y;
+    assert!(
+        (held - y).abs() < 1.,
+        "open picker retains its anchor: {y} -> {held}"
+    );
+}
+
+#[test]
 fn composer_transition_near_the_height_cap_preserves_scroll_editing_and_the_caret() {
     for session in [false, true] {
         let mut c = Composer::new(session);
