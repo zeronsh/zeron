@@ -1285,9 +1285,9 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: in the panel's middle, its rows no wider than the
-	-- reading column (`zeron.prose.measure`, the conversation's own
-	-- default), each row's whole width still its target; and level with a
+	-- Where it stands: in the panel's middle, its rows no wider than a
+	-- list of rows is in ds (`zeron.form.list`: a row's icon, its words and
+	-- the key at its end), each row's whole width still its target; and level with a
 	-- new chat's composer, by the composer's own rule (screens/chat/dock:
 	-- a little over the middle of the room under the title bar, read over
 	-- the panel's whole height). What it's in is at least as tall as the
@@ -1337,7 +1337,7 @@ M.Page = ui.component(function(props: Props): Node
 				id = "panel-home-block",
 				ref = block,
 				w_full = true,
-				max_w = ui.theme.get("zeron.prose.measure") :: number?,
+				max_w = ui.theme.get("zeron.form.list") :: number?,
 				px = "$space.4",
 				py = "$space.6",
 				gap = "$space.5",

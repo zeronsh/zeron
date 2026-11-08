@@ -213,7 +213,7 @@ local function middle(app: any, id: string): number?
 	return if b and b.h > 0 then b.y + b.h / 2 else nil
 end
 
-test("the panel's home stands level with a new chat's composer, its rows no wider than the reading column", function()
+test("the panel's home stands level with a new chat's composer, its rows no wider than a list's", function()
 	local app = mount("shell_fixture.luau")
 	for _, size in { { 1100, 760 }, { 1440, 900 }, { 2560, 1440 } } do
 		app:resize(size[1], size[2])
@@ -228,15 +228,15 @@ test("the panel's home stands level with a new chat's composer, its rows no wide
 			local home, composer = middle(app, "panel-home-block"), middle(app, "chat-composer-dock")
 			return home ~= nil and composer ~= nil and math.abs(home - composer) <= 1
 		end)).to_be(true)
-		-- (No wider than the reading column, in the panel's middle; each row
+		-- (No wider than a list's (zeron.form.list), in the panel's middle; each row
 		-- as wide as the block's inside, its whole width a target.)
 		local panel, block = box(app, "panel-empty") :: any, box(app, "panel-home-block") :: any
 		local row = box(app, "panel-open-browser") :: any
-		expect(block.w <= 660).to_be(true)
+		expect(block.w <= 480).to_be(true)
 		expect(math.abs((block.x - panel.x) - ((panel.x + panel.w) - (block.x + block.w))) <= 1).to_be(true)
 		expect(row.w).to_be(block.w - 32)
 		if size[1] == 2560 then
-			expect(block.w).to_be(660)
+			expect(block.w).to_be(480)
 			expect(panel.w > 700).to_be(true)
 		end
 	end
