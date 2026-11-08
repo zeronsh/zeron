@@ -86,6 +86,21 @@ test("a command picked lands as its token and is sent as its reference; one type
 	expect(calls).to_contain("send:s2:[/review](zeron-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22726576696577227d) the branch, then /compact by hand")
 end)
 
+test("a draft whose last word is a trigger nothing matches still sends on Enter", function()
+	for _, words in { "look in /tmp", "echo $HOME", "ping @nobody", "/nocommand" } do
+		local app = chat()
+		app:type("role:textbox", words)
+		settle(app)
+		-- (Its list shows, with nothing in it.)
+		expect(app:has("#mention-popover")).to_be(true)
+		expect(app:has("role:option")).to_be(false)
+		app:key("Enter")
+		settle(app)
+		expect(app:text("role:textbox")).to_be("")
+		expect(app:state("calls")).to_contain(`send:s2:{words}`)
+	end
+end)
+
 test("Zeron's own commands end the `/` list, named clear of the agent's, and only a chat's in a chat", function()
 	local app = chat()
 	app:type("role:textbox", "/")

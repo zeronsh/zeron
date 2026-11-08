@@ -669,6 +669,26 @@ impl McpServer {
             .get(Self::SIDE_CHATS_ONLY_ENV)
             .is_some_and(|value| value == "1")
     }
+
+    /// The chat Zeron's own server speaks for, set when the engine launched
+    /// it for a chat's run (its in-chat tools are offered only then).
+    pub const CHAT_ID_ENV: &'static str = "ZERON_CHAT_ID";
+
+    /// Set to `1` on Zeron's own server for a chat's run when the runtime
+    /// brings its agent back on its own as background work ends: only then
+    /// is the agent offered `wait_on_background` (anywhere else a turn that
+    /// ends is the agent done, and the call would only be refused).
+    pub const WAITS_ON_BACKGROUND_ENV: &'static str = "ZERON_WAITS_ON_BACKGROUND";
+
+    /// Whether this is Zeron's server for a chat's run whose agent may say
+    /// it waits on background work.
+    pub fn waits_on_background(&self) -> bool {
+        self.env.get(Self::CHAT_ID_ENV).is_some_and(|id| !id.is_empty())
+            && self
+                .env
+                .get(Self::WAITS_ON_BACKGROUND_ENV)
+                .is_some_and(|value| value == "1")
+    }
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created

@@ -99,6 +99,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         room_gen: Some(2),
         parent_chat_id: None,
         child_kind: None,
+        sleep: None,
     };
     (device, space, chat)
 }

@@ -161,6 +161,16 @@ struct RunHandle {
     /// stopping a turn when the driver [`Harness::stops_turn_in_place`].
     turn: TurnControl,
     stops_turn_in_place: bool,
+    /// An explicit steer arriving while a tool call is open stops the turn
+    /// in place first ([`Harness::steer_stops_tool`]).
+    steer_stops_tool: bool,
+    /// Tool calls of the turn in flight that have not returned yet (a
+    /// command running, a wait), kept by the run task.
+    open_tools: Arc<std::sync::atomic::AtomicUsize>,
+    /// A steer is stopping this turn ([`SessionsEngine::steer_now`]): the
+    /// steers the stop cancels go to `redeliver` instead of being dropped.
+    redeliver_on_stop: Arc<std::sync::atomic::AtomicBool>,
+    redeliver: Arc<Mutex<Vec<RoutedSteer>>>,
     /// The harness stream is open. Before that there is no runtime to keep:
     /// a stop tears the pending start down instead.
     started: Arc<std::sync::atomic::AtomicBool>,
@@ -492,6 +502,34 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.turn.background_live())
+    }
+
+    /// The chat's agent says it waits on these background processes (or,
+    /// `waiting` false, no longer): its turn's end reads as a wait on them
+    /// (see [`ParkedWait`]).
+    pub fn await_background(
+        &self,
+        chat_id: &str,
+        task_ids: &[String],
+        waiting: bool,
+    ) -> Result<zeron_harness::MarkOutcome, AwaitRefused> {
+        let turn = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.turn.clone())
+            .ok_or(AwaitRefused::NoRun)?;
+        turn.mark_awaited(task_ids, waiting).map_err(|refused| match refused {
+            zeron_harness::MarkRefused::NoWake => AwaitRefused::NoWake,
+        })
+    }
+
+    /// The person's Stop waiting: what the agent said it waits on no longer
+    /// holds the chat. False when no live runtime runs it.
+    pub fn stop_waiting(&self, chat_id: &str) -> bool {
+        let Some(turn) = lock(&self.inner.runs).get(chat_id).map(|h| h.turn.clone()) else {
+            return false;
+        };
+        turn.clear_awaited();
+        true
     }
 
     /// Ask the chat's runtime to stop one of its background processes. False
@@ -1133,6 +1171,12 @@ impl SessionsEngine {
                 steer_tx,
                 interrupt_token,
                 stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
+                steer_stops_tool: harness.supports_steering()
+                    && harness.stops_turn_in_place()
+                    && harness.steer_stops_tool(),
+                open_tools: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                redeliver_on_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                redeliver: Arc::new(Mutex::new(Vec::new())),
                 turn: turn.clone(),
                 started: started.clone(),
                 cancel: cancel_tx,
@@ -1326,6 +1370,21 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_with(chat_id, prompt, Vec::new(), message_id, issued_at)
+            .await
+    }
+
+    /// [`Self::steer_at`] carrying files: `attachments` (this device's
+    /// paths) ride the mailbox with the prompt, so a driver that inlines
+    /// images delivers them as images, as a run's do.
+    pub(crate) async fn steer_with(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        attachments: Vec<String>,
+        message_id: Option<String>,
+        issued_at: i64,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
@@ -1351,7 +1410,7 @@ impl SessionsEngine {
         // message so a re-dispatch keeps it.
         let sent_with = self.last_request(chat_id).map(|mut request| {
             request.prompt = prompt.to_string();
-            request.attachments = Vec::new();
+            request.attachments = attachments.clone();
             Box::new(request)
         });
         let message = SteerMessage {
@@ -1361,7 +1420,7 @@ impl SessionsEngine {
                 zeron_proto::invocation::harness_prompt(delivered, harness_id)
             },
             message_id: Some(user_id.clone()),
-            attachments: Vec::new(),
+            attachments,
             config: None,
         };
         // Saturation is backpressure, not a dead runtime. Waiting for room
@@ -1417,6 +1476,116 @@ impl SessionsEngine {
         }
         self.inner.note_message(chat_id, prompt);
         Ok(SteerOutcome::Accepted)
+    }
+
+    /// Whether a steer for the chat would stop its turn first: a tool call
+    /// is open (a command running, a wait) in a live turn whose runtime
+    /// stops turns in place and opted in ([`Harness::steer_stops_tool`]).
+    /// Never while the agent waits on a question: answering it is the way
+    /// on.
+    pub fn steer_stops_tool(&self, chat_id: &str) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.turn_in_flight(chat_id) {
+            return false;
+        }
+        lock(&self.inner.runs).get(chat_id).is_some_and(|h| {
+            h.steer_stops_tool
+                && h.steerable
+                && h.started.load(Acquire)
+                && !h.retiring.load(Acquire)
+                && h.open_tools.load(Acquire) > 0
+                && lock(&h.pending_inputs).is_empty()
+        })
+    }
+
+    /// An explicit steer, read by the agent at once. While a tool call is
+    /// open ([`Self::steer_stops_tool`]) the turn is stopped in place first:
+    /// the foreground call ends, the runtime and its background work (shells,
+    /// terminals, agents) stay, and the prompt starts the next turn in that
+    /// same runtime. Steers sent earlier that the stop cancelled go first,
+    /// under their own ids. Otherwise, or when the stop doesn't settle, it
+    /// is an ordinary steer ([`Self::steer_at`]), read at the next step
+    /// boundary. Nothing here tears a runtime down.
+    pub(crate) async fn steer_now(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        attachments: Vec<String>,
+        message_id: Option<String>,
+        issued_at: i64,
+    ) -> Result<SteerOutcome, EngineError> {
+        if self.steer_stops_tool(chat_id) && self.stop_turn_keeping_runtime(chat_id).await {
+            let earlier = lock(&self.inner.runs)
+                .get(chat_id)
+                .map(|h| std::mem::take(&mut *lock(&h.redeliver)))
+                .unwrap_or_default();
+            for steer in earlier {
+                let attachments = steer
+                    .request
+                    .as_ref()
+                    .map(|r| r.attachments.clone())
+                    .unwrap_or_default();
+                let outcome = self
+                    .steer_with(
+                        chat_id,
+                        &steer.prompt,
+                        attachments,
+                        Some(steer.message_id),
+                        now_ms(),
+                    )
+                    .await?;
+                if outcome != SteerOutcome::Accepted {
+                    tracing::warn!(chat = %chat_id, ?outcome, "an earlier steer didn't go again after the stop");
+                }
+            }
+        }
+        self.steer_with(chat_id, prompt, attachments, message_id, issued_at)
+            .await
+    }
+
+    /// End the in-flight turn in place for a steer, keeping the runtime and
+    /// its background work. Unlike [`Self::stop_turn`] it never falls back
+    /// to tearing the runtime down: false when the run can't stop in place
+    /// or the stop doesn't settle, and the steer then waits its turn.
+    async fn stop_turn_keeping_runtime(&self, chat_id: &str) -> bool {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        const STOP_SETTLE: std::time::Duration = std::time::Duration::from_secs(15);
+        let target = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|h| {
+                h.stops_turn_in_place && h.started.load(Acquire) && !h.retiring.load(Acquire)
+            })
+            .map(|h| {
+                (
+                    h.run_id.clone(),
+                    h.turn.clone(),
+                    h.redeliver_on_stop.clone(),
+                )
+            });
+        let Some((run_id, turn, redeliver_on_stop)) = target else {
+            return false;
+        };
+        if !self.turn_in_flight(chat_id) {
+            return false;
+        }
+        // The stopped turn is replaced, not crashed: never revived.
+        self.note_user_stop(chat_id);
+        redeliver_on_stop.store(true, Release);
+        turn.stop_turn();
+        let deadline = tokio::time::Instant::now() + STOP_SETTLE;
+        while tokio::time::Instant::now() < deadline {
+            if !self.is_live(chat_id, &run_id) {
+                return false;
+            }
+            if !self.turn_in_flight(chat_id) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Not settled: a late stop clears its steers as any stop does.
+        redeliver_on_stop.swap(false, AcqRel);
+        tracing::warn!(chat = %chat_id, "a steer's turn stop did not settle; it waits for the turn");
+        false
     }
 
     /// A Stop acting now cancels these messages, sent before it but still
@@ -2174,6 +2343,7 @@ impl Inner {
                     terminal_activity: None,
                     running_subagents: 0,
                     background_tasks: Vec::new(),
+                    waiting: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -2185,6 +2355,12 @@ impl Inner {
                 entry.status,
                 SessionStatus::Working | SessionStatus::AwaitingInput
             );
+            let was = entry.status;
+            // A wait is a parked turn's alone: any turn starting, asking or
+            // failing ends it.
+            if status != SessionStatus::Idle {
+                entry.waiting = None;
+            }
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
             }
@@ -2218,10 +2394,49 @@ impl Inner {
             // send_replace: keep the current value fresh even with no receivers,
             // so late WatchSessions subscribers see the last transition.
             self.sessions_tx.send_replace(list);
-            session
+            (session, was)
         };
+        let (session, was) = session;
         // Mirror the transition into the workspace doc's session-status row so
         // remote devices' sidebars show this run (staleness-checked client-side).
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
+            ws.record_session(&session);
+        }
+        // A chat put to sleep wakes the moment it starts asking for the
+        // person, or fails: this engine hosts it, so it's the one to say so,
+        // once, for every device. (An ask already open when it was put to
+        // sleep is no such moment, so that one doesn't wake it.)
+        if status != was
+            && matches!(status, SessionStatus::AwaitingInput | SessionStatus::Errored)
+            && let Some(ws) = self.workspace()
+            && let Err(error) = ws.wake_chat(chat_id, now)
+        {
+            tracing::warn!(chat = %chat_id, %error, "couldn't wake a sleeping chat");
+        }
+    }
+
+    /// Publish what `chat_id`'s agent waits on after its turn ended (`None`:
+    /// no wait), mirrored like [`Self::set_background_tasks`]; the live
+    /// heartbeat keeps the row fresh while the wait holds.
+    fn set_waiting(&self, chat_id: &str, waiting: Option<zeron_proto::SessionWaiting>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.waiting == waiting {
+                return;
+            }
+            entry.waiting = waiting;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
         if self.activity_tx.get().is_none()
             && let Some(ws) = self.workspace()
         {
@@ -2275,7 +2490,15 @@ impl Inner {
     ///
     /// `side_chats_only`: the run's provider launches without its own
     /// subagents, so all delegation goes through this server.
-    fn zeron_mcp(&self, chat_id: &str, side_chats_only: bool) -> Option<zeron_proto::McpServer> {
+    /// Zeron's own MCP server for a chat's run. `waits`: the runtime wakes
+    /// its agent as background work ends ([`Harness::wakes_on_background`]),
+    /// so the agent is offered `wait_on_background`.
+    fn zeron_mcp(
+        &self,
+        chat_id: &str,
+        side_chats_only: bool,
+        waits: bool,
+    ) -> Option<zeron_proto::McpServer> {
         let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
         if port == 0 {
             return None;
@@ -2283,7 +2506,7 @@ impl Inner {
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
         let mut env: std::collections::BTreeMap<String, String> = [
             ("ZERON_IPC_PORT".to_owned(), port.to_string()),
-            ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+            (zeron_proto::McpServer::CHAT_ID_ENV.to_owned(), chat_id.to_owned()),
             ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
         ]
         .into_iter()
@@ -2291,6 +2514,12 @@ impl Inner {
         if side_chats_only {
             env.insert(
                 zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.to_owned(),
+                "1".to_owned(),
+            );
+        }
+        if waits {
+            env.insert(
+                zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV.to_owned(),
                 "1".to_owned(),
             );
         }
@@ -3539,6 +3768,51 @@ fn cursor_unstarted_history(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Why an agent's [`SessionsEngine::await_background`] can't be honoured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwaitRefused {
+    /// No live runtime runs the chat here.
+    NoRun,
+    /// Its runtime doesn't wake the agent when background work ends.
+    NoWake,
+}
+
+/// A turn that ended into a wait on background work that will wake its agent
+/// ([`TurnControl::watch_waiting`]): the chat reads Waiting, not finished,
+/// and the completion the turn would have marked (its marker, its outcome)
+/// is held back until the wait is over, so "finished" (a banner, a chime, a
+/// phone push, `wait_for_turn`) is said once, when the agent is done.
+///
+/// Every way out is deliberate, and each errs toward the person:
+/// - the agent's wake turn starts: Working, and that turn marks its own end
+///   (the held one goes with it);
+/// - the work all ends and no wake turn starts within [`WAKE_GRACE`]: the
+///   held completion is marked then;
+/// - a turn starts by any other way (the person writes): it goes;
+/// - the run ends (stopped, crashed, reaped, replaced): it goes, its held
+///   completion marked unless the person stopped it;
+/// - the engine dies: its row goes stale and every reader drops the wait
+///   ([`zeron_proto::view::waiting`]).
+struct ParkedWait {
+    since: chrono::DateTime<Utc>,
+    completed_turn: Option<String>,
+    outcome: Option<DoneStatus>,
+    /// The work all ended: when the wake turn is presumed lost.
+    grace: Option<tokio::time::Instant>,
+}
+
+/// How long a wait outlives the work it waited on before the turn's end
+/// stands. The runtime normally starts its wake turn at once (Claude Code:
+/// 0.1 s after the roster drains, live-verified 2.1.319), so this only ever
+/// runs out when no wake comes. `ZERON_WAKE_GRACE_MS` overrides it (tests).
+fn wake_grace() -> std::time::Duration {
+    std::env::var("ZERON_WAKE_GRACE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(15))
+}
+
 async fn drive_run(
     inner: Arc<Inner>,
     chat_id: String,
@@ -3573,7 +3847,7 @@ async fn drive_run(
     // The host stamps its own MCP server onto every run it drives, so the
     // agent can spawn and talk to side chats through the engine it runs in.
     if request.mcp.is_none() {
-        request.mcp = inner.zeron_mcp(&chat_id, side_chats_only);
+        request.mcp = inner.zeron_mcp(&chat_id, side_chats_only, harness.wakes_on_background());
     }
     // Plugins' native MCP servers come from this host's own allowed plugins,
     // run from their verified snapshots — never from what a sender put here.
@@ -3629,6 +3903,19 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The turn's tool calls still running, published for a steer to read
+    // ([`SessionsEngine::steer_now`]).
+    let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // (A call that returned stays closed: drivers refresh a call in place.)
+    let mut closed_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let open_count = lock(&inner.runs)
+        .get(&chat_id)
+        .filter(|h| h.run_id == run_id)
+        .map(|h| h.open_tools.clone())
+        .unwrap_or_default();
+    let publish_open = |open: &std::collections::HashSet<String>| {
+        open_count.store(open.len(), std::sync::atomic::Ordering::Release);
+    };
     let mut seen_images = std::collections::HashSet::new();
     for entry in doc_ref.read_entries().unwrap_or_default() {
         for part in entry.parts {
@@ -3972,6 +4259,11 @@ async fn drive_run(
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The runtime's background processes, published on the session row.
     let mut background_processes = turn.watch_background_processes();
+    // What the agent waits on once its turn ends, and the wait it parked
+    // into (see [`ParkedWait`]).
+    let mut waiting_on = turn.watch_waiting();
+    let mut wait: Option<ParkedWait> = None;
+    let wake_grace = wake_grace();
     // PERSISTENT SESSION (zeron runsBySession): a completed turn on a
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
@@ -4113,6 +4405,57 @@ async fn drive_run(
                 Ok(()) = background_processes.changed() => {
                     let tasks = background_processes.borrow_and_update().clone();
                     inner.set_background_tasks(&chat_id, tasks);
+                    continue;
+                }
+                // What a parked wait waits on changed: shown as it is; once
+                // it's all gone, the wake turn has its grace to start.
+                Ok(()) = waiting_on.changed(), if wait.is_some() => {
+                    let on = waiting_on.borrow_and_update().clone();
+                    if let Some(parked) = wait.as_mut() {
+                        parked.grace = if on.is_empty() {
+                            parked.grace.or_else(|| Some(tokio::time::Instant::now() + wake_grace))
+                        } else {
+                            None
+                        };
+                        inner.set_waiting(
+                            &chat_id,
+                            Some(zeron_proto::SessionWaiting { since: parked.since, on }),
+                        );
+                    }
+                    continue;
+                }
+                // The work ended and no wake turn came: the turn's end stands,
+                // marked now.
+                _ = tokio::time::sleep_until(
+                    wait.as_ref().and_then(|w| w.grace).unwrap_or_else(tokio::time::Instant::now)
+                ), if wait.as_ref().is_some_and(|w| w.grace.is_some()) => {
+                    if let Some(parked) = wait.take() {
+                        tracing::info!(chat = %chat_id, "wait ended without a wake turn");
+                        inner.set_waiting(&chat_id, None);
+                        inner.set_status_with_completion(
+                            &chat_id,
+                            SessionStatus::Idle,
+                            false,
+                            parked.completed_turn,
+                            parked.outcome,
+                        );
+                    }
+                    continue;
+                }
+                // The runtime woke its agent on its own (background work
+                // ended): a turn is running from this moment, not from its
+                // first words.
+                () = turn.woke() => {
+                    if idle_since.is_some() {
+                        tracing::info!(chat = %chat_id, "parked session resumed by a wake turn");
+                        idle_since = None;
+                        wait = None;
+                        self_continued_turn = true;
+                        last_stream_activity = tokio::time::Instant::now();
+                        entry_id = new_id();
+                        segment_started = now_ms();
+                        inner.set_status(&chat_id, SessionStatus::Working, true);
+                    }
                     continue;
                 }
                 // A hang-up restarts the idle window, however long the call.
@@ -4612,6 +4955,7 @@ async fn drive_run(
                     "parked session resumed by self-continued agent output"
                 );
                 idle_since = None;
+                wait = None;
                 self_continued_turn = true;
                 // The park cleared the fold; rotate to a fresh entry and
                 // fall through — this event is the new segment's first part.
@@ -4624,10 +4968,25 @@ async fn drive_run(
                         if resume_state.idle && !saw_session_started => {}
                     AgentEvent::Steered { .. } => {
                         idle_since = None;
+                        // The person wrote: their turn supersedes the wait.
+                        wait = None;
                         inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
                     AgentEvent::Done { .. } => {
                         idle_since = None;
+                        // A turn ended that never showed itself starting (a
+                        // wake turn with nothing to say): the wait is over,
+                        // and the end it held back stands.
+                        if let Some(parked) = wait.take() {
+                            inner.set_waiting(&chat_id, None);
+                            inner.set_status_with_completion(
+                                &chat_id,
+                                SessionStatus::Idle,
+                                false,
+                                parked.completed_turn,
+                                parked.outcome,
+                            );
+                        }
                     }
                     // A question with NO turn behind it (post-turn permission
                     // noise): answer it empty right here. Un-parking into
@@ -4689,6 +5048,29 @@ async fn drive_run(
                 if !in_segment(&folded, id) && seen_tools.contains(id) =>
             {
                 continue;
+            }
+            _ => {}
+        }
+        match &event {
+            AgentEvent::ToolCall { id, .. }
+                if id != zeron_proto::LIVE_PLAN_TOOL_ID && !closed_tools.contains(id) =>
+            {
+                if open_tools.insert(id.clone()) {
+                    publish_open(&open_tools);
+                }
+            }
+            AgentEvent::ToolResult { id, .. } => {
+                closed_tools.insert(id.clone());
+                if open_tools.remove(id) {
+                    publish_open(&open_tools);
+                }
+            }
+            AgentEvent::Done { .. } => {
+                closed_tools.clear();
+                if !open_tools.is_empty() {
+                    open_tools.clear();
+                    publish_open(&open_tools);
+                }
             }
             _ => {}
         }
@@ -4985,13 +5367,25 @@ async fn drive_run(
             // Working forever.
             let stopped_in_place =
                 *status == DoneStatus::Interrupted && stops_turn_in_place && !interrupted;
+            // A steer that stopped the turn to be read at once
+            // (`SessionsEngine::steer_now`) takes them to deliver again
+            // ahead of itself: they were sent first, and still go.
             if stopped_in_place
-                && let Some(ledger) = lock(&inner.runs)
+                && let Some((ledger, redeliver_on_stop, redeliver)) = lock(&inner.runs)
                     .get(&chat_id)
                     .filter(|h| h.run_id == run_id)
-                    .map(|h| h.routed_steers.clone())
+                    .map(|h| {
+                        (
+                            h.routed_steers.clone(),
+                            h.redeliver_on_stop.clone(),
+                            h.redeliver.clone(),
+                        )
+                    })
             {
-                lock(&ledger).clear();
+                let cancelled: Vec<RoutedSteer> = lock(&ledger).drain(..).collect();
+                if redeliver_on_stop.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    lock(&redeliver).extend(cancelled);
+                }
             }
             // An accepted steer awaiting its boundary owns the continuation:
             // the previous Done is an internal handoff, not a completion ping.
@@ -5022,6 +5416,24 @@ async fn drive_run(
                 idle_since = Some(tokio::time::Instant::now());
                 reap_deferred_until = None;
                 self_continued_turn = false;
+                let outcome = (!pending_steer && turn_was_active).then_some(*status);
+                // A finished turn whose agent waits on background work that
+                // will wake it parks into a wait: Waiting, its completion
+                // held back (see [`ParkedWait`]).
+                let on = waiting_on.borrow_and_update().clone();
+                if completed_turn.is_some() && !on.is_empty() {
+                    let since = Utc::now();
+                    wait = Some(ParkedWait {
+                        since,
+                        completed_turn,
+                        outcome,
+                        grace: None,
+                    });
+                    inner.set_status_with_completion(&chat_id, SessionStatus::Idle, false, None, None);
+                    inner.set_waiting(&chat_id, Some(zeron_proto::SessionWaiting { since, on }));
+                    continue;
+                }
+                wait = None;
                 // Accepted steers still own this runtime. Publishing Idle
                 // here lets the ordinary queue overtake that continuation.
                 inner.set_status_with_completion(
@@ -5033,7 +5445,7 @@ async fn drive_run(
                     },
                     false,
                     completed_turn,
-                    (!pending_steer && turn_was_active).then_some(*status),
+                    outcome,
                 );
                 continue;
             }
@@ -5073,6 +5485,15 @@ async fn drive_run(
     inner.set_running_subagents(&chat_id, 0);
     // The runtime is gone, and its background processes with it.
     inner.set_background_tasks(&chat_id, Vec::new());
+    // So is anything it waited on. A wait's held end stands, unless the
+    // person stopped the run.
+    if let Some(parked) = wait.take() {
+        if !interrupted && final_completed_turn.is_none() {
+            final_completed_turn = parked.completed_turn;
+            final_outcome = final_outcome.or(parked.outcome);
+        }
+    }
+    inner.set_waiting(&chat_id, None);
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
@@ -6230,5 +6651,261 @@ mod tests {
         assert!(nudge.contains("check before repeating it"));
         assert!(nudge.contains("if it is not in your history yet, handle it now"));
         assert!(nudge.ends_with("<request>\nrefactor the parser\n</request>"));
+    }
+
+    /// [`FeedHarness`] that also hands the test its run's [`TurnControl`],
+    /// to play the runtime's part: waking its agent, listing background
+    /// agents and processes, starting a wake turn.
+    struct WakeHarness {
+        feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
+        turn: Arc<Mutex<Option<TurnControl>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Harness for WakeHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Wake"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
+            &[zeron_proto::ReasoningLevel::Medium]
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            controls: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            *self.turn.lock().unwrap() = Some(controls.turn.clone());
+            let mut feed = self
+                .feed
+                .lock()
+                .unwrap()
+                .take()
+                .expect("WakeHarness serves one run per test");
+            Ok(futures::stream::poll_fn(move |cx| feed.poll_recv(cx).map(|e| e.map(Ok))).boxed())
+        }
+    }
+
+    struct WakeRig {
+        core: crate::EngineCore,
+        feed: mpsc::UnboundedSender<AgentEvent>,
+        turn: TurnControl,
+        chat: &'static str,
+        _dir: tempfile::TempDir,
+    }
+
+    /// A run on [`WakeHarness`] whose runtime wakes its agent (`wakes`),
+    /// started and mid-turn. The grace a wait gets once its work is gone is
+    /// short here (`ZERON_WAKE_GRACE_MS`, read per run).
+    async fn wake_rig(chat: &'static str, wakes: bool) -> WakeRig {
+        // SAFETY: tests only; nothing reads this but the run loop, per run.
+        unsafe { std::env::set_var("ZERON_WAKE_GRACE_MS", "300") };
+        let (feed, rx) = mpsc::unbounded_channel();
+        let turn_slot = Arc::new(Mutex::new(None));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(WakeHarness {
+            feed: Mutex::new(Some(rx)),
+            turn: turn_slot.clone(),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        let turn = loop {
+            if let Some(turn) = turn_slot.lock().unwrap().clone() {
+                break turn;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        turn.set_wakes_on_background(wakes);
+        feed.send(AgentEvent::TextDelta { text: "on it".into() }).unwrap();
+        WakeRig { core, feed, turn, chat, _dir: dir }
+    }
+
+    fn waiting_agent(id: &str) -> zeron_proto::WaitingOn {
+        zeron_proto::WaitingOn {
+            id: id.into(),
+            kind: zeron_proto::WaitingKind::Agent,
+            label: format!("agent {id}"),
+        }
+    }
+
+    fn bg_process(id: &str) -> zeron_proto::BackgroundTask {
+        zeron_proto::BackgroundTask {
+            id: id.into(),
+            command: format!("run {id}"),
+            description: None,
+            started_at: Utc::now(),
+        }
+    }
+
+    /// The session as the rig's engine says it once things settle.
+    async fn settled(rig: &WakeRig) -> Session {
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        rig.core.sessions.session_status(rig.chat).expect("a session row")
+    }
+
+    fn waits_on(session: &Session) -> Vec<String> {
+        session
+            .waiting
+            .as_ref()
+            .map(|w| w.on.iter().map(|o| o.id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_turn_ending_with_a_background_agent_waits_and_its_wake_turn_marks_the_end() {
+        let rig = wake_rig("chat-wait-wake", true).await;
+        rig.turn.set_background(1);
+        rig.turn.set_background_agents(vec![waiting_agent("ag1")]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        let s = settled(&rig).await;
+        assert_eq!(s.status, SessionStatus::Idle);
+        assert_eq!(waits_on(&s), ["ag1"]);
+        assert_eq!(s.last_completed_turn, None, "a wait is no finish");
+
+        // The agent reports back: the roster drains, the runtime wakes its
+        // agent, and the chat is Working from that moment.
+        rig.turn.set_background_agents(Vec::new());
+        rig.turn.set_background(0);
+        rig.turn.note_wake();
+        let s = settled(&rig).await;
+        assert_eq!(s.status, SessionStatus::Working);
+        assert!(s.waiting.is_none());
+
+        // The wake turn's own end is the one finish.
+        rig.feed.send(AgentEvent::TextDelta { text: "all done".into() }).unwrap();
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        let s = settled(&rig).await;
+        assert_eq!(s.status, SessionStatus::Idle);
+        assert!(s.waiting.is_none());
+        assert!(s.last_completed_turn.is_some());
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn work_ending_with_no_wake_turn_marks_the_held_end_after_its_grace() {
+        let rig = wake_rig("chat-wait-lost", true).await;
+        rig.turn.set_background_agents(vec![waiting_agent("ag1")]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        assert_eq!(waits_on(&settled(&rig).await), ["ag1"]);
+        rig.turn.set_background_agents(Vec::new());
+        let s = settled(&rig).await;
+        assert!(s.waiting.is_some(), "the wake turn has its grace to start");
+        assert!(s.waiting.as_ref().unwrap().on.is_empty());
+        assert_eq!(s.last_completed_turn, None);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let s = settled(&rig).await;
+        assert!(s.waiting.is_none());
+        assert_eq!(s.status, SessionStatus::Idle);
+        assert!(s.last_completed_turn.is_some(), "the turn's end stands");
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_process_is_waited_on_only_once_the_agent_says_so_and_stop_waiting_ends_it() {
+        let rig = wake_rig("chat-wait-mark", true).await;
+        rig.turn.set_background_processes(vec![bg_process("dev"), bg_process("tests")]);
+        let outcome = rig
+            .core
+            .sessions
+            .await_background(rig.chat, &["tests".into(), "nope".into()], true)
+            .unwrap();
+        assert_eq!(outcome.matched, ["tests"]);
+        assert_eq!(outcome.unmatched, ["nope"]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        let s = settled(&rig).await;
+        assert_eq!(waits_on(&s), ["tests"], "the dev server left running is no wait");
+        // The person: Stop waiting.
+        assert!(rig.core.sessions.stop_waiting(rig.chat));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let s = settled(&rig).await;
+        assert!(s.waiting.is_none());
+        assert!(s.last_completed_turn.is_some());
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_turn_ending_with_only_unmarked_processes_finishes_at_once() {
+        let rig = wake_rig("chat-wait-none", true).await;
+        rig.turn.set_background_processes(vec![bg_process("dev")]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        let s = settled(&rig).await;
+        assert!(s.waiting.is_none());
+        assert!(s.last_completed_turn.is_some());
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_never_wakes_its_agent_refuses_a_wait() {
+        let rig = wake_rig("chat-wait-nowake", false).await;
+        rig.turn.set_background_processes(vec![bg_process("build")]);
+        rig.turn.set_background_agents(vec![waiting_agent("ag1")]);
+        assert_eq!(
+            rig.core.sessions.await_background(rig.chat, &["build".into()], true).err(),
+            Some(AwaitRefused::NoWake)
+        );
+        assert_eq!(
+            rig.core.sessions.await_background("chat-elsewhere", &["build".into()], true).err(),
+            Some(AwaitRefused::NoRun)
+        );
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        let s = settled(&rig).await;
+        assert!(s.waiting.is_none(), "nothing wakes this agent: its end is the end");
+        assert!(s.last_completed_turn.is_some());
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_person_writing_ends_a_wait() {
+        let rig = wake_rig("chat-wait-steer", true).await;
+        rig.turn.set_background_agents(vec![waiting_agent("ag1")]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        assert_eq!(waits_on(&settled(&rig).await), ["ag1"]);
+        rig.feed
+            .send(AgentEvent::Steered {
+                assistant_message_id: None,
+                next_assistant_message_id: Some("a2".into()),
+            })
+            .unwrap();
+        let s = settled(&rig).await;
+        assert_eq!(s.status, SessionStatus::Working);
+        assert!(s.waiting.is_none());
+        rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_run_ending_mid_wait_marks_the_held_end() {
+        let rig = wake_rig("chat-wait-exit", true).await;
+        rig.turn.set_background_agents(vec![waiting_agent("ag1")]);
+        rig.feed.send(done(DoneStatus::Completed)).unwrap();
+        assert_eq!(waits_on(&settled(&rig).await), ["ag1"]);
+        // The runtime goes (its stream ends: crashed, or its process exited).
+        drop(rig.feed);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let s = rig.core.sessions.session_status(rig.chat).unwrap();
+        assert!(s.waiting.is_none());
+        assert_eq!(s.status, SessionStatus::Idle);
+        assert!(s.last_completed_turn.is_some(), "a wait never swallows the finish");
+        rig.core.sessions.shutdown().await;
     }
 }

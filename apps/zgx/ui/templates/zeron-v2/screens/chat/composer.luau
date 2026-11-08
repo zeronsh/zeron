@@ -958,6 +958,15 @@ local function Composer(): Node
 			open_model = shared.open_model,
 			model_open = model_open,
 			tray = TRAY,
+			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			aside = function(): number?
+				return shared.jump_width:get()
+			end,
+			on_pill_width = function(w: number?)
+				if shared.pill_width:peek() ~= w then
+					shared.pill_width:set(w)
+				end
+			end,
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
