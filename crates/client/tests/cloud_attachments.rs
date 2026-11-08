@@ -364,9 +364,10 @@ async fn a_failing_upload_backs_off_instead_of_hammering_the_edge() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     // Alone, this is exactly 1: still waiting out the first backoff. Any
     // successful dial in the process cuts a backoff short on purpose, and this
-    // binary's other tests dial. A hot loop would make hundreds.
+    // binary's other tests dial in parallel, so how many more depends on them
+    // (12 seen on CI). A hot loop against a local edge makes thousands.
     let puts = edge.store_puts();
-    assert!((1..=10).contains(&puts), "{puts} uploads in 1.5 s");
+    assert!((1..=50).contains(&puts), "{puts} uploads in 1.5 s");
     assert_eq!(
         session.snapshot().pending[0].state,
         zeron_client::SendState::Sending
