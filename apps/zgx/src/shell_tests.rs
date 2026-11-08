@@ -636,3 +636,50 @@ fn removing_a_project_asks_first() {
         "its sessions with it"
     );
 }
+
+/// A tab carried near an end of its strip scrolls the strip under it, as
+/// long as it's held there; let go, it lands among the others. (Five chats
+/// composed in tabs in a window 800 wide: the top bar's strip overflows,
+/// scrolled to its end, the last tab showing.)
+#[test]
+fn a_tab_carried_near_an_end_of_its_strip_scrolls_it() {
+    let mut app = mount();
+    app.ui.scene.borrow_mut().resize(800., H);
+    app.frames(30);
+    assert!(app.host.run_command("partner_chats"));
+    app.frames(10);
+    app.click("#shell-sidebar >> role:button \"Answer the review\"");
+    app.frames(30);
+    let rows: Vec<String> = ["a1", "a2", "a3", "b1", "b2"]
+        .iter()
+        .enumerate()
+        .map(|(i, id)| format!(r#"{{"kind":"row","key":"{id}","children":[{{"kind":"leaf","id":"{id}"}},{{"kind":"leaf","id":"p{}"}}]}}"#, i + 1))
+        .collect();
+    let tabs = zgx_script::Value::from_json(&format!("[{}]", rows.join(","))).unwrap();
+    app.host.set_state("screens/shell/split.luau::inset_split_trees", tabs).unwrap();
+    app.frames(60);
+    let room = app.bounds("#session-tabs-scroll");
+    let first = app.bounds("#session-tab-a1").x;
+    assert!(first < room.x - 1., "the strip overflows, scrolled past its start: a1 at {first}, the strip at {}", room.x);
+    // b2 carried to the strip's start and held there.
+    let from = app.bounds("#session-tab-b2");
+    let (x, y) = (from.x + from.width / 2., from.y + from.height / 2.);
+    let button = PointerButton::Primary;
+    app.ui.dispatch(InputEvent::PointerMove { x, y });
+    app.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    app.frames(2);
+    let to = room.x + 8.;
+    for i in 1..=20 {
+        let px = x + (to - x) * i as f32 / 20.;
+        app.ui.dispatch(InputEvent::PointerMove { x: px, y });
+        app.frames(1);
+    }
+    let held = app.bounds("#session-tab-a1").x;
+    app.frames(60);
+    let after = app.bounds("#session-tab-a1").x;
+    assert!(after > held + 20., "held near the start, the strip scrolls toward it: a1 {held} then {after}");
+    app.ui.dispatch(InputEvent::PointerUp { x: to, y, button });
+    app.ui.input.forget_clicks();
+    app.frames(60);
+    assert_eq!(app.error(), None);
+}
