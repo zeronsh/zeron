@@ -190,10 +190,8 @@ function M.Wallpaper(props: Props): Node
 		if w == "" then
 			return ""
 		end
-		local how = effect()
-		-- (Every effect's paper follows the scheme.)
-		local paper = if how ~= "none" then (if light() then ":light" else ":dark") else ""
-		return `{how}{paper}|{w}`
+		-- (The scheme isn't in it: the paper follows it in place, below.)
+		return `{effect()}|{w}`
 	end
 	local function strength(): number
 		return M.INTENSITY[read(props.intensity, "medium")] or 1
@@ -225,22 +223,12 @@ function M.Wallpaper(props: Props): Node
 				return ui.div {}
 			end
 			local how, w = string.match(k, "^([^|]*)|(.*)$")
-			how = string.match(how or "", "^[^:]*") or "none"
-			local el = ui.ref()
+			how = how or "none"
 			local picture = if props.picture then props.picture() else nil
-			-- What changes in place: set on its layer as it changes.
-			ui.effect(function()
-				local p = effects.params { strength = strength(), threshold = threshold(), faded = faded() }
-				local node: any = el:peek()
-				if node then
-					anime.utils.set(node, { layerParam0 = p[1][1], layerParam1 = p[1][2], layerParam3 = p[1][4] })
-				end
-			end)
 			-- The art's box: the window's width from the box's right edge, moved
 			-- right by what stands beside the box; the effect drawn over it (on
 			-- the picture's grid: the box is what the picture covers).
 			return ui.div {
-				ref = el,
 				-- (Named, for tests.)
 				id = "wallpaper-layer",
 				absolute = true,
@@ -255,13 +243,18 @@ function M.Wallpaper(props: Props): Node
 				-- composited from, and draws it again in one frame on return.)
 				layer_on = shown,
 				layer_shader = effects.shader(how),
-				layer_params = effects.params {
-					strength = strength(),
-					threshold = threshold(),
-					light = light(),
-					faded = faded(),
-					picture = picture,
-				},
+				-- What changes in place (its strength, density, fade, the
+				-- scheme's paper): followed, the layer composited again, never
+				-- built again.
+				layer_params = function(): { any }
+					return effects.params {
+						strength = strength(),
+						threshold = threshold(),
+						light = light(),
+						faded = faded(),
+						picture = picture,
+					}
+				end,
 				props.content(w or ""),
 			}
 		end, {
