@@ -113,14 +113,14 @@ loro-protocol = "0.3"
 # Atlas tiles updated in place from pixels or imported dma-bufs, display-rate
 # frame callbacks in inactive windows, and Wayland frames that no longer stop
 # after a forced draw (b564a34, zeronsh/zui#18).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9", features = [
+gpui = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be" }
 gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "59f89243cea79dd70eb7a619b3930c374ef6958a" }
 
 # diffs
