@@ -908,11 +908,11 @@ fn a_pane_out_of_focus_is_live_and_gaining_focus_changes_nothing() {
     assert!(places.iter().any(|n| n.ends_with("_a1")) && places.iter().any(|n| n.ends_with("_a3")), "{places:?}");
 }
 
-/// In a split, the side opened wins: the panel opened when the panes would go
-/// under their least closes the sidebar, the sidebar opened closes the panel,
-/// and neither is back until it's asked for. Under their least with one side
-/// open, the panes just narrow. (ui/tests/pane_floor.test.luau has the rest,
-/// which CI doesn't run.)
+/// In a split, the side opened wins (three columns at most, Wing's cap): the
+/// panel opened when the panes would go under their least hides the sidebar,
+/// the sidebar opened hides the panel. Hidden by the fit, not closed: each is
+/// back by itself once the other closes. Under their least with one side
+/// open, the panes just narrow. (ui/tests/pane_floor.test.luau has the rest.)
 #[test]
 fn the_side_opened_wins_in_a_split() {
     use zgx_script::Value;
@@ -932,28 +932,32 @@ fn the_side_opened_wins_in_a_split() {
         app.frames(40);
         let when = format!("{} panes at 1100", ids.len());
         let shown = |app: &mut TestApp, what: &str| app.bounds(what).width > 1.;
+        // (Three panes at 1100 have no room for the sidebar even alone: the
+        // fit hides it already.)
+        let had_sidebar = shown(&mut app, "shell-sidebar");
         app.click(PANEL);
         app.frames(60);
         assert_eq!(app.bounds("shell-files").width, 360., "{when}: the panel, at its least");
-        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar closed for it");
+        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar gave way for it");
         for id in ids {
             let w = app.bounds(&format!("#split-pane-{id}")).width;
             assert!(w >= least, "{when}: {id} is {w} wide, beside the panel");
         }
-        // The panel closed: the sidebar isn't back on its own.
+        // The panel closed: the sidebar is back by itself, as it was.
         app.click(PANEL);
         app.frames(60);
-        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar stays closed");
-        // Open both ways: the sidebar closes the panel, for good too.
+        assert_eq!(shown(&mut app, "shell-sidebar"), had_sidebar, "{when}: the sidebar as it was");
+        // Open both ways: the sidebar hides the panel, back as it folds.
         app.click(PANEL);
         app.frames(60);
         app.click(SIDEBAR);
         app.frames(60);
-        assert!(shown(&mut app, "shell-sidebar"), "{when}: the sidebar opened");
-        assert!(!shown(&mut app, "shell-files"), "{when}: the panel closed for it");
+        assert!(shown(&mut app, "shell-sidebar"), "{when}: the sidebar asked for");
+        assert!(!shown(&mut app, "shell-files"), "{when}: the panel gave way for it");
         app.click(SIDEBAR);
         app.frames(60);
-        assert!(!shown(&mut app, "shell-files"), "{when}: the panel stays closed");
+        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar folded");
+        assert!(shown(&mut app, "shell-files"), "{when}: the panel is back");
     }
 }
 
