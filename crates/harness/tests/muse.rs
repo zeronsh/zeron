@@ -706,3 +706,11 @@ async fn a_title_runs_on_a_read_only_host_and_ends_with_its_turn() {
     assert!(prompt.starts_with(zeron_harness::TITLE_INSTRUCTIONS));
     assert!(prompt.contains("fix the login bug"));
 }
+
+/// A steer stays at its step boundary until a real Muse host has shown that
+/// a stop keeps its background work and doesn't abort a turn that is only
+/// writing (Codex's background commands stayed open and did just that).
+#[test]
+fn a_steer_does_not_stop_the_turn() {
+    assert!(!MuseHarness::new().steer_stops_tool());
+}

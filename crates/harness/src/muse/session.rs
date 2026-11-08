@@ -451,6 +451,25 @@ impl Runner {
         .await;
     }
 
+    /// Its background subagents to the host: the count that holds the
+    /// runtime, and the agents themselves, waited on (Muse starts a wake
+    /// turn of its own when one ends).
+    fn publish_background(&self) {
+        self.turn.set_background(self.norm.running_subagents.len());
+        self.turn.set_wakes_on_background(true);
+        let mut ids: Vec<&String> = self.norm.running_subagents.iter().collect();
+        ids.sort();
+        self.turn.set_background_agents(
+            ids.into_iter()
+                .map(|id| zeron_proto::WaitingOn {
+                    id: id.clone(),
+                    kind: zeron_proto::WaitingKind::Agent,
+                    label: "Subagent".into(),
+                })
+                .collect(),
+        );
+    }
+
     fn owns(&self, turn: &str) -> bool {
         self.active.as_deref() == Some(turn) || self.joined.contains(turn)
     }
@@ -556,6 +575,7 @@ impl Runner {
                     self.joined.insert(turn);
                 } else {
                     // A wake: Muse resumed on its own (background work ended).
+                    self.turn.note_wake();
                     self.begin(turn);
                     self.assistant = uuid::Uuid::new_v4().to_string();
                     self.started(
@@ -575,7 +595,7 @@ impl Runner {
                     // Background work finishing outside a turn still counts down.
                     if matches!(kind, "subagent" | "workflow") {
                         self.norm.item(item);
-                        self.turn.set_background(self.norm.running_subagents.len());
+                        self.publish_background();
                     }
                     return Ok(());
                 }
@@ -592,7 +612,7 @@ impl Runner {
                 for event in self.norm.item(item) {
                     self.emit(event).await?;
                 }
-                self.turn.set_background(self.norm.running_subagents.len());
+                self.publish_background();
             }
             "item/delta" => {
                 if self.active.is_some() {
