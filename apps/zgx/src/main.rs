@@ -914,6 +914,10 @@ fn serve_with(
     if inspect {
         zgx_script::inspect::prepare();
     }
+    // A press travels 6 points before it's a drag, so a click that wavers
+    // stays a click (a tab's above all). (macOS gives no setting: zgx's own
+    // is 4.)
+    cx.ui.input.set_drag_threshold(6.);
     // The platform, which the selection's Copy and Look Up go through, is
     // found as the view mounts.
     let platform = selection_platform(cx, &host);
