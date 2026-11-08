@@ -4,8 +4,8 @@
 --
 -- Dragged, a tab rises a little (larger, its shadow deeper) and follows the
 -- pointer along the strip, held to its line and kept inside it; the others
--- slide aside as its middle passes theirs, and let go it settles into its
--- place, which the strip keeps then (`commit`, once). It leaves the strip as
+-- slide aside as its leading edge passes their middle, and let go it
+-- settles into its place, which the strip keeps then (`commit`, once). It leaves the strip as
 -- it's grabbed: one tab, the lifted one, and where it would land a gap its
 -- width. Carried off the strip, the drag is the platform's again (its
 -- preview follows the pointer) and the gap closes; brought back, it opens
@@ -216,12 +216,21 @@ function M.new(props: Props)
 		local w = held_w
 		local x = math.clamp(pointer - grab, 0, math.max(0, view_w() - w))
 		anime.utils.set(ghost, { x = x })
-		local middle = x + props.offset:peek() + w / 2
-		local before, left = 0, 0
+		-- A neighbour gives way as the lifted tab's leading edge passes its
+		-- middle: its right edge for one after it, its left for one before.
+		-- (Coming back takes the other edge back past it, so it doesn't flicker.)
+		local from = x + props.offset:peek()
+		local to = from + w
+		local before, left, past = 0, 0, false
 		for _, k in order:peek() do
 			local kw = width(k)
-			if k ~= id and left + kw / 2 < middle then
-				before += 1
+			if k == id then
+				past = true
+			else
+				local middle = left + kw / 2
+				if (past and to > middle) or (not past and from >= middle) then
+					before += 1
+				end
 			end
 			left += kw + gap()
 		end
