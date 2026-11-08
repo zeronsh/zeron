@@ -10,6 +10,7 @@
 
 local motion = require("@self/motion")
 local Icon = require("@self/icon")
+local TabStrip = require("@self/tab_strip")
 local control = require("@self/control")
 
 -- (A tab's label may be a message, `ui.t`, drawn as it is.)
@@ -68,6 +69,7 @@ return function(props: Props): Node
 		local function chosen(): boolean
 			return value:get() == o.value
 		end
+		local hovered = ui.use_state(false)
 		local ink = function()
 			if o.disabled then
 				return "$text.disabled"
@@ -105,8 +107,17 @@ return function(props: Props): Node
 				items = "center",
 				shrink = 0,
 				rounded = if pill then "$radius.lg" else "$radius.sm",
+				relative = true,
 				color = ink,
+				-- (Under the pointer, a pill's wash fades in, `TabStrip.Wash`, the
+				-- ink brightening; pressed, either look darkens, as the strips'.)
 				hover = if o.disabled then nil else { color = "$text.primary" },
+				active = if o.disabled then nil else { bg = "$pressed" },
+				on_hover = if pill and not o.disabled
+					then function(inside: boolean)
+						hovered:set(inside)
+					end
+					else nil,
 				focus = control.ring,
 				on_click = function()
 					choose(o)
@@ -114,6 +125,11 @@ return function(props: Props): Node
 				on_focus = function()
 					choose(o)
 				end,
+				if pill
+					then TabStrip.Wash(function(): boolean
+						return hovered:get() and not chosen()
+					end)
+					else nil,
 				if o.icon then ui.div { y = -0.5, Icon { name = o.icon, size = if size == "sm" then 14 else 16 } } else nil,
 				ui.text {
 					o.label,
