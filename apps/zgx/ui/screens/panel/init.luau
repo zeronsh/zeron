@@ -79,6 +79,7 @@ local state = require("@app/screens/panel/state")
 -- Lanes seen as their tabs come to the front (the panel home's done checks).
 require("@app/screens/panel/lanes_seen")
 local Files = require("@app/screens/files")
+local FilePaths = require("@app/screens/files/paths")
 -- The shell's layout (whether a session's panel is expanded), if it's there
 -- (a fixture mounts the panel alone).
 local shell_view: any = nil
@@ -929,8 +930,20 @@ M.Panel = ui.component(function(props: Props): Node
 				-- the one left behind faint until it lands.
 				on_drag = function(): any
 					dragging:set(true)
-					-- (A chat's tab can go out to the page: as a pane, or a tab of its own.)
-					return { panel_tab = id }
+					-- Keep the strip's identity while carrying context to a composer.
+					local payload: any = { panel_tab = id }
+					if tab.kind == "files" then
+						local path = Files.tab_file(id) or tab.path
+						if path then
+							local target = FilePaths.target_of(project, session)
+							payload.paths = { path }
+							payload.root = if target then target.root else nil
+						end
+					elseif tab.kind == "side_chat" and tab.chat and lanes_card
+						and lanes_card.unsent:peek()[tab.chat] == nil and lanes_card.forks:peek()[tab.chat] == nil then
+						payload.session = tab.chat
+					end
+					return payload
 				end,
 				-- (The tab as it stands, on the window's colour. Nothing here eases: a
 				-- drag's preview has no clock for it.)

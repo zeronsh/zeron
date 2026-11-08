@@ -566,6 +566,15 @@ function M.mention_chat(id: string, key: string?)
 			title, mark = c.title, c.agent
 		end
 	end
+	if title == nil then
+		for _, list in sessions.now:peek().children or {} do
+			for _, c in list do
+				if c.id == id then
+					title, mark = c.title, c.agent
+				end
+			end
+		end
+	end
 	M.push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
 end
 
@@ -614,7 +623,7 @@ function M.chat_link(title: string, id: string): string
 end
 
 -- A drag from inside the window that drops here: the files pane's files
--- (their paths). Other drags (a session, a tab, a section) aren't ours.
+-- (their paths, also carried by file tabs). Other drags aren't file context.
 local function workspace_paths(payload: any): { string }?
 	if type(payload) == "table" and type(payload.paths) == "table" and #payload.paths > 0 then
 		return payload.paths
