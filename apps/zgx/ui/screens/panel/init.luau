@@ -1563,8 +1563,7 @@ M.Panel = ui.component(function(props: Props): Node
 		relative = true,
 		overflow = "hidden",
 		rounded = "$zeron.inset.radius",
-		-- (Frosted, Zeron's panel glass, theme.rs `panel_bg`.)
-		bg = ds.material.pick("$zeron.panel.tint", "$zeron.inset.bg"),
+		bg = "$zeron.inset.bg",
 		border = 1,
 		border_color = "$zeron.inset.edge",
 		ui.column { w_full = true, shrink = 0, hidden = closed, strip },
