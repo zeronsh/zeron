@@ -14,6 +14,12 @@
 --   cloud_stub.repos_fail      the next repositories read fails
 --   cloud_stub.last_7_days     Settings → Cloud's usage over the last 7 days
 --   cloud_stub.no_github       GitHub not connected (no repositories)
+--   cloud_stub.two_logins      a second GitHub login, with repositories of its
+--                              own and one it shares with the first
+--   cloud_stub.login_dead      the second login needs reconnecting
+--   cloud_stub.already_connected  the next approval is a login already there
+--   cloud_stub.approve         the code's approved on GitHub
+--   cloud_stub.old_host        an engine from before several logins: no list
 --   cloud_stub.purchase_lands  a Stripe page's purchase lands: 12,000 extra
 --   cloud_stub.fail_next       the next Cloud or Billing call fails ("failed")
 
@@ -29,6 +35,12 @@ end
 
 local offered = ui.state("cloud_stub_offered", false)
 local connected = ui.state("cloud_stub_github", true)
+-- The logins, as the host lists them.
+local logins = ui.state("cloud_stub_logins", {
+	{ slot = "a1", login = "octo-example", status = "connected" },
+} :: { github.Account })
+local old_host = ui.state("cloud_stub_old_host", false)
+local approves_as = ui.state("cloud_stub_approves_as", "home-example")
 local fail = ui.state("cloud_stub_fail", false)
 
 -- A promise already settled, as the host's settle: `:after` at once.
@@ -74,6 +86,31 @@ local REPOS: { cloud.Repo } = {
 	{ name = "acme/site", private = false, branch = "main", clone_url = "https://github.com/acme/site.git", pushed = 2000 },
 	{ name = "octo/tools", private = false, branch = "trunk", clone_url = "https://github.com/octo/tools.git", pushed = 2500 },
 }
+-- A second login's, and who reaches what with it there.
+local HOME_REPO: cloud.Repo = { name = "home/blog", private = true, branch = "main", clone_url = "https://github.com/home/blog.git", pushed = 3500, account = "home-example", accounts = { "home-example" }, installation = 200 }
+local function with_logins(list: { cloud.Repo }): { cloud.Repo }
+	local has_home = false
+	local out = {}
+	for _, a in logins:peek() do
+		has_home = has_home or (a.login == "home-example" and a.status == "connected")
+	end
+	for _, r in list do
+		local repo = table.clone(r)
+		repo.installation = 100
+		repo.account = "octo-example"
+		repo.accounts = { "octo-example" }
+		-- (Reached by both, new chats on it take the newer login.)
+		if has_home and r.name == "acme/site" then
+			repo.account = "home-example"
+			repo.accounts = { "home-example", "octo-example" }
+		end
+		table.insert(out, repo)
+	end
+	if has_home then
+		table.insert(out, HOME_REPO)
+	end
+	return out
+end
 -- What the next repositories read answers: "ok", "none" (connected, none
 -- chosen), "fail" (the edge out of reach).
 local repos_next = ui.state("cloud_stub_repos_next", "ok")
@@ -100,7 +137,7 @@ c.load_repos = function(done: (() -> ())?)
 	elseif repos_next:peek() == "fail" then
 		now.repos, now.repos_failure = nil, "failed"
 	else
-		now.repos = table.clone(REPOS)
+		now.repos = if old_host:peek() then table.clone(REPOS) else with_logins(REPOS)
 	end
 	cloud.now:set(now)
 	if done then
@@ -171,9 +208,14 @@ end
 
 local function publish_github()
 	if connected:peek() then
-		github.now:set({ phase = "connected", account = "octo-example", repos = { "acme/atlas", "acme/site", "octo/tools" } } :: any)
+		github.now:set({
+			phase = "connected",
+			account = "octo-example",
+			accounts = if old_host:peek() then {} else logins:peek(),
+			repos = { "acme/atlas", "acme/site", "octo/tools" },
+		} :: any)
 	else
-		github.now:set({ phase = "idle", repos = {} } :: any)
+		github.now:set({ phase = "idle", repos = {}, accounts = {} } :: any)
 	end
 end
 local g = github :: any
@@ -183,7 +225,7 @@ g.load = function()
 end
 g.connect = function()
 	log("github.connect")
-	github.now:set({ phase = "waiting", code = "WDJB-MJHT", repos = {} } :: any)
+	github.now:set({ phase = "waiting", code = "WDJB-MJHT", repos = {}, accounts = if old_host:peek() then {} else logins:peek() } :: any)
 end
 g.cancel = function()
 	log("github.cancel")
@@ -198,6 +240,21 @@ end
 g.disconnect = function()
 	log("github.disconnect")
 	connected:set(false)
+	publish_github()
+end
+g.forget = function(account: github.Account)
+	log(`github.forget:{account.slot or "all"}`)
+	if not account.slot then
+		g.disconnect()
+		return
+	end
+	local left = {}
+	for _, a in logins:peek() do
+		if a.slot ~= account.slot then
+			table.insert(left, a)
+		end
+	end
+	logins:set(left)
 	publish_github()
 end
 
@@ -250,6 +307,72 @@ ui.command {
 	title = "GitHub isn't connected for Cloud",
 	run = function()
 		connected:set(false)
+		publish_github()
+		cloud.load_repos()
+	end,
+}
+ui.command {
+	id = "cloud_stub.two_logins",
+	title = "A second GitHub login",
+	run = function()
+		local list = table.clone(logins:peek())
+		table.insert(list, { slot = "a2", login = "home-example", status = "connected" })
+		logins:set(list)
+		publish_github()
+		cloud.load_repos()
+	end,
+}
+ui.command {
+	id = "cloud_stub.login_dead",
+	title = "The second GitHub login needs reconnecting",
+	run = function()
+		local list = {}
+		for _, a in logins:peek() do
+			local copy = table.clone(a)
+			if copy.slot == "a2" then
+				copy.status = "needs_reconnect"
+			end
+			table.insert(list, copy)
+		end
+		logins:set(list)
+		publish_github()
+	end,
+}
+ui.command {
+	id = "cloud_stub.already_connected",
+	title = "The next approval is a login already connected",
+	run = function()
+		approves_as:set("octo-example")
+	end,
+}
+ui.command {
+	id = "cloud_stub.approve",
+	title = "The code's approved on GitHub",
+	run = function()
+		local who = approves_as:peek()
+		local already = false
+		local list = table.clone(logins:peek())
+		for _, a in list do
+			already = already or a.login == who
+		end
+		if not already then
+			table.insert(list, { slot = "a2", login = who, status = "connected" })
+			logins:set(list)
+		end
+		publish_github()
+		if already then
+			local now = table.clone(github.now:peek()) :: any
+			now.already = who
+			github.now:set(now)
+		end
+		cloud.load_repos()
+	end,
+}
+ui.command {
+	id = "cloud_stub.old_host",
+	title = "An engine from before several logins",
+	run = function()
+		old_host:set(true)
 		publish_github()
 		cloud.load_repos()
 	end,

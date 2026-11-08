@@ -18,7 +18,10 @@
 --   cloud.branches(repo, default?)     a promise of a repository's branches
 --
 -- A status: { state, available, device?, credits?, error?, failed_action?,
--- awake?, max_awake? }. A repository: { name, private, branch?, pushed }.
+-- awake?, max_awake? }. A repository: { name, private, branch?, pushed,
+-- account?, accounts?, installation? }: `account`, the GitHub login a new chat
+-- on it would use; `accounts`, every one that reaches it; `installation`, the
+-- GitHub App's installation that gives the access. (None from an older vault.)
 -- Every function here is a field, so a fixture answers in the host's place.
 
 local auth = require("@account/auth")
@@ -35,7 +38,16 @@ export type Status = {
 	awake: number?,
 	max_awake: number?,
 }
-export type Repo = { name: string, private: boolean, branch: string?, clone_url: string?, pushed: number }
+export type Repo = {
+	name: string,
+	private: boolean,
+	branch: string?,
+	clone_url: string?,
+	pushed: number,
+	account: string?,
+	accounts: { string }?,
+	installation: number?,
+}
 export type Now = {
 	phase: string,
 	status: Status?,
