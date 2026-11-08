@@ -8107,6 +8107,10 @@ public struct ComposerState: Equatable, Hashable {
      */
     public var lastSubmittedMessageId: String?
     public var contextUsage: ContextUsage?
+    /**
+     * What to show in place of an empty transcript, if anything.
+     */
+    public var transcriptLoad: TranscriptLoad
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8134,7 +8138,10 @@ public struct ComposerState: Equatable, Hashable {
          */queueError: String?, 
         /**
          * Scroll-to-own-send target.
-         */lastSubmittedMessageId: String?, contextUsage: ContextUsage?) {
+         */lastSubmittedMessageId: String?, contextUsage: ContextUsage?, 
+        /**
+         * What to show in place of an empty transcript, if anything.
+         */transcriptLoad: TranscriptLoad) {
         self.chatId = chatId
         self.revision = revision
         self.title = title
@@ -8150,6 +8157,7 @@ public struct ComposerState: Equatable, Hashable {
         self.queueError = queueError
         self.lastSubmittedMessageId = lastSubmittedMessageId
         self.contextUsage = contextUsage
+        self.transcriptLoad = transcriptLoad
     }
 
     
@@ -8182,7 +8190,8 @@ public struct FfiConverterTypeComposerState: FfiConverterRustBuffer {
                 openInput: FfiConverterOptionTypeInputRequest.read(from: &buf), 
                 queueError: FfiConverterOptionString.read(from: &buf), 
                 lastSubmittedMessageId: FfiConverterOptionString.read(from: &buf), 
-                contextUsage: FfiConverterOptionTypeContextUsage.read(from: &buf)
+                contextUsage: FfiConverterOptionTypeContextUsage.read(from: &buf), 
+                transcriptLoad: FfiConverterTypeTranscriptLoad.read(from: &buf)
         )
     }
 
@@ -8202,6 +8211,7 @@ public struct FfiConverterTypeComposerState: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.queueError, into: &buf)
         FfiConverterOptionString.write(value.lastSubmittedMessageId, into: &buf)
         FfiConverterOptionTypeContextUsage.write(value.contextUsage, into: &buf)
+        FfiConverterTypeTranscriptLoad.write(value.transcriptLoad, into: &buf)
     }
 }
 
@@ -8381,6 +8391,11 @@ public struct CoreConfig: Equatable, Hashable {
      */
     public var platform: String
     public var appVersion: String
+    /**
+     * Run the relay layer (docs/design/relay-mobile.md). Off, this device sends what
+     * a shipped phone does, and holds its account's chats on stored rows.
+     */
+    public var relayLayer: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8400,13 +8415,18 @@ public struct CoreConfig: Equatable, Hashable {
          */deviceName: String, 
         /**
          * `ios` / `android`.
-         */platform: String, appVersion: String) {
+         */platform: String, appVersion: String, 
+        /**
+         * Run the relay layer (docs/design/relay-mobile.md). Off, this device sends what
+         * a shipped phone does, and holds its account's chats on stored rows.
+         */relayLayer: Bool = false) {
         self.edgeUrl = edgeUrl
         self.dataDir = dataDir
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.platform = platform
         self.appVersion = appVersion
+        self.relayLayer = relayLayer
     }
 
     
@@ -8430,7 +8450,8 @@ public struct FfiConverterTypeCoreConfig: FfiConverterRustBuffer {
                 deviceId: FfiConverterString.read(from: &buf), 
                 deviceName: FfiConverterString.read(from: &buf), 
                 platform: FfiConverterString.read(from: &buf), 
-                appVersion: FfiConverterString.read(from: &buf)
+                appVersion: FfiConverterString.read(from: &buf), 
+                relayLayer: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -8441,6 +8462,7 @@ public struct FfiConverterTypeCoreConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.deviceName, into: &buf)
         FfiConverterString.write(value.platform, into: &buf)
         FfiConverterString.write(value.appVersion, into: &buf)
+        FfiConverterBool.write(value.relayLayer, into: &buf)
     }
 }
 
@@ -18232,6 +18254,113 @@ public func FfiConverterTypeTerminalPhase_lift(_ buf: RustBuffer) throws -> Term
 #endif
 public func FfiConverterTypeTerminalPhase_lower(_ value: TerminalPhase) -> RustBuffer {
     return FfiConverterTypeTerminalPhase.lower(value)
+}
+
+
+
+/**
+ * Why a transcript with nothing in it has nothing in it. Anything stored on this
+ * device always shows, so this is only about a chat it has never loaded.
+ */
+
+public enum TranscriptLoad: Equatable, Hashable {
+    
+    /**
+     * Show the transcript: it has content, or the chat really is empty.
+     */
+    case ready
+    /**
+     * "Syncing…"
+     */
+    case syncing
+    /**
+     * "Reconnecting…"
+     */
+    case reconnecting
+    /**
+     * "Offline — this chat loads when you're back online". No spinner.
+     */
+    case offline
+    /**
+     * "This chat lives on another device — it loads when that device is back
+     * online". No spinner: nothing is lost, and nothing's happening here.
+     */
+    case hostAway
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TranscriptLoad: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTranscriptLoad: FfiConverterRustBuffer {
+    typealias SwiftType = TranscriptLoad
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TranscriptLoad {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .ready
+        
+        case 2: return .syncing
+        
+        case 3: return .reconnecting
+        
+        case 4: return .offline
+        
+        case 5: return .hostAway
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TranscriptLoad, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .ready:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .syncing:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .reconnecting:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .offline:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .hostAway:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptLoad_lift(_ buf: RustBuffer) throws -> TranscriptLoad {
+    return try FfiConverterTypeTranscriptLoad.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptLoad_lower(_ value: TranscriptLoad) -> RustBuffer {
+    return FfiConverterTypeTranscriptLoad.lower(value)
 }
 
 

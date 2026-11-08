@@ -276,14 +276,19 @@ impl BinConnector for WsBinConnector {
     fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
         let provider = self.url.clone();
         Box::pin(async move {
+            let budget = crate::budget::shared().stats();
+            tracing::debug!(sockets = budget.sockets, socket_limit = budget.socket_limit, socket_waiting = budget.socket_waiting, "chat2 dial: waiting for a socket slot");
             let socket_permit = crate::budget::shared().socket().await?;
             let dial_permit = crate::budget::shared().dial().await?;
+            tracing::debug!("chat2 dial: slots held; getting the token");
             let url = provider.url().await?;
+            tracing::debug!("chat2 dial: connecting");
             let ws = crate::dial::connect_ws(&url).await.map_err(|e| {
                 crate::budget::shared().observe_error(&e);
                 SyncError::WebSocket(e.to_string())
             })?;
             drop(dial_permit);
+            tracing::debug!("chat2 dial: connected");
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
             tokio::spawn(async move {
@@ -293,6 +298,7 @@ impl BinConnector for WsBinConnector {
                     _ => None,
                 })
                 .await;
+                tracing::debug!("chat2 socket closed; its slot is free");
             });
             Ok(BinPipe {
                 tx: out_tx,
@@ -756,6 +762,7 @@ impl ChatClient {
             transport,
             offline_task: offline_task.clone(),
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            checkpoint_gate: Arc::new(tokio::sync::Mutex::new(())),
             relay: relay.clone(),
         };
         let task = tokio::spawn(actor.run(ready_tx));
@@ -1064,6 +1071,9 @@ struct Actor {
     offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// One offline sync in flight at a time.
     sync_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// One checkpoint download at a time, held until it's imported: the bootstrap
+    /// pull and the first socket both find the same checkpoint missing.
+    checkpoint_gate: Arc<tokio::sync::Mutex<()>>,
     /// Some: ask for the relay layer, and hand its frames here.
     relay: Option<crate::chat_relay::RelayHandle>,
     /// False until the first backfill of THIS client instance completes.
@@ -1120,9 +1130,16 @@ impl Actor {
                 .dial_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
+            // This dial is the fresh socket any redial asked for so far. Left in
+            // the channel, such a request would end the session it joins.
+            while self.redial_rx.try_recv().is_ok() {}
+            tracing::info!(attempt, "chat2 dialing");
             let dial = tokio::select! {
                 result = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()) => result,
-                _ = self.shutdown.changed() => return,
+                _ = self.shutdown.changed() => {
+                    tracing::info!(attempt, "chat2 stopped while dialing");
+                    return;
+                }
             };
             let pipe = match dial {
                 Ok(Ok(pipe)) => pipe,
@@ -1158,6 +1175,7 @@ impl Actor {
                 }
             };
 
+            tracing::info!(attempt, "chat2 dialed; joining");
             let session_started = tokio::time::Instant::now();
             // Cover the whole session, including backpressured sends, HELLO
             // and row backfill. A peer need not close or reach a deadline for
@@ -1169,7 +1187,10 @@ impl Actor {
                 end = self.run_session(pipe, &mut ready) => end,
             };
             match end {
-                SessionEnd::Stop => return,
+                SessionEnd::Stop => {
+                    tracing::info!("chat2 stopped");
+                    return;
+                }
                 SessionEnd::Reconnect => {
                     use std::sync::atomic::Ordering::Relaxed;
                     // Only a session that joined AND stayed healthy for a
@@ -1198,6 +1219,7 @@ impl Actor {
                     if joined && session_started.elapsed() >= STABLE_RESET {
                         backoff = BACKOFF_BASE;
                     }
+                    tracing::info!(joined, backoff_ms = backoff.as_millis() as u64, "chat2 session ended; reconnecting");
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -1223,12 +1245,14 @@ impl Actor {
         // or our own last dial would cut every wait to zero.
         while wake.try_recv().is_ok() {}
         while online.try_recv().is_ok() {}
-        let wait = if crate::wake::path_is_offline() {
+        let offline = crate::wake::path_is_offline();
+        let wait = if offline {
             wait.max(OFFLINE_PARK_RECHECK)
         } else {
             wait
         };
-        tokio::select! {
+        tracing::debug!(wait_ms = wait.as_millis() as u64, offline, "chat2 backing off");
+        let waited = tokio::select! {
             _ = tokio::time::sleep(wait + retry_jitter(wait / 4)) => Waited::Elapsed,
             _ = wake.recv() => { tokio::time::sleep(retry_jitter(BACKOFF_BASE)).await; Waited::Woke },
             _ = online.recv() => { tokio::time::sleep(retry_jitter(BACKOFF_BASE)).await; Waited::Woke },
@@ -1239,7 +1263,9 @@ impl Actor {
                     Waited::Elapsed
                 }
             }
-        }
+        };
+        tracing::debug!(woke = matches!(waited, Waited::Woke), stopped = matches!(waited, Waited::Shutdown), "chat2 backoff over");
+        waited
     }
 
     async fn run_session(
@@ -1365,6 +1391,11 @@ impl Actor {
             &self.cursor_amnesty_done,
         );
         let cursor = lock(&self.shared).cursor;
+        tracing::info!(
+            relay = self.relay.is_some() && lock(&self.shared).relay_session,
+            head_seq = state.head_seq,
+            "chat2 joined"
+        );
         self.flags.connected.store(true, Relaxed);
         if ready.is_none() {
             self.flags.rejoins.fetch_add(1, Relaxed);
@@ -1381,7 +1412,14 @@ impl Actor {
         let contained = state.checkpoint_size == 0
             || (!repair_causal_history && self.sink.contains_frontier(&state_frame.payload));
         let deferred = !contained && !repair_causal_history && self.sink.relay_defer_checkpoint();
-        lock(&self.shared).checkpoint_deferred = deferred;
+        {
+            let mut shared = lock(&self.shared);
+            shared.checkpoint_deferred = deferred;
+            // This doc holds that checkpoint, so reading it can't fill any gap.
+            if self.relay.is_some() && contained && state.checkpoint_size > 0 {
+                shared.parked_checkpoint_tried = true;
+            }
+        }
         let plan = plan_catch_up(cursor, &state, contained || deferred);
         let after = match plan {
             CatchUpPlan::RowsOnly { after } => after,
@@ -1437,14 +1475,20 @@ impl Actor {
             // redial retries from wherever the bytes stopped. The socket is
             // drained (into the buffer) for the whole fetch so backpressure
             // can't stall the server's row stream.
-            let fetch = self.fetcher.fetch();
+            let fetch = fetch_once(
+                self.checkpoint_gate.clone(),
+                self.fetcher.clone(),
+                self.sink.clone(),
+                state_frame.payload.to_vec(),
+                repair_causal_history,
+            );
             tokio::pin!(fetch);
             let deadline = tokio::time::sleep(CHECKPOINT_FETCH_DEADLINE);
             tokio::pin!(deadline);
-            let bytes = loop {
+            let (gate, bytes) = loop {
                 tokio::select! {
                     fetched = &mut fetch => match fetched {
-                        Ok(bytes) => break bytes,
+                        Ok(fetched) => break fetched,
                         Err(err) => {
                             tracing::warn!(error = %err, "chat2: checkpoint fetch failed");
                             return SessionEnd::Reconnect;
@@ -1455,6 +1499,17 @@ impl Actor {
                         return SessionEnd::Reconnect;
                     }
                     _ = self.shutdown.changed() => return SessionEnd::Stop,
+                    // The relay layer's frames don't wait on the checkpoint: on a
+                    // relay chat, they are the catch-up.
+                    out = recv_relay(&mut relay_out) => match out {
+                        Some(frame) => {
+                            log_relay_out(&frame, "checkpoint");
+                            if pipe.tx.send(frame).await.is_err() {
+                                return SessionEnd::Reconnect;
+                            }
+                        }
+                        None => relay_out = None,
+                    },
                     inbound = pipe.rx.recv() => match inbound {
                         Some(raw) => match wire::decode(&raw) {
                             Some(frame) => buffered.push(frame),
@@ -1467,12 +1522,19 @@ impl Actor {
                     }
                 }
             };
-            if let Err(err) = self.sink.apply_checkpoint(&bytes, state.checkpoint_seq) {
+            if let Some(bytes) = bytes
+                && let Err(err) = self.sink.apply_checkpoint(&bytes, state.checkpoint_seq)
+            {
                 tracing::warn!(error = %err, "chat2: checkpoint import failed");
                 return SessionEnd::Reconnect;
             }
+            drop(gate);
             let mut shared = lock(&self.shared);
             shared.cursor = shared.cursor.max(state.checkpoint_seq);
+            // A row still parked after this can't be helped by reading it again.
+            if self.relay.is_some() {
+                shared.parked_checkpoint_tried = true;
+            }
             drop(shared);
             let _ = self.events.send(ChatEvent::Applied);
         }
@@ -1505,7 +1567,21 @@ impl Actor {
             None => {
                 let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
                     loop {
-                        let bytes = pipe.rx.recv().await?;
+                        // Nor on the backfill: a host that has just rejoined is
+                        // waiting for this device's announce and sync request.
+                        let bytes = tokio::select! {
+                            inbound = pipe.rx.recv() => inbound?,
+                            out = recv_relay(&mut relay_out) => {
+                                match out {
+                                    Some(frame) => {
+                                        log_relay_out(&frame, "backfill");
+                                        pipe.tx.send(frame).await.ok()?
+                                    }
+                                    None => relay_out = None,
+                                }
+                                continue;
+                            }
+                        };
                         let Some(frame) = wire::decode(&bytes) else {
                             return None;
                         };
@@ -1648,6 +1724,7 @@ impl Actor {
                 }
                 frame = recv_relay(&mut relay_out) => {
                     if let Some(frame) = frame
+                        && log_relay_out(&frame, "live")
                         && pipe.tx.send(frame).await.is_err()
                     {
                         return SessionEnd::Reconnect;
@@ -1804,6 +1881,8 @@ impl Actor {
         let shared = self.shared.clone();
         let sink = self.sink.clone();
         let fetcher = self.fetcher.clone();
+        let checkpoint_gate = self.checkpoint_gate.clone();
+        let relay_client = self.relay.is_some();
         let events = self.events.clone();
         let busy = self.sync_busy.clone();
         let amnesty = self.cursor_amnesty_done.clone();
@@ -1961,13 +2040,29 @@ impl Actor {
                     }
                     if let CatchUpPlan::CheckpointThenRows { .. } = plan {
                         was_live = false;
-                        let fetched =
-                            tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch()).await;
+                        let fetched = tokio::time::timeout(
+                            CHECKPOINT_FETCH_DEADLINE,
+                            fetch_once(
+                                checkpoint_gate,
+                                fetcher.clone(),
+                                sink.clone(),
+                                state_frame.payload.to_vec(),
+                                repair_causal_history,
+                            ),
+                        )
+                        .await;
                         match fetched {
-                            Ok(Ok(bytes)) => {
-                                if sink.apply_checkpoint(&bytes, state.checkpoint_seq).is_err() {
+                            Ok(Ok((_gate, bytes))) => {
+                                if let Some(bytes) = bytes
+                                    && sink.apply_checkpoint(&bytes, state.checkpoint_seq).is_err()
+                                {
                                     busy.store(false, Relaxed);
                                     return;
+                                }
+                                if relay_client {
+                                    let mut sh = lock(&shared);
+                                    sh.room_frontier = state_frame.payload.to_vec();
+                                    sh.parked_checkpoint_tried = true;
                                 }
                                 let _ = events.send(ChatEvent::Applied);
                             }
@@ -2136,6 +2231,11 @@ impl Actor {
 
     fn handle_frame_with_replay(&self, frame: wire::WireFrame, replay: bool) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
+        if frame.kind == frame_type::RELAY {
+            tracing::trace!(replay, "chat2 frame in: relay");
+        } else {
+            tracing::debug!(kind = frame.kind, replay, "chat2 frame in");
+        }
         match frame.kind {
             frame_type::ROW => {
                 let Ok(row) = serde_json::from_value::<wire::RowHeader>(frame.header) else {
@@ -2294,6 +2394,35 @@ impl Actor {
         }
         true
     }
+}
+
+/// Download the room's checkpoint unless whoever held the gate just brought it in.
+/// The returned guard is held until the caller has imported the bytes. A causal
+/// repair reads regardless: it's looking for what its doc claims to contain.
+async fn fetch_once(
+    gate: Arc<tokio::sync::Mutex<()>>,
+    fetcher: Arc<dyn CheckpointFetcher>,
+    sink: Arc<dyn ChatDocSink>,
+    frontier: Vec<u8>,
+    repair: bool,
+) -> Result<(tokio::sync::OwnedMutexGuard<()>, Option<Vec<u8>>), SyncError> {
+    let held = gate.lock_owned().await;
+    if !repair && sink.contains_frontier(&frontier) {
+        return Ok((held, None));
+    }
+    let bytes = fetcher.fetch().await?;
+    Ok((held, Some(bytes)))
+}
+
+/// Always true, so it can sit in a send's condition.
+fn log_relay_out(frame: &[u8], stage: &str) -> bool {
+    let kind = frame.first().copied().unwrap_or(0);
+    if kind == frame_type::RELAY {
+        tracing::trace!(stage, "chat2 frame out: relay");
+    } else {
+        tracing::debug!(kind, stage, "chat2 frame out");
+    }
+    true
 }
 
 async fn recv_relay(rx: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
