@@ -8,6 +8,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         case folder(String)
         case session(String)
         case header(String)
+        /// "Show N more" at a section's foot (Activity's Archived).
+        case more(String)
     }
 
     let app: AppModel
@@ -37,6 +39,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     /// `dropTarget` names what each section means as a destination.
     var movesAcrossSections = false
     private(set) var collapsed = Set(UserDefaults.standard.stringArray(forKey: "collapsedSections") ?? [])
+    /// Activity's shelves start folded: the ones opened, kept apart.
+    private(set) var openShelves = Set(UserDefaults.standard.stringArray(forKey: ActivityList.Keys.openShelves) ?? [])
     private var headerStates: [String: SectionHeaderCell.State] = [:]
 
     init(app: AppModel) {
@@ -88,6 +92,19 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             bg.backgroundColor = .clear
             cell.backgroundConfiguration = bg
         }
+        let moreReg = UICollectionView.CellRegistration<UICollectionViewListCell, String> { [weak self] cell, _, id in
+            var c = UIListContentConfiguration.cell()
+            c.text = "Show \(self?.moreCount(id) ?? 0) more"
+            c.textProperties.font = Fonts.ui(.sansMedium, TypeScale.size(14))
+            c.textProperties.color = Palette.secondary
+            c.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 20)
+            cell.contentConfiguration = c
+            var bg = UIBackgroundConfiguration.listCell()
+            bg.backgroundColor = .clear
+            cell.backgroundConfiguration = bg
+            cell.accessibilityIdentifier = "more-\(id)"
+            cell.accessibilityTraits = .button
+        }
         let sectionReg = UICollectionView.CellRegistration<SectionHeaderCell, String> { [weak self] cell, _, id in
             guard let state = self?.headerStates[id] else { return }
             cell.configure(state)
@@ -98,6 +115,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             case let .folder(id): cv.dequeueConfiguredReusableCell(using: folderReg, for: path, item: id)
             case let .header(id) where self?.collapsible == true: cv.dequeueConfiguredReusableCell(using: sectionReg, for: path, item: id)
             case let .header(id): cv.dequeueConfiguredReusableCell(using: headerReg, for: path, item: id)
+            case let .more(id): cv.dequeueConfiguredReusableCell(using: moreReg, for: path, item: id)
             }
         }
         token = app.observe { [weak self] in self?.reload(animated: true) }
@@ -141,7 +159,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                         id: s.id,
                         title: header,
                         count: s.sessions.count,
-                        collapsed: collapsed.contains(s.id),
+                        collapsed: isCollapsed(s.id),
                         live: s.sessions.contains { $0.status == .working } ? .spinner : s.sessions.contains { $0.status == .awaiting } ? .dot(StatusTone.input) : nil
                     )
                     if let old = headerStates[s.id], old != state { changed.append(.header(s.id)) }
@@ -161,6 +179,10 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 if let old = sessions[r.id], old != r { changed.append(.session(r.id)) }
                 nextSessions[r.id] = r
                 items.append(.session(r.id))
+            }
+            if moreCount(s.id) > 0 {
+                items.append(.more(s.id))
+                changed.append(.more(s.id))
             }
             snapshot.appendItems(items, toSection: s.id)
         }
@@ -189,6 +211,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             openFolder(id)
         case let .header(id) where collapsible:
             toggleSection(id)
+        case let .more(id):
+            showMore(id)
         default:
             break
         }
@@ -200,11 +224,32 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
 
     func toggleSection(_ id: String) {
-        if collapsed.remove(id) == nil { collapsed.insert(id) }
-        UserDefaults.standard.set(Array(collapsed), forKey: "collapsedSections")
+        setCollapsed(id, !isCollapsed(id))
         UISelectionFeedbackGenerator().selectionChanged()
         reload(animated: true)
     }
+
+    /// Whether section `id` is folded: as the person left it, Activity's
+    /// shelves folded until opened.
+    func isCollapsed(_ id: String) -> Bool {
+        ActivityList.Section.shelves.contains(id) ? !openShelves.contains(id) : collapsed.contains(id)
+    }
+
+    func setCollapsed(_ id: String, _ folded: Bool) {
+        if ActivityList.Section.shelves.contains(id) {
+            if folded { openShelves.remove(id) } else { openShelves.insert(id) }
+            UserDefaults.standard.set(Array(openShelves), forKey: ActivityList.Keys.openShelves)
+        } else {
+            if folded { collapsed.insert(id) } else { collapsed.remove(id) }
+            UserDefaults.standard.set(Array(collapsed), forKey: "collapsedSections")
+        }
+    }
+
+    /// How many of section `id`'s sessions aren't shown yet ("Show N more").
+    func moreCount(_ id: String) -> Int { 0 }
+
+    /// "Show N more" tapped: show the next few.
+    func showMore(_ id: String) {}
 
     /// Long-press actions for a collapsible section header.
     func headerMenu(_ id: String) -> UIMenu? { nil }
@@ -238,8 +283,16 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         return nil
     }
 
+    /// An archived row (the Archived list, or Activity's Archived shelf):
+    /// Unarchive instead of Archive / Pin / Move.
+    private func isArchivedRow(_ path: IndexPath) -> Bool {
+        if archivedRows { return true }
+        let sections = dataSource.snapshot().sectionIdentifiers
+        return path.section < sections.count && sections[path.section] == ActivityList.Section.archived
+    }
+
     private func leadingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
-        guard !archivedRows, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        guard !isArchivedRow(path), let id = sessionId(path), let vm = sessions[id] else { return nil }
         let pin = UIContextualAction(style: .normal, title: vm.pinned ? "Unpin" : "Pin") { [weak self] _, _, done in
             self?.app.setPinned(id, !vm.pinned)
             done(true)
@@ -251,7 +304,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
     private func trailingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
         guard let id = sessionId(path) else { return nil }
-        if archivedRows {
+        if isArchivedRow(path) {
             let restore = UIContextualAction(style: .normal, title: "Unarchive") { [weak self] _, _, done in
                 self?.app.unarchive(id)
                 done(true)
@@ -266,6 +319,28 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         }
         archive.image = UIImage(systemName: "archivebox.fill")
         archive.backgroundColor = Palette.secondary
+        // Activity: Sleep (or, asleep, Wake) where Move stands; it lists no
+        // sections to move into. A chat under way isn't archived (as the
+        // desktop's Archive: stop it first).
+        if app.activityOn, let vm = sessions[id] {
+            let underWay = vm.status == .working
+            if vm.sleepUntil != nil {
+                let wake = UIContextualAction(style: .normal, title: "Wake") { [weak self] _, _, done in
+                    self?.app.wake(id)
+                    done(true)
+                }
+                wake.image = UIImage(systemName: "sun.max.fill")
+                wake.backgroundColor = .systemOrange
+                return UISwipeActionsConfiguration(actions: underWay ? [wake] : [archive, wake])
+            }
+            let sleep = UIContextualAction(style: .normal, title: "Sleep") { [weak self] _, view, done in
+                self?.presentSleepSheet(id, from: view)
+                done(true)
+            }
+            sleep.image = UIImage(systemName: "moon.fill")
+            sleep.backgroundColor = .systemIndigo
+            return UISwipeActionsConfiguration(actions: underWay ? [sleep] : [archive, sleep])
+        }
         let move = UIContextualAction(style: .normal, title: "Move") { [weak self] _, view, done in
             self?.presentMoveMenu(id, from: view)
             done(true)
@@ -280,12 +355,30 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
         }
         guard let path = indexPaths.first, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        let archivedRow = isArchivedRow(path)
         return UIContextMenuConfiguration(identifier: id as NSString, previewProvider: nil) { [weak self] _ in
             guard let self else { return nil }
-            if self.archivedRows {
+            if archivedRow {
                 return UIMenu(children: [
                     UIAction(title: "Unarchive", image: UIImage(systemName: "tray.and.arrow.up")) { _ in self.app.unarchive(id) },
                     UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
+                    self.deleteAction(id),
+                ])
+            }
+            if self.app.activityOn {
+                // Activity lists no sections (nothing to move into); Sleep or
+                // Wake, and Stop Waiting on a process it waits on.
+                var activity: [UIMenuElement] = [self.sleepMenu(vm)]
+                if vm.canStopWaiting {
+                    activity.append(UIAction(title: "Stop Waiting", image: UIImage(systemName: "xmark.circle")) { _ in self.app.stopWaiting(id) })
+                }
+                return UIMenu(children: [
+                    UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
+                    UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
+                    UIMenu(options: .displayInline, children: activity),
+                    vm.status == .working
+                        ? UIAction(title: "Archive", subtitle: "Stop it first: its agent is still working", image: UIImage(systemName: "archivebox"), attributes: .disabled) { _ in }
+                        : UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { _ in self.app.archive(id) },
                     self.deleteAction(id),
                 ])
             }
@@ -297,6 +390,44 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 self.deleteAction(id),
             ])
         }
+    }
+
+    // MARK: Sleep
+
+    /// Sleep's times (each saying when it wakes) and Custom…, or, asleep,
+    /// Wake.
+    func sleepMenu(_ vm: SessionRowVM) -> UIMenuElement {
+        let id = vm.id
+        if vm.sleepUntil != nil {
+            return UIAction(title: "Wake", image: UIImage(systemName: "sun.max")) { [weak self] _ in self?.app.wake(id) }
+        }
+        var times: [UIMenuElement] = ActivityList.presets(now: Date()).map { p in
+            UIAction(title: p.title, subtitle: p.detail) { [weak self] _ in self?.app.sleep(id, until: p.until) }
+        }
+        times.append(UIMenu(options: .displayInline, children: [
+            UIAction(title: "Custom…", image: UIImage(systemName: "calendar")) { [weak self] _ in self?.presentCustomSleep(id) },
+        ]))
+        return UIMenu(title: "Sleep", image: UIImage(systemName: "moon"), children: times)
+    }
+
+    /// The swipe's Sleep: its times as an action sheet.
+    func presentSleepSheet(_ id: String, from view: UIView) {
+        let sheet = UIAlertController(title: "Sleep Until", message: nil, preferredStyle: .actionSheet)
+        for p in ActivityList.presets(now: Date()) {
+            sheet.addAction(UIAlertAction(title: "\(p.title) · \(p.detail)", style: .default) { [weak self] _ in self?.app.sleep(id, until: p.until) })
+        }
+        sheet.addAction(UIAlertAction(title: "Custom…", style: .default) { [weak self] _ in self?.presentCustomSleep(id) })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = view
+        present(sheet, animated: true)
+    }
+
+    /// Custom…: the system date picker, from tomorrow at 9.
+    func presentCustomSleep(_ id: String) {
+        let picker = SleepPickerViewController(title: sessions[id]?.title) { [weak self] until in
+            self?.app.sleep(id, until: until)
+        }
+        present(UINavigationController(rootViewController: picker), animated: true)
     }
 
     private func deleteAction(_ id: String) -> UIAction {
@@ -396,9 +527,7 @@ extension SessionListController: UICollectionViewDragDelegate, UICollectionViewD
         // folded destination opens, as desktop's does, to show where it went.
         var snapshot = dataSource.snapshot()
         let section = snapshot.sectionIdentifiers[path.section]
-        if collapsed.remove(section) != nil {
-            UserDefaults.standard.set(Array(collapsed), forKey: "collapsedSections")
-        }
+        if isCollapsed(section) { setCollapsed(section, false) }
         snapshot.deleteItems([.session(id)])
         if slot.index > 0 {
             snapshot.insertItems([.session(id)], afterItem: slot.items[slot.index - 1])
@@ -482,6 +611,7 @@ class SessionsViewController: SessionListController {
         title = "Sessions"
         navigationItem.largeTitleDisplayMode = .always
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu())
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "sessions-options"
     }
 
     /// iPhone: search lives in the bottom bar (the system's toolbar-integrated
@@ -510,6 +640,7 @@ class SessionsViewController: SessionListController {
         if !query.trimmingCharacters(in: .whitespaces).isEmpty {
             return [("results", nil, [], app.search(query))]
         }
+        if app.activityOn { return activitySections() }
         var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = []
         for f in app.frontPage.folders {
             out.append((f.id, f.name, [], app.sessions(inFolder: f.id)))
@@ -522,6 +653,46 @@ class SessionsViewController: SessionListController {
         }
         out.append(("recent", out.isEmpty ? nil : "Recent", [], app.frontPage.sessions))
         return out
+    }
+
+    /// Activity: Pinned above, then one list (every other chat, sections
+    /// and all, the one back last first), then its shelves at the foot,
+    /// each folded until opened: Working, Asleep, Archived.
+    private func activitySections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
+        var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = []
+        let now = Date()
+        let pinned = app.sessions(inFolder: "pinned")
+        if !pinned.isEmpty {
+            out.append(("pinned", "Pinned", [], pinned.map { ActivityList.decorate($0, now: now) }))
+        }
+        var rows = app.frontPage.sessions
+        for f in app.frontPage.folders where f.id != "pinned" {
+            rows += app.sessions(inFolder: f.id)
+        }
+        let page = ActivityList.page(rows, workingShelf: app.activityWorkingShelf, now: now)
+        out.append((ActivityList.Section.list, "Activity", [], page.list))
+        if !page.working.isEmpty { out.append((ActivityList.Section.working, "Working", [], page.working)) }
+        if !page.asleep.isEmpty { out.append((ActivityList.Section.asleep, "Asleep", [], page.asleep)) }
+        if !app.archived.isEmpty {
+            archivedTotal = app.archived.count
+            out.append((ActivityList.Section.archived, "Archived", [], Array(app.archived.prefix(archivedShown))))
+        }
+        return out
+    }
+
+    /// Activity's Archived shows its first 10, then 25 more a tap (the
+    /// desktop's shelf).
+    private var archivedShown = 10
+    private var archivedTotal = 0
+
+    override func moreCount(_ id: String) -> Int {
+        guard id == ActivityList.Section.archived, app.activityOn, !isCollapsed(id) else { return 0 }
+        return max(0, archivedTotal - archivedShown)
+    }
+
+    override func showMore(_ id: String) {
+        archivedShown += 25
+        reload(animated: true)
     }
 
     override func viewDidLayoutSubviews() {
@@ -538,6 +709,8 @@ class SessionsViewController: SessionListController {
     override func dropTarget(_ id: String) -> SessionDropTarget? {
         // Search results and project groups aren't places a session is put.
         guard query.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        // Activity orders itself: only Pinned is a place a session is put.
+        if app.activityOn { return id == "pinned" ? .pinned : nil }
         switch id {
         case "pinned": return .pinned
         case "recent": return .recent
@@ -546,7 +719,7 @@ class SessionsViewController: SessionListController {
     }
 
     override func headerMenu(_ id: String) -> UIMenu? {
-        if id == "recent" { return nil }
+        if id == "recent" || id.hasPrefix(ActivityList.Section.list) { return nil }
         guard let folder = app.frontPage.folders.first(where: { $0.id == id }) else { return nil }
         let open = UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { [weak self] _ in self?.openFolder(id) }
         if id == "pinned" {
@@ -562,6 +735,20 @@ class SessionsViewController: SessionListController {
         ])
     }
 
+    /// Settings → Activity, from the "…" menu: in the tab's own stack on
+    /// iPhone, a sheet over the sidebar on iPad.
+    func openActivitySettings() {
+        let settings = ActivitySettingsViewController(app: app)
+        if let nav = navigationController, splitViewController == nil || splitViewController?.isCollapsed == true {
+            settings.hidesBottomBarWhenPushed = true
+            nav.pushViewController(settings, animated: true)
+        } else {
+            let sheet = UINavigationController(rootViewController: settings)
+            settings.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak sheet] _ in sheet?.dismiss(animated: true) })
+            present(sheet, animated: true)
+        }
+    }
+
     private func renameSection(_ folder: FolderRowVM) {
         let alert = UIAlertController(title: "Rename Section", message: nil, preferredStyle: .alert)
         alert.addTextField { $0.text = folder.name }
@@ -575,21 +762,48 @@ class SessionsViewController: SessionListController {
 
     func optionsMenu() -> UIMenu {
         UIMenu(children: [
-            UIAction(title: "New Section…", image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
-                self?.promptForSection { name in self?.app.createSection(name) }
-            },
-            UIAction(title: "Collapse All", image: UIImage(systemName: "rectangle.compress.vertical")) { [weak self] _ in
-                guard let self else { return }
-                var ids = self.app.frontPage.folders.map(\.id)
-                if self.app.groupByProject { ids += self.app.frontPage.projectGroups.map(\.id) }
-                for id in ids where !self.collapsed.contains(id) { self.toggleSection(id) }
-            },
-            // Rebuilt on each open: Settings flips it too.
+            // Activity: the view itself, and the way to its settings. (Rebuilt
+            // on each open, as what it turns off is.)
             UIDeferredMenuElement.uncached { [weak self] done in
-                guard let app = self?.app else { return done([]) }
-                done([UIAction(title: "Group by Project", image: UIImage(systemName: "square.stack.3d.up"), state: app.groupByProject ? .on : .off) { _ in
-                    app.groupByProject.toggle()
-                }])
+                guard let self else { return done([]) }
+                let app = self.app
+                done([UIMenu(options: .displayInline, children: [
+                    UIAction(title: "Activity", image: UIImage(systemName: "tray.full"), state: app.activityOn ? .on : .off) { _ in
+                        app.activityOn.toggle()
+                    },
+                    UIAction(title: "Activity Settings…", image: UIImage(systemName: "gearshape")) { [weak self] _ in
+                        self?.openActivitySettings()
+                    },
+                ])])
+            },
+            // Rebuilt on each open: Settings flips Activity and grouping too.
+            // What Activity stands aside from (sections, grouping) is out of
+            // reach while it's on.
+            UIDeferredMenuElement.uncached { [weak self] done in
+                guard let self else { return done([]) }
+                let app = self.app
+                let off: UIMenuElement.Attributes = app.activityOn ? .disabled : []
+                done([
+                    UIAction(title: "New Section…", image: UIImage(systemName: "folder.badge.plus"), attributes: off) { [weak self] _ in
+                        self?.promptForSection { name in self?.app.createSection(name) }
+                    },
+                    UIAction(title: "Collapse All", image: UIImage(systemName: "rectangle.compress.vertical")) { [weak self] _ in
+                        guard let self else { return }
+                        if self.app.activityOn {
+                            let ids = ["pinned", ActivityList.Section.list] + Array(ActivityList.Section.shelves)
+                            for id in ids where !self.isCollapsed(id) { self.setCollapsed(id, true) }
+                            UISelectionFeedbackGenerator().selectionChanged()
+                            self.reload(animated: true)
+                            return
+                        }
+                        var ids = self.app.frontPage.folders.map(\.id)
+                        if self.app.groupByProject { ids += self.app.frontPage.projectGroups.map(\.id) }
+                        for id in ids where !self.isCollapsed(id) { self.toggleSection(id) }
+                    },
+                    UIAction(title: "Group by Project", image: UIImage(systemName: "square.stack.3d.up"), attributes: off, state: app.groupByProject ? .on : .off) { _ in
+                        app.groupByProject.toggle()
+                    },
+                ])
             },
             UIAction(title: "Archived", image: UIImage(systemName: "archivebox")) { [weak self] _ in
                 guard let self else { return }
