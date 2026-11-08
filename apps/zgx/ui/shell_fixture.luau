@@ -16,6 +16,14 @@ local sessions = require("@account/sessions")
 -- (Its start as it is, a new chat: not the launch's jump to the latest
 -- session, which its tests drive themselves.)
 require("@app/screens/shell/route").launched:set(true)
+-- (The sidebar these tests were written on: one list, Activity off, empty
+-- projects listed. The app opens with Activity, by project then device and
+-- no empty projects (tests/sidebar_defaults.test.luau); a test of those
+-- views turns them on itself.)
+require("@app/screens/shell/activity").on:set(false)
+local sidebar_options = require("@app/screens/shell/sidebar").options
+sidebar_options.organize:set({})
+sidebar_options.details.empty_projects:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
 -- The host's chats, as the engine has them: one record a chat (its session,
