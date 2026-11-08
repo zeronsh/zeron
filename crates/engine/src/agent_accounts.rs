@@ -3230,7 +3230,7 @@ impl AgentAccounts {
         )
         .await?;
         if let Some(account_id) = str_field(&body, "account_id")
-            && account_id != slot.account_key
+            && account_id != codex_workspace(&slot.account_key)
         {
             return Err(ProbeError::NoCredentials {
                 why: NoCredentials::Missing,
@@ -4051,6 +4051,14 @@ fn parse_codex_auth(auth: serde_json::Value) -> Option<Detected> {
     })
 }
 
+// account keys put the user id before "::" so team seats sharing a workspace
+// stay distinct (`parse_codex_auth`), but openai only ever reports the workspace
+fn codex_workspace(account_key: &str) -> &str {
+    account_key
+        .rsplit_once("::")
+        .map_or(account_key, |(_, workspace)| workspace)
+}
+
 fn codex_slot_auth(slot: &Slot) -> Result<(&str, &str), EngineError> {
     let detected = parse_codex_auth(slot.credentials.clone())
         .ok_or_else(|| EngineError::Other("This Codex login needs to be refreshed.".into()))?;
@@ -4064,7 +4072,7 @@ fn codex_slot_auth(slot: &Slot) -> Result<(&str, &str), EngineError> {
     match (account_id, access_token) {
         (Some(account_id), Some(access_token))
             if !access_token.is_empty()
-                && account_id == slot.account_key
+                && account_id == codex_workspace(&slot.account_key)
                 && detected.account_key == slot.account_key =>
         {
             Ok((access_token, account_id))
