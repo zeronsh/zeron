@@ -1186,6 +1186,20 @@ ui.command {
 		publish()
 	end,
 }
+-- Fix the build has ten side chats (the two above and eight older), for the
+-- sidebar's "Show more" under a chat (tests/sidebar_side_chats).
+ui.command {
+	id = "side_chats_many",
+	title = "Fix the build has ten side chats",
+	run = function()
+		local kids = ((model :: any).children or {}).a1 or {}
+		for i = 1, 8 do
+			table.insert(kids, { id = `x{i}`, parent = "a1", kind = "side", title = `Extra {i}`, device = "mac", updated = NOW - (3 + i) * HOUR, created = NOW - (10 + i) * HOUR, agent = "claude" })
+		end
+		;(model :: any).children = { a1 = kids, archived_parent = ((model :: any).children or {}).archived_parent }
+		publish()
+	end,
+}
 -- Atlas crowded: six more sessions under its three, older than them
 -- ("Atlas 1" the newest), so it shows its first five and "Show 4 more".
 ui.command {

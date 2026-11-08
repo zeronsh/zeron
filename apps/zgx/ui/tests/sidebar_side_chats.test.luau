@@ -3,12 +3,16 @@
 -- the lanes list them) and fold away with a chevron on the chat, a subagent's
 -- chat not among them; the ones in a state stay while it's folded ("Active
 -- when collapsed"), and a side chat whose chat isn't listed is a row of its
--- own in its project. On the shell in ui/shell_fixture.luau.
+-- own in its project. A chat's side chats start folded (its chevron opens
+-- them, kept per chat), unfolded while one of them is the chat open; and
+-- past the first five of them, "Show N more" and "Show less". On the shell in
+-- ui/shell_fixture.luau.
 
 local SIDE = "#shell-sidebar"
 local K = "screens/shell/sidebar.luau::"
 local NEST = `{K}shell_sidebar_side_chats`
 local KEEP = `{K}shell_sidebar_keep_active`
+local FOLDED = `{K}shell_sidebar_folded`
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
@@ -17,6 +21,14 @@ local function open(): any
 	app:command("side_chat_kinds")
 	app:frames(10)
 	return app
+end
+
+-- Nesting on, and Fix the build's side chats opened.
+local function nested(app: any)
+	app:set_state(NEST, true)
+	app:frames(40)
+	app:click(`{SIDE} >> role:button "Show side chats"`)
+	app:frames(40)
 end
 
 local function shows(app: any, label: string): boolean
@@ -64,8 +76,7 @@ end)
 
 test("nested, they stand under their chat a step in, newest first", function()
 	local app = open()
-	app:set_state(NEST, true)
-	app:frames(40)
+	nested(app)
 	local fix, flake, log = top(app, "Fix the build"), top(app, "Look into the flake"), top(app, "Write the changelog")
 	expect(fix < flake and flake < log and log < top(app, "Write the docs")).to_be(true)
 	expect(lead(app, "Look into the flake") > lead(app, "Fix the build")).to_be(true)
@@ -80,6 +91,70 @@ test("nested, they stand under their chat a step in, newest first", function()
 	expect(shows(app, "Look into the flake")).to_be(false)
 end)
 
+test("they start folded, the chat's chevron opening them, kept per chat", function()
+	local app = open()
+	app:set_state(NEST, true)
+	app:frames(40)
+	-- Folded: only the one working stays (Active when collapsed).
+	expect(app:has(`{SIDE} >> role:button "Show side chats"`)).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "Fold side chats"`)).to_be(false)
+	expect(shows(app, "Look into the flake")).to_be(true)
+	expect(shows(app, "Write the changelog")).to_be(false)
+	app:click(`{SIDE} >> role:button "Show side chats"`)
+	app:frames(40)
+	expect(shows(app, "Write the changelog")).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "Fold side chats"`)).to_be(true)
+	-- Kept in the sidebar's folds, so a sidebar made again has it open.
+	expect(((app:state(FOLDED) :: any) or {})["side_open:a1"]).to_be(true)
+	app:click(`{SIDE} >> role:button "Fold side chats"`)
+	app:frames(40)
+	expect(shows(app, "Write the changelog")).to_be(false)
+	expect(((app:state(FOLDED) :: any) or {})["side_open:a1"]).to_be(nil)
+end)
+
+test("the chat open being a side chat, its chat shows unfolded", function()
+	local app = open()
+	app:set_state(NEST, true)
+	app:frames(40)
+	expect(shows(app, "Write the changelog")).to_be(false)
+	app:set_state("shell_selected", "s2")
+	app:frames(40)
+	expect(shows(app, "Write the changelog")).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "Fold side chats"`)).to_be(true)
+end)
+
+test("past its first five, Show more, then Show less", function()
+	local app = open()
+	nested(app)
+	app:command("side_chats_many")
+	app:frames(40)
+	-- s1, s2 and Extra 1–3; the rest behind "Show 5 more".
+	expect(shows(app, "Extra 3")).to_be(true)
+	expect(shows(app, "Extra 4")).to_be(false)
+	expect(shows(app, "Show 5 more")).to_be(true)
+	expect(top(app, "Show 5 more") > top(app, "Extra 3")).to_be(true)
+	expect(top(app, "Show 5 more") < top(app, "Write the docs")).to_be(true)
+	app:click(`{SIDE} >> role:button "Show 5 more"`)
+	app:frames(40)
+	expect(shows(app, "Extra 8")).to_be(true)
+	expect(shows(app, "Show less")).to_be(true)
+	expect(top(app, "Show less") > top(app, "Extra 8")).to_be(true)
+	app:click(`{SIDE} >> role:button "Show less"`)
+	app:frames(40)
+	expect(shows(app, "Extra 4")).to_be(false)
+	expect(shows(app, "Show 5 more")).to_be(true)
+end)
+
+test("a side chat open past the first five shows anyway", function()
+	local app = open()
+	app:set_state(NEST, true)
+	app:command("side_chats_many")
+	app:set_state("shell_selected", "x7")
+	app:frames(40)
+	expect(shows(app, "Extra 7")).to_be(true)
+	expect(shows(app, "Extra 4")).to_be(false)
+end)
+
 test("one without its chat in the list is a row of its own", function()
 	local app = open()
 	app:set_state(NEST, true)
@@ -92,8 +167,7 @@ end)
 
 test("folded, a side chat in a state stays until it settles, and all but it go", function()
 	local app = open()
-	app:set_state(NEST, true)
-	app:frames(40)
+	nested(app)
 	app:click(`{SIDE} >> role:button "Fold side chats"`)
 	app:frames(40)
 	-- Looking into the flake is working: it stays (Active when collapsed).
@@ -116,7 +190,6 @@ test("the side chats working show on their chat's row folded away", function()
 	local app = open()
 	app:set_state(NEST, true)
 	app:frames(40)
-	app:click(`{SIDE} >> role:button "Fold side chats"`)
 	app:set_state(KEEP, false)
 	app:frames(40)
 	expect(shows(app, "Look into the flake")).to_be(false)
