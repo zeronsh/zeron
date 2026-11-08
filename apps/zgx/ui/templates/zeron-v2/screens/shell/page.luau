@@ -538,6 +538,8 @@ return function(props: Props): Node
 	-- is over in its time; nothing lags the window's edge.
 	local base = open_w:peek()
 	local off = ui.use_state(0)
+	-- (The page lands as the step ends: ds/motion `landing`.)
+	motion.glide("panel", off)
 	local easing: any = nil
 	local steps = 0
 	-- Whose panel shows (the session's, a plugin page's; none on a new

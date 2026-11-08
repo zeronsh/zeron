@@ -379,6 +379,10 @@ return ui.component(function(props: Props): Node
 	-- in its time.
 	local base = shown_w:peek()
 	local step = ui.use_state(0)
+	-- (The page beside it lands as the step ends: ds/motion `landing`.)
+	if not props.island then
+		motion.glide("sidebar", step)
+	end
 	ui.effect(function()
 		local to = target()
 		local folded = collapsed:get()

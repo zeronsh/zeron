@@ -224,6 +224,11 @@ export type Props = {
 	-- The trays' pill's width while it shows (for "Scroll to end" to make
 	-- room in turn).
 	on_pill_width: ((w: number?) -> ())?,
+	-- How much wider (narrower, below zero) it lands than it is now, while a
+	-- column glides beside it: its footer folds once, for where it lands
+	-- (narrowing, at once; widening, as it lands), not at each width on the
+	-- way.
+	landing: (() -> number)?,
 
 	-- What the agent asks: a question (its chosen options kept by the
 	-- caller), or an approval.
@@ -1186,11 +1191,14 @@ return ui.component(function(props: Props): Node
 	end)
 	local EASE: TweenOptions = { duration = 220, ease = "out(3)" }
 	-- Each of the pill's measures as it shows: eased (EASE) as it grows or
-	-- shrinks in place; at once for a moment after `snap` moves (what
-	-- settles its size, measured, lands over a frame or two), and with
-	-- motion reduced.
+	-- shrinks in place, what's written growing it; at once for a moment
+	-- after `snap` moves (what settles its size, measured, lands over a
+	-- frame or two) or its width changes (a column gliding beside it, the
+	-- window resized: its lines rewrap at once, so its size follows them),
+	-- and with motion reduced.
 	local SNAP_MS = 400
 	local snap_seen = if props.snap then props.snap:peek() else nil
+	local width_seen = pill_w:peek()
 	local snap_until = 0
 	local function at_once(): boolean
 		if props.snap then
@@ -1199,6 +1207,11 @@ return ui.component(function(props: Props): Node
 				snap_seen = n
 				snap_until = ui.now() + SNAP_MS
 			end
+		end
+		local w = pill_w:get()
+		if w ~= width_seen then
+			width_seen = w
+			snap_until = ui.now() + SNAP_MS
 		end
 		return motion.reduced_now() or ui.now() < snap_until
 	end
@@ -1306,6 +1319,7 @@ return ui.component(function(props: Props): Node
 	end
 	-- (What the model's chip says: another pick, its other folds measure again.)
 	local model_says: string? = nil
+	local access_mode: string? = nil
 	local level = was.level
 	-- Bumped a frame after trying a fold not yet measured: its chip may lay
 	-- out no wider or narrower (the access mode without "Plan" when plan
@@ -1333,6 +1347,15 @@ return ui.component(function(props: Props): Node
 			end
 			model_says = says
 		end
+		-- (Another access mode, or plan mode turned: the access chip's
+		-- folds measure again too.)
+		local access_says = if props.access then `{props.access:get()}/{if props.plan then tostring(props.plan:get()) else ""}` else ""
+		if access_says ~= access_mode then
+			if access_mode ~= nil then
+				table.clear(access_at)
+			end
+			access_mode = access_says
+		end
 		access_at[math.min(left_fold(level), 2)] = a
 		-- (Its widest: with no room at all it's squeezed under the icon's width.)
 		if left_fold(level) >= 3 then
@@ -1343,6 +1366,11 @@ return ui.component(function(props: Props): Node
 		-- and the gaps.
 		local chips = (if props.branch then 1 else 0) + (if props.access then 1 else 0)
 		local room = f - FOOTER_SIDES - FOOTER_GAP * math.max(chips, 1) - (r - m)
+		-- Narrowing to land, the room it lands with; widening, as it is.
+		local ahead = if props.landing then props.landing() else 0
+		if ahead < 0 then
+			room += ahead
+		end
 		-- What fold `lv` takes; nil, not yet measured.
 		local function needs(lv: number): number?
 			local left = left_fold(lv)
@@ -1363,6 +1391,10 @@ return ui.component(function(props: Props): Node
 				next = lv
 				break
 			end
+		end
+		-- (Widening, it unfolds as it lands, once.)
+		if ahead > 0 and next < level then
+			next = level
 		end
 		if next ~= level and needs(next) == nil then
 			retry = true

@@ -122,6 +122,9 @@ local function Composer(): Node
 	-- Moved as it switches between them (ds.Composer's `snap`): its form and
 	-- size there at once, not eased.
 	local snap = ui.state("chat_composer_snap", 0)
+	-- The page's width, for where the composer lands as a column glides
+	-- beside it.
+	local page_w = ui.state("chat_page_w", 0)
 	-- Whether its model picker is open: the composer is held where it is
 	-- while it is (the picker hangs from its chip; a new chat's composer,
 	-- re-centring as its draft grows or shrinks, moved the chip and the
@@ -1064,6 +1067,18 @@ local function Composer(): Node
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
 			snap = snap,
+			-- How much wider (narrower, below zero) it lands than it is, as the
+			-- sidebar or the panel glides beside the page: its width is the
+			-- page's less its room each side (dock.SIDES), up to its own.
+			landing = function(): number
+				local ahead = motion.landing()
+				if math.abs(ahead) < 0.5 then
+					return 0
+				end
+				local most = prefs.conversation_width:get()
+				local room = page_w:get() - 2 * 32
+				return math.min(most, room + ahead) - math.min(most, room)
+			end,
 			menus_below = shown_new,
 			running = running,
 			access = access,
@@ -1493,6 +1508,9 @@ local function Composer(): Node
 		on_resize = function(size: { w: number, h: number })
 			if math.abs(page_h:peek() - size.h) >= 1 then
 				page_h:set(size.h)
+			end
+			if math.abs(page_w:peek() - size.w) >= 0.5 then
+				page_w:set(size.w)
 			end
 		end,
 		absolute = true,

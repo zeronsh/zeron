@@ -72,6 +72,7 @@ mod shell_tests;
 #[cfg(test)]
 mod waiting_toast_tests;
 #[cfg(test)]
+mod composer_motion_tests;
 mod split_tests;
 #[cfg(test)]
 mod route_motion_tests;
