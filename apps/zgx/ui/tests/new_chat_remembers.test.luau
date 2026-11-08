@@ -106,9 +106,11 @@ test("the new page's project, picked there, outlasts the project the route last 
 	expect(app:state("chat_project")).to_be("atlas")
 	app:set_state("chat_project", "notes")
 	settle(app)
+	-- A chat visited (Long chat, in Atlas): New chat starts where it was,
+	-- not in the project last picked on the new page.
 	go(app, "go_s1")
 	go(app, "go_new")
-	expect(app:state("chat_project")).to_be("notes")
+	expect(app:state("chat_project")).to_be("atlas")
 	-- Asked for in a project again: that one.
 	go(app, "go_home")
 	expect(app:state("chat_project")).to_be("atlas")

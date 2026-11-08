@@ -841,6 +841,32 @@ test("New chat, and cmd+n, start in the project the list is narrowed to", functi
 	expect(app:state("shell_project")).to_be(nil)
 end)
 
+test("New chat starts where the chat last open was: its project", function()
+	local app = open()
+	app:click(`{SIDE} >> role:button "Ship the release"`)
+	app:frames(30)
+	expect(app:state("shell_route_path")).to_be("/session/b1")
+	app:click(`{SIDE} >> role:button "New chat"`)
+	app:frames(30)
+	expect(app:state("shell_route_path")).to_be("/")
+	expect(app:state("shell_project")).to_be("borealis")
+	-- Another chat, another project, cmd+n.
+	app:click(`{SIDE} >> role:button "Fix the build"`)
+	app:frames(30)
+	app:command("shell.new_chat")
+	app:frames(30)
+	expect(app:state("shell_project")).to_be("atlas")
+	-- The sidebar's filter wins over the chat last open.
+	app:click(`{SIDE} >> role:button "Ship the release"`)
+	app:frames(30)
+	app:set_state("screens/shell/sidebar.luau::shell_sidebar_show_project_filter", true)
+	app:set_state("screens/shell/sidebar.luau::shell_sidebar_project", "atlas")
+	app:frames(30)
+	app:command("shell.new_chat")
+	app:frames(30)
+	expect(app:state("shell_project")).to_be("atlas")
+end)
+
 test("a session's row shows its running subagents as Zeron's pill: how many, 99+ past that, none at none", function()
 	local app = open()
 	local function pill(): string?
