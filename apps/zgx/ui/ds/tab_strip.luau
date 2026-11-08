@@ -338,6 +338,11 @@ function M.new(props: Props)
 		end
 	end
 
+	-- Still among the strip's tabs (one closed while carried isn't).
+	local function present(id: string): boolean
+		return table.find(props.items(), id) ~= nil
+	end
+
 	local function finish()
 		stop_edge()
 		settle = nil
@@ -397,11 +402,13 @@ function M.new(props: Props)
 	end
 
 	function self.ended(_payload: any?, accepted: boolean?)
-		if dropped or not held:peek() then
+		local id = held:peek()
+		if dropped or not id then
 			return
 		end
-		if phase:peek() == "away" and accepted then
-			-- Taken elsewhere (a split's pane, another window).
+		if (phase:peek() == "away" and accepted) or not present(id) then
+			-- Taken elsewhere (a split's pane, another window), or closed
+			-- while carried: nothing to fly back.
 			return finish()
 		end
 		-- Let go over nothing, or cancelled (Escape): it flies back into its
@@ -475,6 +482,11 @@ function M.new(props: Props)
 			local id = held:peek()
 			if not id or not carried(payload) then
 				return
+			end
+			-- (Closed while carried: nothing to place.)
+			if not present(id) then
+				dropped = true
+				return finish()
 			end
 			track(e)
 			if phase:peek() ~= "lifted" then
