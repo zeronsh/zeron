@@ -258,6 +258,17 @@ pub mod methods {
     // its host's runtime: `{chatId, taskId}`, relay-forwardable.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
     pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
+    /// `{chatId, taskIds, waiting?}` → `{matched, unmatched}`: the agent says
+    /// it waits on these of its background processes (or, `waiting` false,
+    /// no longer), so its turn's end reads as a wait (Zeron's MCP
+    /// `wait_on_background`). An agent's always names its own chat. Refused
+    /// where the runtime doesn't wake its agent when the work ends. Local:
+    /// an agent's MCP server dials its chat's host.
+    pub const AWAIT_BACKGROUND: &str = "AwaitBackground";
+    /// `{chatId}` → `{stopped}`: the person's Stop waiting: the processes the
+    /// agent said it waits on no longer hold the chat (its background agents
+    /// still do). Relay-forwardable, to the chat's host.
+    pub const STOP_WAITING: &str = "StopWaiting";
     /// `{chatId, toolId, offset}` → `ToolOutputChunk`: one command's whole
     /// output, from the run journal of the device that ran it, redacted;
     /// relay-forwardable (target the chat's host).
@@ -704,6 +715,8 @@ pub fn agent_allowed(method: &str) -> bool {
             // Showing the person something in the calling chat.
             | methods::PUBLISH_VISUAL
             | methods::PUBLISH_IMAGE
+            // Saying what the calling chat's agent waits on.
+            | methods::AWAIT_BACKGROUND
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, and their tools.
             | methods::LIST_PLUGINS
