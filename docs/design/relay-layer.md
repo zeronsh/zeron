@@ -437,7 +437,8 @@ Still needed, in this order:
 1. Ship the code with flags off.
 2. Turn on the edge flag on staging, then production. Stored chats behave as before; the registry
    starts remembering clients without the layer. Leave it for 14 days.
-3. Turn on the engine flag for the owner's devices.
+3. Turn on the engine flag for the owner's devices. For Cloud, `CLOUD_RELAY_LAYER=1` on the edge passes
+   it to every machine provisioned after (existing machines keep the environment they were made with).
 4. Ship the capability to desktop and mobile, turned on by default in a release. Chats flip as
    old versions age out of the 14-day window.
 5. Only after the fleet has settled, consider removing old rows and backups for

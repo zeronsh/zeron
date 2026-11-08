@@ -99,6 +99,7 @@ env_new="$(mktemp "$data/.env.XXXXXX")"
   put ZERON_CLOUD_REPO "\${ZERON_CLOUD_REPO:-}"
   put ZERON_CLOUD_PATH "\${ZERON_CLOUD_PATH:-}"
   put ZERON_CLOUD_BRANCH "\${ZERON_CLOUD_BRANCH:-}"
+  put ZERON_RELAY_LAYER "\${ZERON_RELAY_LAYER:-}"
   put ZERON_AUTO_UPDATE 1
   put HOME "$home"
 } >"$env_new"
@@ -172,6 +173,8 @@ export interface SessionEnv {
   readonly ZERON_CLOUD_REPO: string;
   readonly ZERON_CLOUD_PATH: string;
   readonly ZERON_CLOUD_BRANCH: string;
+  /** "1": the engine runs the relay layer (`CLOUD_RELAY_LAYER` on the edge). */
+  readonly ZERON_RELAY_LAYER?: string;
 }
 
 const CHECKS: Record<keyof SessionEnv, (v: string) => boolean> = {
@@ -183,7 +186,8 @@ const CHECKS: Record<keyof SessionEnv, (v: string) => boolean> = {
   ZERON_CLOUD_CHAT: (v) => ID_RE.test(v),
   ZERON_CLOUD_REPO: isRepoUrl,
   ZERON_CLOUD_PATH: isCheckoutPath,
-  ZERON_CLOUD_BRANCH: isBranch
+  ZERON_CLOUD_BRANCH: isBranch,
+  ZERON_RELAY_LAYER: (v) => v === "" || v === "1"
 };
 
 /**
@@ -196,7 +200,7 @@ const CHECKS: Record<keyof SessionEnv, (v: string) => boolean> = {
  */
 export const installCommand = (env: SessionEnv): string => {
   const assignments = (Object.keys(CHECKS) as (keyof SessionEnv)[]).map((name) => {
-    const value = env[name];
+    const value = env[name] ?? "";
     if (!CHECKS[name](value)) throw new Error(`bad ${name}`);
     return `${name}='${value}'`;
   });
