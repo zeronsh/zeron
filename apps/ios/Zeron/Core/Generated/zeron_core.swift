@@ -1142,6 +1142,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func onBackground() 
     
     /**
+     * Still backgrounded after any delivery's had its time, where the OS doesn't
+     * suspend the process: every socket closes until `on_foreground`.
+     */
+    func onBackgroundIdle() 
+    
+    /**
      * App returned to the foreground: resume, redial/probe rooms.
      */
     func onForeground() 
@@ -1867,6 +1873,18 @@ open func networkPathChanged()  {try! rustCall() {
 open func onBackground()  {try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_on_background(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Still backgrounded after any delivery's had its time, where the OS doesn't
+     * suspend the process: every socket closes until `on_foreground`.
+     */
+open func onBackgroundIdle()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_on_background_idle(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
@@ -22169,6 +22187,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_on_background() != 34188) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_on_background_idle() != 33519) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_on_foreground() != 37345) {
