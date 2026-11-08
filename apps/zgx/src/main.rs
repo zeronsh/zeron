@@ -30,6 +30,7 @@ mod acp_registry;
 mod agents;
 mod appshots;
 mod auth;
+mod fps_hud;
 mod carried_settings;
 mod chat;
 mod cloud;
@@ -503,6 +504,10 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     }
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
+    // A frame stats panel over the window (`ZERON_FPS_HUD=1`, src/fps_hud.rs).
+    if fps_hud::asked() {
+        fps_hud::install(cx, &host);
+    }
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
     // The host's own toasts over it (a template in preview, a switch you
