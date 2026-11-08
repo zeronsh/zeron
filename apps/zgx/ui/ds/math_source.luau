@@ -11,7 +11,10 @@ local M = {}
 -- dollars, a closing one not followed by a digit, so "$5 and $10" stays
 -- text). `\$` is a dollar. A `$$` still open (a reply streaming in) is left
 -- as it is until it closes.
-local BACKTICK, TILDE, DOLLAR, SLASH, NEWLINE, SPACE, TAB = 96, 126, 36, 92, 10, 32, 9
+local BACKTICK, TILDE, DOLLAR, SLASH, NEWLINE, SPACE, TAB, BRACKET = 96, 126, 36, 92, 10, 32, 9, 91
+-- a sent prompt's skills are labelled with their `$` (`[$review](zeron-invoke:…)`),
+-- so two in one message would otherwise read as one formula between them
+local ZERON_LINK = "^%[[^%]\n]*%]%(zeron%-[%a]+:[^%)%s]*%)"
 
 local function blank(b: number?): boolean
 	return b == nil or b == SPACE or b == TAB or b == NEWLINE
@@ -74,6 +77,8 @@ function M.prepare(src: string): string
 		end
 		if b == SLASH then
 			i += 2
+		elseif b == BRACKET and string.match(src, ZERON_LINK, i) then
+			i += #(string.match(src, ZERON_LINK, i) :: string)
 		elseif b == BACKTICK then
 			-- Inline code: past its closing run of as many backticks.
 			local run = string.match(src, "^`+", i) or "`"
