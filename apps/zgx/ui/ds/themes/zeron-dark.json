@@ -117,10 +117,12 @@
 				"working": "{text.secondary}", "connecting": "{palette.blue.400}", "waiting": "{palette.gray.400}",
 				"input": "{palette.indigo.400}", "approval": "{palette.amber.400}", "plan": "{palette.violet.400}",
 				"done": "{palette.emerald.400}", "failed": "{palette.red.400}", "limited": "{palette.orange.400}",
+				"woke": "{palette.yellow.400}",
 				"dot": {
 					"working": "{text.secondary}", "connecting": "{palette.blue.400}", "waiting": "{palette.gray.400}",
 					"input": "{palette.indigo.400}", "approval": "{palette.amber.400}", "plan": "{palette.violet.400}",
-					"done": "{palette.emerald.400}", "failed": "{palette.red.400}", "limited": "{palette.orange.400}"
+					"done": "{palette.emerald.400}", "failed": "{palette.red.400}", "limited": "{palette.orange.400}",
+					"woke": "{palette.yellow.400}"
 				}
 			},
 			// A raised thing's edge; no light along its top.

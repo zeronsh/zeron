@@ -70,8 +70,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, McpServer, Model, ReasoningLevel, RunRequest,
+    SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::approval::{self, Action};
@@ -85,6 +85,17 @@ use wire::{
     ControlRequestFrame, Frame, allow_response, control_error_line, control_response_line,
     deny_response,
 };
+
+/// Appended to a chat's system prompt (where Zeron's server offers
+/// `wait_on_background`: [`McpServer::waits_on_background`]): the text Sonnet and Opus were live-probed acting
+/// on. The CLI starts a turn of its own when a background task ends, so a
+/// turn that ends on one isn't the agent's last.
+const WAIT_ON_BACKGROUND_NOTE: &str = "\
+When you start background work you will come back to once it finishes (a test run, a build, a \
+long check) and you end your turn before it finishes, call the Zeron tool wait_on_background \
+with its task id first, so the person sees this chat waiting rather than finished. Never for work \
+you leave running on purpose (a dev server, a watcher). Zeron tools may be deferred: load it \
+with tool search first.";
 
 /// Locate the device's installed Claude Code CLI: our own PATH, then the
 /// login-shell PATH snapshot (the user's shell init shapes PATH in ways a
@@ -505,6 +516,15 @@ impl ClaudeHarness {
             if let Some(config) = mcp_servers_config_arg(request.mcp.as_ref(), &request.extra_mcp) {
                 cmd.args(["--mcp-config", &config]);
             }
+            // When to say it waits on background work (the Zeron tool
+            // `wait_on_background`), where that tool is offered. Its own
+            // description and the server's instructions say so too, but
+            // neither reaches the model before it decides to end a turn:
+            // live-probed on 2.1.319, Sonnet never called it with those
+            // alone, and Sonnet and Opus both did with this note.
+            if request.mcp.as_ref().is_some_and(McpServer::waits_on_background) {
+                cmd.args(["--append-system-prompt", WAIT_ON_BACKGROUND_NOTE]);
+            }
             // Delegation goes through that server's side chats only. A bare
             // tool name "removes the matching tools from Claude's context"
             // (https://code.claude.com/docs/en/cli-reference), so the model
@@ -768,6 +788,10 @@ impl Harness for ClaudeHarness {
     fn id(&self) -> HarnessId {
         HarnessId::ClaudeCode
     }
+    /// Live-verified 2.1.319: a new turn 0.1 s after a background task ends.
+    fn wakes_on_background(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &str {
         "Claude Code"
     }
@@ -802,6 +826,12 @@ impl Harness for ClaudeHarness {
     /// The `interrupt` control request ends the turn and the CLI keeps
     /// reading stdin; background agents and shells run on.
     fn stops_turn_in_place(&self) -> bool {
+        true
+    }
+    /// A steer during an open tool call: the `interrupt` control request
+    /// stops the foreground call (a running Bash is killed) and the CLI keeps
+    /// its background shells and agents (`perTaskStopAffordance`).
+    fn steer_stops_tool(&self) -> bool {
         true
     }
     /// Same launch arguments, cwd and access. The CLI ignores the sandbox
@@ -1267,6 +1297,11 @@ async fn run_session(session: Session) {
     // A message of ours (or a background wake) began a turn that has not
     // reported its end: the CLI dying now leaves it to us to end it.
     let mut turn_open = true;
+    // The CLI re-invokes the model on its own when a background task ends
+    // (live-verified 2.1.319: `task_notification`, the roster drained, a
+    // fresh `init` 0.1 s later, the wake turn's own `result`), so what the
+    // agent waits on can be shown as a wait.
+    turn.set_wakes_on_background(true);
     // A resumed session the CLI turns out to have no conversation for is
     // relaunched fresh, once (see [`no_conversation`]).
     let mut restore_fallback = launched.resume.is_some();
@@ -1464,10 +1499,17 @@ async fn run_session(session: Session) {
                         match system.subtype.as_str() {
                             "background_tasks_changed" => {
                                 turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
+                                turn.set_background_agents(background::agents(system.tasks.as_deref()));
                             }
                             // The first, or a background wake's: either way a
-                            // turn is running.
-                            "init" => turn_open = true,
+                            // turn is running. One starting with no turn of
+                            // ours open is the CLI's own wake.
+                            "init" => {
+                                if !turn_open {
+                                    turn.note_wake();
+                                }
+                                turn_open = true;
+                            }
                             _ => {}
                         }
                     }
@@ -2258,6 +2300,56 @@ mod tests {
             .find(|(key, _)| *key == "CLAUDE_CODE_FORWARD_SUBAGENT_TEXT")
             .and_then(|(_, value)| value.map(|v| v.to_os_string()));
         assert_eq!(value.as_deref(), Some(std::ffi::OsStr::new("1")));
+    }
+
+    #[test]
+    fn a_chats_run_is_told_when_to_say_it_waits_and_nothing_else_is() {
+        let appended = |mcp: Option<McpServer>| {
+            let request = RunRequest {
+                mcp,
+                prompt: "hi".into(),
+                harness: None,
+                model: None,
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                cwd: String::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                auto_approve: false,
+                access: Default::default(),
+                plan: false,
+                attachments: Vec::new(),
+                worktree: None,
+                resume: None,
+                env: Default::default(),
+                extra_mcp: Vec::new(),
+            };
+            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.iter()
+                .position(|a| a == "--append-system-prompt")
+                .map(|i| args[i + 1].clone())
+        };
+        let server = |env: &[(&str, &str)]| McpServer {
+            name: "zeron".into(),
+            command: "zeron-engine".into(),
+            args: vec!["mcp".into()],
+            env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        };
+        let waits = (McpServer::WAITS_ON_BACKGROUND_ENV, "1");
+        assert_eq!(
+            appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), waits]))).as_deref(),
+            Some(WAIT_ON_BACKGROUND_NOTE)
+        );
+        // The tool not offered (no chat's server, or not one that waits):
+        // nothing is said of it.
+        assert_eq!(appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1")]))), None);
+        assert_eq!(appended(Some(server(&[waits]))), None);
+        assert_eq!(appended(Some(server(&[]))), None);
+        assert_eq!(appended(None), None);
     }
 }
 

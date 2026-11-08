@@ -1116,6 +1116,7 @@ impl WorkspaceHost {
                 // (What a child is to its parent: only a child has a kind.)
                 child_kind: child_kind.filter(|_| parent.is_some()),
                 parent_chat_id: parent,
+                sleep: None,
             })
         })?;
         Ok(())
@@ -1236,6 +1237,21 @@ impl WorkspaceHost {
     /// returned chat ids.
     pub fn delete_space(&self, space_id: &str) -> Result<DeletedSpace, EngineError> {
         Ok(self.mutate(|doc| doc.delete_space(space_id))?)
+    }
+
+    /// A chat put to sleep until `until` (any device; `None` wakes it).
+    pub fn set_chat_sleep(
+        &self,
+        chat_id: &str,
+        until: Option<chrono::DateTime<Utc>>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_sleep(chat_id, until, Utc::now()))?)
+    }
+
+    /// A sleeping chat woken early (its host saw it start asking for the
+    /// person, or fail). `false` when it wasn't asleep.
+    pub fn wake_chat(&self, chat_id: &str, at: chrono::DateTime<Utc>) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.wake_chat(chat_id, at))?)
     }
 
     /// Synced seen marker (any device; LWW + monotonic guard in the doc layer).
@@ -2250,6 +2266,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            waiting: None,
         }
     }
 
