@@ -88,3 +88,33 @@ fn composer_headers_grow_and_shrink_without_replacing_or_covering_the_editor() {
         );
     }
 }
+
+#[test]
+fn composer_dictation_transitions_keep_the_editors_draft_and_selection() {
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/composer_fixture.luau");
+    let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    app.ui.scene.borrow_mut().resize(700., 600.);
+    app.frames(30);
+    app.fill("role:textbox", "retained draft");
+    app.frames(30);
+    let field = app.find("role:textbox").unwrap();
+    let editor = app.ui.editor_within(field).unwrap();
+    editor.set_selection(1, 8);
+    for dictating in [true, false, true, false] {
+        app.host
+            .set_state("test_composer_dictating", Value::Bool(dictating))
+            .unwrap();
+        for _ in 0..30 {
+            app.frame();
+            assert_eq!(app.error(), None);
+            let current = app.find("role:textbox").unwrap();
+            assert_eq!(app.ui.editor_within(current).unwrap().node, editor.node);
+            assert_eq!(editor.selection(), (1, 8));
+            assert_eq!(editor.value().get(), "retained draft");
+            assert_eq!(app.ui.input.focused(), Some(editor.node));
+            let bounds = app.bounds("role:textbox");
+            assert!(bounds.width > 0. && bounds.height > 0.);
+        }
+    }
+}

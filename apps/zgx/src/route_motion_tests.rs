@@ -1,5 +1,5 @@
 //! Composer focus and layout transitions on the real shell fixture.
-//! The fixture controls composer deadlines alongside TestApp's frame/timer clocks.
+//! TestApp supplies the frame/timer clock; readiness is revision-based.
 
 use zgx::{
     input::{InputEvent, Key},
@@ -25,9 +25,7 @@ impl Shell {
         let ui = std::env::var_os("ZERON_ZGX_TEST_UI")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"));
-        let app = TestApp::new(|runtime| {
-            ScriptHost::new(runtime, ui.join("composer_motion_fixture.luau"))
-        });
+        let app = TestApp::new(|runtime| ScriptHost::new(runtime, ui.join("shell_fixture.luau")));
         app.ui.scene.borrow_mut().resize(1200., 800.);
         let motion = app
             .host
@@ -45,13 +43,6 @@ impl Shell {
     fn frames(&mut self, n: usize) {
         for _ in 0..n {
             self.frame += 1;
-            self.app
-                .host
-                .set_state(
-                    "fixture_composer_now",
-                    Value::Num(f64::from(self.frame) * 1000. / 60.),
-                )
-                .unwrap();
             self.app.frame();
             assert_eq!(
                 self.app.error(),
@@ -554,4 +545,47 @@ fn a_new_chat_and_a_session_switch_the_composer_at_once() {
     c.watch(30);
     c.draft("build draft", (0, 5));
     c.at_target();
+}
+
+#[test]
+fn composer_resize_theme_transparency_and_zoom_reflow_preserve_the_draft() {
+    for session in [false, true] {
+        let mut c = Composer::new(session);
+        let text = "**bold** café 你好 @mention and words to wrap\n".repeat(8);
+        c.act(|app| {
+            app.fill(FIELD, &text);
+            select(app, 2, 6);
+        });
+        c.watch(40);
+        for (width, height, zoom, theme, frosted) in [
+            (1200., 800., 1., "zeron-dark", true),
+            (950., 800., 1.25, "zeron-light", false),
+            (1400., 900., 0.9, "zeron-dark", true),
+        ] {
+            c.trace.clear();
+            c.act(|app| {
+                app.ui.theme().set(theme).unwrap();
+                app.ui.set_zoom(zoom);
+                // The native host reflows at window points / zoom. Model
+                // that logical layout here; this does not validate GPU scale.
+                app.ui
+                    .scene
+                    .borrow_mut()
+                    .resize(width / zoom as f32, height / zoom as f32);
+                app.ui.refresh_text_geometry();
+                let key = app
+                    .host
+                    .states()
+                    .into_iter()
+                    .find(|(key, _)| key.ends_with("::frosted"))
+                    .unwrap()
+                    .0;
+                app.host.set_state(&key, Value::Bool(frosted)).unwrap();
+            });
+            c.target.frames(30);
+            c.watch(40);
+            c.draft(&text, (2, 6));
+            c.at_target();
+        }
+    }
 }

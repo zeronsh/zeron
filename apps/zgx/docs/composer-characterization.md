@@ -2,8 +2,9 @@
 
 This is characterization for the composer refactor, **not a confirmed
 reproduction or fix of the intermittent glitch when clicking or typing**.
-Production deadline reads delegate to `ds/composer_clock.now`, whose default
-is `ui.now`. No layout rules or framework behavior change in this baseline.
+At C1, production deadlines delegated to an overridable clock. C6 replaced
+those deadlines with readiness/context state, and C9 removed the obsolete
+clock override. The baseline did not change layout rules or framework behavior.
 
 ## Automated observations
 
@@ -14,7 +15,7 @@ cargo test --locked --manifest-path apps/zgx/Cargo.toml --bin zeron-zgx route_mo
 ```
 
 `src/route_motion_tests.rs` mounts the real shell via
-`ui/composer_motion_fixture.luau`. Each observed frame records the editor's
+`ui/shell_fixture.luau`. Each observed frame records the editor's
 node identity, focused node, selection in UTF-8 bytes, committed draft,
 transformed field/composer rectangles, ancestor opacity and scene visibility.
 Assertion failures include the frame trace for the current interaction.
@@ -46,12 +47,9 @@ The tests cover:
 - New-chat/session route changes: immediate destination geometry, a
   retained editor node, and separate session drafts restored on return.
 
-`TestApp` supplies 60 Hz frames and a controlled timer clock. `ui.now()`
-normally uses wall time, so the dedicated fixture replaces `composer_clock.now` with a state
-advanced by the tests to the same logical elapsed time. The override is
-confined to that fixture's VM and uses `peek()` to avoid making time a new
-reactive layout dependency. These tests use no sleeps. The ordinary shell
-fixture and the app retain their real clock.
+`TestApp` supplies 60 Hz frames and a controlled timer clock. These tests use
+no sleeps. Context settlement now follows metric validity and layout; no
+production wall-clock deadline needs a fixture override.
 
 This is headless scene validation. Scene visibility and opacity do **not**
 prove that the GPU painted the text or that a presented frame was correct.

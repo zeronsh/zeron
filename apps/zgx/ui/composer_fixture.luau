@@ -30,6 +30,7 @@ return ui.column {
 		harnesses = HARNESSES,
 		models = MODELS,
 		notice = ui.state("test_composer_notice", nil :: Composer.Notice?),
+		dictating = ui.state("test_composer_dictating", false),
 		cargo = ui.state("test_composer_cargo", {} :: { Cargo.Item }),
 		question = ui.state("test_composer_question", nil :: Ask.Question?),
 		project = ui.state("test_composer_project", "atlas" :: string?),

@@ -20,9 +20,9 @@ updated; the same progress continues with the latest constraints.
 
 Reduce motion is tracked, including changes during a run. It cancels the
 clip and snaps all geometry together. A changed `props.snap` does the same
-for context switches. The existing 400 ms context-settle window remains
-so measurements arriving just after a switch also snap; replacing this
-deadline is C6's work.
+for context switches. C6 keeps that snap until the current metric revision
+is valid and the destination has been laid out; its deferred acknowledgement
+checks context and revision instead of waiting 400 ms.
 
 Cleanup cancels the clip and marks the controller inactive. Completion
 callbacks check their generation and whether the controller is alive,
