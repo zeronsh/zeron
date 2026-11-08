@@ -275,3 +275,37 @@ test("Files with no file and its tree put away shows the tree, never an empty fi
 		return tree_w(app) == 0
 	end)).to_be(true)
 end)
+
+test("switching the panel's tabs, Files or not, and its tree in or out, never moves the panel's width, wide or narrow", function()
+	for _, size in { { 1440, 900 }, { 1100, 760 } } do
+		local app = mount("shell_fixture.luau")
+		app:resize(size[1], size[2])
+		app:frames(30)
+		show_chat(app, "Fix the build")
+		open_files_tab(app)
+		local w = panel_width(app)
+		expect(w > 300).to_be(true)
+		local function held(what: string, act: () -> ())
+			act()
+			for f = 1, 30 do
+				app:frames(1)
+				expect(`{size[1]}, {what}, frame {f}: {panel_width(app)}`).to_be(`{size[1]}, {what}, frame {f}: {w}`)
+			end
+		end
+		held("a Browser tab", function()
+			app:click('#panel-strip >> role:button "New Tab"')
+			app:frames(2)
+			app:click("#panel-open-browser")
+		end)
+		held("back to Files", function()
+			app:click('#panel-strip >> role:tab "Files"')
+		end)
+		held("its tree toggled", function()
+			app:click('#files-pane >> role:button "Toggle File Tree"')
+		end)
+		held("its tree toggled back", function()
+			app:click('#files-pane >> role:button "Toggle File Tree"')
+		end)
+		expect(app:error()).to_be_nil()
+	end
+end)
