@@ -1028,7 +1028,7 @@ impl SessionsEngine {
                 .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
-        let credential = self.inner.registry.run_credential(harness_id).await;
+        let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
         let binary = {
             let harness = harness.clone();
             tokio::task::spawn_blocking(move || binary_identity(harness.as_ref()))
@@ -1259,7 +1259,7 @@ impl SessionsEngine {
         if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
             return false;
         }
-        match self.inner.registry.run_credential(harness_id).await {
+        match self.inner.registry.run_credential(harness_id, Some(chat_id)).await {
             Some(now) if Some(now.as_str()) != started_with => {
                 tracing::info!(chat = %chat_id, harness = ?harness_id,
                     "credential changed; replacing the parked session");
@@ -4035,7 +4035,7 @@ async fn drive_run(
                 // `RunRequest::env` is serde-skipped, never persisted.
                 match inner
                     .registry
-                    .prepare_run(harness_id, &mut wire_request)
+                    .prepare_run(harness_id, Some(&chat_id), &mut wire_request)
                     .await
                 {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
