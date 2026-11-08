@@ -83,32 +83,72 @@ fn hud_only(frame: &zgx::trace::Frame) -> bool {
             .all(|run| run.name.as_deref().is_some_and(|name| name.contains("fps_hud.luau")))
 }
 
+/// A frame the display showed, with the work of the frames it covered.
+#[derive(Debug, PartialEq)]
+struct Shown {
+    /// When the first frame it covered ended: a refresh shows one frame.
+    began_ms: f64,
+    ended_ms: f64,
+    cpu_ms: f64,
+    gpu_ms: Option<f64>,
+}
+
+/// The frames the display showed, of `frames` (when each ended, its CPU and
+/// GPU ms), as Metal's HUD counts presents: WindowServer composes once a
+/// refresh, so a frame handed over less than half a refresh before the next
+/// is covered by it, and its work counts toward the next; frames covering
+/// each other span a refresh at most.
+// ponytail: zgx doesn't tell the app the refresh's phase or when a surface
+// was shown, so this guesses from the gaps; frames steadily under a refresh
+// but over half of it apart (input past the display's rate) still count each.
+fn shown(frames: impl IntoIterator<Item = (f64, f64, Option<f64>)>, budget: f64) -> Vec<Shown> {
+    let mut out: Vec<Shown> = Vec::new();
+    for (ended_ms, cpu_ms, gpu_ms) in frames {
+        match out.last_mut() {
+            // The last frame was covered by this one, which takes its work.
+            Some(prev) if ended_ms - prev.ended_ms < budget / 2. && ended_ms - prev.began_ms < budget => {
+                prev.ended_ms = ended_ms;
+                prev.cpu_ms += cpu_ms;
+                prev.gpu_ms = match (prev.gpu_ms, gpu_ms) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (a, b) => a.or(b),
+                };
+            }
+            _ => out.push(Shown { began_ms: ended_ms, ended_ms, cpu_ms, gpu_ms }),
+        }
+    }
+    out
+}
+
 fn stats(history: &mut History, refresh: f64, scale: f64, size: (u32, u32)) -> Value {
     let budget = 1000. / refresh;
     let now = zgx::trace::now_ms();
-    let recent: Vec<zgx::trace::Frame> =
-        zgx::trace::frames(zgx::trace::MOST_KEPT).into_iter().filter(|f| !hud_only(f)).collect();
-    let second: Vec<&zgx::trace::Frame> = recent.iter().filter(|f| now - f.ended_ms <= 1000.).collect();
+    // A frame's CPU: its phases but the waits (pacing's, and in `present`
+    // the GPU's, which `gpu` counts).
+    let cpu_ms = |f: &zgx::trace::Frame| {
+        let micros: f32 = f
+            .phases
+            .iter()
+            .filter(|(name, ..)| !matches!(*name, "wait" | "present"))
+            .map(|(.., us)| us)
+            .sum();
+        f64::from(micros) / 1e3
+    };
+    let recent = shown(
+        zgx::trace::frames(zgx::trace::MOST_KEPT)
+            .iter()
+            .filter(|f| !hud_only(f))
+            .map(|f| (f.ended_ms, cpu_ms(f), f.gpu_micros.map(|us| f64::from(us) / 1e3))),
+        budget,
+    );
+    let second: Vec<&Shown> = recent.iter().filter(|f| now - f.ended_ms <= 1000.).collect();
     let gaps: Vec<f64> = second
         .windows(2)
         .map(|w| w[1].ended_ms - w[0].ended_ms)
         .filter(|gap| *gap <= IDLE_MS)
         .collect();
-    // A frame's CPU: its phases but the waits (pacing's, and in `present`
-    // the GPU's, which `gpu` counts).
-    let cpu: Vec<f64> = second
-        .iter()
-        .map(|f| {
-            let micros: f32 = f
-                .phases
-                .iter()
-                .filter(|(name, ..)| !matches!(*name, "wait" | "present"))
-                .map(|(.., us)| us)
-                .sum();
-            f64::from(micros) / 1e3
-        })
-        .collect();
-    let gpu: Vec<f64> = second.iter().filter_map(|f| f.gpu_micros).map(|us| f64::from(us) / 1e3).collect();
+    let cpu: Vec<f64> = second.iter().map(|f| f.cpu_ms).collect();
+    let gpu: Vec<f64> = second.iter().filter_map(|f| f.gpu_ms).collect();
 
     let fps = second.len() as f64;
     let at = Instant::now();
@@ -125,7 +165,7 @@ fn stats(history: &mut History, refresh: f64, scale: f64, size: (u32, u32)) -> V
     let tail = &recent[recent.len().saturating_sub(BARS + 1)..];
     let line = |values: Vec<f64>| Value::List(values.into_iter().map(Value::Num).collect::<Vec<_>>().into());
     let pre_line = line(tail.windows(2).map(|w| (w[1].ended_ms - w[0].ended_ms).min(IDLE_MS)).collect());
-    let gpu_line = line(tail[1.min(tail.len())..].iter().map(|f| f.gpu_micros.map_or(0., |us| f64::from(us) / 1e3)).collect());
+    let gpu_line = line(tail[1.min(tail.len())..].iter().map(|f| f.gpu_ms.unwrap_or(0.)).collect());
 
     let num = Value::Num;
     let range = |values: &[f64]| Value::List(vec![num(min(values)), num(max(values))].into());
@@ -228,5 +268,20 @@ mod tests {
         assert_eq!((super::min(&[3., 1., 2.]), super::max(&[3., 1., 2.])), (1., 3.));
         assert_eq!((super::min(&[]), super::max(&[])), (0., 0.));
         assert!(super::footprint_mb() > 0. || cfg!(not(target_os = "macos")));
+    }
+
+    #[test]
+    fn a_frame_covered_within_a_refresh_counts_toward_the_next() {
+        let at = |shown: Vec<super::Shown>| shown.iter().map(|s| s.ended_ms).collect::<Vec<_>>();
+        let budget = 1000. / 60.;
+        // A bounce: input frames a refresh apart, each with one 0.1 ms after.
+        let bounce = [(0., 1., Some(1.)), (0.1, 0.5, None), (16.7, 1., None), (16.8, 0.5, Some(2.)), (33.4, 1., None)];
+        let shown = super::shown(bounce, budget);
+        assert_eq!(at(shown), [0.1, 16.8, 33.4]);
+        let shown = super::shown(bounce, budget);
+        assert_eq!((shown[0].cpu_ms, shown[0].gpu_ms, shown[1].gpu_ms), (1.5, Some(1.), Some(2.)));
+        // Frames 5 ms apart don't cover each other past a refresh.
+        let steady = (0..8).map(|i| (f64::from(i) * 5., 0., None));
+        assert_eq!(at(super::shown(steady, budget)), [15., 35.]);
     }
 }
