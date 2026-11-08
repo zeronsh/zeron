@@ -209,6 +209,28 @@ return function(props: Props): Node
 	-- (Collapsed, past the bar's controls by as much as Zeron's title
 	-- stands past its last control's glyph.)
 	local after_controls = (ui.theme.get("space.1") :: number?) or 4
+	-- Where the title starts: past the title bar's controls while they
+	-- stand over it (the sidebar collapsed), else the page's inset.
+	-- (`full`, `tracked`: as ds.TitleBar's `controls_end`.)
+	local function title_left(full: boolean?, tracked: boolean?): number
+		if shell_view.collapsed:get() or not fit.current:get().sidebar then
+			return ds.TitleBar.controls_end(full, tracked) + after_controls
+		end
+		return inset
+	end
+	-- How far it moves with the controls as the window goes in or out of
+	-- full screen (macOS hides the traffic lights there), kept by the title
+	-- bar's `follow`: still while macOS animates, then sliding with them;
+	-- eased as the sidebar's moves otherwise, as its `left` is.
+	local function full_screen_shift(full: boolean?, tracked: boolean?): number
+		return title_left(full, tracked) - title_left(false, tracked)
+	end
+	local header_ref = ui.ref()
+	ds.TitleBar.follow(header_ref, {
+		x = function(full: boolean): number
+			return full_screen_shift(full)
+		end,
+	}, motion.sidebar)
 	table.insert(
 		pane,
 		ui.show(
@@ -227,13 +249,23 @@ return function(props: Props): Node
 					end),
 				},
 				absolute = true,
-				top = TITLE_TOP,
+				-- (Centred on the bar's line: 21 down, or the window's own
+				-- buttons' middle where they set it.)
+				top = function(): number
+					return ds.TitleBar.middle() - (TITLE_H - TITLE_TOP) / 2
+				end,
 				h = TITLE_H - TITLE_TOP,
+				ref = header_ref,
 				left = motion.tween(ui.computed(function(): number
-					return if shell_view.collapsed:get() or not fit.current:get().sidebar then ds.TitleBar.controls_end() + after_controls else inset
+					return title_left(false, true)
 				end), motion.sidebar),
-				-- (Clear of the bar's own controls at its right.)
-				right = ui.raw(TITLE_RIGHT, "the title bar's controls at the right, and their room"),
+				x = full_screen_shift(ds.TitleBar.full_screen_now(), false),
+				-- (Clear of the bar's own controls at its right, and of the
+				-- window's buttons where they stand there; TITLE_RIGHT counts the
+				-- bar's row padding, 10, which `actions_right` gives as it is.)
+				right = function(): number
+					return ui.raw(TITLE_RIGHT - 10 + ds.TitleBar.actions_right(), "the title bar's controls at the right, and their room")
+				end,
 				gap = "$zeron.space.tight",
 				items = "center",
 				pointer_events = "none",
@@ -669,6 +701,9 @@ return function(props: Props): Node
 			if boundary.load("@app/screens/panel")
 				then boundary.screen(boundary.named("shell.boundary.screen.panel"), "@app/screens/panel", function(panel): Node
 					return panel.Panel {
+						visible = function(): boolean
+							return shown:get()
+						end,
 						project = route.project,
 						session = route.session,
 						page = route.page,

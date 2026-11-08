@@ -12,6 +12,8 @@
     <string>zeron</string>
     <key>CFBundleIconFile</key>
     <string>zeron.icns</string>
+    <key>CFBundleIconName</key>
+    <string>Zeron</string>
     <key>CFBundleIdentifier</key>
     <string>sh.zeron.app</string>
     <key>CFBundleInfoDictionaryVersion</key>

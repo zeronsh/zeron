@@ -780,12 +780,7 @@ local function Composer(): Node
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
 			T.send(function()
-				local here = false
-				for _, m in store.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = store.messages:index_of("id", mid) ~= nil
 				if not here then
 					store.messages:push {
 						id = mid,
@@ -923,6 +918,9 @@ local function Composer(): Node
 			end
 		end, function() end)
 	end)
+	local accounts = shared.model_accounts(function(): string?
+		return device:get()
+	end)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -936,7 +934,14 @@ local function Composer(): Node
 		end
 		local lb = live_branch:get()
 		local name = if lb.key:sub(1, #s.id + 1) == `{s.id}|` then lb.name else (s :: any).branch
+		local on: string? = nil
+		for _, d in sessions.now:get().devices do
+			if d.id == (s :: any).device then
+				on = d.name
+			end
+		end
 		return {
+			device = on,
 			name = name,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,
@@ -961,6 +966,15 @@ local function Composer(): Node
 			open_model = shared.open_model,
 			model_open = model_open,
 			tray = TRAY,
+			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			aside = function(): number?
+				return shared.jump_width:get()
+			end,
+			on_pill_width = function(w: number?)
+				if shared.pill_width:peek() ~= w then
+					shared.pill_width:set(w)
+				end
+			end,
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
@@ -980,6 +994,9 @@ local function Composer(): Node
 			models = function(): { ds.Model }
 				return store.catalog:get().models
 			end,
+			accounts = accounts.accounts,
+			on_account = accounts.on_account,
+			on_accounts_open = accounts.on_accounts_open,
 			-- What its context holds (the ring shows once a window is
 			-- reported, its card saying the numbers).
 			usage = function(): ds.ComposerUsage?
@@ -1228,6 +1245,39 @@ local function Composer(): Node
 		shared.composer_shown:set(false)
 	end)
 	local dock = ui.ref()
+	-- How tall a new chat's composer is with nothing in it (what it's placed
+	-- by, so what's written in it doesn't move its top).
+	local rest_tall = ui.state("chat_composer_rest_tall", nil :: number?)
+	-- (A draft just deleted, it's empty while still easing back, and that
+	-- height would move its top: taken once that's over.)
+	local REST_SETTLE_MS = 500
+	local had_draft = false
+	local rest_settles_at = 0
+	ui.effect(function()
+		local tall = dock.height or 0
+		if shared.text:get() ~= "" or #shared.cargo:get() > 0 or next(shared.quotes:get()) ~= nil then
+			had_draft = true
+			return
+		end
+		if had_draft then
+			had_draft = false
+			rest_settles_at = ui.now() + REST_SETTLE_MS
+		end
+		if tall <= 0 or not new_chat() then
+			return
+		end
+		local function take()
+			if math.abs((rest_tall:peek() or 0) - tall) >= 0.5 then
+				rest_tall:set(tall)
+			end
+		end
+		local left = rest_settles_at - ui.now()
+		if left > 0 and rest_tall:peek() ~= nil then
+			ui.after(left, take)
+		else
+			take()
+		end
+	end)
 	-- Where it stands: mid-page on a new chat (centred under the title bar),
 	-- else docked at the foot (0), as laid out now.
 	local function target_y(): number
@@ -1244,9 +1294,13 @@ local function Composer(): Node
 		if tall <= 0 then
 			tall = shared.dock_h:get()
 		end
+		-- (Its top stays as a draft grows: it's placed by its empty height,
+		-- and grows down from there. Only a draft that would run off the
+		-- page's foot moves it, up by as much.)
+		local rest = rest_tall:get() or tall
 		local hero = TITLE_H + (h - TITLE_H - 96) / 2
-		local docked = h - FOOT - tall / 2
-		return hero - docked
+		local docked = h - FOOT - rest / 2
+		return math.min(hero - docked, rest - tall)
 	end
 	-- Moving between a new chat and a session: its own send from a new chat
 	-- slides it down with the prompt (`slide_next`); any other move (another
@@ -1263,6 +1317,10 @@ local function Composer(): Node
 	local place = ui.state("chat_composer_place", 0)
 	-- (Held where it is while its model picker is open: `model_open`.)
 	local was_new: boolean? = nil
+	-- (Its model picker open on a new chat: how far its top gives way so its
+	-- chip stays, the picker hanging from it, as what's written grows.)
+	local hold = ui.state("chat_composer_hold", 0)
+	local held_tall: number? = nil
 	local gliding: any = nil
 	local snap_until = 0
 	local function glide_to(y: number)
@@ -1296,9 +1354,27 @@ local function Composer(): Node
 			snap:set(snap:peek() + 1)
 		end
 		form_new:set(nc)
-		if model_open:get() and not switched then
+		-- On a new chat its place is the layout's (see the row below), so the
+		-- page resizing moves it with the page; this is only where a send
+		-- slides from.
+		if nc and not switched then
+			if gliding then
+				gliding:cancel()
+				gliding = nil
+			end
+			place:set(y)
+			local tall = dock.height or 0
+			if model_open:get() then
+				held_tall = held_tall or tall
+				hold:set(held_tall - tall)
+			elseif held_tall then
+				held_tall = nil
+				anime.animate(hold, { value = 0, duration = GLIDE.duration, ease = GLIDE.ease })
+			end
 			return
 		end
+		held_tall = nil
+		hold:set(0)
 		glide_to(y)
 	end)
 	-- Over the whole pane, the pointer passing through it to the page
@@ -1327,14 +1403,38 @@ local function Composer(): Node
 			pointer_events = "none",
 			left = 0,
 			right = 0,
-			bottom = FOOT,
+			-- On a new chat by its top, from the page's middle: it moves with
+			-- the page as the page lays out, and what's written grows it down.
+			-- Docked, by its foot.
+			top = function(): any
+				return if new_chat() then "50%" else nil
+			end,
+			bottom = function(): any
+				return if new_chat() then nil else FOOT
+			end,
 			px = require("@app/screens/chat/dock").SIDES,
 			justify = "center",
 			-- Mid-page on a new chat, docked on a session: sliding there as it
 			-- sends from a new chat (with its prompt), there at once otherwise
 			-- (another chat, a new chat: `place`).
 			id = "chat-composer-dock",
-			y = place,
+			y = function(): number
+				if not new_chat() then
+					return place:get()
+				end
+				local tall = dock.height or 0
+				if tall <= 0 then
+					tall = shared.dock_h:get()
+				end
+				local rest = rest_tall:get() or tall
+				local at = TITLE_H / 2 - 48 - rest / 2
+				-- (Only a draft that would run off the page's foot moves it.)
+				local h = page.height or 0
+				if h > 0 then
+					at = math.min(at, h / 2 - FOOT - tall)
+				end
+				return at + hold:get()
+			end,
 			ui.div {
 				ref = dock,
 				id = "chat-composer",

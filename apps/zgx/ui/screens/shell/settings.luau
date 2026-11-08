@@ -24,6 +24,7 @@
 -- `settings.title_of(id, fallback)`: a page's title in the locale shown, a
 -- string read now (`title` stays the English it's kept and compared by).
 
+local motion = require("@ds/motion")
 local ds = require("@ds")
 local route = require("@app/screens/shell/route")
 
@@ -146,6 +147,7 @@ local BACK = "::back"
 local TITLE_KEYS: { [string]: { string } } = {
 	general = { "General", "settings.general.title" },
 	appearance = { "Appearance", "settings.appearance.title" },
+	activity = { "Activity", "settings.activity.title" },
 	notifications = { "Notifications", "settings.notifications.title" },
 	files = { "Files", "settings.files.title" },
 	browser = { "Browsing", "settings.browser.page_title" },
@@ -197,7 +199,34 @@ end
 -- the page scrolling beside it under a strip of its own. The gallery's
 -- settings window (demos/example_kit `settings`). Esc, ⌘[ and Back to
 -- chats go back where the chats were, as they were.
-function M.View(): Node
+-- `inset`: under the top bar, its tabs still there, the list and the page each a card
+-- as the chats' sidebar and page are (v3). `collapsed`, the chats' sidebar's: the list
+-- folds with it, by the title bar's toggle.
+function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
+	local inset = props ~= nil and props.inset == true
+	local collapsed = if props then props.collapsed else nil
+	-- How open the list is, 0 to 1: its width follows this and the width dragged, at
+	-- once, and what it holds stays at its width, the edge clipping it.
+	local list_open = ui.use_state(if collapsed and collapsed:peek() then 0 else 1)
+	if collapsed then
+		local was = collapsed:peek()
+		ui.effect(function()
+			local now = collapsed:get()
+			if now ~= was then
+				was = now
+				anime.animate(list_open, motion.params({
+					value = if now then 0 else 1,
+					duration = motion.sidebar.duration,
+					ease = motion.sidebar.ease,
+				}) :: any)
+			end
+		end)
+	end
+	local function list_w(): number
+		local fit: any = require("@app/screens/shell/fit")
+		local sidebar: any = require("@app/screens/shell/sidebar")
+		return math.clamp(sidebar.width:get(), fit.SIDEBAR_MIN, fit.SIDEBAR_MAX)
+	end
 	-- Where the page is scrolled, as the view has it: `M.scroll` as it was,
 	-- put back until a layout keeps it. (A view made again, the scripts
 	-- reloaded, lays the page out before its rows have come; its scroll,
@@ -244,6 +273,9 @@ function M.View(): Node
 		w_full = true,
 		h_full = true,
 		min_h = 0,
+		-- (In the page's place: its row has the edges, but for the 1 more the sidebar
+		-- stands from the window than the page does from it.)
+		pl = if inset then ui.raw(1, "as far in as the sidebar") else nil,
 		-- The pages (the design system's list of them; a page added later
 		-- joins it in place), and what plugins add under them.
 		ui.div {
@@ -252,7 +284,26 @@ function M.View(): Node
 			h_full = true,
 			shrink = 0,
 			relative = true,
+			rounded = if inset then "$zeron.inset.radius" else nil,
+			bg = if inset then "$zeron.inset.bg" else nil,
+			overflow = if inset then "hidden" else nil,
+			w = if inset
+				then function(): number
+					return ui.raw(list_open:get() * list_w(), "the list's width, folding")
+				end
+				else nil,
+			mr = if inset
+				then function(): number
+					return ui.raw(list_open:get() * 4, "the window's gap between cards, closing with the list")
+				end
+				else nil,
+			hidden = if inset
+				then function(): boolean
+					return list_open:get() <= 0
+				end
+				else nil,
 			ds.Settings.Nav {
+				card = inset,
 				value = ui.computed(function(): string?
 					return route.current:get().page
 				end) :: any,
@@ -269,7 +320,7 @@ function M.View(): Node
 				width = require("@app/screens/shell/sidebar").width,
 				min_w = require("@app/screens/shell/fit").SIDEBAR_MIN,
 				max_w = require("@app/screens/shell/fit").SIDEBAR_MAX,
-				top = TITLE_H,
+				top = if inset then nil else TITLE_H,
 				lead = { { value = BACK, label = ui.t("settings.shell.back") :: any, icon = "arrow-left" } },
 				items = function(): { any }
 					local out: { any } = {}
@@ -344,7 +395,7 @@ function M.View(): Node
 				end)(),
 			},
 			-- Its strip, with the window's buttons in it, moves the window.
-			ui.div { id = "settings-nav-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
+			if inset then nil else ui.div { id = "settings-nav-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
 		},
 		-- The page open, under its own strip (another page is another page:
 		-- it swaps).
@@ -352,8 +403,20 @@ function M.View(): Node
 			grow = 1,
 			min_w = 0,
 			h_full = true,
-			-- (Its strip moves the window, a double click zooming it.)
-			ui.div { id = "settings-drag", h = TITLE_H, w_full = true, shrink = 0, window_drag = true },
+			-- (The panel expanded over it: none of it shows, the list beside the panel.)
+			hidden = if inset
+				then function(): boolean
+					return (require("@app/screens/shell/view") :: any).expanded:get() == true
+				end
+				else nil,
+			rounded = if inset then "$zeron.inset.radius" else nil,
+			bg = if inset then "$zeron.inset.bg" else nil,
+			border = if inset then 1 else nil,
+			border_color = if inset then "$zeron.inset.edge" else nil,
+			overflow = if inset then "hidden" else nil,
+			-- (Its strip moves the window, a double click zooming it; inset, the top
+			-- bar does that.)
+			if inset then nil else ui.div { id = "settings-drag", h = TITLE_H, w_full = true, shrink = 0, window_drag = true },
 			ui.scroll {
 				w_full = true,
 				grow = 1,

@@ -78,6 +78,21 @@ local function note(what: string)
 	table.insert(said, what)
 	calls:set(table.concat(said, ","))
 end
+-- (The composer's accounts: `agents.on_device` set by a test, what's asked of
+-- the host noted.)
+do
+	local stub_agents = require("@account/agents") :: any
+	stub_agents.watch_device = function(key: string)
+		note(`watch_device:{key}`)
+	end
+	stub_agents.refresh_device = function(key: string)
+		note(`refresh_device:{key}`)
+	end
+	stub_agents.switch_on = function(key: string, id: string, account: string): any
+		note(`switch_on:{key}:{id}:{account}`)
+		return { after = function(_: any, done: (any) -> ()) done(nil) end }
+	end
+end
 
 local function publish(id: string, patch: { [string]: any }?)
 	local s = table.clone(META[id] or {})
@@ -102,6 +117,27 @@ ui.command {
 		end
 	end,
 }
+-- The open session with subagents (the host says them, as it does from the
+-- transcript's spawn chips): `subagents_running` has two working and one
+-- done; opening one is noted (`open_subagent:<session>:<doc>`).
+do
+	local lanes = require("@app/screens/chat/lanes") :: any
+	lanes.open_subagent = function(session: string, sub: any)
+		note(`open_subagent:{session}:{sub.ref}`)
+	end
+	local published = ui.shared("chat.subagents", {} :: { any })
+	ui.command {
+		id = "subagents_running",
+		title = "Subagents run: two working, one done",
+		run = function()
+			published:set({
+				{ ref = "d1", title = "scan the repo", status = "running" },
+				{ ref = "d2", title = "read the docs", status = "running" },
+				{ ref = "d3", title = "find the flaky test", status = "done" },
+			})
+		end,
+	}
+end
 -- The open session, as if it ran on the box (a remote device that's up),
 -- or on the old laptop (one gone quiet).
 for _, d in { "box", "old" } do
@@ -274,7 +310,33 @@ stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
 stub.answer = function() end
-stub.queue = function() end
+-- A queued message sent on (steered in): noted; `steer_fails` makes the
+-- next one not go.
+local STEER_FAILS = ui.state("fixture_steer_fails", false)
+stub.queue = function(id: string, op: any, failed: (() -> ())?)
+	if op.op ~= "send" then
+		return
+	end
+	note(`queue:{id}:send:{op.item}`)
+	if STEER_FAILS:peek() then
+		STEER_FAILS:set(false)
+		if failed then
+			failed()
+		end
+	end
+end
+ui.command {
+	id = "steer_fails",
+	title = "The next steer doesn't go",
+	run = function()
+		STEER_FAILS:set(true)
+	end,
+}
+-- A queued message's files, as the host hands them to an edit (`q2`'s).
+local QUEUED_FILES = {
+	{ path = "/host/uploads/9e97a72f-shot.png", name = "shot.png", kind = "image", src = "/host/uploads/9e97a72f-shot.png", on_host = true },
+	{ path = "/host/uploads/ea958e1e-note.txt", name = "note.txt", kind = "file", on_host = true },
+}
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
@@ -286,13 +348,33 @@ stub.queue_edit = function(id: string, item: string): any
 		end
 	end
 	publish(id, { queue = q })
+	if item == "q2" then
+		return settled({ text = "Queued with files", attachments = QUEUED_FILES })
+	end
 	return settled({ text = "Queued words" })
 end
-stub.queue_finish = function(id: string, item: string, action: string, text: string?): any
-	note(`queue_finish:{id}:{item}:{action}:{text or ""}`)
+stub.queue_finish = function(id: string, item: string, action: string, text: string?, attachments: { any }?): any
+	local files = ""
+	if attachments then
+		local names = {}
+		for _, a in attachments do
+			table.insert(names, `{a.path}{if a.on_host then "@host" else ""}`)
+		end
+		files = `:files={table.concat(names, ",")}`
+	end
+	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
 	publish(id, { queue = { { id = item, text = if action == "commit" then text else "Queued words" } } })
 	return settled(nil)
 end
+ui.command {
+	id = "queue_with_files",
+	title = "A message with files waits in the queue",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q2", text = "Queued with files" } } })
+		end
+	end,
+}
 ui.command {
 	id = "queue_one",
 	title = "A message waits in the queue",
@@ -462,6 +544,18 @@ ui.command {
 	end,
 }
 
+-- Messages from other chats, as the host gives them: one from a chat that's
+-- listed, one from a chat that isn't, one with a long title (tests/chat_sender).
+ui.command {
+	id = "messages_from_chats",
+	title = "Other chats send messages",
+	run = function()
+		store.messages:push { id = "from1", role = "user", text = "The layout pass is done.", at = "Sep 8, 5:00 PM", copy = "The layout pass is done.", sender = { chat = "s2", title = "Old title" } }
+		store.messages:push { id = "from2", role = "user", text = "Waiting on you.", at = "Sep 8, 5:01 PM", copy = "Waiting on you.", sender = { chat = "gone", title = "Gone chat" } }
+		store.messages:push { id = "from3", role = "user", text = "And a word from far away.", at = "Sep 8, 5:02 PM", copy = "And a word from far away.", sender = { chat = "gone2", title = string.rep("A very long chat title ", 12) } }
+	end,
+}
+
 -- The theme, for captures in both.
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
 ui.command { id = "theme_dark", title = "Dark theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-dark") end }
@@ -569,7 +663,7 @@ ui.command { id = "learn_icons", title = "Hear of the registry icons", run = fun
 	agent_icons:set(ICONS)
 end }
 
--- The shell's sessions: one project, two chats, this Mac.
+-- The shell's sessions: one project, two chats, this computer.
 local function seed()
 	local chats: { any } = {}
 	for id, m in META do
@@ -581,7 +675,7 @@ local function seed()
 	sessions.now:set(({
 		state = "ready",
 		here = "mac",
-		-- This Mac; a box that's up (seen a moment ago); one gone quiet.
+		-- This computer; a box that's up (seen a moment ago); one gone quiet.
 		devices = {
 			{ id = "mac", name = "MacBook Pro", platform = "macos", here = true, online = true },
 			-- (Its beat a day ahead: up however long the fixture runs.)
@@ -1151,6 +1245,27 @@ ui.command {
 			{ n, "blocks", 1, "tools", 1, "call" },
 			"Weighing the parser first.\n\n**The parser**\n\nIt reads the whole file on every keystroke, and the file is the transcript, so the cost grows with the chat. A cursor into the last block would read only what changed, which is what the host already keeps.\n\n**The host**\n\nIt sends each block whole as it grows, so the parser's input is the bottleneck twice over. The last line is the freshest thought."
 		)
+	end,
+}
+-- More of it, as the host streams one: the draft's words alone, its row's
+-- own (`call`) left as they were.
+ui.command {
+	id = "thought_streams",
+	title = "More of the thought arrives",
+	run = function()
+		store.draft:set { id = "th1", text = "", thought = "th-r", thought_text = "Weighing the parser first. Then the host." }
+	end,
+}
+-- Written: the row takes its words, then the draft lets them go.
+ui.command {
+	id = "thought_written",
+	title = "The thought is written",
+	run = function()
+		local n = store.messages:len()
+		store.messages:set_key({ n, "blocks", 1, "tools", 1, "call" }, "Weighing the parser first. Then the host.")
+		store.messages:set_key({ n, "blocks", 1, "tools", 1, "live" }, false)
+		store.messages:set_key({ n, "blocks", 1, "live" }, false)
+		store.draft:set { id = "", text = "" }
 	end,
 }
 ui.command {

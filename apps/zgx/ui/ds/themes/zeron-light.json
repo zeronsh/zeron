@@ -75,7 +75,16 @@
 		"control.height": 32,
 
 		"zeron": {
-			"window": "#f6f6f7",
+			"window": "#eeeef0",
+			// Where nothing shows through: the page a white card on that
+			// window, its edge a hairline you can see, and muted text about
+			// 7:1 and 4.5:1, where glass's tones fall under 3:1.
+			"solid": {
+				"card": "#ffffff",
+				"edge": "#00000024",
+				"secondary": "alpha({text.primary}, 0.74)",
+				"tertiary": "alpha({text.primary}, 0.62)"
+			},
 			// Code: the same hues as dark, at deep steps (700; 600 for the
 			// warm ones, which go muddy deeper), so each reads as ink on white
 			// paper and on pale glass. The structure is the text's ink, fainter.
@@ -156,10 +165,12 @@
 				"working": "{text.secondary}", "connecting": "{palette.blue.600}", "waiting": "{palette.gray.600}",
 				"input": "{palette.indigo.600}", "approval": "{palette.amber.600}", "plan": "{palette.violet.600}",
 				"done": "{palette.emerald.600}", "failed": "{palette.red.600}", "limited": "{palette.orange.600}",
+				"woke": "{palette.yellow.600}",
 				"dot": {
 					"working": "{text.secondary}", "connecting": "{palette.blue.500}", "waiting": "{palette.gray.500}",
 					"input": "{palette.indigo.500}", "approval": "{palette.amber.500}", "plan": "{palette.violet.500}",
-					"done": "{palette.emerald.500}", "failed": "{palette.red.500}", "limited": "{palette.orange.500}"
+					"done": "{palette.emerald.500}", "failed": "{palette.red.500}", "limited": "{palette.orange.500}",
+					"woke": "{palette.yellow.500}"
 				}
 			},
 			"slider": { "tint": 0.3, "ring": 0.45 },

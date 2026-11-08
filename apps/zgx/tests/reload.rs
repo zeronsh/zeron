@@ -861,6 +861,16 @@ fn mid_history(log: &Log) -> TestApp {
     app
 }
 
+/// `n` frames at a window's pace, a refresh apart. (`frames` runs them as
+/// fast as it can, well under a millisecond each, where a window's are 16 ms
+/// apart: what reads the clock between frames sees another order of things.)
+fn paced_frames(app: &mut TestApp, n: usize) {
+    for _ in 0..n {
+        app.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+}
+
 /// The wheel over the transcript scrolls it, with the composer there: the
 /// composer's layer covers the whole page pane, and must let the pointer and
 /// the wheel through to the conversation under it (Nov 1: a box round it
@@ -887,12 +897,88 @@ fn the_wheel_over_the_transcript_scrolls_it_with_the_composer_there() {
     app.scroll("#transcript", -600.);
     app.frames(10);
     let after = place_of(&mut app, needle).map_or(i32::MAX, |p| p.0);
-    assert!(after > before + 300, "the wheel moved nothing: {before} then {after}");
+    // By what the wheel asked: a reply coming back above the view moves
+    // nothing under it.
+    assert_eq!(after, before + 600, "the wheel up moved it by other than the wheel");
     // And back down.
     app.scroll("#transcript", 600.);
     app.frames(10);
     let back = place_of(&mut app, needle).map_or(i32::MIN, |p| p.0);
     assert!((back - before).abs() < 40, "the wheel down came back: {before}, {after}, {back}");
+}
+
+/// A reply above the view, away from it and held as a box of its last height,
+/// comes back at another height: the window's width changed meanwhile. The
+/// list already keeps what shows as a row above it changes, so the wheel moves
+/// the view by what it asked and no more. (Corrected twice, it came up short
+/// by that difference, under a person's wheel.)
+#[test]
+fn a_reply_coming_back_at_another_height_moves_the_view_by_the_wheel_alone() {
+    let log: Log = Rc::default();
+    let mut app = mount("main", "signin", &log);
+    app.frames(30);
+    app.host.shared("sessions", Value::Nil).set(Value::from_json(SESSIONS).unwrap());
+    app.host
+        .shared("chat.session", Value::Nil)
+        .set(Value::from_json(r#"{"id":"c1","state":"ready","title":"Fix the build","running":false,"queue":[],"todos":[],"tasks":[]}"#).unwrap());
+    app.host.shared("chat.messages", Value::Nil).set(Value::from_json(&wrapping_transcript(30)).unwrap());
+    app.frames(60);
+    app.click("#shell-sidebar >> \"Fix the build\"");
+    paced_frames(&mut app, 30);
+    // Narrower: the reply above the view, held, stands at its old height.
+    resize(&mut app, 700., 820.);
+    paced_frames(&mut app, 30);
+    let needle = "\"Reply 30, paragraph 10:";
+    let (before, _) = place_of(&mut app, needle).expect("the end shows");
+    // (Far enough to bring it near, still above the view.)
+    app.scroll("#transcript", -1300.);
+    paced_frames(&mut app, 10);
+    let after = place_of(&mut app, needle).map_or(i32::MAX, |p| p.0);
+    assert_eq!(after, before + 1300, "the wheel moved it by other than the wheel");
+}
+
+/// Inside a reply longer than the view, its runs of words held at a guess come
+/// back as the wheel reaches them, above the view's top with the reply's own
+/// row across it. The list keeps that row's top, not what shows inside it, so
+/// here the window makes up the difference: each step of the wheel moves what
+/// shows by the wheel alone.
+#[test]
+fn a_long_reply_coming_back_inside_its_row_moves_the_view_by_the_wheel_alone() {
+    let paragraph = "The layout pass runs first and measures every row it shows, then paint fills the scene, then present hands the frame to the display; a width change asks layout again for every line that wraps, so a long paragraph like this one takes a different number of lines at each width.";
+    let text = (1..=300).map(|k| format!("Part {k}: {paragraph}")).collect::<Vec<_>>().join("\\n\\n");
+    let messages = format!(
+        r#"[{{"id":"u1","role":"user","text":"Tell me more.","at":"Sep 9, 3:00 PM","copy":"x"}},{{"id":"a1","role":"assistant","text":"{text}","at":"Sep 9, 3:01 PM","copy":"x","blocks":[{{"id":"t","kind":"text","text":"{text}"}}]}}]"#
+    );
+    let log: Log = Rc::default();
+    let mut app = mount("main", "signin", &log);
+    app.frames(30);
+    app.host.shared("sessions", Value::Nil).set(Value::from_json(SESSIONS).unwrap());
+    app.host
+        .shared("chat.session", Value::Nil)
+        .set(Value::from_json(r#"{"id":"c1","state":"ready","title":"Fix the build","running":false,"queue":[],"todos":[],"tasks":[]}"#).unwrap());
+    app.host.shared("chat.messages", Value::Nil).set(Value::from_json(&messages).unwrap());
+    app.frames(60);
+    app.click("#shell-sidebar >> \"Fix the build\"");
+    paced_frames(&mut app, 30);
+    // (A paragraph in view, by its words, from the end up.)
+    let (list_top, _) = place_of(&mut app, " #transcript ").expect("no transcript");
+    let in_view = |app: &mut TestApp| {
+        (1..=300).rev().find_map(|k| {
+            let needle = format!("\"Part {k}:");
+            place_of(app, &needle).filter(|(y, _)| *y > list_top + 100 && *y < list_top + 400).map(|(y, _)| (needle, y))
+        })
+    };
+    let mut slips = Vec::new();
+    for step in 0..40 {
+        let Some((needle, from)) = in_view(&mut app) else { panic!("nothing in view at step {step}:\n{}", app.tree()) };
+        app.scroll("#transcript", -250.);
+        paced_frames(&mut app, 3);
+        let to = place_of(&mut app, &needle).map_or(i32::MAX, |p| p.0);
+        if to != from + 250 {
+            slips.push(format!("step {step}, {needle}: {from} then {to}"));
+        }
+    }
+    assert!(slips.is_empty(), "the wheel moved what shows by other than the wheel:\n{}", slips.join("\n"));
 }
 
 /// A paragraph starting in the view's upper half: the reading place.
@@ -1120,7 +1206,8 @@ fn arrow(app: &mut TestApp, name: &str) -> String {
 /// The history behind and ahead survives a reload of the scripts: from a
 /// session back to the one before it, with one ahead, both arrows work
 /// after it as before. (The router was made again from where it stood
-/// alone, and Back came back disabled.)
+/// alone, and Back came back disabled.) It opens on the latest session, the
+/// build, in place of where it started: that's the first place.
 #[test]
 fn a_reload_keeps_the_history_behind_and_ahead() {
     let log: Log = Rc::default();
@@ -1128,9 +1215,9 @@ fn a_reload_keeps_the_history_behind_and_ahead() {
     app.frames(30);
     app.host.shared("sessions", Value::Nil).set(Value::from_json(TWO_SESSIONS).unwrap());
     app.frames(60);
-    app.click("#shell-sidebar >> \"Fix the build\"");
-    app.frames(30);
     app.click("#shell-sidebar >> \"Write the docs\"");
+    app.frames(30);
+    app.click("#shell-sidebar >> \"Fix the build\"");
     app.frames(30);
     app.click("role:button \"Back\"");
     app.frames(30);
@@ -1141,15 +1228,16 @@ fn a_reload_keeps_the_history_behind_and_ahead() {
     assert_eq!(app.error(), None, "the reload failed");
     assert_eq!(arrow(&mut app, "Back"), back, "Back after the reload");
     assert_eq!(arrow(&mut app, "Forward"), forward, "Forward after the reload");
-    // Forward to the docs, back twice past the build to home: as it was.
+    // Forward to the build, back twice past the docs to where it opened: as
+    // it was.
     app.click("role:button \"Forward\"");
     app.frames(30);
-    assert!(arrow(&mut app, "Forward").contains("disabled"), "nothing ahead of the docs: {}", arrow(&mut app, "Forward"));
+    assert!(arrow(&mut app, "Forward").contains("disabled"), "nothing ahead of the build: {}", arrow(&mut app, "Forward"));
     app.click("role:button \"Back\"");
     app.frames(30);
     app.click("role:button \"Back\"");
     app.frames(30);
-    assert!(arrow(&mut app, "Back").contains("disabled"), "home is the first place: {}", arrow(&mut app, "Back"));
+    assert!(arrow(&mut app, "Back").contains("disabled"), "where it opened is the first place: {}", arrow(&mut app, "Back"));
 }
 
 /// The window's width changed in one step mid-conversation (maximized, a

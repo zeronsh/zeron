@@ -6,7 +6,8 @@
 -- hairline edge and the menus' deep shadow. An `island` is a bar resting
 -- over content (a floating action bar): the
 -- island's lighter glass and close shadow, with a fainter edge. Opaque
--- (`material`), both turn solid (the menus' solid fill) and blur nothing.
+-- (`material`: the setting, or the system's transparency off), both turn
+-- solid (the menus' solid fill) and blur nothing.
 --
 -- `Glass { kind = "menu", w = 232, … }` is a column of it. Where the
 -- panel is zgx's own (`ui.popover`, `ui.submenu`, a drag preview's row),
@@ -19,7 +20,7 @@ local material = require("@self/material")
 export type Kind = "menu" | "island"
 
 local function frosted(): boolean
-	return material.frosted:get()
+	return material.see_through()
 end
 
 local M = {}
@@ -41,11 +42,12 @@ function M.style(props: { [any]: any }, kind: Kind?): { [any]: any }
 		return props
 	end
 	props.rounded = props.rounded or "$radius.lg"
+	-- (Where popups can't blur what's under them, Windows', solid too.)
 	props.bg = function()
-		return if frosted() then "$zeron.menu.tint" else "$zeron.menu.solid"
+		return if material.menus_see_through() then "$zeron.menu.tint" else "$zeron.menu.solid"
 	end
 	props.backdrop_blur = function()
-		return if frosted() then "$zeron.menu.blur" else 0
+		return if material.menus_see_through() then "$zeron.menu.blur" else 0
 	end
 	props.border = 1
 	props.border_color = "$border"

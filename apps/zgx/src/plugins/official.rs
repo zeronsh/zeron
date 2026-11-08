@@ -460,13 +460,17 @@ mod tests {
             std::fs::write(path, bytes).unwrap();
         }
         assert!(verified_at(&ui(), &elsewhere).is_none());
-        // A link in it.
-        let linked = dir("linked");
-        install(&ui(), &linked);
-        let page = linked.join("zeron-v2/screens/shell/page.luau");
-        std::fs::remove_file(&page).unwrap();
-        std::os::unix::fs::symlink(ui().join("templates/zeron-v2/screens/shell/page.luau"), &page).unwrap();
-        assert!(verified_at(&ui(), &linked.join("zeron-v2")).is_none());
+        // A link in it. (Unix's alone: a symlink on Windows needs Developer
+        // Mode or an administrator, and the test builds there too.)
+        #[cfg(unix)]
+        {
+            let linked = dir("linked");
+            install(&ui(), &linked);
+            let page = linked.join("zeron-v2/screens/shell/page.luau");
+            std::fs::remove_file(&page).unwrap();
+            std::os::unix::fs::symlink(ui().join("templates/zeron-v2/screens/shell/page.luau"), &page).unwrap();
+            assert!(verified_at(&ui(), &linked.join("zeron-v2")).is_none());
+        }
         // The page and the trust follow `verified`.
         let listed = live::installed(&t);
         assert!(listed.iter().find(|i| i.id == "zeron-v2").unwrap().official.is_none());

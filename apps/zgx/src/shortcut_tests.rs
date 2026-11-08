@@ -217,38 +217,80 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// ⌘W: the visible panel's active tab, wherever the keyboard is; else the chat's tab
+/// (a split's focused pane: split_tests), a new chat's page after the last; only
+/// with no chat, the window.
 #[test]
-fn command_w_closes_the_panels_tab_while_it_has_the_keyboard_else_the_window() {
+fn command_w_closes_the_visible_panels_tab_then_the_chats_tab_then_the_window() {
+    for at in [Focus::Nothing, Focus::Composer, Focus::Sidebar, Focus::Editor] {
+        let mut w = mount();
+        w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        w.app.frames(20);
+        w.app.click("#titlebar >> role:button \"Panel\"");
+        w.app.frames(40);
+        w.app.click("#panel-open-files");
+        w.app.frames(40);
+        assert!(w.app.find("#panel-strip >> role:tab").is_some());
+        let session = w.route();
+
+        // The visible panel's tab first, wherever the keyboard is.
+        focus(&mut w, at);
+        assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+        w.app.frames(30);
+        assert!(w.app.find("#panel-strip >> role:tab").is_none(), "{at:?}: tab left open");
+        assert!(!w.closed.get(), "{at:?}: window closed with the tab");
+        assert_eq!(w.route(), session, "{at:?}: chat changed");
+
+        // No panel tab: the chat's tab, its last leaving a new chat.
+        assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+        w.app.frames(30);
+        assert!(!w.closed.get(), "{at:?}: window closed with a chat open");
+        assert_eq!(w.route(), "/", "{at:?}: the chat's tab stayed");
+
+        // No chat: the window.
+        assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+        assert!(w.closed.get(), "{at:?}: no chat, and the window stayed");
+    }
+}
+
+/// A hidden panel's tabs are left be: ⌘W goes on to the chat's tab.
+#[test]
+fn command_w_leaves_a_hidden_panels_tabs_intact() {
     let mut w = mount();
     w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
     w.app.frames(20);
     w.app.click("#titlebar >> role:button \"Panel\"");
     w.app.frames(40);
-    // A file viewer's tab (README.md in its tree).
     w.app.click("#panel-open-files");
     w.app.frames(40);
     let tabs = |w: &mut Window| w.app.find("#panel-strip >> role:tab").is_some();
     assert!(tabs(&mut w), "the panel has a tab");
-    // In the file: the tab closes, the window stays.
-    focus(&mut w, Focus::Editor);
+    focus(&mut w, Focus::Composer);
+    assert_eq!(w.press("cmd+r").as_deref(), Some("shell.toggle_files"));
+    assert_eq!(w.app.bounds("#shell-files").width, 0.);
     assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
     w.app.frames(30);
-    assert!(!tabs(&mut w), "⌘W in the panel's file left its tab open");
-    assert!(!w.closed.get(), "⌘W in the panel closed the window too");
-    // In the composer: the panel left be, the window closes (the app with
-    // it, as Zeron's). (Its last tab closed, the panel closed with it: open
-    // again, a file viewer in it.)
+    assert!(!w.closed.get(), "⌘W with a hidden panel closed the window, with a chat open");
+    assert_eq!(w.route(), "/", "⌘W with a hidden panel didn't close the chat's tab");
+    // The chat opened again, its panel shown: the hidden tab was left be.
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(40);
     if w.app.bounds("#shell-files").width == 0. {
-        w.app.click("#titlebar >> role:button \"Panel\"");
+        w.press("cmd+r");
         w.app.frames(40);
     }
-    w.app.click("#panel-open-files");
-    w.app.frames(40);
-    assert!(tabs(&mut w), "the panel has a tab again");
-    focus(&mut w, Focus::Composer);
-    assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
-    assert!(tabs(&mut w), "⌘W in the composer closed the panel's tab");
-    assert!(w.closed.get(), "⌘W in the composer didn't close the window");
+    assert!(tabs(&mut w), "⌘W closed a hidden panel's tab");
+}
+
+#[test]
+fn command_w_active_tab_preserves_visibility_and_unsaved_file_gates() {
+    let report = zgx_script::test_runner::run(&std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"), Some("closing the active tab"), |outcome| {
+        if let Some(failure) = &outcome.failure {
+            eprintln!("{}: {failure}", outcome.name);
+        }
+    }).expect("panel tests load");
+    assert_eq!(report.outcomes.len(), 3, "all active-tab regression tests ran");
+    assert_eq!(report.failed(), 0, "{report:?}");
 }
 
 /// ⌘1–9 open the sidebar's sessions as it shows them, top to bottom
@@ -534,4 +576,43 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     w.app.frames(10);
     assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("cmd+j"));
     assert_eq!(w.app.error(), None);
+}
+
+/// Check for Updates… and Settings lead the application menu (macOS's
+/// first, over Services), a line between them, as Zeron's did; Settings
+/// keeps ⌘, and isn't in File any more. Check for Updates… opens About &
+/// updates.
+#[test]
+fn check_for_updates_and_settings_lead_the_application_menu() {
+    let w = mount();
+    let commands = w.app.host.commands().get();
+    let bar = crate::menu_bar::Bar::of(&commands, &[], &[], None);
+    assert_eq!(super::menu_bar_tests::refusal(&bar.menus), None);
+    let menu = |label: &str| bar.menus.iter().find(|m| m.label == label).cloned();
+    let application = menu(zgx_desktop::APPLICATION_MENU).expect("no application menu");
+    let shown: Vec<String> = application
+        .entries
+        .iter()
+        .map(|e| match e {
+            zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } => {
+                format!("{label} [{}]{}", action.0, if accelerator.is_some() { " ⌘" } else { "" })
+            }
+            zgx_desktop::AppMenuEntry::Separator => "—".into(),
+            _ => "?".into(),
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        ["Check for Updates… [shell.check_updates]", "—", "Settings [shell.settings] ⌘"],
+        "{shown:?}"
+    );
+    let file = menu("File").expect("no File menu");
+    assert!(
+        !file.entries.iter().any(|e| matches!(e, zgx_desktop::AppMenuEntry::Item { action, .. } if action.0 == "shell.settings")),
+        "Settings is still in File"
+    );
+    let mut w = w;
+    assert!(w.app.host.run_command("shell.check_updates"), "no shell.check_updates command");
+    w.app.frames(20);
+    assert_eq!(w.route(), "/settings/about", "Check for Updates… didn't open About & updates");
 }

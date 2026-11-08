@@ -23,6 +23,9 @@ local icon_button = require("@self/icon_button")
 local IconButton = icon_button.IconButton
 local Menu = require("@self/menu")
 local FadeText = require("@self/fade_text")
+local Tooltip = require("@self/tooltip")
+local PrivateText = require("@self/private_text")
+local context_usage = require("@self/context_usage")
 local locale = require("@self/locale")
 
 -- An agent: a tab of its own.
@@ -45,13 +48,33 @@ export type Model = {
 	fast: boolean?,
 	options: { Option }?,
 }
+-- An account of an agent: how much of its plan it has used (what the ring
+-- and the row say; nil: nothing reported), its windows said in words (or why
+-- not), whether it's the one in use, and whether it can be moved to.
+export type Account = {
+	id: string,
+	email: string,
+	plan: string?,
+	used: number?,
+	detail: string,
+	active: boolean,
+	can_switch: boolean,
+}
 export type Props = {
+	-- The accounts of a model's agent (nil or none: no row, no ring), followed
+	-- as they change. `on_account` puts one in use; `on_accounts_open` asks
+	-- after them again as the panel opens.
+	accounts: ((harness: string, model: string) -> { Account }?)?,
+	on_account: ((harness: string, id: string) -> ())?,
+	on_accounts_open: (() -> ())?,
 	model: State<string?>,
 	effort: State<string?>,
 	fast: State<boolean>?,
 	-- The choices made of the model's options (option id to choice id; one
 	-- left out is at its default), changed as they're picked.
 	options: State<{ [string]: string }>?,
+	-- Its catalog is still on its way (a device's first look).
+	loading: (() -> boolean)?,
 	-- The agents and their models: lists, or states or functions of them
 	-- (a catalog that arrives or changes, followed in place: the tabs and
 	-- rows come and go, the picker stays).
@@ -68,6 +91,9 @@ export type Props = {
 	open_with: State<number>?,
 	-- Set to whether it is open (Dropdown's `showing`).
 	showing: State<boolean>?,
+	-- How far its chip folds (Dropdown's `fold`): 1, without the effort; 2, its
+	-- mark alone.
+	fold: (() -> number)?,
 }
 
 -- Devin Fusion's lead (what runs), listed first among its options.
@@ -411,6 +437,158 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
+	-- The chosen model's agent's accounts, and the one in use.
+	local function accounts(): { Account }
+		local m = current()
+		return (if m and props.accounts then props.accounts(m.harness, m.value) else nil) or {}
+	end
+	local function account_by_id(id: string?): Account?
+		for _, a in accounts() do
+			if a.id == id then
+				return a
+			end
+		end
+		return nil
+	end
+	local function in_use(): Account?
+		for _, a in accounts() do
+			if a.active then
+				return a
+			end
+		end
+		return nil
+	end
+	local function used(a: Account?): number
+		return if a and a.used then a.used else 0
+	end
+	local function percent(f: number): string
+		return locale.s("ds.composer.context.percent", { n = math.floor(f * 100 + 0.5) })
+	end
+
+	-- The account row: its name, the address in use and how much of it is
+	-- used (quiet, as an option's choice is; the figure in the ring's ink),
+	-- opening the agent's accounts beside the panel as an option's choices do.
+	local function account_row(): Node
+		local value = ui.use_state(nil :: string?)
+		local function sync()
+			local a = in_use()
+			value:set(if a then a.id else nil)
+		end
+		ui.effect(sync)
+		return Dropdown {
+			value = value,
+			items = function(): { Dropdown.Item }
+				local out: { Dropdown.Item } = {}
+				for _, a in accounts() do
+					local words = { a.plan or "", a.detail }
+					table.insert(out, {
+						value = a.id,
+						label = a.email,
+						private = true,
+						disabled = not a.active and not a.can_switch,
+						description = if words[1] ~= "" and words[2] ~= ""
+							then `{words[1]} · {words[2]}`
+							else words[1] .. words[2],
+					})
+				end
+				return out
+			end,
+			label = locale.t("ds.model_picker.account"),
+			search = false,
+			width = 300,
+			placement = { side = "right", align = "start", offset = 7 },
+			on_open = sync,
+			trailing_item = function(item: Dropdown.Item): Node?
+				return ui.show(function(): boolean
+					local a = account_by_id(item.value)
+					return a ~= nil and a.used ~= nil
+				end, ui.div {
+					self = "center",
+					shrink = 0,
+					context_usage.Ring {
+						ink = context_usage.usage_ink,
+						fraction = function(): number
+							return used(account_by_id(item.value))
+						end,
+					},
+				})
+			end,
+			on_choose = function(id: string)
+				local m = current()
+				if m and props.on_account then
+					props.on_account(m.harness, id)
+				end
+			end,
+			trigger = function(menu: Dropdown.Menu): Node
+				local row: ContainerProps = {
+					id = "model-picker-account",
+					label = locale.t("ds.model_picker.account"),
+					bg = function()
+						return if menu.open:get() then "$hover" else "#00000000"
+					end,
+					on_click = menu.toggle,
+					ui.text { locale.t("ds.model_picker.account"), text_size = "$font.size.md", color = "$text.primary", grow = 1 },
+					PrivateText {
+						function(): string
+							local a = in_use()
+							return if a then a.email else ""
+						end,
+						reveal = false,
+						truncate = true,
+						text_size = "$font.size.md",
+						color = "$text.tertiary",
+						max_w = 128,
+						shrink = 1,
+					},
+					ui.show(function(): boolean
+						local a = in_use()
+						return a ~= nil and a.used ~= nil
+					end, ui.text {
+						function(): string
+							return percent(used(in_use()))
+						end,
+						tabular = true,
+						shrink = 0,
+						text_size = "$font.size.md",
+						-- (Quiet until it's near a limit, as Zeron's ring's figure.)
+						color = function(): string
+							local f = used(in_use())
+							return if f >= 0.8 then context_usage.usage_ink(f) else "$text.tertiary"
+						end,
+					}),
+					Menu.chevron(),
+				}
+				Menu.look(row)
+				return ui.row(row)
+			end,
+		}
+	end
+
+	-- The ring on the chip, right of the effort: how near the account in use
+	-- is to a limit. (Nothing reported, or its mark alone, folded: no ring.)
+	local function usage_ring(): Node
+		return ui.show(function(): boolean
+			local a = in_use()
+			return a ~= nil and a.used ~= nil and (props.fold == nil or props.fold() < 2)
+		end, ui.div {
+			id = "model-picker-usage",
+			self = "center",
+			shrink = 0,
+			tooltip = Tooltip {
+				function(): string
+					local a = in_use()
+					return if a then a.detail else ""
+				end,
+			},
+			context_usage.Ring {
+				ink = context_usage.usage_ink,
+				fraction = function(): number
+					return used(in_use())
+				end,
+			},
+		})
+	end
+
 	-- Fast mode's switch row (a model with Fast mode and no reasoning has
 	-- it under its options; a card has it last).
 	local function fast_row(before: (() -> ())?): Node?
@@ -462,6 +640,9 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 	local foot: { Node } = {
+		ui.show(function(): boolean
+			return #accounts() > 0
+		end, account_row()),
 		ui.each(owned, function(it: Owned): Node
 			return option_row(it.option)
 		end, {
@@ -501,6 +682,14 @@ return ui.component(function(props: Props): Node
 	end
 
 	return Dropdown {
+		fold = props.fold,
+		-- (Only with nothing to show yet: a catalog being looked at again keeps
+		-- what it knows.)
+		loading = if props.loading
+			then function(): boolean
+				return (props.loading :: () -> boolean)() and current() == nil
+			end
+			else nil,
 		value = props.model,
 		items = items :: any,
 		tone = props.tone or "chip",
@@ -514,6 +703,9 @@ return ui.component(function(props: Props): Node
 			end
 			return ""
 		end,
+		trail = usage_ring(),
+		-- (Another chat's model and effort, shown as it's moved to: at once.)
+		roll_in_panel = true,
 		-- (Dropdown hands its label on, as the trigger's name.)
 		label = props.label or locale.t("ds.model_picker.model") :: any,
 		search = function(): string
@@ -553,9 +745,13 @@ return ui.component(function(props: Props): Node
 		on_open = function()
 			tab:set(nil)
 			expanded:set(false)
+			if props.on_accounts_open then
+				props.on_accounts_open()
+			end
 		end,
+		-- (Nothing chosen, nothing to fold onto: opened out.)
 		expanded = function(): boolean
-			return expanded:get()
+			return expanded:get() or current() == nil
 		end,
 		on_expand = function()
 			expanded:set(true)
@@ -611,7 +807,7 @@ return ui.component(function(props: Props): Node
 		extra_when = function(): boolean
 			local m = current()
 			return m ~= nil
-				and ((m.efforts ~= nil and #m.efforts > 0) or (m.fast == true and fast ~= nil) or #ordered(m) > 0)
+				and ((m.efforts ~= nil and #m.efforts > 0) or (m.fast == true and fast ~= nil) or #ordered(m) > 0 or #accounts() > 0)
 		end,
 		placement = props.placement,
 		bottom_up = bottom_up,

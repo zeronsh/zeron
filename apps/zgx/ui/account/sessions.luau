@@ -26,12 +26,18 @@
 --   sessions.link(id)      its Zeron conversation link: a promise
 --   sessions.collapse(id, folded)  a section of yours folded, everywhere
 --   sessions.seen(id)      its finished state seen, on every device
+--   sessions.sleep(id, until?)  asleep until `until` (Unix seconds), on every
+--                          device; none, awake (its host wakes it early when
+--                          it asks for you)
+--   sessions.stop_waiting(id)  what its agent said it waits on no longer
+--                          holds it
 --   sessions.place(places) where sessions are put by hand, as the sidebar
 --                          has them now ({ pinned, sections })
 --
 -- A chat: { id, title, project?, device, branch?, cwd?, status?, updated,
 -- created, harness?, agent?, model? }: `status` the sidebar's state
--- ("working", "input", "failed", "done"), nil idle; `updated` and `created`
+-- ("working", "waiting" on background work that will wake it, "input",
+-- "failed", "done"), nil idle; `updated` and `created`
 -- Unix seconds; `agent` ds.Mark's name for its harness. A project: { id,
 -- name, device, path, git, github? }. A device: { id, name, platform, here }.
 
@@ -57,7 +63,14 @@ export type Chat = {
 	running_subagents: number?,
 	side_chats: number?,
 	working_side_chats: number?,
+	-- What its agent waits on after its turn (status "waiting").
+	waiting: { WaitingOn }?,
+	-- Put to sleep: until when; or, woken and not looked at since, when it
+	-- woke (Unix seconds).
+	sleep_until: number?,
+	woke: number?,
 }
+export type WaitingOn = { id: string, kind: string, label: string }
 -- A side chat: a chat under another (its `parent`).
 export type Child = {
 	id: string,
@@ -75,9 +88,11 @@ export type Child = {
 -- A project's chosen picture: an emoji, or an uploaded image's https URL,
 -- on a palette hue (each optional; none of them is no icon).
 export type ProjectIcon = { emoji: string?, image: string?, hue: string? }
-export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, icon: ProjectIcon? }
--- `online`: its presence heartbeat fresh (this device always); `seen`: its
--- last beat, in unix seconds, to judge that again as time passes.
+export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, repository: string?, created: number?, icon: ProjectIcon? }
+-- `online`: its presence heartbeat fresh (this device always), published
+-- again as that changes; `seen`: while it's away, its last beat, in unix
+-- seconds ("last seen …"; online, none: its beat moves every few seconds and
+-- shows nowhere).
 -- `cloud`: one of Cloud's (the account's, or a session's machine): never a
 -- device to pick.
 export type Device = { id: string, name: string, platform: string, here: boolean, online: boolean?, seen: number?, version: string?, cloud: boolean? }
@@ -170,6 +185,15 @@ end
 
 function M.seen(id: string)
 	ui.invoke("sessions.seen", id)
+end
+
+function M.sleep(id: string, until_at: number?): any
+	-- (`until` is Luau's word: a key spelled out.)
+	return ui.call("sessions.sleep", { id = id, ["until"] = until_at })
+end
+
+function M.stop_waiting(id: string): any
+	return ui.call("chat.stop_waiting", id)
 end
 
 function M.place(places: Places)

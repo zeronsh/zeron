@@ -120,7 +120,7 @@ test("on Cloud, the branches are GitHub's and there's no checkout to choose", fu
 	expect(app:has('role:option ~"Borealis"')).to_be(false)
 	app:key("Escape")
 	settle(app)
-	-- And back to this Mac: its checkout again, git's branches.
+	-- And back to this computer: its checkout again, git's branches.
 	pick_in(app, "Device", "MacBook Pro")
 	expect(chosen(app, "Project")).to_contain("Atlas")
 	panel(app)

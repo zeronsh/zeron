@@ -1187,6 +1187,13 @@ impl DocHost {
         Ok(())
     }
 
+    /// Start no new work until [`Self::lift_quiesce`]: a new version trying out
+    /// an update, whose changes may yet be undone. Controls keep working, as
+    /// they do in a quiesce, and what queues meanwhile runs when it's lifted.
+    pub fn hold_work(&self) {
+        self.inner.quiesced.store(true, Ordering::SeqCst);
+    }
+
     /// End a quiesce and run everything that queued meanwhile.
     pub fn lift_quiesce(&self) {
         if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
@@ -4142,7 +4149,9 @@ impl DocHost {
     /// Promote one held row without ever interrupting a turn. A live,
     /// steerable turn receives it as steering; if that turn has already ended,
     /// it starts normally as the next turn. Turn-boundary providers retain it
-    /// in their mailbox until ready. Attachment-bearing rows stay untouched.
+    /// in their mailbox until ready. A row's files go with it as the steer's
+    /// attachments (images as images); one whose files from another device
+    /// haven't landed yet stays queued, and the call says why.
     pub async fn steer_queued_now(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         if !self.is_host(chat_id) {
             return Err(EngineError::Other(format!(
@@ -4160,9 +4169,12 @@ impl DocHost {
         else {
             return Ok(false);
         };
-        if !candidate.attachments.is_empty() {
+        // Its files ride the steer, as images where they are. Ones still on
+        // their way from another device can't go yet (the drain waits for
+        // them; a steer says so).
+        if !self.missing_row_attachments(&candidate).is_empty() {
             return Err(EngineError::Other(
-                "messages with attachments cannot be steered mid-turn".into(),
+                "this message's images are still uploading".into(),
             ));
         }
         if candidate.delivery_gate.is_some() {
@@ -4463,7 +4475,13 @@ impl DocHost {
         self.resolve_attachment_refs(&mut prompt, &mut attachments);
         if send == QueueSend::Steer {
             match sessions
-                .steer(chat_id, &prompt, Some(message_id.clone()))
+                .steer_now(
+                    chat_id,
+                    &prompt,
+                    attachments.clone(),
+                    Some(message_id.clone()),
+                    now_ms(),
+                )
                 .await?
             {
                 SteerOutcome::Accepted => return Ok(()),
@@ -5886,8 +5904,10 @@ impl DocHost {
         {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
+        // A steer is read at once: while a command runs, its turn stops in
+        // place first (the runtime and its background work stay).
         match sessions
-            .steer_at(chat_id, &prompt, message_id.clone(), issued_at)
+            .steer_now(chat_id, &prompt, Vec::new(), message_id.clone(), issued_at)
             .await?
         {
             SteerOutcome::Accepted => {

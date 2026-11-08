@@ -128,6 +128,7 @@ async fn entry_survives_transient_identity_failure() {
         .create_chat("chat-1", Some("space-1"), None, None, None)
         .expect("chat row");
     wait_chat_state(&core, "chat-1", true).await;
+    let _interest = core.diff_sync.retain_chat("chat-1");
     core.diff_sync.reconcile_now().await;
     let before = wait_for_diff(&core.diff_sync).await;
 
@@ -194,6 +195,7 @@ async fn chat_flap_keeps_entry_and_sustained_absence_removes_it() {
         .create_chat("chat-1", Some("space-1"), None, None, None)
         .expect("chat row");
     wait_chat_state(&core, "chat-1", true).await;
+    let _interest = sync.retain_chat("chat-1");
     sync.reconcile_now().await;
     let before = wait_for_diff(&sync).await;
 
@@ -267,6 +269,7 @@ async fn deleted_checkout_is_evicted_after_grace() {
         .create_chat("chat-1", Some("space-1"), None, None, None)
         .expect("chat row");
     wait_chat_state(&core, "chat-1", true).await;
+    let _interest = sync.retain_chat("chat-1");
     sync.reconcile_now().await;
     wait_for_diff(&sync).await;
 
@@ -327,96 +330,98 @@ async fn wait_watched(sync: &CheckoutDiffSync, root: &Path) {
     }
 }
 
-/// Archived chats cost nothing: no entry, no watch, no capture. Unarchiving
-/// tracks the checkout again, and re-archiving drops it at once — archiving is
-/// a deliberate state change, not a row flap, so it skips the orphan grace.
+/// Old unarchived chats must cost nothing, including on repair passes. Chats
+/// sharing a viewed checkout reuse one watcher; closing its last viewer drops
+/// the checkout only after the switch-chat grace period.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn archived_chats_get_no_entry_and_archiving_drops_it() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let live_dir = tmp.path().join("live");
-    let archived_dir = tmp.path().join("archived");
-    init_dirty_repo(&live_dir).await;
-    init_dirty_repo(&archived_dir).await;
-    let live_root = std::fs::canonicalize(&live_dir).unwrap();
-    let archived_root = std::fs::canonicalize(&archived_dir).unwrap();
-
+async fn unopened_chats_stay_idle_and_shared_checkout_lasts_until_last_viewer() {
+    let tmp = tempfile::tempdir().unwrap();
     let core = assemble(&tmp.path().join("data"));
-    // A grace far beyond the test: any removal observed here is the
-    // archive fast path, not the orphan timeout.
-    let sync = CheckoutDiffSync::start_with_orphan_grace(
+    let sync = CheckoutDiffSync::start_with_timings(
         core.repos.clone(),
         core.workspace.clone(),
         &core.device_id,
         None,
         Duration::from_secs(3600),
+        Duration::from_millis(300),
     );
-    for (space, dir) in [("space-live", &live_dir), ("space-arch", &archived_dir)] {
+    for id in ["active", "old"] {
+        let dir = tmp.path().join(id);
+        init_dirty_repo(&dir).await;
         core.workspace
-            .create_space(space, &core.device_id, &dir.to_string_lossy(), None, true)
-            .expect("space row");
+            .create_space(id, &core.device_id, &dir.to_string_lossy(), None, true)
+            .unwrap();
+        core.workspace
+            .create_chat(id, Some(id), None, None, None)
+            .unwrap();
+        wait_chat_state(&core, id, true).await;
     }
     core.workspace
-        .create_chat("chat-live", Some("space-live"), None, None, None)
-        .expect("live chat");
-    core.workspace
-        .create_chat("chat-arch", Some("space-arch"), None, None, None)
-        .expect("archived chat");
-    core.workspace
-        .set_chat_archived("chat-arch", true)
-        .expect("archive");
-    wait_chat_state(&core, "chat-live", true).await;
-    wait_chat_archived(&core, "chat-arch", true).await;
-
+        .create_chat("second", Some("active"), None, None, None)
+        .unwrap();
+    wait_chat_state(&core, "second", true).await;
     sync.repair_now().await;
-    wait_watched(&sync, &live_root).await;
-    let tracked: Vec<_> = sync
-        .tracked_checkouts()
-        .into_iter()
-        .map(|(root, _)| root)
-        .collect();
-    assert_eq!(
-        tracked,
-        vec![live_root.clone()],
-        "archived chat's checkout is not tracked"
+    assert!(
+        sync.tracked_checkouts().is_empty(),
+        "no viewers: no watchers or captures"
     );
+    assert!(current_diffs(&sync).is_empty());
+    assert_eq!(
+        chat_row(&core, "old").checkout_id,
+        None,
+        "unopened checkout was never resolved"
+    );
+
+    let first = sync.retain_chat("active");
+    let second = sync.retain_chat("second");
+    let root = std::fs::canonicalize(tmp.path().join("active")).unwrap();
+    wait_watched(&sync, &root).await;
     wait_for_diff(&sync).await;
-    assert!(
-        current_diffs(&sync)
-            .iter()
-            .all(|diff| Path::new(&diff.cwd) == live_root),
-        "no capture is published for an archived chat's checkout"
-    );
-
-    // Unarchive: the checkout is tracked and watched again.
-    core.workspace
-        .set_chat_archived("chat-arch", false)
-        .expect("unarchive");
-    wait_chat_archived(&core, "chat-arch", false).await;
-    sync.reconcile_now().await;
-    wait_watched(&sync, &archived_root).await;
-
-    // Re-archive: the entry (watches, published diff) goes on this pass.
-    core.workspace
-        .set_chat_archived("chat-arch", true)
-        .expect("re-archive");
-    wait_chat_archived(&core, "chat-arch", true).await;
-    sync.reconcile_now().await;
-    let tracked: Vec<_> = sync
-        .tracked_checkouts()
-        .into_iter()
-        .map(|(root, _)| root)
-        .collect();
+    sync.repair_now().await;
     assert_eq!(
-        tracked,
-        vec![live_root.clone()],
-        "archiving drops the entry at once"
+        sync.tracked_checkouts().len(),
+        1,
+        "only the viewed checkout is scanned"
     );
+    assert_eq!(chat_row(&core, "old").checkout_id, None);
+
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        sync.tracked_checkouts().len(),
+        1,
+        "second chat still viewing this checkout"
+    );
+    drop(second);
+    sync.reconcile_now().await;
+    assert_eq!(
+        sync.tracked_checkouts().len(),
+        1,
+        "brief switches retain the checkout"
+    );
+    eventually("last viewer releases watchers, diffs and statuses", || {
+        sync.tracked_checkouts().is_empty()
+            && current_diffs(&sync).is_empty()
+            && sync.watch_git_statuses().borrow().is_empty()
+    })
+    .await;
+    std::fs::write(root.join("a.txt"), "edited while closed\n").unwrap();
+    sync.repair_now().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(sync.tracked_checkouts().is_empty());
     assert!(
-        current_diffs(&sync)
-            .iter()
-            .all(|diff| Path::new(&diff.cwd) == live_root),
-        "archiving drops the checkout's published diff"
+        current_diffs(&sync).is_empty(),
+        "edits and repairs cannot reactivate a closed chat"
     );
+
+    let _reopened = sync.retain_chat("active");
+    assert!(
+        wait_for_diff(&sync)
+            .await
+            .patch
+            .contains("edited while closed")
+    );
+    sync.shutdown().await;
     core.shutdown().await;
 }
 
@@ -585,6 +590,7 @@ async fn orphaned_entry_skips_captures_and_catches_up_on_return() {
         .create_chat("chat-1", Some("space-1"), None, None, None)
         .expect("chat row");
     wait_chat_state(&core, "chat-1", true).await;
+    let _interest = sync.retain_chat("chat-1");
     sync.reconcile_now().await;
     let root = std::fs::canonicalize(&dir).unwrap();
     wait_watched(&sync, &root).await;

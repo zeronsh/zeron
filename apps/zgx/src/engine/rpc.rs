@@ -201,6 +201,11 @@ pub(crate) fn poll_fd(fd: &impl AsRawFd, events: libc::c_short) -> libc::pollfd 
     libc::pollfd { fd: fd.as_raw_fd(), events, revents: 0 }
 }
 
+/// How long the network thread hears nothing before it gives back what its
+/// heap holds of frames the main thread has freed.
+#[cfg(unix)]
+const QUIET_MS: libc::c_int = 2000;
+
 /// The network thread: requests out, frames in, and asleep between.
 fn serve(mut socket: Socket, rx: mpsc::Receiver<String>, frames: Frames, #[cfg(unix)] heard: OwnedFd) {
     // Without a pipe to wait on (not unix), short reads let the thread
@@ -210,6 +215,10 @@ fn serve(mut socket: Socket, rx: mpsc::Receiver<String>, frames: Frames, #[cfg(u
     #[cfg(not(unix))]
     let _ = socket.get_ref().set_read_timeout(Some(Duration::from_millis(15)));
     let fail = |error: tungstenite::Error| frames.push(None, Some(error.to_string()));
+    // Frames were read since this thread last gave back what the main thread
+    // has freed of them.
+    #[cfg(unix)]
+    let mut read_some = false;
     loop {
         loop {
             match rx.try_recv() {
@@ -237,6 +246,10 @@ fn serve(mut socket: Socket, rx: mpsc::Receiver<String>, frames: Frames, #[cfg(u
         loop {
             match socket.read() {
                 Ok(tungstenite::Message::Text(text)) => {
+                    #[cfg(unix)]
+                    {
+                        read_some = true;
+                    }
                     for line in text.as_str().lines().filter(|l| !l.trim().is_empty()) {
                         if let Ok(frame) = serde_json::from_str(line) {
                             frames.push(Some(frame), None);
@@ -256,7 +269,18 @@ fn serve(mut socket: Socket, rx: mpsc::Receiver<String>, frames: Frames, #[cfg(u
         {
             let out = if unsent { libc::POLLOUT } else { 0 };
             let mut fds = [poll_fd(socket.get_ref(), libc::POLLIN | out), poll_fd(&heard, libc::POLLIN)];
-            wait(&mut fds);
+            // SAFETY: `fds` is a valid slice of pollfds for its whole length.
+            let woken = unsafe {
+                libc::poll(
+                    fds.as_mut_ptr(),
+                    fds.len() as libc::nfds_t,
+                    if read_some { QUIET_MS } else { -1 },
+                )
+            };
+            if woken == 0 {
+                read_some = false;
+                zgx_desktop::release_thread_heap();
+            }
             if fds[1].revents != 0 {
                 // (Its write end closes with the client, whose channel
                 // says so next time round.)
@@ -478,14 +502,17 @@ impl Rpc {
         }
     }
 
-    fn route(&self, frame: Value) {
+    fn route(&self, mut frame: Value) {
         let Some(id) = frame.get("id").and_then(Value::as_u64) else {
             return;
         };
+        // (Its parts are taken, not copied. A frame comes parsed on the network
+        // thread; a copy here is a long chat's whole transcript, block by block,
+        // among the window's own, to pin their pages when it has gone.)
         let result = if let Some(error) = frame.get("err") {
             Some(Err(error.as_str().unwrap_or("error").to_owned()))
         } else {
-            frame.get("ok").map(|ok| Ok(ok.clone()))
+            frame.get_mut("ok").map(|ok| Ok(ok.take()))
         };
         let mut pending = self.0.pending.borrow_mut();
         match pending.get_mut(&id) {
@@ -513,7 +540,7 @@ impl Rpc {
                     }
                     return;
                 }
-                let Some(item) = frame.get("item").cloned() else {
+                let Some(item) = frame.get_mut("item").map(Value::take) else {
                     return;
                 };
                 let Some(mut on_item) = watching.on_item.take() else {

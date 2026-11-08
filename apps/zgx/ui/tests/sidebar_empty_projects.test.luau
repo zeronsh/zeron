@@ -3,8 +3,9 @@
 -- opened (kept with the folds); opened, each a project's header as any
 -- other (its new chat, its menu). The view options' Show → Empty projects
 -- off lists them nowhere. A project with none at all, just added, isn't
--- empty; one gaining a session leaves the fold, one losing its last joins
--- it. On the shell in ui/shell_fixture.luau.
+-- empty: it's listed with the rest, and that same option off hides it too.
+-- One gaining a session leaves the fold, one losing its last joins it. On
+-- the shell in ui/shell_fixture.luau.
 
 local SIDE = "#shell-sidebar"
 local FOLDED = "screens/shell/sidebar.luau::shell_sidebar_folded"
@@ -126,12 +127,16 @@ test("Show → Empty projects off lists them nowhere; on, the fold is back as it
 	app:frames(30)
 	expect(shows(app, "2 empty projects")).to_be(false)
 	expect(shows(app, "Cobalt")).to_be(false)
-	expect(shows(app, "Ember")).to_be(true)
+	-- (One never used goes with them; a project with sessions stays.)
+	expect(shows(app, "Ember")).to_be(false)
+	expect(shows(app, "Atlas")).to_be(true)
 
 	app:set_state(SHOW, true)
 	app:frames(30)
 	expect(shows(app, "2 empty projects")).to_be(true)
 	expect(shows(app, "Cobalt")).to_be(false)
+	-- (Back with the rest, not in the fold.)
+	expect(shows(app, "Ember")).to_be(true)
 end)
 
 test("with Archived shown, an empty project stays in the fold, its sessions on the shelf", function()

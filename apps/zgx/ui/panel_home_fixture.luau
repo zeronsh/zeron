@@ -1,6 +1,6 @@
 -- The right panel's home (screens/panel/home) for a session, with no
 -- engine: for tests/panel_home.test.luau and captures. The session
--- (chat-1, on this Mac "work-laptop", project comet-native, a branch with
+-- (chat-1, on this computer "work-laptop", project comet-native, a branch with
 -- changes), its side chats and the open chat's subagents are made up here;
 -- the home's host calls (screens/panel/home_api), the terminal's, and
 -- what's asked of sessions (create, fork) and lanes (watch) are stood in
@@ -55,6 +55,8 @@ local children = {
 	{ id = "side-b", parent = "chat-1", title = "Draft the release notes", device = "d", updated = NOW - 1800, created = NOW - 1900, agent = "openai" },
 }
 local online = true
+-- (`box_project`: the project checked out on the devbox too.)
+local box_project = false
 local function publish()
 	sessions.now:set({
 		state = "ready",
@@ -63,7 +65,12 @@ local function publish()
 			{ id = "d", name = "work-laptop", platform = "macos", here = true, online = true },
 			{ id = "box", name = "devbox", platform = "linux", here = false, online = online },
 		},
-		projects = { { id = "p1", name = "comet-native", device = "d", path = "/Users/me/comet-native", git = true } },
+		projects = if box_project
+			then {
+				{ id = "p1", name = "comet-native", device = "d", path = "/Users/me/comet-native", git = true },
+				{ id = "p2", name = "comet-native", device = "box", path = "/srv/comet-native", git = true },
+			}
+			else { { id = "p1", name = "comet-native", device = "d", path = "/Users/me/comet-native", git = true } },
 		chats = {
 			{ id = "chat-1", title = "Parent", project = "p1", device = "d", branch = "zeron/panel-home", cwd = "/proj", status = "idle", updated = NOW, created = NOW - 3600, side_chats = #children },
 			{ id = "chat-2", title = "On the devbox", device = "box", branch = "main", cwd = "/srv", updated = NOW, created = NOW - 3600 },
@@ -93,6 +100,10 @@ publish_messages()
 local stub_sessions = sessions :: any
 stub_sessions.create = function(req: any): any
 	note(`create:{req.parent}:{req.id}`)
+	-- (Where it's made, when its composer moved it.)
+	if req.project or req.device or req.no_project then
+		note(`place:{req.id}:{req.project or ""}:{req.device or ""}`)
+	end
 	return settled(true, req.id)
 end
 stub_sessions.fork = function(source: string, _parent: string?, id: string?): any
@@ -237,6 +248,19 @@ ui.command { id = "side_elsewhere", title = "A side chat on the devbox", run = f
 	table.insert(children, { id = "side-box", parent = "chat-1", title = "Try it on the devbox", device = "box", updated = NOW - 10, created = NOW - 20, agent = "claude" })
 	publish()
 end }
+ui.command { id = "box_project", title = "The project on the devbox too", run = function()
+	box_project = true
+	publish()
+end }
+-- Lanes at work further down: a side chat working since long ago (under
+-- the idle one, by when they moved), and a subagent running after the
+-- finished one (spawned in the same turn).
+ui.command { id = "lanes_at_work", title = "Lanes at work further down", run = function()
+	table.insert(children, { id = "side-old", parent = "chat-1", title = "Long-running refactor", device = "d", status = "working", updated = NOW - 7200, created = NOW - 7300, agent = "claude" })
+	publish()
+	table.insert(subs, { id = "t3", kind = "agent", verb = "Ran a subagent", subagent = { ref = "chat-1--sub--3", title = "watch the build", status = "running" } })
+	publish_messages()
+end }
 -- The rows' menus (a secondary click opens them): a session's, the
 -- sidebar's own builder, for `test_menu_of`; a subagent's, the home's.
 -- Their labels in `test_menu_labels`.
@@ -264,6 +288,13 @@ end }
 -- its labels in `test_menu_labels`; `port_menu_pick` does the one
 -- `test_menu_pick` names. Opening outside is noted (`external:<url>`).
 local stub_browser = require("@app/screens/panel/browser_api") :: any
+-- (As the host says them: this fixture has no host.)
+do
+	local said = ui.shared("chat.subagents", {} :: { any })
+	ui.effect(function()
+		said:set(require("@app/screens/chat/lanes").subagents_of(require("@app/screens/chat/store").messages:get()))
+	end)
+end
 stub_browser.open_externally = function(url: string)
 	note(`external:{url}`)
 end
@@ -329,12 +360,6 @@ return ui.column {
 			return Panel.Panel {
 				session = session,
 				project = { id = "p1", path = "/proj", name = "comet-native" },
-				left = function(): number
-					return 600
-				end,
-				docked = function(): boolean
-					return true
-				end,
 				grow = 1,
 				h_full = true,
 			}

@@ -177,7 +177,7 @@ test("edit project: an engine without project icons says Zeron needs an update; 
 	app:frames(20)
 	expect(said(app)).to_contain("upload_icon:")
 	expect(said(app)).to_contain("set_project_icon_refused:borealis")
-	expect(app:has(`#project-edit-error >> "Zeron on this Mac needs an update to save project icons. Update it, then save again."`)).to_be(true)
+	expect(app:has(`#project-edit-error >> "Zeron on this computer needs an update to save project icons. Update it, then save again."`)).to_be(true)
 	expect(app:state("project_edit_open")).to_be(true)
 	expect(said(app)).never.to_contain("forget_icon")
 	-- Cancelled: the uploaded picture, worn by nothing, goes.

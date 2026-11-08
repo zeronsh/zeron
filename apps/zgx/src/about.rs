@@ -12,7 +12,7 @@
 //! itself once nothing runs.
 //!
 //! **A development build** has no bundle to update: the page shows the
-//! engine's updater (the engine on this Mac, which knows its version and the
+//! engine's updater (the engine on this computer, which knows its version and the
 //! newest release and updates an install it manages), as before.
 //!
 //!   shared `about`   { app_version, app_build, engine_version?, engine_build?,
@@ -61,6 +61,9 @@ struct About {
     /// To quit for "Restart to update".
     windows: RefCell<Option<WindowFactory>>,
 }
+
+/// How long a restart to update waits on the engine going with it.
+const ENGINE_STOP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
 
 thread_local! {
     static ABOUT: Rc<About> = Rc::default();
@@ -125,11 +128,11 @@ impl Desktop {
         let data_dir = engine::data_dir()?;
         zeron_update::set_app_version(APP_VERSION);
         zeron_update::channel::set_data_dir(&data_dir);
-        // A beta's first launch puts this Mac on the beta channel (once per
+        // A beta's first launch puts this computer on the beta channel (once per
         // build: a later choice of Stable in it sticks).
         if zeron_update::Channel::of_version(APP_VERSION) == Channel::Beta {
             match zeron_update::channel::claim_for_beta_build(&data_dir, APP_VERSION) {
-                Ok(true) => eprintln!("zeron-zgx: updates: this Mac now gets beta updates"),
+                Ok(true) => eprintln!("zeron-zgx: updates: this computer now gets beta updates"),
                 Ok(false) => {}
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
             }
@@ -161,7 +164,16 @@ impl Desktop {
     fn available(&self) -> Option<String> {
         let status = self.status.borrow();
         let status = status.as_ref()?;
-        status.update_available.then(|| status.latest_version.clone()).flatten()
+        let latest = status.update_available.then(|| status.latest_version.clone()).flatten()?;
+        // Another device updated this Mac under this window: what's on offer
+        // is on disk already, and only wants reopening on (`moved_on_to`).
+        if let InstallKind::MacApp { bundle } = &self.install
+            && let Some(on_disk) = zeron_update::bundle_app_version(bundle)
+            && already_there(&on_disk, &latest, APP_VERSION)
+        {
+            return None;
+        }
+        Some(latest)
     }
 
     fn status_heard(self: &Rc<Self>, status: UpdateStatus) {
@@ -346,6 +358,17 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                     eprintln!("zeron-zgx: updates: held: {why}");
                     return Err("held".to_string());
                 }
+                // Its engine already updated this Mac, from another device: the
+                // new bundle is on disk, so this window only has to reopen on it.
+                // (The engine is new already, and stays up.)
+                let moved_on = moved_on_to(&a.status.borrow(), APP_VERSION);
+                if let (Some(version), InstallKind::MacApp { bundle }) = (moved_on, &desktop.install) {
+                    zeron_update::relaunch_after_exit(std::path::Path::new("/usr/bin/open"), bundle);
+                    if let Some(windows) = a.windows.borrow().as_ref() {
+                        windows.quit();
+                    }
+                    return Ok(Value::record([("version", Value::from(version.as_str()))]));
+                }
                 if matches!(*desktop.flow.borrow(), Flow::Ready { .. }) {
                     let version = desktop.install_for_restart().map_err(|message| {
                         eprintln!("zeron-zgx: updates: install failed: {message}");
@@ -353,6 +376,26 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                         "failed".to_string()
                     })?;
                     publish();
+                    // (The engine goes with it, so it comes back on the new
+                    // bundle's rather than running on from the old: what's
+                    // running stops cleanly, and carries on after.)
+                    // (Not for long: the update's in, and a stuck engine mustn't
+                    // keep the window from going.)
+                    let engine = engine::get();
+                    if engine.config().is_some_and(|c| c.follows_bundle()) {
+                        let stopped = std::rc::Rc::new(std::cell::Cell::new(false));
+                        let done = stopped.clone();
+                        engine.spawn(async move {
+                            if let Err(error) = engine::get().stop().await {
+                                eprintln!("zeron-zgx: updates: the engine didn't stop: {error}");
+                            }
+                            done.set(true);
+                        });
+                        let started = std::time::Instant::now();
+                        while !stopped.get() && started.elapsed() < ENGINE_STOP_PATIENCE {
+                            zgx::timer::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    }
                     if let Some(windows) = a.windows.borrow().as_ref() {
                         windows.quit();
                     }
@@ -433,6 +476,23 @@ fn start(about: &Rc<About>) {
     });
 }
 
+/// Whether the bundle on disk has moved on from the app that's open, to what's
+/// on offer or past it. (Not when it's the app that's open: going back to
+/// stable from a beta offers an older version on purpose.)
+fn already_there(on_disk: &str, offered: &str, open: &str) -> bool {
+    on_disk != open && !zeron_update::version_newer(offered, on_disk)
+}
+
+/// The version this device's engine updated it to, past the app that's open:
+/// another device updated it. (Only a finished update says so: a beta's engine
+/// can be ahead of its app without one, and reopening wouldn't change that.)
+fn moved_on_to(status: &Json, app_version: &str) -> Option<String> {
+    let update = &status["update"];
+    let target = update["targetVersion"].as_str()?;
+    (update["state"].as_str() == Some("updated") && zeron_update::version_newer(target, app_version))
+        .then(|| target.to_owned())
+}
+
 impl About {
     fn engine_version(&self) -> Option<String> {
         self.status.borrow()["currentVersion"].as_str().map(Into::into)
@@ -494,6 +554,11 @@ impl About {
         if let Some(desktop) = &desktop {
             fields.retain(|(key, _)| !matches!(*key, "self_updating" | "channels" | "switch" | "flow"));
             desktop.fields(&mut fields);
+            if matches!(desktop.install, InstallKind::MacApp { .. })
+                && let Some(version) = moved_on_to(&status, APP_VERSION)
+            {
+                fields.push(("moved_on_to", Value::from(version.as_str())));
+            }
         }
         if let Some(v) = self.engine_version() {
             fields.push(("engine_version", Value::from(v.as_str())));
@@ -593,5 +658,29 @@ mod tests {
         assert!(!value.field("self_updating").is_some_and(Value::truthy));
         assert!(!value.field("channels").is_some_and(Value::truthy));
         assert_eq!(value.field("app_version").map(|v| v.to_json()).as_deref(), Some(format!("\"{APP_VERSION}\"").as_str()));
+    }
+
+    #[test]
+    fn what_another_device_already_installed_isn_t_offered_again() {
+        // Updated under this window: nothing to download.
+        assert!(already_there("0.3.0", "0.3.0", "0.2.0"));
+        // Something newer still.
+        assert!(!already_there("0.3.0", "0.4.0", "0.2.0"));
+        // Nothing has moved: an update, or leaving a beta for an older stable.
+        assert!(!already_there("0.2.0", "0.3.0", "0.2.0"));
+        assert!(!already_there("0.3.0-beta.2", "0.2.9", "0.3.0-beta.2"));
+    }
+
+    #[test]
+    fn an_app_is_behind_only_when_its_engine_finished_updating_past_it() {
+        let status = |state: &str, target: &str| json!({ "currentVersion": target, "update": { "state": state, "targetVersion": target } });
+        assert_eq!(moved_on_to(&status("updated", "0.3.0"), "0.2.0").as_deref(), Some("0.3.0"));
+        // Reopened on it: nothing more to do.
+        assert_eq!(moved_on_to(&status("updated", "0.3.0"), "0.3.0"), None);
+        // Still on trial, or gone back: the bundle hasn't changed.
+        assert_eq!(moved_on_to(&status("inProgress", "0.3.0"), "0.2.0"), None);
+        assert_eq!(moved_on_to(&status("rolledBack", "0.3.0"), "0.2.0"), None);
+        // A beta's engine ahead of its app, with no update: no restart offered.
+        assert_eq!(moved_on_to(&json!({ "currentVersion": "0.3.0" }), "0.2.0"), None);
     }
 }

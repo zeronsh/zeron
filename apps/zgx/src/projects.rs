@@ -89,6 +89,7 @@ pub fn install(host: &ScriptHost) {
         Ok(Value::from(id.as_str()))
     });
     host.async_action("projects.delete", |id| async move {
+        crate::plugins::preview::refuse("projects.delete")?;
         let id = text(&id);
         if id.is_empty() {
             return Err("no project".into());

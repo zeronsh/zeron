@@ -51,7 +51,7 @@ function M.setup()
 				-- (A panel's pane not focused: lighter, its terminal or page
 				-- still worth reading.)
 				pane_dim = "alpha({background}, 0.3)",
-				focus_edge = "alpha({accent}, 0.55)",
+				focus_edge = "{border.subtle}",
 				drop = "alpha({accent}, 0.14)",
 				drop_edge = "alpha({accent}, 0.7)",
 			},
@@ -202,6 +202,16 @@ function M.setup()
 					row = 32,
 					-- A tray's body never grows past this; past it, it scrolls.
 					body = 216,
+				},
+				-- The deck: the trays as the composer's own top (ds/composer_dock).
+				-- Its header's inset from the frame, and its tabs' height: capsules
+				-- concentric with the frame (26 less its edge and 10 is 15, a 30
+				-- capsule's), the header as tall as the pill's own line. The thumb
+				-- under the open tab: the menus' selected wash, as ⌘K's scopes.
+				deck = {
+					inset = 10,
+					tab = 30,
+					thumb = "{zeron.menu.selected}",
 				},
 				-- A question's option (ds/composer_ask): its row, its corner, the
 				-- number cap at its start; chosen, a ring (never a fill).
@@ -655,17 +665,41 @@ function M.setup()
 				inset = {
 					-- A card lifted off the window, lighter than it: the
 					-- theme's raised surface.
-					bg = "{surface.raised}",
-					-- In a split (chats, or the panel's tab groups): the
-					-- focused pane lifted as any card is; the others sunk,
-					-- darker than the window.
-					active = "{surface.raised}",
-					inactive = if dark then "#00000059" else "#00000014",
+					bg = if dark then "alpha({text.primary}, 0.035)" else "alpha({background}, 0.55)",
+					-- A pane with focus a touch brighter than the cards round it.
+					active = if dark then "alpha({text.primary}, 0.06)" else "alpha({background}, 0.85)",
+					inactive = if dark then "alpha({text.primary}, 0.035)" else "alpha({background}, 0.55)",
+					dim = "#00000000",
+					dim_hover = "#00000000",
+					pane_dim = "#00000000",
 				},
 			},
 		}
 	end)
 	local control = require("@self/control")
+	-- The cards set into the window keep their corners concentric with the
+	-- window's where the host says what it is now (Windows, `window.corner_
+	-- radius`: 8 on Windows 11, 0 maximized, in full screen and on Windows
+	-- 10): its radius less the gap they're set in by, square once that's
+	-- nothing. Elsewhere they keep the theme's (macOS's window and its 12).
+	local ok, corner = pcall(ui.shared, "window.corner_radius", nil :: number?)
+	if ok then
+		ui.effect(function()
+			local radius = (corner :: any):get()
+			if type(radius) ~= "number" then
+				return
+			end
+			local gap = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+			local card = math.max(0, radius - gap)
+			ui.theme.tokens {
+				zeron = {
+					-- (And what follows its corner inside its 1-point edge,
+					-- as the effect below has it.)
+					inset = { radius = card, inner_radius = math.max(0, card - 1) },
+				},
+			}
+		end)
+	end
 	ui.effect(function()
 		local chip = control.nest("$zeron.composer.radius", 1, "$zeron.composer.chip.inset")
 		local option = control.nest("$zeron.composer.radius", 1, control.nest("$zeron.composer.chip.inset", 8))

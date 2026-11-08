@@ -29,7 +29,10 @@
 -- the Left and Right; tabs drag to reorder; "+" opens the empty page.
 -- ⌘W closes the active tab; ⌃Tab and ⌃⇧Tab step through them.
 --
---   Panel.close_focused_tab()    (the app's ⌘W) with the keyboard in the
+--   Panel.close_active_tab()     (the app's ⌘W) closes the visible panel's
+--                                 active tab, asking first as × does;
+--                                 false if hidden or no tab is active
+--   Panel.close_focused_tab()    with the keyboard in the
 --                                 panel (a file tab's tree or editor, a
 --                                 terminal), closes its active tab, asking
 --                                 first as a click on × does: true; else false
@@ -173,6 +176,7 @@ local focus_in: string? = nil
 local claimed = false
 local closer: ((id: string) -> ())? = nil
 local shown_key: (() -> string?)? = nil
+local is_shown: (() -> boolean)? = nil
 
 -- Whether the active tab's terminal has the keyboard (a terminal's focus
 -- is its own: its node may not say).
@@ -358,13 +362,12 @@ function M.find_in_browser(): boolean
 	return true
 end
 
-function M.close_focused_tab(): boolean
+-- Close the visible panel's active tab regardless of keyboard focus. The
+-- shell keeps the panel mounted while hidden, so its layout supplies visibility.
+function M.close_active_tab(): boolean
 	local k = if shown_key then shown_key() else nil
 	local close_tab = closer
-	if not k or not close_tab then
-		return false
-	end
-	if focus_in ~= k and not terminal_focused(k) then
+	if not k or not close_tab or (is_shown and not is_shown()) then
 		return false
 	end
 	local active = state.of(k).active
@@ -373,6 +376,14 @@ function M.close_focused_tab(): boolean
 	end
 	close_tab(active)
 	return true
+end
+
+function M.close_focused_tab(): boolean
+	local k = if shown_key then shown_key() else nil
+	if not k or (focus_in ~= k and not terminal_focused(k)) then
+		return false
+	end
+	return M.close_active_tab()
 end
 
 -- The strip where Zeron's is: in the window's top row over the panel (its
@@ -387,7 +398,7 @@ end
 local CHIP_H = 26
 local LABEL_MAX = 140
 local SLOT = 18
-local BAND_H, BAND_PAD = 38, "$space.1"
+local BAND_H = 38
 local STRIP_START = "$space.2"
 local TOGGLE_ROOM = 34
 local STRIP_FADE = 36
@@ -591,13 +602,14 @@ end
 -- its edge clipping it, so the tabs never pass under the title bar's fixed
 -- controls at the window's right (as Zeron's pane header is revealed in
 -- place).
+-- `visible`: whether the shell currently shows the panel (including window fit).
+-- Not given, a standalone panel is visible. Used by the app's ⌘W.
+--
 -- `docked`: whether the window has room for a file tab's tree beside its
 -- file (the shell's fit, as Zeron's Files column); not given, each file tab
 -- decides by its own width.
-export type Props = { project: any?, session: any?, page: any?, left: (() -> number)?, hold: (() -> number)?, on_last_closed: (() -> ())?, docked: (() -> boolean)?, [any]: any }
+export type Props = { project: any?, session: any?, page: any?, visible: (() -> boolean)?, left: (() -> number)?, hold: (() -> number)?, on_last_closed: (() -> ())?, docked: (() -> boolean)?, [any]: any }
 
--- Where the title bar's controls end, from the window's left (ds/title_bar).
-local CONTROLS_END = ds.TitleBar.controls_end()
 local STRIP_START_PT = (ui.theme.get("space.2") :: number?) or 8
 
 M.Panel = ui.component(function(props: Props): Node
@@ -1082,7 +1094,17 @@ M.Panel = ui.component(function(props: Props): Node
 		w_full = true,
 		h = BAND_H,
 		shrink = 0,
-		pt = BAND_PAD,
+		-- (Its tabs on the title bar's line: under the bar's 4 of top pad,
+		-- or, where the window's buttons draw the line higher, above as much
+		-- room at the foot.)
+		pt = function(): any
+			local line = ds.TitleBar.middle()
+			return if line * 2 >= BAND_H then ui.raw(line * 2 - BAND_H, "the title bar's line") else 0
+		end,
+		pb = function(): any
+			local line = ds.TitleBar.middle()
+			return if line * 2 < BAND_H then ui.raw(BAND_H - line * 2, "the title bar's line") else 0
+		end,
 		-- (Clear of the title bar's controls when they stand over it; its
 		-- own start otherwise. It follows the edge as it moves, so expanding
 		-- and back glide with it.)
@@ -1091,12 +1113,14 @@ M.Panel = ui.component(function(props: Props): Node
 		pl = if left_of
 			then function(): number
 				local left = left_of() + (if hold then hold() else 0)
-				return ui.raw(math.max(STRIP_START_PT, CONTROLS_END - left), "clear of the title bar's controls, as its edge moves")
+				return ui.raw(math.max(STRIP_START_PT, ds.TitleBar.controls_end() - left), "clear of the title bar's controls, as its edge moves")
 			end
 			else STRIP_START,
 		-- (And the window's own buttons, where they stand at the right.)
 		pr = function(): number
-			return ui.raw(TOGGLE_ROOM + ds.TitleBar.window_buttons_right(), "the title bar's panel toggle, and the window's buttons, stand over the strip's end")
+			-- (TOGGLE_ROOM counts the bar's row padding, 10, which
+			-- `actions_right` gives as it is now: the window's buttons too.)
+			return ui.raw(TOGGLE_ROOM - 10 + ds.TitleBar.actions_right(), "the title bar's panel toggle, and the window's buttons, stand over the strip's end")
 		end,
 		items = "center",
 		window_drag = true,
@@ -1276,7 +1300,6 @@ M.Panel = ui.component(function(props: Props): Node
 				session = session,
 				view = tab.id,
 				initial = tab.path,
-				docked = props.docked,
 				-- (Said with the code: Tab indents there.)
 				-- (A string, read as the tab is made.)
 				escape_hint = ui.t("panel.escape_hint"):get(),
@@ -1407,7 +1430,7 @@ M.Panel = ui.component(function(props: Props): Node
 
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "left" and k ~= "hold" and k ~= "on_last_closed" and k ~= "docked" and k ~= "children" then
+		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "visible" and k ~= "left" and k ~= "hold" and k ~= "on_last_closed" and k ~= "docked" and k ~= "children" then
 			box[k] = v
 		end
 	end
@@ -1424,6 +1447,7 @@ M.Panel = ui.component(function(props: Props): Node
 	-- Where the keyboard is (focus and blur reach the panel from what's in
 	-- it), and how a tab closes, for the app's ⌘W.
 	closer = close
+	is_shown = props.visible
 	shown_key = function(): string?
 		return key:peek()
 	end
@@ -1439,7 +1463,7 @@ M.Panel = ui.component(function(props: Props): Node
 	end
 	ui.on_cleanup(function()
 		if closer == close then
-			closer, shown_key, focus_in = nil, nil, nil
+			closer, shown_key, focus_in, is_shown = nil, nil, nil, nil
 		end
 	end)
 	box.on_key = function(e): boolean?

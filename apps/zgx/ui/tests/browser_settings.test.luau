@@ -77,7 +77,8 @@ test("Browser settings: a heading of its own, Browsing and History, and General 
 	app:click(`{NAV} >> role:tab "General"`)
 	app:frames(20)
 	expect(shows(app, PAGE, "Open links in")).to_be(false)
-	expect(shows(app, PAGE, "Open pull requests in") or shows(app, PAGE, "pull requests")).to_be(true)
+	-- (Where a pull request opens is the GitHub plugin's setting.)
+	expect(shows(app, PAGE, "Open pull requests in")).to_be(false)
 end)
 
 test("Browser settings: history lists, filters, and lets one page go in place", function()

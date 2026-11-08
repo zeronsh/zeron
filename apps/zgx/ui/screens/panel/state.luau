@@ -11,7 +11,6 @@
 --                                 active (else the first, else the empty page)
 --   state.activate(key, id?)      that tab (nil: the empty page)
 --   state.move(key, id, to)       to place `to` (from 1)
---   state.groups                  each panel's tab groups (below)
 --
 -- `key`: the session's ("chat:<id>"), a project's with none open, or a
 -- plugin's page's ("page:<plugin>/<id>": a page has a panel of its own).
@@ -55,54 +54,11 @@ export type Session = { tabs: { Tab }, active: string?, visited: { string } }
 M.sessions = ui.state("panel_sessions", {} :: { [string]: Session })
 local next_id = ui.state("panel_next_id", 1)
 
--- Each panel's tab groups, by its key, while its tabs are split into
--- groups (screens/panel draws them): `{ tree, groups = { [gid] = { tabs } },
--- focus, actives, next }`, none while there's one group. `MAIN` holds every
--- tab no other group does. The focused group is kept here, with the tabs,
--- and moved here alone, in the same write as the tabs: a tab opened (by
--- whatever opens one) lands in it, a tab turned to focuses its group, and
--- a tab closed leaves the focus in its own group, or, that one empty, its
--- neighbour's.
-M.MAIN = "main"
-M.groups = ui.state("panel_groups", {} :: { [string]: any })
-local tree = require("@app/screens/shell/split").tree
-
--- The group `id` is in.
-function M.group_of(rec: any, id: string): string
-	for gid, g in rec.groups do
-		if table.find(g.tabs, id) then
-			return gid
-		end
-	end
-	return M.MAIN
-end
-
--- `key`'s groups, changed by `change` (a copy), if it has any.
-local function regroup(key: string, change: (rec: any) -> ())
-	local rec = M.groups:peek()[key]
-	if not rec then
-		return
-	end
-	local r = table.clone(rec)
-	r.groups = table.clone(rec.groups)
-	r.actives = table.clone(rec.actives or {})
-	change(r)
-	M.groups:set_key(key, r)
-end
-
--- The focus to `id`'s group, it the one that group shows.
-local function focus_tab(key: string, id: string?)
-	if not id then
-		return
-	end
-	regroup(key, function(r: any)
-		local gid = M.group_of(r, id)
-		r.focus = gid
-		r.actives[gid] = id
-	end)
-end
-
 local EMPTY: Session = { tabs = {}, visited = {} }
+
+-- A new chat with no project's tabs (v3's page asks for it): a panel of its own all the
+-- same, with what needs no folder.
+M.NO_PROJECT = "no-project"
 
 -- Which session's tabs: its id's, or its project's; a plugin's page's,
 -- on one (`page`: `{ plugin, id }`).
@@ -240,20 +196,7 @@ function M.open(key: string, kind: Kind, extra: { [string]: any }?): string
 	table.insert(s.tabs, tab)
 	s.active = id
 	visit(s, id)
-	ui.batch(function()
-		write(key, s)
-		-- (Into the focused group, whoever opened it.)
-		regroup(key, function(r: any)
-			local f = r.focus or M.MAIN
-			if f ~= M.MAIN and r.groups[f] then
-				local tabs = table.clone(r.groups[f].tabs)
-				table.insert(tabs, id)
-				r.groups[f] = { tabs = tabs }
-			end
-			r.focus = f
-			r.actives[f] = id
-		end)
-	end)
+	write(key, s)
 	M.want_keys(key, id)
 	return id
 end
@@ -270,7 +213,6 @@ function M.activate(key: string, id: string?)
 	visit(s, id)
 	ui.batch(function()
 		write(key, s)
-		focus_tab(key, id)
 	end)
 	M.want_keys(key, id)
 end
@@ -303,66 +245,22 @@ function M.close(key: string, id: string)
 		table.remove(s.visited, v)
 	end
 	local was_active = s.active == id
-	-- In groups: the tab's own group goes on (the last it showed of those
-	-- left), or, it emptied, its neighbour does.
-	local rec = M.groups:peek()[key]
-	local within: { [string]: boolean }? = nil
-	if rec then
-		local gid = M.group_of(rec, id)
-		local function members(g: string): { [string]: boolean }
-			local out: { [string]: boolean } = {}
-			for _, t in s.tabs do
-				if M.group_of(rec, t.id) == g then
-					out[t.id] = true
-				end
-			end
-			return out
-		end
-		within = members(gid)
-		if next(within :: any) == nil then
-			local order = tree.leaves(rec.tree)
-			local at = table.find(order, gid) or 1
-			local near = order[at + 1] or order[at - 1]
-			within = if near then members(near) else nil
-		end
-	end
 	ui.batch(function()
-		regroup(key, function(r: any)
-			for g, gg in r.groups do
-				local i = table.find(gg.tabs, id)
-				if i then
-					local tabs = table.clone(gg.tabs)
-					table.remove(tabs, i)
-					r.groups[g] = { tabs = tabs }
-				end
-			end
-		end)
 		if was_active then
 			local next_active: string? = nil
 			for _, seen in s.visited do
-				if within == nil or within[seen] then
-					for _, t in s.tabs do
-						if t.id == seen then
-							next_active = seen
-							break
-						end
+				for _, t in s.tabs do
+					if t.id == seen then
+						next_active = seen
+						break
 					end
 				end
 				if next_active then
 					break
 				end
 			end
-			if not next_active and within then
-				for _, t in s.tabs do
-					if within[t.id] then
-						next_active = t.id
-						break
-					end
-				end
-			end
 			s.active = next_active or (if s.tabs[1] then s.tabs[1].id else nil)
 			write(key, s)
-			focus_tab(key, s.active)
 		else
 			write(key, s)
 		end

@@ -36,7 +36,7 @@ end
 
 test("a device's header under its project shows the project's + and starts a new chat there", function()
 	local app = open()
-	-- From a session: Fix the build, Atlas on this Mac.
+	-- From a session: Fix the build, Atlas on this computer.
 	app:set_state("shell_selected", "a1")
 	app:frames(30)
 	expect(app:state("shell_route_path")).to_be("/session/a1")
@@ -66,7 +66,7 @@ test("on a new chat already, a device's + picks its device: the project's folder
 	app:command("atlas_on_box")
 	app:command("atlas_twin_on_box")
 	app:frames(40)
-	-- A new chat in Atlas, on this Mac (the fixture starts on one).
+	-- A new chat in Atlas, on this computer (the fixture starts on one).
 	app:set_state("shell_project", "atlas")
 	app:frames(30)
 	expect(app:state("shell_route_path")).to_be("/")
@@ -83,7 +83,7 @@ test("on a new chat already, a device's + picks its device: the project's folder
 	-- (Taken: the next new chat isn't moved by it.)
 	expect(app:state("shell_device_pick")).to_be(nil)
 
-	-- Back on this Mac, from Atlas's own.
+	-- Back on this computer, from Atlas's own.
 	app:hover(under(app, "Atlas", "MacBook Pro"))
 	app:frames(20)
 	app:click(plus("New chat in Atlas on MacBook Pro"))

@@ -7,7 +7,10 @@
 //! "you", one edited since you kept it) it runs as a **preview**: it draws
 //! as it likes, with a toast the host draws over it ("Previewing <name>",
 //! Keep and Revert, host_bar.rs), and the host refuses its dangerous
-//! actions (`BLOCKED`).
+//! actions (`BLOCKED`) and, through zgx's guard (`guard`), what would run a
+//! program or carry what it reads out of the window. What it draws stays its
+//! own, and what it saves is held until it's kept. It can still read what the
+//! app reads, so don't word a preview as safe.
 //!
 //! What you kept is bound to the template's content: the sha256 of every
 //! file it lays over Zeron's own (`digest`). The record lives in the app's
@@ -51,6 +54,7 @@ pub const BLOCKED: &[&str] = &[
     "plugins.new",
     "plugins.remove",
     "plugins.setting_set",
+    "plugins.set_off",
     "templates.use",
     "templates.create",
     "templates.duplicate",
@@ -62,18 +66,30 @@ pub const BLOCKED: &[&str] = &[
     "files.create",
     "files.move",
     "files.delete",
+    // (Opens a file as a double click would: a `.command` runs.)
+    "files.open_external",
     "chat.send",
     "chat.respond",
     "chat.queue",
+    "chat.queue_edit",
+    "chat.queue_finish",
+    "chat.retry",
+    // (Only one that says what an agent may do unasked: `chat.configure`.)
+    "chat.configure",
     "agents.install",
     "agents.set_key",
     "agents.sign_in",
+    "agents.sign_out",
+    "agents.remove",
     "acp_registry.add",
     "acp_registry.add_own",
     "acp_registry.env_set",
     "home.run_action",
     "home.save_action",
+    "sessions.delete",
     "projects.clone",
+    "projects.delete",
+    "github.disconnect",
     "engine.restart",
     "billing.checkout",
 ];
@@ -135,6 +151,57 @@ pub fn refuse(action: &str) -> Result<(), String> {
             Err(format!("{} is a preview. Keep it first, or go back to Zeron v3.", p.name))
         }
         _ => Ok(()),
+    }
+}
+
+/// `refuse`, for an action with no promise to reject: the same words, as one
+/// of the host's toasts. Whether it refused.
+pub fn refuse_aloud(action: &str) -> bool {
+    let Err(why) = refuse(action) else { return false };
+    super::host_bar::notice(super::host_bar::Notice { title: why, body: String::new(), tone: super::host_bar::Tone::Neutral, action: None, stays: false });
+    true
+}
+
+/// Actions the guard refuses itself, rather than each with a friendly answer
+/// of its own: a plugin's own (`plugin.<id>.…`, its programs among them), run
+/// as that plugin. Only the app's VM is asked, a plugin's isn't, and Zeron's
+/// own screens call none of them.
+const REFUSED_BY_GUARD: &[&str] = &["plugin."];
+
+/// The words every refusal shares (`refused` knows one by them).
+const IS_A_PREVIEW: &str = " is a preview";
+
+/// Whether `error` is a preview's refusal, not something wrong with the
+/// template: its script asked for what it may not have yet.
+pub fn refused(error: &str) -> bool {
+    current().is_some() && error.contains(IS_A_PREVIEW)
+}
+
+/// Whether the app's VM may reach `name` now, as zgx asks before it leaves
+/// the interface (a plugin's VM isn't asked). While a template is a preview:
+/// no program, no plugin's powers, no page, no request or remote picture (a
+/// URL carries what it read), no link, and what it saves is held. Everything
+/// else, and everything once it's kept, is as the app's. Most blocked actions
+/// answer for themselves (`refuse`), with a promise that rejects.
+pub fn guard(kind: zgx_script::GuardKind, name: &str) -> Result<(), String> {
+    use zgx_script::GuardKind as Kind;
+    let Some(p) = current() else { return Ok(()) };
+    let refused = || Err(format!("{}{IS_A_PREVIEW}. Keep it first, or go back to Zeron v3.", p.name));
+    match kind {
+        Kind::Clipboard | Kind::Dialog | Kind::File | Kind::Folder | Kind::Notification | Kind::Window => Ok(()),
+        Kind::Action | Kind::AsyncAction | Kind::Function => match REFUSED_BY_GUARD.iter().any(|b| name.starts_with(b)) {
+            true => refused(),
+            false => Ok(()),
+        },
+        // Showing a terminal you already have runs nothing new: only what
+        // the host itself started (`terminal.command`, refused here).
+        Kind::Term if crate::terminal::issued(name) => Ok(()),
+        Kind::OpenLink | Kind::Web => {
+            super::host_bar::links_need_keeping();
+            refused()
+        }
+        // (Any kind zgx adds is refused until it's looked at.)
+        _ => refused(),
     }
 }
 
@@ -398,7 +465,7 @@ mod tests {
         set(None);
         assert!(refuse("terminal.start").is_ok(), "nothing in preview: all allowed");
         set(Some(Preview { id: "agent".into(), name: "Agent's".into() }));
-        for action in ["terminal.start", "terminal.write", "account.sign_out", "account.delete", "plugins.install", "templates.use", "files.write", "chat.send", "chat.respond"] {
+        for action in ["terminal.start", "terminal.write", "account.sign_out", "account.delete", "plugins.install", "templates.use", "files.write", "chat.send", "chat.respond", "chat.retry", "chat.queue_edit", "chat.queue_finish", "chat.configure", "files.open_external"] {
             assert!(refuse(action).is_err(), "{action}");
         }
         for action in ["files.read", "files.list", "chat.open", "appearance", "templates.review", "sessions.seen"] {
@@ -439,6 +506,347 @@ mod tests {
         // Zeron's own needs no keeping.
         assert!(trusted_at(&templates, live::BUILTIN, &approvals));
         set(None);
+    }
+
+    /// A server on this machine: how many requests for `/<token>` reached it.
+    /// (By token: a port freed by another process on this machine may have
+    /// something still asking it.)
+    fn serve() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = format!("preview-{}-{port}-{:?}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (counted, wanted) = (hits.clone(), token.clone());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut asked = [0; 4096];
+                let n = stream.read(&mut asked).unwrap_or(0);
+                if String::from_utf8_lossy(&asked[..n]).contains(&wanted) {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            }
+        });
+        (format!("http://127.0.0.1:{port}/{token}"), hits)
+    }
+
+    use zgx_script::{Capability, GuardKind, Plugin, ScriptHost, Value, testing::TestApp};
+
+    /// `script` as the app's, under the window's guard.
+    fn guarded(script: String, with: impl FnOnce(&ScriptHost) + 'static) -> TestApp {
+        TestApp::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", script);
+            zgx_run::install_fetcher(&host);
+            host.guard(guard);
+            host.async_action("plugin.git.run", |_| async move { Ok(Value::from("ran")) });
+            host.async_action("files.read", |_| async move { Ok(Value::from("read")) });
+            with(&host);
+            host
+        })
+    }
+
+    /// `body`'s text, shown once it's run, in `out`.
+    fn showing(body: &str) -> String {
+        format!(
+            r#"
+local out = ui.state("out", "")
+local function say(v: any) out:set(tostring(v)) end
+{body}
+return ui.column {{ ui.text {{ id = "out", function() return out:get() end }} }}
+"#
+        )
+    }
+
+    fn answered(app: &mut TestApp) -> String {
+        assert!(app.wait_until(|app| !app.text("out").is_empty()), "no answer: {:?}", app.error());
+        app.text("out")
+    }
+
+    fn sleek() -> Preview {
+        Preview { id: "agent".into(), name: "Sleek".into() }
+    }
+
+    /// R7: a preview's `ui.fetch` rejects (its script's own `after` hears
+    /// it), and nothing reaches the network; kept, the same line goes.
+    #[test]
+    fn a_preview_s_fetch_rejects_and_goes_nowhere() {
+        let (url, hits) = serve();
+        let body = format!(r#"ui.fetch("{url}"):after(function(r) say(`ok {{r.status}}`) end, function(e) say(`rejected {{e}}`) end)"#);
+        set(Some(sleek()));
+        let out = answered(&mut guarded(showing(&body), |_| {}));
+        assert!(out.starts_with("rejected") && out.contains("Sleek is a preview"), "{out}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "it went");
+        set(None);
+        assert_eq!(answered(&mut guarded(showing(&body), |_| {})), "ok 200");
+    }
+
+    /// R7: a preview's remote picture isn't asked for, nothing breaks, and a
+    /// reload once it's kept shows it. Its own pictures show all along.
+    #[test]
+    fn a_preview_s_remote_picture_waits_and_its_own_shows() {
+        let (url, hits) = serve();
+        let root = dir("pictures");
+        let own = root.join("own.png");
+        // A 1x1 PNG.
+        std::fs::write(&own, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0, 5, 0, 1, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]).unwrap();
+        let script = format!(
+            r#"
+local own = ui.state("own", "")
+return ui.column {{
+    ui.text {{ id = "own", function() return own:get() end }},
+    ui.image {{ src = "{}", w = 8, h = 8, on_load = function() own:set("loaded") end }},
+    ui.image {{ id = "remote", src = "{url}.png", w = 8, h = 8, fallback = ui.text {{ id = "fell-back", "gradient" }} }},
+    ui.text {{ id = "up", "up" }},
+}}
+"#,
+            own.display()
+        );
+        set(Some(sleek()));
+        let mut app = guarded(script, |_| {});
+        assert!(app.wait_until(|app| app.text("own") == "loaded"), "its own picture didn't show: {:?}", app.error());
+        for _ in 0..20 {
+            app.frames(2);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the remote picture went");
+        assert_eq!(app.text("up"), "up", "the window carries on");
+        assert!(app.find("#fell-back").is_some(), "its fallback shows");
+        // Kept: the guard says yes, and the reload asks again.
+        set(None);
+        app.host.reload().unwrap();
+        assert!(app.wait_until(|_| hits.load(Ordering::SeqCst) > 0), "it didn't come back on Keep, with no relaunch");
+    }
+
+    /// R7: a preview can't use a plugin's powers, start a program or load a
+    /// page, each with the same words; it reads as the app does, and a plugin
+    /// beside it isn't asked.
+    #[test]
+    fn a_preview_runs_nothing_and_borrows_nothing() {
+        let root = dir("runs-nothing");
+        let ran = root.join("ran");
+        set(Some(sleek()));
+        for (what, body) in [
+            ("a plugin's programs", r#"local ok, e = pcall(function() return ui.call("plugin.git.run", {}) end); say(if ok then "ok" else `refused {e}`)"#.to_string()),
+            ("a program", format!(r#"local ok, e = pcall(function() return ui.term("x", {{ command = "/usr/bin/touch {}" }}) end); say(if ok then "ok" else `refused {{e}}`)"#, ran.display())),
+            ("a page", r#"local ok, e = pcall(function() ui.web("p"):load("https://example.com/") end); say(if ok then "ok" else `refused {e}`)"#.to_string()),
+        ] {
+            let out = answered(&mut guarded(showing(&body), |_| {}));
+            assert!(out.starts_with("refused") && out.contains("Sleek is a preview"), "{what}: {out}");
+        }
+        assert!(!ran.exists(), "the program ran");
+        let reads = r#"ui.call("files.read", {}):after(function(v) say(`ok {v}`) end, function(e) say(`rejected {e}`) end)"#;
+        assert_eq!(answered(&mut guarded(showing(reads), |_| {})), "ok read", "reading isn't refused");
+
+        let (url, hits) = serve();
+        let entry = root.join("init.luau");
+        let plugin = format!(
+            r#"local out = ui.state("out", "")
+            ui.fetch("{url}"):after(function(r) out:set(`ok {{r.status}}`) end, function(e) out:set(`failed {{e}}`) end)
+            ui.contribute("bar", ui.text {{ id = "out", function() return out:get() end }})"#
+        );
+        std::fs::write(&entry, plugin).unwrap();
+        let mut app = guarded(r#"return ui.column { ui.slot("bar") }"#.to_string(), move |host| {
+            host.set_plugins(vec![Plugin { name: "plug".into(), entry, grants: vec![Capability::Fetch] }]);
+        });
+        assert_eq!(answered(&mut app), "ok 200", "a plugin's VM isn't under the guard");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        set(None);
+    }
+
+    /// Every action in `BLOCKED` answers for itself, as `refuse` does: a name
+    /// listed with nothing checking it would be open.
+    #[test]
+    fn every_blocked_action_checks_for_itself() {
+        let mut sources = String::new();
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("preview.rs") {
+                    sources.push_str(&std::fs::read_to_string(path).unwrap());
+                }
+            }
+        }
+        for action in BLOCKED {
+            let (checked, aloud) = (format!("refuse(\"{action}"), format!("refuse_aloud(\"{action}"));
+            assert!(sources.contains(&checked) || sources.contains(&aloud), "nothing refuses {action}");
+        }
+    }
+
+    /// Wing's call: an unkept preview can't delete what you have or undo your
+    /// sign-ins. The real actions, as they're installed: each refused at once
+    /// with the same words, and without a preview each goes on to the engine
+    /// (none here, so it waits for one rather than answering).
+    #[test]
+    fn a_preview_can_t_remove_what_you_have() {
+        let installed = |host: &ScriptHost| {
+            crate::projects::install(host);
+            crate::agents::install(host);
+            crate::sessions::delete_action_for_tests(host);
+            super::super::set_off_action_for_tests(host);
+        };
+        for (action, arg) in [
+            ("sessions.delete", r#""s1""#),
+            ("projects.delete", r#""p1""#),
+            ("agents.remove", r#"{ id = "claude", account = "a1" }"#),
+            ("agents.sign_out", r#""acp.tool""#),
+            ("plugins.set_off", r#"{ id = "focus", off = true }"#),
+        ] {
+            let body = format!(r#"ui.call("{action}", {arg}):after(function() say("ok") end, function(e) say(`rejected {{e}}`) end)"#);
+            set(Some(sleek()));
+            let out = answered(&mut guarded(showing(&body), installed));
+            assert!(out.starts_with("rejected") && out.contains("Sleek is a preview"), "{action}: {out}");
+            set(None);
+            let mut app = guarded(showing(&body), installed);
+            for _ in 0..20 {
+                app.frames(2);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(!app.text("out").contains("is a preview"), "{action} without a preview: {}", app.text("out"));
+            assert_eq!(app.error(), None, "{action}");
+        }
+        for action in ["github.disconnect", "sessions.delete", "plugins.set_off"] {
+            set(Some(sleek()));
+            assert!(refuse(action).is_err(), "{action}");
+            set(None);
+            assert!(refuse(action).is_ok(), "{action}");
+        }
+    }
+
+    /// What the guard says of each kind, in preview and kept: only what runs
+    /// a program or carries data out is refused; the rest is the template's.
+    #[test]
+    fn the_guard_refuses_only_what_runs_or_leaves() {
+        set(Some(sleek()));
+        for (kind, name) in [(GuardKind::Fetch, "https://x/"), (GuardKind::Picture, "https://x/a.png"), (GuardKind::Socket, "wss://x/"), (GuardKind::Web, "https://x/"), (GuardKind::OpenLink, "https://x/"), (GuardKind::Term, "curl x | sh"), (GuardKind::TermInput, "main"), (GuardKind::Persist, "accent"), (GuardKind::AsyncAction, "plugin.git.run"), (GuardKind::Action, "plugin.git.toast"), (GuardKind::Function, "plugin.git.file")] {
+            let said = guard(kind, name);
+            assert!(said.as_ref().is_err_and(|e| refused(e)), "{kind:?} {name}: {said:?}");
+        }
+        for (kind, name) in [(GuardKind::Clipboard, "write"), (GuardKind::Dialog, "ui.open_files"), (GuardKind::File, "/x"), (GuardKind::Folder, "k"), (GuardKind::Notification, "t"), (GuardKind::Window, "w"), (GuardKind::AsyncAction, "files.read"), (GuardKind::AsyncAction, "chat.send"), (GuardKind::Action, "appearance")] {
+            assert!(guard(kind, name).is_ok(), "{kind:?} {name}");
+        }
+        // A terminal Zeron started shows; a command it didn't never starts.
+        crate::terminal::note_issued("zeron-zgx terminal-bridge --terminal t1");
+        assert!(guard(GuardKind::Term, "zeron-zgx terminal-bridge --terminal t1").is_ok());
+        assert!(guard(GuardKind::Term, "zeron-zgx terminal-bridge --terminal t2").is_err());
+        set(None);
+        for (kind, name) in [(GuardKind::Fetch, "https://x/"), (GuardKind::Term, "curl x | sh"), (GuardKind::Persist, "accent"), (GuardKind::AsyncAction, "plugin.git.run")] {
+            assert!(guard(kind, name).is_ok(), "kept: {kind:?} {name}");
+        }
+        assert!(!refused("x is a preview"), "no preview, no refusal");
+    }
+
+    /// A preview reads what's saved, so settings look as they do; what it
+    /// writes isn't saved. Kept, it is; reverted, it's gone.
+    #[test]
+    fn a_preview_holds_what_it_saves_until_it_s_kept() {
+        let root = dir("held");
+        let storage = root.join("state");
+        let script = r#"
+local accent = ui.persist("accent", "default")
+ui.command { id = "set", run = function() accent:set("preview") end }
+return ui.column { ui.text { id = "accent", function() return accent:get() end } }
+"#;
+        let mount = |with_guard: bool| {
+            let storage = storage.clone();
+            TestApp::new(move |runtime| {
+                let host = ScriptHost::inline(runtime, "app", script).storage(storage);
+                if with_guard {
+                    host.guard(guard);
+                }
+                host
+            })
+        };
+        // What the person has saved, kept.
+        set(None);
+        {
+            let app = mount(false);
+            app.host.shared("x", 0.);
+            assert!(app.host.run_command("set"));
+            app.host.save();
+        }
+        let saved_as = |word: &str| {
+            let found = std::fs::read_dir(&storage).unwrap().flatten().flat_map(|d| if d.path().is_dir() { std::fs::read_dir(d.path()).unwrap().flatten().map(|f| f.path()).collect() } else { vec![d.path()] }).any(|f| std::fs::read_to_string(f).is_ok_and(|t| t.contains(word)));
+            assert!(found, "{word} isn't saved");
+        };
+        saved_as("preview");
+        // Written over as the person's, to tell apart from the preview's.
+        for entry in std::fs::read_dir(&storage).unwrap().flatten() {
+            let files: Vec<_> = if entry.path().is_dir() { std::fs::read_dir(entry.path()).unwrap().flatten().map(|f| f.path()).collect() } else { vec![entry.path()] };
+            for file in files {
+                let text = std::fs::read_to_string(&file).unwrap();
+                std::fs::write(&file, text.replace("preview", "mine")).unwrap();
+            }
+        }
+
+        set(Some(sleek()));
+        let mut app = mount(true);
+        app.frames(2);
+        assert_eq!(app.text("accent"), "mine", "a preview reads what's saved");
+        assert!(app.host.run_command("set"));
+        app.frames(2);
+        assert_eq!(app.text("accent"), "preview", "and shows what it wrote");
+        app.host.save();
+        saved_as("mine");
+        // Reverted: nothing of it is saved.
+        app.host.drop_held_state();
+        set(None);
+        app.host.reload().unwrap();
+        app.frames(2);
+        assert_eq!(app.text("accent"), "mine");
+        app.host.save();
+        saved_as("mine");
+
+        // Kept: the same keys saved, and what shows after the reload.
+        set(Some(sleek()));
+        app.host.reload().unwrap();
+        app.frames(2);
+        assert!(app.host.run_command("set"));
+        app.frames(2);
+        assert_eq!(app.host.keep_held_state(), 1);
+        set(None);
+        app.host.reload().unwrap();
+        app.frames(2);
+        assert_eq!(app.text("accent"), "preview");
+        app.host.save();
+        saved_as("preview");
+    }
+
+    /// A setting first written in a preview, with nothing saved before it, is
+    /// on disk once it's kept, as much as one that was (zgx #1468).
+    #[test]
+    fn a_key_first_written_in_a_preview_is_saved_on_keep() {
+        let storage = dir("held-new").join("state");
+        let script = r#"
+local first = ui.persist("first_written", "default")
+ui.command { id = "set", run = function() first:set("written") end }
+return ui.column { ui.text { id = "first", function() return first:get() end } }
+"#;
+        set(Some(sleek()));
+        let mut app = TestApp::new({
+            let storage = storage.clone();
+            move |runtime| {
+                let host = ScriptHost::inline(runtime, "app", script).storage(storage);
+                host.guard(guard);
+                host
+            }
+        });
+        app.frames(2);
+        assert!(app.host.run_command("set"));
+        app.frames(2);
+        app.host.save();
+        assert!(!storage.join("app").join("first_written.json").exists(), "saved while it's a preview");
+        assert_eq!(app.host.keep_held_state(), 1);
+        set(None);
+        app.host.reload().unwrap();
+        app.frames(2);
+        assert_eq!(app.text("first"), "written");
+        app.host.save();
+        let saved = std::fs::read_to_string(storage.join("app").join("first_written.json")).expect("saved on keep");
+        assert!(saved.contains("written"), "{saved}");
     }
 
     #[test]

@@ -193,8 +193,8 @@ function M.s(key: string, args: { [string]: any }?): string
 	return english_of(key, args)
 end
 
--- How long it has worked: seconds, then minutes, then hours and minutes
--- ("42s", "5m", "1h 5m").
+-- How long it has worked, to the second, as it's still counting: seeing the
+-- seconds go is how you know it's working ("42s", "3m 22s", "1h 5m 22s").
 function M.elapsed(seconds: number): string
 	local t = math.max(0, math.floor(seconds))
 	if t < 60 then
@@ -202,9 +202,9 @@ function M.elapsed(seconds: number): string
 	end
 	local m = t // 60
 	if m < 60 then
-		return M.s("time.short.minutes", { n = m })
+		return M.s("time.short.minutes_seconds", { m = m, s = t % 60 })
 	end
-	return M.s("time.short.hours_minutes", { h = m // 60, m = m % 60 })
+	return M.s("time.short.hours_minutes_seconds", { h = m // 60, m = m % 60, s = t % 60 })
 end
 
 -- How long ago, in a corner's room: now, then minutes, hours, days and

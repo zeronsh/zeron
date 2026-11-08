@@ -26,10 +26,12 @@ local status = require("@ds/status")
 local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
+local motion = require("@ds/motion")
 local boundary = require("@app/screens/shell/boundary")
 local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
+local activity = require("@app/screens/shell/activity")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -290,7 +292,9 @@ end
 -- A project is empty when every session it has had is archived: none
 -- listed, one or more on the Archived shelf. The sidebar folds those into
 -- one row at the projects' end. One with no sessions at all (just added)
--- isn't: it's where a new chat is about to start. Counted on all of them,
+-- isn't: it's where a new chat is about to start, listed with the rest, until
+-- Show → Empty projects is off, which hides it too (it's still in the project
+-- selector). Counted on all of them,
 -- not what a filter shows, so narrowing never moves a project in or out
 -- (the status filter hides every group with none anyway); the project the
 -- project filter is narrowed to is never folded away. Archived sessions
@@ -308,7 +312,7 @@ local ASKED: { [string]: string } = { approval = "approval", question = "input" 
 -- or `{ statuses = { "working", … }, by = "Focus" }`, those in these
 -- states ("idle", in none). Written by a plugin, so read with care: what
 -- isn't that shape is nil, and a word it doesn't know counts for nothing.
-local KNOWN = { working = true, input = true, approval = true, failed = true, done = true, idle = true }
+local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, done = true, woke = true, idle = true }
 local filter = ui.shared("sidebar.filter", nil :: any)
 type Narrow = { statuses: { [string]: boolean }, words: { string }, by: string }
 local narrow = ui.computed(function(): Narrow?
@@ -411,6 +415,44 @@ local function kept(row: { [string]: any }): { [string]: any }
 	return row
 end
 
+-- `p` and the other checkouts of its repository, on any device, the oldest first
+-- (its name and picture stand for them all, the same on every device). A project
+-- with no repository is its own.
+local function checkouts_of(p: any, all: { any }): { any }
+	local out: { any } = {}
+	for _, q in all do
+		if q.id == p.id or (p.repository and q.repository == p.repository) then
+			table.insert(out, q)
+		end
+	end
+	table.sort(out, function(a: any, b: any): boolean
+		local x, y = a.created or math.huge, b.created or math.huge
+		if x ~= y then
+			return x < y
+		end
+		return a.id < b.id
+	end)
+	return out
+end
+local function oldest_checkout(p: any, all: { any }): any
+	return checkouts_of(p, all)[1]
+end
+-- Where a new chat in project `id`'s repository starts: its clone on this device,
+-- else `id`.
+local function checkout_here(id: string?): string?
+	local now = sessions.now:peek()
+	for _, p in now.projects do
+		if p.id == id then
+			for _, q in checkouts_of(p, now.projects) do
+				if q.device == now.here then
+					return q.id
+				end
+			end
+		end
+	end
+	return id
+end
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
@@ -419,41 +461,76 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	local names = devices()
 	local out: { ds.SidebarProject } = {}
 	local by: { [string]: ds.SidebarProject } = {}
+	-- One group for each repository, whichever device its clones are on: it stands
+	-- where the first of them does, and reads as the oldest of them.
+	local of_repository: { [string]: ds.SidebarProject } = {}
 	for _, p in now.projects do
-		local l = route.look(p.id) or { hue = route.hue(p.id) }
-		local group: ds.SidebarProject = { id = p.id, name = p.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} }
-		by[p.id] = group
-		table.insert(out, group)
+		local group = if p.repository then of_repository[p.repository] else nil
+		if not group then
+			local first = oldest_checkout(p, now.projects)
+			local l = route.look(first.id) or { hue = route.hue(first.id) }
+			group = { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} }
+			table.insert(out, group :: any)
+			if p.repository then
+				of_repository[p.repository] = group :: any
+			end
+		end
+		by[p.id] = group :: any
 	end
-	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "chat-round-line", sessions = {} }
+	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} }
 	-- (Which have sessions listed, and which archived ones.)
-	local listed: { [string]: boolean } = {}
+	-- (By group: a repository isn't empty while any clone of it has a session.)
+	local just_group = if just then by[just] else nil
+	local listed: { [any]: boolean } = {}
 	for _, c in now.chats do
-		if c.project then
-			listed[c.project] = true
+		local group = if c.project then by[c.project] else nil
+		if group then
+			listed[group] = true
 		end
 	end
+	local archived: { [any]: boolean } = {}
 	for _, c in now.archived or {} do
 		local group = if c.project then by[c.project] else nil
-		if group and not listed[c.project :: string] and c.project ~= just then
-			group.empty = true
+		if group then
+			archived[group] = true
+			if not listed[group] and group ~= just_group then
+				group.empty = true
+			end
+		end
+	end
+	-- (And which have never had one: gone with the empty ones when those are off.)
+	for _, group in out do
+		if not listed[group] and not archived[group] and group ~= just_group then
+			group.unused = true
 		end
 	end
 	for _, c in now.chats do
-		if just and c.project ~= just then
+		if just and not (just_group and c.project and by[c.project] == just_group) then
 			continue
 		end
 		local group = (c.project and by[c.project]) or loose
 		-- (Waiting on you beats working: an approval, then a question.)
 		local status = ASKED[asked[c.id] or ""] or c.status
+		-- (The Activity view's: woken from sleep and not looked at since, the
+		-- alarm, unless it's asking for you or under way. Which shelf it's
+		-- on, and its place; asleep, its corner says when it wakes. Off, none
+		-- of it.)
+		local act = activity.on:get()
+		if act and c.woke and (status == nil or status == "done") then
+			status = "woke"
+		end
 		if only and not only.statuses[status or "idle"] then
 			continue
 		end
+		local on_shelf = activity.shelf(c, status)
+		local rank = if act then activity.rank(c, on_shelf) else nil
 		table.insert(group.sessions, kept({
 			id = c.id,
 			title = c.title,
 			status = status :: any,
-			time = c.updated,
+			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
+			shelf = on_shelf,
+			rank = rank,
 			created = c.created,
 			agent = c.agent :: any,
 			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
@@ -526,9 +603,16 @@ local function project_filter(): Node
 				},
 				items = function(): { any }
 					local out: { any } = { { value = ALL, label = locale.s("shell.sidebar.project_filter.all_projects"), icon = "folder-with-files" } }
-					for _, p in sessions.now:get().projects do
-						local l = route.look(p.id) or { hue = route.hue(p.id) }
-						table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji })
+					-- (A repository once, as the list has it.)
+					local all = sessions.now:get().projects
+					local seen: { [string]: boolean } = {}
+					for _, p in all do
+						local first = oldest_checkout(p, all)
+						if not seen[first.id] then
+							seen[first.id] = true
+							local l = route.look(first.id) or { hue = route.hue(first.id) }
+							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji })
+						end
 					end
 					return out
 				end,
@@ -744,6 +828,10 @@ local renaming_row = ui.state("shell_renaming_row", nil :: string?)
 -- The session asked about deleting, and its dialog.
 local deleting = ui.state("shell_deleting", nil :: string?)
 local delete_open = ui.state("shell_delete_open", false)
+-- Sleep → Custom…: the chat, the moment chosen, and whether it's asking.
+local sleep_custom = ui.state("shell_sleep_custom", nil :: string?)
+local sleep_custom_at = ui.state("shell_sleep_custom_at", nil :: number?)
+local sleep_custom_open = ui.state("shell_sleep_custom_open", false)
 local new_title = ui.state("shell_rename_title", "")
 
 local function chat(id: string): sessions.Chat?
@@ -1033,6 +1121,63 @@ local function menu(id: string): { any }?
 		end,
 	})
 	local side = is_side(id)
+	-- The Activity view's Sleep (its times, each saying when, and one of
+	-- your own), or, asleep, Wake.
+	local sleep: any = false
+	if activity.on:peek() and not side then
+		if c.sleep_until then
+			sleep = {
+				label = locale.s("shell.activity.wake"),
+				icon = "sun",
+				on_select = function()
+					activity.wake(id)
+				end,
+			}
+		else
+			local times: { any } = {}
+			for _, p in activity.presets() do
+				table.insert(times, {
+					label = locale.s("shell.activity.sleep.choice", { name = p.label, when = p.detail }),
+					on_select = function()
+						activity.sleep(id, p.until_at)
+					end,
+				})
+			end
+			table.insert(times, { separator = true })
+			table.insert(times, {
+				label = locale.s("shell.activity.sleep.custom"),
+				on_select = function()
+					-- (It opens on tomorrow at 9: a time already chosen,
+					-- moved from there.)
+					local d = os.date("*t") :: any
+					sleep_custom:set(id)
+					sleep_custom_at:set(activity.local_time({ year = d.year, month = d.month, day = d.day + 1, hour = 9, min = 0, sec = 0 }))
+					sleep_custom_open:set(true)
+				end,
+			})
+			sleep = { label = locale.s("shell.activity.sleep.title"), icon = "moon", submenu = times }
+		end
+	end
+	-- Waiting on background work it said it waits on: the person can say
+	-- otherwise (a dev server marked by mistake). Its background agents
+	-- aren't its say, so there's nothing to take back there.
+	local stop_waiting: any = false
+	if c.status == "waiting" then
+		for _, w in c.waiting or {} do
+			if w.kind == "process" then
+				stop_waiting = {
+					label = locale.s("shell.activity.stop_waiting"),
+					icon = "close-circle",
+					on_select = function()
+						sessions.stop_waiting(id):after(function() end, function()
+							ds.toast.show { title = locale.s("shell.activity.stop_waiting_failed"), tone = "danger" }
+						end)
+					end,
+				}
+				break
+			end
+		end
+	end
 	local entries = {
 		{
 			label = locale.s("common.rename"),
@@ -1056,13 +1201,16 @@ local function menu(id: string): { any }?
 			icon = "copy",
 			submenu = copies,
 		},
-		if side then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
+		-- (Activity lists no sections: nothing to move into.)
+		if side or activity.on:peek() then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
+		sleep,
+		stop_waiting,
 		{ separator = true },
 		{
 			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
 			label = locale.s("common.archive"),
 			icon = "archive-minimalistic",
-			disabled = if c.status == "working" then locale.s("shell.sidebar.menu.archive_working") else nil,
+			disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
 			on_select = function()
 				M.archive(id)
 			end,
@@ -1106,6 +1254,8 @@ M.session_menu = menu
 -- right click.
 local project_acting = ui.state("shell_project_acting", nil :: string?)
 local project_remove_open = ui.state("shell_project_remove_open", false)
+-- Of a repository on several devices, the checkouts to remove, by id.
+local project_remove_chosen = ui.state("shell_project_remove_chosen", {} :: { [string]: boolean })
 local function project_of(id: string?): sessions.Project?
 	for _, p in sessions.now:get().projects do
 		if p.id == id then
@@ -1133,6 +1283,15 @@ local function project_menu(id: string): { any }?
 			icon = "trash-bin-minimalistic",
 			danger = true,
 			on_select = function()
+				-- (Of a repository on several devices: this device's, to begin with.)
+				local now = sessions.now:peek()
+				local chosen: { [string]: boolean } = {}
+				for _, q in checkouts_of(p, now.projects) do
+					if q.device == now.here then
+						chosen[q.id] = true
+					end
+				end
+				project_remove_chosen:set(chosen)
 				project_acting:set(id)
 				project_remove_open:set(true)
 			end,
@@ -1140,6 +1299,28 @@ local function project_menu(id: string): { any }?
 	}
 end
 local function project_dialogs(): Node
+	-- The checkouts of the project being removed (one, for most).
+	local function acting_checkouts(): { any }
+		local p = project_of(project_acting:get())
+		return if p then checkouts_of(p, sessions.now:get().projects) else {}
+	end
+	local function device_of(q: any): string
+		for _, d in sessions.now:peek().devices do
+			if d.id == q.device then
+				return d.name
+			end
+		end
+		return locale.s("shell.sidebar.project.its_device")
+	end
+	local function chats_in(id: string): number
+		local n = 0
+		for _, c in sessions.now:peek().chats do
+			if c.project == id then
+				n += 1
+			end
+		end
+		return n
+	end
 	-- (Its sessions as Zeron counts them: those in it, not archived.)
 	local function removing(): string
 		local id = project_acting:get()
@@ -1179,17 +1360,69 @@ local function project_dialogs(): Node
 					if not id then
 						return
 					end
-					-- (Showing it, or one of its sessions: a new chat instead.)
-					local shown = route.session:peek()
-					if route.chat:peek().project == id or (shown and shown.project == id) then
-						route.new_chat()
+					-- The one project, or the checkouts ticked.
+					local going: { string } = { id }
+					local list = acting_checkouts()
+					if #list > 1 then
+						going = {}
+						for _, q in list do
+							if project_remove_chosen:peek()[q.id] then
+								table.insert(going, q.id)
+							end
+						end
 					end
-					project_calls.delete(id):after(function() end, function(err: any)
-						ds.toast.show { title = locale.s("shell.sidebar.project.couldnt_remove"), body = if type(err) == "string" then err else nil, tone = "danger" }
-					end)
+					for _, gone in going do
+						-- (Showing it, or one of its sessions: a new chat instead.)
+						local shown = route.session:peek()
+						if route.chat:peek().project == gone or (shown and shown.project == gone) then
+							route.new_chat()
+						end
+						project_calls.delete(gone):after(function() end, function(err: any)
+							ds.toast.show { title = locale.s("shell.sidebar.project.couldnt_remove"), body = if type(err) == "string" then err else nil, tone = "danger" }
+						end)
+					end
 				end,
 			},
-			ui.text { removing, w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" },
+			ui.presence(function(): string
+				return if #acting_checkouts() > 1 then "several" else "one"
+			end, function(kind: string): Node
+				if kind == "one" then
+					return ui.text { removing, w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" }
+				end
+				return ui.column {
+					w_full = true,
+					gap = "$space.3",
+					ui.text {
+						function(): string
+							local p = project_of(project_acting:get())
+							return locale.s("shell.sidebar.project.removing_where", { name = if p then p.name else "" })
+						end,
+						w_full = true,
+						wrap = true,
+						text_size = "$font.size.md",
+						line_height = 20,
+						color = "$text.secondary",
+					},
+					ui.each(ui.computed(acting_checkouts), function(q: any): Node
+						return ds.Checkbox {
+							label = device_of(q),
+							description = locale.s("shell.sidebar.project.checkout", { n = chats_in(q.id), path = q.path }),
+							value = function(): boolean
+								return project_remove_chosen:get()[q.id] == true
+							end,
+							on_change = function(on: boolean)
+								local next = table.clone(project_remove_chosen:peek())
+								next[q.id] = if on then true else nil
+								project_remove_chosen:set(next)
+							end,
+						}
+					end, {
+						key = function(q: any): string
+							return q.id
+						end,
+					}),
+				}
+			end, { w_full = true }),
 		},
 	}
 end
@@ -1224,6 +1457,50 @@ local function delete_dialog(): Node
 		},
 		-- (As its own body line, but following the session.)
 		ui.text { says, w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" },
+	}
+end
+
+-- Sleep until a time of your own: a day and a time from a minute ahead.
+local function sleep_dialog(): Node
+	return ds.Dialog {
+		open = sleep_custom_open,
+		title = ui.t("shell.activity.sleep.custom_title") :: any,
+		-- Under it, the moment chosen, in words: what Sleep will do.
+		body = function(): string
+			local at = sleep_custom_at:get()
+			if not at then
+				return ""
+			end
+			return locale.s("shell.activity.sleep.until_when", {
+				day = locale.weekday(at),
+				date = locale.month_day(at),
+				time = locale.clock(at),
+			})
+		end,
+		size = "sm",
+		confirm = {
+			label = ui.t("shell.activity.sleep.title") :: any,
+			-- (A time that has passed, or none chosen, puts nothing to sleep.)
+			on_click = function()
+				local id, at = sleep_custom:peek(), sleep_custom_at:peek()
+				sleep_custom:set(nil)
+				sleep_custom_open:set(false)
+				if id and at and at > os.time() then
+					activity.sleep(id, at)
+				end
+			end,
+		},
+		-- (Built as it opens: its month of days is nothing to keep.)
+		build = function(): Node
+			return ds.DatePicker {
+				id = "sleep-custom",
+				value = sleep_custom_at,
+				min = function(): number
+					return os.time() + 60
+				end,
+				label = ui.t("shell.activity.sleep.custom_title") :: any,
+			}
+		end,
 	}
 end
 
@@ -1275,12 +1552,17 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end :: any,
 		user = user,
 		top = props.top,
+		card = not props.island,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)
-			route.new_chat(project, if device then device_named(device, project) else nil)
+			route.new_chat(if device then project else checkout_here(project), if device then device_named(device, project) else nil)
 		end,
 		on_archive = M.archive,
 		archived = shelf,
+		activity = activity.on,
+		on_activity_settings = function()
+			route.settings("activity")
+		end,
 		on_unarchive = function(id: string)
 			sessions.unarchive(id)
 		end,
@@ -1332,9 +1614,17 @@ M.Sidebar = ui.component(function(props: Props): Node
 		hook = "shell.sidebar",
 		h_full = true,
 		shrink = 0,
+		relative = true,
+		-- (The window's gap before its card, closing with it.)
+		pl = motion.tween(ui.computed(function(): number
+			return if fit.current:get().sidebar then 5 else 0
+		end), motion.sidebar),
+		-- (That gap's top moves the window, as the bar beside it does.)
+		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,
 		rename_dialog(),
 		delete_dialog(),
+		sleep_dialog(),
 		project_dialogs(),
 	}
 end)

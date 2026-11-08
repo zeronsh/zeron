@@ -2216,12 +2216,13 @@ local function component(props: Props): Node
 			return sel() and sel_at(index:get() + 1)
 		end
 		-- A row's wash: square-cornered, the look the user chose (Nov 1) over
-		-- the sidebar's rounded rows, so no corners to work out; a
-		-- selection's rows run together, their gaps closed.
+		-- the sidebar's rounded rows, and edge to edge, the pane's whole
+		-- width (its words keep their inset); a selection's rows run
+		-- together, their gaps closed.
 		local wash = ui.div {
 			absolute = true,
-			left = PAD,
-			right = PAD,
+			left = 0,
+			right = 0,
 			top = function(): number
 				return if joined_up() then 0 else 1
 			end,
@@ -2513,12 +2514,12 @@ local function component(props: Props): Node
 			return 0
 		end
 		local n = nodes[id]
-		-- (Inset as a row's wash is; its words where the row's are.)
-		local x0 = INSET + n.depth * INDENT
+		-- (Edge to edge as a row's wash is; its words where the row's are.)
+		local x0 = PAD + INSET + n.depth * INDENT
 		return ui.div {
 			absolute = true,
-			left = PAD,
-			right = PAD,
+			left = 0,
+			right = 0,
 			h = ROW,
 			top = function(): number
 				local st = stuck:get()[k_of()]
@@ -2543,12 +2544,12 @@ local function component(props: Props): Node
 				end
 				go_to(id)
 			end,
-			rounded = "$radius.md",
+			-- (Square, as the rows' washes.)
 			hover = { bg = "$hover" },
 			ui.row {
 				absolute = true,
 				left = x0,
-				right = INSET,
+				right = PAD + INSET,
 				top = 0,
 				h = ROW,
 				items = "center",

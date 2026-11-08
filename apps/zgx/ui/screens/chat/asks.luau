@@ -16,14 +16,102 @@
 -- for, and its chat).
 
 local store = require("@app/screens/chat/store")
+local Carried = require("@app/screens/chat/carried")
 
 local M = {}
+
+-- A queued message edited in a chat's composer, by whichever composer shows
+-- that chat: `text` its draft, `editing` which message and the draft it set
+-- aside (put back as the edit ends), `focus` gives it the keys, `say` a
+-- notice. `cargo`/`set_cargo`: the draft's chips, where the message's
+-- files show while it's edited (the draft's own set aside meanwhile).
+export type Edits = {
+	id: () -> string?,
+	text: State<string>,
+	editing: State<{ item: string, aside: string, aside_cargo: { any }? }?>,
+	focus: () -> (),
+	say: (tone: string, key: string) -> (),
+	cargo: (() -> { any })?,
+	set_cargo: (({ any }) -> ())?,
+}
+
+local chips = 0
+-- A queued message's files (the host's `queued_attachment`s) as chips.
+local function chips_of(attachments: { any }?): { any }
+	local out = {}
+	for _, a in attachments or {} do
+		chips += 1
+		table.insert(out, {
+			id = `queued-file-{chips}`,
+			kind = a.kind,
+			name = a.name,
+			src = a.src,
+			path = a.path,
+			on_host = true,
+		})
+	end
+	return out
+end
+
+function M.queue_edits(e: Edits): { [string]: any }
+	-- ("commit" saves what's in the draft, "cancel" leaves it as it was.)
+	local function finish(action: string)
+		local now = e.editing:peek()
+		local id = e.id()
+		if not now or not id then
+			return
+		end
+		local words = e.text:peek()
+		-- The files it carries now: its chips, as edited.
+		local files = if e.cargo then Carried.pack(e.cargo(), "", "").attachments else nil
+		ui.batch(function()
+			e.editing:set(nil)
+			e.text:set(now.aside)
+			if e.set_cargo and now.aside_cargo then
+				e.set_cargo(now.aside_cargo)
+			end
+		end)
+		store.queue_finish(id, now.item, action, if action == "commit" then words else nil, if action == "commit" then files else nil):after(function() end, function(err: any)
+			local why = err and err.message
+			e.say("danger", if why == "conflict" then "chat.composer.edit_conflict" else "chat.composer.edit_not_saved")
+		end)
+	end
+	return {
+		finish = finish,
+		on_queue_edit = function(item: string)
+			local id = e.id()
+			if not id or e.editing:peek() then
+				return
+			end
+			store.queue_edit(id, item):after(function(got: any)
+				ui.batch(function()
+					e.editing:set { item = item, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
+					e.text:set(if got then got.text else "")
+					if e.set_cargo then
+						e.set_cargo(chips_of(if got then got.attachments else nil))
+					end
+				end)
+				e.focus()
+			end, function(err: any)
+				e.say("warning", if err and err.message == "locked" then "chat.composer.edit_locked" else "chat.composer.edit_unavailable")
+			end)
+		end,
+		on_queue_save = function()
+			finish("commit")
+		end,
+		on_queue_cancel = function()
+			finish("cancel")
+		end,
+	}
+end
 
 export type Bind = {
 	id: () -> string?,
 	session: () -> any,
 	chosen: State<{ [string]: boolean }>,
 	asked: State<any>,
+	-- A notice, when a queued message's send or steer doesn't go.
+	say: ((tone: string, key: string) -> ())?,
 }
 
 function M.bind(b: Bind): { [string]: any }
@@ -114,7 +202,11 @@ function M.bind(b: Bind): { [string]: any }
 		on_queue_send = function(item: string)
 			local id = b.id()
 			if id then
-				store.queue(id, { op = "send", item = item })
+				store.queue(id, { op = "send", item = item }, function()
+					if b.say then
+						b.say("danger", "chat.composer.didnt_send")
+					end
+				end)
 			end
 		end,
 		on_queue_remove = function(item: string)

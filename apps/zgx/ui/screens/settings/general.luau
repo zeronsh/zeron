@@ -29,7 +29,6 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "escape_stops", title = ui.t("settings.general.escape_stops.label"), terms = ui.t("settings.general.escape_stops.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
-	{ key = "pull_requests", title = ui.t("settings.general.pull_requests.label"), section = ui.t("settings.general.links"), terms = ui.t("settings.general.pull_requests.terms") },
 	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
@@ -264,25 +263,6 @@ function M.view(): Node
 					label = ui.t("settings.general.hide_emails.label"),
 					description = ui.t("settings.general.hide_emails.description"),
 					control = ds.Switch { value = prefs.hide_emails, label = ui.t("settings.general.hide_emails.label") },
-				}),
-			},
-		},
-		ds.Settings.Section {
-			title = ui.t("settings.general.links"),
-			ds.Settings.Group {
-				-- (Web links' "Open links in" is Settings → Browser's.)
-				row("pull_requests", {
-					label = ui.t("settings.general.pull_requests.label"),
-					description = function()
-						local v = prefs.pull_requests:get()
-						if v == "browser" then
-							return ui.t("settings.general.links_in.tab"):get()
-						elseif v == "external" then
-							return ui.t("settings.general.links_in.external"):get()
-						end
-						return ui.t("settings.general.pull_requests.native"):get()
-					end,
-					control = ds.Select { value = prefs.pull_requests, name = ui.t("settings.general.pull_requests.label"), w = 180, options = prefs.PULL_REQUESTS },
 				}),
 			},
 		},

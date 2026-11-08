@@ -198,3 +198,39 @@ test("moving between tabs keeps the panel's size, its list changing in place", f
 	expect(app:has('role:option ~"Sonnet"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
+
+test("with no model chosen, the picker opens out rather than folding onto nothing", function()
+	local app = mount("picker_fixture.luau")
+	app:resize(900, 700)
+	settle(app)
+	app:set_state("test_picker_model", "gone-from-the-catalog")
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	-- Rows showing, not an empty panel: folded with nothing chosen, every row is out
+	-- of sight.
+	local rows = 0
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(" option ", 1, true) and not line:find(" hidden", 1, true) then
+			rows += 1
+		end
+	end
+	expect(rows > 0).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("while its catalog is on its way, the model holds its shape rather than saying Choose", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(1100, 760)
+	app:command("go_s1")
+	app:frames(20)
+	local catalog = app:state("chat.catalog")
+	app:set_state("chat.catalog", { state = "looking", complete = false, harnesses = {}, models = {} })
+	app:frames(5)
+	expect(app:has('#composer-toolbar >> "Choose…"')).to_be(false)
+	-- All in, and truly none: it may say so.
+	app:set_state("chat.catalog", { state = "ready", complete = true, harnesses = {}, models = {} })
+	app:frames(5)
+	expect(app:has('#composer-toolbar >> "Choose…"')).to_be(true)
+	app:set_state("chat.catalog", catalog)
+end)

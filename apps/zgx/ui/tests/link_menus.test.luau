@@ -139,7 +139,46 @@ test("a web link keeps its href: the app takes the click, else zgx opens it", fu
 	expect(app:state("links_last")).to_be("system:https://example.com/a.rs")
 end)
 
-test("a file link: Open, Reveal in Finder on this Mac, Copy path", function()
+test("external links bypass an internal opener, including pull requests", function()
+	local app = setup()
+	-- A plugin can claim a link before the shell's browser fallback. The
+	-- shared link handler must honor the preference before asking it.
+	app:command("set_opener")
+	app:set_state("test_open_links", "external")
+	app:frames(5)
+	local url = "https://github.com/zeronsh/example/pull/1"
+	local target = `role:link "{url}"`
+	local before = app:state("calls")
+
+	app:click(target)
+	app:frames(5)
+	expect(app:opened()[1]).to_be(url)
+	expect(app:state("calls")).to_be(before)
+	expect(app:state("links_last")).to_be(`system:{url}`)
+
+	app:set_state("links_last", "")
+	menu(app, target)
+	expect(shows(app, "Open in browser panel")).to_be(true)
+	pick(app, "Open")
+	expect(app:state("calls")).to_be(before)
+	expect(app:state("links_last")).to_be(`system:{url}`)
+
+	-- An explicit choice of the panel still works with this preference.
+	menu(app, target)
+	pick(app, "Open in browser panel")
+	expect(app:state("calls")).to_contain(`panel:{url}`)
+
+	-- Switching back lets the internal opener take the same link again.
+	app:set_state("test_open_links", "zeron")
+	app:frames(5)
+	app:click(target)
+	app:frames(5)
+	expect(app:state("calls")).to_contain(`opener:{url}`)
+	expect(#app:opened()).to_be(1)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a file link: Open, Reveal in Finder on this computer, Copy path", function()
 	local app = setup()
 	menu(app, 'role:link "the parser"')
 	expect(shows(app, "Open")).to_be(true)

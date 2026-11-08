@@ -35,6 +35,7 @@ local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local view = require("@app/screens/shell/view")
 local Links = require("@ds/links")
+local plugin_links = require("@app/screens/shell/plugin_links")
 local MenuAt = require("@ds/menu_at")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
@@ -115,6 +116,10 @@ return function(): Node
 		if panel and panel.find_in_browser and (panel.find_in_browser :: any)() == true then
 			return true
 		end
+		-- (So does a chat's lane with it: its own transcript's.)
+		if panel and panel.find_in_lane and (panel.find_in_lane :: any)() == true then
+			return true
+		end
 		local search: any = boundary.load("@app/screens/settings/search")
 		if search ~= nil and search.focus ~= nil and (search.focus :: any)() == true then
 			return true
@@ -131,25 +136,29 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	-- Check for Updates…: Settings' About & updates, checking now.
+	runs["shell.check_updates"] = function()
+		route.settings("about")
+		local about: any = boundary.load("@app/screens/settings/about")
+		if about and about.check then
+			about.check()
+		end
+	end
 	runs["shell.toggle_sidebar"] = function()
 		fit.toggle_sidebar()
 	end
 	runs["shell.toggle_files"] = function()
-		local name = route.current:peek().name
-		if name == "session" or name == "plugin" then
+		local name = route.chat:peek().name
+		if name == "session" or name == "plugin" or name == "home" then
 			fit.toggle_panel()
 		end
 	end
-	-- ⌘W: the panel's active tab, while the panel has the keyboard (as
-	-- × closes it: a file with changes, a busy terminal, ask first). Else
-	-- the window, as Zeron's closes it, and with it the app: what's kept is
-	-- saved as it closes (src/main.rs), the engine and its terminals go on.
-	-- (In a split, else the pane in front: the focused chat out of it, its
-	-- neighbour focused, the last left alone. A chat alone closes the
-	-- window, as it always has.)
+	-- ⌘W closes the visible right panel's active tab first, regardless of
+	-- keyboard focus, through the same unsaved-file / busy-terminal gate as ×.
+	-- Without a tab to close, close the focused split chat or the window.
 	runs["shell.close"] = function()
 		local panel: any = boundary.load("@app/screens/panel")
-		if panel and panel.close_focused_tab and (panel.close_focused_tab :: any)() then
+		if panel and panel.close_active_tab and (panel.close_active_tab :: any)() then
 			return
 		end
 		if route.current:peek().name == "session" then
@@ -157,6 +166,12 @@ return function(): Node
 			local focused = if splits then splits.focused:peek() else nil
 			if splits and focused and splits.shown:peek() ~= nil then
 				splits.close(focused)
+				return
+			end
+			-- A chat alone: its tab. (The last gone, a new chat; the window closes from
+			-- there.)
+			local tabs: any = boundary.load("@app/screens/shell/session_tabs")
+			if tabs and tabs.close_showing() then
 				return
 			end
 		end
@@ -208,6 +223,9 @@ return function(): Node
 		return route.session:peek() ~= nil or route.page:peek() ~= nil
 	end
 	Links.opener = function(url: string): boolean
+		if plugin_links.take(route.session:peek(), url) then
+			return true
+		end
 		if prefs.open_links:peek() ~= "zeron" then
 			return false
 		end
@@ -229,6 +247,11 @@ return function(): Node
 	-- ⌘/: the composer's model picker (a focused code editor keeps ⌘/ for
 	-- its comments: it takes the key first).
 	runs["shell.model_picker"] = function()
+		-- (A side chat with the keyboard: its own.)
+		local panel: any = boundary.load("@app/screens/panel")
+		if panel and panel.model_in_lane and (panel.model_in_lane :: any)() == true then
+			return
+		end
 		local chat: any = boundary.load("@app/screens/chat")
 		if chat and chat.open_model_picker then
 			(chat.open_model_picker :: any)()
@@ -315,6 +338,9 @@ return function(): Node
 					run()
 				end,
 			}
+			if k.rule then
+				ui.command { separator = true, menu = k.menu }
+			end
 		end
 	end
 
@@ -382,12 +408,50 @@ return function(): Node
 		end
 		was_settings = now
 	end)
-	-- Whether the title bar stands over a wallpaper: a new chat's.
-	local function art(): boolean
-		return route.current:get().name == "home" and appearance.showing:get() ~= "none"
+	-- Settings: in the page's place, under the top bar and beside the panel, its tabs
+	-- still there, its own list of pages down its side and the way back to the chats at
+	-- its head.
+	local function settings_view(): Node
+		return
+		ui.show(
+				in_settings,
+				ui.column {
+					id = "shell-settings",
+					-- Zeron's Settings are no plugin's to change or add to: what you
+					-- allow plugins and templates is decided here (Settings →
+					-- Plugins and Templates). Sealed, with all it holds.
+					hook = false,
+					w_full = true,
+					h_full = true,
+					focusable = true,
+					focus = { outline = 0 },
+					-- (Focus comes here as it shows: none left on a row of the chats
+					-- now out of sight, where keys would go unseen.)
+					on_mount = function(el)
+						el:focus()
+					end,
+					on_key = function(e): boolean
+						if e.key == "Escape" then
+							route.leave_settings()
+							return true
+						end
+						return false
+					end,
+					on_navigate = function(e)
+						if e.direction == "back" then
+							route.back()
+						else
+							route.forward()
+						end
+					end,
+					boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
+						return settings.View({ inset = true, collapsed = collapsed :: any })
+					end),
+				}
+			)
 	end
 	local frosted = ui.computed(function(): number
-		return if material.frosted:get() then 1 else 0
+		return if material.see_through() then 1 else 0
 	end)
 	return ui.column {
 		ref = root,
@@ -474,17 +538,22 @@ return function(): Node
 			w_full = true,
 			h_full = true,
 			relative = true,
-			hidden = in_settings,
 			ui.row {
 				grow = 1,
 				min_h = 0,
 				w_full = true,
-				boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
-					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H }
-				end),
+				-- (Settings stand in its place and the page's, under the top bar.)
+				ui.div {
+					h_full = true,
+					shrink = 0,
+					hidden = in_settings,
+					boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
+						return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = 42 }
+					end),
+				},
 				boundary.screen(boundary.named("shell.boundary.screen.page"), "@app/screens/shell/page", function(Page): Node
-					return Page { files = files, width = window_w }
-				end),
+					return Page { files = files, width = window_w, away = in_settings, settings = settings_view }
+				end, { pass = true }),
 			},
 			-- The rail, while the sidebar is collapsed: floating over the page at
 			-- the window's bottom left. (Not mounted while `view.rail` is off.)
@@ -492,6 +561,7 @@ return function(): Node
 				then ui.div {
 					id = "shell-rail",
 					absolute = true,
+					hidden = in_settings,
 					left = ds.island.metrics().inset,
 					bottom = ds.island.metrics().inset,
 					boundary.screen(boundary.named("shell.boundary.screen.rail"), "@app/screens/shell/sidebar", function(Sidebar): Node
@@ -500,7 +570,16 @@ return function(): Node
 				}
 				else nil,
 			boundary.screen(boundary.named("shell.boundary.screen.title_bar"), "@app/screens/shell/title_bar", function(TitleBar): Node
-				return TitleBar { collapsed = collapsed :: any, files = files, art = art }
+				-- (A new chat's art is in its card, under the top bar: nothing there for
+				-- the bar's controls to need glass over.)
+				return TitleBar {
+					collapsed = collapsed :: any,
+					files = files,
+					art = function(): boolean
+						return false
+					end,
+					panel_on_home = true,
+				}
 			end, { pass = true }),
 		},
 		-- A session's card, its row rested on (Zeron's hover card): over the
@@ -549,48 +628,59 @@ return function(): Node
 					return nil, false
 				end
 				local card = ui.ref()
+				-- (Its place on the card, not the region's root: what leaves is laid
+				-- over what enters, and would take this one's offset on top of its own.)
 				return ui.div {
-					ref = card,
-					absolute = true,
-					left = at.x + at.w + 10,
-					-- (Beside the row's top, kept inside the window.)
-					top = function(): number
-						local h = card.height or 0
-						return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
+					pointer_events = "none",
+					w = function(): number
+						return root.width or 0
 					end,
-					ds.SessionCard {
-						session = id,
-						title = function(): string
-							local c = chat()
-							return if c then c.title else ""
+					h = function(): number
+						return root.height or 0
+					end,
+					ui.div {
+						ref = card,
+						absolute = true,
+						left = at.x + at.w + 10,
+						-- (Beside the row's top, kept inside the window.)
+						top = function(): number
+							local h = card.height or 0
+							return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
 						end,
-						time = function(): number?
-							local c = chat()
-							return if c then c.updated else nil
-						end,
-						device = function(): string?
-							return (device())
-						end,
-						here = function(): boolean
-							local _, here = device()
-							return here
-						end,
-						project = function(): string?
-							local c = chat()
-							if not c or not c.project then
-								return nil
-							end
-							for _, p in sessions.now:get().projects do
-								if p.id == c.project then
-									return p.name
+						ds.SessionCard {
+							session = id,
+							title = function(): string
+								local c = chat()
+								return if c then c.title else ""
+							end,
+							time = function(): number?
+								local c = chat()
+								return if c then c.updated else nil
+							end,
+							device = function(): string?
+								return (device())
+							end,
+							here = function(): boolean
+								local _, here = device()
+								return here
+							end,
+							project = function(): string?
+								local c = chat()
+								if not c or not c.project then
+									return nil
 								end
-							end
-							return nil
-						end,
-						branch = function(): string?
-							local c = chat()
-							return if c then c.branch else nil
-						end,
+								for _, p in sessions.now:get().projects do
+									if p.id == c.project then
+										return p.name
+									end
+								end
+								return nil
+							end,
+							branch = function(): string?
+								local c = chat()
+								return if c then c.branch else nil
+							end,
+						},
 					},
 				}
 			end, {
@@ -600,46 +690,6 @@ return function(): Node
 				exit = motion.transition({ opacity = 0, duration = 100 }),
 			}),
 		},
-		-- Settings: a page of its own over the whole window, its own list of
-		-- pages down its side and the way back to the chats at its head.
-		-- (Esc goes back: taken here, so a field or a menu elsewhere keeps
-		-- its own Esc.)
-		ui.show(
-			in_settings,
-			ui.column {
-				id = "shell-settings",
-				-- Zeron's Settings are no plugin's to change or add to: what you
-				-- allow plugins and templates is decided here (Settings →
-				-- Plugins and Templates). Sealed, with all it holds.
-				hook = false,
-				w_full = true,
-				h_full = true,
-				focusable = true,
-				focus = { outline = 0 },
-				-- (Focus comes here as it shows: none left on a row of the chats
-				-- now out of sight, where keys would go unseen.)
-				on_mount = function(el)
-					el:focus()
-				end,
-				on_key = function(e): boolean
-					if e.key == "Escape" then
-						route.leave_settings()
-						return true
-					end
-					return false
-				end,
-				on_navigate = function(e)
-					if e.direction == "back" then
-						route.back()
-					else
-						route.forward()
-					end
-				end,
-				boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
-					return settings.View()
-				end),
-			}
-		),
 		-- What's said for a moment (a plugin's toast, a notice): over
 		-- everything, once for the window.
 		ds.toast.Host {},

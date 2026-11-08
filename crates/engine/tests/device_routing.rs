@@ -2276,3 +2276,99 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
     drop(host);
     relay.abort();
 }
+
+/// A device answering `UpdateStatus` with one report and then staying quiet, as an
+/// engine does between checks.
+struct OneStatus(&'static str);
+
+#[async_trait]
+impl RpcService for OneStatus {
+    async fn handle(
+        &self,
+        method: &str,
+        _params: serde_json::Value,
+    ) -> Result<zeron_rpc::RpcReply, RpcError> {
+        if method == methods::UPDATE_STATUS {
+            let item = serde_json::json!({ "currentVersion": self.0 });
+            return Ok(zeron_rpc::RpcReply::Stream(
+                futures::stream::once(async move { item })
+                    .chain(futures::stream::pending())
+                    .boxed(),
+            ));
+        }
+        zeron_rpc::RpcReply::value(&serde_json::json!({}))
+    }
+}
+
+/// Updating a device takes it away for a moment. Whoever asked for its status, on
+/// another device, goes on hearing about it on the same subscription.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_status_follows_another_device_through_its_restart() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let host = |version: &'static str| {
+        HostRelay::spawn(
+            HostRelayConfig::new(&relay_url, "other-device", Arc::new(StaticToken("test-user".into()))),
+            Arc::new(OneStatus(version)),
+            Arc::new(|_| true),
+        )
+    };
+    let before = host("1.0.0");
+
+    let core = assemble(&dirs.path().join("asker"), "asking-device");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    let params = serde_json::json!({ "targetDeviceId": "other-device" });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut updates = loop {
+        match client.subscribe_checked(methods::UPDATE_STATUS, params.clone()).await {
+            Ok(updates) => break updates,
+            Err(error) => {
+                assert!(tokio::time::Instant::now() < deadline, "never reached it: {error}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    let item = tokio::time::timeout(Duration::from_secs(10), updates.recv())
+        .await
+        .expect("the first report")
+        .expect("the subscription");
+    assert_eq!(item["currentVersion"], "1.0.0");
+
+    drop(before);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let _after = host("2.0.0");
+
+    // The test room doesn't say a host went, as a device dying without a word
+    // doesn't: this is the follow asking again.
+    let item = tokio::time::timeout(Duration::from_secs(90), updates.recv())
+        .await
+        .expect("a report after the restart")
+        .expect("the same subscription must still be open");
+    assert_eq!(item["currentVersion"], "2.0.0");
+}
+
+/// Asking a device that isn't there says so plainly, and nothing has started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn updating_a_device_that_cannot_be_reached_says_so_plainly() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core = assemble(&dirs.path().join("asker"), "asking-device");
+    let mut link_config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(2);
+    core.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let error = client
+        .call(
+            methods::APPLY_UPDATE,
+            serde_json::json!({ "targetDeviceId": "not-here" }),
+        )
+        .await
+        .expect_err("nothing can answer");
+    assert!(error.to_string().contains("can't be reached"), "{error}");
+    assert!(error.to_string().contains("didn't start"), "{error}");
+}
