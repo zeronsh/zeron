@@ -1,0 +1,15 @@
+{
+  "id": "imgui-memory-inspector",
+  "name": "Memory Inspector",
+  "version": "1.0.0",
+  "description": "A reverse-engineering memory view: regions, a hex dump with ASCII, and a live decode of the selected row. All mock data, with a Ghidra relay on the status line.",
+  "entry": "init.luau",
+  "permissions": ["imgui.windows"],
+  "tools": [
+    {
+      "name": "memory_status",
+      "description": "Which region and row are selected, the endianness and the frame count.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}
