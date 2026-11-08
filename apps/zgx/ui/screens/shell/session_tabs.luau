@@ -286,8 +286,43 @@ local function title(id: string): string
 	return if c then c.title else ""
 end
 
-local Tab = ui.component(function(props: { chat: string }): Node
+-- What a tab shows, still (the tab lifted by a drag, and the drag's
+-- preview): its tiles as they stand, its title, and room for its end.
+-- (Nothing here eases: a drag's preview has no clock for it.)
+local function still_face(key: string): Node
+	local count = #stack_of(key)
+	local places: { any } = { relative = true, shrink = 0, h = TILE, w = TILE + FAN[math.clamp(count, 1, STACK)].x }
+	for at = math.min(count, STACK), 1, -1 do
+		local fan = FAN[at]
+		table.insert(places, ui.div {
+			absolute = true,
+			top = 0,
+			left = fan.x,
+			w = TILE,
+			h = TILE,
+			rounded = "$radius.sm",
+			rotate = if count >= 2 then fan.turn else 0,
+			bg = if count >= 2 then "$zeron.menu.solid" else "#00000000",
+			shadow = if count >= 2 and at == 1 then "$shadow.sm" else false,
+			pane_tile(key, at),
+		})
+	end
+	return ui.row {
+		grow = 1,
+		min_w = 0,
+		h_full = true,
+		pl = ui.raw(4, "as far in as the tile is from its top"),
+		pr = ui.raw(4, "the tab's inset"),
+		gap = "$zeron.space.tight",
+		items = "center",
+		ui.div(places),
+		ds.FadeText { title(key), max_w = LABEL_MAX, min_w = 0, grow = 1, text_size = "$font.size.sm", weight = "$font.weight.medium" },
+	}
+end
+
+local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 	local id = props.chat
+	local strip = props.strip
 	local hovered = ui.use_state(false)
 	-- A chat held over it, that dropping would bring in.
 	local held = ui.use_state(false)
@@ -359,87 +394,47 @@ local Tab = ui.component(function(props: { chat: string }): Node
 					close(id)
 				end
 			end,
-			-- (`session`, as a sidebar row's: dropped on a pane, it joins the split,
-			-- whose panes show where it can land while it's carried.)
+			-- Dragged, it lifts and follows the pointer along the strip, the others
+			-- making room (`ds/tab_strip`); let go, it stays where it lands.
+			-- (`session`, as a sidebar row's: carried off the strip onto a pane, it
+			-- joins the split, whose panes show where it can land.)
+			on_press = function(e: any)
+				strip.press(e)
+			end,
 			on_drag = function(): any
+				strip.begin(id)
 				splits.dragging:set(true)
 				return { session_tab = id, session = face(id) }
 			end,
-			on_drag_end = function()
+			on_drag_end = function(payload: any, accepted: boolean)
 				splits.dragging:set(false)
+				strip.ended(payload, accepted)
 			end,
-			-- The tab as it stands, on the window's colour. (Nothing here eases: a drag's
-			-- preview has no clock for it.)
 			drag_preview = function(): Node
-				local box = own:peek()
-				local count = #stack_of(id)
-				local places: { any } = { relative = true, shrink = 0, h = TILE, w = TILE + FAN[math.clamp(count, 1, STACK)].x }
-				for at = math.min(count, STACK), 1, -1 do
-					local fan = FAN[at]
-					table.insert(places, ui.div {
-						absolute = true,
-						top = 0,
-						left = fan.x,
-						w = TILE,
-						h = TILE,
-						rounded = "$radius.sm",
-						rotate = if count >= 2 then fan.turn else 0,
-						bg = if count >= 2 then "$zeron.menu.solid" else "#00000000",
-						shadow = if count >= 2 and at == 1 then "$shadow.sm" else false,
-						pane_tile(id, at),
-					})
-				end
-				return ui.div {
-					rounded = "$radius.lg",
-					bg = "$background",
-					shadow = "$shadow.sm",
-					ui.row {
-						w = if box then box.width else nil,
-						h = TAB_H,
-						pl = ui.raw(4, "as far in as the tile is from its top"),
-						pr = ui.raw(4, "the tab's inset"),
-						gap = "$zeron.space.tight",
-						items = "center",
-						rounded = "$radius.lg",
-						bg = if active() then "$zeron.selected.flat.bg" else "#00000000",
-						color = if active() then "$text.primary" else "$text.secondary",
-						ui.div(places),
-						ds.FadeText { title(id), max_w = LABEL_MAX, min_w = 0, grow = 1, text_size = "$font.size.sm", weight = "$font.weight.medium" },
-					},
-				}
+				return strip.preview(id)
 			end,
-			on_drag_over = function(payload: any, e: any)
-				local other = if type(payload) == "table" then payload.session_tab else nil
-				if not other then
-					local chat = carried(payload)
-					if not chat then
-						return
-					end
-					-- Dropped on it, the chat joins it.
-					local can = splits.can_join(chat, id)
-					if held:peek() ~= can then
-						held:set(can)
-					end
+			opacity = function(): number
+				return strip.opacity(id)
+			end,
+			-- (A tab of these goes to the strip's own drop: a chat, a sidebar's
+			-- row or a pane's head, comes here.)
+			drop_when = function(payload: any): boolean
+				return carried(payload) ~= nil
+			end,
+			on_drag_over = function(payload: any)
+				local chat = carried(payload)
+				if not chat then
 					return
 				end
-				if other == id then
-					return
-				end
-				local list = shown:peek()
-				local from, here = table.find(list, other), table.find(list, id)
-				if not from or not here then
-					return
-				end
-				local past_middle = e.local_x > e.w / 2
-				if (from < here and past_middle) or (from > here and not past_middle) then
-					splits.move_tab(other, id)
+				-- Dropped on it, the chat joins it.
+				local can = splits.can_join(chat, id)
+				if held:peek() ~= can then
+					held:set(can)
 				end
 			end,
 			on_drag_leave = function()
 				held:set(false)
 			end,
-			-- (A tab dropped on a tab has moved already. A chat, a sidebar's row or
-			-- a pane's head, joins it.)
 			on_drop = function(payload: any)
 				held:set(false)
 				local chat = carried(payload)
@@ -512,6 +507,31 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 	-- few points. Over the last few, as the end comes to rest, it goes.
 	local offset = ui.state("shell_session_tabs_offset", 0)
 	local view, content = ui.ref(), ui.ref()
+	local strip = TabStrip.new {
+		key = "session_tab",
+		items = function(): { string }
+			return shown:get()
+		end,
+		width = function(id: string): number
+			local r = tab_refs[id]
+			return if r then r.width or 0 else 0
+		end,
+		content = content,
+		offset = offset,
+		selected = function(): string?
+			return if route.session:get() then splits.current_key() else nil
+		end,
+		face = still_face,
+		-- (To the place of the one standing at `index` before it moved.)
+		commit = function(id: string, index: number)
+			local onto = shown:peek()[index]
+			if onto and onto ~= id then
+				splits.move_tab(id, onto)
+			end
+		end,
+		h = TAB_H,
+		rounded = "$radius.lg",
+	}
 	local function bands(): { number }
 		local at = offset:get()
 		local past = (content.width or 0) - (view.width or 0) - at
@@ -576,7 +596,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		end,
 		h = 34,
 		pointer_events = "none",
-		ui.row {
+		ui.row(strip.zone {
 			id = "session-tabs",
 			role = "tablist",
 			label = "Open chats",
@@ -591,7 +611,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			pr = function(): any
 				return ui.raw(props.right(), "clear of the title bar's controls at the right")
 			end,
-			ui.scroll_x {
+			strip.Frame(ui.scroll_x {
 				id = "session-tabs-scroll",
 				ref = view,
 				offset = offset,
@@ -604,24 +624,9 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 					relative = true,
 					gap = "$zeron.space.hair",
 					items = "center",
-					TabStrip.Highlight {
-						key = "session_tab",
-						order = function(): { string }
-							return shown:get()
-						end,
-						width = function(id: string): number
-							local r = tab_refs[id]
-							return if r then r.width or 0 else 0
-						end,
-						content = content,
-						selected = function(): string?
-							return if route.session:get() then splits.current_key() else nil
-						end,
-						h = TAB_H,
-						rounded = "$radius.lg",
-					},
-					ui.each(shown, function(id: string): Node
-						return Tab { chat = id }
+					strip.Highlight(),
+					ui.each(strip.order, function(id: string): Node
+						return Tab { chat = id, strip = strip }
 					end, {
 						key = function(id: string): string
 							return id
@@ -631,8 +636,8 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 						animate = motion.layout(SLIDE),
 					}),
 				},
-			},
-		},
+			}),
+		}),
 	}
 end
 

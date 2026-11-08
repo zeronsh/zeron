@@ -5,11 +5,13 @@
 -- Dragged, a tab rises a little (larger, its shadow deeper) and follows the
 -- pointer along the strip, held to its line and kept inside it; the others
 -- slide aside as its middle passes theirs, and let go it settles into its
--- place, which the strip keeps then (`commit`, once). Carried off the strip,
--- the drag is the platform's again: its preview follows the pointer, and
--- the tab waits, faint, where it would come back to. (The pointer is
--- followed through the native drag's moves over the strip: zgx gives Luau no
--- way to start a native drag mid-gesture.)
+-- place, which the strip keeps then (`commit`, once). It leaves the strip as
+-- it's grabbed: one tab, the lifted one, and where it would land a gap its
+-- width. Carried off the strip, the drag is the platform's again (its
+-- preview follows the pointer) and the gap closes; brought back, it opens
+-- where the tab is held; let go over nothing (or Escape), the tab flies back
+-- into its gap. (The pointer is followed through the native drag's moves
+-- over the strip: zgx gives Luau no way to start a native drag mid-gesture.)
 --
 --   TabStrip.Highlight {         the chosen tab's wash: first in the tabs'
 --     key, order, width,         row, which is `relative`
@@ -33,17 +35,14 @@
 --   strip.zone(props)         the strip's props, with its drop handlers
 --   strip.press(e)            a tab's `on_press`: where it was grabbed
 --   strip.begin(id)           a tab's `on_drag`, before its payload
---   strip.ended()             a tab's `on_drag_end`
+--   strip.ended(_, accepted)  a tab's `on_drag_end`
 --   strip.preview(id)         a tab's `drag_preview`: shown off the strip
---   strip.opacity(id)         a tab's: gone while lifted, faint while away
+--   strip.opacity(id)         a tab's: gone while it's carried (its gap)
 --   strip.busy()              (untracked) a tab carried or settling
 
 local motion = require("@self/motion")
 
 local M = {}
-
--- How faint a tab carried off its strip stands where it would come back to.
-local AWAY = 0.4
 
 local function gap(): number
 	return (ui.theme.get("zeron.space.hair") :: number?) or 2
@@ -151,14 +150,22 @@ function M.new(props: Props)
 	local dropped = false
 	local settle: any = nil
 	local frame, ghost = ui.ref(), ui.ref()
+	-- The carried tab's width, as it was grabbed: off the strip it isn't laid
+	-- out, and has none to read.
+	local held_w = 0
+	local function width(id: string): number
+		return if id == held:peek() then held_w else props.width(id)
+	end
 
-	-- The order shown: the carried tab at its place among the others.
+	-- The order shown: the carried tab at its place among the others; off
+	-- the strip, not there at all (its gap closed).
 	local order = ui.computed(function(): { string }
 		local list = props.items()
 		local id = held:get()
 		if not id then
 			return list
 		end
+		local away = phase:get() == "away"
 		local out: { string } = {}
 		for _, k in list do
 			if k ~= id then
@@ -168,6 +175,9 @@ function M.new(props: Props)
 		if #out == #list then
 			-- (Closed meanwhile.)
 			return list
+		end
+		if away then
+			return out
 		end
 		table.insert(out, math.clamp(at:get(), 1, #out + 1), id)
 		return out
@@ -185,13 +195,13 @@ function M.new(props: Props)
 		if not id or phase:peek() ~= "lifted" then
 			return
 		end
-		local w = props.width(id)
+		local w = held_w
 		local x = math.clamp(pointer - grab, 0, math.max(0, view_w() - w))
 		anime.utils.set(ghost, { x = x })
 		local middle = x + props.offset:peek() + w / 2
 		local before, left = 0, 0
 		for _, k in order:peek() do
-			local kw = props.width(k)
+			local kw = width(k)
 			if k ~= id and left + kw / 2 < middle then
 				before += 1
 			end
@@ -215,7 +225,7 @@ function M.new(props: Props)
 			return finish()
 		end
 		phase:set("settling")
-		local x = left_in(order:peek(), props.width, id) - props.offset:peek()
+		local x = left_in(order:peek(), width, id) - props.offset:peek()
 		if motion.reduced_now() then
 			anime.utils.set(ghost, { x = x })
 			return finish()
@@ -249,6 +259,7 @@ function M.new(props: Props)
 		from_at = table.find(list, id) or 1
 		dropped = false
 		-- (Where it stands, so it lifts from there.)
+		held_w = props.width(id)
 		local x = left_in(list, props.width, id) - props.offset:peek()
 		pointer = x + grab
 		anime.utils.set(ghost, { x = x })
@@ -257,16 +268,18 @@ function M.new(props: Props)
 		phase:set("lifted")
 	end
 
-	function self.ended()
+	function self.ended(_payload: any?, accepted: boolean?)
 		if dropped or not held:peek() then
 			return
 		end
-		if phase:peek() == "away" then
-			-- Taken elsewhere, or let go over nothing (its preview goes back).
+		if phase:peek() == "away" and accepted then
+			-- Taken elsewhere (a split's pane, another window).
 			return finish()
 		end
-		-- Cancelled over the strip (Escape): back where it was.
+		-- Let go over nothing, or cancelled (Escape): it flies back into its
+		-- gap, opening again where it was, from where it left the strip.
 		at:set(from_at)
+		phase:set("lifted")
 		settle_in()
 	end
 
@@ -277,7 +290,7 @@ function M.new(props: Props)
 			bg = "$background",
 			shadow = shadow,
 			ui.row {
-				w = props.width(id),
+				w = held_w,
 				h = props.h,
 				rounded = props.rounded,
 				bg = if props.selected() == id then "$zeron.selected.flat.bg" else "$hover",
@@ -299,10 +312,7 @@ function M.new(props: Props)
 	end
 
 	function self.opacity(id: string): number
-		if held:get() ~= id then
-			return 1
-		end
-		return if phase:get() == "away" then AWAY else 0
+		return if held:get() == id then 0 else 1
 	end
 
 	local function carried(payload: any): boolean
@@ -398,7 +408,7 @@ function M.new(props: Props)
 			order = function(): { string }
 				return order:get()
 			end,
-			width = props.width,
+			width = width,
 			content = props.content,
 			selected = props.selected,
 			h = props.h,

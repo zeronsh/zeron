@@ -325,12 +325,25 @@ test("a tab still opens its chat on a click, and reorders by a drag, with its me
 	app:frames(20)
 	expect(tostring(app:state("shell_route_path")):find("a1", 1, true) ~= nil).to_be(true)
 	expect(box(app, "#session-tab-a1").x < box(app, "#session-tab-a2").x).to_be(true)
-	-- (To the tab past the next: it passes the next one's middle on the way.
-	-- Dropped on a tab's own middle, it stays before that tab.)
+	-- (To the tab past the next: its middle passes the next one's on the way.)
 	app:drag("#session-tab-a1", "#session-tab-a3")
 	app:frames(40)
 	expect(box(app, "#session-tab-a2").x < box(app, "#session-tab-a1").x).to_be(true)
-	expect(box(app, "#session-tab-a1").x < box(app, "#session-tab-a3").x).to_be(true)
+	expect(box(app, "#session-tab-b1").x > box(app, "#session-tab-a1").x).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+-- A tab carried off the strip and let go over nothing flies back into its
+-- place: one tab throughout, none left behind in the strip while it's away.
+test("a tab let go off the strip goes back to its place", function()
+	local app = all_open()
+	app:frames(20)
+	local was = box(app, "#session-tab-a2").x
+	app:drag("#session-tab-a2", "#star-banner")
+	app:frames(60)
+	expect(math.abs(box(app, "#session-tab-a2").x - was) <= 0.5).to_be(true)
+	expect(box(app, "#session-tab-a1").x < was).to_be(true)
+	expect(box(app, "#session-tab-a3").x > was).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 

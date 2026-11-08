@@ -960,8 +960,8 @@ M.Panel = ui.component(function(props: Props): Node
 				drag_preview = function(): Node
 					return strip.preview(id)
 				end,
-				on_drag_end = function()
-					strip.ended()
+				on_drag_end = function(payload: any, accepted: boolean)
+					strip.ended(payload, accepted)
 				end,
 				opacity = function(): number
 					return strip.opacity(id)
