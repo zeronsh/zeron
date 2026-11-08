@@ -85,12 +85,31 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
     // Updates that came by relay, until a saved snapshot holds them. Nothing on
     // the edge can give these back to a device that crashes before saving.
-    "CREATE TABLE chat_inbox (
+    "CREATE TABLE IF NOT EXISTS chat_inbox (
         ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
         doc_id TEXT NOT NULL,
         bytes BLOB NOT NULL
      ) STRICT;
-     CREATE INDEX chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
+     CREATE INDEX IF NOT EXISTS chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
+    // Sends waiting for their attachment bytes to reach the edge
+    // (held_sends.rs). Ordinal order is send order, per chat.
+    // The relay inbox again: a pre-release build took the previous slot for
+    // this table, so a device that ran it skipped the inbox above.
+    "CREATE TABLE IF NOT EXISTS held_sends (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        chat_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        failure TEXT
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS held_sends_chat ON held_sends(chat_id,ordinal);
+    CREATE TABLE IF NOT EXISTS chat_inbox (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id TEXT NOT NULL,
+        bytes BLOB NOT NULL
+     ) STRICT;
+     CREATE INDEX IF NOT EXISTS chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);

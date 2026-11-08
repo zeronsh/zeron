@@ -4061,6 +4061,12 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
      */
     func removeQueued(id: String) async throws  -> Bool
     
+    /**
+     * Remove a pending send that's `removable`: it never goes out. `false`
+     * when it already went.
+     */
+    func removeSend(messageId: String) throws  -> Bool
+    
     func renewQueuedEdit(lease: QueueEditLease) async  -> Bool
     
     func respondInput(requestId: String, answers: [UserInputAnswer]) throws 
@@ -4329,6 +4335,20 @@ open func removeQueued(id: String)async throws  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
+}
+    
+    /**
+     * Remove a pending send that's `removable`: it never goes out. `false`
+     * when it already went.
+     */
+open func removeSend(messageId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_remove_send(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),uniffiCallStatus
+    )
+})
 }
     
 open func renewQueuedEdit(lease: QueueEditLease)async  -> Bool  {
@@ -10806,6 +10826,11 @@ public struct PendingSend: Equatable, Hashable {
     public var kind: PendingKind
     public var sentAtMs: Int64
     public var state: SendState
+    /**
+     * Still on this device, failed or uploading: Remove applies
+     * (`SessionHandle::remove_send`), and it then never goes out.
+     */
+    public var removable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10815,7 +10840,11 @@ public struct PendingSend: Equatable, Hashable {
          */messageId: String, 
         /**
          * Raw content (attachment trailer included).
-         */text: String, visibleText: String, images: [String], kind: PendingKind, sentAtMs: Int64, state: SendState) {
+         */text: String, visibleText: String, images: [String], kind: PendingKind, sentAtMs: Int64, state: SendState, 
+        /**
+         * Still on this device, failed or uploading: Remove applies
+         * (`SessionHandle::remove_send`), and it then never goes out.
+         */removable: Bool) {
         self.messageId = messageId
         self.text = text
         self.visibleText = visibleText
@@ -10823,6 +10852,7 @@ public struct PendingSend: Equatable, Hashable {
         self.kind = kind
         self.sentAtMs = sentAtMs
         self.state = state
+        self.removable = removable
     }
 
     
@@ -10847,7 +10877,8 @@ public struct FfiConverterTypePendingSend: FfiConverterRustBuffer {
                 images: FfiConverterSequenceString.read(from: &buf), 
                 kind: FfiConverterTypePendingKind.read(from: &buf), 
                 sentAtMs: FfiConverterInt64.read(from: &buf), 
-                state: FfiConverterTypeSendState.read(from: &buf)
+                state: FfiConverterTypeSendState.read(from: &buf), 
+                removable: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -10859,6 +10890,7 @@ public struct FfiConverterTypePendingSend: FfiConverterRustBuffer {
         FfiConverterTypePendingKind.write(value.kind, into: &buf)
         FfiConverterInt64.write(value.sentAtMs, into: &buf)
         FfiConverterTypeSendState.write(value.state, into: &buf)
+        FfiConverterBool.write(value.removable, into: &buf)
     }
 }
 
@@ -22401,6 +22433,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_remove_queued() != 25599) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_remove_send() != 18915) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_renew_queued_edit() != 7655) {

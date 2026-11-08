@@ -224,6 +224,9 @@ pub struct PendingSend {
     pub kind: PendingKind,
     pub sent_at_ms: i64,
     pub state: SendState,
+    /// Still in this device's outbox, failed or uploading: it can be removed
+    /// (`SessionHandle::remove_send`), and then never goes out.
+    pub removable: bool,
 }
 
 /// The unresolved question the composer should answer instead of typing.
@@ -249,6 +252,9 @@ pub struct HostCapabilities {
     /// The host moves the chat to another provider between turns; older
     /// hosts would resume one provider's session under another.
     pub provider_switch: bool,
+    /// The host fetches attachment bytes from the edge's store, so a send to
+    /// it needn't reach it directly.
+    pub attachment_store: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

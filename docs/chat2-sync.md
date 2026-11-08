@@ -77,6 +77,9 @@ check. Host uploads are debounced/batched per commit tick, fire-and-forget (a lo
 upload degrades to "full output unavailable", never blocks the doc). UI fetches on
 expand; offline shows the summary + a greyed affordance.
 
+Attachment bytes on their way to a Cloud machine use this bucket too, under a route of their
+own (`/blob/{chatId}/attachments/{uploadId}`; see `docs/design/cloud-attachments.md`).
+
 **A3. UI.** Tool-part expansion fetches `outputRef` lazily; render summary inline.
 
 Estimate: 2–3 days. Ships in the next release; immediately cuts new-session growth ~7×.

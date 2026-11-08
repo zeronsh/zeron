@@ -10,11 +10,13 @@
 //! - [`DocsStore`]: snapshot persistence (the doc IS the outbox — commands + user entries
 //!   flush immediately) and the processed-command ledger with mark-BEFORE-execute semantics.
 
+pub mod attachment_store;
 pub mod budget;
 pub mod chat_client;
 pub mod chat_relay;
 pub mod chat_frames;
 pub mod dial;
+mod held_sends;
 pub mod net_path;
 pub mod registry;
 pub mod socket;

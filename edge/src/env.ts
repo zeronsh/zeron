@@ -13,6 +13,10 @@ export interface Env {
    * replacing SessionRoom's loro-aware s2 rooms (docs/chat2-sync.md). */
   CHAT_ROOMS: DurableObjectNamespace;
   BLOBS: R2Bucket;
+  /** Per-user limits on attachment bytes stored and not yet collected by a
+   * Cloud machine (attachment-blobs.ts). Unset ⇒ 1 GiB and 500 files. */
+  ATTACHMENT_QUOTA_BYTES?: string;
+  ATTACHMENT_QUOTA_OBJECTS?: string;
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */
   RELEASES: R2Bucket;
