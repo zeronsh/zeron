@@ -163,14 +163,12 @@ end
 M.TAB_LIFT = 1.03
 M.TAB_LIFT_TWEEN = { duration = 120, ease = "out(3)" } :: TweenOptions
 -- The tabs beside one moving, opening or closing slide over on a stiffer
--- spring, critically damped: quick, and still, with nothing to wobble.
+-- spring, critically damped: quick, and still, with nothing to wobble. (The
+-- tab itself comes and goes at once: a chat alone's tab is replaced on each
+-- navigation, too often for an entrance.)
 M.TAB_SLIDE_SPRING = { stiffness = 600, damping = 49 }
 function M.tab_slide(): { [string]: any }?
 	return M.layout { spring = anime.createSpring(M.TAB_SLIDE_SPRING) }
 end
--- A tab opening grows in where it goes, one closing shrinks away from its
--- place (its neighbours closing the gap as it goes).
-M.TAB_ENTER = { opacity = { 0, 1 }, scale = { 0.9, 1 }, duration = 180, ease = "out(3)" }
-M.TAB_EXIT = { opacity = 0, scale = 0.9, duration = 120, ease = "in(2)" }
 
 return M

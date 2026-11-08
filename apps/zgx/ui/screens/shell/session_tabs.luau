@@ -634,8 +634,6 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 						direction = "row",
 						gap = "$zeron.space.hair",
 						animate = motion.tab_slide(),
-						enter = motion.transition(motion.TAB_ENTER),
-						exit = motion.transition(motion.TAB_EXIT),
 					}),
 				},
 			}),
