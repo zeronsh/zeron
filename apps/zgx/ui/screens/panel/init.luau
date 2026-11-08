@@ -778,6 +778,12 @@ M.Panel = ui.component(function(props: Props): Node
 		local hovered = ui.use_state(false)
 		local ref = ui.ref()
 		chip_refs[id] = ref
+		-- (Gone with its tab: neither kept for one closed.)
+		ui.on_cleanup(function()
+			if chip_refs[id] == ref then
+				chip_refs[id], chip_faces[id] = nil, nil
+			end
+		end)
 		local function is_active(): boolean
 			return active() == id
 		end

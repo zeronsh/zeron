@@ -46,6 +46,11 @@
 
 local motion = require("@self/motion")
 
+-- A node id from a strip's key: "panel_tab" gives "panel-tab-…".
+local function id_of(key: string, what: string): string
+	return `{(string.gsub(key, "_", "-"))}-{what}`
+end
+
 local M = {}
 
 local function gap(): number
@@ -159,7 +164,7 @@ function M.Highlight(props: HighlightProps): Node
 		return if measured() then "on" else nil
 	end, function(): Node
 		return ui.div {
-			id = `{props.key}-chosen`,
+			id = id_of(props.key, "chosen"),
 			h = props.h,
 			rounded = props.rounded,
 			bg = "$zeron.selected.flat.bg",
@@ -337,7 +342,6 @@ function M.new(props: Props)
 			props.on_away(to == "away")
 		end
 	end
-
 	-- Still among the strip's tabs (one closed while carried isn't).
 	local function present(id: string): boolean
 		return table.find(props.items(), id) ~= nil
@@ -508,8 +512,8 @@ function M.new(props: Props)
 		return if phase:get() == "lifted" then motion.TAB_LIFT else 1
 	end)
 	local layer = ui.div {
-		-- (`#<key>-lifted`: `#panel_tab-lifted`.)
-		id = `{props.key}-lifted`,
+		-- (`#panel-tab-lifted` for "panel_tab".)
+		id = id_of(props.key, "lifted"),
 		ref = ghost,
 		absolute = true,
 		left = 0,
