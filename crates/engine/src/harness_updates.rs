@@ -39,7 +39,25 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 /// Long enough for a slow link: native updaters download hundreds of megabytes
 /// without printing progress, and stopping one mid-download can leave a
 /// truncated CLI behind.
-const UPDATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const UPDATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long a device asking another to update one of its CLIs waits for the
+/// answer: [`UPDATE_TIMEOUT`], and room for a check, verification and the
+/// relay. (Waiting for that device's chats to finish comes before it, and
+/// isn't bounded: the row there says what it waits on.)
+pub(crate) const APPLY_REPLY_DEADLINE: Duration = Duration::from_secs(40 * 60);
+/// How long an updater may sit on a question (a `y/N` with nobody to answer)
+/// before it's stopped with that question as the reason, rather than left to
+/// run out [`UPDATE_TIMEOUT`].
+const PROMPT_STALL: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 10 });
+/// Every command runs with these, so nothing stops to ask: Git (Hermes
+/// pulls, npm's git dependencies) and its credential manager mustn't prompt
+/// for a login, Homebrew's and installers' `NONINTERACTIVE`, npm/npx's yes.
+const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GCM_INTERACTIVE", "never"),
+    ("NONINTERACTIVE", "1"),
+    ("npm_config_yes", "true"),
+];
 /// Between full checks, how often each CLI's binary is looked at (stat only)
 /// for an update made outside zeron — its own auto-updater or the user.
 const BINARY_WATCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -68,6 +86,9 @@ enum LatestSource {
     /// An agent from the ACP registry: the registry's current version
     /// (`crate::acp_registry`), installed by Zeron.
     Registry,
+    /// The release Cursor's installer installs, which `cursor-agent update`
+    /// fetches too.
+    Cursor,
     Manual,
 }
 
@@ -109,6 +130,10 @@ struct HomebrewPackage {
     brew: PathBuf,
     cask: bool,
     token: String,
+    /// The tap it came from, when not Homebrew's own (`sst/tap`), as its
+    /// install receipt records: a tap's package goes by its full name, and
+    /// formulae.brew.sh knows only Homebrew's own.
+    tap: Option<String>,
 }
 
 impl HomebrewPackage {
@@ -117,21 +142,37 @@ impl HomebrewPackage {
         self.token == "node" || self.token.starts_with("node@")
     }
 
-    fn upgrade_command(&self) -> String {
-        if self.cask {
-            format!("brew upgrade --cask {}", self.token)
-        } else {
-            format!("brew upgrade --formula {}", self.token)
+    /// The name brew knows it by: `sst/tap/opencode` for a tap's.
+    fn name(&self) -> String {
+        match &self.tap {
+            Some(tap) => format!("{tap}/{}", self.token),
+            None => self.token.clone(),
         }
     }
 
-    fn upgrade_args(&self) -> Vec<&str> {
+    fn upgrade_command(&self) -> String {
         if self.cask {
-            vec!["upgrade", "--cask", self.token.as_str()]
+            format!("brew upgrade --cask {}", self.name())
         } else {
-            vec!["upgrade", "--formula", self.token.as_str()]
+            format!("brew upgrade --formula {}", self.name())
         }
     }
+
+    fn upgrade_args(&self) -> Vec<String> {
+        let kind = if self.cask { "--cask" } else { "--formula" };
+        vec!["upgrade".into(), kind.into(), self.name()]
+    }
+}
+
+/// The tap a keg's or cask's install receipt names, when it isn't Homebrew's
+/// own.
+fn homebrew_tap(receipt: &Path) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(receipt).ok()?).ok()?;
+    let tap = json.pointer("/source/tap")?.as_str()?;
+    let mut parts = tap.split('/');
+    let valid = matches!((parts.next(), parts.next(), parts.next()), (Some(user), Some(repo), None)
+        if homebrew_token_ok(user) && homebrew_token_ok(repo));
+    (valid && !matches!(tap, "homebrew/core" | "homebrew/cask")).then(|| tap.to_owned())
 }
 
 enum UpdatePlan {
@@ -151,8 +192,10 @@ enum UpdatePlan {
     /// whether to install over it, and with nobody to answer waits for ever.
     Winget {
         winget: PathBuf,
-        id: &'static str,
+        id: String,
     },
+    /// A Scoop app, updated by that Scoop.
+    Scoop(ScoopApp),
     /// An npm-packaged CLI, updated by the package manager that owns it.
     Package {
         owner: ownership::PackageOwner,
@@ -191,6 +234,7 @@ impl UpdatePlan {
                 package.token
             ),
             UpdatePlan::Winget { winget, id } => format!("winget:{}:{id}", real(winget)),
+            UpdatePlan::Scoop(app) => format!("scoop:{}:{}", real(&app.root), app.app),
             UpdatePlan::Package {
                 owner,
                 launcher,
@@ -215,7 +259,9 @@ impl UpdatePlan {
             // when nothing is running from them.
             UpdatePlan::Registry(_) | UpdatePlan::AntigravityArchive | UpdatePlan::CodexStandalone(_) => Ok(()),
             UpdatePlan::Homebrew(_) => Err("Homebrew deletes the old version straight away."),
-            UpdatePlan::Winget { .. } => Err("Updating replaces the program in place."),
+            UpdatePlan::Winget { .. } | UpdatePlan::Scoop(_) => {
+                Err("Updating replaces the program in place.")
+            }
             UpdatePlan::Package { .. } => Err(REPLACES_FILES),
             UpdatePlan::MuseLauncher(_) => Err("Updating removes the version running chats use."),
             UpdatePlan::Command { executable, .. } => {
@@ -249,6 +295,7 @@ impl UpdatePlan {
             UpdatePlan::Homebrew(package) => Some(format!("homebrew:{}", package.brew.display())),
             // WinGet runs one install at a time for the whole user.
             UpdatePlan::Winget { .. } => Some("winget".into()),
+            UpdatePlan::Scoop(app) => Some(format!("scoop:{}", app.root.display())),
             UpdatePlan::Package {
                 owner,
                 launcher,
@@ -433,7 +480,7 @@ fn provider(id: HarnessId) -> ProviderSpec {
         },
         HarnessId::Cursor => ProviderSpec {
             version_args: &["--version"],
-            latest: LatestSource::Manual,
+            latest: LatestSource::Cursor,
             update_args: Some(&["update"]),
             manual_command: "cursor-agent update",
         },
@@ -566,17 +613,33 @@ fn update_plan(
         resolve_brew(&package.brew)?;
         return Ok(UpdatePlan::Homebrew(package));
     }
+    // The other package managers that can own a CLI. Each is updated by
+    // itself or, where only an administrator or root can, left to the
+    // person with the exact command; the CLI's own updater would write a
+    // second copy somewhere else, or ask whether to.
+    if let Some(id) = winget_package(executable) {
+        let winget = resolve_winget().ok_or_else(|| {
+            format!("WinGet installed this copy, but WinGet wasn't found. Update it with `winget upgrade --id {id} --exact`")
+        })?;
+        return Ok(UpdatePlan::Winget { winget, id });
+    }
+    if let Some(app) = scoop_app(executable) {
+        return app.plan();
+    }
+    if let Some(package) = chocolatey_package(harness, executable) {
+        return Err(format!(
+            "Chocolatey installed this copy, and only an administrator can update it. In an \
+             administrator terminal, run `choco upgrade {package} -y`"
+        ));
+    }
+    if system_package_path(executable) {
+        return Err(SYSTEM_PACKAGE.into());
+    }
     if harness == HarnessId::ClaudeCode && claude_package_manager_command(executable).is_some() {
         return Err("update Claude Code with its package manager".into());
     }
     if harness == HarnessId::Muse && is_muse_launcher(executable) {
         return Ok(UpdatePlan::MuseLauncher(executable.to_path_buf()));
-    }
-    if let Some(id) = winget_package(harness, executable) {
-        let winget = resolve_winget().ok_or_else(|| {
-            format!("WinGet installed this copy but wasn't found; update it with `winget upgrade --id {id}`")
-        })?;
-        return Ok(UpdatePlan::Winget { winget, id });
     }
     if let Some(args) = provider(harness).update_args {
         return Ok(UpdatePlan::Command {
@@ -640,14 +703,34 @@ fn manual_update_command(harness: HarnessId, executable: &Path, can_apply: bool)
     {
         return Some(package.upgrade_command());
     }
-    if let Some(id) = winget_package(harness, executable) {
-        return Some(format!("winget upgrade --id {id}"));
+    if let Some(id) = winget_package(executable) {
+        return Some(format!("winget upgrade --id {id} --exact"));
+    }
+    if let Some(app) = scoop_app(executable) {
+        return Some(app.command());
+    }
+    if let Some(package) = chocolatey_package(harness, executable) {
+        return Some(format!("choco upgrade {package} -y"));
+    }
+    if system_package_path(executable) {
+        return Some(SYSTEM_PACKAGE.into());
     }
     Some(
         claude_package_manager_command_for(harness, executable)
             .unwrap_or_else(|| provider(harness).manual_command.to_string()),
     )
     .filter(|command| !command.is_empty())
+}
+
+/// [`manual_update_command`], with the exact package a system package
+/// manager installed it as, asked of its database.
+async fn manual_command_for(harness: HarnessId, executable: &Path, can_apply: bool) -> Option<String> {
+    if !can_apply && system_package_path(executable)
+        && let Some(command) = system_package_command(executable).await
+    {
+        return Some(command);
+    }
+    manual_update_command(harness, executable, can_apply)
 }
 
 /// What's installed just before an updater with no release to aim for runs.
@@ -1217,11 +1300,16 @@ impl HarnessUpdateCoordinator {
         if self.settle_if_unmonitored(harness) {
             return Ok(());
         }
-        self.mutate(harness, |status| {
-            status.phase = HarnessUpdatePhase::Checking;
-            status.progress = None;
-            status.error = None;
-        });
+        // A failed install keeps saying why while it's checked again (see
+        // [`kept_install_failure`]): the row isn't put through Checking.
+        let prior = self.status(harness);
+        if !failed_install(&prior) {
+            self.mutate(harness, |status| {
+                status.phase = HarnessUpdatePhase::Checking;
+                status.progress = None;
+                status.error = None;
+            });
+        }
         let executable = match self.executable(harness) {
             Ok(path) => path,
             Err(error) => {
@@ -1261,7 +1349,7 @@ impl HarnessUpdateCoordinator {
             },
         );
         let can_apply = plan.is_ok();
-        match plan {
+        match &plan {
             Ok(plan) => {
                 lock(&self.inner.checked_plans).insert(harness, plan.identity());
             }
@@ -1272,12 +1360,21 @@ impl HarnessUpdateCoordinator {
         if self.settle_if_unmonitored(harness) {
             return Ok(());
         }
-        // mise installed by Homebrew is mise's keg, not the CLI's.
-        if let Some(package) =
-            homebrew_package(&executable).filter(|_| !ownership::mise_managed(&executable))
-        {
+        // A package manager that owns the install can only deliver what it
+        // has published, which trails the vendor's feed by hours or days:
+        // that's the release on offer.
+        // (mise installed by Homebrew is mise's keg, not the CLI's.)
+        let owner_latest = match &plan {
+            Ok(UpdatePlan::Winget { winget, id }) => Some(self.winget_latest(winget, id).await),
+            Ok(UpdatePlan::Scoop(app)) => Some(app.latest()),
+            _ => match homebrew_package(&executable).filter(|_| !ownership::mise_managed(&executable)) {
+                Some(package) => Some(self.homebrew_latest(&package).await),
+                None => None,
+            },
+        };
+        if let Some(latest) = owner_latest {
             return self
-                .finish_homebrew_check(harness, &executable, installed, source, package, can_apply)
+                .finish_owner_check(harness, &executable, installed, source, latest, can_apply, &prior)
                 .await;
         }
         let latest = match spec.latest {
@@ -1308,6 +1405,12 @@ impl HarnessUpdateCoordinator {
                     status.channel = channel.map(str::to_owned)
                 });
                 match channel {
+                    // The native install's updater installs its own feed's
+                    // release, which can trail npm's by a while.
+                    Some(channel) if claude_native_install(&executable) => self
+                        .claude_native_release(channel)
+                        .await
+                        .map(UpdateCheck::Version),
                     Some(channel) => self
                         .npm_release("@anthropic-ai/claude-code", channel)
                         .await
@@ -1350,11 +1453,18 @@ impl HarnessUpdateCoordinator {
                 drop(lease);
                 result
             }
+            LatestSource::Cursor => self.cursor_latest().await.map(UpdateCheck::Version),
             LatestSource::Manual => Ok(UpdateCheck::Manual),
         };
         if self.settle_if_unmonitored(harness) {
             return Ok(());
         }
+        // A system package is its package manager's, whatever its own check
+        // says (distributions often strip that updater), so the row says who.
+        let latest = match latest {
+            Err(_) if !can_apply && system_package_path(&executable) => Ok(UpdateCheck::Manual),
+            latest => latest,
+        };
         let (latest, available) = match latest {
             Ok(UpdateCheck::Version(version)) => {
                 let dismissed = lock(&self.inner.prefs)
@@ -1371,14 +1481,16 @@ impl HarnessUpdateCoordinator {
             Ok(UpdateCheck::Manual) => {
                 // Computed outside the status lock: it runs the CLIs' install probes.
                 let enabled = self.inner.registry.enabled_set().contains(&harness);
+                let manual_command = manual_command_for(harness, &executable, can_apply)
+                    .await
+                    .or_else(|| Some(spec.manual_command.into()));
                 self.mutate(harness, |status| {
                     status.installed_version = Some(installed);
                     status.latest_version = None;
                     status.channel = None;
                     status.source = source;
                     status.can_apply = can_apply;
-                    status.manual_command = manual_update_command(harness, &executable, can_apply)
-                        .or_else(|| Some(spec.manual_command.into()));
+                    status.manual_command = manual_command;
                     status.phase = if status.policy == HarnessUpdatePolicy::Off || !enabled {
                         HarnessUpdatePhase::Dormant
                     } else {
@@ -1401,9 +1513,10 @@ impl HarnessUpdateCoordinator {
                 || lock(&self.inner.antigravity_release)
                     .as_ref()
                     .is_some_and(|release| release.installable()));
-        let manual_command = manual_update_command(harness, &executable, can_apply);
+        let manual_command = manual_command_for(harness, &executable, can_apply).await;
         // Computed outside the status lock: it runs the CLIs' install probes.
         let enabled = self.inner.registry.enabled_set().contains(&harness);
+        let kept = kept_install_failure(&prior, &installed, latest.as_deref(), available && can_apply);
         self.mutate(harness, |status| {
             status.installed_version = Some(installed);
             status.latest_version = latest;
@@ -1412,30 +1525,36 @@ impl HarnessUpdateCoordinator {
             status.manual_command = manual_command;
             status.phase = if status.policy == HarnessUpdatePolicy::Off || !enabled {
                 HarnessUpdatePhase::Dormant
+            } else if let Some((phase, _)) = &kept {
+                *phase
             } else if available {
                 HarnessUpdatePhase::Available
             } else {
                 HarnessUpdatePhase::Current
             };
             status.checked_at = Some(now_ms());
-            status.error = None;
+            status.error = kept
+                .filter(|_| status.phase != HarnessUpdatePhase::Dormant)
+                .map(|(_, error)| error);
         });
         Ok(())
     }
 
-    /// Homebrew owns this binary, so the only release on offer is the one
-    /// Homebrew has: casks and formulae trail upstream by hours or days, and
-    /// `brew upgrade` can't install what it hasn't published.
-    async fn finish_homebrew_check(
+    /// A package manager (Homebrew, WinGet, Scoop) owns this binary, so the
+    /// only release on offer is the one it has: they trail upstream by hours
+    /// or days, and can't install what they haven't published.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_owner_check(
         &self,
         harness: HarnessId,
         executable: &Path,
         installed: String,
         source: HarnessInstallSource,
-        package: HomebrewPackage,
+        latest: Result<String, String>,
         can_apply: bool,
+        prior: &HarnessUpdateStatus,
     ) -> Result<(), String> {
-        let latest = match self.homebrew_latest(&package).await {
+        let latest = match latest {
             Ok(version) => version,
             Err(error) => {
                 return self.fail_check_with_installed(harness, installed, source, error);
@@ -1449,13 +1568,14 @@ impl HarnessUpdateCoordinator {
             .get(&harness)
             .is_some_and(|dismissed| dismissed == &latest);
         let available = version_is_newer(&latest, &installed) && !dismissed;
-        let manual_command = manual_update_command(harness, executable, can_apply);
+        let manual_command = manual_command_for(harness, executable, can_apply).await;
         let channel = (harness == HarnessId::ClaudeCode)
             .then(|| claude_cask_channel(executable))
             .flatten()
             .map(str::to_owned);
         // Computed outside the status lock: it runs the CLIs' install probes.
         let enabled = self.inner.registry.enabled_set().contains(&harness);
+        let kept = kept_install_failure(prior, &installed, Some(&latest), available && can_apply);
         self.mutate(harness, |status| {
             status.installed_version = Some(installed);
             status.latest_version = Some(latest);
@@ -1467,19 +1587,65 @@ impl HarnessUpdateCoordinator {
             status.manual_command = manual_command;
             status.phase = if status.policy == HarnessUpdatePolicy::Off || !enabled {
                 HarnessUpdatePhase::Dormant
+            } else if let Some((phase, _)) = &kept {
+                *phase
             } else if available {
                 HarnessUpdatePhase::Available
             } else {
                 HarnessUpdatePhase::Current
             };
             status.checked_at = Some(now_ms());
-            status.error = None;
+            status.error = kept
+                .filter(|_| status.phase != HarnessUpdatePhase::Dormant)
+                .map(|(_, error)| error);
         });
         Ok(())
     }
 
+    /// The release WinGet would install for `id`.
+    async fn winget_latest(&self, winget: &Path, id: &str) -> Result<String, String> {
+        let output = run_command_output(
+            winget,
+            &[
+                "show",
+                "--id",
+                id,
+                "--exact",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ],
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|error| format!("WinGet couldn't say which {id} it has: {error}"))?;
+        parse_winget_show(&output)
+            .ok_or_else(|| format!("WinGet's description of {id} names no version it can install"))
+    }
+
     async fn homebrew_latest(&self, package: &HomebrewPackage) -> Result<String, String> {
-        let api = self.homebrew_api_version(package).await;
+        // The brew beside the keg is the one that owns it, as long as it says
+        // that prefix is its own (a copied or relocated tree wouldn't).
+        let brew = resolve_brew(&package.brew)?;
+        let prefix = package.brew.parent().and_then(Path::parent).map(Path::to_path_buf);
+        let says = run_command_output_env(&brew, &["--prefix"], COMMAND_TIMEOUT, BREW_INFO_ENV).await?;
+        let same = |a: &Path, b: &Path| {
+            std::fs::canonicalize(a).unwrap_or_else(|_| a.into())
+                == std::fs::canonicalize(b).unwrap_or_else(|_| b.into())
+        };
+        if let Some(prefix) = &prefix
+            && !same(Path::new(says.trim()), prefix)
+        {
+            return Err(format!(
+                "The Homebrew at {} manages {}, not {}, so it can't update this copy",
+                brew.display(),
+                says.trim(),
+                prefix.display()
+            ));
+        }
+        let api = match package.tap {
+            None => self.homebrew_api_version(package).await,
+            Some(_) => Err("a tap's packages aren't on formulae.brew.sh".into()),
+        };
         let local = self.homebrew_local_version(package).await;
         match (api, local) {
             (Ok(api), Ok(local)) => Ok(if version_is_newer(&local, &api) {
@@ -1516,11 +1682,11 @@ impl HarnessUpdateCoordinator {
 
     async fn homebrew_local_version(&self, package: &HomebrewPackage) -> Result<String, String> {
         let brew = resolve_brew(&package.brew)?;
-        let token = package.token.as_str();
+        let name = package.name();
         let args: &[&str] = if package.cask {
-            &["info", "--cask", "--json=v2", token]
+            &["info", "--cask", "--json=v2", &name]
         } else {
-            &["info", "--formula", "--json=v2", token]
+            &["info", "--formula", "--json=v2", &name]
         };
         // Don't refresh taps on a probe. `brew upgrade` does that when applying.
         let output = run_command_output_env(&brew, args, COMMAND_TIMEOUT, BREW_INFO_ENV).await?;
@@ -1756,6 +1922,9 @@ impl HarnessUpdateCoordinator {
             intent.finish();
             return Ok(installed);
         }
+        // Zeron's own installers put each release in a folder of its own; any
+        // other updater replaces what's at the path chats run.
+        let same_launcher = !matches!(plan, UpdatePlan::Registry(_) | UpdatePlan::AntigravityArchive);
         let applied = match plan {
             UpdatePlan::Command { executable, args } => {
                 match self.begin_install(harness, &cancel) {
@@ -1772,9 +1941,28 @@ impl HarnessUpdateCoordinator {
                 }
             }
             UpdatePlan::Winget { winget, id } => match self.begin_install(harness, &cancel) {
-                Ok(()) => run_command_output(&winget, &winget_upgrade_args(id), UPDATE_TIMEOUT)
+                Ok(()) => run_command_output(&winget, &winget_upgrade_args(&id), UPDATE_TIMEOUT)
                     .await
-                    .map(drop),
+                    .map(drop)
+                    .map_err(|error| winget_failure(&id, error)),
+                Err(error) => Err(error),
+            },
+            UpdatePlan::Scoop(app) => match self.begin_install(harness, &cancel) {
+                Ok(()) => {
+                    // Scoop finds its root by `SCOOP` (else `~\scoop`): a root
+                    // anywhere else is only that Scoop's when it's told.
+                    let root = app.root.to_string_lossy();
+                    let (program, args) = app.update_command();
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    run_command_output_env(
+                        &program,
+                        &args,
+                        UPDATE_TIMEOUT,
+                        &[("SCOOP", root.as_ref())],
+                    )
+                    .await
+                    .map(drop)
+                }
                 Err(error) => Err(error),
             },
             UpdatePlan::AntigravityArchive => {
@@ -1829,7 +2017,12 @@ impl HarnessUpdateCoordinator {
                     Ok(update) => match self.begin_install(harness, &cancel) {
                         Ok(()) => {
                             let args: Vec<&str> = update.args.iter().map(String::as_str).collect();
-                            run_command_output(&update.program, &args, UPDATE_TIMEOUT)
+                            let env: Vec<(&str, &str)> = update
+                                .env
+                                .iter()
+                                .map(|(key, value)| (key.as_str(), value.as_str()))
+                                .collect();
+                            run_command_output_env(&update.program, &args, UPDATE_TIMEOUT, &env)
                                 .await
                                 .map(drop)
                         }
@@ -1849,6 +2042,7 @@ impl HarnessUpdateCoordinator {
             UpdatePlan::Homebrew(package) => match resolve_brew(&package.brew) {
                 Ok(brew) => {
                     let args = package.upgrade_args();
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     match self.begin_install(harness, &cancel) {
                         Ok(()) => {
                             run_command_output_env(&brew, &args, UPDATE_TIMEOUT, BREW_UPGRADE_ENV)
@@ -1876,7 +2070,18 @@ impl HarnessUpdateCoordinator {
             status.phase = HarnessUpdatePhase::Verifying
         });
         let mut unchanged = false;
+        // "Updated" means the copy chats run moved: the one at the path the
+        // update was for, asked for its version there. A second copy that
+        // turned up ahead of it on PATH is another install, not this update.
         let verified = match self.executable(harness) {
+            Ok(now) if same_launcher && now != executable => {
+                let _ = self.install_changed(harness);
+                Err(format!(
+                    "the update ran, but Zeron now finds the CLI at {} instead of {}",
+                    now.display(),
+                    executable.display()
+                ))
+            }
             Ok(executable) => {
                 installed_version_of(harness, &executable, provider(harness).version_args)
                     .await
@@ -1895,13 +2100,18 @@ impl HarnessUpdateCoordinator {
                     }
                 };
                 if let Some(latest) = expected.filter(|latest| version_is_newer(latest, &version)) {
+                    self.mutate(harness, |status| {
+                        status.installed_version = Some(version.clone());
+                    });
                     Err(match homebrew_package(&executable) {
                         Some(_) => format!(
-                            "Homebrew upgrade left the CLI on {version}, older than expected {latest}"
+                            "Homebrew's upgrade finished, but {} is still on {version}, not {latest}",
+                            executable.display()
                         ),
-                        None => {
-                            format!("verification returned {version}, older than expected {latest}")
-                        }
+                        None => format!(
+                            "The update finished, but {} is still on {version}, not {latest}",
+                            executable.display()
+                        ),
                     })
                 } else if let Err(error) = changed {
                     Err(format!("post-update verification failed: {error}"))
@@ -2325,6 +2535,41 @@ impl HarnessUpdateCoordinator {
             .ok_or_else(|| "Muse release manifest names no version".into())
     }
 
+    /// What Claude Code's native updater installs on `channel`.
+    async fn claude_native_release(&self, channel: &str) -> Result<String, String> {
+        let body = self
+            .inner
+            .client
+            .get(format!("{CLAUDE_RELEASES}/{channel}"))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| format!("latest-version check failed: {error}"))?
+            .text()
+            .await
+            .map_err(|error| format!("latest-version response was invalid: {error}"))?;
+        let version = body.trim();
+        version_numbers(version)
+            .map(|_| version.to_owned())
+            .ok_or_else(|| "latest-version response contained no version".into())
+    }
+
+    /// The release Cursor's install script names.
+    async fn cursor_latest(&self) -> Result<String, String> {
+        let script = self
+            .inner
+            .client
+            .get(CURSOR_INSTALL)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| format!("Cursor release check failed: {error}"))?
+            .text()
+            .await
+            .map_err(|error| format!("Cursor release check failed: {error}"))?;
+        parse_cursor_release(&script).ok_or_else(|| "Cursor's installer names no release".into())
+    }
+
     async fn npm_latest(&self, package: &str) -> Result<String, String> {
         self.npm_release(package, "latest").await
     }
@@ -2707,6 +2952,39 @@ async fn cancellable<T>(
     }
 }
 
+/// A row whose last install failed (its error says so) and that still
+/// offers that update: Failed with the reason, or where it was when the
+/// updater ran but nothing moved.
+fn failed_install(status: &HarnessUpdateStatus) -> bool {
+    status
+        .error
+        .as_ref()
+        .is_some_and(|error| error.kind == HarnessUpdateFailureKind::Install)
+        && matches!(
+            status.phase,
+            HarnessUpdatePhase::Failed | HarnessUpdatePhase::Available
+        )
+}
+
+/// What a check leaves of a failed install: its phase and reason, while the
+/// same release is still on offer to the same installed version. A check
+/// finding nothing new mustn't turn "Failed: why" back into a plain
+/// "Available" (every view that opens re-checks a CLI the failed updater
+/// touched). Anything that moved, the install or the release, starts over.
+fn kept_install_failure(
+    prior: &HarnessUpdateStatus,
+    installed: &str,
+    latest: Option<&str>,
+    still_available: bool,
+) -> Option<(HarnessUpdatePhase, HarnessUpdateFailure)> {
+    (failed_install(prior)
+        && still_available
+        && prior.installed_version.as_deref() == Some(installed)
+        && prior.latest_version.as_deref() == latest)
+        .then(|| (prior.phase, prior.error.clone()))
+        .and_then(|(phase, error)| Some((phase, error?)))
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -2924,10 +3202,19 @@ fn homebrew_package(path: &Path) -> Option<HomebrewPackage> {
     if prefix.as_os_str().is_empty() {
         return None;
     }
+    let mut keg = prefix.clone();
+    keg.push(if cask { "Caskroom" } else { "Cellar" });
+    keg.push(token);
+    let receipt = if cask {
+        keg.join(".metadata").join("INSTALL_RECEIPT.json")
+    } else {
+        keg.join(components[index + 2].as_os_str()).join("INSTALL_RECEIPT.json")
+    };
     Some(HomebrewPackage {
         brew: prefix.join("bin").join("brew"),
         cask,
         token: token.to_string(),
+        tap: homebrew_tap(&receipt),
     })
 }
 
@@ -3018,6 +3305,37 @@ fn claude_package_manager_command(path: &Path) -> Option<String> {
     }
 }
 
+/// Claude Code's native release feed (`<feed>/stable`, `<feed>/latest`).
+const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
+/// Cursor's installer, which names the release it installs.
+const CURSOR_INSTALL: &str = "https://cursor.com/install";
+
+/// Claude Code's native install: `…/claude/versions/<version>`, which
+/// `claude update` fills from [`CLAUDE_RELEASES`].
+fn claude_native_install(executable: &Path) -> bool {
+    let real = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    real.parent()
+        .filter(|versions| versions.file_name().is_some_and(|name| name == "versions"))
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "claude")
+}
+
+/// `https://downloads.cursor.com/lab/<release>/…` in Cursor's installer.
+fn parse_cursor_release(script: &str) -> Option<String> {
+    const MARK: &str = "downloads.cursor.com/lab/";
+    script.match_indices(MARK).find_map(|(at, _)| {
+        let rest = &script[at + MARK.len()..];
+        let release = &rest[..rest.find('/')?];
+        (release.len() <= 64
+            && release
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-')))
+        .then(|| release.to_owned())
+        .filter(|release| version_numbers(release).is_some())
+    })
+}
+
 /// Only actual cask paths establish Homebrew ownership. An npm install
 /// under /opt/homebrew/lib/node_modules belongs to npm, not a Claude cask.
 fn claude_cask_channel(path: &Path) -> Option<&'static str> {
@@ -3047,19 +3365,42 @@ fn parse_claude_release_channel(output: &str) -> Option<&'static str> {
     )
 }
 
+/// `hermes update --check`'s verdict. A checkout following a branch says how
+/// far behind it is; one on a release channel (`hermes update
+/// --set-channel`) names the release instead, and may hold where it is.
 fn parse_hermes_update_check(output: &str) -> Result<UpdateCheck, String> {
     for line in output.lines() {
         let line = line.trim_start_matches(|ch: char| !ch.is_ascii_alphanumeric());
-        if line == "Already up to date." {
+        if line == "Already up to date."
+            // A release channel: at its release, or past it.
+            || line.starts_with("No newer release")
+            || line.starts_with("Up to date with the latest release")
+            // Held back: `hermes update` would stay on this build.
+            || line.starts_with("Holding at this build")
+            // `hermes update` would move it back to an older release.
+            || line.starts_with("This checkout is newer than the selected release")
+        {
             return Ok(UpdateCheck::Current);
         }
         if line.starts_with("Update available: ") && line.contains(" behind ")
             || line.starts_with("Update available (behind ") && line.ends_with(").")
+            || line.starts_with("Selected release available")
         {
             return Ok(UpdateCheck::Available);
         }
     }
-    Err("Hermes update check returned no recognizable verdict".into())
+    // Its own words for why it can't tell (`✗ Not a git repository…`).
+    let reason = output
+        .lines()
+        .map(|line| line.trim_start_matches(|ch: char| !ch.is_ascii_alphanumeric()))
+        .rfind(|line| !line.is_empty());
+    Err(match reason {
+        Some(reason) => format!(
+            "Hermes's update check didn't say whether there's an update: {}",
+            first_chars(reason, 200)
+        ),
+        None => "Hermes's update check didn't say whether there's an update".into(),
+    })
 }
 
 /// The version installed: an agent from the ACP registry's is its record's
@@ -3166,14 +3507,37 @@ fn updater_refusals(harness: HarnessId) -> &'static [Refusal] {
     }
 }
 
-/// The updater printed a [`Refusal`]'s needle.
+/// The updater printed a [`Refusal`]'s needle, or sat on a question.
 #[derive(Debug)]
-struct Refused(&'static str);
+struct Refused(String);
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
+}
+
+/// The question an updater's output ends on, when it ends on one: the last
+/// line, unfinished (no newline: it waits on the same line) or a clack-style
+/// choice, that asks yes or no.
+fn pending_question(tail: &[u8]) -> Option<String> {
+    let start = tail.len().saturating_sub(4096);
+    let text = String::from_utf8_lossy(&tail[start..]);
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|line| line.chars().any(char::is_alphanumeric))?;
+    let lower = line.to_ascii_lowercase();
+    let unfinished = !text.ends_with('\n');
+    let asks = [
+        "(y/n)", "[y/n]", "(yes/no)", "[yes/no]", "(y)", "[y]", "y/n?", "press any key",
+        "press enter", "● yes / ○ no", "○ yes / ● no", "› yes", "› no",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    (asks || (unfinished && line.ends_with('?')))
+        .then(|| first_chars(line.trim_start_matches(|c: char| !c.is_alphanumeric()), 160).into_owned())
 }
 
 impl std::error::Error for Refused {}
@@ -3194,10 +3558,19 @@ async fn run_command_output_watched(
         .kill_on_drop(true)
         .env("NO_COLOR", "1")
         .env("CLAUDE_CODE_ENTRYPOINT", "zeron");
-    for (key, value) in env {
-        command.env(*key, *value);
+    for (key, value) in NONINTERACTIVE_ENV.iter().chain(env) {
+        if *key != "PATH" {
+            command.env(*key, *value);
+        }
     }
-    zeron_harness::compose_child_path(&mut command, executable);
+    // A `PATH` entry in `env` goes ahead of the composed PATH rather than
+    // replacing it (pnpm refuses to install unless its global bin is there).
+    let ahead: Vec<PathBuf> = env
+        .iter()
+        .filter(|(key, _)| *key == "PATH")
+        .flat_map(|(_, value)| std::env::split_paths(value).collect::<Vec<_>>())
+        .collect();
+    zeron_harness::compose_child_path_ahead(&mut command, executable, &ahead);
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command
@@ -3210,12 +3583,39 @@ async fn run_command_output_watched(
     let mut stderr = child.stderr.take().expect("updater stderr is piped");
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
+    let out_question: Mutex<Option<(tokio::time::Instant, String)>> = Mutex::new(None);
+    let err_question: Mutex<Option<(tokio::time::Instant, String)>> = Mutex::new(None);
+    let name = executable
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| executable.display().to_string());
+    // Its stdin is closed: a question it prints and then waits on is never
+    // answered. Stopped once it has sat there for [`PROMPT_STALL`].
+    let stalled = async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            for slot in [&out_question, &err_question] {
+                if let Some((since, line)) = lock(slot).clone()
+                    && since.elapsed() >= PROMPT_STALL
+                {
+                    return std::io::Error::other(Refused(format!(
+                        "{name} stopped to ask \u{201c}{line}\u{201d}, and nobody can answer it here"
+                    )));
+                }
+            }
+        }
+    };
     let result = tokio::time::timeout(timeout, async {
-        tokio::try_join!(
-            child.wait(),
-            read_tail_watched(&mut stdout, &mut stdout_bytes, refusals),
-            read_tail_watched(&mut stderr, &mut stderr_bytes, refusals),
-        )
+        tokio::select! {
+            joined = async {
+                tokio::try_join!(
+                    child.wait(),
+                    read_tail_watched(&mut stdout, &mut stdout_bytes, refusals, &out_question),
+                    read_tail_watched(&mut stderr, &mut stderr_bytes, refusals, &err_question),
+                )
+            } => joined,
+            error = stalled => Err(error),
+        }
     })
     .await;
     // Stop descendants before returning and releasing the execution lease,
@@ -3228,7 +3628,7 @@ async fn run_command_output_watched(
             let _ = child.start_kill();
             let _ = child.wait().await;
             return Err(match error {
-                Err(_) => format!("{} timed out", executable.display()),
+                Err(_) => format!("{name} was still running after {}, so it was stopped", spoken(timeout)),
                 Ok(Err(error)) if error.get_ref().is_some_and(|inner| inner.is::<Refused>()) => {
                     tracing::warn!(
                         executable = %executable.display(),
@@ -3262,16 +3662,30 @@ async fn run_command_output_watched(
         );
         // The full output is in the log; the reason is almost always its
         // last line (npm's, brew's and the vendors' updaters all end there).
+        let how = match output.status.code() {
+            Some(code) => format!("failed (exit code {code})"),
+            None => "was stopped by a signal".to_owned(),
+        };
         return Err(format!(
-            "{} exited with {}{}",
-            executable.display(),
-            output.status,
+            "{name} {how}{}",
             failure_summary(detail)
                 .map(|line| format!(": {line}"))
                 .unwrap_or_default()
         ));
     }
     Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+/// `d` as a person says it: "20 seconds", "30 minutes".
+fn spoken(d: Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0..60 => format!("{secs} second{}", if secs == 1 { "" } else { "s" }),
+        _ => {
+            let minutes = secs.div_ceil(60);
+            format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+        }
+    }
 }
 
 /// Updaters can print without bound (npm and Homebrew logs); keep only the
@@ -3284,6 +3698,7 @@ async fn read_tail_watched(
     pipe: &mut (impl tokio::io::AsyncRead + Unpin),
     tail: &mut Vec<u8>,
     refusals: &[Refusal],
+    question: &Mutex<Option<(tokio::time::Instant, String)>>,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt as _;
     let mut chunk = [0_u8; 16 * 1024];
@@ -3293,6 +3708,10 @@ async fn read_tail_watched(
             break;
         }
         tail.extend_from_slice(&chunk[..read]);
+        // Any output moves the clock: a question counts only while the
+        // updater says nothing more after it.
+        *lock(question) =
+            pending_question(tail).map(|line| (tokio::time::Instant::now(), line));
         // Only what's new, plus enough before it for a needle split across reads.
         for refusal in refusals {
             let start = tail.len().saturating_sub(read + refusal.needle.len());
@@ -3300,7 +3719,7 @@ async fn read_tail_watched(
                 .windows(refusal.needle.len())
                 .any(|window| window == refusal.needle.as_bytes())
             {
-                return Err(std::io::Error::other(Refused(refusal.message)));
+                return Err(std::io::Error::other(Refused(refusal.message.to_owned())));
             }
         }
         // Drain in batches so a chatty updater isn't memmoved per chunk.
@@ -3317,11 +3736,24 @@ async fn read_tail_watched(
 /// The last line of `output` that says something (not blank, not a bare
 /// progress or box-drawing line), capped for a one-line status.
 fn failure_summary(output: &str) -> Option<String> {
-    let line = output
-        .lines()
-        .map(str::trim)
-        .rev()
-        .find(|line| line.chars().any(char::is_alphanumeric))?;
+    // Where to read more, not what went wrong.
+    const BOILERPLATE: &[&str] = &[
+        "for help, run",
+        "a complete log of this run can be found in",
+        "run with --verbose",
+        "run `brew",
+        "please report",
+    ];
+    let meaningful = |line: &&str| {
+        line.chars().any(char::is_alphanumeric) && {
+            let lower = line.to_ascii_lowercase();
+            !BOILERPLATE.iter().any(|noise| lower.contains(noise))
+        }
+    };
+    let lines = || output.lines().map(str::trim).rev();
+    let line = lines()
+        .find(meaningful)
+        .or_else(|| lines().find(|line| line.chars().any(char::is_alphanumeric)))?;
     Some(first_chars(line, 300).into_owned())
 }
 
@@ -3421,35 +3853,337 @@ fn is_muse_launcher(path: &Path) -> bool {
         })
 }
 
-/// WinGet's id for OpenCode's package.
-const OPENCODE_WINGET_ID: &str = "SST.opencode";
-
-/// The WinGet package that installed `executable`, when Zeron knows how to
-/// upgrade it: WinGet unpacks portable packages to
-/// `%LOCALAPPDATA%\Microsoft\WinGet\Packages\<id>_<source>\`, and its
-/// `Links\opencode.exe` points there.
-fn winget_package(harness: HarnessId, executable: &Path) -> Option<&'static str> {
-    let id = match harness {
-        HarnessId::Opencode => OPENCODE_WINGET_ID,
-        _ => return None,
-    };
-    let canonical = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
-    [executable, canonical.as_path()]
-        .into_iter()
-        .any(|path| in_winget_package(path, id))
-        .then_some(id)
+/// `path`'s parts, however it's spelled (`\\` or `/`), for reading a
+/// package manager's layout on any platform.
+fn path_parts(path: &Path) -> Vec<String> {
+    path.to_string_lossy()
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
-/// `path` lies inside `…\WinGet\Packages\<id>_<source>\`.
-fn in_winget_package(path: &Path, id: &str) -> bool {
-    let prefix = format!("{}_", id.to_ascii_lowercase());
-    let parts: Vec<String> = path
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
-        .collect();
-    parts.windows(3).any(|window| {
-        window[0] == "winget" && window[1] == "packages" && window[2].starts_with(&prefix)
+/// The WinGet package that installed `executable`: WinGet unpacks a portable
+/// package to `…\WinGet\Packages\<id>_<source>\` (per user, or for the
+/// machine under Program Files), and its `Links\<cli>.exe` points there.
+fn winget_package(executable: &Path) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    [executable, canonical.as_path()].into_iter().find_map(winget_id_in)
+}
+
+/// The package id in a `…/WinGet/Packages/<id>_<source>/…` path.
+fn winget_id_in(path: &Path) -> Option<String> {
+    let parts = path_parts(path);
+    parts.windows(3).find_map(|window| {
+        if !window[0].eq_ignore_ascii_case("winget") || !window[1].eq_ignore_ascii_case("packages") {
+            return None;
+        }
+        let folder = &window[2];
+        let lower = folder.to_ascii_lowercase();
+        // `<id>_Microsoft.Winget.Source_8wekyb3d8bbwe`; another source's
+        // folder is `<id>_<source>` too.
+        let cut = lower
+            .find("_microsoft.winget.source_")
+            .or_else(|| folder.rfind('_'))?;
+        let id = &folder[..cut];
+        let valid = id.contains('.')
+            && id.len() <= 128
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
+        valid.then(|| id.to_owned())
     })
+}
+
+/// WinGet's own words for "there's nothing newer to install" (exit code
+/// `APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE`, `0x8A15002B`).
+fn winget_failure(id: &str, error: String) -> String {
+    if error.contains("-1978335189") || error.contains("2316632107") || error.contains("0x8a15002b") {
+        format!("WinGet has no newer {id} to install yet. It can update once WinGet publishes the release.")
+    } else {
+        error
+    }
+}
+
+/// The version `winget show` reports for `id` (the release WinGet would
+/// install). Its labels are localized; only the English `Version:` line is
+/// read, and otherwise the vendor's feed stands.
+fn parse_winget_show(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let version = line.trim().strip_prefix("Version:")?.trim();
+        version_numbers(version).map(|_| version.to_owned())
+    })
+}
+
+/// A Scoop app: `<scoop>/apps/<app>/<version or current>/…`, reached through
+/// its shim in `<scoop>/shims`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScoopApp {
+    /// Scoop's root (`~/scoop`, `$SCOOP`, or `C:\ProgramData\scoop` for all users).
+    root: PathBuf,
+    app: String,
+    /// The root's own `scoop` command.
+    scoop: PathBuf,
+    /// Installed for all users: only an administrator can update it.
+    global: bool,
+}
+
+impl ScoopApp {
+    fn command(&self) -> String {
+        if self.global {
+            format!("scoop update {} --global", self.app)
+        } else {
+            format!("scoop update {}", self.app)
+        }
+    }
+
+    fn plan(self) -> Result<UpdatePlan, String> {
+        if self.global {
+            return Err(format!(
+                "Scoop installed this copy for all users, and only an administrator can update \
+                 it. In an administrator terminal, run `{}`",
+                self.command()
+            ));
+        }
+        if !self.scoop.is_file() {
+            return Err(format!(
+                "Scoop installed this copy, but Scoop wasn't found in {}. Update it with `{}`",
+                self.root.display(),
+                self.command()
+            ));
+        }
+        Ok(UpdatePlan::Scoop(self))
+    }
+
+    /// The program and arguments that run `scoop update <app>` with this root's Scoop.
+    ///
+    /// Not through `shims\scoop.cmd`: it turns each `"` in its arguments into
+    /// `'`, and a batch file's arguments are always quoted when Zeron runs
+    /// one, so Scoop would be asked for `'update'`. The script the shim runs,
+    /// run as the shim runs it (with `-File`, which takes each argument as is).
+    fn update_command(&self) -> (PathBuf, Vec<String>) {
+        let script = self
+            .root
+            .join("apps")
+            .join("scoop")
+            .join("current")
+            .join("bin")
+            .join("scoop.ps1");
+        let powershell = std::env::var_os("SystemRoot")
+            .map(|root| {
+                Path::new(&root)
+                    .join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe")
+            })
+            .filter(|powershell| powershell.is_file());
+        match powershell {
+            Some(powershell) if script.is_file() => (
+                powershell,
+                vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    script.to_string_lossy().into_owned(),
+                    "update".into(),
+                    self.app.clone(),
+                ],
+            ),
+            _ => (self.scoop.clone(), vec!["update".into(), self.app.clone()]),
+        }
+    }
+
+    /// The version this Scoop would install: its bucket's manifest for the
+    /// app (`scoop update` refreshes buckets first when they're stale).
+    fn latest(&self) -> Result<String, String> {
+        let app_dir = self.root.join("apps").join(&self.app).join("current");
+        // Scoop 0.6 writes `scoop-install.json`; older Scoop wrote
+        // `install.json`, which Scoop still reads when the other is missing.
+        let receipt: serde_json::Value = ["scoop-install.json", "install.json"]
+            .iter()
+            .find_map(|name| std::fs::read_to_string(app_dir.join(name)).ok())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .ok_or_else(|| format!("Scoop's record of {} couldn't be read", self.app))?;
+        let bucket = receipt
+            .get("bucket")
+            .and_then(serde_json::Value::as_str)
+            .filter(|bucket| safe_component(bucket))
+            .ok_or_else(|| format!("Scoop doesn't say which bucket {} came from", self.app))?;
+        let manifest = self
+            .root
+            .join("buckets")
+            .join(bucket)
+            .join("bucket")
+            .join(format!("{}.json", self.app));
+        let manifest: serde_json::Value = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .ok_or_else(|| format!("Scoop's {bucket} bucket has no manifest for {}", self.app))?;
+        manifest
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .filter(|version| version_numbers(version).is_some())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Scoop's manifest for {} names no version", self.app))
+    }
+}
+
+/// The Scoop app `executable` belongs to, through its shim when that's what
+/// PATH found (`<scoop>/shims/<cli>.exe` beside a `<cli>.shim` naming the
+/// real path).
+fn scoop_app(executable: &Path) -> Option<ScoopApp> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let shim = executable.with_extension("shim");
+    let target = std::fs::read_to_string(&shim)
+        .ok()
+        .and_then(|text| scoop_shim_target(&text));
+    let canonical = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    [target.as_deref(), Some(executable), Some(canonical.as_path())]
+        .into_iter()
+        .flatten()
+        .find_map(scoop_app_in)
+}
+
+/// `path = "C:\Users\me\scoop\apps\x\current\x.exe"` in a Scoop shim.
+fn scoop_shim_target(shim: &str) -> Option<PathBuf> {
+    shim.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "path").then(|| PathBuf::from(value.trim().trim_matches('"')))
+    })
+}
+
+/// `<root>/apps/<app>/<version>/…` where `<root>` is a Scoop install.
+fn scoop_app_in(path: &Path) -> Option<ScoopApp> {
+    let parts = path_parts(path);
+    let at = parts
+        .windows(3)
+        .position(|w| w[0].to_ascii_lowercase().contains("scoop") && w[1].eq_ignore_ascii_case("apps"))?;
+    let app = parts.get(at + 2)?.clone();
+    // Its version folder, then something inside it.
+    parts.get(at + 4)?;
+    if !homebrew_token_ok(&app) || app.eq_ignore_ascii_case("scoop") {
+        return None;
+    }
+    // The root as spelled: the ancestor that is that folder.
+    let root = path
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy() == parts[at])
+                && path.starts_with(ancestor.join("apps").join(&app))
+        })?
+        .to_path_buf();
+    let global = parts
+        .iter()
+        .take(at + 1)
+        .any(|part| part.eq_ignore_ascii_case("programdata"));
+    let shims = root.join("shims");
+    let scoop = ["scoop.cmd", "scoop.ps1", "scoop"]
+        .iter()
+        .map(|name| shims.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| shims.join("scoop.cmd"));
+    Some(ScoopApp { root, app, scoop, global })
+}
+
+/// The Chocolatey package that installed `executable`: `…\chocolatey\lib\<pkg>\…`,
+/// or for a shim in `…\chocolatey\bin`, the package Zeron knows the CLI by.
+fn chocolatey_package(harness: HarnessId, executable: &Path) -> Option<String> {
+    let canonical = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    for path in [executable, canonical.as_path()] {
+        let parts = path_parts(path);
+        let Some(at) = parts.iter().position(|part| part.eq_ignore_ascii_case("chocolatey")) else {
+            continue;
+        };
+        match parts.get(at + 1).map(|part| part.to_ascii_lowercase()).as_deref() {
+            Some("lib") => {
+                if let Some(package) = parts.get(at + 2).filter(|package| homebrew_token_ok(package)) {
+                    return Some(package.clone());
+                }
+            }
+            Some("bin") => {
+                return Some(
+                    match harness {
+                        HarnessId::ClaudeCode => "claude-code",
+                        HarnessId::Opencode => "opencode",
+                        HarnessId::Codex => "codex",
+                        _ => return Some("<package>".into()),
+                    }
+                    .into(),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Only root can update a CLI the system's package manager installed.
+const SYSTEM_PACKAGE: &str = "The system's package manager installed this copy, and only an \
+                              administrator can update it. Update it with that package manager \
+                              (apt, dnf, pacman, nix, snap)";
+
+/// Where a Linux distribution's packages (and nix's and snap's) put CLIs:
+/// root's to change, not the user's.
+fn system_package_path(executable: &Path) -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let canonical = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    ["/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/nix/store", "/snap", "/var/lib/flatpak"]
+        .iter()
+        .any(|root| canonical.starts_with(root))
+}
+
+/// The exact command that updates a system-packaged CLI, asked of the
+/// package database that owns it.
+async fn system_package_command(executable: &Path) -> Option<String> {
+    let canonical = std::fs::canonicalize(executable).ok()?;
+    let path = canonical.to_str()?;
+    if canonical.starts_with("/snap") {
+        let name = canonical.iter().nth(2)?.to_str()?;
+        return Some(format!("sudo snap refresh {name}"));
+    }
+    if canonical.starts_with("/nix/store") {
+        return Some("nix profile upgrade --all (or update the NixOS or home-manager configuration that installs it)".into());
+    }
+    let ask = |program: &'static str, args: Vec<&'static str>| async move {
+        let program = [Path::new("/usr/bin").join(program), Path::new("/bin").join(program)]
+            .into_iter()
+            .find(|candidate| candidate.is_file())?;
+        let mut args: Vec<&str> = args;
+        args.push(path);
+        run_command_output(&program, &args, Duration::from_secs(5)).await.ok()
+    };
+    if let Some(output) = ask("dpkg-query", vec!["-S"]).await {
+        // `claude-code: /usr/bin/claude`
+        let package = output.lines().next()?.split(':').next()?.trim().to_owned();
+        if homebrew_token_ok(&package) {
+            return Some(format!("sudo apt install --only-upgrade {package}"));
+        }
+    }
+    if let Some(output) = ask("rpm", vec!["-qf", "--qf", "%{NAME}\\n"]).await {
+        let package = output.lines().next()?.trim().to_owned();
+        if homebrew_token_ok(&package) {
+            return Some(format!("sudo dnf upgrade {package}"));
+        }
+    }
+    if let Some(output) = ask("pacman", vec!["-Qqo"]).await {
+        let package = output.lines().next()?.trim().to_owned();
+        if homebrew_token_ok(&package) {
+            return Some(format!("sudo pacman -S {package}"));
+        }
+    }
+    None
 }
 
 /// The arguments that upgrade one WinGet package with nobody there to answer.
@@ -3458,6 +4192,7 @@ fn winget_upgrade_args(id: &str) -> Vec<&str> {
         "upgrade",
         "--id",
         id,
+        "--exact",
         "--silent",
         "--accept-package-agreements",
         "--accept-source-agreements",
@@ -3619,7 +4354,7 @@ mod tests {
                 Duration::from_millis(250),
             )
             .await;
-            assert!(result.unwrap_err().contains("timed out"));
+            assert!(result.unwrap_err().contains("was still running after"));
             let pid: i32 = std::fs::read_to_string(&ready)
                 .unwrap()
                 .trim()
@@ -4825,14 +5560,29 @@ esac
             HarnessId::ClaudeCode,
             std::path::Path::new("/home/test/.local/bin/claude")
         ));
-        let npm =
-            std::path::Path::new("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js");
+        // A global npm install, with that prefix's own npm (an update needs
+        // it, and it shouldn't matter whether this machine has npm on PATH).
+        let prefix = tempfile::tempdir().unwrap();
+        let (modules, npm_bin) = if cfg!(windows) {
+            (prefix.path().join("node_modules"), prefix.path().join("npm.cmd"))
+        } else {
+            (prefix.path().join("lib/node_modules"), prefix.path().join("bin/npm"))
+        };
+        let package = modules.join("@anthropic-ai/claude-code");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(npm_bin.parent().unwrap()).unwrap();
+        std::fs::write(&npm_bin, "").unwrap();
+        let cli = package.join("cli.js");
+        std::fs::write(&cli, "").unwrap();
+        let npm = cli.as_path();
         assert!(super::can_apply_update(HarnessId::ClaudeCode, npm));
         assert_eq!(super::claude_cask_channel(npm), None);
         assert_eq!(super::claude_package_manager_command(npm), None);
+        // Outside the system's own folders: on Linux, /usr/bin is left to the
+        // package manager (a_system_package_is_left_to_the_system_package_manager).
         assert!(super::can_apply_update(
             HarnessId::Pi,
-            std::path::Path::new("/usr/bin/pi")
+            std::path::Path::new("/opt/agents/bin/pi")
         ));
     }
 
@@ -5361,8 +6111,9 @@ esac
         coordinator.shutdown().await;
     }
 
-    /// No release to compare with, and no verdict of its own (Cursor): a
-    /// version that moved or an executable that was rewritten is the only proof.
+    /// No release to compare with, and no verdict of its own (a Claude whose
+    /// channel its `doctor` won't say): a version that moved or an executable
+    /// that was rewritten is the only proof.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_update_with_no_target_is_updated_only_when_the_install_moved() {
@@ -5375,7 +6126,7 @@ esac
             ),
         ] {
             let temp = tempfile::tempdir().unwrap();
-            let executable = temp.path().join("cursor-agent");
+            let executable = temp.path().join("claude");
             std::fs::write(
                 &executable,
                 format!(
@@ -5385,15 +6136,15 @@ esac
             .unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
             let registry = Arc::new(HarnessRegistry::new());
-            registry.register(Arc::new(ExecutableHarness(executable, HarnessId::Cursor)));
+            registry.register(Arc::new(ExecutableHarness(executable, HarnessId::ClaudeCode)));
             let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
-            coordinator.check_one(HarnessId::Cursor).await.unwrap();
+            coordinator.check_one(HarnessId::ClaudeCode).await.unwrap();
             assert_eq!(
-                coordinator.status(HarnessId::Cursor).phase,
+                coordinator.status(HarnessId::ClaudeCode).phase,
                 HarnessUpdatePhase::ManualActionRequired
             );
-            let applied = coordinator.apply(HarnessId::Cursor).await;
-            let status = coordinator.status(HarnessId::Cursor);
+            let applied = coordinator.apply(HarnessId::ClaudeCode).await;
+            let status = coordinator.status(HarnessId::ClaudeCode);
             if moved {
                 assert_eq!(applied.unwrap(), "2026.2");
                 assert_eq!(status.phase, HarnessUpdatePhase::Updated);
@@ -5562,6 +6313,7 @@ esac
                 brew: root.join("bin/brew"),
                 cask: true,
                 token: "codex".into(),
+                tap: None,
             }),
             HarnessId::Codex
         ));
@@ -5586,11 +6338,548 @@ esac
         );
         assert!(!super::can_apply_update(HarnessId::ClaudeCode, path));
     }
+    // ---- Updating through whatever owns the install ----
+
+    /// A Grok-shaped CLI whose updater fails the way npm's does (after
+    /// touching the install), for what a check does to the failure after.
+    #[cfg(unix)]
+    fn failing_cli_fixture() -> (tempfile::TempDir, super::HarnessUpdateCoordinator, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("bin")).unwrap();
+        let executable = temp.path().join("bin").join("agent");
+        std::fs::write(temp.path().join("version"), "1.0.0\n").unwrap();
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+root="$(dirname "$0")/.."
+case "$1:$2" in
+  version:) cat "$root/version" ;;
+  update:--check) printf '2.0.0\n' ;;
+  update:)
+    # Rewrites its own launcher, then fails, as a half-done npm install does.
+    printf '\n# touched\n' >> "$0"
+    echo "npm error code EACCES" >&2
+    echo "npm error syscall rename" >&2
+    exit 1 ;;
+  *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(executable.clone(), HarnessId::Grok)));
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+        (temp, coordinator, executable)
+    }
+
+    /// The reason an update failed stays on its row. Every view that opens
+    /// (`WatchHarnessUpdates`) re-checks a CLI whose binary changed, and the
+    /// failed updater had changed it: that check used to put the row back to
+    /// a bare "Available" within a second.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_install_keeps_its_reason_through_the_checks_a_view_triggers() {
+        let (_temp, coordinator, _) = failing_cli_fixture();
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        assert_eq!(coordinator.status(HarnessId::Grok).phase, HarnessUpdatePhase::Available);
+        let error = coordinator.apply(HarnessId::Grok).await.unwrap_err();
+        assert!(error.contains("npm error syscall rename"), "{error}");
+        let failed = coordinator.status(HarnessId::Grok);
+        assert_eq!(failed.phase, HarnessUpdatePhase::Failed);
+
+        // What a view opening does, then an explicit check.
+        coordinator.recheck_changed_binaries().await;
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let after = coordinator.status(HarnessId::Grok);
+        assert_eq!(after.phase, HarnessUpdatePhase::Failed);
+        assert_eq!(after.error.as_ref().map(|e| &e.message), failed.error.as_ref().map(|e| &e.message));
+        assert!(after.can_apply, "Retry is still offered");
+        coordinator.shutdown().await;
+    }
+
+    /// Once the CLI did move (updated by hand, or by its own updater), the
+    /// old failure is gone.
+    #[test]
+    fn a_failure_is_kept_only_while_nothing_moved() {
+        let mut prior = super::HarnessUpdateCoordinator::new(
+            tempfile::tempdir().unwrap().path(),
+            Arc::new(HarnessRegistry::new()),
+        )
+        .status(HarnessId::Grok);
+        prior.phase = HarnessUpdatePhase::Failed;
+        prior.installed_version = Some("1.0.0".into());
+        prior.latest_version = Some("2.0.0".into());
+        prior.error = Some(zeron_proto::HarnessUpdateFailure {
+            message: "npm error".into(),
+            retryable: true,
+            kind: zeron_proto::HarnessUpdateFailureKind::Install,
+        });
+        assert!(super::kept_install_failure(&prior, "1.0.0", Some("2.0.0"), true).is_some());
+        assert!(super::kept_install_failure(&prior, "2.0.0", Some("2.0.0"), false).is_none());
+        assert!(super::kept_install_failure(&prior, "1.0.0", Some("2.1.0"), true).is_none());
+        assert!(super::kept_install_failure(&prior, "1.5.0", Some("2.0.0"), true).is_none());
+        prior.error.as_mut().unwrap().kind = zeron_proto::HarnessUpdateFailureKind::Check;
+        assert!(super::kept_install_failure(&prior, "1.0.0", Some("2.0.0"), true).is_none());
+    }
+
+    /// A device asking another to update waits at least as long as the
+    /// updater there may run.
+    #[test]
+    fn a_remote_update_is_waited_on_as_long_as_the_updater_runs() {
+        assert!(super::APPLY_REPLY_DEADLINE > super::UPDATE_TIMEOUT);
+    }
+
+    /// Hermes on a release channel says so in its own words.
+    #[test]
+    fn hermes_release_channel_verdicts_are_understood() {
+        use super::{UpdateCheck, parse_hermes_update_check as parse};
+        let current = [
+            "→ Update channel: stable\n✓ No newer release: v2026.11.1.",
+            "→ Update channel: stable\n✓ Up to date with the latest release (v2026.11.1).",
+            "→ Update channel: stable\n→ Holding at this build: v2026.11.1 predates the gateway runtime your sessions use.",
+            "→ Update channel: stable\n→ This checkout is newer than the selected release: v2026.10.2.\n  `hermes update` moves it back",
+            "⚕ Already up to date.",
+        ];
+        for output in current {
+            assert!(matches!(parse(output), Ok(UpdateCheck::Current)), "{output}");
+        }
+        assert!(matches!(
+            parse("→ Update channel: stable\n→ Selected release available: v2026.11.2\n  Run `hermes update` to install it."),
+            Ok(UpdateCheck::Available)
+        ));
+        assert!(matches!(parse("⚕ Update available: 3 commits behind origin/main."), Ok(UpdateCheck::Available)));
+        let Err(error) = parse("✗ Not a git repository — cannot check for updates.") else { panic!() };
+        assert!(error.contains("Not a git repository"), "{error}");
+    }
+
+    /// An updater that asks something nobody can answer is stopped soon,
+    /// with its question as the reason, not left to its 30 minutes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_updater_sitting_on_a_question_is_stopped_with_it() {
+        let started = std::time::Instant::now();
+        let error = super::run_command_output(
+            std::path::Path::new("/bin/sh"),
+            &["-c", "echo 'Removing old version'; printf 'Proceed? (y/N) '; sleep 60"],
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(error.contains("Proceed? (y/N)") && error.contains("nobody can answer"), "{error}");
+        // Output that only looks like a question, then more: not stopped.
+        let output = super::run_command_output(
+            std::path::Path::new("/bin/sh"),
+            &["-c", "printf 'Continue? '; sleep 1; echo; echo done"],
+            Duration::from_secs(20),
+        )
+        .await
+        .unwrap();
+        assert!(output.ends_with("done"), "{output}");
+    }
+
+    /// pnpm and bun find their global install through variables a Finder
+    /// launch doesn't have; the update hands them over.
+    #[cfg(unix)]
+    #[test]
+    fn pnpm_and_bun_are_told_where_their_global_install_is() {
+        use super::ownership::{PackageOwner, package_update};
+        let home = tempfile::tempdir().unwrap();
+        let pnpm_home = home.path().join("Library/pnpm");
+        std::fs::create_dir_all(&pnpm_home).unwrap();
+        std::fs::write(pnpm_home.join("pnpm"), "").unwrap();
+        std::fs::write(pnpm_home.join("claude"), "").unwrap();
+        let update = package_update(
+            &PackageOwner::Pnpm,
+            &pnpm_home.join("claude"),
+            "@anthropic-ai/claude-code",
+            "latest",
+            None,
+        )
+        .unwrap();
+        let env = |key: &str| update.env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert_eq!(
+            env("PNPM_HOME").map(PathBuf::from),
+            Some(std::fs::canonicalize(&pnpm_home).unwrap())
+        );
+        assert_eq!(env("npm_config_confirm_modules_purge").as_deref(), Some("false"));
+        // pnpm refuses unless its global bin is on PATH, too.
+        assert_eq!(env("PATH"), env("PNPM_HOME"));
+
+        let bun_bin = home.path().join("tools/bun/bin");
+        std::fs::create_dir_all(&bun_bin).unwrap();
+        std::fs::write(bun_bin.join("bun"), "").unwrap();
+        let update = package_update(
+            &PackageOwner::Bun,
+            &bun_bin.join("claude"),
+            "@anthropic-ai/claude-code",
+            "latest",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            update.env,
+            [("BUN_INSTALL".to_string(), home.path().join("tools/bun").to_string_lossy().into_owned())]
+        );
+    }
+
+    /// A failure's line is what went wrong, not where to read more.
+    #[test]
+    fn a_failure_says_what_went_wrong_not_where_to_read_more() {
+        assert_eq!(
+            super::failure_summary(
+                "ERROR  The configured global bin directory \"/x\" is not in PATH\nFor help, run: pnpm help add\n"
+            )
+            .as_deref(),
+            Some("ERROR  The configured global bin directory \"/x\" is not in PATH")
+        );
+        assert_eq!(
+            super::failure_summary(
+                "npm error code EACCES\nnpm error path /usr/lib/node_modules\nnpm error A complete log of this run can be found in: /h/.npm/_logs/x.log\n"
+            )
+            .as_deref(),
+            Some("npm error path /usr/lib/node_modules")
+        );
+        assert_eq!(super::failure_summary("For help, run: x").as_deref(), Some("For help, run: x"));
+    }
+
+    /// An updater's PATH entry goes ahead of the child's PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_owners_path_entry_goes_first() {
+        let output = super::run_command_output_env(
+            std::path::Path::new("/bin/sh"),
+            &["-c", "echo \"$PATH\""],
+            Duration::from_secs(10),
+            &[("PATH", "/owner/bin")],
+        )
+        .await
+        .unwrap();
+        assert!(output.starts_with("/owner/bin:"), "{output}");
+    }
+
+    /// Scoop's apps are known by their folder, and what's on offer is what
+    /// that Scoop's bucket has.
+    #[test]
+    fn a_scoop_app_is_known_by_its_folder_and_offers_its_buckets_release() {
+        let root = tempfile::tempdir().unwrap();
+        let scoop = root.path().join("scoop");
+        let current = scoop.join("apps/claude-code/current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(scoop.join("shims")).unwrap();
+        std::fs::create_dir_all(scoop.join("buckets/extras/bucket")).unwrap();
+        std::fs::write(scoop.join("shims/scoop.cmd"), "").unwrap();
+        std::fs::write(current.join("install.json"), r#"{"bucket":"extras","architecture":"64bit"}"#).unwrap();
+        std::fs::write(scoop.join("buckets/extras/bucket/claude-code.json"), r#"{"version":"2.1.320"}"#).unwrap();
+        let app = super::scoop_app_in(&current.join("claude.exe")).unwrap();
+        assert_eq!(app.app, "claude-code");
+        assert_eq!(app.root, scoop);
+        assert_eq!(app.scoop, scoop.join("shims/scoop.cmd"));
+        assert!(!app.global);
+        assert_eq!(app.latest().as_deref(), Ok("2.1.320"));
+        assert_eq!(app.command(), "scoop update claude-code");
+        assert!(matches!(app.clone().plan(), Ok(super::UpdatePlan::Scoop(_))));
+        // A shim names the app's real path.
+        assert_eq!(
+            super::scoop_shim_target("path = \"C:\\Users\\me\\scoop\\apps\\x\\current\\x.exe\"\n"),
+            Some(PathBuf::from("C:\\Users\\me\\scoop\\apps\\x\\current\\x.exe"))
+        );
+        // For all users: an administrator's to update, with the command.
+        let global = super::scoop_app_in(std::path::Path::new(
+            "C:/ProgramData/scoop/apps/opencode/1.4.2/opencode.exe",
+        ))
+        .unwrap();
+        assert!(global.global);
+        let Err(why) = global.plan() else { panic!() };
+        assert!(why.contains("scoop update opencode --global"), "{why}");
+        assert!(super::scoop_app_in(std::path::Path::new("/home/u/.local/bin/opencode")).is_none());
+    }
+
+    /// Scoop 0.6 names its receipt `scoop-install.json` (older Scoop wrote
+    /// `install.json`, which it still reads): either says the bucket.
+    #[test]
+    fn a_scoop_receipt_is_read_under_either_name() {
+        let root = tempfile::tempdir().unwrap();
+        let scoop = root.path().join("scoop");
+        let current = scoop.join("apps/opencode/current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(scoop.join("shims")).unwrap();
+        std::fs::create_dir_all(scoop.join("buckets/main/bucket")).unwrap();
+        std::fs::write(scoop.join("shims/scoop.cmd"), "").unwrap();
+        std::fs::write(scoop.join("buckets/main/bucket/opencode.json"), r#"{"version":"1.19.5"}"#).unwrap();
+        // What Scoop 0.6.0 writes.
+        std::fs::write(current.join("scoop-install.json"), r#"{"bucket":"main","architecture":"64bit"}"#).unwrap();
+        let app = super::scoop_app_in(&current.join("opencode.exe")).unwrap();
+        assert_eq!(app.latest().as_deref(), Ok("1.19.5"));
+        // The newer name wins over a stale older receipt beside it.
+        std::fs::write(current.join("install.json"), r#"{"bucket":"gone","architecture":"64bit"}"#).unwrap();
+        assert_eq!(app.latest().as_deref(), Ok("1.19.5"));
+        std::fs::remove_file(current.join("scoop-install.json")).unwrap();
+        std::fs::write(current.join("install.json"), r#"{"bucket":"main","architecture":"64bit"}"#).unwrap();
+        assert_eq!(app.latest().as_deref(), Ok("1.19.5"));
+        // Installed from a pinned manifest (`scoop install opencode@1.19.0`):
+        // no bucket, and `scoop update` keeps it where it is.
+        std::fs::write(current.join("scoop-install.json"), r#"{"url":"C:\\scoop\\workspace\\opencode.json","architecture":"64bit"}"#).unwrap();
+        assert!(app.latest().unwrap_err().contains("which bucket"));
+    }
+
+    /// Scoop's `scoop.cmd` shim turns every `"` in its arguments into `'`,
+    /// and a batch file's arguments are always quoted when Zeron runs one:
+    /// through the shim, Scoop is asked for `'update'`, which it doesn't know.
+    /// The root's own `scoop.ps1` is run instead, as the shim itself does.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn scoop_is_asked_to_update_the_app_not_a_quoted_word() {
+        let root = tempfile::tempdir().unwrap();
+        let scoop = root.path().join("scoop");
+        let bin = scoop.join("apps/scoop/current/bin");
+        let current = scoop.join("apps/opencode/current");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(scoop.join("shims")).unwrap();
+        let script = bin.join("scoop.ps1");
+        // Says what it was asked, and which root it was told.
+        std::fs::write(&script, "Write-Output (($args -join ',') + ' in ' + $env:SCOOP)\r\n").unwrap();
+        // Scoop 0.6.0's shim, as `scoop` writes it.
+        std::fs::write(
+            scoop.join("shims/scoop.cmd"),
+            format!(
+                "@rem {script}\r\n@echo off\r\nsetlocal enabledelayedexpansion\r\nset args=%*\r\n:: replace problem characters in arguments\r\nset args=%args:\"='%\r\nset args=%args:(=`(%\r\nset args=%args:)=`)%\r\nset invalid=\"='\r\nif !args! == !invalid! ( set args= )\r\npowershell -noprofile -ex unrestricted -file \"{script}\"  %args%\r\n",
+                script = script.display()
+            ),
+        )
+        .unwrap();
+        let app = super::scoop_app_in(&current.join("opencode.exe")).unwrap();
+        let (program, args) = app.update_command();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let root_text = scoop.to_string_lossy().into_owned();
+        let output = super::run_command_output_env(
+            &program,
+            &args,
+            Duration::from_secs(60),
+            &[("SCOOP", root_text.as_str())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, format!("update,opencode in {}", scoop.display()));
+    }
+
+    /// Chocolatey's CLIs need an administrator, whichever agent: the exact
+    /// command, and never the CLI's own updater (which asks, or writes a
+    /// second copy).
+    #[test]
+    fn chocolatey_installs_say_the_exact_command_for_any_agent() {
+        let path = std::path::Path::new("C:/ProgramData/chocolatey/lib/opencode/tools/opencode.exe");
+        assert!(!super::can_apply_update(HarnessId::Opencode, path));
+        let manual = super::manual_update_command(HarnessId::Opencode, path, false).unwrap();
+        assert_eq!(manual, "choco upgrade opencode -y");
+        let Err(why) = super::update_plan(HarnessId::Opencode, path, super::PlanContext::default()) else {
+            panic!()
+        };
+        assert!(why.contains("administrator") && why.contains("choco upgrade opencode -y"), "{why}");
+    }
+
+    /// A distribution's package is root's: never its CLI's own updater.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_system_package_is_left_to_the_system_package_manager() {
+        for harness in [HarnessId::Opencode, HarnessId::Pi, HarnessId::Grok, HarnessId::Hermes] {
+            let path = std::path::Path::new("/usr/bin/agent-cli");
+            assert!(!super::can_apply_update(harness, path), "{harness:?}");
+        }
+    }
+
+    /// Distributions often strip a CLI's own updater. That says nothing about
+    /// the package, so the row still says who updates it. `git` stands in:
+    /// it answers `version` like Grok, and has no `update`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_system_package_whose_own_check_fails_still_says_who_updates_it() {
+        let git = std::path::PathBuf::from("/usr/bin/git");
+        if !git.is_file() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(git, HarnessId::Grok)));
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let status = coordinator.status(HarnessId::Grok);
+        assert_eq!(status.phase, HarnessUpdatePhase::ManualActionRequired);
+        assert_eq!(status.error, None);
+        assert!(!status.can_apply);
+        assert!(status.manual_command.is_some());
+    }
+
+    /// A tap's formula is upgraded by its full name, and only Homebrew's own
+    /// are looked up on formulae.brew.sh.
+    #[cfg(unix)]
+    #[test]
+    fn a_taps_formula_goes_by_its_full_name() {
+        let prefix = tempfile::tempdir().unwrap();
+        let keg = prefix.path().join("Cellar/opencode/1.4.2");
+        std::fs::create_dir_all(keg.join("bin")).unwrap();
+        std::fs::create_dir_all(prefix.path().join("bin")).unwrap();
+        std::fs::write(keg.join("bin/opencode"), "").unwrap();
+        std::fs::write(keg.join("INSTALL_RECEIPT.json"), r#"{"source":{"tap":"sst/tap"}}"#).unwrap();
+        let package = super::homebrew_package(&keg.join("bin/opencode")).unwrap();
+        assert_eq!(package.tap.as_deref(), Some("sst/tap"));
+        assert_eq!(package.upgrade_args(), ["upgrade", "--formula", "sst/tap/opencode"]);
+        assert_eq!(package.upgrade_command(), "brew upgrade --formula sst/tap/opencode");
+        std::fs::write(keg.join("INSTALL_RECEIPT.json"), r#"{"source":{"tap":"homebrew/core"}}"#).unwrap();
+        assert_eq!(super::homebrew_package(&keg.join("bin/opencode")).unwrap().tap, None);
+    }
+
+    /// A brew that doesn't own the prefix it sits in doesn't get to upgrade it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn homebrew_proves_it_owns_the_prefix_before_it_is_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+        let prefix = tempfile::tempdir().unwrap();
+        let keg = prefix.path().join("Cellar/grok/1.0.0/bin");
+        std::fs::create_dir_all(&keg).unwrap();
+        std::fs::create_dir_all(prefix.path().join("bin")).unwrap();
+        let grok = keg.join("grok");
+        std::fs::write(&grok, "#!/bin/sh\necho 1.0.0\n").unwrap();
+        std::fs::set_permissions(&grok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let brew = prefix.path().join("bin/brew");
+        std::fs::write(&brew, "#!/bin/sh\ncase \"$1\" in --prefix) echo /somewhere/else ;; *) exit 1 ;; esac\n").unwrap();
+        std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(grok, HarnessId::Grok)));
+        let coordinator = super::HarnessUpdateCoordinator::new(prefix.path(), registry);
+        let error = coordinator.check_one(HarnessId::Grok).await.unwrap_err();
+        assert!(error.contains("manages /somewhere/else"), "{error}");
+        coordinator.shutdown().await;
+    }
+
+    /// Claude's native install is offered what its own feed has; Cursor's
+    /// release is read off its installer.
+    #[cfg(unix)]
+    #[test]
+    fn native_installs_follow_their_own_release_feeds() {
+        let home = tempfile::tempdir().unwrap();
+        let versions = home.path().join(".local/share/claude/versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        std::fs::write(versions.join("2.1.318"), "").unwrap();
+        std::os::unix::fs::symlink(versions.join("2.1.318"), home.path().join("claude")).unwrap();
+        assert!(super::claude_native_install(&home.path().join("claude")));
+        assert!(!super::claude_native_install(std::path::Path::new("/opt/homebrew/bin/node")));
+        let script = "DOWNLOAD_URL=\"https://downloads.cursor.com/lab/2026.11.05-86047df/${OS}/${ARCH}/agent-cli-package.tar.gz\"";
+        assert_eq!(super::parse_cursor_release(script).as_deref(), Some("2026.11.05-86047df"));
+        assert!(version_is_newer("2026.11.05-86047df", "2026.08.11-e8db854"));
+        assert!(!version_is_newer("2026.11.05-86047df", "2026.11.05-86047df"));
+        assert!(matches!(provider(HarnessId::Cursor).latest, LatestSource::Cursor));
+    }
+
+    /// A harness whose CLI is wherever a file says, as PATH resolution finds
+    /// a second copy that turns up ahead of the first.
+    #[cfg(unix)]
+    struct MovingHarness(PathBuf);
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl Harness for MovingHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Grok
+        }
+        fn display_name(&self) -> &str {
+            "Fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        fn executable_path(&self) -> Option<PathBuf> {
+            std::fs::read_to_string(&self.0).ok().map(|path| PathBuf::from(path.trim()))
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(Vec::new())
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            _controls: RunControls,
+        ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError>
+        {
+            Ok(futures::stream::empty().boxed())
+        }
+    }
+
+    /// An updater that writes a new copy elsewhere, which Zeron then finds
+    /// first, didn't update the copy that was asked about: not "Updated".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_the_copy_that_was_updated_counts_as_updated() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let which = temp.path().join("which");
+        for dir in ["a", "b"] {
+            std::fs::create_dir_all(temp.path().join(dir)).unwrap();
+        }
+        let first = temp.path().join("a/agent");
+        let second = temp.path().join("b/agent");
+        std::fs::write(
+            &first,
+            format!(
+                "#!/bin/sh\ncase \"$1:$2\" in\n  version:) echo 1.0.0 ;;\n  update:--check) echo 2.0.0 ;;\n  update:) printf '#!/bin/sh\\necho 2.0.0\\n' > '{second}'; chmod +x '{second}'; echo '{second}' > '{which}' ;;\nesac\n",
+                second = second.display(),
+                which = which.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&which, first.display().to_string()).unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(MovingHarness(which)));
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let error = coordinator.apply(HarnessId::Grok).await.unwrap_err();
+        assert!(error.contains("now finds the CLI at"), "{error}");
+        assert_ne!(coordinator.status(HarnessId::Grok).phase, HarnessUpdatePhase::Updated);
+        coordinator.shutdown().await;
+    }
+
+    /// Windows: npm's `.cmd` shim is all PATH finds; its target says it's
+    /// that prefix's npm package.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_npm_shim_belongs_to_its_prefixs_npm() {
+        let appdata = tempfile::tempdir().unwrap();
+        let prefix = appdata.path().join("npm");
+        let package = prefix.join(r"node_modules\@openai\codex\bin");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("codex.js"), "").unwrap();
+        std::fs::write(
+            prefix.join("codex.cmd"),
+            "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
+        )
+        .unwrap();
+        let owner = super::ownership::package_owner(&prefix.join("codex.cmd"), "@openai/codex");
+        let Some(super::ownership::PackageOwner::Npm { prefix: found }) = owner else {
+            panic!("{owner:?}")
+        };
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(&prefix).unwrap()
+        );
+        assert!(!found.to_string_lossy().starts_with(r"\\?\"), "{}", found.display());
+    }
+
 }
 
 #[cfg(test)]
 mod winget_tests {
     use super::*;
+
+    const OPENCODE_WINGET_ID: &str = "SST.opencode";
 
     // (Windows paths: only Windows reads them as paths.)
     #[cfg(windows)]
@@ -5599,28 +6888,43 @@ mod winget_tests {
     #[cfg(windows)]
     #[test]
     fn a_winget_package_is_known_by_its_folder() {
-        assert!(in_winget_package(Path::new(PACKAGE), OPENCODE_WINGET_ID));
-        assert!(in_winget_package(
-            Path::new(&PACKAGE.to_ascii_uppercase()),
-            OPENCODE_WINGET_ID
-        ));
+        assert_eq!(winget_package(Path::new(PACKAGE)).as_deref(), Some(OPENCODE_WINGET_ID));
+    }
+
+    /// Any WinGet package, not only OpenCode's, read off its folder name
+    /// (`<id>_<source>`), however the path is spelled.
+    #[test]
+    fn a_winget_package_id_is_read_off_its_folder() {
+        let id = |path: &str| winget_id_in(Path::new(path));
+        assert_eq!(
+            id("C:/Users/me/AppData/Local/Microsoft/WinGet/Packages/SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe/opencode.exe").as_deref(),
+            Some("SST.opencode")
+        );
+        assert_eq!(
+            id(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe").as_deref(),
+            Some("Anthropic.ClaudeCode")
+        );
+        assert_eq!(
+            id(r"C:\PROGRAM FILES\WINGET\PACKAGES\OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe\codex.exe").as_deref(),
+            Some("OpenAI.Codex")
+        );
         for other in [
             r"C:\Users\me\.opencode\bin\opencode.exe",
             r"C:\Users\me\scoop\apps\opencode\current\opencode.exe",
-            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\SST.opencodeX_src\opencode.exe",
-            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Other.tool_src\opencode.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\noid\opencode.exe",
         ] {
-            assert!(
-                !in_winget_package(Path::new(other), OPENCODE_WINGET_ID),
-                "{other}"
-            );
+            assert_eq!(id(other), None, "{other}");
         }
-        assert_eq!(
-            winget_package(HarnessId::Opencode, Path::new(PACKAGE)),
-            Some(OPENCODE_WINGET_ID)
-        );
-        // Only OpenCode's WinGet package is upgraded through WinGet here.
-        assert_eq!(winget_package(HarnessId::Codex, Path::new(PACKAGE)), None);
+    }
+
+    #[test]
+    fn winget_says_which_release_it_has_and_when_it_has_none() {
+        let show = "Found opencode [SST.opencode]\r\nVersion: 1.4.2\r\nPublisher: SST\r\n";
+        assert_eq!(parse_winget_show(show).as_deref(), Some("1.4.2"));
+        assert_eq!(parse_winget_show("Gefunden opencode\nVersion: unbekannt\n"), None);
+        let error = winget_failure("SST.opencode", "winget failed (exit code -1978335189): No available upgrade found.".into());
+        assert!(error.contains("WinGet has no newer SST.opencode"), "{error}");
+        assert_eq!(winget_failure("x", "other".into()), "other");
     }
 
     #[test]
@@ -5648,7 +6952,9 @@ mod winget_tests {
     fn winget_upgrades_without_asking() {
         assert_eq!(
             winget_upgrade_args(OPENCODE_WINGET_ID).join(" "),
-            "upgrade --id SST.opencode --silent --accept-package-agreements \
+            // `--exact`: else `--id` matches by substring, and SST.opencode
+            // also matches SST.OpenCodeDesktop ("multiple packages found").
+            "upgrade --id SST.opencode --exact --silent --accept-package-agreements \
              --accept-source-agreements --disable-interactivity"
         );
     }
@@ -5675,7 +6981,7 @@ mod winget_tests {
         let mut tail = Vec::new();
         let error = tokio::time::timeout(
             Duration::from_secs(5),
-            read_tail_watched(&mut reader, &mut tail, OPENCODE_REFUSALS),
+            read_tail_watched(&mut reader, &mut tail, OPENCODE_REFUSALS, &Mutex::new(None)),
         )
         .await
         .expect("seen without waiting for the pipe to close")
@@ -5740,6 +7046,6 @@ mod winget_tests {
             run_command_output_watched(&script, &["upgrade"], Duration::from_secs(2), &[], &[])
                 .await
                 .unwrap_err();
-        assert!(error.ends_with("timed out"), "{error}");
+        assert!(error.contains("was still running after"), "{error}");
     }
 }

@@ -3259,7 +3259,12 @@ impl AppState {
         if self.send_pending(&chat.id, now) {
             return ChatIndicator::Working;
         }
-        display_status(chat, self.session_for(&chat.id), now)
+        // This app draws no Waiting of its own: waiting on background work
+        // that will wake the agent reads as the work under way it is.
+        match display_status(chat, self.session_for(&chat.id), now) {
+            ChatIndicator::Waiting => ChatIndicator::Working,
+            status => status,
+        }
     }
 
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
@@ -5676,6 +5681,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sleep: None,
         }
     }
 
@@ -5715,6 +5721,7 @@ mod tests {
             status,
             started_at: None,
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
+            waiting: None,
         }
     }
 
@@ -5986,6 +5993,7 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            waiting: None,
         };
         assert!(state.apply_sessions_at(vec![row.clone()], now));
         row.updated_at = now + TimeDelta::seconds(30);
@@ -6021,6 +6029,7 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            waiting: None,
         }];
         let mut row = device("host", "Host");
         row.last_seen_at = Some(now);

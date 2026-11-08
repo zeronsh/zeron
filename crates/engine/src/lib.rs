@@ -50,6 +50,7 @@ pub mod desktop_notify;
 pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;
+mod git_tree;
 pub mod harness_updates;
 pub(crate) mod home_index;
 mod http_error;

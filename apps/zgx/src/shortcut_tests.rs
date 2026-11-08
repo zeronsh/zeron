@@ -577,3 +577,42 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("cmd+j"));
     assert_eq!(w.app.error(), None);
 }
+
+/// Check for Updates… and Settings lead the application menu (macOS's
+/// first, over Services), a line between them, as Zeron's did; Settings
+/// keeps ⌘, and isn't in File any more. Check for Updates… opens About &
+/// updates.
+#[test]
+fn check_for_updates_and_settings_lead_the_application_menu() {
+    let w = mount();
+    let commands = w.app.host.commands().get();
+    let bar = crate::menu_bar::Bar::of(&commands, &[], &[], None);
+    assert_eq!(super::menu_bar_tests::refusal(&bar.menus), None);
+    let menu = |label: &str| bar.menus.iter().find(|m| m.label == label).cloned();
+    let application = menu(zgx_desktop::APPLICATION_MENU).expect("no application menu");
+    let shown: Vec<String> = application
+        .entries
+        .iter()
+        .map(|e| match e {
+            zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } => {
+                format!("{label} [{}]{}", action.0, if accelerator.is_some() { " ⌘" } else { "" })
+            }
+            zgx_desktop::AppMenuEntry::Separator => "—".into(),
+            _ => "?".into(),
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        ["Check for Updates… [shell.check_updates]", "—", "Settings [shell.settings] ⌘"],
+        "{shown:?}"
+    );
+    let file = menu("File").expect("no File menu");
+    assert!(
+        !file.entries.iter().any(|e| matches!(e, zgx_desktop::AppMenuEntry::Item { action, .. } if action.0 == "shell.settings")),
+        "Settings is still in File"
+    );
+    let mut w = w;
+    assert!(w.app.host.run_command("shell.check_updates"), "no shell.check_updates command");
+    w.app.frames(20);
+    assert_eq!(w.route(), "/settings/about", "Check for Updates… didn't open About & updates");
+}
