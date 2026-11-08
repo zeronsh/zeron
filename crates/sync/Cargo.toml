@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
@@ -34,5 +35,6 @@ chrono.workspace = true
 reqwest.workspace = true
 zeron-proto.workspace = true
 tempfile.workspace = true
+base64 = "0.22"
 # `start_paused` virtual-clock tests (the 2026-07-30 sync-stall regressions).
 tokio = { workspace = true, features = ["test-util"] }

@@ -150,6 +150,43 @@ pub trait ChatDocSink: Send + Sync + 'static {
     fn contains_frontier(&self, frontier: &[u8]) -> bool;
     /// An own-write ack advanced the cursor with no content change.
     fn advance_cursor(&self, cursor: u64);
+
+    // The relay layer (docs/design/relay-layer.md). Sinks without it answer as
+    // a doc nobody can sync with.
+
+    /// This doc's encoded version vector; `None` = relay sync unavailable.
+    fn relay_version(&self) -> Option<Vec<u8>> {
+        None
+    }
+    /// The encoded version holds ops this doc doesn't have.
+    fn relay_lacks(&self, _version: &[u8]) -> bool {
+        false
+    }
+    /// This doc holds ops the encoded version doesn't.
+    fn relay_behind(&self, _version: &[u8]) -> bool {
+        false
+    }
+    /// One causally complete blob of everything since the encoded version.
+    fn relay_export(&self, _since: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    /// Import a relayed update. `history`: it's catch-up, not live. A parked
+    /// import doesn't advance anything; version exchange fills the gap.
+    fn relay_import(&self, _bytes: &[u8], _history: bool) -> crate::chat_relay::RelayImport {
+        crate::chat_relay::RelayImport::Applied
+    }
+    /// Everything imported so far is saved on this device.
+    fn relay_durable(&self) -> bool {
+        true
+    }
+    /// The room holds a checkpoint this doc lacks. May it wait? On a relaying chat
+    /// a checkpoint moves with every turn and is a whole chat's bytes, while a host
+    /// that's around sends only what's missing. A phone says yes while it has
+    /// something to show, and asks for the checkpoint with
+    /// [`ChatClient::read_deferred_checkpoint`] if the host doesn't come through.
+    fn relay_defer_checkpoint(&self) -> bool {
+        false
+    }
 }
 
 /// `GET /chat2/{chatId}/checkpoint` over HTTP. Implementations should resume
@@ -166,6 +203,11 @@ pub trait CheckpointFetcher: Send + Sync + 'static {
 /// Both are safe at-least-once: batchId dedupe and Loro re-import no-ops.
 pub trait ChatTransport: Send + Sync + 'static {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>>;
+    /// A pull because sockets aren't working here. With the relay layer on, this
+    /// reader can't get relay frames, so it tells the room it needs stored rows.
+    fn fetch_rows_fallback(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        self.fetch_rows(after)
+    }
     fn push(
         &self,
         batch_id: String,
@@ -312,6 +354,23 @@ struct Shared {
     needs_checkpoint: bool,
     /// Prevent an overlapping HTTP/socket catch-up from clearing a newer gap.
     causal_gap_generation: u64,
+    /// This session's room has the relay layer, so a row can depend on ops that
+    /// were only ever relayed. No checkpoint or row can fill that gap; a peer can.
+    relay_session: bool,
+    /// A row parked that way. The cursor holds below it, later rows still import,
+    /// and nobody redials: the row is read again once a peer has filled the gap.
+    relay_parked: bool,
+    /// A parked row first gets the ordinary repair, one checkpoint read: it may be
+    /// an old cursor's gap, which a checkpoint does fill. Reading the same checkpoint
+    /// again can't do better, with or without the layer.
+    parked_checkpoint_tried: bool,
+    /// The checkpoint that read was of, to notice a newer one.
+    room_frontier: Vec<u8>,
+    /// How long a parked row next waits before it's read again. It outlives the
+    /// session, so rejoining to hear about a newer checkpoint keeps backing off.
+    park_wait: Option<Duration>,
+    /// The room's checkpoint isn't in this doc, and the sink chose to wait.
+    checkpoint_deferred: bool,
 }
 
 // Retry failed writes before network admission. Do not reinsert already-ACKed
@@ -383,8 +442,10 @@ fn apply_remote_row(
     let cursor = {
         let mut shared = lock(shared);
         if seq > shared.cursor.saturating_add(1) {
-            shared.gap_repair = true;
-            shared.row_gap_generation = shared.row_gap_generation.wrapping_add(1);
+            if !shared.relay_parked {
+                shared.gap_repair = true;
+                shared.row_gap_generation = shared.row_gap_generation.wrapping_add(1);
+            }
             shared.cursor
         } else {
             shared.cursor.max(seq)
@@ -399,8 +460,22 @@ fn apply_remote_row(
     };
     let mut shared = lock(shared);
     match outcome {
-        RowImportOutcome::Applied => shared.cursor = shared.cursor.max(cursor),
+        RowImportOutcome::Applied => {
+            shared.cursor = shared.cursor.max(cursor);
+            if !shared.relay_parked {
+                shared.park_wait = None;
+            }
+        }
+        RowImportOutcome::PendingDependencies
+            if shared.parked_checkpoint_tried
+                || (shared.relay_session
+                    && shared.server.is_none_or(|server| server.checkpoint_size == 0)) =>
+        {
+            shared.relay_parked = true;
+            tracing::info!(seq, cursor = shared.cursor, "chat2: row waits on history no checkpoint holds");
+        }
         RowImportOutcome::PendingDependencies => {
+            shared.parked_checkpoint_tried = true;
             shared.needs_checkpoint = true;
             shared.causal_gap_generation = shared.causal_gap_generation.wrapping_add(1);
             tracing::warn!(
@@ -463,6 +538,7 @@ pub struct ChatClient {
     flags: Arc<Flags>,
     task: Option<tokio::task::JoinHandle<()>>,
     offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    relay: Option<crate::chat_relay::RelayHandle>,
 }
 
 #[derive(Default)]
@@ -475,7 +551,40 @@ struct Flags {
     /// Monotonic dial-attempt counter; each attempt's number is its trace id
     /// in logs, so an incident reads as one numbered sequence.
     dial_seq: std::sync::atomic::AtomicU64,
+    /// Dials failed since the last hello answer.
+    failed_dials: std::sync::atomic::AtomicU64,
+    /// When the first of those failed dials was noticed.
+    failing_since: Mutex<Option<tokio::time::Instant>>,
+    /// This session's room's answer about the relay layer (`ROOM_*`).
+    room_answer: std::sync::atomic::AtomicU8,
+    /// Dials keep failing while HTTPS works: this network has no sockets.
+    socketless: std::sync::atomic::AtomicBool,
+    /// The room says ops were relayed that no checkpoint holds.
+    room_relay_dirty: std::sync::atomic::AtomicBool,
 }
+
+/// Dials that must fail, with HTTPS working, before this counts as a network
+/// without sockets. A brief drop isn't one, and nor is a laptop asleep: there
+/// HTTPS fails too.
+const FALLBACK_AFTER_FAILED_DIALS: u64 = 3;
+/// And for this long. Three dials can fail in two seconds, and a network coming back
+/// answers HTTPS first. Calling that socketless tells the room to treat this device as an
+/// old reader, which moves the chat off relaying for every device for ten minutes.
+const FALLBACK_AFTER_FAILING_FOR: Duration = Duration::from_secs(30);
+/// How long a send for the queue waits for a socket before going over HTTPS.
+const QUEUE_HOLD_WHILE_DIALING: Duration = Duration::from_secs(5);
+
+const ROOM_NO_ANSWER: u8 = 0;
+const ROOM_NO_LAYER: u8 = 1;
+const ROOM_HAS_LAYER: u8 = 2;
+
+/// A row parked on history only peers hold: how soon to ask again, and the most
+/// it waits. Backs off so a chat whose host stays away lets its room hibernate.
+const RELAY_PARK_RECHECK: Duration = Duration::from_secs(5);
+const RELAY_PARK_RECHECK_MAX: Duration = Duration::from_secs(300);
+/// From this wait on, a parked row's recheck joins the room again, to hear whether
+/// its checkpoint has changed.
+const PARKED_REHELLO: Duration = Duration::from_secs(20);
 
 impl ChatClient {
     /// Connect (fixed URL — dev/tests).
@@ -533,8 +642,22 @@ impl ChatClient {
         initial_cursor: u64,
         transport: Arc<dyn ChatTransport>,
     ) -> Result<Self, SyncError> {
+        Self::connect_via_relay(provider, sink, fetcher, device_id, initial_cursor, transport, None).await
+    }
+
+    /// [`Self::connect_via_transport`], asking the room for the relay layer when
+    /// `relay` is given. Without it, every byte on the wire is as before.
+    pub async fn connect_via_relay(
+        provider: Arc<dyn UrlProvider>,
+        sink: Arc<dyn ChatDocSink>,
+        fetcher: Arc<dyn CheckpointFetcher>,
+        device_id: &str,
+        initial_cursor: u64,
+        transport: Arc<dyn ChatTransport>,
+        relay: Option<crate::chat_relay::RelayHandle>,
+    ) -> Result<Self, SyncError> {
         let connector = Arc::new(WsBinConnector { url: provider });
-        Self::connect_with_transport(
+        Self::connect_full(
             connector,
             sink,
             fetcher,
@@ -542,6 +665,7 @@ impl ChatClient {
             initial_cursor,
             ChatTuning::default(),
             Some(transport),
+            relay,
         )
         .await
     }
@@ -574,6 +698,20 @@ impl ChatClient {
         initial_cursor: u64,
         tuning: ChatTuning,
         transport: Option<Arc<dyn ChatTransport>>,
+    ) -> Result<Self, SyncError> {
+        Self::connect_full(connector, sink, fetcher, device_id, initial_cursor, tuning, transport, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_full(
+        connector: Arc<dyn BinConnector>,
+        sink: Arc<dyn ChatDocSink>,
+        fetcher: Arc<dyn CheckpointFetcher>,
+        device_id: &str,
+        initial_cursor: u64,
+        tuning: ChatTuning,
+        transport: Option<Arc<dyn ChatTransport>>,
+        relay: Option<crate::chat_relay::RelayHandle>,
     ) -> Result<Self, SyncError> {
         let (events, _) = broadcast::channel(256);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -618,6 +756,7 @@ impl ChatClient {
             transport,
             offline_task: offline_task.clone(),
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            relay: relay.clone(),
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -635,6 +774,7 @@ impl ChatClient {
             flags,
             task: Some(task),
             offline_task,
+            relay,
         };
         match ready_rx.await {
             Ok(Ok(())) => Ok(client),
@@ -645,6 +785,74 @@ impl ChatClient {
 
     pub fn events(&self) -> broadcast::Receiver<ChatEvent> {
         self.events.subscribe()
+    }
+
+    /// This session's room offered the relay layer.
+    pub fn relay_room(&self) -> bool {
+        self.relay_answer() == Some(true)
+    }
+
+    /// The room's answer about the layer. `None`: no session has one right now.
+    pub fn relay_answer(&self) -> Option<bool> {
+        match self.flags.room_answer.load(std::sync::atomic::Ordering::Acquire) {
+            ROOM_HAS_LAYER => Some(true),
+            ROOM_NO_LAYER => Some(false),
+            _ => None,
+        }
+    }
+
+    /// The room remembers relaying that no checkpoint has healed, whatever this
+    /// device's chat row says about the generation.
+    pub fn room_relay_dirty(&self) -> bool {
+        self.flags.room_relay_dirty.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The room's checkpoint is known not to be in this doc, and hasn't been read.
+    pub fn checkpoint_deferred(&self) -> bool {
+        lock(&self.shared).checkpoint_deferred
+    }
+
+    /// Stop waiting: read the checkpoint now, unless peers have since filled the doc
+    /// past it. A fresh session makes the read, as any causal repair does.
+    pub fn read_deferred_checkpoint(&self) {
+        let mut shared = lock(&self.shared);
+        if !std::mem::take(&mut shared.checkpoint_deferred)
+            || self.sink.contains_frontier(&shared.room_frontier)
+        {
+            return;
+        }
+        shared.needs_checkpoint = true;
+        shared.causal_gap_generation = shared.causal_gap_generation.wrapping_add(1);
+        drop(shared);
+        self.redial();
+    }
+
+    /// Sockets don't work on this network, though HTTPS does.
+    pub fn socketless(&self) -> bool {
+        self.flags.socketless.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Nothing can be waiting unread in the room's queue. The HTTPS pull can finish
+    /// a catch-up before any socket does, and it doesn't read the queue, so a socket
+    /// must have answered too. Without one, a socketless pull drained the queue into
+    /// the rows it read.
+    fn queue_read_settled(&self) -> bool {
+        let Some(relay) = &self.relay else {
+            return true;
+        };
+        match self.relay_answer() {
+            Some(true) => relay.queue_settled(),
+            Some(false) => true,
+            None => self.socketless(),
+        }
+    }
+
+    /// Send pushes to the room's offline queue, when the room has one. Another
+    /// device's ops in a generation 3 chat; a host's go through its doc instead.
+    pub fn set_queue_pushes(&self, queue: bool) {
+        if let Some(relay) = &self.relay {
+            relay.set_queue_pushes(queue);
+        }
     }
 
     /// Queue one local update batch for push (a fresh batch id is minted; the
@@ -714,6 +922,9 @@ impl ChatClient {
         let ticket = shared.refresh_requested;
         drop(shared);
         let _ = self.probe.try_send(());
+        if let Some(relay) = &self.relay {
+            relay.read_queue();
+        }
         ticket
     }
 
@@ -723,6 +934,7 @@ impl ChatClient {
             && shared.caught_up
             && !shared.needs_checkpoint
             && !shared.gap_repair
+            && self.queue_read_settled()
     }
 
     /// Escalation: tear the session down and dial a fresh socket.
@@ -763,6 +975,7 @@ impl ChatClient {
             && !shared.needs_checkpoint
             && !shared.gap_repair
             && shared.refresh_completed >= shared.refresh_requested
+            && self.queue_read_settled()
     }
 
     pub fn stats(&self) -> ChatStatsSnapshot {
@@ -851,6 +1064,8 @@ struct Actor {
     offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// One offline sync in flight at a time.
     sync_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// Some: ask for the relay layer, and hand its frames here.
+    relay: Option<crate::chat_relay::RelayHandle>,
     /// False until the first backfill of THIS client instance completes.
     /// (Continuity is instance-scoped: a host that restores an older doc
     /// snapshot must construct a fresh `ChatClient` — C3 wiring contract.)
@@ -917,6 +1132,7 @@ impl Actor {
                         return; // first join failed: caller owns the retry
                     }
                     tracing::warn!(error = %err, attempt, "chat2 dial failed; backing off");
+                    self.flags.failed_dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -931,6 +1147,7 @@ impl Actor {
                         return;
                     }
                     tracing::warn!(attempt, "chat2 dial timed out; backing off");
+                    self.flags.failed_dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -961,6 +1178,10 @@ impl Actor {
                     // without any reset, ~7 flaps pinned every future
                     // reconnect at the cap for the life of the client.
                     let joined = self.flags.connected.swap(false, Relaxed);
+                    self.flags.room_answer.store(ROOM_NO_ANSWER, std::sync::atomic::Ordering::Release);
+                    if !joined {
+                        self.flags.failed_dials.fetch_add(1, Relaxed);
+                    }
                     if joined {
                         let mut shared = lock(&self.shared);
                         shared.http_replay_epoch = shared.http_replay_epoch.wrapping_add(1);
@@ -1035,11 +1256,15 @@ impl Actor {
             shared.rows_req_outstanding = false;
         }
         let cursor = lock(&self.shared).cursor;
+        let (gen_hint, relaying_hint) = self.relay.as_ref().map_or((None, None), |relay| relay.hello());
         let hello = wire::encode(
             frame_type::HELLO,
             &wire::HelloHeader {
                 cursor,
                 device: &self.device_id,
+                relay: self.relay.is_some().then_some(1),
+                room_gen: gen_hint,
+                relaying: relaying_hint,
             },
             &[],
         );
@@ -1074,6 +1299,47 @@ impl Actor {
             let mut shared = lock(&self.shared);
             shared.replaying_gap = false;
             shared.rows_req_outstanding = false;
+        }
+        self.flags.failed_dials.store(0, Relaxed);
+        self.flags.socketless.store(false, Relaxed);
+        {
+            // A checkpoint the parked row hasn't tried yet may fill its gap.
+            let mut shared = lock(&self.shared);
+            if shared.room_frontier != state_frame.payload {
+                shared.room_frontier = state_frame.payload.to_vec();
+                shared.parked_checkpoint_tried = false;
+            }
+        }
+        self.flags.room_relay_dirty.store(
+            state_frame.header["relayDirty"].as_u64() == Some(1),
+            std::sync::atomic::Ordering::Release,
+        );
+        // The room's answer, not ours, decides the layer: a room without it
+        // leaves this session on stored rows.
+        let mut relay_out: Option<mpsc::Receiver<Vec<u8>>> = None;
+        let mut relay_events = None;
+        if let Some(relay) = &self.relay {
+            let offered = state_frame.header["relay"].as_u64() == Some(1);
+            self.flags.room_answer.store(
+                if offered { ROOM_HAS_LAYER } else { ROOM_NO_LAYER },
+                std::sync::atomic::Ordering::Release,
+            );
+            {
+                let mut shared = lock(&self.shared);
+                shared.relay_session = offered;
+                if !offered {
+                    shared.relay_parked = false;
+                }
+            }
+            if offered {
+                if state_frame.header["legacyPeers"].as_u64().unwrap_or(0) > 0 {
+                    relay.legacy_peer();
+                }
+                let (tx, rx) = mpsc::channel(crate::chat_relay::PATH_QUEUE);
+                relay.room_up(tx);
+                relay_out = Some(rx);
+                relay_events = Some(relay.events());
+            }
         }
         // Server behind our cursor = the room was reset/wiped. Detect on the
         // RAW persisted cursor, BEFORE the amnesty below rewrites it —
@@ -1114,7 +1380,9 @@ impl Actor {
         };
         let contained = state.checkpoint_size == 0
             || (!repair_causal_history && self.sink.contains_frontier(&state_frame.payload));
-        let plan = plan_catch_up(cursor, &state, contained);
+        let deferred = !contained && !repair_causal_history && self.sink.relay_defer_checkpoint();
+        lock(&self.shared).checkpoint_deferred = deferred;
+        let plan = plan_catch_up(cursor, &state, contained || deferred);
         let after = match plan {
             CatchUpPlan::RowsOnly { after } => after,
             CatchUpPlan::CheckpointThenRows { after } => after,
@@ -1270,7 +1538,7 @@ impl Actor {
         if !lock(&self.shared).needs_checkpoint {
             let mut shared = lock(&self.shared);
             shared.caught_up = true;
-            if !shared.gap_repair && shared.cursor >= head_seq {
+            if !shared.gap_repair && (shared.cursor >= head_seq || shared.relay_parked) {
                 shared.refresh_completed = shared.refresh_completed.max(refresh_ticket);
             }
             drop(shared);
@@ -1285,6 +1553,8 @@ impl Actor {
         let mut gap_repairs = 0u32;
         let mut refresh_in_flight: Option<(u64, tokio::time::Instant)> = None;
         let mut refresh_gap_deadline = None;
+        let mut park_wait = lock(&self.shared).park_wait.unwrap_or(RELAY_PARK_RECHECK);
+        let mut park_recheck = tokio::time::Instant::now();
         if !self.maybe_repair_gap(&mut pipe, &mut gap_repairs).await {
             return SessionEnd::Reconnect;
         }
@@ -1355,7 +1625,10 @@ impl Actor {
                         && let Some((ticket, _)) = refresh_in_flight.take()
                     {
                         let mut shared = lock(&self.shared);
-                        if shared.cursor >= done.head_seq && !shared.needs_checkpoint && !shared.gap_repair {
+                        if (shared.cursor >= done.head_seq || shared.relay_parked)
+                            && !shared.needs_checkpoint
+                            && !shared.gap_repair
+                        {
                             shared.refresh_completed = shared.refresh_completed.max(ticket);
                         } else if shared.cursor < done.head_seq {
                             // Missing rows use bounded gap repair, not an
@@ -1372,6 +1645,52 @@ impl Actor {
                     if !self.push_pending(&mut pipe, &mut in_flight).await {
                         return SessionEnd::Reconnect;
                     }
+                }
+                frame = recv_relay(&mut relay_out) => {
+                    if let Some(frame) = frame
+                        && pipe.tx.send(frame).await.is_err()
+                    {
+                        return SessionEnd::Reconnect;
+                    }
+                }
+                event = recv_relay_event(&mut relay_events) => {
+                    // Something new from a peer may be what a parked row needs.
+                    let applied = matches!(event, Ok(crate::chat_relay::RelayEvent::Applied));
+                    if applied && lock(&self.shared).relay_parked {
+                        park_recheck = park_recheck.min(tokio::time::Instant::now() + RELAY_PARK_RECHECK);
+                        park_wait = RELAY_PARK_RECHECK;
+                    }
+                }
+                _ = tokio::time::sleep_until(park_recheck), if lock(&self.shared).relay_parked => {
+                    // The room may have taken a newer checkpoint since (a host making up
+                    // for a rejected push), and only a hello says so: a session's rows
+                    // requests never do. A parked row that's waited this long joins
+                    // again. The checkpoint is fetched only if its frontier changed.
+                    if park_wait >= PARKED_REHELLO {
+                        lock(&self.shared).park_wait = Some((park_wait * 2).min(RELAY_PARK_RECHECK_MAX));
+                        return SessionEnd::Reconnect;
+                    }
+                    if let Some(relay) = &self.relay {
+                        relay.ask_peers();
+                    }
+                    let after = {
+                        let mut shared = lock(&self.shared);
+                        shared.relay_parked = false;
+                        shared.replaying_gap = true;
+                        shared.rows_req_outstanding = true;
+                        shared.cursor
+                    };
+                    let request = wire::encode(
+                        frame_type::ROWS_REQ,
+                        &wire::RowsReqHeader { after, exclude_own: false },
+                        &[],
+                    );
+                    if pipe.tx.send(request).await.is_err() {
+                        return SessionEnd::Reconnect;
+                    }
+                    park_recheck = tokio::time::Instant::now() + park_wait;
+                    park_wait = (park_wait * 2).min(RELAY_PARK_RECHECK_MAX);
+                    lock(&self.shared).park_wait = Some(park_wait);
                 }
                 beat = self.presence_rx.recv() => {
                     if let Some((at, payload)) = beat {
@@ -1449,13 +1768,24 @@ impl Actor {
             return false;
         }
         let frame = wire::encode(
-            frame_type::PUSH,
+            self.push_kind(),
             &wire::PushHeader {
                 batch_id: &push.batch_id,
             },
             &push.bytes,
         );
         pipe.tx.send(frame).await.is_ok()
+    }
+
+    /// Stored rows, unless this session's room holds a queue for this device.
+    fn push_kind(&self) -> u8 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let queue = self.relay.as_ref().is_some_and(|relay| relay.queue_pushes());
+        if queue && self.flags.room_answer.load(Relaxed) == ROOM_HAS_LAYER {
+            frame_type::ENQUEUE
+        } else {
+            frame_type::PUSH
+        }
     }
 
     /// One HTTPS sync cycle off the critical path: flush pending batches
@@ -1477,8 +1807,36 @@ impl Actor {
         let events = self.events.clone();
         let busy = self.sync_busy.clone();
         let amnesty = self.cursor_amnesty_done.clone();
+        let failed_dials = self.flags.failed_dials.load(Relaxed);
+        let failing_for = {
+            let mut since = lock(&self.flags.failing_since);
+            if failed_dials == 0 {
+                *since = None;
+            } else {
+                since.get_or_insert_with(tokio::time::Instant::now);
+            }
+            since.map_or(Duration::ZERO, |at| at.elapsed())
+        };
+        let dials_failing = self.relay.is_some()
+            && failed_dials >= FALLBACK_AFTER_FAILED_DIALS
+            && failing_for >= FALLBACK_AFTER_FAILING_FOR;
+        let socketless = self.flags.socketless.load(Relaxed);
+        // These belong in the room's queue, and a socket is the only way in. A
+        // stored row here could depend on ops only peers hold, and it would park on
+        // any old reader in the room. So the outbox holds them while a socket may
+        // still answer: not once dials have kept failing for a few seconds. A send
+        // then goes as a stored row, as it does without the layer, rather than wait
+        // half a minute for this network to be called socketless.
+        let hold_for_queue = !socketless
+            && failing_for < QUEUE_HOLD_WHILE_DIALING
+            && self.relay.as_ref().is_some_and(|relay| relay.queue_pushes());
+        let flags = self.flags.clone();
         let task = tokio::spawn(async move {
-            let batches: Vec<PendingPush> = lock(&shared).pending.iter().cloned().collect();
+            let batches: Vec<PendingPush> = if hold_for_queue {
+                Vec::new()
+            } else {
+                lock(&shared).pending.iter().cloned().collect()
+            };
             for push in batches {
                 if !ensure_durable(&shared, sink.as_ref(), &push) {
                     break;
@@ -1524,8 +1882,19 @@ impl Actor {
                     sh.row_gap_generation,
                 )
             };
-            let body = match transport.fetch_rows(cursor).await {
-                Ok(body) => body,
+            let pull = if socketless {
+                transport.fetch_rows_fallback(cursor)
+            } else {
+                transport.fetch_rows(cursor)
+            };
+            let body = match pull.await {
+                Ok(body) => {
+                    // HTTPS works while dials fail. The next pull says so.
+                    if dials_failing && !flags.connected.load(Relaxed) {
+                        flags.socketless.store(true, Relaxed);
+                    }
+                    body
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "chat2: http pull failed; will retry");
                     let mut sh = lock(&shared);
@@ -1575,7 +1944,15 @@ impl Actor {
                     };
                     let contained = state.checkpoint_size == 0
                         || (!repair_causal_history && sink.contains_frontier(&state_frame.payload));
-                    let plan = plan_catch_up(cursor, &state, contained);
+                    let deferred = !contained && !repair_causal_history && sink.relay_defer_checkpoint();
+                    {
+                        let mut sh = lock(&shared);
+                        sh.checkpoint_deferred = deferred;
+                        if deferred {
+                            sh.room_frontier = state_frame.payload.to_vec();
+                        }
+                    }
+                    let plan = plan_catch_up(cursor, &state, contained || deferred);
                     if repair_causal_history || cursor > state.head_seq {
                         was_live = false;
                     }
@@ -1643,7 +2020,7 @@ impl Actor {
                         {
                             let mut sh = lock(&shared);
                             if sh.http_replay_epoch == replay_epoch
-                                && sh.cursor >= done.head_seq
+                                && (sh.cursor >= done.head_seq || sh.relay_parked)
                                 && !sh.needs_checkpoint
                             {
                                 sh.http_live_epoch = Some(replay_epoch);
@@ -1738,7 +2115,7 @@ impl Actor {
                 return false;
             }
             let frame = wire::encode(
-                frame_type::PUSH,
+                self.push_kind(),
                 &wire::PushHeader {
                     batch_id: &push.batch_id,
                 },
@@ -1795,7 +2172,9 @@ impl Actor {
                 // Same contiguity rule as ROW: our own batch landing at
                 // `seq` proves rows up to seq exist server-side, not that we
                 // HAVE the interleaved ones from other devices.
-                if ack.seq > shared.cursor + 1 {
+                if ack.seq > shared.cursor + 1 && shared.relay_parked {
+                    // The cursor is holding on purpose; the re-read walks past this.
+                } else if ack.seq > shared.cursor + 1 {
                     shared.gap_repair = true;
                     shared.row_gap_generation = shared.row_gap_generation.wrapping_add(1);
                     tracing::warn!(
@@ -1819,6 +2198,32 @@ impl Actor {
                 drop(shared);
                 self.sink.advance_cursor(cursor);
                 let _ = self.events.send(ChatEvent::Applied);
+            }
+            frame_type::QUEUED if self.relay.is_some() => {
+                let Some(batch_id) = frame.header["batchId"].as_str() else {
+                    return false;
+                };
+                // Held durably by the room. No row seq: the cursor doesn't move.
+                let mut shared = lock(&self.shared);
+                if self.sink.acknowledge_update(batch_id).is_ok() {
+                    shared.pending.retain(|p| p.batch_id != batch_id);
+                } else {
+                    shared.retry_at = Some(tokio::time::Instant::now() + QUOTA_RETRY);
+                }
+                if shared.quota_blocked {
+                    if shared.pending.is_empty() {
+                        shared.quota_blocked = false;
+                    } else {
+                        shared.retry_at = Some(tokio::time::Instant::now());
+                    }
+                }
+                drop(shared);
+                let _ = self.events.send(ChatEvent::Applied);
+            }
+            kind if self.relay.is_some() && wire::is_relay_frame(kind) => {
+                if let Some(relay) = &self.relay {
+                    relay.room_frame(frame);
+                }
             }
             frame_type::PRESENCE => {
                 let _ = self.events.send(ChatEvent::Presence);
@@ -1888,6 +2293,22 @@ impl Actor {
             }
         }
         true
+    }
+}
+
+async fn recv_relay(rx: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_relay_event(
+    rx: &mut Option<broadcast::Receiver<crate::chat_relay::RelayEvent>>,
+) -> Result<crate::chat_relay::RelayEvent, broadcast::error::RecvError> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 

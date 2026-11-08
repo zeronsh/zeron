@@ -3937,6 +3937,7 @@ impl Transcript {
             L::Syncing => "Syncing…",
             L::Reconnecting => "Reconnecting…",
             L::Offline => "Offline — this chat loads when you're back online",
+            L::HostAway => "This chat lives on another device — it loads when that device is back online",
         };
         let caption = div()
             .flex()
@@ -3946,7 +3947,7 @@ impl Transcript {
             .text_color(theme.text_faint)
             // Hard offline waits on nothing this app does: the amber dot the
             // composer and sidebar use, not a spinner.
-            .when(loading == L::Offline, |row| {
+            .when(matches!(loading, L::Offline | L::HostAway), |row| {
                 row.child(div().size(px(5.0)).rounded_full().bg(theme.warning))
             })
             .child(SharedString::from(caption));
