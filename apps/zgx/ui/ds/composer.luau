@@ -54,6 +54,7 @@ local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
 local motion = require("@self/motion")
+local clock = require("@ds/composer_clock")
 local EditorMenu = require("@self/editor_menu")
 
 -- What the model's context holds, as its agent reports it: the tokens in
@@ -1191,10 +1192,10 @@ return ui.component(function(props: Props): Node
 			local n = props.snap:get()
 			if n ~= snap_seen then
 				snap_seen = n
-				snap_until = ui.now() + SNAP_MS
+				snap_until = clock.now() + SNAP_MS
 			end
 		end
-		return motion.reduced_now() or ui.now() < snap_until
+		return motion.reduced_now() or clock.now() < snap_until
 	end
 	local function eased(src: ReadOnlyState<number>): State<number>
 		local value = ui.use_state(src:peek())

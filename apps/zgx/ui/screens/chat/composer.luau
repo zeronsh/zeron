@@ -17,6 +17,7 @@
 
 local ds = require("@ds")
 local motion = require("@ds/motion")
+local clock = require("@ds/composer_clock")
 local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
@@ -1009,7 +1010,7 @@ local function Composer(): Node
 		end
 		if had_draft then
 			had_draft = false
-			rest_settles_at = ui.now() + REST_SETTLE_MS
+			rest_settles_at = clock.now() + REST_SETTLE_MS
 		end
 		if tall <= 0 or not new_chat() then
 			return
@@ -1019,7 +1020,7 @@ local function Composer(): Node
 				rest_tall:set(tall)
 			end
 		end
-		local left = rest_settles_at - ui.now()
+		local left = rest_settles_at - clock.now()
 		if left > 0 and rest_tall:peek() ~= nil then
 			ui.after(left, take)
 		else
@@ -1076,7 +1077,7 @@ local function Composer(): Node
 			gliding:cancel()
 			gliding = nil
 		end
-		if motion.reduced_now() or ui.now() < snap_until or math.abs(place:peek() - y) < 0.5 then
+		if motion.reduced_now() or clock.now() < snap_until or math.abs(place:peek() - y) < 0.5 then
 			place:set(y)
 			return
 		end
@@ -1098,7 +1099,7 @@ local function Composer(): Node
 		was_new = nc
 		slide_next = false
 		if switched then
-			snap_until = ui.now() + SNAP_MS
+			snap_until = clock.now() + SNAP_MS
 			snap:set(snap:peek() + 1)
 		end
 		form_new:set(nc)
@@ -1133,7 +1134,7 @@ local function Composer(): Node
 		local now = route.chat:get().session
 		if now ~= chat_was then
 			chat_was = now
-			snap_until = ui.now() + SNAP_MS
+			snap_until = clock.now() + SNAP_MS
 			snap:set(snap:peek() + 1)
 		end
 	end)
@@ -1149,7 +1150,7 @@ local function Composer(): Node
 		local now = not shell_view.collapsed:get() and fit.current:get().sidebar
 		if now ~= sidebar_was then
 			sidebar_was = now
-			snap_until = ui.now() + SNAP_MS
+			snap_until = clock.now() + SNAP_MS
 		end
 	end)
 	-- Over the whole pane, the pointer passing through it to the page
